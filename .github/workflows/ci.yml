@@ -170,6 +170,14 @@ jobs:
         # separate yml step because it is a top-level layer.
         run: bash scripts/run-ci.sh --layer A2
 
+      - name: Layer A3 — catalog status truthfulness
+        # Joins the Mnemosyne inventory catalog SSOT to the cargo-feature
+        # gate reality; rejects a reserved-but-gated / active-but-ungated
+        # status drift that neither the cargo-feature CI lanes nor
+        # validate-workspace can see. Top-level layer, so it needs its
+        # own yml step (same reason as A2).
+        run: bash scripts/run-ci.sh --layer A3
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 

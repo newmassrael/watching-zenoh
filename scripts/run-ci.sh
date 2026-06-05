@@ -15,6 +15,12 @@
 #
 #   Layer A  — mnemosyne-cli validate-workspace
 #   Layer A2 — scripts/audit-mid-values.sh (envelope mid value= gate; R111)
+#   Layer A3 — scripts/audit-catalog-status.sh (inventory atom status vs
+#              cargo-feature gate reality; joins the Mnemosyne catalog
+#              SSOT to the source tree so a reserved-but-gated /
+#              active-but-ungated drift cannot pass invisibly — the class
+#              every cargo-feature CI lane and validate-workspace both
+#              miss because neither knows about the other world)
 #   Layer B  — verify-codegen.sh per codec (L1+L2+L3)
 #   Layer C0 — binary-dep test #[ignore] discipline pre-flight
 #              (R235-hotfix; rejects new e2e tests that would panic
@@ -389,6 +395,18 @@ layer_a_mnemosyne() {
 # preventer for that whole class of defect.
 layer_a2_audit_mid_values() {
     bash scripts/audit-mid-values.sh
+}
+
+# ─── Layer A3 — catalog status truthfulness gate ────────────────────
+# Asserts every Mnemosyne inventory atom's status agrees with the
+# cargo-feature gate reality in crates/**. Motivation: the cargo-feature
+# CI triad (build/behaviour/clippy/footprint) never inspects the
+# inventory, and Layer A's validate-workspace never inspects the source
+# gates, so a status that drifts from the code it describes (e.g. Phase 2
+# R311fx wired pubsub-source-info to real gates but left it "reserved")
+# is invisible to both. This gate is the join.
+layer_a3_audit_catalog_status() {
+    bash scripts/audit-catalog-status.sh
 }
 
 # ─── Layer B — verify-codegen.sh per codec ──────────────────────────
@@ -1745,6 +1763,7 @@ overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
 run_layer A layer_a_mnemosyne || overall=1
 run_layer A2 layer_a2_audit_mid_values || overall=1
+run_layer A3 layer_a3_audit_catalog_status || overall=1
 run_layer B layer_b_verify_codegen || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1

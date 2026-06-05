@@ -29953,6 +29953,68 @@
         "The 13 design docs are now unvalidated human notes; read SSOT via mnemosyne-cli query"
       ]
     },
+    "Round 311hr": {
+      "decision_summary": "R311hr reconciles inventory status to cargo-feature gate reality (8 reserved-but-gated -> active, 10 folded/unimplemented -> reserved, 12 foundational kept active) and adds Layer A3 catalog-status truthfulness gate joining the catalog SSOT to the source tree",
+      "changes_bullets": [
+        "8 reserved-but-gated atoms flipped to active (each has real cfg(feature) sites; Phase 2 R311fx wired them but left status stale): pubsub-source-info, pubsub-allow-loop, pubsub-priority, pubsub-congestion-control, pubsub-express, query-reply-err, query-selector-parameters, runtime-lwip",
+        "10 active-but-ungated atoms flipped to reserved per already-ratified §5 audits (folded/unimplemented, no own cfg gate): encoding-bytes/empty/utf8 (§5.19), locator-tcp/udp (§5.2), link-batching/fragment/frame (§5.5), time-ntp64 (§5.18), transport-fragmentation (§5.1)",
+        "12 foundational atoms kept active (implemented + always-on, no toggle by design): keyexpr-canon/literal/mapping/intersect/includes/wildcard-single/wildcard-double/dollar-star, pubsub-sample, time-system-clock, routing-client, platform-linux",
+        "inventory F/P/C reason text preserved on every flip (status-only mutation; the why is recorded here, not by overwriting reason)",
+        "new scripts/audit-catalog-status.sh enforces active<=>(gated OR foundational-allowlisted), reserved=>not-gated, every atom declared as a cargo feature",
+        "wired as Layer A3 in scripts/run-ci.sh (dispatch + header) and mirrored into .github/workflows/ci.yml + release.yml; pre-push delegates to run-ci.sh so the gate also fires at push time"
+      ],
+      "verification_bullets": [
+        "Layer A3 gate exits 0 post-reconciliation (bash scripts/run-ci.sh --layer A3 -> pass)",
+        "gate first-run reproduced the exact 8-reserved-gated + 10-active-ungated worklist the hand-audit derived, so the fix is self-verifying against the same invariant it installs",
+        "validate-workspace after mutations: T1 orphan new=+0 (13 ledger unchanged), entries=577 sections=257 unchanged, T3 warn=4 T4 info=3 unchanged",
+        "foundational classification grounded in code, not guesswork: keyexpr matchers live in wz-session-core/src/keyexpr_match.rs (R293/R311dn) used on every subscriber/queryable match path; lib.rs:70 documents keyexpr-canon FOUNDATIONAL"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "§5 domain section BODIES still understate active sets post-Phase-2 (e.g. §5.8 prose says active(5), inventory now 10+); reconcile §5 prose to inventory in a follow-up (R408 makes §5 unvalidated human notes, so lower priority than the queryable inventory SSOT)",
+        "optional hardening: set-inventory-section-ref to link each atom to its §5 domain section (currently all section_ref=None); would let Layer A3 additionally cross-check status against the §5 verdict",
+        "reserved access/storage/SHM domains remain MS3+ long-tail and untouched this round; out-of-phase per project_north_star phasing"
+      ],
+      "publishable_decision_summary": "R311hr reconciles inventory status to cargo-feature gate reality (8 reserved-but-gated -> active, 10 folded/unimplemented -> reserved, 12 foundational kept active) and adds Layer A3 catalog-status truthfulness gate joining the catalog SSOT to the source tree",
+      "publishable_changes_bullets": [
+        "8 reserved-but-gated atoms flipped to active (each has real cfg(feature) sites; Phase 2 R311fx wired them but left status stale): pubsub-source-info, pubsub-allow-loop, pubsub-priority, pubsub-congestion-control, pubsub-express, query-reply-err, query-selector-parameters, runtime-lwip",
+        "10 active-but-ungated atoms flipped to reserved per already-ratified §5 audits (folded/unimplemented, no own cfg gate): encoding-bytes/empty/utf8 (§5.19), locator-tcp/udp (§5.2), link-batching/fragment/frame (§5.5), time-ntp64 (§5.18), transport-fragmentation (§5.1)",
+        "12 foundational atoms kept active (implemented + always-on, no toggle by design): keyexpr-canon/literal/mapping/intersect/includes/wildcard-single/wildcard-double/dollar-star, pubsub-sample, time-system-clock, routing-client, platform-linux",
+        "inventory F/P/C reason text preserved on every flip (status-only mutation; the why is recorded here, not by overwriting reason)",
+        "new scripts/audit-catalog-status.sh enforces active<=>(gated OR foundational-allowlisted), reserved=>not-gated, every atom declared as a cargo feature",
+        "wired as Layer A3 in scripts/run-ci.sh (dispatch + header) and mirrored into .github/workflows/ci.yml + release.yml; pre-push delegates to run-ci.sh so the gate also fires at push time"
+      ],
+      "publishable_verification_bullets": [
+        "Layer A3 gate exits 0 post-reconciliation (bash scripts/run-ci.sh --layer A3 -> pass)",
+        "gate first-run reproduced the exact 8-reserved-gated + 10-active-ungated worklist the hand-audit derived, so the fix is self-verifying against the same invariant it installs",
+        "validate-workspace after mutations: T1 orphan new=+0 (13 ledger unchanged), entries=577 sections=257 unchanged, T3 warn=4 T4 info=3 unchanged",
+        "foundational classification grounded in code, not guesswork: keyexpr matchers live in wz-session-core/src/keyexpr_match.rs (R293/R311dn) used on every subscriber/queryable match path; lib.rs:70 documents keyexpr-canon FOUNDATIONAL"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "§5 domain section BODIES still understate active sets post-Phase-2 (e.g. §5.8 prose says active(5), inventory now 10+); reconcile §5 prose to inventory in a follow-up (R408 makes §5 unvalidated human notes, so lower priority than the queryable inventory SSOT)",
+        "optional hardening: set-inventory-section-ref to link each atom to its §5 domain section (currently all section_ref=None); would let Layer A3 additionally cross-check status against the §5 verdict",
+        "reserved access/storage/SHM domains remain MS3+ long-tail and untouched this round; out-of-phase per project_north_star phasing"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [
@@ -35734,7 +35796,7 @@
       "reason": "F=UNDECLARE codec pair per declare kind; P=zenoh UNDECLARE; C=lifecycle pair of DECLARE"
     },
     "encoding-bytes": {
-      "status": "active",
+      "status": "reserved",
       "source": "sources/codecs/encoding.scxml octet-stream arm",
       "reason": "F=application/octet-stream tag; P=zenoh; C=indep encoding tag"
     },
@@ -35744,7 +35806,7 @@
       "reason": "F=CBOR encoding tag; P=zenoh; C=indep encoding tag"
     },
     "encoding-empty": {
-      "status": "active",
+      "status": "reserved",
       "source": "sources/codecs/encoding.scxml empty arm",
       "reason": "F=empty encoding tag; P=zenoh encoding empty; C=baseline tag value"
     },
@@ -35764,7 +35826,7 @@
       "reason": "F=Protobuf encoding tag; P=zenoh; C=indep encoding tag"
     },
     "encoding-utf8": {
-      "status": "active",
+      "status": "reserved",
       "source": "sources/codecs/encoding.scxml text/plain arm",
       "reason": "F=text/plain UTF-8 tag; P=zenoh; C=indep encoding tag"
     },
@@ -35809,7 +35871,7 @@
       "reason": "F=star chunk handling; P=zenoh keyexpr *; C=opt-in pattern, indep of double-wildcard"
     },
     "link-batching": {
-      "status": "active",
+      "status": "reserved",
       "source": "crates/wz-runtime-tokio/src/session_glue.rs tx batch",
       "reason": "F=multi-msg pack; P=zenoh batch; C=opt-in throughput"
     },
@@ -35819,12 +35881,12 @@
       "reason": "F=backpressure signal; P=zenoh; C=indep, can fail-fast without"
     },
     "link-fragment": {
-      "status": "active",
+      "status": "reserved",
       "source": "sources/codecs/fragment.scxml",
       "reason": "F=Fragment codec; P=zenoh transport Fragment; C=requires transport-fragmentation"
     },
     "link-frame": {
-      "status": "active",
+      "status": "reserved",
       "source": "sources/codecs/frame.scxml",
       "reason": "F=Frame envelope codec; P=zenoh transport Frame; C=indep of fragment path"
     },
@@ -35874,7 +35936,7 @@
       "reason": "F=serial prefix; P=zenoh-pico; C=requires transport-link-serial"
     },
     "locator-tcp": {
-      "status": "active",
+      "status": "reserved",
       "source": "crates/wz-ap-demo/src/args.rs",
       "reason": "F=parser branch; P=zenoh-pico locator tcp prefix; C=indep"
     },
@@ -35884,7 +35946,7 @@
       "reason": "F=tls prefix dispatch; P=zenoh; C=requires transport-link-tls"
     },
     "locator-udp": {
-      "status": "active",
+      "status": "reserved",
       "source": "crates/wz-ap-demo/src/args.rs",
       "reason": "F=parser branch; P=zenoh-pico locator udp prefix; C=indep prefix dispatch"
     },
@@ -35969,7 +36031,7 @@
       "reason": "v0.1.0; cross-feature consistency anchor matching zenoh-cpp public API; preset-ap-full minus MCU subset"
     },
     "pubsub-allow-loop": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh allowed_destination enum",
       "reason": "F=local-loop dispatch; P=zenoh; C=opt-in same-process delivery"
     },
@@ -35979,7 +36041,7 @@
       "reason": "F=attachment bytes; P=zenoh; C=opt-in metadata, requires attachment-bytes"
     },
     "pubsub-congestion-control": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh CongestionControl enum",
       "reason": "F=Block/Drop policy; P=zenoh; C=opt-in publisher option"
     },
@@ -35994,12 +36056,12 @@
       "reason": "F=Encoding field codec; P=zenoh Encoding; C=opt-in payload tag"
     },
     "pubsub-express": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh express bit",
       "reason": "F=express bit; P=zenoh; C=opt-in fast-path bypass batching"
     },
     "pubsub-priority": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh Priority 8-level enum",
       "reason": "F=priority field; P=zenoh; C=requires session-extqos"
     },
@@ -36014,7 +36076,7 @@
       "reason": "F=Sample receive surface; P=zenoh Sample; C=indep receive-side"
     },
     "pubsub-source-info": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh SourceInfo extension",
       "reason": "F=source-info ext codec; P=zenoh; C=opt-in sample provenance"
     },
@@ -36049,12 +36111,12 @@
       "reason": "F=Reply emit path; P=zenoh Query::reply; C=companion to query-queryable"
     },
     "query-reply-err": {
-      "status": "reserved",
+      "status": "active",
       "source": "sources/codecs/err.scxml",
       "reason": "F=ReplyErr variant; P=zenoh Query::reply_err; C=opt-in error reporting"
     },
     "query-selector-parameters": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh Selector ?k=v parameters",
       "reason": "F=selector param parse; P=zenoh; C=opt-in query refinement"
     },
@@ -36109,7 +36171,7 @@
       "reason": "F=async-std executor; P=zenoh; C=alternative to runtime-tokio"
     },
     "runtime-lwip": {
-      "status": "reserved",
+      "status": "active",
       "source": "crates/wz-runtime-lwip/ Phase W skeleton",
       "reason": "F=lwIP MCU adapter; P=docs/runtime-crate-lwip.md; C=alternative runtime, mutually exclusive with runtime-tokio"
     },
@@ -36240,7 +36302,7 @@
       "reason": "F=HLC clock state; P=zenoh-uhlc; C=opt-in alternative to wall-clock"
     },
     "time-ntp64": {
-      "status": "active",
+      "status": "reserved",
       "source": "sources/codecs/timestamp.scxml",
       "reason": "F=NTP64 timestamp codec; P=zenoh NTP64 timestamp; C=baseline timestamp shape"
     },
@@ -36265,7 +36327,7 @@
       "reason": "F=est lz4/zstd wrap; P=zenoh ext compression; C=opt-in per-message, OQ-W4 carry"
     },
     "transport-fragmentation": {
-      "status": "active",
+      "status": "reserved",
       "source": "sources/codecs/frame.scxml + fragment.scxml",
       "reason": "F=measured wz codec pair; P=zenoh fragment/reassembly; C=can disable for transport-lowlatency"
     },

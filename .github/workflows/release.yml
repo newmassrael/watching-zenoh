@@ -108,6 +108,9 @@ jobs:
       - name: Layer A2 — Envelope mid value= audit
         run: bash scripts/run-ci.sh --layer A2
 
+      - name: Layer A3 — catalog status truthfulness
+        run: bash scripts/run-ci.sh --layer A3
+
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
