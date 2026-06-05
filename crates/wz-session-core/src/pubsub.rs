@@ -1120,7 +1120,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     // Fixtures build the borrowed codec views then `.into_owned()` at the
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
     use wz_codecs::push::Push;
@@ -3193,6 +3193,120 @@ mod tests {
             present.load(Ordering::SeqCst),
             0,
             "wire QoS must NOT project to Sample.qos when all QoS-byte consumers are off"
+        );
+    }
+
+    // timestamp / attachment POS arm — the wire-decode projection ON
+    // contrast for the NEG arm in `metadata_decode_isolation_tests` (which
+    // can only build with pubsub-timestamp / pubsub-attachment OFF). The
+    // module gate forces both features ON here, so these run in C1d /
+    // default; together with the NEG module they complete the wire-decode
+    // POS/NEG matrix for every pubsub metadata field.
+
+    /// A Put carrying a wire `timestamp` (time + 4-byte zid).
+    fn push_put_with_timestamp(keyexpr: &str) -> PushOwned {
+        let zid = [0x09u8, 0x0A, 0x0B, 0x0C];
+        let put = wz_codecs::msg_put::MsgPut {
+            timestamp: Some(wz_codecs::timestamp::Timestamp {
+                time: 0x1122_3344_5566_7788,
+                zid_len: zid.len() as u64,
+                zid: &zid,
+            }),
+            ..wz_codecs::msg_put::MsgPut::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        let mut push = Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        push.body = PushOwnedVariant::CodecZenohMsgPut(put);
+        push
+    }
+
+    /// A Put carrying a wire attachment ext (ext_id 0x03 ZBuf).
+    fn push_put_with_attachment(keyexpr: &str, bytes: &[u8]) -> PushOwned {
+        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        ext.set_ext_id(0x03); // ATTACHMENT_EXT_ID_PUSH
+        ext.set_enc(0x02); // ENC_ZBUF
+        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
+            wz_codecs::ext_zbuf::ExtZbuf {
+                value_len: bytes.len() as u64,
+                value: bytes,
+            },
+        );
+        let mut put = wz_codecs::msg_put::MsgPut::default()
+            .try_into_owned()
+            .unwrap();
+        put.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        let mut push = Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        push.body = PushOwnedVariant::CodecZenohMsgPut(put);
+        push
+    }
+
+    #[test]
+    fn inbound_put_timestamp_is_projected_when_pubsub_timestamp_on() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("home/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.timestamp().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_with_timestamp("home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "subscriber fires");
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            1,
+            "wire timestamp projects to Sample.timestamp when pubsub-timestamp is on"
+        );
+    }
+
+    #[test]
+    fn inbound_put_attachment_is_projected_when_pubsub_attachment_on() {
+        let mut registry = SubscriberRegistry::new();
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let cap = captured.clone();
+        registry.register("home/temp", move |sample| {
+            *cap.lock().unwrap() = sample.attachment().map(<[u8]>::to_vec);
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_with_attachment(
+                "home/temp",
+                &[0xDE, 0xAD, 0xBE, 0xEF],
+            ))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some(&[0xDE, 0xAD, 0xBE, 0xEF][..]),
+            "wire attachment projects to Sample.attachment verbatim when pubsub-attachment is on"
         );
     }
 

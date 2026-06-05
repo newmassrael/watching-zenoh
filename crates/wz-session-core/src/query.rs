@@ -1476,6 +1476,61 @@ mod tests {
         );
     }
 
+    /// A `Request(Query)` carrying a selector `parameters` slice (header
+    /// flag 0x40 + parameters_len + parameters). The POS contrast for the
+    /// `query-selector-parameters`-OFF NEG in
+    /// `request_decode_isolation_tests`.
+    fn request_query_with_parameters(rid: u64, suffix: &str, params: &[u8]) -> RequestOwned {
+        let keyexpr = Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix),
+            }),
+        };
+        let query = Query {
+            header: 0x40,
+            parameters_len: Some(params.len() as u64),
+            parameters: Some(params),
+            ..Query::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        let mut request = Request {
+            header: 0x1c,
+            rid,
+            keyexpr,
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned()
+        .unwrap();
+        request.body = RequestOwnedVariant::CodecZenohQuery(query);
+        request
+    }
+
+    #[test]
+    fn dispatch_threads_parameters_into_query_event_callback() {
+        // query-selector-parameters ON (module gate) → the wire
+        // parameters slice reaches the handler's QueryView::parameters().
+        let mut reg = QueryableRegistry::new();
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+        reg.register("home/temp", move |event, _responder| {
+            *cap_cb.lock().unwrap() = event.parameters().map(<[u8]>::to_vec);
+        });
+
+        let req = request_query_with_parameters(13, "home/temp", b"key=value");
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some(&b"key=value"[..]),
+            "wire parameters slice must reach QueryView when query-selector-parameters is on"
+        );
+    }
+
     #[test]
     fn dispatch_ignores_non_query_request_body_arms() {
         let mut reg = QueryableRegistry::new();
