@@ -3078,3 +3078,138 @@ mod tests {
         assert_eq!(none, 0, "non-matching keyexpr does not fire");
     }
 }
+
+// ── decode-side feature-isolation NEG (asymmetric pubsub-put /
+// pubsub-delete) ──
+//
+// The main `mod tests` above is gated on BOTH pubsub-put AND
+// pubsub-delete (its Del-body POS tests construct the Del variant and
+// assert `SampleKind::Del`), so it is entirely cfg'd out under an
+// asymmetric build and cannot host these guards. `dispatch_push` routes
+// the variant whose consumer feature is OFF to the `_ => return`
+// silent-drop (the put arm is `cfg(feature = "pubsub-put")`, the del arm
+// `cfg(feature = "pubsub-delete")`). Layer F proves the off feature
+// SHRINKS the binary; only these pin the receive BEHAVIOUR — an inbound
+// Push of the off variant fires NO subscriber callback, while the ON
+// variant still dispatches (so the drop is variant-selective, not a dead
+// registry). Each test runs only in the single-variant build its `cfg`
+// selects; the run-ci C1d asymmetric lanes
+// (`--features codec-push,pubsub-put` and `…,pubsub-delete`) compile
+// exactly those two builds, which the symmetric (both-on) lanes never do.
+#[cfg(test)]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    any(
+        all(feature = "pubsub-put", not(feature = "pubsub-delete")),
+        all(not(feature = "pubsub-put"), feature = "pubsub-delete"),
+    )
+))]
+mod decode_isolation_tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use wz_codecs::push::Push;
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+
+    /// A Put-bodied Push for `suffix` (literal local wireexpr, id=0).
+    /// `Push::default()` already carries a `CodecZenohMsgPut` body, so the
+    /// keyexpr is the only field overridden. Constructible regardless of
+    /// `pubsub-put` — that feature gates the dispatch consumer, not the
+    /// `codec-push` wire variant.
+    fn put_push(suffix: &str) -> PushOwned {
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(suffix.len() as u64),
+                    suffix: Some(suffix),
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// A Del-bodied Push for `suffix`. Constructible regardless of
+    /// `pubsub-delete` (same reason as [`put_push`]).
+    fn del_push(suffix: &str) -> PushOwned {
+        let mut push = put_push(suffix);
+        push.body = PushOwnedVariant::CodecZenohMsgDel(
+            wz_codecs::msg_del::MsgDel::default()
+                .try_into_owned()
+                .unwrap(),
+        );
+        push
+    }
+
+    #[cfg(all(feature = "pubsub-put", not(feature = "pubsub-delete")))]
+    #[test]
+    fn inbound_del_push_is_silently_dropped_when_pubsub_delete_off() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        registry.register("home/temp", move |_| {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // Del variant → `pubsub-delete` arm cfg'd out → `_ => return`.
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(del_push("home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "inbound Del must not fire the subscriber when pubsub-delete is off"
+        );
+
+        // Put still dispatches — proves the drop is variant-selective,
+        // not a dead/unwired registry.
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(put_push("home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "inbound Put still fires when pubsub-put is on"
+        );
+    }
+
+    #[cfg(all(not(feature = "pubsub-put"), feature = "pubsub-delete"))]
+    #[test]
+    fn inbound_put_push_is_silently_dropped_when_pubsub_put_off() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        registry.register("home/temp", move |_| {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // Put variant → `pubsub-put` arm cfg'd out → `_ => return`.
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(put_push("home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "inbound Put must not fire the subscriber when pubsub-put is off"
+        );
+
+        // Del still dispatches — proves the drop is variant-selective.
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(del_push("home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "inbound Del still fires when pubsub-delete is on"
+        );
+    }
+}

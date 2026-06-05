@@ -662,10 +662,22 @@ layer_c1c_cargo_test_codec_declare() {
 # engage when the wire source_info is decoded. The maximal-preset lanes
 # never build the metadata-off subset, so the off arms would otherwise
 # escape CI.
+# The two ASYMMETRIC lanes (pubsub-put XOR pubsub-delete) run the
+# `pubsub::decode_isolation_tests` module: the main `mod tests` requires
+# BOTH features (its Del-body POS tests assert SampleKind::Del), so the
+# receive-side silent-drop of the OFF variant — dispatch_push's
+# `_ => return` for the cfg'd-out arm — is only behaviourally guarded
+# here. The symmetric lanes above never build a single-variant subset, so
+# without these a regression that un-gated an arm (firing the OFF variant)
+# would escape CI. Layer F proves the OFF feature shrinks the binary;
+# these prove the OFF variant fires no subscriber callback while the ON
+# variant still dispatches.
 layer_c1d_cargo_test_pubsub() {
     (cd crates \
         && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
-        && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-priority,pubsub-congestion-control,pubsub-express --quiet)
+        && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-priority,pubsub-congestion-control,pubsub-express --quiet \
+        && cargo test -p wz-session-core --features codec-push,pubsub-put --quiet \
+        && cargo test -p wz-session-core --features codec-push,pubsub-delete --quiet)
 }
 
 # ─── Layer C1e — cargo test -p wz-session-core (query dispatch plane) ──
