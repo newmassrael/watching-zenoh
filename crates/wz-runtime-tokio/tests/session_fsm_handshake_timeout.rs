@@ -22,7 +22,6 @@
 //! stale timer would drive an OpenAck-awaiting session to Closing.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use sce_rust_runtime::Engine;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -30,24 +29,9 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{BoxedLinkDriver, CloseReason, SessionLinkActions};
-use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver,
 };
-
-/// Inert outbound driver — Closing.onentry fires `send_close_frame_with_reason`,
-/// which routes through this no-op recording (the timeout tests assert on the
-/// FSM state + close-reason trace, not on emitted bytes).
-#[derive(Default)]
-struct NoopOutboundDriver {
-    _state: Mutex<()>,
-}
-
-impl BoxedLinkDriver for NoopOutboundDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
-    fn open_blocking(&self) {}
-    fn close_blocking(&self) {}
-}
 
 fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());

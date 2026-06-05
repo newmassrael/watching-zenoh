@@ -22,6 +22,8 @@
 //! owns an independent engine — the cross-test namespace race
 //! the R71b carry pointed at is gone by design.
 
+use std::collections::VecDeque;
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +35,7 @@ use wz_runtime_tokio::session_glue::{
     install_session_actions, BoxedLinkDriver, SessionInitParams, SessionLinkActions, SigningKey,
     REGISTERED_SCRIPT_NAMES, SESSION_ID,
 };
-use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
 /// fixture inputs, so wire-byte assertions cross-reference cleanly
@@ -140,6 +142,63 @@ impl BoxedLinkDriver for LifecycleRecordingDriver {
     }
     fn close_blocking(&self) {
         self.inner.lock().expect("lifecycle driver poisoned").closes += 1;
+    }
+}
+
+/// Inert no-op outbound [`BoxedLinkDriver`]. `SessionLinkActions::new`
+/// requires an outbound driver for the Lua-closure capture path, but
+/// scenarios that drive the inbound side independently (or assert only
+/// on lifecycle / FSM state) never inspect its output. Callers
+/// construct it via `NoopOutboundDriver::default()`.
+///
+/// SSOT home for the byte-identical no-op driver previously copy-pasted
+/// across five `tests/session_fsm_*.rs` files (lease_deadline,
+/// accepting_path, handshake_timeout, driver_loop, drive_session).
+#[derive(Default)]
+pub struct NoopOutboundDriver {
+    _state: Mutex<()>,
+}
+
+impl BoxedLinkDriver for NoopOutboundDriver {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
+/// Scripted async [`LinkDriver`] that replays a fixed `LinkEvent` queue
+/// from `poll_event`, returning `Lost { PeerClosed }` once the queue
+/// drains. `open` / `send` / `close` are inert `Ok(())`.
+///
+/// SSOT home for the byte-identical queue driver previously copy-pasted
+/// across three `tests/session_fsm_*.rs` files (accepting_path,
+/// driver_loop, drive_session).
+pub struct QueueDriver {
+    events: VecDeque<LinkEvent>,
+}
+
+impl QueueDriver {
+    /// Build a driver that yields `events` in order from `poll_event`.
+    pub fn with(events: Vec<LinkEvent>) -> Self {
+        Self {
+            events: events.into(),
+        }
+    }
+}
+
+impl LinkDriver for QueueDriver {
+    async fn open(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
+        Ok(())
+    }
+    async fn close(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    async fn poll_event(&mut self) -> LinkEvent {
+        self.events.pop_front().unwrap_or(LinkEvent::Lost {
+            cause: LostCause::PeerClosed,
+        })
     }
 }
 

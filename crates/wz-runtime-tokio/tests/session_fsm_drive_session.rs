@@ -20,7 +20,6 @@
 //!     (wall-clock dependency; the leaf logic is already covered
 //!     deterministically by R77).
 
-use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 // R294 — lease deadline arithmetic migrated to u64 ms via TokioTime
@@ -37,55 +36,8 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver, QueueDriver,
 };
-
-/// Inert outbound driver — `SessionLinkActions::new` requires one
-/// for the Lua-closure capture path; `drive_session_until_terminal`
-/// drives the inbound driver independently.
-#[derive(Default)]
-struct NoopOutboundDriver {
-    _state: Mutex<()>,
-}
-
-impl BoxedLinkDriver for NoopOutboundDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
-    fn open_blocking(&self) {}
-    fn close_blocking(&self) {}
-}
-
-/// Staged-event `LinkDriver` (same shape as the R76 driver_loop
-/// scaffolding; duplicated rather than extracted to keep the
-/// test-support boundary minimal until the broader test scaffolding
-/// gets its own retrospective).
-struct QueueDriver {
-    events: VecDeque<LinkEvent>,
-}
-
-impl QueueDriver {
-    fn with(events: Vec<LinkEvent>) -> Self {
-        Self {
-            events: events.into(),
-        }
-    }
-}
-
-impl LinkDriver for QueueDriver {
-    async fn open(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
-        Ok(())
-    }
-    async fn close(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-    async fn poll_event(&mut self) -> LinkEvent {
-        self.events.pop_front().unwrap_or(LinkEvent::Lost {
-            cause: LostCause::PeerClosed,
-        })
-    }
-}
 
 /// Never-returning `LinkDriver` — `poll_event` resolves to
 /// `std::future::pending`, so the only way out of the driver loop

@@ -26,8 +26,6 @@
 //! carry that previously forced the mega-test pattern here, but
 //! splitting this particular path-dependent flow gains no granularity.
 
-use std::collections::VecDeque;
-use std::io;
 use std::sync::{Arc, Mutex};
 
 use sce_rust_runtime::Engine;
@@ -43,58 +41,10 @@ use wz_runtime_tokio::session_glue::{
 // so a transport-keepalive-off subset does not see an unused import.
 #[cfg(feature = "transport-keepalive")]
 use wz_runtime_tokio::session_glue::DriverLoopOutcome;
-use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+use wz_runtime_tokio::{LinkEvent, Reliability, RxFrame};
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver, QueueDriver,
 };
-
-/// Inert outbound driver — the listener path triggers
-/// `send_init_ack_with_cookie` and `send_open_ack` outbound;
-/// `NoopOutboundDriver` swallows the bytes so the test focuses on
-/// the FSM transitions, not the wire shape (Layer 3 interop tests
-/// already cover the outbound wire bytes against zenoh-pico).
-#[derive(Default)]
-struct NoopOutboundDriver {
-    _state: Mutex<()>,
-}
-
-impl BoxedLinkDriver for NoopOutboundDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
-    fn open_blocking(&self) {}
-    fn close_blocking(&self) {}
-}
-
-/// Staged-event `LinkDriver`. Each `poll_event` call returns the
-/// next `LinkEvent` from the queue; an empty queue yields
-/// `Lost { PeerClosed }` so a forgotten staging step does not hang.
-struct QueueDriver {
-    events: VecDeque<LinkEvent>,
-}
-
-impl QueueDriver {
-    fn with(events: Vec<LinkEvent>) -> Self {
-        Self {
-            events: events.into(),
-        }
-    }
-}
-
-impl LinkDriver for QueueDriver {
-    async fn open(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
-        Ok(())
-    }
-    async fn close(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-    async fn poll_event(&mut self) -> LinkEvent {
-        self.events.pop_front().unwrap_or(LinkEvent::Lost {
-            cause: LostCause::PeerClosed,
-        })
-    }
-}
 
 // ─── Transport-header constants (mirror session_glue::wire_const) ──
 

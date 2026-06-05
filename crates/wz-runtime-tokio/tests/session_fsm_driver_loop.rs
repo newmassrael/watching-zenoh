@@ -19,9 +19,7 @@
 //! `INSTALLED` OnceLock + Lua singleton). Each test owns its own
 //! `LuaEngine` via `install_session_actions_for_test`.
 
-use std::collections::VecDeque;
-use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -38,57 +36,10 @@ use wz_runtime_tokio::session_glue::{
 // Both require codec-push, so this import follows codec-push.
 #[cfg(feature = "codec-push")]
 use wz_runtime_tokio::session_glue::NetworkMessage;
-use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+use wz_runtime_tokio::{LinkEvent, LostCause, RxFrame};
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver, QueueDriver,
 };
-
-/// Inert outbound driver — `SessionLinkActions::new` requires one
-/// for the Lua-closure capture path, but `poll_and_dispatch_one`
-/// drives the inbound `LinkDriver` independently, so the outbound
-/// trace counters from this driver are unused in these scenarios.
-#[derive(Default)]
-struct NoopOutboundDriver {
-    _state: Mutex<()>,
-}
-
-impl BoxedLinkDriver for NoopOutboundDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
-    fn open_blocking(&self) {}
-    fn close_blocking(&self) {}
-}
-
-/// Staged-event `LinkDriver`. Each `poll_event` call returns the
-/// next `LinkEvent` from the queue; an empty queue yields
-/// `Lost { PeerClosed }` so a forgotten staging step does not hang.
-struct QueueDriver {
-    events: VecDeque<LinkEvent>,
-}
-
-impl QueueDriver {
-    fn with(events: Vec<LinkEvent>) -> Self {
-        Self {
-            events: events.into(),
-        }
-    }
-}
-
-impl LinkDriver for QueueDriver {
-    async fn open(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
-        Ok(())
-    }
-    async fn close(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-    async fn poll_event(&mut self) -> LinkEvent {
-        self.events.pop_front().unwrap_or(LinkEvent::Lost {
-            cause: LostCause::PeerClosed,
-        })
-    }
-}
 
 // ─── Wire-bytes helpers (mirror session_fsm_inbound_dispatch.rs) ──
 

@@ -22,7 +22,6 @@
 //! SCE upstream's per-instance ScriptEngine DI.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 // R294: lease deadline arithmetic migrated to u64 ms
 
 use sce_rust_runtime::Engine;
@@ -34,26 +33,9 @@ use wz_runtime_tokio::session_fsm_unicast::{
 use wz_runtime_tokio::session_glue::{
     check_lease_deadline, BoxedLinkDriver, CloseReason, LeaseCheckOutcome, SessionLinkActions,
 };
-use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver,
 };
-
-/// Inert outbound driver — the lease-deadline helper does not pull
-/// from the outbound driver, but `SessionLinkActions::new` requires
-/// one for the script-closure capture path. The Closing entry from
-/// the `lease.expired` transition fires `send_close_frame_with_reason`,
-/// which routes through this driver as a no-op recording.
-#[derive(Default)]
-struct NoopOutboundDriver {
-    _state: Mutex<()>,
-}
-
-impl BoxedLinkDriver for NoopOutboundDriver {
-    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
-    fn open_blocking(&self) {}
-    fn close_blocking(&self) {}
-}
 
 fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
