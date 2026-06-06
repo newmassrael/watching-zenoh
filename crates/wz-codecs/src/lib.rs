@@ -318,6 +318,24 @@ pub mod wire_const {
     /// 0 = best-effort) per transport.h:80.
     pub const FLAG_T_FRAME_R: u8 = 0x20;
 
+    /// Fragmented established-session payload carrier (transport.h:38 MID
+    /// 0x06). Body = VLE sn + tail payload (the same body codec as
+    /// `T_MID_FRAME`, `sources/codecs/fragment.scxml`); the per-fragment R
+    /// (reliable) and M (more) discriminators live in the transport header
+    /// byte, not the body. Header layout `|Z|M|R| FRAGMENT|`
+    /// (transport.h:485). Reassembled fragments re-enter the `T_MID_FRAME`
+    /// decode path as a complete NetworkMessage batch.
+    pub const T_MID_FRAGMENT: u8 = 0x06;
+    /// Reliable channel discriminator for `T_MID_FRAGMENT` (1 = reliable,
+    /// 0 = best-effort) per transport.h:86 (`_Z_FLAG_T_FRAGMENT_R`, 1<<5).
+    /// Part of the reassembly chain key alongside the peer ZID.
+    pub const FLAG_T_FRAGMENT_R: u8 = 0x20;
+    /// More-fragments discriminator for `T_MID_FRAGMENT` (1 = more
+    /// fragments follow, 0 = final fragment) per transport.h:87
+    /// (`_Z_FLAG_T_FRAGMENT_M`, 1<<6). The reassembly slot FSM guards
+    /// Continue-vs-Final on this bit.
+    pub const FLAG_T_FRAGMENT_M: u8 = 0x40;
+
     /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
     #[cfg(feature = "codec-init-body")]
     pub const FLAG_T_INIT_A: u8 = 0x20;

@@ -54,6 +54,17 @@ default = ["alloc"]
 # allocator-free and keeps the alloc profile unchanged.
 alloc = ["wz-codecs/alloc"]
 
+# Transport reassembly subsystem (Tier B). Gates the SCE-generated
+# reassembly slot statechart module (build.rs codegens
+# sources/network/reassembly_slot.scxml only under this feature) and the
+# `reassembly` dispatcher that drives N slot Engine instances. Pulls
+# sce-rust-runtime (the generated `Engine`/`StatePolicy` host). The slot
+# FSM is script-engine-free, so the no_std (heapless) variant of
+# sce-rust-runtime — selected by the MCU profile, never by this crate so
+# the AP profile's std `sce-rust-runtime` stays unification-compatible —
+# lets the dispatcher cross-compile bare-metal.
+reassembly = ["dep:sce-rust-runtime", "sce-rust-runtime/no_std"]
+
 # R311di-11 — body-codec feature forwarders for the NetworkMessage
 # dispatch cluster. Each forwards to wz-codecs/codec-* so the 3-stage
 # chain (wz-runtime-tokio codec-X -> wz-session-core codec-X ->
@@ -195,6 +206,13 @@ transport-batching = []
 
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
+# Tier B reassembly — host runtime for the SCE-generated reassembly slot
+# statechart (`Engine<ReassemblySlotPolicy<A>>`). Optional, pulled only by
+# the `reassembly` feature. No feature is forced here: the std default
+# serves the AP profile (shared with wz-runtime-tokio) while the MCU
+# profile selects `sce-rust-runtime/no_std`; forcing either would break
+# Cargo feature unification on the other profile.
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true, default-features = false }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`
 # projection helpers (extract_qos / extract_attachment / extract_source_info).
 # R311hl (Track 2) — `default-features = false` with NO hardcoded `alloc`;

@@ -497,3 +497,28 @@ pub mod response_sink;
 /// (MCU) profiles.
 #[cfg(feature = "alloc")]
 pub mod observer;
+
+/// SCE-generated reassembly slot state machine. The emit comes from
+/// `sources/network/reassembly_slot.scxml` via `build.rs` (codegen'd into
+/// `$OUT_DIR/reassembly_slot_sm.rs` only under the `reassembly` feature).
+/// Exposes the `ReassemblySlotState` / `ReassemblySlotEvent` enums, the
+/// `ReassemblySlotActions` host trait, the `ReassemblySlotPolicy<A>`
+/// policy, and the typed `ReassemblySlotInject` seam. Fully
+/// script-engine-free (no `IScriptEngine`): every effect is a native
+/// `<sce:action>` trait call and every guard is a typed `_event.data`
+/// comparison, so the module compiles `#![no_std]`. The build script
+/// strips the file-head `#![...]` inner attributes; the lint allows are
+/// restored here as outer attributes on the wrapping module.
+#[cfg(feature = "reassembly")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod reassembly_slot {
+    include!(concat!(env!("OUT_DIR"), "/reassembly_slot_sm.rs"));
+}

@@ -1618,6 +1618,7 @@ dependencies = [
  "hmac",
  "log",
  "sce-forge-runtime",
+ "sce-rust-runtime",
  "sha2",
  "wz-codecs",
  "wz-codecs-test-support",

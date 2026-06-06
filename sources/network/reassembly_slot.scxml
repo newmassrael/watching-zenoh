@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Reassembly slot FSM — the per-slot reassembly protocol, instantiated
+  once per pool slot as an SCE Engine<ReassemblySlotPolicy<A>>. First
+  `network/`-kind statechart in watching-zenoh, and the first wz
+  statechart that is fully script-engine-free (no_std): every effect is
+  a `<sce:action>` native host-trait call and every guard is a typed
+  `_event.data` comparison, so the generated policy carries no
+  IScriptEngine.
+
+  Lowering of the reassembly-fsm prose-sketch §2.2 slot-states + §2.4
+  transitions + §2.5 strict-in-order policy.
+
+  Realization (prose-sketch §2.1 / §2.3, Round 311ii refine):
+    The N concurrent slots are N Engine instances held by the Rust
+    ReassemblyDispatcher (the Router) — NOT N orthogonal SCXML regions.
+    This file is ONE slot's protocol FSM, replicated by instantiation.
+
+  Router boundary (prose-sketch §1 / §2.3) — engine-free division of
+  labour:
+    The dispatcher decodes Fragment bodies (sources/codecs/fragment.scxml
+    = sn:vle + payload:tail), tracks per-chain SN, enforces per-peer
+    quota, and CLASSIFIES each fragment. The SN-consecutiveness arithmetic
+    is stateful (event.sn vs the chain's expected next SN) and therefore
+    cannot be a typed `_event.data` guard — a native guard may reference
+    `_event.data` fields and literals only, never stored state. So the
+    dispatcher resolves in-order-ness and raises distinct typed inject
+    events:
+      - in-order fragment      -> `fragment.chunk` (payload + more bit)
+      - out-of-order fragment  -> `fragment.ooo`   (signal-only)
+    What stays in the FSM is the wire `more` bit (a real per-fragment
+    field, fragment_chunk_schema.scxml), guarded natively to split a
+    Continue (more != 0, keep receiving) from a Final (more == 0,
+    complete). Stateful SN counting in the dispatcher; the wire more-bit
+    in the FSM.
+
+    First-vs-Continue is the source state, not a guard: the dispatcher
+    routes a chain-starting fragment to a free (Empty) slot and an
+    in-order continuation to that chain's Receiving slot. Duplicate-First
+    and unmatched-Continue are refused at the Router and never reach a
+    slot.
+
+  Timeout ownership (design decision; prose-sketch §4):
+    The reassembly deadline is the buffer-pool reassembly-variant's
+    per-slot `deadline` field (RFC §5.M, SCE C9-gamma), swept by the
+    dispatcher on its worker tick (cf. RFC 815 table-manager reassembly
+    GC). The dispatcher raises `reassembly.timeout` only into the slot
+    still holding the live message, so a reused slot never sees a stale
+    deadline. The slot FSM arms no timer of its own; it owns the TimedOut
+    state + transition only.
+
+  Slot reuse: the three terminal states (Complete / TimedOut / Aborted)
+  are not `<final>` — each funnels back to Empty on the dispatcher's
+  `slot.release` (raised after the buffer-pool slot is reclaimed,
+  cpu-mut/cpu-ref -> free, §6), so one Engine serves successive messages.
+
+  Host actions (the generated ReassemblySlotActions trait, one method per
+  distinct `<sce:action name>`):
+    begin_chain(payload)            — init chain + stage the first body
+    append_fragment_payload(payload)— append an in-order continuation
+    finalize_message(payload)       — append the final body + emit the
+                                      reassembled message upstream
+    abort_ooo / abort_peer_drop / abort_evicted / abort_codec
+                                    — record the abort reason + signal
+    record_timeout                  — record the deadline expiry
+    reset_slot                      — clear chain state for reuse
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="reassembly_slot"
+       version="1.0"
+       datamodel="ecmascript"
+       initial="Empty">
+
+  <sce:import src="fragment_chunk_schema.scxml" kind="event-schema" as="FragmentChunk"/>
+
+  <!-- Slot free, awaiting a chain-starting fragment routed here by the
+       Router. The dispatcher only routes a first fragment to a free
+       slot, so the chunk is unconditionally a chain start. -->
+  <state id="Empty">
+    <transition event="fragment.chunk" target="Receiving">
+      <sce:action name="begin_chain">
+        <sce:arg expr="_event.data.payload"/>
+      </sce:action>
+    </transition>
+  </state>
+
+  <!-- Chain in progress. The dispatcher has already proven this chunk is
+       in-order (an out-of-order fragment arrives as fragment.ooo). The
+       wire more bit splits a continuation (more != 0) from the final
+       fragment (more == 0). Strict in-order parity (§2.5, OQ-W21). -->
+  <state id="Receiving">
+    <transition event="fragment.chunk" cond="_event.data.more !== 0" target="Receiving">
+      <sce:action name="append_fragment_payload">
+        <sce:arg expr="_event.data.payload"/>
+      </sce:action>
+    </transition>
+    <transition event="fragment.chunk" cond="_event.data.more === 0" target="Complete">
+      <sce:action name="finalize_message">
+        <sce:arg expr="_event.data.payload"/>
+      </sce:action>
+    </transition>
+    <transition event="fragment.ooo" target="Aborted">
+      <sce:action name="abort_ooo"/>
+    </transition>
+    <transition event="fragment.drop" target="Aborted">
+      <sce:action name="abort_peer_drop"/>
+    </transition>
+    <transition event="slot.evict" target="Aborted">
+      <sce:action name="abort_evicted"/>
+    </transition>
+    <transition event="codec.error" target="Aborted">
+      <sce:action name="abort_codec"/>
+    </transition>
+    <transition event="reassembly.timeout" target="TimedOut">
+      <sce:action name="record_timeout"/>
+    </transition>
+  </state>
+
+  <!-- Final received in-order: finalize_message has emitted the
+       reassembled message upstream. Await pool-slot reclamation. -->
+  <state id="Complete">
+    <transition event="slot.release" target="Empty">
+      <sce:action name="reset_slot"/>
+    </transition>
+  </state>
+
+  <!-- Deadline expired (dispatcher-raised reassembly.timeout). -->
+  <state id="TimedOut">
+    <transition event="slot.release" target="Empty">
+      <sce:action name="reset_slot"/>
+    </transition>
+  </state>
+
+  <!-- Chain aborted; the abort reason was recorded by the triggering
+       transition's action. Await pool-slot reclamation. -->
+  <state id="Aborted">
+    <transition event="slot.release" target="Empty">
+      <sce:action name="reset_slot"/>
+    </transition>
+  </state>
+
+</scxml>
