@@ -2130,10 +2130,13 @@
       ]
     },
     "reassembly-fsm--prose-sketch/2-1-hierarchy": {
-      "intent": "ReassemblyDispatcher = Router region + N parallel Slot regions (N=slot_count); one-active-per-key invariant; codegen N is build-time const.",
+      "intent": "ReassemblyDispatcher = Router dispatcher + N slot-FSM instances (N=slot_count, build-const); one-active-per-key. N identical slots via instantiation (Engines in pool), not orthogonal regions.",
       "inputs_bullets": [
-        "Router: chain-key→slot-index map (bounded-collection<SlotEntry, N>), per-peer quota check",
-        "Slot[0..N-1]: parallel sub-region, four-state machine each",
+        "Router: Rust dispatcher (registry pattern) — routing-over-tables, not a state machine",
+        "Router map: chain-key→slot-index (bounded-collection<SlotEntry,N>); per-peer quota check",
+        "Slot: reassembly-protocol statechart, instantiated per slot as SCE Engine<ReassemblySlotPolicy>",
+        "Slot four states; real orthogonality is per-slot: memory-lifecycle ∥ reassembly-protocol FSM",
+        "<parallel> reserved for fixed distinct concerns, not N-identical slots (= instantiation)",
         "Upstream divergence: shared bounded pool decoupled from peer count (vs upstream inline 2×peers)",
         "Parity invariant: slot_count ≥ 2 × peer_table.capacity reproduces upstream no-exhaustion",
         "MCU slot_count=4, AP=32 (OQ-W8); over-commits trade strict parity for memory cost"
@@ -2162,7 +2165,7 @@
       ]
     },
     "reassembly-fsm--prose-sketch/2-3-router-states": {
-      "intent": "Router region routes Fragment.* events to Slot regions by chain key; enforces per-peer quota; refuses second First on already-open key (duplicate-first abort).",
+      "intent": "Router = dispatcher (registry): routes Fragment.* to the chain-key's slot FSM instance; enforces per-peer quota; refuses second First on an open key (duplicate-first abort); not an SCXML region.",
       "impact_scope": [
         "reassembly-fsm--prose-sketch",
         "reassembly-fsm--prose-sketch/2-1-hierarchy",
@@ -30488,6 +30491,48 @@
         "ARCHITECTURE: established the wz-runtime-lwip -> wz-session-core edge (MCU mirror of wz-runtime-tokio -> wz-session-core). scout_static is its first capability (runtime-agnostic, no LwipRuntime binding). More MCU session machinery flows across this edge as the MCU session runtime grows.",
         "OPEN (consumer-side, future): MCU session-open that calls synth_static_locators does not exist yet (the broader MCU session-runtime work: FSM + registries bound to LwipRuntime). The synth is exposed + unit-tested + cross-compiled, awaiting that consumer (bottom-up framework build).",
         "NEXT MS1 frontier (Tier B): transport-fragmentation (reassembly FSM, sizeable) remains; locator-tcp/udp gating tidy is a cheap cleanup."
+      ]
+    },
+    "Round 311ii": {
+      "decision_summary": "reassembly realization refine: Slot FSM = per-slot instantiated statechart (Engine), Router = Rust dispatcher (registry); N-identical concurrency is instantiation, not orthogonal SCXML regions",
+      "changes_bullets": [
+        "§2-1 intent+inputs: 'Router region + N parallel Slot regions' -> dispatcher + N Engine instances",
+        "§2-1 inputs: real orthogonality per-slot (memory∥protocol); <parallel> not for N-identical slots",
+        "§2-3 intent: Router = Rust dispatcher (registry), not an SCXML region"
+      ],
+      "verification_bullets": [
+        "validate_workspace post-edit: orphan delta 0, T3 warn not increased",
+        "grounded: Engine<Policy> per-instance (session_open.rs); registry pattern (SubscriberRegistry)",
+        "SCE has no statechart region-replication; <sce:repeat> codec-only; SCXML purity preserved"
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "reassembly-fsm--prose-sketch/2-3-router-states"
+      ],
+      "carry_forward_bullets": [
+        "NEXT: author sources/network slot reassembly FSM statechart (Engine<ReassemblySlotPolicy>)",
+        "THEN: ReassemblyDispatcher Rust registry (chain-key map, per-peer quota, oldest-wins evict)",
+        "pool+deploy reassembly_pool+fragment codec ready; SCE C9-γ reassembly codegen landed"
+      ],
+      "publishable_decision_summary": "reassembly realization refine: Slot FSM = per-slot instantiated statechart (Engine), Router = Rust dispatcher (registry); N-identical concurrency is instantiation, not orthogonal SCXML regions",
+      "publishable_changes_bullets": [
+        "§2-1 intent+inputs: 'Router region + N parallel Slot regions' -> dispatcher + N Engine instances",
+        "§2-1 inputs: real orthogonality per-slot (memory∥protocol); <parallel> not for N-identical slots",
+        "§2-3 intent: Router = Rust dispatcher (registry), not an SCXML region"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-edit: orphan delta 0, T3 warn not increased",
+        "grounded: Engine<Policy> per-instance (session_open.rs); registry pattern (SubscriberRegistry)",
+        "SCE has no statechart region-replication; <sce:repeat> codec-only; SCXML purity preserved"
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "reassembly-fsm--prose-sketch/2-3-router-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NEXT: author sources/network slot reassembly FSM statechart (Engine<ReassemblySlotPolicy>)",
+        "THEN: ReassemblyDispatcher Rust registry (chain-key map, per-peer quota, oldest-wins evict)",
+        "pool+deploy reassembly_pool+fragment codec ready; SCE C9-γ reassembly codegen landed"
       ]
     },
     "Round 311j": {
