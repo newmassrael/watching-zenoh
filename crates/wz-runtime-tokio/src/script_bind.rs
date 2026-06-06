@@ -6,15 +6,15 @@
 //! Helpers that register a native function onto an [`IScriptEngine`]
 //! whose closure body captures a shared `Arc<A>` deps bundle. Extracted
 //! from `session_glue.rs` (where they were hard-coded to
-//! `Arc<SessionLinkActions>`) and generalised over the deps type `A` so
-//! the scouting FSM glue (`scouting_glue.rs`, which drives a separate
-//! `Arc<ScoutingActions>`) reuses the exact same binder instead of
-//! copy-pasting it.
+//! `Arc<SessionLinkActions>`) and generalised over the deps type `A`.
 //!
-//! The module is deliberately neutral: it depends on neither
-//! `session_glue` nor `scouting_glue`, so a `scouting_glue ->
-//! session_glue` module edge is never created. Both glues import the
-//! binder from here.
+//! Sole consumer today is the still-Lua-bound session FSM glue
+//! (`session_glue.rs`). The scouting FSM was its second consumer until
+//! R311ik made scouting engine-free (native `<sce:action>` host-trait
+//! dispatch, no `IScriptEngine`), so `scouting_glue.rs` no longer binds
+//! through here. The module stays generic over `A` so the binder is
+//! ready for any further Lua-bound FSM, and remains neutral — it depends
+//! on no glue module, so no inter-glue module edge is created.
 //!
 //! `bind_close_reason` / `bind_bool` stay in `session_glue.rs` — they
 //! are specialised to the session FSM's [`CloseReason`] dispatch and a

@@ -117,8 +117,39 @@ pubsub-express = []
 # transform with no wz-codecs forward. Off by default: a deploy that does
 # not use `scouting.mode: static` elides the module entirely (§2.4.3
 # reason #2 codegen-elision). Independent of `scouting-active` (the
-# multicast FSM in wz-runtime-tokio) — the two modes are alternatives.
+# multicast FSM, below) — the two modes are alternatives.
 scouting-static = []
+
+# R311ik — active scouting mode (docs/scouting-fsm.md §2.4.1). Gates the
+# SCE-generated `scouting` slot statechart module (build.rs codegens
+# sources/session/scouting.scxml with `--no-std` only under this
+# feature). The FSM is engine-free — every effect is a `<sce:action>`
+# native host-trait call (the generated `ScoutingActions` trait, impl'd
+# by wz-runtime-tokio's scouting_glue) and there is no `<send delay>`
+# self-timer (the host drive loop owns the scout deadline), so the
+# emitted `ScoutingPolicy<A>` carries no `IScriptEngine` and no
+# scheduler.
+#
+# This pulls `dep:sce-rust-runtime` but — UNLIKE `reassembly` — does NOT
+# force `sce-rust-runtime/no_std`. Rationale: `no_std` is mutually
+# exclusive with `http-send` (sce-rust-runtime lib.rs `compile_error!`),
+# and `scouting-active` is hosted by wz-runtime-tokio, whose own
+# sce-rust-runtime dep pulls default features (`http-send`). Forcing
+# `no_std` here would make the AP build fail that compile_error. The
+# `--no-std` *codegen* flag already gives the allocator-free / NoOpHal
+# code shape; the runtime's heapless aliases resolve to std types under a
+# std sce-rust-runtime, so the same emit compiles on the AP profile. The
+# std-ness of the runtime is a build-PROFILE decision (the MCU profile
+# selects `sce-rust-runtime/no_std` once the whole build is Lua-free),
+# not a per-capability-feature one — this is what the `reassembly`
+# feature's own comment intends ("selected by the MCU profile, never by
+# this crate"); its feature line forcing `no_std` is a separate debt that
+# only stays harmless while reassembly is session-core/MCU-only (its dep
+# there is default-features=false, so no http-send to conflict). A whole
+# no_std/MCU active-scouting build is unblocked only after the session
+# FSM is also engine-free and sce-rust-lua leaves the graph (the
+# IScriptEngine trait the no_std runtime elides is what Lua needs).
+scouting-active = ["dep:sce-rust-runtime"]
 
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the

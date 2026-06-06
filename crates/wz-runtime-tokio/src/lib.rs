@@ -290,44 +290,14 @@ pub mod session_fsm_unicast {
     include!(concat!(env!("OUT_DIR"), "/session_fsm_unicast_sm.rs"));
 }
 
-/// R311en — SCE-generated scouting FSM (active mode) per
-/// docs/scouting-fsm.md §10. Same statechart pipeline as
-/// `session_fsm_unicast`: build.rs shells out to `sce-codegen generate`
-/// for `sources/session/scouting.scxml` and strips the inner-attribute
-/// header; this wrapping module restores the lint allows as outer
-/// attributes. The generated code is self-contained (state enum +
-/// transition table + Lua-bound script dispatch). The host registration
-/// of the scout_emit / record_hello_and_emit / emit_scout_timeout /
-/// diag_scout_tx_failed actions + the UDP-multicast scouting link wiring
-/// land in the R311en cascade body round; this milestone confirms the
-/// SCXML -> sce-codegen statechart path.
-// The allow set mirrors the inner-attribute suppression budget the SCE
-// codegen self-declares at the head of scouting_sm.rs (the "audited
-// 2026-04-15 against the W3C suite" block). build.rs strips those `#![..]`
-// inner attrs so the file is include!()-able mid-module; this wrapper
-// restores them as OUTER attrs, exactly as documented in build.rs
-// emit_one. `unused_imports` covers the generated `use core::time::Duration`
-// that the fully-qualified `core::time::Duration::from_millis` call site
-// leaves unused; the rest cover the StatePolicy trait-shape fields the
-// scouting fixture does not exercise.
-#[cfg(feature = "scouting-active")]
-#[allow(non_snake_case)]
-#[allow(unused_imports)]
-#[allow(dead_code)]
-#[allow(unused_variables)]
-#[allow(unused_mut)]
-#[allow(unused_labels)]
-#[allow(unreachable_patterns)]
-#[allow(unreachable_code)]
-#[allow(unused_assignments)]
-#[allow(clippy::style)]
-#[allow(clippy::complexity)]
-pub mod scouting_fsm {
-    include!(concat!(env!("OUT_DIR"), "/scouting_sm.rs"));
-}
-
-// R311ep — scouting FSM <-> multicast-link glue (active mode): the four
-// scouting.scxml script actions + the async scout->hello drive loop.
+// R311ik — scouting FSM <-> multicast-link glue (active mode),
+// engine-free. The SCE-generated FSM (the `ScoutingActions` trait,
+// `ScoutingPolicy<A>`, and the state/event enums) now lives in
+// `wz_session_core::scouting` (codegen moved out of this crate's
+// build.rs into the runtime-agnostic core, mirroring the reassembly
+// slot FSM). This module is the host side: the `ScoutingActions` trait
+// impl that stages Scout/Hello bytes + the async scout->hello drive loop
+// that owns the scout deadline. No Lua engine is involved.
 #[cfg(feature = "scouting-active")]
 pub mod scouting_glue;
 

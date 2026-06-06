@@ -470,15 +470,25 @@ query-reply-err = ["wz-session-core/query-reply-err"]
 # R311en — scouting domain wire-up (active mode). First of the
 # scouting 0/6 -> active transition (north-star missing-subsystem
 # track). `scouting-active` gates:
-#   - build.rs codegen of sources/session/scouting.scxml (the
-#     pre-session Scout/Hello discovery FSM, docs/scouting-fsm.md §10).
-#   - the `pub mod scouting_fsm` include + the host ScoutingActions
-#     impl that binds the FSM actions to the UDP-multicast scouting
-#     link (multicast driver lands in the R311en cascade body round).
+#   - the engine-free `scouting` FSM module, codegen'd in
+#     wz-session-core (R311ik moved the codegen there; forwarded via
+#     `wz-session-core/scouting-active`). The pre-session Scout/Hello
+#     discovery FSM, docs/scouting-fsm.md §10.
+#   - the `scouting_glue` module: the host `ScoutingActions` trait impl
+#     that binds the engine-free FSM actions to the UDP-multicast
+#     scouting link, plus the drive loop that owns the scout deadline.
 # Off by default: scouting is opt-in per deploy.scouting.mode. The
 # static mode (docs/scouting-fsm.md §2.4.3) never instantiates this
 # FSM, so it is not gated by this feature. passive is Phase D+
 # (OQ-W23). Forwarded from the wz facade `scouting-active`.
+#
+# Forwards to wz-session-core/scouting-active: R311ik moved the
+# SCE-generated FSM (the `ScoutingActions` trait + `ScoutingPolicy<A>`
+# + the `ScoutingState`/`ScoutingEvent` enums) from this crate's
+# build.rs into the runtime-agnostic core, mirroring the reassembly
+# slot FSM. The former Lua binding (sce-rust-lua) is gone from the
+# scouting path; this is one half of the runtime-schism resolution
+# (the session FSM is the other half, still Lua-bound for now).
 #
 # Implies transport-link-udp: the scouting link is UDP multicast
 # (docs/scouting-fsm.md §1.2 — 224.0.0.224:7446), so the UdpDriver +
@@ -493,7 +503,12 @@ query-reply-err = ["wz-session-core/query-reply-err"]
 # scouting glue cannot compose without both body codecs. The S_MID_SCOUT
 # / S_MID_HELLO wire_const header bytes are gated on the same two codec
 # features in wz-codecs.
-scouting-active = ["transport-link-udp", "codec-scout", "codec-hello"]
+scouting-active = [
+    "wz-session-core/scouting-active",
+    "transport-link-udp",
+    "codec-scout",
+    "codec-hello",
+]
 
 # R311if — static scouting mode wire-up. Forwards to
 # wz-session-core/scouting-static (the `scout_static` synth module) and

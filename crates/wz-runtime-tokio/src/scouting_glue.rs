@@ -1,44 +1,62 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311ep — scouting FSM <-> multicast-link glue (active mode).
+//! R311ik — scouting FSM <-> multicast-link glue (active mode),
+//! engine-free.
 //!
-//! Wires the four `scouting.scxml` script actions
-//! (`sources/session/scouting.scxml`, codegen'd into
-//! [`crate::scouting_fsm`]) onto a Lua engine and drives the FSM against
-//! a UDP-multicast scouting link. This is the B-2 body of the
-//! scouting-subsystem implementation begun by the R311en scaffold; it
-//! turns "find a peer to handshake with" into a concrete unicast locator
-//! the session FSM can dial (docs/scouting-fsm.md §1.1, §2.4.1).
+//! Hosts the four `scouting.scxml` actions
+//! (`sources/session/scouting.scxml`, codegen'd engine-free into
+//! [`wz_session_core::scouting`]) as native `<sce:action>` trait methods
+//! and drives the FSM against a UDP-multicast scouting link. This is the
+//! engine-free successor of the R311ep Lua-bound glue: the generated
+//! [`wz_session_core::scouting::ScoutingActions`] trait replaces the Lua
+//! registration, so no `IScriptEngine` / `LuaEngine` is involved and the
+//! scouting path no longer pulls `sce-rust-lua` (one half of the runtime
+//! schism that blocked hosting the reassembly FSM and the session FSMs in
+//! one `sce-rust-runtime`).
 //!
 //! ## IO ownership — actions are pure, the loop owns the socket
 //!
-//! The session glue's outbound actions (`send_init_syn`, …) call
-//! `BoxedLinkDriver::send_blocking`, which bridges the sync Lua callback
-//! to the async link via `Handle::block_on` (session_glue.rs ~315, with
-//! a documented current-thread-runtime deadlock caveat). Scouting takes
-//! the cleaner path: the script actions are **pure** — `scout_emit`
-//! encodes a Scout frame and stages the bytes in
-//! [`ScoutingActions::pending_scout`]; `record_hello_and_emit` decodes a
-//! staged Hello and stores the locator. All socket IO lives in the async
-//! [`drive_scouting_until_resolved`] loop, which owns the `&mut` link
-//! driver. This (a) avoids `block_on` entirely, (b) keeps the actions
-//! trivially unit-testable without a socket, and (c) makes the
-//! `link.tx_failed` arm real: a failed multicast send feeds
-//! `LinkTxFailed` instead of being unreachable.
+//! The script actions are **pure** — `scout_emit` encodes a Scout frame
+//! and stages the bytes in [`ScoutingActions::pending_scout`];
+//! `record_hello_and_emit` decodes a staged Hello and stores the locator.
+//! All socket IO lives in the async [`drive_scouting_until_resolved`]
+//! loop, which owns the `&mut` link driver. This (a) keeps the actions
+//! trivially unit-testable without a socket, and (b) makes the
+//! `link.tx_failed` arm real: a failed multicast send feeds `LinkTxFailed`
+//! instead of being unreachable.
 //!
 //! A single UDP multicast socket both sends the Scout and receives the
 //! Hello (zenoh-pico `__z_scout` does the same: send the wbuf, then read
-//! replies on the same link). The session glue could split a TCP stream
-//! into read/write halves to give the actions and the loop independent
-//! handles, but a UDP socket has no such split, so loop-owned IO is the
-//! natural fit.
+//! replies on the same link).
+//!
+//! ## Action state sharing — the trait moves, the Arc stays
+//!
+//! [`wz_session_core::scouting::ScoutingPolicy<A>`] takes `A` (the action
+//! impl) **by value**, and the engine's policy field is private, so the
+//! drive loop cannot read the staging slots back out of the engine. The
+//! shared state therefore lives in an [`ScoutingActions`] the caller holds
+//! behind an `Arc`; the policy is parameterised over a thin
+//! [`ScoutActionsBinding`] newtype that wraps a clone of that `Arc` and
+//! impls the generated trait through the `Arc`'s interior-mutable slots.
+//! (The trait cannot be impl'd directly on `Arc<ScoutingActions>` — the
+//! orphan rule rejects `impl ForeignTrait for Arc<Local>` since `Arc` is
+//! not a fundamental type — so the local newtype carries the impl.)
+//!
+//! ## Timeout ownership — the loop owns the clock
+//!
+//! The engine-free FSM is codegen'd `--no-std` (`type Hal = NoOpHal`), so
+//! a W3C SCXML `<send delay>` would be a dead element (NoOpHal's clock
+//! never advances). The FSM therefore arms no timer; it owns only the
+//! `scout.timer.elapsed` transition. This loop owns the clock: it measures
+//! the [`ScoutParams::timeout_ms`] window against the runtime's monotonic
+//! clock and raises [`ScoutingEvent::ScoutTimerElapsed`] when it elapses.
+//! Mirrors the reassembly dispatcher's deadline-sweep split (FSM owns the
+//! transition, runtime owns the clock; the value stays spec-sourced).
 
 use std::sync::Arc;
 
 use sce_forge_runtime::codec::SceCursor;
-use sce_rust_lua::LuaEngine;
-use sce_rust_runtime::scripting::IScriptEngine;
 use sce_rust_runtime::Engine;
 
 use wz_codecs::hello::Hello;
@@ -48,21 +66,20 @@ use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::scout_params::ScoutParams;
 use wz_session_core::scout_trace::ScoutTrace;
+// The generated engine-free action trait. Aliased so the trait name does
+// not shadow the host-side [`ScoutingActions`] state struct below (the
+// struct holds the shared staging slots the caller reads; the trait is
+// what the generated policy dispatches through).
+use wz_session_core::scouting::ScoutingActions as ScoutingActionsTrait;
+use wz_session_core::scouting::{ScoutingEvent, ScoutingPolicy, ScoutingState};
 
 use wz_runtime_core::{Runtime, TimeSource};
 
 use crate::runtime_impl::TokioRuntime;
-use crate::scouting_fsm::{ScoutingEvent, ScoutingPolicy, ScoutingState};
-use crate::script_bind::bind_unit;
 use crate::sync::Mutex;
 use crate::LinkDriver;
 
-/// SCE-runtime session id the generated scouting state-machine
-/// dispatches against — the `name="scouting"` attribute of
-/// `sources/session/scouting.scxml`.
-pub const SCOUTING_SESSION_ID: &str = "scouting";
-
-/// Deps bundle captured by the four scouting script-action closures.
+/// Shared host state for one active-scouting cycle.
 ///
 /// Distinct from [`crate::session_glue::SessionLinkActions`] (the session
 /// handshake bundle): scouting is a pre-session, untrusted-link
@@ -71,8 +88,14 @@ pub const SCOUTING_SESSION_ID: &str = "scouting";
 /// crate's `R::Mutex` convention; the AP profile (`TokioRuntime`, the
 /// only one that compiles `scouting-active` today since it implies
 /// `transport-link-udp`) is constructed via [`ScoutingActions::new`].
+///
+/// The caller holds this behind an `Arc`; [`new_scouting_engine`] wraps a
+/// clone of that `Arc` in a [`ScoutActionsBinding`] for the policy to own,
+/// so the caller can still read [`ScoutingActions::discovered_locator`] /
+/// [`ScoutingActions::trace_snapshot`] after the policy takes the binding.
 pub struct ScoutingActions<R: Runtime = TokioRuntime> {
-    /// Inputs for the outbound Scout frame (version / what / zid).
+    /// Inputs for the outbound Scout frame + the scouting deadline
+    /// (version / what / zid / timeout_ms).
     pub params: ScoutParams,
     /// Script-action dispatch counters, read in tests via
     /// [`ScoutingActions::trace_snapshot`].
@@ -96,9 +119,8 @@ pub struct ScoutingActions<R: Runtime = TokioRuntime> {
 }
 
 impl ScoutingActions<TokioRuntime> {
-    /// Construct an active-scouting action bundle for one discovery
-    /// cycle. `params` are captured by value; the staging slots start
-    /// empty.
+    /// Construct an active-scouting state bundle for one discovery cycle.
+    /// `params` are captured by value; the staging slots start empty.
     pub fn new(params: ScoutParams) -> Arc<Self> {
         Arc::new(Self {
             params,
@@ -121,28 +143,27 @@ impl ScoutingActions<TokioRuntime> {
     }
 }
 
-/// Register the four scouting script actions onto `script_engine` and
-/// create the SCE-runtime scouting session. Mirrors
-/// [`crate::session_glue::install_session_actions`]; each closure
-/// captures a clone of `actions` via the generic
-/// [`crate::script_bind::bind_unit`] binder.
-pub fn install_scouting_actions(
-    actions: Arc<ScoutingActions>,
-    script_engine: &Arc<dyn IScriptEngine>,
-) {
-    script_engine.create_session(SCOUTING_SESSION_ID);
-    register_scout_fns(script_engine.as_ref(), &actions);
+/// Thin newtype that carries the generated [`ScoutingActionsTrait`] impl
+/// for the policy to own by value. Wraps a clone of the caller's
+/// `Arc<`[`ScoutingActions`]`>` so the four native actions mutate the same
+/// shared staging slots the caller reads back (the orphan rule forbids
+/// impl'ing the foreign trait on `Arc<ScoutingActions>` directly).
+pub struct ScoutActionsBinding<R: Runtime = TokioRuntime> {
+    inner: Arc<ScoutingActions<R>>,
 }
 
-/// Bind the four `scouting.scxml` script-action names. Public so a
-/// future test-support composition can vary the registration set; the
-/// production path reaches this through [`install_scouting_actions`].
-pub fn register_scout_fns(lua: &dyn IScriptEngine, actions: &Arc<ScoutingActions>) {
-    // Sending.onentry — encode one Scout frame and stage the datagram
-    // for the drive loop to transmit. Pure: no socket access. Mirrors
-    // zenoh-pico scout.c:57 `_z_link_send_wbuf`, except the send itself
-    // is the loop's job (see module doc).
-    bind_unit(lua, "scout_emit", actions, |a| {
+// Concrete `TokioRuntime` impl: the actions reach through the runtime
+// `R::Mutex` staging slots, and only `TokioRuntime`'s `Mutex` (std
+// `std::sync::Mutex`) exposes `.lock()` here — `scouting-active` is an
+// AP-only feature (it implies `transport-link-udp`), so the single
+// concrete impl matches `ScoutingActions<TokioRuntime>`'s inherent impl.
+impl ScoutingActionsTrait for ScoutActionsBinding<TokioRuntime> {
+    /// Idle -> Sending entering transition — encode one Scout frame and
+    /// stage the datagram for the drive loop to transmit. Pure: no socket
+    /// access. Mirrors zenoh-pico scout.c:57 `_z_link_send_wbuf`, except
+    /// the send itself is the loop's job (see module doc).
+    fn scout_emit(&mut self) {
+        let a = &self.inner;
         a.trace.lock().unwrap().scout_emit += 1;
         let zid = &a.params.zid;
         let mut scout = Scout::new();
@@ -157,16 +178,17 @@ pub fn register_scout_fns(lua: &dyn IScriptEngine, actions: &Arc<ScoutingActions
         }
         let body = scout.encode_to_vec();
         let mut datagram = Vec::with_capacity(1 + body.len());
-        // Scouting-message envelope: prepend the MID header byte the
-        // body codec omits (mirror of session_glue prepending T_MID_*).
+        // Scouting-message envelope: prepend the MID header byte the body
+        // codec omits (mirror of session_glue prepending T_MID_*).
         datagram.push(wire_const::S_MID_SCOUT);
         datagram.extend_from_slice(&body);
         *a.pending_scout.lock().unwrap() = Some(datagram);
-    });
+    }
 
-    // AwaitingHello -> Idle on hello.received — decode the staged Hello
-    // datagram and capture its first locator (exit-on-first MVP).
-    bind_unit(lua, "record_hello_and_emit", actions, |a| {
+    /// AwaitingHello -> Idle on hello.received — decode the staged Hello
+    /// datagram and capture its first locator (exit-on-first MVP).
+    fn record_hello_and_emit(&mut self) {
+        let a = &self.inner;
         a.trace.lock().unwrap().record_hello += 1;
         let bytes = match a.pending_hello.lock().unwrap().take() {
             Some(b) => b,
@@ -178,8 +200,8 @@ pub fn register_scout_fns(lua: &dyn IScriptEngine, actions: &Arc<ScoutingActions
         // header byte carries the MID (low 5 bits, already matched to
         // HELLO by the loop) and the locators-present flag in bit 5; the
         // hello body codec wants that flag projected to its 1-bit `l`.
-        // The decode borrows `bytes`, so confine it to an inner scope
-        // that yields an owned locator string before `bytes` drops.
+        // The decode borrows `bytes`, so confine it to an inner scope that
+        // yields an owned locator string before `bytes` drops.
         let locator: Option<String> = {
             let l = (bytes[0] >> 5) & 1;
             let mut cursor = SceCursor::new(&bytes[1..]);
@@ -195,29 +217,33 @@ pub fn register_scout_fns(lua: &dyn IScriptEngine, actions: &Arc<ScoutingActions
         if let Some(loc) = locator {
             *a.discovered.lock().unwrap() = Some(loc);
         }
-    });
+    }
 
-    // AwaitingHello -> Idle on scout.timer.elapsed — the window expired
-    // with no Hello. Observability only; `discovered` stays None.
-    bind_unit(lua, "emit_scout_timeout", actions, |a| {
-        a.trace.lock().unwrap().scout_timeout += 1;
-    });
+    /// AwaitingHello -> Idle on scout.timer.elapsed — the window expired
+    /// with no Hello. Observability only; `discovered` stays None.
+    fn emit_scout_timeout(&mut self) {
+        self.inner.trace.lock().unwrap().scout_timeout += 1;
+    }
 
-    // Sending -> Idle on link.tx_failed — the multicast Scout transmit
-    // errored. Fed by the drive loop when `driver.send` returns Err.
-    bind_unit(lua, "diag_scout_tx_failed", actions, |a| {
-        a.trace.lock().unwrap().tx_failed += 1;
-    });
+    /// Sending -> Idle on link.tx_failed — the multicast Scout transmit
+    /// errored. Fed by the drive loop when `driver.send` returns Err.
+    fn diag_scout_tx_failed(&mut self) {
+        self.inner.trace.lock().unwrap().tx_failed += 1;
+    }
 }
 
-/// Build a production scouting engine: a fresh `LuaEngine` with the four
-/// actions installed, wrapped in an [`Engine`] over the generated
-/// [`ScoutingPolicy`]. The caller drives it with
+/// Build a production scouting engine: an [`Engine`] over the generated
+/// engine-free [`ScoutingPolicy`], parameterised over a
+/// [`ScoutActionsBinding`] wrapping a clone of `actions`. The caller
+/// retains `actions` and drives the engine with
 /// [`drive_scouting_until_resolved`].
-pub fn new_scouting_engine(actions: &Arc<ScoutingActions>) -> Engine<ScoutingPolicy> {
-    let lua: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    install_scouting_actions(actions.clone(), &lua);
-    Engine::new(ScoutingPolicy::new(lua))
+pub fn new_scouting_engine(
+    actions: &Arc<ScoutingActions>,
+) -> Engine<ScoutingPolicy<ScoutActionsBinding>> {
+    let binding = ScoutActionsBinding {
+        inner: actions.clone(),
+    };
+    Engine::new(ScoutingPolicy::new(binding))
 }
 
 /// Outcome of one active-scouting cycle.
@@ -234,25 +260,25 @@ pub enum ScoutOutcome {
 }
 
 /// Drive one active-scouting cycle to resolution: emit a Scout on the
-/// multicast `driver`, then await a Hello until the `scouting.scxml`
-/// timer (`AwaitingHello.onentry <send delay>`) elapses.
+/// multicast `driver`, then await a Hello until the
+/// [`ScoutParams::timeout_ms`] window elapses.
 ///
-/// The SCXML `<send delay>` is serviced by the SCE engine's own
-/// scheduler (real host monotonic clock via the runtime `Hal`), so the
-/// loop calls [`Engine::tick`] on a `tick_interval_ms` cadence to give
-/// the scheduler a chance to fire `scout.timer.elapsed`. The cadence is
-/// a host polling detail; the window duration itself stays the SCXML's
-/// single source of truth (it is not duplicated here). A Hello datagram
-/// races the cadence via `poll_event`, so the common case resolves as
-/// soon as the peer replies.
+/// The engine-free FSM arms no timer of its own (engine-free no_std binds
+/// `NoOpHal`, so a `<send delay>` would never fire), so this loop owns the
+/// clock: it records a monotonic start instant on entry and raises
+/// [`ScoutingEvent::ScoutTimerElapsed`] once `timeout_ms` has elapsed with
+/// no Hello (driving the FSM's `AwaitingHello -> Idle` timeout). A Hello
+/// datagram races the `tick_interval_ms` cadence via `poll_event`, so the
+/// common case resolves as soon as the peer replies. The window duration
+/// is the spec-sourced `ScoutParams::timeout_ms`, not duplicated here.
 ///
-/// `max_iters` bounds the select loop for tests; production passes
-/// `None`. Returns once the FSM returns to `Idle` (Hello captured or
-/// timed out) or the link is lost.
+/// `max_iters` bounds the select loop for tests; production passes `None`.
+/// Returns once the FSM returns to `Idle` (Hello captured or timed out) or
+/// the link is lost.
 pub async fn drive_scouting_until_resolved<D, T>(
     driver: &mut D,
     actions: &Arc<ScoutingActions>,
-    engine: &mut Engine<ScoutingPolicy>,
+    engine: &mut Engine<ScoutingPolicy<ScoutActionsBinding>>,
     clock: &T,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -262,8 +288,8 @@ where
     T: TimeSource,
 {
     engine.initialize();
-    // Idle -> Sending: scout_emit fires on Sending.onentry and stages
-    // the datagram.
+    // Idle -> Sending: scout_emit fires on the entering transition and
+    // stages the datagram.
     engine.process_event(ScoutingEvent::SessionOpenRequested);
     // Transmit the staged Scout; the send result drives the
     // Sending -> AwaitingHello (tx.done) vs Sending -> Idle (tx_failed)
@@ -281,6 +307,11 @@ where
         // transmit failure so the FSM returns to Idle deterministically.
         None => engine.process_event(ScoutingEvent::LinkTxFailed),
     }
+
+    // The host owns the scout deadline (see module doc). Measure the
+    // spec-sourced window against the runtime monotonic clock.
+    let deadline_ms = actions.params.timeout_ms;
+    let start_ms = clock.now_monotonic_ms();
 
     let mut iter: usize = 0;
     loop {
@@ -308,9 +339,15 @@ where
                 LinkEvent::Ready => {}
             },
             _ = clock.sleep(tick_interval_ms) => {
-                // Let the SCE scheduler fire scout.timer.elapsed if the
-                // SCXML window has elapsed (-> emit_scout_timeout -> Idle).
-                engine.tick();
+                // Raise the timeout once the spec-sourced window has
+                // elapsed with no Hello (-> emit_scout_timeout -> Idle).
+                // Only AwaitingHello handles the event; firing it in any
+                // other state is a no-op transition in the generated FSM.
+                if clock.now_monotonic_ms().saturating_sub(start_ms) >= deadline_ms
+                    && engine.get_current_state() == ScoutingState::AwaitingHello
+                {
+                    engine.process_event(ScoutingEvent::ScoutTimerElapsed);
+                }
             }
         }
     }
@@ -330,17 +367,17 @@ mod tests {
             version: 0x09,
             what: 0x03, // ROUTER | PEER
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            timeout_ms: 1000,
         })
     }
 
-    /// `scout_emit` (Sending.onentry) stages a correctly-framed Scout
-    /// datagram: MID header + version + cbyte(what|I|zid_len_m1) + zid.
+    /// `scout_emit` (Idle -> Sending entering transition) stages a
+    /// correctly-framed Scout datagram: MID header + version +
+    /// cbyte(what|I|zid_len_m1) + zid.
     #[test]
     fn scout_emit_stages_framed_datagram() {
         let actions = fixture_actions();
-        let lua: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-        install_scouting_actions(actions.clone(), &lua);
-        let mut engine = Engine::new(ScoutingPolicy::new(lua));
+        let mut engine = new_scouting_engine(&actions);
         engine.initialize();
         engine.process_event(ScoutingEvent::SessionOpenRequested);
 
@@ -365,9 +402,7 @@ mod tests {
     #[test]
     fn record_hello_extracts_first_locator() {
         let actions = fixture_actions();
-        let lua: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-        install_scouting_actions(actions.clone(), &lua);
-        let mut engine = Engine::new(ScoutingPolicy::new(lua));
+        let mut engine = new_scouting_engine(&actions);
         engine.initialize();
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);
@@ -385,14 +420,12 @@ mod tests {
         );
     }
 
-    /// `scout.timer.elapsed` (no Hello) routes through
-    /// `emit_scout_timeout` and leaves `discovered` unset.
+    /// `scout.timer.elapsed` (no Hello) routes through `emit_scout_timeout`
+    /// and leaves `discovered` unset.
     #[test]
     fn scout_timeout_leaves_no_locator() {
         let actions = fixture_actions();
-        let lua: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-        install_scouting_actions(actions.clone(), &lua);
-        let mut engine = Engine::new(ScoutingPolicy::new(lua));
+        let mut engine = new_scouting_engine(&actions);
         engine.initialize();
         engine.process_event(ScoutingEvent::SessionOpenRequested);
         engine.process_event(ScoutingEvent::ScoutTxDone);

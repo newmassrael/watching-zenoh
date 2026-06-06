@@ -75,6 +75,7 @@ async fn scout_discovers_peer_locator_over_multicast() {
         version: 0x09,
         what: 0x03, // ROUTER | PEER
         zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        timeout_ms: 1000,
     });
     let mut engine = new_scouting_engine(&actions);
 
@@ -229,6 +230,7 @@ mod round2 {
             version: 0x09,
             what: 0x03, // ROUTER | PEER
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            timeout_ms: 1000,
         });
         let mut engine = new_scouting_engine(&actions);
 

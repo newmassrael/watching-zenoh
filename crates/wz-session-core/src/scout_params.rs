@@ -10,16 +10,20 @@
 //! — kept separate so the pre-session scouting subsystem does not reuse
 //! (and thereby couple to) the session handshake parameter bundle.
 //!
-//! `timeout_ms` is intentionally absent: the scouting window is authored
-//! directly in `scouting.scxml` as the `AwaitingHello.onentry`
-//! `<send ... delay="1000ms">` (docs/scouting-fsm.md §2.5), so the SCXML
-//! is its single source of truth. A future round that makes the window
-//! deploy-configurable will thread it through the FSM codegen, not this
-//! struct.
+//! `timeout_ms` is the active-scouting window (docs/scouting-fsm.md §2.5,
+//! default 1000ms). R311ik moved it here from the former
+//! `scouting.scxml` `AwaitingHello.onentry <send delay="1000ms">`: the
+//! engine-free no_std FSM arms no self-timer (under no-std codegen a
+//! `<send delay>` binds `NoOpHal` and can never fire), so the host drive
+//! loop owns the scout deadline and reads its VALUE from this field. SSOT
+//! is preserved — the value lives in the (deploy-sourced) ScoutParams
+//! bundle, the timeout TRANSITION stays in the statechart, and the clock
+//! belongs to the runtime. This is the deploy-configurable window the
+//! prior revision's note anticipated.
 
 use alloc::vec::Vec;
 
-/// Inputs for one outbound Scout frame.
+/// Inputs for one outbound Scout frame plus the active-scouting deadline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoutParams {
     /// Zenoh protocol version byte (`Z_PROTO_VERSION`), emitted as Scout
@@ -36,4 +40,13 @@ pub struct ScoutParams {
     /// the wire). Length must be 1..=16 when present (the 4-bit
     /// `zid_len_m1` field caps it).
     pub zid: Vec<u8>,
+    /// Active-scouting window in milliseconds (docs/scouting-fsm.md §2.5,
+    /// `scouting.timeout_ms`, default 1000). The host drive loop
+    /// (`scouting_glue::drive_scouting_until_resolved`) raises
+    /// `scout.timer.elapsed` once this elapses with no Hello, driving the
+    /// FSM's `AwaitingHello -> Idle` timeout transition. The FSM itself
+    /// arms no timer (engine-free no_std: a `<send delay>` would bind
+    /// `NoOpHal` and never fire), so this field is the deadline's single
+    /// source of truth.
+    pub timeout_ms: u64,
 }

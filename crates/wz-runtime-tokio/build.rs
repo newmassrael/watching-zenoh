@@ -61,17 +61,11 @@ const EXPECTED_SCRIPT_NAMES: &[&str] = &[
     "half_open_cap_available",
     "accept_rate_token",
     "cookie_valid",
-    // R311en — scouting FSM (active mode) script actions. Listed
-    // unconditionally: audit_script_names scans every
-    // sources/session/*.scxml regardless of feature, so scouting.scxml's
-    // <script> names must appear here even when scouting-active is off.
-    // The generated FSM module + the Lua registration of these names are
-    // gated on scouting-active (lib.rs + session_glue); EXPECTED only
-    // mirrors the wire-shape, it does not force the codegen.
-    "scout_emit",
-    "record_hello_and_emit",
-    "emit_scout_timeout",
-    "diag_scout_tx_failed",
+    // R311ik — scouting.scxml is now engine-free (`<sce:action>` host
+    // trait, codegen'd in wz-session-core) and carries no `<script>` /
+    // `cond` bodies, so it contributes no names to this Lua-binding audit.
+    // The session FSM (session_fsm_unicast.scxml) remains Lua-bound until
+    // its own engine-free migration, so this list still covers it.
 ];
 
 fn main() {
@@ -113,21 +107,12 @@ fn main() {
         emit_one(stem, &resource_dir, &out_dir, &sce_codegen, &sce_workspace);
     }
 
-    // R311en — scouting FSM statechart (active mode). Codegen'd only when
-    // scouting-active is enabled; lib.rs includes the output behind the
-    // same feature gate. The script-name audit above still runs over
-    // scouting.scxml unconditionally (EXPECTED_SCRIPT_NAMES carries the
-    // scout actions), so a malformed scouting.scxml is caught even in a
-    // non-scouting build.
-    if std::env::var("CARGO_FEATURE_SCOUTING_ACTIVE").is_ok() {
-        emit_one(
-            "scouting",
-            &resource_dir,
-            &out_dir,
-            &sce_codegen,
-            &sce_workspace,
-        );
-    }
+    // R311ik — scouting.scxml is now engine-free and codegen'd in
+    // wz-session-core (build.rs there, gated on `scouting-active`), not
+    // here. This crate's build.rs only emits the still-Lua-bound session
+    // FSM. The script-name audit above still scans scouting.scxml for
+    // stray `<script>` / `cond` bodies (it has none after R311ik), so a
+    // regression that reintroduced a Lua call site would be caught.
 }
 
 /// Parse every SCXML in `resource_dir` for `<script>foo()</script>`

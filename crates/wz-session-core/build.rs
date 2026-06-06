@@ -1,25 +1,32 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! wz-session-core build.rs — codegens the reassembly slot statechart.
+//! wz-session-core build.rs — codegens the engine-free statecharts.
 //!
-//! `sources/network/reassembly_slot.scxml` is the first `network/`-kind
-//! statechart and the first SCE-generated statechart hosted in
-//! wz-session-core (the AP/MCU-shared core crate). It is fully
-//! script-engine-free: every effect is a `<sce:action>` native host-trait
-//! call and every guard is a typed `_event.data` comparison, so the
-//! emitted `ReassemblySlotPolicy<A>` carries no `IScriptEngine` and
-//! compiles `#![no_std]` (proven by the sce-rust-runtime no_std CI lane).
+//! Two SCE-generated statecharts are hosted in wz-session-core (the
+//! AP/MCU-shared core crate), each behind its own feature gate:
+//!   - `sources/network/reassembly_slot.scxml` (feature `reassembly`) —
+//!     the per-slot transport reassembly FSM (Tier B).
+//!   - `sources/session/scouting.scxml` (feature `scouting-active`) —
+//!     the active Scout/Hello discovery FSM (R311ik).
+//!
+//! Both are fully script-engine-free: every effect is a `<sce:action>`
+//! native host-trait call, so the emitted `*Policy<A>` carries no
+//! `IScriptEngine` and compiles `#![no_std]` (proven by the
+//! sce-rust-runtime no_std CI lane). The scouting FSM additionally arms
+//! no `<send delay>` self-timer — under `--no-std` a delayed `<send>`
+//! binds `NoOpHal` and can never fire, so the host drive loop owns the
+//! scout deadline; the FSM owns only the `scout.timer.elapsed`
+//! transition (see the scouting.scxml header "Timeout ownership").
 //!
 //! Unlike `wz-runtime-tokio/build.rs`, there is no script-name audit:
-//! `<sce:action>` binds to the generated `ReassemblySlotActions` trait,
-//! whose implementation is checked at compile time by the Rust type
-//! system — an unimplemented action cannot link, so the build-script
-//! grep that the Lua-bound FSMs need is unnecessary here.
+//! `<sce:action>` binds to a generated `*Actions` trait whose
+//! implementation is checked at compile time by the Rust type system —
+//! an unimplemented action cannot link, so the build-script grep that the
+//! Lua-bound FSMs need is unnecessary here.
 //!
-//! Codegen is gated on the `reassembly` feature (the module is elidable):
-//! a build without the feature neither invokes sce-codegen nor includes
-//! the emitted module.
+//! Codegen is per-feature elidable: a build without the gating feature
+//! neither invokes sce-codegen nor includes the emitted module.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,8 +34,12 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Elidable: only codegen when the reassembly feature is active.
-    if std::env::var("CARGO_FEATURE_REASSEMBLY").is_err() {
+    let reassembly = std::env::var("CARGO_FEATURE_REASSEMBLY").is_ok();
+    let scouting_active = std::env::var("CARGO_FEATURE_SCOUTING_ACTIVE").is_ok();
+
+    // Elidable: skip the sce-codegen lookup entirely when no statechart
+    // feature is active.
+    if !reassembly && !scouting_active {
         return;
     }
 
@@ -36,11 +47,6 @@ fn main() {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set by cargo"),
     );
-
-    let resource_dir = manifest_dir
-        .join("../../sources/network")
-        .canonicalize()
-        .expect("canonicalize sources/network");
 
     let sce_workspace = manifest_dir
         .join("../../vendor/sce")
@@ -57,22 +63,47 @@ fn main() {
         );
     }
 
-    println!("cargo:rerun-if-changed={}", resource_dir.display());
     // Rerun when the binary itself is rebuilt — covers a vendor/sce pin
     // bump + scripts/build-sce.sh rebuild during a round where the crate
     // sources did not otherwise change.
     println!("cargo:rerun-if-changed={}", sce_codegen.display());
 
-    // The statechart imports fragment_chunk_schema.scxml (an event-schema
-    // kind) via a relative `<sce:import>`; sce-codegen resolves it from
-    // resource_dir, so only the statechart stem is emitted.
-    emit_one(
-        "reassembly_slot",
-        &resource_dir,
-        &out_dir,
-        &sce_codegen,
-        &sce_workspace,
-    );
+    if reassembly {
+        let resource_dir = manifest_dir
+            .join("../../sources/network")
+            .canonicalize()
+            .expect("canonicalize sources/network");
+        println!("cargo:rerun-if-changed={}", resource_dir.display());
+        // The statechart imports fragment_chunk_schema.scxml (an
+        // event-schema kind) via a relative `<sce:import>`; sce-codegen
+        // resolves it from resource_dir, so only the statechart stem is
+        // emitted.
+        emit_one(
+            "reassembly_slot",
+            &resource_dir,
+            &out_dir,
+            &sce_codegen,
+            &sce_workspace,
+        );
+    }
+
+    if scouting_active {
+        let resource_dir = manifest_dir
+            .join("../../sources/session")
+            .canonicalize()
+            .expect("canonicalize sources/session");
+        println!("cargo:rerun-if-changed={}", resource_dir.display());
+        // Active Scout/Hello discovery FSM (R311ik). Engine-free + no
+        // self-timer; the host (wz-runtime-tokio scouting_glue) impls the
+        // generated ScoutingActions trait and owns the scout deadline.
+        emit_one(
+            "scouting",
+            &resource_dir,
+            &out_dir,
+            &sce_codegen,
+            &sce_workspace,
+        );
+    }
 }
 
 /// Invoke sce-codegen for one statechart stem and strip the file-head

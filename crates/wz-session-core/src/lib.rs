@@ -522,3 +522,28 @@ pub mod observer;
 pub mod reassembly_slot {
     include!(concat!(env!("OUT_DIR"), "/reassembly_slot_sm.rs"));
 }
+
+/// SCE-generated active scouting state machine (R311ik). The emit comes
+/// from `sources/session/scouting.scxml` via `build.rs` (codegen'd into
+/// `$OUT_DIR/scouting_sm.rs` only under the `scouting-active` feature).
+/// Exposes the `ScoutingState` / `ScoutingEvent` enums, the
+/// `ScoutingActions` host trait, and the `ScoutingPolicy<A>` policy.
+/// Fully script-engine-free (no `IScriptEngine`) and self-timer-free (no
+/// `<send delay>`): every effect is a native `<sce:action>` trait call
+/// and the host drive loop (wz-runtime-tokio scouting_glue) owns the
+/// scout deadline, so the module compiles `#![no_std]`. The build script
+/// strips the file-head `#![...]` inner attributes; the lint allows are
+/// restored here as outer attributes on the wrapping module.
+#[cfg(feature = "scouting-active")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod scouting {
+    include!(concat!(env!("OUT_DIR"), "/scouting_sm.rs"));
+}

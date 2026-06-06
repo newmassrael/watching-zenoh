@@ -9,14 +9,29 @@
   scaffolding ("Phase A SCXML authoring of sources/session/scouting.scxml
   for {active, static}").
 
-  This is a statechart-kind SCXML, the same shape as
-  session_fsm_unicast.scxml: sce:kind="statechart", plain script-element
-  action bodies whose text is the Lua call site, e.g. scout_emit()
-  (bound against the Lua engine in session_glue.rs), and send-element
-  delayed timer events. It is
-  codegen'd by the sce-codegen CLI (see crates/wz-runtime-tokio/build.rs
-  STATECHARTS) into $OUT_DIR/scouting_sm.rs and included behind
+  This is a statechart-kind SCXML, the same engine-free shape as
+  network/reassembly_slot.scxml: sce:kind="statechart" with native
+  `<sce:action name=>` host-trait calls (no IScriptEngine / Lua), so the
+  generated ScoutingPolicy carries no script engine and the module
+  compiles #![no_std]. It is codegen'd in no-std mode by the sce-codegen
+  CLI (see crates/wz-session-core/build.rs STATECHARTS) into
+  $OUT_DIR/scouting_sm.rs and included behind
   #[cfg(feature = "scouting-active")].
+
+  Timeout ownership (engine-free no_std, mirrors reassembly_slot.scxml
+  §"Timeout ownership"): under no-std codegen the generated machine binds
+  `type Hal = NoOpHal` (now_ticks_ms() == 0), so a W3C SCXML `<send
+  delay>` is emitted but DEAD — its scheduled event can never fire
+  because the no_std clock never advances. A self-armed timer in the FSM
+  would therefore be a non-functional statechart element. So this FSM
+  arms NO timer of its own: it owns the `scout.timer.elapsed` TRANSITION
+  only (AwaitingHello -> Idle), and the host drive loop owns the CLOCK,
+  raising scout.timer.elapsed when the deadline elapses. The deadline
+  VALUE stays spec-sourced (scouting.timeout_ms, docs/scouting-fsm.md
+  §2.5, carried in ScoutParams), so SSOT is preserved: value = spec,
+  transition = statechart, clock = runtime — each owned by the right
+  layer. This is the same clock/transition split reassembly uses for its
+  buffer-pool reassembly.timeout.
 
   Position. Pre-session. Turns "I need to find a peer to handshake
   with" into a concrete unicast locator the session FSM
@@ -33,36 +48,37 @@
 
   Active body = __z_scout_loop lifted into states per the per-line
   mapping in docs/scouting-fsm.md §2.4.1:
-    - Sending.onentry scout_emit()      <- scout.c:57 _z_link_send_wbuf
-    - AwaitingHello.onentry <send delay> <- scout.c:60-63 RX setup + clock
-                                            + while elapsed < period
-    - AwaitingHello hello.received        <- scout.c:80-119 _Z_MID_HELLO arm
-    - exit_on_first short-circuit         <- scout.c:121-123 (MVP active =
-                                            implicit-scout: one Hello, take
-                                            it, return to Idle)
+    - Idle->Sending scout_emit          <- scout.c:57 _z_link_send_wbuf
+    - AwaitingHello (host clock)        <- scout.c:60-63 RX setup + clock
+                                           + while elapsed < period
+    - AwaitingHello hello.received      <- scout.c:80-119 _Z_MID_HELLO arm
+    - exit_on_first short-circuit       <- scout.c:121-123 (MVP active =
+                                           implicit-scout: one Hello, take
+                                           it, return to Idle)
 
-  Timer idiom mirrors session_fsm_unicast.scxml (W3C SCXML <send
-  delay>): AwaitingHello.onentry arms scout.timer.elapsed at the
-  scouting.timeout_ms default (1000ms, docs/scouting-fsm.md §2.5). No
-  host arm/disarm action is needed — the codegen schedules the delayed
-  internal event, matching how the session FSM arms init_ack.timeout etc.
-
-  Script-action call sites (registered against the Lua engine in
-  session_glue.rs, and mirrored in build.rs EXPECTED_SCRIPT_NAMES):
-    scout_emit()            — encode Scout(what=3, local_zid) + link.send
-                              on the udp_scout multicast link.
-    record_hello_and_emit() — capture the decoded Hello locators + emit
-                              the discovered locator upward to the
-                              session-open caller.
-    emit_scout_timeout()    — emit "no peer found within timeout".
-    diag_scout_tx_failed()  — observability: the scout frame TX failed.
+  Host actions (the generated ScoutingActions trait, one method per
+  distinct `<sce:action name>`; impl'd by the host in scouting_glue.rs):
+    scout_emit            — encode Scout(what=3, local_zid) + stage the
+                            datagram for the drive loop to send on the
+                            udp_scout multicast link.
+    record_hello_and_emit — decode the staged Hello + capture the
+                            discovered locator for the session-open caller.
+    emit_scout_timeout    — record "no peer found within timeout".
+    diag_scout_tx_failed  — observability: the scout frame TX failed.
+  All four are no-arg: they read/write host staging slots via &mut self,
+  not `_event.data` (the loop owns the socket + the staging slots, so no
+  event-schema import is needed — cf. the IO-ownership note in
+  scouting_glue.rs).
 
   Events fed by the host runtime:
     session_open.requested — application/SCE asks to discover a peer.
     scout.tx.done          — host completed the multicast Scout send.
     link.tx_failed         — the scouting link TX errored.
     hello.received         — host decoded a Hello on the scouting link.
-    scout.timer.elapsed    — scouting.timeout_ms expired (internal <send>).
+    scout.timer.elapsed    — host drive loop's deadline (scouting.timeout_ms,
+                             ScoutParams) elapsed with no Hello; raised by
+                             the loop, not a self-armed <send> (see
+                             "Timeout ownership" above).
 
   Trust class. The scouting link is `untrusted` (docs/scouting-fsm.md
   §1.3); it can never drive a session handshake. This FSM only produces
@@ -79,36 +95,41 @@
        initial="Idle">
 
   <!-- Waiting for a session-open trigger. Re-entered after every scout
-       cycle (active mode is one-shot per request). -->
+       cycle (active mode is one-shot per request). scout_emit runs on the
+       entering transition (not Sending.onentry): `<sce:action>` is a
+       `<transition>`-child only in the engine-free SCE surface (R311ij),
+       and Sending has exactly one entry path (this transition), so a
+       transition action is the exact equivalent of an onentry action. -->
   <state id="Idle">
-    <transition event="session_open.requested" target="Sending"/>
+    <transition event="session_open.requested" target="Sending">
+      <sce:action name="scout_emit"/>
+    </transition>
   </state>
 
   <!-- Encode + transmit one Scout frame on the udp_scout link.
-       scout.c:57 _z_link_send_wbuf maps to the onentry action. -->
+       scout.c:57 _z_link_send_wbuf maps to scout_emit on the entering
+       transition above. -->
   <state id="Sending">
-    <onentry>
-      <script>scout_emit()</script>
-    </onentry>
     <transition event="scout.tx.done" target="AwaitingHello"/>
     <transition event="link.tx_failed" target="Idle">
-      <script>diag_scout_tx_failed()</script>
+      <sce:action name="diag_scout_tx_failed"/>
     </transition>
   </state>
 
-  <!-- Poll the scouting link RX path for Hello replies until
-       scouting.timeout_ms elapses (scout.c:60-63). MVP active body is
+  <!-- Poll the scouting link RX path for Hello replies until the host
+       drive loop's scouting.timeout_ms deadline elapses (scout.c:60-63).
+       The FSM arms no timer of its own (engine-free no_std: a <send
+       delay> would bind NoOpHal and never fire — see "Timeout ownership"
+       in the header); the host loop owns the clock and raises
+       scout.timer.elapsed at the deadline. MVP active body is
        implicit-scout (exit_on_first=true): the first Hello is taken and
        the FSM returns to Idle. -->
   <state id="AwaitingHello">
-    <onentry>
-      <send event="scout.timer.elapsed" delay="1000ms"/>
-    </onentry>
     <transition event="hello.received" target="Idle">
-      <script>record_hello_and_emit()</script>
+      <sce:action name="record_hello_and_emit"/>
     </transition>
     <transition event="scout.timer.elapsed" target="Idle">
-      <script>emit_scout_timeout()</script>
+      <sce:action name="emit_scout_timeout"/>
     </transition>
   </state>
 
