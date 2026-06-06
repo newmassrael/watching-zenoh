@@ -425,13 +425,16 @@ scouting-autoconnect = []
 scouting-gossip = ["routing-router"]
 scouting-multicast = ["transport-link-udp"]
 scouting-passive = []
-# scouting-static forwards only to wz-session-core/scouting-static (pure
-# alloc synth, no transport deps). On MCU presets (runtime-lwip, which
-# does not yet depend on wz-session-core) the `?` forward is a no-op, so
-# the static synth currently compiles on the AP (tokio) profile only —
-# the MCU static synth is a follow-up when runtime-lwip consumes
-# wz-session-core.
-scouting-static = ["wz-runtime-tokio?/scouting-static"]
+# R311ih — scouting-static wired on BOTH profiles via the uniform
+# facade -> runtime -> core funnel: the AP runtime (wz-runtime-tokio) and
+# the MCU runtime (wz-runtime-lwip) each forward to
+# wz-session-core/scouting-static (the runtime-agnostic `scout_static`
+# synth). The synth is no-alloc-capable (bounded seam), so the MCU forward
+# needs no alloc; whichever runtime the preset selects pulls the synth.
+scouting-static = [
+    "wz-runtime-tokio?/scouting-static",
+    "wz-runtime-lwip?/scouting-static",
+]
 
 # ----- domain: session (9 atomic, 2 active / 7 reserved) -----
 session-extauth = []

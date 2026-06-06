@@ -1574,6 +1574,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "wz-runtime-core",
+ "wz-session-core",
 ]
 
 [[package]]

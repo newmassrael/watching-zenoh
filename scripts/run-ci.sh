@@ -874,10 +874,17 @@ layer_c1i_cargo_test_scouting() {
 #     which Layer C1 stopped running once the static tests gained the gate.
 # `--features X` adds to (does not replace) the default feature set, so the
 # transport-link-tcp/udp + transport-unicast the open path needs stay on.
+# R311ih: also build-gates the no-alloc backing (scout_static on the
+# bounded seam composes without alloc) and the MCU runtime edge
+# (wz-runtime-lwip scouting-static = the facade -> runtime -> core funnel,
+# no-alloc + alloc). The thumb cross-compile of the same is Layer G.5.
 layer_c1k_cargo_test_scouting_static() {
     (cd crates \
         && cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet \
-        && cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet)
+        && cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet \
+        && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \
+        && cargo build -p wz-runtime-lwip --features scouting-static --quiet \
+        && cargo build -p wz-runtime-lwip --features alloc,scouting-static --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -1570,6 +1577,24 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.6 cross-real lwip-sys $t OK"
         else
             echo "  G.6 cross-real lwip-sys $t FAIL" >&2
+            fail=1
+        fi
+        # G.7 (R311ih) static-scouting synth on the MCU profile. Proves
+        # the scout_static bounded-seam synth composes no-alloc on every
+        # Phase W target (the §2.4.3 reason #2 claim — static mode is for
+        # tiny static-only deploys), and that the facade -> wz-runtime-lwip
+        # -> wz-session-core funnel cross-compiles with scouting-static on.
+        # No-alloc: the synth builds onto BoundedVec/BoundedString, so it
+        # rides every target including thumbv6m (Cortex-M0+), where the
+        # alloc::sync::Arc the rest of session-core uses is unavailable.
+        if (cd crates && cargo build -p wz-session-core \
+            --target "$t" --no-default-features --features scouting-static --quiet) \
+           && (cd crates && cargo build -p wz \
+            --target "$t" --no-default-features \
+            --features runtime-lwip,scouting-static --quiet); then
+            echo "  G.7 scouting-static MCU synth $t OK"
+        else
+            echo "  G.7 scouting-static MCU synth $t FAIL" >&2
             fail=1
         fi
     done

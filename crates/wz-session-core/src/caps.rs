@@ -123,3 +123,25 @@ pub const MAX_PENDING_LIVELINESS_GETS: usize = 8;
 /// single poll batch, so the bound is sized generously. R311hn (Track 2)
 /// — replaces the prior unbounded `Vec<DeclareOwned>` staging.
 pub const MAX_PENDING_DECLARES: usize = 32;
+
+/// Maximum byte length of one static-scouting peer locator string
+/// (`deploy.connect[]` entry, e.g. `"udp/192.168.1.10:7447"`). Bounds the
+/// [`crate::bounded::BoundedString`] each
+/// [`crate::scout_static::synth_static_locators`] entry is built into on
+/// the no-alloc backing; a configured locator longer than this is rejected
+/// (skipped) rather than truncated. Matches the conservative per-locator
+/// length the scouting Hello sizing uses (docs/scouting-fsm.md §2.6,
+/// "per-locator length of 64 bytes") — long enough for an `ipv6` locator
+/// with a `proto/` prefix and port, with margin.
+pub const MAX_LOCATOR_LEN: usize = 64;
+
+/// Maximum number of static-scouting peer locators
+/// ([`crate::scout_static::synth_static_locators`] output capacity =
+/// `deploy.connect[]` length). Bounds the no-alloc synthesis on the MCU
+/// backing; a `connect[]` longer than this stops at the cap (a future
+/// `deploy.yaml` -> caps codegen step enforces the bound at build time, the
+/// same hard-error model as docs/scouting-fsm.md §2.6 hello_max_peers).
+/// Mirrors the MCU `hello_max_peers` discovery capacity (deploy
+/// `mcu_target.yaml:263 = 8`): a static deploy is a small fixed peer set
+/// (e.g. one AP for a fixed AP<->MCU pair), so few configured locators.
+pub const MAX_STATIC_CONNECT: usize = 8;

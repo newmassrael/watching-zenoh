@@ -513,12 +513,23 @@ pub async fn open_session_static(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // R311ih — synth now yields the bounded seam (StaticLocators =
+    // BoundedVec<BoundedString>); iterate via the slice Deref and pass each
+    // locator as &str to the mode-agnostic open path.
     let locators = synth_static_locators(connect);
     if locators.is_empty() {
         return Err(OpenError::NoReachableLocator);
     }
-    for locator in &locators {
-        match open_session_at(locator, params.clone(), clock, max_iters, tick_interval_ms).await {
+    for locator in locators.iter() {
+        match open_session_at(
+            locator.as_str(),
+            params.clone(),
+            clock,
+            max_iters,
+            tick_interval_ms,
+        )
+        .await
+        {
             Ok(opened) => return Ok(opened),
             Err(e) => {
                 log::warn!(

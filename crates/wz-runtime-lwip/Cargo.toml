@@ -92,6 +92,18 @@ alloc = [
     "dep:portable-atomic-util",
 ]
 
+# R311ih — static scouting mode on the MCU profile. The MCU session
+# runtime reaches the runtime-agnostic core (wz-session-core) the same way
+# the AP runtime (wz-runtime-tokio) does: facade -> runtime -> core. This
+# is the first capability across that edge, chosen because the static
+# locator synth (`scout_static`) is runtime-agnostic (no LwipRuntime
+# binding needed) and no-alloc-capable (bounded seam), so it composes on
+# the no-alloc MCU profile where static mode is most valuable
+# (docs/scouting-fsm.md §2.4.3 reason #2 SRAM elision). Pulls the optional
+# wz-session-core dep + forwards its scouting-static gate; no alloc
+# requirement (the synth builds onto BoundedVec/BoundedString).
+scouting-static = ["dep:wz-session-core", "wz-session-core/scouting-static"]
+
 [dependencies]
 # critical-section provides the IRQ-disabling Mutex<T> primitive
 # used as the per-profile `sync::Mutex` / `sync::RwLock` alias
@@ -122,6 +134,14 @@ portable-atomic-util = { version = "0.2", default-features = false, features = [
 # alloc gate governs the whole error enum and aligns with the AP
 # profile (wz-runtime-tokio also pulls `wz-runtime-core/alloc`).
 wz-runtime-core = { path = "../wz-runtime-core", default-features = false, optional = true }
+# R311ih — the runtime-agnostic core, the MCU mirror of the
+# wz-runtime-tokio -> wz-session-core edge. Optional + default-features =
+# false: only the `scouting-static` feature pulls it today (the
+# `scout_static` synth), so a scouting-static-free MCU build keeps it out
+# of the dep graph entirely. As the MCU session runtime grows (FSM,
+# registries bound to LwipRuntime), more capabilities flow across this
+# same edge.
+wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 
 [dev-dependencies]
 # critical-section's `std` feature provides a software-emulated impl

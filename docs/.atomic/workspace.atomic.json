@@ -884,7 +884,9 @@
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; session-level scout loop is a future cascade.",
         "R311if: scouting-static reserved->active; existing scout_static synth now cfg-gated (AP profile).",
-        "R311if: MCU static synth pending runtime-lwip->wz-session-core dep; CI lane C1k covers the gate."
+        "R311if: MCU static synth pending runtime-lwip->wz-session-core dep; CI lane C1k covers the gate.",
+        "R311ih: scout_static Vec<String> -> bounded seam (BoundedVec<BoundedString>), no-alloc-capable.",
+        "R311ih: lwip->session-core edge added; scouting-static composes on AP+MCU (Layer G.7)."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -30430,6 +30432,64 @@
         "DEBT (carry from R311ie): partition-drain-fire no-alloc idiom duplicated reply.rs + declare/liveliness_get.rs (8 sites) — cross-cutting refactor candidate."
       ]
     },
+    "Round 311ih": {
+      "decision_summary": "scouting-static composes on AP+MCU: reshape scout_static to no-alloc bounded seam + establish wz-runtime-lwip->wz-session-core edge (MCU mirror of the AP runtime->core funnel); cross-compiles on all 7 MCU targets",
+      "changes_bullets": [
+        "scout_static: synth_static_locators Vec<String> -> StaticLocators (BoundedVec<BoundedString<MAX_LOCATOR_LEN>, MAX_STATIC_CONNECT>); generic input &[impl AsRef<str>]; no-alloc-capable via bounded seam",
+        "scout_static: ScoutingMode deploy-string parser alloc-gated (host/build-time only; MCU mode is compile-time)",
+        "caps: add MAX_LOCATOR_LEN=64 (per-locator, §2.6) + MAX_STATIC_CONNECT=8 (mirrors mcu hello_max_peers)",
+        "lib.rs: scout_static gate all(alloc,scouting-static) -> scouting-static (alloc no longer required)",
+        "wz-runtime-lwip: optional wz-session-core dep + scouting-static feature + alloc forwards session-core/alloc; re-export scout_static (MCU mirror of tokio->core edge)",
+        "wz facade: scouting-static forwards both wz-runtime-tokio? and wz-runtime-lwip?",
+        "session_open.rs: open_session_static iterates bounded seam (locator.as_str())",
+        "run-ci: C1k adds no-alloc + lwip builds; new Layer G.7 cross-compiles scouting-static synth on all 7 MCU targets"
+      ],
+      "verification_bullets": [
+        "session-core scouting-static builds: alloc + no-alloc (host); cross-compiles no-alloc on all 7 MCU targets incl thumbv6m (Cortex-M0, where alloc::sync::Arc is unavailable)",
+        "thumbv7em cross-compile OK both no-alloc and alloc",
+        "lwip scouting-static builds host (no-alloc+alloc) + thumbv7em cross",
+        "facade preset-mcu-minimal pulls wz-session-core (cargo tree: session-core <- runtime-lwip <- wz); facade cross thumbv7em runtime-lwip,scouting-static OK",
+        "C1k: scout_static 7 tests + static_scout_open 6 tests pass; clippy session-core+lwip -D warnings clean",
+        "Layer A3 catalog-status OK (scouting-static active<=>gated)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "scouting-static CLOSED on BOTH profiles: AP (tokio) + MCU (lwip) reach the same scout_static SSOT via the uniform facade->runtime->core funnel; no-alloc-capable bounded seam composes on every Phase W target (Layer G.7).",
+        "ARCHITECTURE: established the wz-runtime-lwip -> wz-session-core edge (MCU mirror of wz-runtime-tokio -> wz-session-core). scout_static is its first capability (runtime-agnostic, no LwipRuntime binding). More MCU session machinery flows across this edge as the MCU session runtime grows.",
+        "OPEN (consumer-side, future): MCU session-open that calls synth_static_locators does not exist yet (the broader MCU session-runtime work: FSM + registries bound to LwipRuntime). The synth is exposed + unit-tested + cross-compiled, awaiting that consumer (bottom-up framework build).",
+        "NEXT MS1 frontier (Tier B): transport-fragmentation (reassembly FSM, sizeable) remains; locator-tcp/udp gating tidy is a cheap cleanup."
+      ],
+      "publishable_decision_summary": "scouting-static composes on AP+MCU: reshape scout_static to no-alloc bounded seam + establish wz-runtime-lwip->wz-session-core edge (MCU mirror of the AP runtime->core funnel); cross-compiles on all 7 MCU targets",
+      "publishable_changes_bullets": [
+        "scout_static: synth_static_locators Vec<String> -> StaticLocators (BoundedVec<BoundedString<MAX_LOCATOR_LEN>, MAX_STATIC_CONNECT>); generic input &[impl AsRef<str>]; no-alloc-capable via bounded seam",
+        "scout_static: ScoutingMode deploy-string parser alloc-gated (host/build-time only; MCU mode is compile-time)",
+        "caps: add MAX_LOCATOR_LEN=64 (per-locator, §2.6) + MAX_STATIC_CONNECT=8 (mirrors mcu hello_max_peers)",
+        "lib.rs: scout_static gate all(alloc,scouting-static) -> scouting-static (alloc no longer required)",
+        "wz-runtime-lwip: optional wz-session-core dep + scouting-static feature + alloc forwards session-core/alloc; re-export scout_static (MCU mirror of tokio->core edge)",
+        "wz facade: scouting-static forwards both wz-runtime-tokio? and wz-runtime-lwip?",
+        "session_open.rs: open_session_static iterates bounded seam (locator.as_str())",
+        "run-ci: C1k adds no-alloc + lwip builds; new Layer G.7 cross-compiles scouting-static synth on all 7 MCU targets"
+      ],
+      "publishable_verification_bullets": [
+        "session-core scouting-static builds: alloc + no-alloc (host); cross-compiles no-alloc on all 7 MCU targets incl thumbv6m (Cortex-M0, where alloc::sync::Arc is unavailable)",
+        "thumbv7em cross-compile OK both no-alloc and alloc",
+        "lwip scouting-static builds host (no-alloc+alloc) + thumbv7em cross",
+        "facade preset-mcu-minimal pulls wz-session-core (cargo tree: session-core <- runtime-lwip <- wz); facade cross thumbv7em runtime-lwip,scouting-static OK",
+        "C1k: scout_static 7 tests + static_scout_open 6 tests pass; clippy session-core+lwip -D warnings clean",
+        "Layer A3 catalog-status OK (scouting-static active<=>gated)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "scouting-static CLOSED on BOTH profiles: AP (tokio) + MCU (lwip) reach the same scout_static SSOT via the uniform facade->runtime->core funnel; no-alloc-capable bounded seam composes on every Phase W target (Layer G.7).",
+        "ARCHITECTURE: established the wz-runtime-lwip -> wz-session-core edge (MCU mirror of wz-runtime-tokio -> wz-session-core). scout_static is its first capability (runtime-agnostic, no LwipRuntime binding). More MCU session machinery flows across this edge as the MCU session runtime grows.",
+        "OPEN (consumer-side, future): MCU session-open that calls synth_static_locators does not exist yet (the broader MCU session-runtime work: FSM + registries bound to LwipRuntime). The synth is exposed + unit-tested + cross-compiled, awaiting that consumer (bottom-up framework build).",
+        "NEXT MS1 frontier (Tier B): transport-fragmentation (reassembly FSM, sizeable) remains; locator-tcp/udp gating tidy is a cheap cleanup."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
@@ -36673,7 +36733,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh config static peer list",
-      "reason": "F=config-file static peer (scout_static synth); P=zenoh static endpoints; C=alternative to dynamic discovery; R311if gated scouting-static (AP profile)"
+      "reason": "F=config-file static peer (scout_static bounded-seam synth, no-alloc-capable); P=zenoh static endpoints; C=alternative to dynamic discovery; R311if gated, R311ih composes on AP+MCU via facade->runtime->core"
     },
     "session-extauth": {
       "status": "reserved",

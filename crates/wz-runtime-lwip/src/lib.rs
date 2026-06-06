@@ -167,3 +167,11 @@ pub use join_handle::LwipJoinHandle;
 pub use runtime_impl::LwipRuntime;
 #[cfg(feature = "alloc")]
 pub use time::{ClockSource, LwipTime};
+
+// R311ih — re-export the runtime-agnostic static-scouting synth so the
+// MCU profile reaches it through its runtime crate, mirroring how the AP
+// profile reaches wz-session-core items through wz-runtime-tokio. The
+// synth is no-alloc-capable (bounded seam), so this is NOT alloc-gated —
+// a no-alloc static-only MCU deploy gets the synthesis.
+#[cfg(feature = "scouting-static")]
+pub use wz_session_core::scout_static;
