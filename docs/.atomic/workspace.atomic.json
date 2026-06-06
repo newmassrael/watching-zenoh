@@ -30600,6 +30600,62 @@
         "RX seam: parse_inbound session_glue:4609 Fragment arm -> dispatcher -> finalize re-enters FramePayload path"
       ]
     },
+    "Round 311ik": {
+      "decision_summary": "scouting active FSM migrated engine-free (schism scouting-half): <sce:action> + host-owned deadline, codegen->wz-session-core no_std, sce-rust-lua dropped from the scouting path",
+      "changes_bullets": [
+        "scouting.scxml engine-free: 4 <script> bodies -> <sce:action>; scout_emit moved from Sending.onentry to the Idle->Sending entering transition (<sce:action> is a <transition>-child only — onentry actions are dropped by codegen); removed the <send delay> self-timer",
+        "FSM codegen moved from wz-runtime-tokio/build.rs to wz-session-core/build.rs (--no-std, gated scouting-active); the generated FSM now lives at wz_session_core::scouting (ScoutingActions trait + ScoutingPolicy<A>, needs_script_engine=false)",
+        "scouting_glue.rs rewritten: impls the generated trait on ScoutActionsBinding (newtype over Arc<ScoutingActions> — orphan rule forbids impl ForeignTrait for Arc<Local>; Engine.policy is pub(crate) so the drive loop reads staging via the shared Arc); Lua/IScriptEngine/bind_unit dropped from the scouting path",
+        "ScoutParams.timeout_ms added (spec-sourced deadline value, docs/scouting-fsm.md §2.5); the drive loop owns the clock via TimeSource::now_monotonic_ms and raises scout.timer.elapsed at the deadline",
+        "scouting-active feature pulls dep:sce-rust-runtime but does NOT force sce-rust-runtime/no_std (no_std XOR http-send is a compile_error in sce-rust-runtime; the AP build keeps http-send), so the std-ness of the runtime stays a build-profile decision"
+      ],
+      "verification_bullets": [
+        "full run-ci EXIT0: all host lanes + Layer C1i (scouting-active glue unit tests) + Layer G (7 MCU cross-compile, zero regression) + Layer M (real UDP-multicast scout->hello e2e + active-scout-then-open-reaches-Established) all pass",
+        "clippy clean on scouting-active; validate_workspace drift 0 (T1 orphan 13 unchanged, entries 589, sections 257, T3 warn 4 / T4 info 3 unchanged) — source-only code change",
+        "committed 81b77bb and pushed 6a5f1c9..81b77bb to origin/main (pre-push run-ci gate green); SCE vendor pin unchanged (c9759a973, zero SCE change this round)"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/2-5-timeouts-and-budgets"
+      ],
+      "carry_forward_bullets": [
+        "NEXT = the SESSION half of the schism fix: migrate session_fsm_unicast.scxml to engine-free (the larger, harder half)",
+        "session stateful guards (cookie_valid / half_open_cap_available / accept_rate_token — like reassembly's consecutive_sn) are NOT native-guardable -> move to a dispatcher that pre-classifies and injects distinct typed events",
+        "session has MANY <onentry> <script> actions -> ALL must move to entering transitions (onentry <sce:action> is silently dropped by codegen — verified this round with scout_emit)",
+        "session has 5 <send delay> timers (init_ack.timeout, open_ack.timeout, accepting.inactivity_timeout, closing.timeout, link.open_timeout) -> host/dispatcher deadline-sweep (under no_std a <send delay> binds NoOpHal and never fires)",
+        "rewrite the 8245-line session_glue.rs Lua dispatch as a ScoutingActions-style native trait impl",
+        "once session is engine-free too, sce-rust-lua leaves the whole graph -> the AP build can go no_std -> reassembly AP integration unblocks (ReassemblyDispatcher in wz-session-core + RX seam at session_glue.rs parse_inbound Fragment arm still TODO after that)",
+        "scout_static dual-authoring NOT yet paid: scout_static.rs is static-mode (no FSM), scouting.scxml is active-mode; unifying them is deferred consumer-side MCU active-scouting work",
+        "SCHISM ROOT (for reference): sce-rust-runtime lib.rs has #[cfg(all(no_std, http-send))] compile_error; tokio's runtime dep pulls default http-send; no_std also elides IScriptEngine that sce-rust-lua needs -> full no_std AP is impossible until Lua fully leaves the graph"
+      ],
+      "publishable_decision_summary": "scouting active FSM migrated engine-free (schism scouting-half): <sce:action> + host-owned deadline, codegen->wz-session-core no_std, sce-rust-lua dropped from the scouting path",
+      "publishable_changes_bullets": [
+        "scouting.scxml engine-free: 4 <script> bodies -> <sce:action>; scout_emit moved from Sending.onentry to the Idle->Sending entering transition (<sce:action> is a <transition>-child only — onentry actions are dropped by codegen); removed the <send delay> self-timer",
+        "FSM codegen moved from wz-runtime-tokio/build.rs to wz-session-core/build.rs (--no-std, gated scouting-active); the generated FSM now lives at wz_session_core::scouting (ScoutingActions trait + ScoutingPolicy<A>, needs_script_engine=false)",
+        "scouting_glue.rs rewritten: impls the generated trait on ScoutActionsBinding (newtype over Arc<ScoutingActions> — orphan rule forbids impl ForeignTrait for Arc<Local>; Engine.policy is pub(crate) so the drive loop reads staging via the shared Arc); Lua/IScriptEngine/bind_unit dropped from the scouting path",
+        "ScoutParams.timeout_ms added (spec-sourced deadline value, docs/scouting-fsm.md §2.5); the drive loop owns the clock via TimeSource::now_monotonic_ms and raises scout.timer.elapsed at the deadline",
+        "scouting-active feature pulls dep:sce-rust-runtime but does NOT force sce-rust-runtime/no_std (no_std XOR http-send is a compile_error in sce-rust-runtime; the AP build keeps http-send), so the std-ness of the runtime stays a build-profile decision"
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci EXIT0: all host lanes + Layer C1i (scouting-active glue unit tests) + Layer G (7 MCU cross-compile, zero regression) + Layer M (real UDP-multicast scout->hello e2e + active-scout-then-open-reaches-Established) all pass",
+        "clippy clean on scouting-active; validate_workspace drift 0 (T1 orphan 13 unchanged, entries 589, sections 257, T3 warn 4 / T4 info 3 unchanged) — source-only code change",
+        "committed 81b77bb and pushed 6a5f1c9..81b77bb to origin/main (pre-push run-ci gate green); SCE vendor pin unchanged (c9759a973, zero SCE change this round)"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/2-5-timeouts-and-budgets"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NEXT = the SESSION half of the schism fix: migrate session_fsm_unicast.scxml to engine-free (the larger, harder half)",
+        "session stateful guards (cookie_valid / half_open_cap_available / accept_rate_token — like reassembly's consecutive_sn) are NOT native-guardable -> move to a dispatcher that pre-classifies and injects distinct typed events",
+        "session has MANY <onentry> <script> actions -> ALL must move to entering transitions (onentry <sce:action> is silently dropped by codegen — verified this round with scout_emit)",
+        "session has 5 <send delay> timers (init_ack.timeout, open_ack.timeout, accepting.inactivity_timeout, closing.timeout, link.open_timeout) -> host/dispatcher deadline-sweep (under no_std a <send delay> binds NoOpHal and never fires)",
+        "rewrite the 8245-line session_glue.rs Lua dispatch as a ScoutingActions-style native trait impl",
+        "once session is engine-free too, sce-rust-lua leaves the whole graph -> the AP build can go no_std -> reassembly AP integration unblocks (ReassemblyDispatcher in wz-session-core + RX seam at session_glue.rs parse_inbound Fragment arm still TODO after that)",
+        "scout_static dual-authoring NOT yet paid: scout_static.rs is static-mode (no FSM), scouting.scxml is active-mode; unifying them is deferred consumer-side MCU active-scouting work",
+        "SCHISM ROOT (for reference): sce-rust-runtime lib.rs has #[cfg(all(no_std, http-send))] compile_error; tokio's runtime dep pulls default http-send; no_std also elides IScriptEngine that sce-rust-lua needs -> full no_std AP is impossible until Lua fully leaves the graph"
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
