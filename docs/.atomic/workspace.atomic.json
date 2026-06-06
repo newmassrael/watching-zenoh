@@ -2141,6 +2141,11 @@
         "Parity invariant: slot_count ≥ 2 × peer_table.capacity reproduces upstream no-exhaustion",
         "MCU slot_count=4, AP=32 (OQ-W8); over-commits trade strict parity for memory cost"
       ],
+      "caveats_bullets": [
+        "R311ij realized engine-free: <sce:action> + native more-bit guard, needs_script_engine=false",
+        "R311ij SN-consecutive not native-guardable -> dispatcher pre-classifies chunk vs ooo",
+        "R311ij FSM cross-compiles thumbv7em no_std; buffer = wz-side BoundedVec per slot"
+      ],
       "impact_scope": [
         "reassembly-fsm--prose-sketch",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
@@ -2214,6 +2219,10 @@
     },
     "reassembly-fsm--prose-sketch/4-timer-quota-pool-config": {
       "intent": "Reassembly timer / per-peer quota / pool config from deploy.yaml — reassembly_timeout_ms, per_peer_quota, slot_count, slot_size live under buffer_pools.reassembly_pool.",
+      "caveats_bullets": [
+        "R311ij timeout = dispatcher worker-tick deadline-sweep, not an FSM <send delay> (SCE no <cancel>)",
+        "R311ij slots reused; sweep targets only the live slot, not stale (cf. RFC 815 GC)"
+      ],
       "impact_scope": [
         "reassembly-fsm--prose-sketch",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
@@ -30533,6 +30542,62 @@
         "NEXT: author sources/network slot reassembly FSM statechart (Engine<ReassemblySlotPolicy>)",
         "THEN: ReassemblyDispatcher Rust registry (chain-key map, per-peer quota, oldest-wins evict)",
         "pool+deploy reassembly_pool+fragment codec ready; SCE C9-γ reassembly codegen landed"
+      ]
+    },
+    "Round 311ij": {
+      "decision_summary": "Tier B reassembly engine-free slot FSM (<sce:action>+native guard, MCU no_std) + session-core codegen pipeline; surfaced Lua-vs-engine-free runtime schism blocking AP integration",
+      "changes_bullets": [
+        "sources/network/reassembly_slot.scxml + fragment_chunk_schema.scxml: engine-free 5-state slot FSM",
+        "wz-codecs wire_const T_MID_FRAGMENT 0x06 + FLAG_T_FRAGMENT_M/_R (zenoh-pico transport.h:38/86/87)",
+        "wz-session-core: first build.rs (--no-std codegen) + reassembly feature + reassembly_slot module",
+        "session commits aa33afc locator-tidy / 559e094 R311ii / 846aa89 pin c9759a973 / 782bf53 FSM+pipeline"
+      ],
+      "verification_bullets": [
+        "codegen needs_script_engine=false; cargo check host + thumbv7em-none-eabihf no_std EXIT 0",
+        "default workspace build unaffected (reassembly off-by-default); pin bump full run-ci + Layer G green",
+        "wire_const verified vs zenoh-pico transport.h:38/86/87; ReassemblySlotActions trait surface confirmed"
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "carry_forward_bullets": [
+        "NEXT (full debt): resolve runtime schism via engine-free migration of session + scouting FSMs",
+        "rewrite Lua FSMs (session_fsm_unicast, scouting) as <sce:action>+native guards -> drop sce-rust-lua",
+        "reuse reassembly pattern: state-guards -> dispatcher pre-classify; <send delay> -> dispatcher sweep",
+        "session guards cookie_valid/half_open_cap ref state -> not native-guardable, pre-classify like consecutive_sn",
+        "schism: sce-rust-runtime no_std (reassembly) vs http-send/std (Lua FSMs) cannot share one AP build",
+        "blocked on schism: reassembly AP integration (parse_inbound Fragment arm + dispatcher routing)",
+        "also pays dual-authoring debt: scouting AP=Lua-SCXML vs MCU=scout_static.rs -> one engine-free FSM both",
+        "still TODO after schism: ReassemblyDispatcher (session-core registry, BoundedVec chain map + N slot Engines + SlotActions impl)",
+        "RX seam: parse_inbound session_glue:4609 Fragment arm -> dispatcher -> finalize re-enters FramePayload path"
+      ],
+      "publishable_decision_summary": "Tier B reassembly engine-free slot FSM (<sce:action>+native guard, MCU no_std) + session-core codegen pipeline; surfaced Lua-vs-engine-free runtime schism blocking AP integration",
+      "publishable_changes_bullets": [
+        "sources/network/reassembly_slot.scxml + fragment_chunk_schema.scxml: engine-free 5-state slot FSM",
+        "wz-codecs wire_const T_MID_FRAGMENT 0x06 + FLAG_T_FRAGMENT_M/_R (zenoh-pico transport.h:38/86/87)",
+        "wz-session-core: first build.rs (--no-std codegen) + reassembly feature + reassembly_slot module",
+        "session commits aa33afc locator-tidy / 559e094 R311ii / 846aa89 pin c9759a973 / 782bf53 FSM+pipeline"
+      ],
+      "publishable_verification_bullets": [
+        "codegen needs_script_engine=false; cargo check host + thumbv7em-none-eabihf no_std EXIT 0",
+        "default workspace build unaffected (reassembly off-by-default); pin bump full run-ci + Layer G green",
+        "wire_const verified vs zenoh-pico transport.h:38/86/87; ReassemblySlotActions trait surface confirmed"
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NEXT (full debt): resolve runtime schism via engine-free migration of session + scouting FSMs",
+        "rewrite Lua FSMs (session_fsm_unicast, scouting) as <sce:action>+native guards -> drop sce-rust-lua",
+        "reuse reassembly pattern: state-guards -> dispatcher pre-classify; <send delay> -> dispatcher sweep",
+        "session guards cookie_valid/half_open_cap ref state -> not native-guardable, pre-classify like consecutive_sn",
+        "schism: sce-rust-runtime no_std (reassembly) vs http-send/std (Lua FSMs) cannot share one AP build",
+        "blocked on schism: reassembly AP integration (parse_inbound Fragment arm + dispatcher routing)",
+        "also pays dual-authoring debt: scouting AP=Lua-SCXML vs MCU=scout_static.rs -> one engine-free FSM both",
+        "still TODO after schism: ReassemblyDispatcher (session-core registry, BoundedVec chain map + N slot Engines + SlotActions impl)",
+        "RX seam: parse_inbound session_glue:4609 Fragment arm -> dispatcher -> finalize re-enters FramePayload path"
       ]
     },
     "Round 311j": {
