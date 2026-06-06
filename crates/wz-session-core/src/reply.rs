@@ -689,25 +689,13 @@ impl<C: ReplySink> ReplyRegistry<C> {
         // ensures a panicking on_final does NOT leave half-swept entries
         // in the registry — every fired entry has already been removed
         // from self.pending by the time its callback runs.
-        // R311gb (Track 2) — no-alloc partition: take the table out, drain
-        // it by value into two bounded stack partitions (`keep` / `fired`),
-        // reassign `keep`, then fire. Each partition is capacity
-        // MAX_PENDING_QUERIES and the two together hold exactly the taken
-        // entries, so neither push can exceed `N`.
-        let mut fired: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
-        let mut keep: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
-        for entry in core::mem::take(&mut self.pending) {
-            let expired = matches!(entry.deadline_ms, Some(d) if d <= now_ms);
-            if expired {
-                fired
-                    .push(entry)
-                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
-            } else {
-                keep.push(entry)
-                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
-            }
-        }
-        self.pending = keep;
+        // R311ig — no-alloc drain-partition via the shared
+        // `BoundedVec::drain_partition` seam: extract the expired entries
+        // (removed from self.pending), then fire after the borrow releases
+        // so a panicking on_final cannot leave a half-swept entry behind.
+        let fired = self
+            .pending
+            .drain_partition(|entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms));
         let swept = fired.len();
         for mut entry in fired {
             let rid = entry.rid;
@@ -765,27 +753,18 @@ impl<C: ReplySink> ReplyRegistry<C> {
         // need to call `(on_final)(rid)` which requires `&mut Pending`);
         // we instead drain the matches into a stash and fire after the
         // retain-pass releases the &mut self.pending borrow.
-        // R311gb (Track 2) — no-alloc partition (see `sweep_timed_out`):
-        // take the table out, drain by value into bounded `keep` / `fired`
-        // partitions preserving registration order, reassign `keep`, then
-        // fire the terminal entries. Order-preserving (matters for the
-        // documented duplicate-rid registration-order final firing).
-        let mut fired: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
-        let mut keep: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
-        for mut entry in core::mem::take(&mut self.pending) {
+        // R311ig — no-alloc drain-partition via the shared
+        // `BoundedVec::drain_partition` seam (see `sweep_timed_out`); the
+        // extract predicate mutates the entry (decrement remaining_finals)
+        // and extracts only when it reaches zero. Order-preserving (matters
+        // for the documented duplicate-rid registration-order final firing).
+        let fired = self.pending.drain_partition(|entry| {
             if entry.rid == rid && entry.remaining_finals > 0 {
                 entry.remaining_finals -= 1;
-                if entry.remaining_finals == 0 {
-                    fired
-                        .push(entry)
-                        .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
-                    continue;
-                }
+                return entry.remaining_finals == 0;
             }
-            keep.push(entry)
-                .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
-        }
-        self.pending = keep;
+            false
+        });
         for mut entry in fired {
             entry.sink.on_final(rid);
         }

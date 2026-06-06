@@ -129,6 +129,46 @@ impl<T, const N: usize> BoundedVec<T, N> {
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+
+    /// Drain the collection by value, partitioning each element by
+    /// `extract`: every element for which it returns `true` is moved
+    /// into the returned `BoundedVec` (in original order); the rest are
+    /// retained in `self`. `extract` receives `&mut T`, so it may mutate
+    /// an element before deciding (e.g. decrement a counter and extract
+    /// on reaching zero).
+    ///
+    /// This is the no-alloc *drain-partition-fire* seam the pending-table
+    /// registries share (the reply + liveliness-get `sweep_timed_out` /
+    /// `fire_final_for` bodies): the borrow checker forbids firing a
+    /// captured callback while a `&mut self.pending` iteration is live, so
+    /// the caller extracts the to-fire entries here and fires over the
+    /// returned vec *after* this call releases the borrow. Extract-then-
+    /// fire also means a panicking callback cannot leave a half-swept
+    /// entry behind — every fired entry is already out of `self`.
+    ///
+    /// No-alloc: `self` is taken out via [`core::mem::take`] and rebuilt
+    /// from the retained partition; `self` and the returned vec share
+    /// capacity `N` (retained + extracted == taken <= N), so neither push
+    /// can exceed `N`.
+    pub fn drain_partition<F>(&mut self, mut extract: F) -> Self
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        let mut extracted: Self = Self::new();
+        let mut keep: Self = Self::new();
+        for mut entry in core::mem::take(self) {
+            if extract(&mut entry) {
+                extracted
+                    .push(entry)
+                    .expect("drain_partition fits: keep + extracted == taken <= N");
+            } else {
+                keep.push(entry)
+                    .expect("drain_partition fits: keep + extracted == taken <= N");
+            }
+        }
+        *self = keep;
+        extracted
+    }
 }
 
 impl<T, const N: usize> Default for BoundedVec<T, N> {
@@ -361,6 +401,48 @@ mod tests {
         }
         v.retain(|&x| x % 2 == 0);
         assert_eq!(v.as_ref(), &[0, 2]);
+    }
+
+    #[test]
+    fn drain_partition_extracts_matches_and_retains_rest_in_order() {
+        let mut v: BoundedVec<u32, 4> = BoundedVec::new();
+        for i in 0..4 {
+            v.push(i).unwrap();
+        }
+        // Extract evens; odds retained, both partitions order-preserving.
+        let extracted = v.drain_partition(|x| *x % 2 == 0);
+        assert_eq!(extracted.as_ref(), &[0, 2]);
+        assert_eq!(v.as_ref(), &[1, 3]);
+    }
+
+    #[test]
+    fn drain_partition_predicate_may_mutate_before_deciding() {
+        let mut v: BoundedVec<u32, 4> = BoundedVec::new();
+        for i in 1..=3 {
+            v.push(i).unwrap();
+        }
+        // Decrement each, extract those that reach zero (mirrors the
+        // reply registry's remaining_finals counter path).
+        let extracted = v.drain_partition(|x| {
+            *x -= 1;
+            *x == 0
+        });
+        assert_eq!(extracted.len(), 1); // only the original `1` reaches 0
+        assert_eq!(v.as_ref(), &[1, 2]); // 2->1, 3->2 retained, decremented
+    }
+
+    #[test]
+    fn drain_partition_empty_and_all_match() {
+        let mut empty: BoundedVec<u32, 4> = BoundedVec::new();
+        assert!(empty.drain_partition(|_| true).is_empty());
+        assert!(empty.is_empty());
+
+        let mut all: BoundedVec<u32, 4> = BoundedVec::new();
+        all.push(7).unwrap();
+        all.push(8).unwrap();
+        let extracted = all.drain_partition(|_| true);
+        assert_eq!(extracted.len(), 2);
+        assert!(all.is_empty());
     }
 
     // Capacity overflow is backing-specific: only the no-alloc backing

@@ -247,27 +247,14 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// argument (opaque-cause, same architectural pick as the reply
     /// registry).
     pub fn sweep_timed_out(&mut self, now_ms: u64) -> usize {
-        // no-alloc partition (mirror of ReplyRegistry::sweep_timed_out):
-        // take the table out, drain by value into two bounded stack
-        // partitions, reassign `keep`, then fire after the borrow
-        // releases so a panicking `on_final` cannot leave half-swept
-        // entries behind.
-        let mut fired: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }> =
-            BoundedVec::new();
-        let mut keep: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }> =
-            BoundedVec::new();
-        for entry in core::mem::take(&mut self.pending) {
-            let expired = matches!(entry.deadline_ms, Some(d) if d <= now_ms);
-            if expired {
-                fired
-                    .push(entry)
-                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_LIVELINESS_GETS");
-            } else {
-                keep.push(entry)
-                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_LIVELINESS_GETS");
-            }
-        }
-        self.pending = keep;
+        // R311ig — no-alloc drain-partition via the shared
+        // `BoundedVec::drain_partition` seam (mirror of
+        // ReplyRegistry::sweep_timed_out): extract the expired entries, then
+        // fire after the borrow releases so a panicking `on_final` cannot
+        // leave half-swept entries behind.
+        let fired = self
+            .pending
+            .drain_partition(|entry| matches!(entry.deadline_ms, Some(d) if d <= now_ms));
         let swept = fired.len();
         for mut entry in fired {
             let id = entry.interest_id;
@@ -283,21 +270,11 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// (a `BoundedVec` partition) though only a single entry can match a
     /// fresh-allocated id.
     fn fire_final_for(&mut self, interest_id: u64) -> bool {
-        let mut fired: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }> =
-            BoundedVec::new();
-        let mut keep: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }> =
-            BoundedVec::new();
-        for entry in core::mem::take(&mut self.pending) {
-            if entry.interest_id == interest_id {
-                fired
-                    .push(entry)
-                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_LIVELINESS_GETS");
-            } else {
-                keep.push(entry)
-                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_LIVELINESS_GETS");
-            }
-        }
-        self.pending = keep;
+        // R311ig — no-alloc drain-partition via the shared
+        // `BoundedVec::drain_partition` seam (see `sweep_timed_out`).
+        let fired = self
+            .pending
+            .drain_partition(|entry| entry.interest_id == interest_id);
         let any = !fired.is_empty();
         for mut entry in fired {
             let id = entry.interest_id;
