@@ -26,9 +26,14 @@
 //! so these tests only ever point UDP at a responsive acceptor; the
 //! unreachable-exhaustion case uses dead TCP ports, which fail fast at dial.
 
+// R311if — SocketAddr is used only by the static-mode `refused_locator`.
+#[cfg(feature = "scouting-static")]
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+// R311if — only the static-mode tests (via `refused_locator`) need the
+// raw non-listening socket; gate the import with their feature.
+#[cfg(feature = "scouting-static")]
 use socket2::{Domain, Socket, Type};
 
 use sce_rust_lua::LuaEngine;
@@ -45,9 +50,11 @@ use wz_runtime_tokio::session_glue::{
     install_session_actions, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
     SessionLinkActions,
 };
-use wz_runtime_tokio::session_open::{
-    open_session_at, open_session_static, OpenError, DEFAULT_OPEN_TICK_MS,
-};
+use wz_runtime_tokio::session_open::{open_session_at, OpenError, DEFAULT_OPEN_TICK_MS};
+// R311if — the static-mode open path is gated on `scouting-static`; the
+// mode-agnostic `open_session_at` tests stay in the default run.
+#[cfg(feature = "scouting-static")]
+use wz_runtime_tokio::session_open::open_session_static;
 #[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::udp_pipeline::wire_udp_socket;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -75,6 +82,9 @@ fn initiator_params() -> SessionInitParams {
 /// Established — surfacing as the flaky `NoReachableLocator` / `got Ok` results.
 /// `std::net::TcpListener::bind` always calls `listen()`, so socket2 is used to
 /// bind without listening.
+///
+/// R311if — used only by the static-mode exhaustion tests; gated with them.
+#[cfg(feature = "scouting-static")]
 fn refused_locator() -> (Socket, SocketAddr) {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, None).expect("socket");
     let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
@@ -250,6 +260,7 @@ async fn open_session_at_malformed_is_bad_locator() {
     );
 }
 
+#[cfg(feature = "scouting-static")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_session_static_skips_unreachable_to_first_reachable() {
     // A deterministically connection-refused loopback port (bound, not
@@ -282,6 +293,7 @@ async fn open_session_static_skips_unreachable_to_first_reachable() {
     assert!(acc_est >= 1, "acceptor established");
 }
 
+#[cfg(feature = "scouting-static")]
 #[tokio::test]
 async fn open_session_static_empty_is_no_reachable() {
     let result = open_session_static(
@@ -301,6 +313,7 @@ async fn open_session_static_empty_is_no_reachable() {
     );
 }
 
+#[cfg(feature = "scouting-static")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_session_static_all_unreachable_is_no_reachable() {
     // A list of dead loopback ports exhausts — each fails fast at dial

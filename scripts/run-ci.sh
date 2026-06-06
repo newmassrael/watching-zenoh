@@ -88,6 +88,12 @@
 #              scout-timeout unit tests under --features scouting-active
 #              + deny-warnings. The socket-bound multicast e2e is the
 #              opt-in Layer M.)
+#   Layer C1k — scouting-static synth + static-open seam
+#              (R311if; scouting-static is off by default — the static-
+#              mode toggle. Builds + runs the wz-session-core scout_static
+#              synth unit tests + the wz-runtime-tokio static_scout_open
+#              seam under --features scouting-static, which Layer C1 stops
+#              building once the static tests gain the gate.)
 #   Layer C1j — wz-runtime-tokio arbitrary-subset BEHAVIOUR matrix
 #              (R311ff; `cargo test`s the runtime crate under the same
 #              SSOT coherent subsets C4c builds — handshake-only /
@@ -852,6 +858,26 @@ layer_c1h_arbitrary_subset_matrix() {
 # and only runs under Layer M.
 layer_c1i_cargo_test_scouting() {
     (cd crates && cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet)
+}
+
+# ─── Layer C1k — cargo test ... --features scouting-static ──────────
+#
+# R311if: scouting-static is off by default (the static-mode toggle, the
+# alternative to scouting-active per deploy.scouting.mode), so Layer C1's
+# `cargo test --workspace` builds neither the wz-session-core `scout_static`
+# synth module nor the wz-runtime-tokio `open_session_static` consumer. This
+# lane builds + runs both under `--features scouting-static`:
+#   - the synth unit tests (ScoutingMode parse, synth_static_locators
+#     trim/dedup/order) in wz-session-core;
+#   - the static -> session-open seam in wz-runtime-tokio
+#     (static_scout_open.rs: skip-unreachable, empty, all-unreachable),
+#     which Layer C1 stopped running once the static tests gained the gate.
+# `--features X` adds to (does not replace) the default feature set, so the
+# transport-link-tcp/udp + transport-unicast the open path needs stay on.
+layer_c1k_cargo_test_scouting_static() {
+    (cd crates \
+        && cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet \
+        && cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -1834,6 +1860,7 @@ run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
+run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1

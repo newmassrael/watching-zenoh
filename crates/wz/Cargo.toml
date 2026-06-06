@@ -413,16 +413,25 @@ runtime-tokio = [
 runtime-tokio-uring = ["runtime-tokio"]
 runtime-zero-copy = []
 
-# ----- domain: scouting (6 atomic, 0 active / 6 reserved) -----
-# R311ci — audit-only ratify. Scout/Hello flow not yet implemented
-# (codec-scout / codec-hello forwards exist but no session-level
-# scout loop). "1 active / 5 reserved" estimate corrected to 0/6.
+# ----- domain: scouting (6 atomic) -----
+# R311ci — audit-only ratify. R311if — scouting-static wired (forwards
+# the wz-session-core `scout_static` synth via the optional tokio
+# runtime). scouting-active gates the multicast FSM in wz-runtime-tokio
+# but is not yet forwarded from the facade (off-by-default opt-in; a
+# future cascade wires the facade forward + preset runtime selection).
+# The remaining four stay declaration-only (no runtime counterpart yet).
 scouting-active = []
 scouting-autoconnect = []
 scouting-gossip = ["routing-router"]
 scouting-multicast = ["transport-link-udp"]
 scouting-passive = []
-scouting-static = []
+# scouting-static forwards only to wz-session-core/scouting-static (pure
+# alloc synth, no transport deps). On MCU presets (runtime-lwip, which
+# does not yet depend on wz-session-core) the `?` forward is a no-op, so
+# the static synth currently compiles on the AP (tokio) profile only —
+# the MCU static synth is a follow-up when runtime-lwip consumes
+# wz-session-core.
+scouting-static = ["wz-runtime-tokio?/scouting-static"]
 
 # ----- domain: session (9 atomic, 2 active / 7 reserved) -----
 session-extauth = []

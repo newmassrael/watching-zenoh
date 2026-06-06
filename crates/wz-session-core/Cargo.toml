@@ -98,6 +98,17 @@ pubsub-priority = []
 pubsub-congestion-control = []
 pubsub-express = []
 
+# R311if — static scouting mode (docs/scouting-fsm.md §2.4.3). Gates the
+# `scout_static` module: the `ScoutingMode` discriminator + the
+# `synth_static_locators` host-side locator synthesis from
+# `deploy.connect[]`. Static mode is scouting expressed as *absent* (no
+# FSM, no scout codec, no scout link), so this is a pure alloc value
+# transform with no wz-codecs forward. Off by default: a deploy that does
+# not use `scouting.mode: static` elides the module entirely (§2.4.3
+# reason #2 codegen-elision). Independent of `scouting-active` (the
+# multicast FSM in wz-runtime-tokio) — the two modes are alternatives.
+scouting-static = []
+
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the
 # `switchboard::SwitchboardRegistry` (the table + its

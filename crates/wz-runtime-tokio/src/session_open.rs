@@ -30,6 +30,7 @@ use tokio::net::TcpStream;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::locator::{parse_locator, LocatorParseError, ParsedLocator, Proto};
+#[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::synth_static_locators;
 
 use crate::link_pipeline::{dial_tcp, wire_tcp_stream, TcpReadDriver};
@@ -470,7 +471,7 @@ pub async fn accept_and_open_session(
 /// Both scouting modes feed this the same way, which is the whole point of
 /// the seam: active mode's `ScoutOutcome::Discovered(String)`
 /// (wz-runtime-tokio::scouting_glue) and static mode's
-/// [`synth_static_locators`] entries are both zenoh locator strings. This
+/// `synth_static_locators` entries are both zenoh locator strings. This
 /// parses one via [`wz_session_core::locator::parse_locator`] and hands the
 /// typed endpoint to [`connect_and_open_session`] — "a discovered locator
 /// opens the same way regardless of how scouting found it" (the contract the
@@ -500,6 +501,11 @@ pub async fn open_session_at(
 /// MVP single-session: zenoh-pico opens the first peer then `_z_new_peer`s
 /// the rest (session.c:157-189); the multi-peer mesh is Phase D+, so this
 /// opens exactly one session to the first reachable peer.
+///
+/// R311if — gated on `scouting-static` (the static-mode toggle); the
+/// mode-agnostic [`open_session_at`] above stays ungated since active
+/// scouting feeds it too.
+#[cfg(feature = "scouting-static")]
 pub async fn open_session_static(
     connect: &[String],
     params: SessionInitParams,

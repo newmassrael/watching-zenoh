@@ -882,7 +882,9 @@
       "decision_status": "active",
       "intent": "Scouting domain catalog: 6 atomic features all reserved (Scout/Hello session-level flow not yet implemented; codec-scout / codec-hello forwards exist but unused).",
       "caveats_bullets": [
-        "R311ci audit: 0 source cfg sites; session-level scout loop is a future cascade."
+        "R311ci audit: 0 source cfg sites; session-level scout loop is a future cascade.",
+        "R311if: scouting-static reserved->active; existing scout_static synth now cfg-gated (AP profile).",
+        "R311if: MCU static synth pending runtime-lwip->wz-session-core dep; CI lane C1k covers the gate."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -30370,6 +30372,64 @@
         "CAUTION: Layer G G.2 facade cross-compile is --no-default-features, so NO per-feature MCU cross-compile is CI-gated for any atomic feature (project-wide coverage shape). MCU no_std proof = preset membership (C4 host) + manual thumbv7m cross-compile."
       ]
     },
+    "Round 311if": {
+      "decision_summary": "scouting-static reserved->active: wire the real cfg gate around the pre-existing (R311eq/ew) static-mode synth + open path so it is independently composable + elidable; AP profile only (MCU pending runtime-lwip dep)",
+      "changes_bullets": [
+        "wz-session-core: add scouting-static feature; gate scout_static module on all(alloc, scouting-static)",
+        "wz-runtime-tokio: add scouting-static = [wz-session-core/scouting-static]; gate open_session_static fn + synth_static_locators import",
+        "wz-runtime-tokio tests/static_scout_open.rs: gate the 3 open_session_static tests + refused_locator + SocketAddr/socket2 imports on scouting-static; open_session_at tests stay ungated",
+        "wz facade: scouting-static [] -> [wz-runtime-tokio?/scouting-static]; update scouting domain comment",
+        "scripts/run-ci.sh: new Layer C1k runs scout_static synth unit tests + static_scout_open seam under --features scouting-static",
+        "mnemosyne: scouting-static inventory reserved->active; 2 caveats appended to feature-inventory §5.3 scouting"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-session-core both gate states OK (module elided when off)",
+        "cargo build/clippy -p wz-runtime-tokio --all-targets both gate states OK (-D warnings)",
+        "C1k: cargo test -p wz-session-core --features scouting-static --lib scout_static = 6 passed",
+        "C1k: cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open = 6 passed",
+        "default static_scout_open run = 3 ungated open_session_at tests (coverage preserved)",
+        "facade builds OK: preset-ap-client (static path compiled), preset-mcu-minimal (no-op forward)",
+        "Layer A3 catalog-status truthfulness OK (active 56->57); scouting-static now active<=>gated"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "scouting-static CLOSED at AP profile: static-mode synth + open path now cfg-gated (reserved->active), independently composable + elidable (docs/scouting-fsm.md §2.4.3).",
+        "OPEN: MCU static synth — runtime-lwip does not depend on wz-session-core, so MCU presets carry scouting-static as a no-op forward; wire when runtime-lwip gains the session-core dep.",
+        "OPEN (pre-existing): scouting-active facade forward still [] (off-by-default opt-in, future cascade); 4 scouting atoms remain reserved (autoconnect/gossip/multicast/passive).",
+        "NEXT MS1 frontier (Tier B): transport-fragmentation (reassembly FSM, sizeable) is the remaining Tier B item; locator-tcp/udp gating tidy is a cheap cleanup.",
+        "DEBT (carry from R311ie): partition-drain-fire no-alloc idiom duplicated reply.rs + declare/liveliness_get.rs (8 sites) — cross-cutting refactor candidate."
+      ],
+      "publishable_decision_summary": "scouting-static reserved->active: wire the real cfg gate around the pre-existing (R311eq/ew) static-mode synth + open path so it is independently composable + elidable; AP profile only (MCU pending runtime-lwip dep)",
+      "publishable_changes_bullets": [
+        "wz-session-core: add scouting-static feature; gate scout_static module on all(alloc, scouting-static)",
+        "wz-runtime-tokio: add scouting-static = [wz-session-core/scouting-static]; gate open_session_static fn + synth_static_locators import",
+        "wz-runtime-tokio tests/static_scout_open.rs: gate the 3 open_session_static tests + refused_locator + SocketAddr/socket2 imports on scouting-static; open_session_at tests stay ungated",
+        "wz facade: scouting-static [] -> [wz-runtime-tokio?/scouting-static]; update scouting domain comment",
+        "scripts/run-ci.sh: new Layer C1k runs scout_static synth unit tests + static_scout_open seam under --features scouting-static",
+        "mnemosyne: scouting-static inventory reserved->active; 2 caveats appended to feature-inventory §5.3 scouting"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-session-core both gate states OK (module elided when off)",
+        "cargo build/clippy -p wz-runtime-tokio --all-targets both gate states OK (-D warnings)",
+        "C1k: cargo test -p wz-session-core --features scouting-static --lib scout_static = 6 passed",
+        "C1k: cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open = 6 passed",
+        "default static_scout_open run = 3 ungated open_session_at tests (coverage preserved)",
+        "facade builds OK: preset-ap-client (static path compiled), preset-mcu-minimal (no-op forward)",
+        "Layer A3 catalog-status truthfulness OK (active 56->57); scouting-static now active<=>gated"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "scouting-static CLOSED at AP profile: static-mode synth + open path now cfg-gated (reserved->active), independently composable + elidable (docs/scouting-fsm.md §2.4.3).",
+        "OPEN: MCU static synth — runtime-lwip does not depend on wz-session-core, so MCU presets carry scouting-static as a no-op forward; wire when runtime-lwip gains the session-core dep.",
+        "OPEN (pre-existing): scouting-active facade forward still [] (off-by-default opt-in, future cascade); 4 scouting atoms remain reserved (autoconnect/gossip/multicast/passive).",
+        "NEXT MS1 frontier (Tier B): transport-fragmentation (reassembly FSM, sizeable) is the remaining Tier B item; locator-tcp/udp gating tidy is a cheap cleanup.",
+        "DEBT (carry from R311ie): partition-drain-fire no-alloc idiom duplicated reply.rs + declare/liveliness_get.rs (8 sites) — cross-cutting refactor candidate."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
@@ -36610,10 +36670,10 @@
       "reason": "F=listen-only path; P=OQ-W23 passive scouting mode; C=alternative to scouting-active"
     },
     "scouting-static": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh config static peer list",
-      "reason": "F=config-file static peer; P=zenoh static endpoints; C=alternative to dynamic discovery"
+      "reason": "F=config-file static peer (scout_static synth); P=zenoh static endpoints; C=alternative to dynamic discovery; R311if gated scouting-static (AP profile)"
     },
     "session-extauth": {
       "status": "reserved",

@@ -223,7 +223,13 @@ pub mod scout_params;
 /// `deploy.connect[]`, docs/scouting-fsm.md §2.4.3). Pure alloc value
 /// transform, NOT gated on `scouting-active` — static mode is the FSM
 /// bypass path used when the active FSM is compiled out.
-#[cfg(feature = "alloc")]
+///
+/// R311if — gated on `scouting-static` (in addition to `alloc`) so a
+/// deploy that does not use `scouting.mode: static` elides the module
+/// entirely (§2.4.3 reason #2 codegen-elision). The two scouting modes
+/// are independent toggles: `scouting-active` (the multicast FSM in
+/// wz-runtime-tokio) and `scouting-static` (this host synthesis).
+#[cfg(all(feature = "alloc", feature = "scouting-static"))]
 pub mod scout_static;
 
 /// R311er — mode-agnostic locator parsing (`proto/addr:port` ->
