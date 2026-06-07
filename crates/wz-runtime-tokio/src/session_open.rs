@@ -30,13 +30,11 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::locator::{parse_locator, LocatorParseError, ParsedLocator, Proto};
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::synth_static_locators;
-use wz_session_core::session_timeouts::{handshake_deadline_for, SessionTimeouts};
+use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 use crate::link_pipeline::{dial_tcp, wire_tcp_stream, TcpReadDriver};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
-use crate::session_fsm_unicast::{
-    SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState,
-};
+use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
     new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, CloseReason, DriverLoopOutcome,
     SessionActionsBinding, SessionInitParams, SessionLinkActions,
@@ -50,14 +48,16 @@ use std::net::SocketAddr;
 #[cfg(feature = "transport-link-udp")]
 use tokio::net::UdpSocket;
 
-/// Default cadence at which [`connect_and_open_session`] pumps the SCE
-/// scheduler (`Engine::tick`) while waiting on the handshake. It bounds
-/// only the *precision* of the open-deadline (a handshake timer fires
-/// within `[delay, delay + DEFAULT_OPEN_TICK_MS]`), never the deadline
-/// itself — the window durations are the SCXML's single source of truth
-/// (`link.open_timeout` / `init_ack.timeout` / `open_ack.timeout`). 50ms
-/// keeps the 2s/5s windows accurate to <3% while the inbound `poll_event`
-/// races the tick so a frame still resolves the instant it arrives.
+/// Default cadence at which [`connect_and_open_session`] sweeps the host
+/// handshake deadline (R311il — the engine-free FSM arms no `<send delay>`,
+/// so there is no SCE scheduler to pump) while waiting on the handshake. It
+/// bounds only the *precision* of the open-deadline (a handshake timeout
+/// fires within `[deadline, deadline + DEFAULT_OPEN_TICK_MS]`), never the
+/// deadline itself — the window durations are the §2.5 single source of
+/// truth carried in [`SessionTimeouts`] (`link.open_timeout` /
+/// `init_ack.timeout` / `open_ack.timeout`). 50ms keeps the 2s/5s windows
+/// accurate to <3% while the inbound `poll_event` races the tick so a frame
+/// still resolves the instant it arrives.
 pub const DEFAULT_OPEN_TICK_MS: u64 = 50;
 
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
@@ -204,11 +204,12 @@ pub enum OpenError {
     /// The FSM reached a terminal state before Established — e.g. a peer
     /// Close during the handshake.
     Terminal,
-    /// A handshake timer fired before Established: the peer did not complete
-    /// the handshake within the SCXML-declared window (`init_ack.timeout` /
-    /// `open_ack.timeout`, 2s each; `link.open_timeout` 5s). The SCE
-    /// scheduler fires the timer once [`connect_and_open_session`]'s tick
-    /// pump advances past the deadline, driving the FSM to `Closing`.
+    /// A handshake timeout fired before Established: the peer did not
+    /// complete the handshake within the §2.5 window (`init_ack.timeout` /
+    /// `open_ack.timeout`, 2s each; `link.open_timeout` 5s). The host
+    /// deadline-sweep raises the timeout event once
+    /// [`connect_and_open_session`]'s tick advances past the deadline,
+    /// driving the FSM to `Closing`.
     /// Distinguished from [`Self::Terminal`] via the close-reason trace: a
     /// timeout transition runs `set_close_reason_generic` (so
     /// `set_close_reason_count >= 1` with `CloseReason::Generic`), whereas a
@@ -249,13 +250,14 @@ fn wire_session_engine(
 }
 
 /// Drive an already-activated session FSM to Established, bounded by the
-/// FSM's own handshake timers (R311fa). The role-agnostic open loop shared by
-/// both open paths: the caller wires the link + engine and dispatches the
-/// role-start event, then this races the cancel-safe inbound poll against a
-/// `tick_interval_ms` cadence that pumps `Engine::tick` so an elapsed SCXML
-/// `<send delay>` fires its transition — the Initiator's `init_ack.timeout` /
-/// `open_ack.timeout` (2s) / `link.open_timeout` (5s), and the Accepting
-/// side's `accepting.inactivity_timeout` (1s, R311fb). A frame that arrives
+/// host handshake deadline-sweep (R311fa / R311il). The role-agnostic open
+/// loop shared by both open paths: the caller wires the link + engine and
+/// dispatches the role-start event, then this races the cancel-safe inbound
+/// poll against a `tick_interval_ms` cadence; on each tick the
+/// [`HandshakeDeadlineTracker`] raises the elapsed timeout event — the
+/// Initiator's `init_ack.timeout` / `open_ack.timeout` (2s) /
+/// `link.open_timeout` (5s), and the Accepting side's
+/// `accepting.inactivity_timeout` (1s, R311fb). A frame that arrives
 /// first resolves the handshake without waiting for the next tick; the losing
 /// `select!` branch is cancelled, safe because `poll_and_dispatch_one`'s only
 /// await is `poll_event`, whose partial-read state lives in the driver's
@@ -280,14 +282,12 @@ async fn drive_open_loop(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     // R311il — the engine-free FSM arms no `<send delay>` (NoOpHal), so the
-    // host owns every handshake deadline (replacing the retired
-    // `engine.tick()` SCE-scheduler pump). The deadline VALUES are the
-    // §2.5 spec baseline — the same literals the SCXML `<send delay>`s
-    // carried before the migration (deploy-config overrides are a later
-    // round); the arming-state key + monotonic armed-at stamp track which
-    // window is in flight (see [`handshake_deadline_for`]).
-    let timeouts = SessionTimeouts::spec_defaults();
-    let mut handshake_armed: Option<(SessionFsmUnicastState, u64)> = None;
+    // host owns every handshake deadline. The deadline VALUES are the §2.5
+    // spec baseline — the same literals the SCXML `<send delay>`s carried
+    // before the migration (deploy-config overrides are a later round); the
+    // [`HandshakeDeadlineTracker`] owns the arming-key staleness logic
+    // shared with the steady-state loop.
+    let mut deadline_tracker = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
     let mut iter: usize = 0;
     loop {
         let trace = actions.trace_snapshot();
@@ -321,33 +321,16 @@ async fn drive_open_loop(
             }
             iter += 1;
         }
-        // R311fa / R311il — (re-)arm the host handshake deadline for the
-        // current state. Per-phase keys (LinkOpening / SentInitSyn /
-        // GotInitAck / Closing) re-arm on entry to their state; the
-        // Accepting children share the parent key so the whole-handshake
-        // inactivity bound is armed once and not reset as they advance.
-        let armed_deadline = match handshake_deadline_for(engine.get_current_state(), &timeouts) {
-            Some(hd) => {
-                let armed_at = match handshake_armed {
-                    Some((key, at)) if key == hd.arming_key => at,
-                    _ => {
-                        let now = clock.now_monotonic_ms();
-                        handshake_armed = Some((hd.arming_key, now));
-                        now
-                    }
-                };
-                Some((armed_at.saturating_add(hd.deadline_ms), hd.event))
-            }
-            None => {
-                handshake_armed = None;
-                None
-            }
-        };
+        // R311fa / R311il — the tracker (re-)arms the host handshake
+        // deadline for the current state (per-phase keys re-arm on entry;
+        // the Accepting children share one whole-handshake bound).
+        let armed_deadline =
+            deadline_tracker.poll(engine.get_current_state(), clock.now_monotonic_ms());
         // R311il — race the cancel-safe inbound poll against a `tick_interval_ms`
         // cadence; on each wake, raise the armed handshake timeout event once
-        // its spec-sourced window has elapsed (host deadline-sweep, replacing
-        // the retired `engine.tick()` SCE-scheduler pump — the engine-free FSM
-        // arms no `<send delay>`). A frame that arrives first resolves the
+        // its spec-sourced window has elapsed (host deadline-sweep — the
+        // engine-free FSM arms no `<send delay>`, so there is no SCE
+        // scheduler to pump). A frame that arrives first resolves the
         // handshake without waiting for the next tick.
         tokio::select! {
             outcome = poll_and_dispatch_one(&mut inbound, &actions, &mut engine) => {
@@ -377,17 +360,18 @@ async fn drive_open_loop(
 /// one message per datagram (boundary == frame), and both decode through the
 /// same `handle_inbound` path.
 ///
-/// Wall-clock bounded by the FSM's own handshake timers (R311fa). The
-/// inbound poll is raced in a `tokio::select!` against a `tick_interval_ms`
-/// cadence that calls `Engine::tick`; once the SCE scheduler passes a
-/// `<send delay>` deadline armed by the current handshake state
+/// Wall-clock bounded by the host handshake deadline-sweep (R311fa /
+/// R311il). The inbound poll is raced in a `tokio::select!` against a
+/// `tick_interval_ms` cadence; once the [`HandshakeDeadlineTracker`]
+/// reports the deadline armed by the current handshake state has elapsed
 /// (`init_ack.timeout` / `open_ack.timeout`, 2s; `link.open_timeout`, 5s),
-/// it fires the timer and the FSM transitions to `Closing` — surfaced here
-/// as [`OpenError::HandshakeTimeout`]. So a peer that never answers no
-/// longer hangs the loop (the prior `max_iters`-only bound was a test
-/// guard, not a wall-clock deadline). The window durations are the SCXML's
-/// single source of truth; `tick_interval_ms` only sets how finely the host
-/// pumps the clock (see [`DEFAULT_OPEN_TICK_MS`]). `poll_and_dispatch_one`
+/// the loop raises the timeout event and the FSM transitions to `Closing` —
+/// surfaced here as [`OpenError::HandshakeTimeout`]. So a peer that never
+/// answers no longer hangs the loop (the prior `max_iters`-only bound was a
+/// test guard, not a wall-clock deadline). The window durations are the
+/// §2.5 single source of truth in [`SessionTimeouts`]; `tick_interval_ms`
+/// only sets how finely the host samples the clock (see
+/// [`DEFAULT_OPEN_TICK_MS`]). `poll_and_dispatch_one`
 /// is cancel-safe (partial reads live in `TcpReadDriver`'s `ReadState`), so
 /// the tick branch can cancel an in-flight read without losing wire bytes.
 ///
@@ -468,9 +452,9 @@ pub async fn initiate_and_open_session(
 /// `Accepting.AwaitingInitSyn`), and drives the 4-way handshake (peer InitSyn
 /// -> our InitAck -> peer OpenSyn -> our OpenAck) to Established.
 ///
-/// Wall-clock bounded by the accept-side open-deadline (R311fb): the
-/// `accepting.inactivity_timeout` armed on `AwaitingInitSyn` entry (1s, §2.5)
-/// fires through the same `Engine::tick` pump as the Initiator timers, so a
+/// Wall-clock bounded by the accept-side open-deadline (R311fb / R311il):
+/// the `accepting.inactivity_timeout` armed on `Accepting` entry (1s, §2.5)
+/// is raised by the same host deadline-sweep as the Initiator timers, so a
 /// peer that connects then goes silent no longer hangs the loop (closing the
 /// R311fa carry #2 — the Initiator path was bounded, the acceptor was not).
 /// The drop is silent (the transition targets `Closed`, no Close frame —

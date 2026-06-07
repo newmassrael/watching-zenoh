@@ -129,6 +129,71 @@ pub fn handshake_deadline_for(
     })
 }
 
+/// Stateful host-side tracker for the currently-armed handshake deadline.
+///
+/// Wraps the [`SessionTimeouts`] config plus the arming-state key and the
+/// monotonic instant the deadline was armed. A session drive loop calls
+/// [`HandshakeDeadlineTracker::poll`] once per iteration to get the
+/// in-flight deadline without re-deriving the arming-key staleness logic
+/// inline — both session drive loops (the handshake-open loop in
+/// `session_open` and the steady-state loop in `session_glue`) share this,
+/// so the §2.5 deadline ownership has a single implementation:
+///   - per-phase deadlines (LinkOpening / SentInitSyn / GotInitAck /
+///     Closing) re-arm on entry to their arming state;
+///   - the three `Accepting` children share the parent `Accepting` key, so
+///     the whole-handshake bound is armed once and not reset as they
+///     advance;
+///   - a state with no host handshake deadline disarms the tracker.
+pub struct HandshakeDeadlineTracker {
+    timeouts: SessionTimeouts,
+    armed: Option<(SessionFsmUnicastState, u64)>,
+}
+
+impl HandshakeDeadlineTracker {
+    /// Construct a disarmed tracker over the spec-sourced `timeouts`.
+    pub fn new(timeouts: SessionTimeouts) -> Self {
+        Self {
+            timeouts,
+            armed: None,
+        }
+    }
+
+    /// Return the in-flight handshake deadline for `state` as an absolute
+    /// monotonic-ms instant plus the event to raise when it elapses, or
+    /// `None` if `state` carries no host handshake deadline (Init / the
+    /// compound parents / Established / Closed — see
+    /// [`handshake_deadline_for`]).
+    ///
+    /// `now_ms` is the runtime monotonic clock reading; it is consumed
+    /// only when (re-)arming — i.e. when the arming-state key changes — so
+    /// the per-phase deadlines measure from entry to their state and the
+    /// `Accepting` bound keeps its original armed-at instant across the
+    /// child transitions. A state with no deadline disarms the tracker so
+    /// a later re-entry re-arms from its own entry instant.
+    pub fn poll(
+        &mut self,
+        state: SessionFsmUnicastState,
+        now_ms: u64,
+    ) -> Option<(u64, SessionFsmUnicastEvent)> {
+        match handshake_deadline_for(state, &self.timeouts) {
+            Some(hd) => {
+                let armed_at = match self.armed {
+                    Some((key, at)) if key == hd.arming_key => at,
+                    _ => {
+                        self.armed = Some((hd.arming_key, now_ms));
+                        now_ms
+                    }
+                };
+                Some((armed_at.saturating_add(hd.deadline_ms), hd.event))
+            }
+            None => {
+                self.armed = None;
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +246,57 @@ mod tests {
         for state in [S::Init, S::Opening, S::Accepting, S::Established, S::Closed] {
             assert!(handshake_deadline_for(state, &t).is_none());
         }
+    }
+
+    #[test]
+    fn tracker_per_phase_rearms_on_key_change() {
+        let mut tr = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
+        // LinkOpening armed at t=1000 -> 1000 + 5000.
+        assert_eq!(
+            tr.poll(S::LinkOpening, 1_000),
+            Some((6_000, E::LinkOpenTimeout))
+        );
+        // Re-poll same state at a later now does NOT re-arm (stamp kept).
+        assert_eq!(
+            tr.poll(S::LinkOpening, 4_999),
+            Some((6_000, E::LinkOpenTimeout))
+        );
+        // Advancing to SentInitSyn re-arms from the new now (2000 + 2000).
+        assert_eq!(
+            tr.poll(S::SentInitSyn, 2_000),
+            Some((4_000, E::InitAckTimeout))
+        );
+    }
+
+    #[test]
+    fn tracker_accepting_children_keep_one_stamp() {
+        let mut tr = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
+        // Armed on first Accepting child at t=1000 -> 1000 + 1000.
+        assert_eq!(
+            tr.poll(S::AwaitingInitSyn, 1_000),
+            Some((2_000, E::AcceptingInactivityTimeout))
+        );
+        // Children advance, now=1500/1800 — the whole-handshake bound keeps
+        // its original armed_at (1000), so the deadline stays 2000 (NOT
+        // re-armed to 2500/2800).
+        assert_eq!(
+            tr.poll(S::SentInitAck, 1_500),
+            Some((2_000, E::AcceptingInactivityTimeout))
+        );
+        assert_eq!(
+            tr.poll(S::SentOpenAck, 1_800),
+            Some((2_000, E::AcceptingInactivityTimeout))
+        );
+    }
+
+    #[test]
+    fn tracker_disarms_on_no_deadline_state_then_rearms_fresh() {
+        let mut tr = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
+        assert_eq!(tr.poll(S::Closing, 1_000), Some((1_100, E::ClosingTimeout)));
+        // Established has no host handshake deadline -> disarm.
+        assert_eq!(tr.poll(S::Established, 2_000), None);
+        // Re-entering a handshake state re-arms from the new now, not the
+        // pre-disarm stamp.
+        assert_eq!(tr.poll(S::Closing, 5_000), Some((5_100, E::ClosingTimeout)));
     }
 }

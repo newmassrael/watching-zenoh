@@ -90,9 +90,8 @@ use sce_rust_runtime::Engine;
 // runtime-agnostic `wz_session_core::session_fsm_unicast` codegen.
 use crate::session_fsm_unicast::{
     SessionFsmUnicastActions as SessionFsmUnicastActionsTrait, SessionFsmUnicastPolicy,
-    SessionFsmUnicastState,
 };
-use wz_session_core::session_timeouts::handshake_deadline_for;
+use wz_session_core::session_timeouts::HandshakeDeadlineTracker;
 // Re-exported: `drive_session_until_terminal` takes `&SessionTimeouts`, so
 // consumers that drive a session (wz-e2e-harness, wz-ap-demo) reach the
 // type through this crate's session API without a direct wz-session-core dep.
@@ -5146,15 +5145,12 @@ where
     } else {
         actions.params.lease
     };
-    // R311il — currently-armed handshake deadline (arming-state key +
-    // monotonic armed-at stamp). The per-phase deadlines (LinkOpening /
-    // SentInitSyn / GotInitAck / Closing) re-arm on entry to their state;
-    // the Accepting whole-handshake bound's three children share the
-    // parent key (see `handshake_deadline_for`), so the key comparison
-    // keeps the original stamp as the children advance — one bound, armed
-    // once on accept entry. A stale per-phase deadline is discarded
-    // because the next iteration recomputes against the new state's key.
-    let mut handshake_armed: Option<(SessionFsmUnicastState, u64)> = None;
+    // R311il — host-owned handshake deadline tracker (the arming-key
+    // staleness logic lives once in wz-session-core; see
+    // [`HandshakeDeadlineTracker`]). The engine-free FSM arms no
+    // `<send delay>`, so this loop owns every handshake deadline; in
+    // Established the keepalive-resetting lease deadline takes over.
+    let mut deadline_tracker = HandshakeDeadlineTracker::new(*timeouts);
     let mut iter: usize = 0;
     loop {
         if engine.is_in_final_state() {
@@ -5167,30 +5163,17 @@ where
             iter += 1;
         }
         // This iteration's deadline. During the handshake phases the
-        // host-owned handshake deadline applies (the engine-free FSM arms
-        // no `<send delay>`); in Established the keepalive-resetting lease
-        // deadline applies; in Init / between there is none (block on the
-        // link poll). `Some((abs_ms, Some(event)))` = handshake timeout to
-        // raise; `Some((abs_ms, None))` = lease deadline (-> check_lease).
+        // tracker yields the host-owned handshake deadline; in Established
+        // it disarms and the keepalive-resetting lease deadline applies;
+        // in Init / between there is none (block on the link poll).
+        // `Some((abs_ms, Some(event)))` = handshake timeout to raise;
+        // `Some((abs_ms, None))` = lease deadline (-> check_lease).
         let deadline: Option<(
             u64,
             Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
-        )> = match handshake_deadline_for(engine.get_current_state(), timeouts) {
-            Some(hd) => {
-                let armed_at = match handshake_armed {
-                    Some((key, at)) if key == hd.arming_key => at,
-                    _ => {
-                        let now = clock.now_monotonic_ms();
-                        handshake_armed = Some((hd.arming_key, now));
-                        now
-                    }
-                };
-                Some((armed_at.saturating_add(hd.deadline_ms), Some(hd.event)))
-            }
+        )> = match deadline_tracker.poll(engine.get_current_state(), clock.now_monotonic_ms()) {
+            Some((deadline_ms, event)) => Some((deadline_ms, Some(event))),
             None => {
-                // Left the handshake phase; drop any armed deadline so a
-                // later re-entry re-arms from its own entry instant.
-                handshake_armed = None;
                 let stamp_ms = *actions.last_inbound_keepalive_at.lock().unwrap();
                 stamp_ms.map(|s| (s.saturating_add(lease_ms), None))
             }
