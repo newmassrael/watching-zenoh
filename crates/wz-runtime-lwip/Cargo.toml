@@ -104,6 +104,23 @@ alloc = [
 # requirement (the synth builds onto BoundedVec/BoundedString).
 scouting-static = ["dep:wz-session-core", "wz-session-core/scouting-static"]
 
+# R311in carry[3] — transport reassembly (Tier B) on the MCU profile.
+# The MCU mirror of wz-runtime-tokio's `reassembly` feature: forwards to
+# wz-session-core's `reassembly` capability AND its `no_std` profile
+# selector (the heapless sce-rust-runtime — wz-runtime-lwip is always
+# #![no_std]). No `alloc` requirement: the ReassemblyDispatcher stages
+# into inline BoundedVec buffers, so the live MCU reassembly seam
+# (`reassembly_rx`) composes on the no-alloc profile. The no_std
+# dispatcher is ~22 KiB (vendor/sce 4ec1aa642 metadata elision +
+# fragment.chunk payload-field removal), resident in the MCU SRAM region.
+# Pulls the optional wz-session-core dep, mirroring scouting-static
+# across the same facade -> runtime -> core edge.
+reassembly = [
+    "dep:wz-session-core",
+    "wz-session-core/reassembly",
+    "wz-session-core/no_std",
+]
+
 [dependencies]
 # critical-section provides the IRQ-disabling Mutex<T> primitive
 # used as the per-profile `sync::Mutex` / `sync::RwLock` alias

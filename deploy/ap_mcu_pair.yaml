@@ -105,6 +105,14 @@ machines:
       scout_rx_pool:    { slot_count: 8,  slot_size:  256, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH0, cache_policy: maintain }
       session_rx_pool:  { slot_count: 16, slot_size: 1536, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH1, cache_policy: maintain }
       session_tx_pool:  { slot_count: 8,  slot_size: 1536, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH2, cache_policy: maintain }
+      # R311in — the parsed SSOT for these reassembly pool dims/knobs is
+      # `sources/network/reassembly_pool_mcu.scxml` (sce:kind=buffer-pool);
+      # SCE codegen emits the SLOT_COUNT/SLOT_SIZE/PER_PEER_QUOTA/
+      # REASSEMBLY_TIMEOUT_MS constants the MCU reassembly_rx seam
+      # consumes. This block is a human-readable mirror (this deploy.yaml
+      # is not yet parsed — its top-level schema differs from SCE's
+      # DeployConfig). Keep in sync by hand until that alignment retires
+      # the inline copy in favour of a by-name pool reference.
       reassembly_pool:
         variant: reassembly
         slot_count: 4

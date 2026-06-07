@@ -175,3 +175,37 @@ pub use time::{ClockSource, LwipTime};
 // a no-alloc static-only MCU deploy gets the synthesis.
 #[cfg(feature = "scouting-static")]
 pub use wz_session_core::scout_static;
+
+/// SCE-generated MCU reassembly buffer-pool config. The emit comes from
+/// `sources/network/reassembly_pool_mcu.scxml` (an `sce:kind="buffer-pool"`
+/// document, the SSOT) via `build.rs` (codegen'd into
+/// `$OUT_DIR/reassembly_pool_mcu.rs` only under the `reassembly` feature).
+///
+/// R311in carry[3] — the MCU sibling of `wz-runtime-tokio`'s
+/// `reassembly_pool_ap`. Exposes the spec-anchored pool constants the
+/// MCU [`reassembly_rx`] seam consumes: `SLOT_COUNT` / `SLOT_SIZE` (the
+/// dispatcher const generics) and `PER_PEER_QUOTA` /
+/// `REASSEMBLY_TIMEOUT_MS` (the `ReassemblyConfig` knobs). NOT
+/// alloc-gated — the no-alloc MCU reassembly profile consumes these. The
+/// build script strips the file-head `#![...]` inner attributes and the
+/// trailing SCE-pool-API `generated_tests` module; the lint allows are
+/// restored here as outer attributes on the wrapping module. SCE's §5.E
+/// DMA slot-pool API in the emit is unused by the dispatcher (which owns
+/// its own inline staging) and is dead code.
+#[cfg(feature = "reassembly")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod reassembly_pool_mcu {
+    include!(concat!(env!("OUT_DIR"), "/reassembly_pool_mcu.rs"));
+}
+
+// R311in carry[3] — the live MCU reassembly seam: binds the engine-free
+// ReassemblyDispatcher to the MCU machine's pool policy (from the
+// buffer-pool SSOT above) and re-exports the driving types. No-alloc;
+// the MCU main loop owns the dispatcher and feeds it decoded fragments.
+#[cfg(feature = "reassembly")]
+pub mod reassembly_rx;

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  MCU reassembly buffer-pool config — the SSOT for the lwIP (MCU /
+  bare-metal) host's reassembly slot-pool dimensions and runtime knobs
+  (reassembly-fsm prose-sketch §4 "Timer / quota / pool config").
+
+  R311in — the MCU sibling of `reassembly_pool_ap.scxml`. Same SSOT
+  rationale: SCE codegen emits the spec-anchored SLOT_COUNT / SLOT_SIZE /
+  MAX_FRAGMENTS_PER_MESSAGE / REASSEMBLY_TIMEOUT_MS / PER_PEER_QUOTA
+  constants that the MCU host's `ReassemblyDispatcher` consumes via the
+  no-alloc `wz-runtime-lwip::reassembly_rx` seam (carry [3]). Both
+  profiles source their pool from one SCE-owned scxml each, selecting
+  their own machine — the kconfig composable-framework structure.
+
+  Values mirror `deploy/ap_mcu_pair.yaml` `mcu_node.buffer_pools.
+  reassembly_pool` (the MCU machine of the canonical asymmetric deploy:
+  the smaller, SRAM-resident pool). SCE deploy invariants hold against
+  the MCU link mtu 1472 / peer_table 16: slot_size 4096 >= 2*1472 = 2944,
+  and peer_table 16 * per_peer_quota 2 = 32 >= slot_count 4.
+
+  MCU footprint (R311in, vendor/sce 4ec1aa642 + fragment.chunk payload
+  field removed): the no_std ReassemblyDispatcher<4, 4096> is ~22 KiB,
+  resident in the 128 KiB sram2 region. (Before both fixes it was 1.68
+  MiB — the per-slot Engine carried a 1472-byte event payload x 64-deep
+  queue x 4 slots plus inline W3C event metadata; see the SCE
+  no_std-footprint report.)
+
+  cache-policy is `none` here (NOT the deploy.yaml mcu_node's `maintain`):
+  the wz reassembly dispatcher stages into its own `BoundedVec`, not the
+  §5.E DMA slot table, so it performs no DMA cache maintenance. Emitting
+  `maintain` would pull the C5 `sce_dcache_clean_by_addr` /
+  `sce_dcache_invalidate_by_addr` externs into the (wz-unused) DMA pool
+  API for no benefit. The eventual DMA-staged reassembly path is a
+  separate, not-yet-wired concern; the five reassembly constants this
+  emit feeds the dispatcher are identical under either cache policy.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="reassembly_pool_mcu" version="1.0">
+  <sce:variant>reassembly</sce:variant>
+  <sce:slot-count>4</sce:slot-count>
+  <sce:slot-size>4096</sce:slot-size>
+  <sce:section>sram2</sce:section>
+  <sce:alignment>32</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+  <sce:max-fragments-per-message>2</sce:max-fragments-per-message>
+  <sce:reassembly-timeout-ms>500</sce:reassembly-timeout-ms>
+  <sce:per-peer-quota>2</sce:per-peer-quota>
+</scxml>

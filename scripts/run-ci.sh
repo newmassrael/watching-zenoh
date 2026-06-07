@@ -1636,6 +1636,23 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.8 reassembly MCU $t FAIL" >&2
             fail=1
         fi
+        # G.9 (R311in carry[3]) wz-runtime-lwip reassembly seam on the MCU
+        # profile. Proves the live MCU reassembly consumer (reassembly_rx:
+        # LwipReassembly + mcu_reassembly() over the SCE buffer-pool SSOT
+        # reassembly_pool_mcu.scxml) cross-compiles no_std + no-alloc on
+        # every Phase W target. The bottom-up MCU consumer of the
+        # ReassemblyDispatcher that G.8 only build-checked at the
+        # session-core layer; the ~22 KiB no_std dispatcher (vendor/sce
+        # 4ec1aa642 metadata elision + fragment.chunk payload-field
+        # removal) is SRAM-resident. No alloc: the seam stages into inline
+        # BoundedVec, so it rides every target including thumbv6m (M0+).
+        if (cd crates && cargo build -p wz-runtime-lwip \
+            --target "$t" --features reassembly --quiet); then
+            echo "  G.9 reassembly seam MCU $t OK"
+        else
+            echo "  G.9 reassembly seam MCU $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"
