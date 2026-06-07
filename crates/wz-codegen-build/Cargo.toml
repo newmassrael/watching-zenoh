@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-codegen-build — shared build-script helper.
+#
+# R311in — the sce-codegen binary lookup + the emit post-processing
+# (strip inner attributes; for buffer-pool kind also strip the trailing
+# SCE-pool-API generated_tests) lived duplicated across three build
+# scripts (wz-session-core for statecharts, wz-runtime-tokio /
+# wz-runtime-lwip for buffer pools). This crate is the single source for
+# that logic; the three build scripts depend on it as a build-dependency
+# and call `Codegen::emit_statechart` / `emit_buffer_pool`.
+
+[package]
+name = "wz-codegen-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Shared build-script helper: invoke vendored sce-codegen + post-process emits for include! (one source for statechart + buffer-pool codegen)."
+
+[lib]
+name = "wz_codegen_build"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -121,6 +121,11 @@ reassembly = [
     "wz-session-core/no_std",
 ]
 
+[build-dependencies]
+# R311in — shared sce-codegen invocation + emit post-processing (one
+# source across the three codegen build scripts).
+wz-codegen-build = { path = "../wz-codegen-build" }
+
 [dependencies]
 # critical-section provides the IRQ-disabling Mutex<T> primitive
 # used as the per-profile `sync::Mutex` / `sync::RwLock` alias

@@ -288,6 +288,11 @@ liveliness-get = ["codec-declare"]
 # handshake batch-size negotiation semantics stay consistent workspace-wide.
 transport-batching = []
 
+[build-dependencies]
+# R311in — shared sce-codegen invocation + emit post-processing (one
+# source across the three codegen build scripts).
+wz-codegen-build = { path = "../wz-codegen-build" }
+
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
 # Tier B reassembly — host runtime for the SCE-generated reassembly slot

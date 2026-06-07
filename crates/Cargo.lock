@@ -1376,6 +1376,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-codegen-build"
+version = "0.1.0"
+
+[[package]]
 name = "wz-e2e-declare-observer"
 version = "0.1.0"
 dependencies = [
@@ -1475,6 +1479,7 @@ dependencies = [
  "critical-section",
  "portable-atomic",
  "portable-atomic-util",
+ "wz-codegen-build",
  "wz-runtime-core",
  "wz-session-core",
 ]
@@ -1493,6 +1498,7 @@ dependencies = [
  "tokio",
  "wz-codecs",
  "wz-codecs-test-support",
+ "wz-codegen-build",
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
@@ -1522,6 +1528,7 @@ dependencies = [
  "sha2",
  "wz-codecs",
  "wz-codecs-test-support",
+ "wz-codegen-build",
  "wz-runtime-core",
  "wz-session-core-test-support",
  "zeroize",

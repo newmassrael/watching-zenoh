@@ -33,6 +33,7 @@ members = [
     "wz",
     "wz-codecs",
     "wz-codecs-test-support",
+    "wz-codegen-build",
     "wz-runtime-core",
     "wz-session-core",
     "wz-session-core-test-support",
