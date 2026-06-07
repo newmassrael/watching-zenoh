@@ -603,15 +603,19 @@ into the TX pool slot.
 
 ## §4 Timer / quota / pool config (cross-ref deploy.yaml)
 
-All values come from `deploy/{mcu_target,ap_standalone,ap_mcu_
-pair}.yaml`. Table mirrors session-fsm.md §2.5 shape so authors
-have one mental model across both FSMs.
+R311in — the PARSED SSOT for these reassembly pool constants is the
+per-machine `sce:kind="buffer-pool"` doc (`sources/network/reassembly_
+pool_{ap,mcu}.scxml`); SCE codegen emits them and the host dispatcher
+consumes them. The `deploy/*.yaml` `buffer_pools.reassembly_pool` block
+is an un-parsed human mirror (its top-level schema differs from SCE's
+DeployConfig). Table mirrors session-fsm.md §2.5 shape so authors have
+one mental model across both FSMs.
 
 | Field | MCU default | AP default | Source |
 |---|---|---|---|
 | `reassembly_pool.slot_count` | 4 | 32 | `deploy.machines.<m>.buffer_pools.reassembly_pool.slot_count` |
 | `reassembly_pool.slot_size` | 4096 | 65536 | `deploy.machines.<m>.buffer_pools.reassembly_pool.slot_size` |
-| `reassembly_pool.max_fragments_per_message` | 16 | 256 | `deploy.machines.<m>.buffer_pools.reassembly_pool.max_fragments_per_message` |
+| `reassembly_pool.max_fragments_per_message` | 2 | 44 | scxml `<sce:max-fragments-per-message>` (R311in: corrected from stale 16/256, which violated `slot_size ≥ max_frag·mtu`: 16·1472 > 4096, 256·1472 > 65536) |
 | `reassembly_pool.reassembly_timeout_ms` | 500 | 500 | `deploy.machines.<m>.buffer_pools.reassembly_pool.reassembly_timeout_ms` (defense-in-depth; not part of upstream parity — see §2.4.5) |
 | `reassembly_pool.per_peer_quota` | 2 | 8 | `deploy.machines.<m>.buffer_pools.reassembly_pool.per_peer_quota` |
 | `peer_table.capacity` | 16 | 256 | `deploy.machines.<m>.limits.peer_table` (used in build-time invariant check) |
