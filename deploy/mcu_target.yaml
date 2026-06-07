@@ -315,30 +315,28 @@ machines:
     # buffer_pools — RFC §5.K buffer_pools block
     # ---------------------------------------------------------------
     buffer_pools:
-      scout_rx_pool:
-        slot_count: 8                  # bounded by burst_pps × tick:
-                                       # 50 pps × 1 ms = 0.05; with
-                                       # 2× safety factor and Scout
-                                       # bursts during initial
-                                       # discovery, 8 is comfortable.
-        slot_size: 256                 # cache-line multiple (32 × 8).
-                                       # ≥ udp_scout.expected_p99_bytes.
-        section: sram1
-        alignment: 32                  # cache-line alignment for
-                                       # `cache_policy: maintain`.
-        dma_channel: DMAMUX1_CH0
-        cache_policy: maintain
+      # R311ip — scout_rx_pool's dims (slot_count / slot_size) live ONLY
+      # in their SSOT doc `sources/network/scout_rx_pool_mcu.scxml`
+      # (sce:kind=buffer-pool), referenced by name here; values are NOT
+      # duplicated. SCE codegen emits SLOT_COUNT / SLOT_SIZE, which the MCU
+      # link tier consumes as the const-generic dims of the scouting-link
+      # receive socket (wz-link-lwip::rx_sockets::ScoutRxSocket). The
+      # derivation annotations (50 pps x 1 ms burst sizing; >=
+      # udp_scout.expected_p99_bytes) moved with the values into the scxml
+      # header. NOTE the eventual isr_to_pool DMA placement is
+      # cache_policy=maintain + dma_channel=DMAMUX1_CH0; the scxml uses
+      # cache-policy=none because the live socket copies into a heapless
+      # Vec, not the §5.E DMA slot table (DMA path not yet wired).
+      scout_rx_pool: { ref: scout_rx_pool_mcu }
 
-      session_rx_pool:
-        slot_count: 16                 # 200 pps × 1 ms × 2.0 safety
-                                       # = 0.4; round up for burst
-                                       # absorption headroom.
-        slot_size: 1536                # cache-line multiple. ≥
-                                       # udp_session.mtu_bytes (1472).
-        section: sram1
-        alignment: 32
-        dma_channel: DMAMUX1_CH1
-        cache_policy: maintain
+      # R311ip — session_rx_pool's dims live ONLY in
+      # `sources/network/session_rx_pool_mcu.scxml` (sce:kind=buffer-pool),
+      # referenced by name; values NOT duplicated. SCE codegen emits
+      # SLOT_COUNT / SLOT_SIZE consumed by the MCU session-link receive
+      # socket (wz-link-lwip::rx_sockets::SessionRxSocket). Eventual
+      # isr_to_pool DMA placement: cache_policy=maintain + dma_channel=
+      # DMAMUX1_CH1 (scxml uses cache-policy=none; see the scout_rx note).
+      session_rx_pool: { ref: session_rx_pool_mcu }
 
       session_tx_pool:
         slot_count: 8                  # tx-queue capacity 16, slots

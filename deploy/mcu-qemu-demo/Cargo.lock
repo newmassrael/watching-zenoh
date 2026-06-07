@@ -548,6 +548,7 @@ version = "0.1.0"
 dependencies = [
  "heapless",
  "lwip-sys",
+ "wz-codegen-build",
 ]
 
 [[package]]

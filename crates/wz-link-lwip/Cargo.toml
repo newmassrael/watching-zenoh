@@ -59,6 +59,15 @@ lwip-sys = { path = "../lwip-sys" }
 # applies).
 heapless = "0.8"
 
+[build-dependencies]
+# R311ip — codegens the MCU scout/session rx buffer-pool SSOTs
+# (sources/network/{scout_rx,session_rx}_pool_mcu.scxml) into the
+# SLOT_COUNT / SLOT_SIZE constants that `rx_sockets`'s typed socket
+# aliases consume. Shared with the other wz codegen build scripts;
+# invoked only on the real-build path (DEP_LWIP_LWIP_REAL_BUILD=1),
+# matching the crate-body `lwip_real_build` cfg gate.
+wz-codegen-build = { path = "../wz-codegen-build" }
+
 [dev-dependencies]
 # (none yet — host smoke uses only the library + lwip-sys FFI.)
 

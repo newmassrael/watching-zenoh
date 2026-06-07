@@ -30842,6 +30842,66 @@
         "AP: fold the reassembly deadline into the drive-loop select! race (today swept per-iteration); multi-peer / router multi-link wiring"
       ]
     },
+    "Round 311ip": {
+      "decision_summary": "R311ip: scout/session-rx MCU buffer-pool SSOTs born with their consumer; wz-link-lwip rx sockets size N/Q from scxml SLOT_SIZE/SLOT_COUNT; deploy mcu refs by name (carry #2 pivot from L1)",
+      "changes_bullets": [
+        "sources/network/{scout_rx,session_rx}_pool_mcu.scxml: new sce:kind=buffer-pool SSOTs; cache-policy none (live socket CPU-copies into a heapless Vec, not the §5.E DMA slot table; maintain would emit unsatisfied dcache externs); deploy.yaml derivation annotations transcribed into the scxml headers",
+        "wz-link-lwip build.rs: emits both pools on the real-build path (DEP_LWIP_LWIP_REAL_BUILD=1), gated like the crate body; pulls wz-codegen-build as a build-dep",
+        "wz-link-lwip lib.rs: pub mod {scout,session}_rx_pool_mcu (include! the emit, lint-allows mirror reassembly_pool wrapper) + pub mod rx_sockets",
+        "wz-link-lwip rx_sockets.rs: ScoutRxSocket/SessionRxSocket = LwipUdpSocket<SLOT_SIZE, SLOT_COUNT> from the pool SSOTs + bind_scout_rx/bind_session_rx constructors (the link-tier sibling of reassembly_rx consuming reassembly_pool_mcu)",
+        "wz-link-lwip lib.rs: lwip_test_link() test helper = std::sync::Once one-time lwip_init + Mutex serialize (NO_SYS=1 lwip_init is not re-entrant — a second call asserts netif-already-added); mod smoke migrated onto it",
+        "deploy/{mcu_target,ap_mcu_pair}.yaml: mcu_node scout_rx_pool/session_rx_pool -> { ref: <name> }; session_tx + AP pools stay inline (no live consumer / no scxml SSOT this round)",
+        "crates/Cargo.lock: wz-codegen-build added to wz-link-lwip build-deps"
+      ],
+      "verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1: Layer A/B/C/G pass; G.6 cross-real wz-link-lwip OK on all 6 ARM MCU targets (thumbv6m/7m/7em/8m.base/8m.main/8m.main-hf), riscv32imac SKIP (riscv32-unknown-elf-gcc absent — standard known skip)",
+        "wz-link-lwip: 3 tests pass (rx_socket_dims_come_from_the_buffer_pool_ssot: scout 8/256 session 16/1536; session_rx_socket_loopback_round_trip; mod smoke); clippy --all-targets -D warnings clean; cargo fmt --all --check clean",
+        "sce-codegen direct check: scout_rx_pool_mcu emits SLOT_COUNT=8/SLOT_SIZE=256, no reassembly-only consts (default variant), no real dcache externs (cache-policy none — only doc-comment mentions)",
+        "targeted cross-build: wz-link-lwip thumbv7em-none-eabihf (cortex-m4) + thumbv6m-none-eabi (cortex-m0+, no-atomic) build OK with WZ_LWIP_PORT",
+        "validate-deploy.sh: all 3 deploy/*.yaml pass lightweight schema check (the { ref: } form accepted)",
+        "validate_workspace post-append: entries 594->595, sections 257, T1 orphan ledger=13 new=+0 (no new orphans), style T3 warn=4 / T4 info=3 unchanged"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "carry_forward_bullets": [
+        "session_tx_pool (MCU) + all AP-profile pools (scout_rx/session_rx/session_tx_ap) still inline: no live consumer (no tx staging ring; tokio uses a single recv buffer, not a pooled rx ring). Extract each as a scxml SSOT when its consumer lands — the born-with-consumer rule, not pre-emptively.",
+        "reassembly_pool standalone-yaml mirror still open from R311io: mcu_target.yaml + ap_standalone.yaml keep reassembly_pool inline despite reassembly_pool_{mcu,ap}.scxml being the codegen SSOT. The uniform ref-iff-SSOT rule applied here to scout/session would convert these too (deferred to keep this round scoped to carry #2).",
+        "scout multicast rx: bind_scout_rx binds IP_ADDR_ANY:port (unicast) today; the deploy scout endpoint 224.0.0.224:7446 needs an lwIP IGMP join (LWIP_IGMP + igmp_joingroup) not yet wired.",
+        "R311io carries unchanged: deploy.yaml full top-level alignment to SCE DeployConfig topology: schema (R50/R123b); MCU alloc-profile reassembly auto-sweep + live main-loop consumer; AP reassembly deadline into the drive-loop select! race; multi-peer / router multi-link wiring."
+      ],
+      "publishable_decision_summary": "R311ip: scout/session-rx MCU buffer-pool SSOTs born with their consumer; wz-link-lwip rx sockets size N/Q from scxml SLOT_SIZE/SLOT_COUNT; deploy mcu refs by name (carry #2 pivot from L1)",
+      "publishable_changes_bullets": [
+        "sources/network/{scout_rx,session_rx}_pool_mcu.scxml: new sce:kind=buffer-pool SSOTs; cache-policy none (live socket CPU-copies into a heapless Vec, not the §5.E DMA slot table; maintain would emit unsatisfied dcache externs); deploy.yaml derivation annotations transcribed into the scxml headers",
+        "wz-link-lwip build.rs: emits both pools on the real-build path (DEP_LWIP_LWIP_REAL_BUILD=1), gated like the crate body; pulls wz-codegen-build as a build-dep",
+        "wz-link-lwip lib.rs: pub mod {scout,session}_rx_pool_mcu (include! the emit, lint-allows mirror reassembly_pool wrapper) + pub mod rx_sockets",
+        "wz-link-lwip rx_sockets.rs: ScoutRxSocket/SessionRxSocket = LwipUdpSocket<SLOT_SIZE, SLOT_COUNT> from the pool SSOTs + bind_scout_rx/bind_session_rx constructors (the link-tier sibling of reassembly_rx consuming reassembly_pool_mcu)",
+        "wz-link-lwip lib.rs: lwip_test_link() test helper = std::sync::Once one-time lwip_init + Mutex serialize (NO_SYS=1 lwip_init is not re-entrant — a second call asserts netif-already-added); mod smoke migrated onto it",
+        "deploy/{mcu_target,ap_mcu_pair}.yaml: mcu_node scout_rx_pool/session_rx_pool -> { ref: <name> }; session_tx + AP pools stay inline (no live consumer / no scxml SSOT this round)",
+        "crates/Cargo.lock: wz-codegen-build added to wz-link-lwip build-deps"
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1: Layer A/B/C/G pass; G.6 cross-real wz-link-lwip OK on all 6 ARM MCU targets (thumbv6m/7m/7em/8m.base/8m.main/8m.main-hf), riscv32imac SKIP (riscv32-unknown-elf-gcc absent — standard known skip)",
+        "wz-link-lwip: 3 tests pass (rx_socket_dims_come_from_the_buffer_pool_ssot: scout 8/256 session 16/1536; session_rx_socket_loopback_round_trip; mod smoke); clippy --all-targets -D warnings clean; cargo fmt --all --check clean",
+        "sce-codegen direct check: scout_rx_pool_mcu emits SLOT_COUNT=8/SLOT_SIZE=256, no reassembly-only consts (default variant), no real dcache externs (cache-policy none — only doc-comment mentions)",
+        "targeted cross-build: wz-link-lwip thumbv7em-none-eabihf (cortex-m4) + thumbv6m-none-eabi (cortex-m0+, no-atomic) build OK with WZ_LWIP_PORT",
+        "validate-deploy.sh: all 3 deploy/*.yaml pass lightweight schema check (the { ref: } form accepted)",
+        "validate_workspace post-append: entries 594->595, sections 257, T1 orphan ledger=13 new=+0 (no new orphans), style T3 warn=4 / T4 info=3 unchanged"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session_tx_pool (MCU) + all AP-profile pools (scout_rx/session_rx/session_tx_ap) still inline: no live consumer (no tx staging ring; tokio uses a single recv buffer, not a pooled rx ring). Extract each as a scxml SSOT when its consumer lands — the born-with-consumer rule, not pre-emptively.",
+        "reassembly_pool standalone-yaml mirror still open from R311io: mcu_target.yaml + ap_standalone.yaml keep reassembly_pool inline despite reassembly_pool_{mcu,ap}.scxml being the codegen SSOT. The uniform ref-iff-SSOT rule applied here to scout/session would convert these too (deferred to keep this round scoped to carry #2).",
+        "scout multicast rx: bind_scout_rx binds IP_ADDR_ANY:port (unicast) today; the deploy scout endpoint 224.0.0.224:7446 needs an lwIP IGMP join (LWIP_IGMP + igmp_joingroup) not yet wired.",
+        "R311io carries unchanged: deploy.yaml full top-level alignment to SCE DeployConfig topology: schema (R50/R123b); MCU alloc-profile reassembly auto-sweep + live main-loop consumer; AP reassembly deadline into the drive-loop select! race; multi-peer / router multi-link wiring."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [

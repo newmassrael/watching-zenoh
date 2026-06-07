@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  MCU session-rx buffer-pool config — the SSOT for the lwIP (MCU /
+  bare-metal) host's session-link receive slot-pool dimensions
+  (RFC §5.K buffer_pools block; unicast session-data rx).
+
+  Born with its consumer (the reassembly_pool pattern): SCE codegen
+  emits the spec-anchored SLOT_COUNT / SLOT_SIZE constants and the MCU
+  link tier consumes them as the const-generic parameters of the
+  session-link receive socket — `wz-link-lwip::rx_sockets::SessionRxSocket`
+  = `LwipUdpSocket<SLOT_SIZE, SLOT_COUNT>`. SLOT_COUNT sizes the
+  callback-to-application `heapless::spsc::Queue` depth (Q); SLOT_SIZE
+  sizes the per-datagram payload capacity (N). Authoring the values
+  here once, and codegen'ing them, removes the prior duplication (the
+  same dims lived inline in both `deploy/mcu_target.yaml` and
+  `deploy/ap_mcu_pair.yaml` mcu_node).
+
+  Values (and their derivations) mirror `deploy/mcu_target.yaml`
+  `mcu_node.buffer_pools.session_rx_pool`:
+    - slot_count 16  — 200 pps x 1 ms x 2.0 safety = 0.4, rounded up for
+      burst absorption headroom. (This is the rx-queue depth Q; the
+      callback copies each pbuf out immediately and frees it, so Q is
+      independent of lwipopts MEMP_NUM_PBUF — a full queue drops with the
+      `rx_drop_count` counter rather than back-pressuring the pbuf pool.)
+    - slot_size 1536 — cache-line multiple; >= udp_session.mtu_bytes
+      (1472), so a full-MTU session datagram fits without truncation.
+
+  cache-policy is `none` here (NOT the deploy.yaml mcu_node's `maintain`),
+  for the same reason as `reassembly_pool_mcu.scxml`: the live consumer
+  (`LwipUdpSocket`) copies each datagram via `pbuf_copy_partial` into an
+  inline `heapless::Vec`, not the §5.E DMA slot table, so it performs no
+  DMA cache maintenance. Emitting `maintain` would pull the C5
+  `sce_dcache_clean_by_addr` / `sce_dcache_invalidate_by_addr` externs
+  into the (wz-unused) DMA pool API — undefined at link time on the host
+  smoke build, for no benefit. The eventual isr_to_pool DMA-staged
+  session rx path (deploy.yaml's `cache_policy: maintain` + `dma_channel:
+  DMAMUX1_CH1` placement) is a separate, not-yet-wired concern; the two
+  pool dims this emit feeds the socket are identical under either policy.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="session_rx_pool_mcu" version="1.0">
+  <sce:slot-count>16</sce:slot-count>
+  <sce:slot-size>1536</sce:slot-size>
+  <sce:section>sram1</sce:section>
+  <sce:alignment>32</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+</scxml>

@@ -71,6 +71,79 @@ use lwip_sys::{
     udp_bind, udp_new, udp_pcb, udp_recv, udp_remove, udp_sendto,
 };
 
+// ── R311ip — MCU rx buffer-pool SSOT consumers ──────────────────────
+//
+// The link tier's receive sockets size their per-datagram payload
+// capacity (`N`) and rx-queue depth (`Q`) from the SCE-codegen'd
+// buffer-pool SSOTs rather than hand-tuned constants — the link-tier
+// sibling of `wz-runtime-lwip`'s `reassembly_rx` consuming
+// `reassembly_pool_mcu`. build.rs emits each `sce:kind="buffer-pool"`
+// doc into `$OUT_DIR`; `rx_sockets` turns the emitted SLOT_COUNT /
+// SLOT_SIZE into the `ScoutRxSocket` / `SessionRxSocket` typed aliases.
+
+// The lint allows mirror wz-runtime-lwip's reassembly_pool_mcu wrapper:
+// the strip post-process drops the emit's file-head inner attributes, so
+// they are restored here as outer attributes over the SCE pool API (the
+// §5.E DMA slot lifecycle is dead code under the wz consumer, and the
+// emitted `&'static str` consts trip clippy::redundant_static_lifetimes).
+
+/// SCE-codegen'd MCU scout-rx buffer-pool SSOT — `sce:kind="buffer-pool"`
+/// doc `sources/network/scout_rx_pool_mcu.scxml`. Exposes `SLOT_COUNT`
+/// (rx-queue depth) and `SLOT_SIZE` (per-datagram payload cap).
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod scout_rx_pool_mcu {
+    include!(concat!(env!("OUT_DIR"), "/scout_rx_pool_mcu.rs"));
+}
+
+/// SCE-codegen'd MCU session-rx buffer-pool SSOT — `sce:kind="buffer-pool"`
+/// doc `sources/network/session_rx_pool_mcu.scxml`.
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_rx_pool_mcu {
+    include!(concat!(env!("OUT_DIR"), "/session_rx_pool_mcu.rs"));
+}
+
+pub mod rx_sockets;
+
+#[cfg(test)]
+extern crate std;
+
+/// Test-only lwIP harness handle. lwIP under NO_SYS=1 keeps process-global
+/// static state (netif list + udp_pcb / pbuf MEMP pools) and `lwip_init`
+/// is NOT re-entrant — a second call asserts "netif already added" and
+/// aborts — while cargo runs a binary's `#[test]`s on parallel threads.
+/// This helper (a) runs `lwip_init` exactly once per process via a
+/// [`std::sync::Once`] and (b) serializes every lwIP-touching test behind
+/// one mutex. Hold the returned guard for the test body; drive the input
+/// path through the returned [`LwipLink`].
+#[cfg(test)]
+pub(crate) fn lwip_test_link() -> (std::sync::MutexGuard<'static, ()>, LwipLink) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static INIT: std::sync::Once = std::sync::Once::new();
+    let guard = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: exactly one `lwip_init` per process, before any socket bind,
+    // honouring the NO_SYS=1 single-thread contract. `LwipLink::init`'s own
+    // call path is bypassed here so the second test does not re-init.
+    INIT.call_once(|| unsafe { lwip_init() });
+    (
+        guard,
+        LwipLink {
+            _no_send_sync: core::marker::PhantomData,
+        },
+    )
+}
+
 /// Maximum UDP datagram payload captured per receive (R311az-pre D4
 /// per-link bounded shape). Sized to the standard 1500-byte Ethernet
 /// MTU minus IP+UDP overhead, rounded up to a power of two for
@@ -401,12 +474,14 @@ mod smoke {
     //! lands: D2 raw udp_* API, D3 lwip-sys FFI surface, D4 mpsc
     //! bridge with overflow drop, D5 cooperative poll-driven recv.
 
-    extern crate std;
     use super::*;
 
     #[test]
     fn loopback_echo_one_packet() {
-        let link = LwipLink::init();
+        // R311ip — one-time lwIP init + serialize against the rx_sockets
+        // lwIP test (lwIP's NO_SYS=1 global state is not concurrency-safe
+        // and `lwip_init` is not re-entrant).
+        let (_serial, link) = crate::lwip_test_link();
         let port: u16 = 12345;
         // R311bq: `LwipUdpSocket` (no turbofish) resolves to the
         // default generic args `<MAX_DATAGRAM, RX_QUEUE_DEPTH>`.

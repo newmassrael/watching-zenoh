@@ -102,8 +102,15 @@ machines:
       stage_copy_policy: error
 
     buffer_pools:
-      scout_rx_pool:    { slot_count: 8,  slot_size:  256, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH0, cache_policy: maintain }
-      session_rx_pool:  { slot_count: 16, slot_size: 1536, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH1, cache_policy: maintain }
+      # R311ip — scout_rx / session_rx dims live ONLY in their scxml SSOTs
+      # (sources/network/{scout_rx,session_rx}_pool_mcu.scxml), consumed by
+      # the MCU link tier's rx sockets (wz-link-lwip::rx_sockets); values
+      # NOT duplicated. See the mcu_target.yaml notes for the per-pool
+      # derivation + the eventual isr_to_pool DMA placement. session_tx has
+      # no live consumer yet (the send_to path allocates a pbuf directly,
+      # no tx ring), so it stays inline until its consumer lands.
+      scout_rx_pool:    { ref: scout_rx_pool_mcu }
+      session_rx_pool:  { ref: session_rx_pool_mcu }
       session_tx_pool:  { slot_count: 8,  slot_size: 1536, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH2, cache_policy: maintain }
       # R311in — reassembly_pool's def (slot_count / slot_size /
       # max_fragments_per_message / reassembly_timeout_ms / per_peer_quota)
