@@ -28,17 +28,19 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
-use wz_runtime_tokio::session_glue::{BoxedLinkDriver, CloseReason, SessionLinkActions};
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver,
+use wz_runtime_tokio::session_glue::{
+    new_session_engine, BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionLinkActions,
 };
+use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 
-fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
+fn fresh_setup() -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
     let actions =
         SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
 }
@@ -46,7 +48,7 @@ fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
 /// Initiator activation through to SentInitSyn (the state that arms
 /// `init_ack.timeout`): OutboundStart -> LinkOpening, LinkOpened -> Opening
 /// (initial child SentInitSyn).
-fn drive_to_sent_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy>) {
+fn drive_to_sent_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
     assert_eq!(engine.get_current_state(), S::SentInitSyn);
@@ -55,7 +57,7 @@ fn drive_to_sent_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy>) {
 /// One step further: InitAck received moves the config to GotInitAck (the
 /// state that arms `open_ack.timeout`). The `init_ack.timeout` armed back in
 /// SentInitSyn is now stale.
-fn drive_to_got_init_ack(engine: &mut Engine<SessionFsmUnicastPolicy>) {
+fn drive_to_got_init_ack(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
     drive_to_sent_init_syn(engine);
     engine.process_event(E::InitAckReceived);
     assert_eq!(engine.get_current_state(), S::GotInitAck);
@@ -156,7 +158,7 @@ fn stale_init_ack_timeout_in_got_init_ack_is_discarded() {
 /// Accepting activation through to AwaitingInitSyn — the state whose onentry
 /// arms `accepting.inactivity_timeout` (R311fb): InboundStart -> Accepting
 /// (initial child AwaitingInitSyn).
-fn drive_to_awaiting_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy>) {
+fn drive_to_awaiting_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
     engine.process_event(E::InboundStart);
     assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
 }

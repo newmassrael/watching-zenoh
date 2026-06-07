@@ -23,8 +23,6 @@
 use std::io;
 use std::sync::Arc;
 
-use sce_rust_lua::LuaEngine;
-use sce_rust_runtime::scripting::IScriptEngine;
 use sce_rust_runtime::Engine;
 use tokio::net::TcpStream;
 
@@ -32,13 +30,16 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::locator::{parse_locator, LocatorParseError, ParsedLocator, Proto};
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::synth_static_locators;
+use wz_session_core::session_timeouts::{handshake_deadline_for, SessionTimeouts};
 
 use crate::link_pipeline::{dial_tcp, wire_tcp_stream, TcpReadDriver};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
-use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
+use crate::session_fsm_unicast::{
+    SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState,
+};
 use crate::session_glue::{
-    install_session_actions, poll_and_dispatch_one, BoxedLinkDriver, CloseReason,
-    DriverLoopOutcome, SessionInitParams, SessionLinkActions,
+    new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, CloseReason, DriverLoopOutcome,
+    SessionActionsBinding, SessionInitParams, SessionLinkActions,
 };
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -180,7 +181,7 @@ pub fn wire_dialed_link(
 /// monotonic epoch (Copy) the open phase used, returned so the steady-state
 /// loop and any lease comparator stay on the same epoch.
 pub struct OpenedSession {
-    pub engine: Engine<SessionFsmUnicastPolicy>,
+    pub engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
     pub actions: Arc<SessionLinkActions>,
     pub inbound: InboundLink,
     pub writer_handle: TokioJoinHandle<()>,
@@ -226,18 +227,23 @@ pub enum OpenError {
 /// Build the session action layer + SCE engine for an open path, ready for
 /// role activation. Shared by [`connect_and_open_session`] (Initiator) and
 /// [`accept_and_open_session`] (Accepting): both wire the same
-/// [`SessionLinkActions`] + Lua-bound [`SessionFsmUnicastPolicy`] engine and
+/// [`SessionLinkActions`] + engine-free [`SessionFsmUnicastPolicy`] and
 /// differ only in the role-start event they dispatch afterwards.
+///
+/// R311il — the engine is the engine-free
+/// `SessionFsmUnicastPolicy<SessionActionsBinding>` built by
+/// [`new_session_engine`]; no `LuaEngine` / `IScriptEngine` is involved
+/// (the 18 actions are native trait methods on the binding).
 fn wire_session_engine(
     outbound: Arc<dyn BoxedLinkDriver>,
     params: SessionInitParams,
     clock: TokioTime,
-) -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
+) -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
     let actions = SessionLinkActions::new(outbound, params, clock);
-    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    install_session_actions(actions.clone(), &script_engine);
-    let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
 }
@@ -267,12 +273,21 @@ fn wire_session_engine(
 async fn drive_open_loop(
     mut inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
-    mut engine: Engine<SessionFsmUnicastPolicy>,
+    mut engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
     writer_handle: TokioJoinHandle<()>,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
+    // R311il — the engine-free FSM arms no `<send delay>` (NoOpHal), so the
+    // host owns every handshake deadline (replacing the retired
+    // `engine.tick()` SCE-scheduler pump). The deadline VALUES are the
+    // §2.5 spec baseline — the same literals the SCXML `<send delay>`s
+    // carried before the migration (deploy-config overrides are a later
+    // round); the arming-state key + monotonic armed-at stamp track which
+    // window is in flight (see [`handshake_deadline_for`]).
+    let timeouts = SessionTimeouts::spec_defaults();
+    let mut handshake_armed: Option<(SessionFsmUnicastState, u64)> = None;
     let mut iter: usize = 0;
     loop {
         let trace = actions.trace_snapshot();
@@ -306,10 +321,34 @@ async fn drive_open_loop(
             }
             iter += 1;
         }
-        // R311fa — race the cancel-safe inbound poll against a clock tick that
-        // pumps the SCE scheduler so an elapsed handshake `<send delay>` fires
-        // its FSM transition; a frame that arrives first resolves without
-        // waiting for the next tick.
+        // R311fa / R311il — (re-)arm the host handshake deadline for the
+        // current state. Per-phase keys (LinkOpening / SentInitSyn /
+        // GotInitAck / Closing) re-arm on entry to their state; the
+        // Accepting children share the parent key so the whole-handshake
+        // inactivity bound is armed once and not reset as they advance.
+        let armed_deadline = match handshake_deadline_for(engine.get_current_state(), &timeouts) {
+            Some(hd) => {
+                let armed_at = match handshake_armed {
+                    Some((key, at)) if key == hd.arming_key => at,
+                    _ => {
+                        let now = clock.now_monotonic_ms();
+                        handshake_armed = Some((hd.arming_key, now));
+                        now
+                    }
+                };
+                Some((armed_at.saturating_add(hd.deadline_ms), hd.event))
+            }
+            None => {
+                handshake_armed = None;
+                None
+            }
+        };
+        // R311il — race the cancel-safe inbound poll against a `tick_interval_ms`
+        // cadence; on each wake, raise the armed handshake timeout event once
+        // its spec-sourced window has elapsed (host deadline-sweep, replacing
+        // the retired `engine.tick()` SCE-scheduler pump — the engine-free FSM
+        // arms no `<send delay>`). A frame that arrives first resolves the
+        // handshake without waiting for the next tick.
         tokio::select! {
             outcome = poll_and_dispatch_one(&mut inbound, &actions, &mut engine) => {
                 if let DriverLoopOutcome::LinkLost(cause) = outcome {
@@ -317,7 +356,11 @@ async fn drive_open_loop(
                 }
             }
             _ = clock.sleep(tick_interval_ms) => {
-                engine.tick();
+                if let Some((deadline_ms, event)) = armed_deadline {
+                    if clock.now_monotonic_ms() >= deadline_ms {
+                        engine.process_event(event);
+                    }
+                }
             }
         }
     }

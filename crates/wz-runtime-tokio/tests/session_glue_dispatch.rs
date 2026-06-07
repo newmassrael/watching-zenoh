@@ -32,14 +32,13 @@
 use std::sync::Arc;
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastActions;
 use wz_runtime_tokio::session_glue::{
-    BoxedLinkDriver, CloseReason, SessionInitParams, SessionLinkActions, SigningKey,
+    BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionInitParams, SessionLinkActions,
+    SigningKey,
 };
 use wz_runtime_tokio::Reliability;
-use wz_runtime_tokio_test_support::{
-    dispatch_script, fixture_session_init_params, install_session_actions_for_test,
-    LifecycleRecordingDriver,
-};
+use wz_runtime_tokio_test_support::{fixture_session_init_params, LifecycleRecordingDriver};
 
 /// Mirror of `layer3_init_body.rs::compute_init_cbyte` so this test's
 /// expected bytes are independent of the production code under
@@ -77,32 +76,37 @@ fn fixture_params() -> SessionInitParams {
 fn r57_session_script_actions_produce_real_wire_bytes() {
     let driver = Arc::new(LifecycleRecordingDriver::default());
     let actions = SessionLinkActions::new(driver.clone(), fixture_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
+    // R311il — engine-free: dispatch each action by calling the native
+    // `SessionFsmUnicastActions` trait method on a binding over `actions`
+    // (the successor of the retired Lua `dispatch_script` by-name shim).
+    // The walk-through fires the actions in a fixed sequence and asserts
+    // the recorded wire bytes inline.
+    let mut binding = SessionActionsBinding::new(actions.clone());
 
     // ─── Step 1: initiator handshake path ───────────────────────
-    dispatch_script(&*lua, "link_driver_open").expect("LinkOpening onentry");
-    dispatch_script(&*lua, "send_init_syn").expect("Opening/SentInitSyn onentry");
-    dispatch_script(&*lua, "send_open_syn").expect("Opening/GotInitAck onentry");
-    dispatch_script(&*lua, "enable_rx_tx_regions").expect("Established onentry");
-    dispatch_script(&*lua, "start_lease_monitor").expect("Established onentry");
-    dispatch_script(&*lua, "start_keepalive_worker").expect("Established onentry");
+    binding.link_driver_open();
+    binding.send_init_syn();
+    binding.send_open_syn();
+    binding.enable_rx_tx_regions();
+    binding.start_lease_monitor();
+    binding.start_keepalive_worker();
 
     // ─── Step 2: session-close walk ────────────────────────────
-    dispatch_script(&*lua, "set_close_reason_generic").expect("session.close transition action");
-    dispatch_script(&*lua, "stop_keepalive_worker").expect("Established onexit");
-    dispatch_script(&*lua, "stop_lease_monitor").expect("Established onexit");
-    dispatch_script(&*lua, "send_close_frame_with_reason").expect("Closing onentry");
-    dispatch_script(&*lua, "release_link").expect("Closed onentry");
-    dispatch_script(&*lua, "free_pool_slots").expect("Closed onentry");
+    binding.set_close_reason_generic();
+    binding.stop_keepalive_worker();
+    binding.stop_lease_monitor();
+    binding.send_close_frame_with_reason();
+    binding.release_link();
+    binding.free_pool_slots();
 
     // ─── Step 3: listener-path actions ─────────────────────────
-    dispatch_script(&*lua, "send_init_ack_with_cookie").expect("Accepting/SentInitAck onentry");
-    dispatch_script(&*lua, "send_open_ack").expect("Accepting/SentOpenAck onentry");
+    binding.send_init_ack_with_cookie();
+    binding.send_open_ack();
 
     // ─── Step 4: close-reason discriminator coverage ──────────
-    dispatch_script(&*lua, "set_close_reason_invalid").expect("framing.error path");
-    dispatch_script(&*lua, "set_close_reason_expired").expect("lease.expired path");
-    dispatch_script(&*lua, "set_close_reason_unresponsive").expect("tx.congestion.exhaust path");
+    binding.set_close_reason_invalid();
+    binding.set_close_reason_expired();
+    binding.set_close_reason_unresponsive();
 
     let trace = actions.trace_snapshot();
     assert_eq!(trace.link_driver_open, 1);
@@ -225,22 +229,20 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
         "OpenAck body must NOT contain the cookie payload"
     );
 
-    // ── R79 multi-engine isolation assertion ────────────────────
-    // SCE upstream `09906015` + `489e1922` retired the process-global
-    // ScriptEngineProvider singleton; two independent
-    // `install_session_actions_for_test` calls now own separate
-    // `LuaEngine` instances, and a dispatch against the second
-    // engine must hit the SECOND `SessionLinkActions` — not the
-    // first one (which would be the pre-R79 race symptom).
+    // ── R311il binding-isolation assertion ──────────────────────
+    // Each `SessionActionsBinding` wraps its own `Arc<SessionLinkActions>`,
+    // so dispatching an action on a second binding must hit the SECOND
+    // actions bundle — not the first. (Engine-free successor of the R79
+    // per-instance ScriptEngine isolation assertion: there is no shared
+    // Lua namespace to race on at all now.)
     let second_driver = Arc::new(LifecycleRecordingDriver::default());
     let second_actions = SessionLinkActions::new(
         second_driver.clone() as Arc<dyn BoxedLinkDriver>,
         fixture_session_init_params(),
         TokioTime::new(),
     );
-    let second_lua = install_session_actions_for_test(second_actions.clone());
-    dispatch_script(&*second_lua, "link_driver_open")
-        .expect("second engine dispatch must succeed independently");
+    let mut second_binding = SessionActionsBinding::new(second_actions.clone());
+    second_binding.link_driver_open();
     let second_trace = second_actions.trace_snapshot();
     assert_eq!(
         second_trace.link_driver_open, 1,

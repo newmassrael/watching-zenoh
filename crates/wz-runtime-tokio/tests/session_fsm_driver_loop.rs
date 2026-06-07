@@ -27,7 +27,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, SessionLinkActions,
+    new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome,
+    SessionActionsBinding, SessionLinkActions,
 };
 // `NetworkMessage` is referenced only by the two codec-decode tests
 // below: `r74_rx_frame_unknown_network_mid_absorbs_as_unknown`
@@ -37,9 +38,7 @@ use wz_runtime_tokio::session_glue::{
 #[cfg(feature = "codec-push")]
 use wz_runtime_tokio::session_glue::NetworkMessage;
 use wz_runtime_tokio::{LinkEvent, LostCause, RxFrame};
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver, QueueDriver,
-};
+use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver, QueueDriver};
 
 // ─── Wire-bytes helpers (mirror session_fsm_inbound_dispatch.rs) ──
 
@@ -67,17 +66,19 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
     wire
 }
 
-fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
+fn fresh_setup() -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
     let actions =
         SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
 }
 
-fn drive_to_sent_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy>) {
+fn drive_to_sent_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
     assert_eq!(engine.get_current_state(), S::SentInitSyn);

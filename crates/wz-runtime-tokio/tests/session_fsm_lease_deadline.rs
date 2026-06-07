@@ -31,23 +31,24 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    check_lease_deadline, BoxedLinkDriver, CloseReason, LeaseCheckOutcome, SessionLinkActions,
+    check_lease_deadline, new_session_engine, BoxedLinkDriver, CloseReason, LeaseCheckOutcome,
+    SessionActionsBinding, SessionLinkActions,
 };
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver,
-};
+use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 
-fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
+fn fresh_setup() -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
     let actions =
         SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
 }
 
-fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy>) {
+fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
     engine.process_event(E::InitAckReceived);

@@ -21,18 +21,13 @@
 //! bounded by an iteration cap so a handshake regression fails fast instead
 //! of hanging.
 
-use std::sync::Arc;
-
-use sce_rust_lua::LuaEngine;
-use sce_rust_runtime::scripting::IScriptEngine;
-use sce_rust_runtime::Engine;
 use tokio::net::TcpListener;
 
 use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
+use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, poll_and_dispatch_one, DriverLoopOutcome, SessionLinkActions,
+    new_session_engine, poll_and_dispatch_one, DriverLoopOutcome, SessionLinkActions,
 };
 use wz_runtime_tokio::session_open::{connect_and_open_session, OpenError, DEFAULT_OPEN_TICK_MS};
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -55,10 +50,7 @@ async fn connect_and_open_reaches_established_against_wz_acceptor() {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4]; // distinct zid from the initiator
         let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
-        let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-        install_session_actions(actions.clone(), &script_engine);
-        let mut engine: Engine<SessionFsmUnicastPolicy> =
-            Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+        let mut engine = new_session_engine(&actions);
         engine.initialize();
         engine.process_event(E::InboundStart);
 

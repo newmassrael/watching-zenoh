@@ -22,15 +22,10 @@
 
 use std::sync::Arc;
 
-use sce_rust_runtime::Engine;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_fsm_unicast::{
-    SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
-};
-use wz_runtime_tokio::session_glue::SessionLinkActions;
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test, LifecycleRecordingDriver,
-};
+use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState};
+use wz_runtime_tokio::session_glue::{new_session_engine, SessionLinkActions};
+use wz_runtime_tokio_test_support::{fixture_session_init_params, LifecycleRecordingDriver};
 
 #[test]
 fn r55b_engine_drives_link_opening_onentry_script() {
@@ -40,10 +35,7 @@ fn r55b_engine_drives_link_opening_onentry_script() {
         fixture_session_init_params(),
         TokioTime::new(),
     );
-    let lua = install_session_actions_for_test(actions.clone());
-
-    let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
 
     // SCXML <scxml initial="Init"> places the engine at Init after

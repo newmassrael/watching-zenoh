@@ -73,19 +73,30 @@ use portable_atomic::{AtomicU64, Ordering};
 
 use crate::sync::Mutex;
 
-// R311eo — bind_unit / bind_guard extracted to the neutral `script_bind`
-// module and generalised over the deps type; the session FSM keeps using
-// them here for `Arc<SessionLinkActions>`.
-use crate::script_bind::{bind_guard, bind_unit};
-
 // R311ei — the HMAC-SHA256 cookie primitive + SigningKey newtype moved
 // to wz-session-core::signing_key; only the OS-entropy constructor stays
 // here (as a free fn), so this crate keeps just the `Zeroizing` wrapper +
 // `getrandom` deps (hmac / sha2 moved out with the primitive).
 use zeroize::Zeroizing;
 
-use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
 use sce_rust_runtime::Engine;
+
+// R311il — the engine-free session FSM's generated host-action trait.
+// Aliased so the trait name does not collide with host-side identifiers;
+// the `SessionActionsBinding` newtype below carries the impl (the orphan
+// rule forbids impl'ing the foreign trait on `Arc<SessionLinkActions>`
+// directly). The state/event enums + `SessionFsmUnicastPolicy<A>` are
+// reached via the `crate::session_fsm_unicast` re-export (lib.rs) of the
+// runtime-agnostic `wz_session_core::session_fsm_unicast` codegen.
+use crate::session_fsm_unicast::{
+    SessionFsmUnicastActions as SessionFsmUnicastActionsTrait, SessionFsmUnicastPolicy,
+    SessionFsmUnicastState,
+};
+use wz_session_core::session_timeouts::handshake_deadline_for;
+// Re-exported: `drive_session_until_terminal` takes `&SessionTimeouts`, so
+// consumers that drive a session (wz-e2e-harness, wz-ap-demo) reach the
+// type through this crate's session API without a direct wz-session-core dep.
+pub use wz_session_core::session_timeouts::SessionTimeouts;
 
 // R311g1 — CodecError / VecSink / SceSink are still needed in the
 // minus-all-codecs lane because outbound `encode_frame_envelope` +
@@ -2212,276 +2223,318 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     }
 }
 
-/// SCE-runtime session id the generated state-machine uses by default.
-pub const SESSION_ID: &str = "session_fsm_unicast";
-
-/// Wire the 17 native script functions referenced by
-/// `session_fsm_unicast.scxml` onto the supplied script engine, then
-/// create the SCE-runtime session that the generated state machine
-/// dispatches against.
+/// R311il — thin newtype that carries the generated
+/// [`SessionFsmUnicastActionsTrait`] impl for the
+/// [`crate::session_fsm_unicast::SessionFsmUnicastPolicy`] to own by
+/// value. Wraps a clone of the caller's `Arc<`[`SessionLinkActions`]`>`
+/// so the 18 native actions mutate the same shared state (trace / staging
+/// slots / link driver) the caller reads back; the orphan rule forbids
+/// impl'ing the foreign trait on `Arc<SessionLinkActions>` directly, so
+/// the local newtype carries the impl.
 ///
-/// R79 — the process-global `INSTALLED` OnceLock retired after SCE
-/// upstream commit `489e1922` deleted `lua_engine_singleton` /
-/// `sce_rust_lua::register` and SCE commit `09906015` reshaped every
-/// generated `Policy::new` to accept a per-instance
-/// `Arc<dyn IScriptEngine>`. Each call to `install_session_actions`
-/// now binds the 17 closures onto a caller-owned engine, so two
-/// independent session FSMs in the same process bind their closures
-/// onto separate engines — no cross-instance namespace race.
-///
-/// Caller pattern:
-/// ```ignore
-/// let lua: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-/// install_session_actions(actions.clone(), &lua);
-/// let policy = SessionFsmUnicastPolicy::new(lua.clone());
-/// let mut engine = Engine::new(policy);
-/// ```
-pub fn install_session_actions(
-    actions: Arc<SessionLinkActions>,
-    script_engine: &Arc<dyn IScriptEngine>,
-) {
-    script_engine.create_session(SESSION_ID);
-    register_outbound_link_fns(script_engine.as_ref(), &actions);
-    register_state_internal_fns(script_engine.as_ref(), &actions);
-    register_guard_fns(script_engine.as_ref(), &actions);
+/// Engine-free successor of the R79 Lua binding
+/// (`install_session_actions` + the `register_*` family): the generated
+/// trait replaces the per-name Lua closure registration, so no
+/// `IScriptEngine` / `LuaEngine` is involved and the session path no
+/// longer pulls `sce-rust-lua` — the second half of the runtime-schism
+/// resolution after R311ik did the same for scouting.
+pub struct SessionActionsBinding<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    inner: Arc<SessionLinkActions<R, T>>,
 }
 
-// R71 — the former `rebind_session_actions_for_test` moved to the
-// `wz-runtime-tokio-test-support` sibling crate as
-// `install_session_actions_for_test`. R79 — that rebind helper is
-// also retired upstream of R79's per-instance DI; test-support now
-// simply constructs a fresh `LuaEngine` per test and calls
-// `install_session_actions` with it. The three `register_*` helpers
-// below remain `pub` so the test-support crate can compose them in
-// patterns that vary the registration set (e.g. partial rebinds).
+impl<R: Runtime, T: TimeSource> SessionActionsBinding<R, T> {
+    /// Wrap a clone of the caller's `Arc<`[`SessionLinkActions`]`>` so the
+    /// generated [`SessionFsmUnicastActionsTrait`] dispatches its 18
+    /// actions against the shared state the caller reads back. Production
+    /// callers reach this through [`new_session_engine`]; it is `pub` so a
+    /// test can drive an individual action method directly (the
+    /// engine-free successor of the retired `dispatch_script` shim).
+    pub fn new(actions: Arc<SessionLinkActions<R, T>>) -> Self {
+        Self { inner: actions }
+    }
+}
 
-/// Register the 7 outbound link-driver script functions. Public only
-/// to let `wz-runtime-tokio-test-support::install_session_actions_for_test`
-/// compose the rebind path; production code reaches this through
-/// `install_session_actions` instead.
-pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
-    bind_unit(lua, "link_driver_open", actions, |a| {
+/// Build a production session engine: an [`Engine`] over the generated
+/// engine-free [`crate::session_fsm_unicast::SessionFsmUnicastPolicy`],
+/// parameterised over a [`SessionActionsBinding`] wrapping a clone of
+/// `actions`. The caller retains `actions` (to read trace / observe link
+/// state) and drives the engine with [`drive_session_until_terminal`].
+/// Mirrors [`crate::scouting_glue::new_scouting_engine`].
+pub fn new_session_engine<T: TimeSource>(
+    actions: &Arc<SessionLinkActions<TokioRuntime, T>>,
+) -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding<TokioRuntime, T>>> {
+    let binding = SessionActionsBinding {
+        inner: actions.clone(),
+    };
+    Engine::new(SessionFsmUnicastPolicy::new(binding))
+}
+
+/// R311il — the 18 `session_fsm_unicast.scxml` `<sce:action>` operations
+/// as native host-trait methods, replacing the R79 Lua-bound
+/// `register_*` closures. Each body is the verbatim closure body of the
+/// retired `bind_unit(lua, "<name>", actions, |a| { … })` registration,
+/// with `a = &self.inner`.
+///
+/// Concrete `TokioRuntime` impl (any `T: TimeSource`): the actions reach
+/// through the runtime `R::Mutex` staging slots via `.lock()`, which only
+/// `TokioRuntime`'s `std::sync::Mutex` exposes here. `transport-unicast`
+/// is an AP-hosted feature, so the single concrete impl matches the
+/// `SessionLinkActions<TokioRuntime, T>` inherent impls.
+///
+/// The wire-emit actions stay gated on their codec / role feature
+/// (`send_init_syn` etc.); cfg-off the method body is a silent no-op —
+/// the FSM advances but emits no bytes, exactly the documented
+/// minus-codec contract of [`SessionLinkActions::send_close_with_reason`].
+/// A subset build that elides a codec genuinely cannot dial that leg, and
+/// the host handshake deadline-sweep (see [`drive_session_until_terminal`])
+/// turns the resulting no-emit into an honest `*.timeout -> Closing`
+/// rather than an indefinite hang.
+impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<TokioRuntime, T> {
+    fn link_driver_open(&mut self) {
+        let a = &self.inner;
         a.trace.lock().unwrap().link_driver_open += 1;
         a.driver.open_blocking();
-    });
+    }
 
-    // R311cd — session-unicast-open gates the open-side (Initiator)
-    // wire emit script-actions. cfg-off: send_init_syn /
-    // send_open_syn names are not bound, so a session FSM in the
-    // Initiator role trips `function not found` at the
-    // `<onentry>send_init_syn</onentry>` transition. Honest semantic:
-    // open-side OFF means the deploy is acceptor-only (cannot
-    // outbound-dial a peer). Default-on so the AP path keeps both
-    // sides bindable.
-    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
-    bind_unit(lua, "send_init_syn", actions, |a| {
-        a.trace.lock().unwrap().send_init_syn += 1;
-        let bytes = a
-            .encode_init_with_role(
-                /*is_ack=*/ false,
-                /*cookie_override=*/ None,
-                ExtChainRole::InitSyn,
-            )
-            .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
-        a.driver.send_blocking(&bytes, Reliability::Reliable);
-    });
+    fn send_init_syn(&mut self) {
+        // R311cd — session-unicast-open gates the open-side (Initiator)
+        // wire emit. cfg-off: no-op (acceptor-only deploy cannot
+        // outbound-dial; the SentInitSyn init_ack deadline then closes
+        // the stalled handshake).
+        #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
+        {
+            let a = &self.inner;
+            a.trace.lock().unwrap().send_init_syn += 1;
+            let bytes = a
+                .encode_init_with_role(
+                    /*is_ack=*/ false,
+                    /*cookie_override=*/ None,
+                    ExtChainRole::InitSyn,
+                )
+                .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
+            a.driver.send_blocking(&bytes, Reliability::Reliable);
+        }
+    }
 
-    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
-    bind_unit(lua, "send_open_syn", actions, |a| {
-        a.trace.lock().unwrap().send_open_syn += 1;
-        // RFC §5.M echo contract: prefer the cookie captured from a
-        // peer InitAck via handle_inbound; fall back to params.cookie
-        // for tests that drive OpenSyn without an inbound parse cycle.
-        let cookie_override = a.inbound_cookie.lock().unwrap().clone();
-        let bytes = a
-            .encode_open_with_role(
-                /*is_ack=*/ false,
-                cookie_override.as_deref(),
-                ExtChainRole::OpenSyn,
-            )
-            .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
-        a.driver.send_blocking(&bytes, Reliability::Reliable);
-    });
+    fn send_open_syn(&mut self) {
+        #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
+        {
+            let a = &self.inner;
+            a.trace.lock().unwrap().send_open_syn += 1;
+            // RFC §5.M echo contract: prefer the cookie captured from a
+            // peer InitAck via handle_inbound; fall back to params.cookie
+            // for tests that drive OpenSyn without an inbound parse cycle.
+            let cookie_override = a.inbound_cookie.lock().unwrap().clone();
+            let bytes = a
+                .encode_open_with_role(
+                    /*is_ack=*/ false,
+                    cookie_override.as_deref(),
+                    ExtChainRole::OpenSyn,
+                )
+                .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
+            a.driver.send_blocking(&bytes, Reliability::Reliable);
+        }
+    }
 
-    // R311cd — session-unicast-accept gates the accept-side (Acceptor)
-    // wire emit script-actions. cfg-off: send_init_ack_with_cookie /
-    // send_open_ack names are not bound, so a session FSM in the
-    // Acceptor role trips `function not found`. Honest semantic:
-    // accept-side OFF means the deploy is initiator-only (can dial
-    // but cannot listen). Default-on so the AP path keeps both
-    // sides bindable.
-    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
-    bind_unit(lua, "send_init_ack_with_cookie", actions, |a| {
-        a.trace.lock().unwrap().send_init_ack_with_cookie += 1;
-        // R86 — Accepting-side cookie binding per RFC §5.M
-        // anti-amplification. If the inbound InitSyn already arrived
-        // (`inbound_peer_zid` slot populated by `handle_inbound`),
-        // mint a fresh cookie via HMAC-SHA256(cookie_signing_key,
-        // peer_zid)[..16] and pass it as the encode override; the
-        // cookie is now bound to the specific peer's claimed
-        // identity, not a deploy-static value. Falls back to
-        // `params.cookie` verbatim if no peer_zid has been observed
-        // (defensive — a well-formed handshake always populates the
-        // slot before this script fires, since `Accepting.onentry`
-        // is gated on `InitSynReceived`).
-        let cookie_hmac: Option<Vec<u8>> =
-            a.inbound_peer_zid.lock().unwrap().as_ref().map(|peer_zid| {
-                generate_cookie_hmac_sha256(&a.params.cookie_signing_key, peer_zid)
-            });
-        let bytes = a
-            .encode_init_with_role(
-                /*is_ack=*/ true,
-                cookie_hmac.as_deref(),
-                ExtChainRole::InitAck,
-            )
-            .expect("InitAck cookie is HMAC-SHA256[..16] (16 bytes, within codec cap)");
-        a.driver.send_blocking(&bytes, Reliability::Reliable);
-    });
+    fn send_init_ack_with_cookie(&mut self) {
+        // R311cd — session-unicast-accept gates the accept-side (Acceptor)
+        // wire emit. cfg-off: no-op (initiator-only deploy cannot listen).
+        #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+        {
+            let a = &self.inner;
+            a.trace.lock().unwrap().send_init_ack_with_cookie += 1;
+            // R86 — Accepting-side cookie binding per RFC §5.M
+            // anti-amplification. If the inbound InitSyn already arrived
+            // (`inbound_peer_zid` slot populated by `handle_inbound`),
+            // mint a fresh cookie via HMAC-SHA256(cookie_signing_key,
+            // peer_zid)[..16] and pass it as the encode override; the
+            // cookie is now bound to the specific peer's claimed
+            // identity, not a deploy-static value. Falls back to
+            // `params.cookie` verbatim if no peer_zid has been observed.
+            let cookie_hmac: Option<Vec<u8>> =
+                a.inbound_peer_zid.lock().unwrap().as_ref().map(|peer_zid| {
+                    generate_cookie_hmac_sha256(&a.params.cookie_signing_key, peer_zid)
+                });
+            let bytes = a
+                .encode_init_with_role(
+                    /*is_ack=*/ true,
+                    cookie_hmac.as_deref(),
+                    ExtChainRole::InitAck,
+                )
+                .expect("InitAck cookie is HMAC-SHA256[..16] (16 bytes, within codec cap)");
+            a.driver.send_blocking(&bytes, Reliability::Reliable);
+        }
+    }
 
-    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
-    bind_unit(lua, "send_open_ack", actions, |a| {
-        a.trace.lock().unwrap().send_open_ack += 1;
-        // Accepting side OpenAck: cookie is consumed by the time we
-        // get here (it travelled inbound on OpenSyn and was already
-        // MAC-verified); the OpenAck shape omits it (parent.A=1
-        // suppresses the cookie field per transport.c:300-302).
-        let bytes = a
-            .encode_open_with_role(
-                /*is_ack=*/ true,
-                /*cookie_override=*/ None,
-                ExtChainRole::OpenAck,
-            )
-            .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
-        a.driver.send_blocking(&bytes, Reliability::Reliable);
-    });
+    fn send_open_ack(&mut self) {
+        #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
+        {
+            let a = &self.inner;
+            a.trace.lock().unwrap().send_open_ack += 1;
+            // Accepting side OpenAck: cookie is consumed by the time we
+            // get here (it travelled inbound on OpenSyn and was already
+            // MAC-verified); the OpenAck shape omits it (parent.A=1
+            // suppresses the cookie field per transport.c:300-302).
+            let bytes = a
+                .encode_open_with_role(
+                    /*is_ack=*/ true,
+                    /*cookie_override=*/ None,
+                    ExtChainRole::OpenAck,
+                )
+                .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
+            a.driver.send_blocking(&bytes, Reliability::Reliable);
+        }
+    }
 
-    #[cfg(feature = "codec-close")]
-    bind_unit(lua, "send_close_frame_with_reason", actions, |a| {
-        let reason = a.trace.lock().unwrap().close_reason as u8;
-        a.trace.lock().unwrap().send_close_frame_with_reason += 1;
-        let bytes = encode_close(reason);
-        a.driver.send_blocking(&bytes, Reliability::Reliable);
-    });
+    fn send_close_frame_with_reason(&mut self) {
+        #[cfg(feature = "codec-close")]
+        {
+            let a = &self.inner;
+            let reason = a.trace.lock().unwrap().close_reason as u8;
+            a.trace.lock().unwrap().send_close_frame_with_reason += 1;
+            let bytes = encode_close(reason);
+            a.driver.send_blocking(&bytes, Reliability::Reliable);
+        }
+    }
 
-    bind_unit(lua, "release_link", actions, |a| {
+    fn release_link(&mut self) {
+        let a = &self.inner;
         a.trace.lock().unwrap().release_link += 1;
         a.driver.close_blocking();
-    });
-}
+    }
 
-/// Register the 7 lifecycle / lease-monitor script functions. Public
-/// for the same reason as `register_outbound_link_fns` — the
-/// test-support crate composes it during the rebind path.
-pub fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
-    bind_unit(lua, "enable_rx_tx_regions", actions, |a| {
-        a.trace.lock().unwrap().enable_rx_tx_regions += 1;
-    });
-    bind_unit(lua, "record_established_at", actions, |a| {
+    fn enable_rx_tx_regions(&mut self) {
+        self.inner.trace.lock().unwrap().enable_rx_tx_regions += 1;
+    }
+
+    fn record_established_at(&mut self) {
+        let a = &self.inner;
         a.trace.lock().unwrap().record_established_at += 1;
-        // R294 — `a.clock.now_monotonic_ms()` reads the shared
-        // monotonic clock (same epoch as
-        // last_inbound_keepalive_at + drive_session_until_terminal)
-        // so the lease comparator's u64 subtract stays on one scale.
+        // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
+        // clock (same epoch as last_inbound_keepalive_at +
+        // drive_session_until_terminal) so the lease comparator's u64
+        // subtract stays on one scale.
         *a.established_at.lock().unwrap() = Some(a.clock.now_monotonic_ms());
-    });
-    bind_unit(lua, "start_lease_monitor", actions, |a| {
-        a.trace.lock().unwrap().start_lease_monitor += 1;
-    });
-    bind_unit(lua, "stop_lease_monitor", actions, |a| {
-        a.trace.lock().unwrap().stop_lease_monitor += 1;
-    });
-    // R311cb — transport-keepalive gates the SCXML script-action bind
-    // for the keepalive worker. cfg-off: the action names are not
-    // registered with the Lua engine, so a session FSM that reaches a
-    // `<script>start_keepalive_worker</script>` body trips
-    // `function not found` and fails the transition. Honest semantic:
-    // keepalive-OFF means the FSM cannot enter the lease-monitored
-    // Established sub-region. Default-on so the AP path still binds.
-    // Wire-level KeepAlive parse (last_inbound_keepalive_at stamp) is
-    // a separate axis governed by codec-keep-alive.
-    #[cfg(feature = "transport-keepalive")]
-    bind_unit(lua, "start_keepalive_worker", actions, |a| {
-        a.trace.lock().unwrap().start_keepalive_worker += 1;
-    });
-    #[cfg(feature = "transport-keepalive")]
-    bind_unit(lua, "stop_keepalive_worker", actions, |a| {
-        a.trace.lock().unwrap().stop_keepalive_worker += 1;
-    });
-    bind_unit(lua, "free_pool_slots", actions, |a| {
-        a.trace.lock().unwrap().free_pool_slots += 1;
-    });
-    bind_close_reason(
-        lua,
-        "set_close_reason_generic",
-        actions,
-        CloseReason::Generic,
-    );
-    bind_close_reason(
-        lua,
-        "set_close_reason_invalid",
-        actions,
-        CloseReason::Invalid,
-    );
-    bind_close_reason(
-        lua,
-        "set_close_reason_expired",
-        actions,
-        CloseReason::Expired,
-    );
-    bind_close_reason(
-        lua,
-        "set_close_reason_unresponsive",
-        actions,
-        CloseReason::Unresponsive,
-    );
+    }
+
+    fn start_lease_monitor(&mut self) {
+        self.inner.trace.lock().unwrap().start_lease_monitor += 1;
+    }
+
+    fn stop_lease_monitor(&mut self) {
+        self.inner.trace.lock().unwrap().stop_lease_monitor += 1;
+    }
+
+    fn start_keepalive_worker(&mut self) {
+        // R311cb — transport-keepalive gates the keepalive worker. cfg-off:
+        // no-op (the FSM cannot enter the lease-monitored Established
+        // sub-region's keepalive cadence). Wire-level KeepAlive parse is a
+        // separate axis (codec-keep-alive).
+        #[cfg(feature = "transport-keepalive")]
+        {
+            self.inner.trace.lock().unwrap().start_keepalive_worker += 1;
+        }
+    }
+
+    fn stop_keepalive_worker(&mut self) {
+        #[cfg(feature = "transport-keepalive")]
+        {
+            self.inner.trace.lock().unwrap().stop_keepalive_worker += 1;
+        }
+    }
+
+    fn free_pool_slots(&mut self) {
+        self.inner.trace.lock().unwrap().free_pool_slots += 1;
+    }
+
+    fn set_close_reason_generic(&mut self) {
+        let mut trace = self.inner.trace.lock().unwrap();
+        trace.set_close_reason_count += 1;
+        trace.close_reason = CloseReason::Generic;
+    }
+
+    fn set_close_reason_invalid(&mut self) {
+        let mut trace = self.inner.trace.lock().unwrap();
+        trace.set_close_reason_count += 1;
+        trace.close_reason = CloseReason::Invalid;
+    }
+
+    fn set_close_reason_expired(&mut self) {
+        let mut trace = self.inner.trace.lock().unwrap();
+        trace.set_close_reason_count += 1;
+        trace.close_reason = CloseReason::Expired;
+    }
+
+    fn set_close_reason_unresponsive(&mut self) {
+        let mut trace = self.inner.trace.lock().unwrap();
+        trace.set_close_reason_count += 1;
+        trace.close_reason = CloseReason::Unresponsive;
+    }
 }
 
-/// Register the 3 guard-condition script functions. Public for the
-/// same reason as `register_outbound_link_fns` — the test-support
-/// crate composes it during the rebind path.
+/// R311il — accept-side admission guards (§2.7), evaluated by the host
+/// dispatcher ([`poll_and_dispatch_one`]) before it injects an
+/// `InitSynReceived` / `OpenSynReceived` event into the engine-free FSM.
 ///
-/// R89 — signature gains `actions` parameter so `cookie_valid` can
-/// dispatch dynamically against the inbound OpenSyn cookie + the
-/// stored peer_zid + cookie_signing_key. `half_open_cap_available`
-/// and `accept_rate_token` remain R57 placeholder constants pending
-/// cap-quota / token-bucket implementation rounds.
-pub fn register_guard_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
-    bind_bool(lua, "half_open_cap_available", true);
-    bind_bool(lua, "accept_rate_token", true);
-    bind_guard(lua, "cookie_valid", actions, |a| {
-        // R89 — cookie_valid is the inbound half of R86's outbound
-        // cookie binding. The Accepting side stored peer_zid on
-        // InitSyn arrival (R86 inbound_peer_zid slot) and minted a
-        // cookie via HMAC-SHA256(cookie_signing_key, peer_zid)[..16]
-        // on InitAck send (R86 send_init_ack_with_cookie). The
-        // Initiator echoes that cookie verbatim on OpenSyn; here we
-        // re-compute the expected HMAC and compare against the
-        // captured inbound OpenSyn cookie (R89 inbound_opensyn_cookie
-        // slot). Mismatch -> guard returns false -> FSM stays at
-        // SentInitAck instead of advancing to SentOpenAck.
-        //
-        // The counter increments on every invocation so tests can
-        // assert the guard actually fired (vs. R57's bind_bool
-        // placeholder which never executed any dynamic check).
-        a.trace.lock().unwrap().cookie_valid_check += 1;
+/// The three caps depend on HOST state (the cookie HMAC + the half-open
+/// table + the token bucket), not on the triggering event's wire payload,
+/// so they cannot be native `cond=` guards in the statechart; the
+/// dispatcher PRE-CLASSIFIES, injecting the event only when admission
+/// passes and dropping silently otherwise (no Close frame —
+/// anti-amplification per the §2.7 trust-class matrix). Engine-free
+/// successors of the retired R89 `register_guard_fns` Lua bindings.
+///
+/// Concrete `TokioRuntime` impl (the `.lock()` on the `R::Mutex` slots is
+/// `std::sync::Mutex`-only); `transport-unicast` is AP-hosted.
+impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
+    /// R57 placeholder constant (`true`) pending the half-open cap-quota
+    /// implementation round. Kept as a named method (not inlined as `true`
+    /// in the dispatcher) so the admission structure stays explicit and
+    /// the future quota check has a single edit point.
+    pub fn half_open_cap_available(&self) -> bool {
+        true
+    }
 
-        // Defensive: any missing material rejects. A well-formed
-        // handshake populates both slots before this guard runs.
-        let peer_zid = match a.inbound_peer_zid.lock().unwrap().clone() {
+    /// R57 placeholder constant (`true`) pending the per-source
+    /// token-bucket implementation round.
+    pub fn accept_rate_token(&self) -> bool {
+        true
+    }
+
+    /// R89 — the inbound half of R86's outbound cookie binding. The
+    /// Accepting side stored `peer_zid` on InitSyn arrival
+    /// (`inbound_peer_zid` slot) and minted a cookie via
+    /// HMAC-SHA256(cookie_signing_key, peer_zid)[..16] on InitAck send
+    /// (`send_init_ack_with_cookie`). The Initiator echoes that cookie
+    /// verbatim on OpenSyn; here we re-compute the expected HMAC and
+    /// compare against the captured inbound OpenSyn cookie
+    /// (`inbound_opensyn_cookie` slot). Mismatch -> `false` -> the
+    /// dispatcher drops the `OpenSynReceived` event so the FSM stays at
+    /// SentInitAck instead of advancing to SentOpenAck.
+    ///
+    /// The counter increments on every invocation so tests can assert the
+    /// guard actually fired (vs. R57's `bind_bool` placeholder which never
+    /// executed any dynamic check).
+    pub fn cookie_valid(&self) -> bool {
+        self.trace.lock().unwrap().cookie_valid_check += 1;
+
+        // Defensive: any missing material rejects. A well-formed handshake
+        // populates both slots before this guard runs.
+        let peer_zid = match self.inbound_peer_zid.lock().unwrap().clone() {
             Some(z) => z,
             None => return false,
         };
-        let echoed = match a.inbound_opensyn_cookie.lock().unwrap().clone() {
+        let echoed = match self.inbound_opensyn_cookie.lock().unwrap().clone() {
             Some(c) => c,
             None => return false,
         };
-        let expected = generate_cookie_hmac_sha256(&a.params.cookie_signing_key, &peer_zid);
-        // Byte-equality compare. Constant-time compare is overkill
-        // for a single-peer test fixture path; if the HMAC verdict
-        // ever drives a security-critical timing oracle on prod
-        // hardware, swap to `subtle::ConstantTimeEq` here.
+        let expected = generate_cookie_hmac_sha256(&self.params.cookie_signing_key, &peer_zid);
+        // Byte-equality compare. Constant-time compare is overkill for a
+        // single-peer test fixture path; if the HMAC verdict ever drives a
+        // security-critical timing oracle on prod hardware, swap to
+        // `subtle::ConstantTimeEq` here.
         echoed == expected
-    });
+    }
 }
 
 // ─────────────────────────── codec wiring ───────────────────────────
@@ -4825,7 +4878,7 @@ pub use wz_session_core::driver_loop::DriverLoopOutcome;
 pub async fn poll_and_dispatch_one<D: LinkDriver>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
-    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) -> DriverLoopOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     match driver.poll_event().await {
@@ -4840,6 +4893,26 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
         LinkEvent::Rx(rx) => match actions.handle_inbound(&rx.bytes) {
             Ok(frame) => match inbound_to_fsm_event(&frame) {
                 Some(event) => {
+                    // R311il — §2.7 dispatcher admission pre-classify. The
+                    // accept-side caps (half-open + token bucket on
+                    // init_syn; cookie HMAC on open_syn) depend on HOST
+                    // state, not on the triggering frame's wire payload, so
+                    // the engine-free FSM carries no `cond=` for them — the
+                    // dispatcher evaluates admission and injects the event
+                    // only when it passes. Denial drops silently: no Close
+                    // frame, no FSM advance (anti-amplification per the §2.7
+                    // trust-class matrix). Engine-free successor of the
+                    // retired Lua `cond="cookie_valid()"` transition guard.
+                    let admit = match event {
+                        E::InitSynReceived => {
+                            actions.half_open_cap_available() && actions.accept_rate_token()
+                        }
+                        E::OpenSynReceived => actions.cookie_valid(),
+                        _ => true,
+                    };
+                    if !admit {
+                        return DriverLoopOutcome::SideEffectOnly;
+                    }
                     engine.process_event(event);
                     DriverLoopOutcome::AdvancedFsm
                 }
@@ -4923,7 +4996,7 @@ pub use wz_session_core::lease::LeaseCheckOutcome;
 /// inputs (R294 migration from `Duration::from_secs/from_millis`).
 pub fn check_lease_deadline(
     actions: &Arc<SessionLinkActions>,
-    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
     now_ms: u64,
 ) -> LeaseCheckOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
@@ -5057,9 +5130,10 @@ pub enum DriverOutcome {
 pub async fn drive_session_until_terminal<D, F, T>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
-    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
     max_iters: Option<usize>,
     clock: &T,
+    timeouts: &SessionTimeouts,
     mut on_event: F,
 ) -> DriverOutcome
 where
@@ -5072,6 +5146,15 @@ where
     } else {
         actions.params.lease
     };
+    // R311il — currently-armed handshake deadline (arming-state key +
+    // monotonic armed-at stamp). The per-phase deadlines (LinkOpening /
+    // SentInitSyn / GotInitAck / Closing) re-arm on entry to their state;
+    // the Accepting whole-handshake bound's three children share the
+    // parent key (see `handshake_deadline_for`), so the key comparison
+    // keeps the original stamp as the children advance — one bound, armed
+    // once on accept entry. A stale per-phase deadline is discarded
+    // because the next iteration recomputes against the new state's key.
+    let mut handshake_armed: Option<(SessionFsmUnicastState, u64)> = None;
     let mut iter: usize = 0;
     loop {
         if engine.is_in_final_state() {
@@ -5083,22 +5166,58 @@ where
             }
             iter += 1;
         }
-        let lease_deadline_ms = {
-            let stamp_ms = *actions.last_inbound_keepalive_at.lock().unwrap();
-            stamp_ms.map(|s| s.saturating_add(lease_ms))
+        // This iteration's deadline. During the handshake phases the
+        // host-owned handshake deadline applies (the engine-free FSM arms
+        // no `<send delay>`); in Established the keepalive-resetting lease
+        // deadline applies; in Init / between there is none (block on the
+        // link poll). `Some((abs_ms, Some(event)))` = handshake timeout to
+        // raise; `Some((abs_ms, None))` = lease deadline (-> check_lease).
+        let deadline: Option<(
+            u64,
+            Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
+        )> = match handshake_deadline_for(engine.get_current_state(), timeouts) {
+            Some(hd) => {
+                let armed_at = match handshake_armed {
+                    Some((key, at)) if key == hd.arming_key => at,
+                    _ => {
+                        let now = clock.now_monotonic_ms();
+                        handshake_armed = Some((hd.arming_key, now));
+                        now
+                    }
+                };
+                Some((armed_at.saturating_add(hd.deadline_ms), Some(hd.event)))
+            }
+            None => {
+                // Left the handshake phase; drop any armed deadline so a
+                // later re-entry re-arms from its own entry instant.
+                handshake_armed = None;
+                let stamp_ms = *actions.last_inbound_keepalive_at.lock().unwrap();
+                stamp_ms.map(|s| (s.saturating_add(lease_ms), None))
+            }
         };
-        match lease_deadline_ms {
-            Some(deadline_ms) => {
+        match deadline {
+            Some((deadline_ms, kind)) => {
                 let now_ms = clock.now_monotonic_ms();
                 let remaining_ms = deadline_ms.saturating_sub(now_ms);
                 tokio::select! {
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
                         on_event(IterationEvent::Poll(&outcome));
                     }
-                    _ = clock.sleep(remaining_ms) => {
-                        let lease_outcome =
-                            check_lease_deadline(actions, engine, clock.now_monotonic_ms());
-                        on_event(IterationEvent::Lease(lease_outcome));
+                    _ = clock.sleep(remaining_ms) => match kind {
+                        // Established lease deadline (existing R77 path).
+                        None => {
+                            let lease_outcome =
+                                check_lease_deadline(actions, engine, clock.now_monotonic_ms());
+                            on_event(IterationEvent::Lease(lease_outcome));
+                        }
+                        // Handshake timeout: raise the FSM event the arming
+                        // state declared (`*.timeout -> Closing` / accept ->
+                        // Closed). Each of the 5 events has a handler in its
+                        // arming state, so the raise always advances out of
+                        // that state — the loop cannot hot-spin re-raising.
+                        Some(event) => {
+                            engine.process_event(event);
+                        }
                     }
                 }
             }
@@ -5167,80 +5286,16 @@ fn pack_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
     (seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)
 }
 
-// ─────────────────────────── helpers ───────────────────────────
-
-// R311eo — `bind_unit` moved to `crate::script_bind` (generalised over
-// the deps type `A`). Imported at the top of this module.
-
-fn bind_close_reason(
-    lua: &dyn IScriptEngine,
-    name: &str,
-    actions: &Arc<SessionLinkActions>,
-    reason: CloseReason,
-) {
-    let captured = actions.clone();
-    let cb: NativeMethod = Box::new(move |_args: &[ScriptValue]| -> ScriptValue {
-        let mut trace = captured.trace.lock().unwrap();
-        trace.set_close_reason_count += 1;
-        trace.close_reason = reason;
-        ScriptValue::Null
-    });
-    let ok = lua.register_global_function(name, cb);
-    assert!(ok, "register_global_function failed for {name}");
-}
-
-fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
-    let cb: NativeMethod =
-        Box::new(move |_args: &[ScriptValue]| -> ScriptValue { ScriptValue::Bool(value) });
-    let ok = lua.register_global_function(name, cb);
-    assert!(ok, "register_global_function failed for {name}");
-}
-
-// R311eo — `bind_guard` (R89 dynamic boolean guard binding) moved to
-// `crate::script_bind`, generalised over the deps type `A`. Used here by
-// `cookie_valid()` to re-HMAC peer_zid against the inbound OpenSyn cookie
-// at guard evaluation time rather than at registration time.
-
-// R71 — the former `dispatch_script` test shim moved to the
-// `wz-runtime-tokio-test-support` sibling crate. Production callers
-// drive script actions via `Engine::process_event` (which validates
-// against generated SCXML transition guards before invoking the Lua
-// closure); the direct-by-name dispatch would be a Lua-injection
-// surface in production code paths and therefore lives behind the
-// test-support crate boundary.
-
-/// Single-source-of-truth list of every script-action name the
-/// `register_*` family installs onto the Lua engine. The build
-/// script (`build.rs::audit_script_names`) reads this constant
-/// directly via `include_str!` parsing and compares it against the
-/// SCXML's `<script>` bodies + `cond=` identifiers, so adding a
-/// name in one place but not the other fails the build instead of
-/// drifting silently. R60 consolidated the build-time and runtime
-/// lists; previously they were hand-maintained twins (drift hazard
-/// flagged in R59's self-review).
-pub const REGISTERED_SCRIPT_NAMES: &[&str] = &[
-    "link_driver_open",
-    "send_init_syn",
-    "send_open_syn",
-    "send_init_ack_with_cookie",
-    "send_open_ack",
-    "send_close_frame_with_reason",
-    "release_link",
-    "enable_rx_tx_regions",
-    "record_established_at",
-    "start_lease_monitor",
-    "stop_lease_monitor",
-    "start_keepalive_worker",
-    "stop_keepalive_worker",
-    "free_pool_slots",
-    "set_close_reason_generic",
-    "set_close_reason_invalid",
-    "set_close_reason_expired",
-    "set_close_reason_unresponsive",
-    "half_open_cap_available",
-    "accept_rate_token",
-    "cookie_valid",
-];
+// R311il — the Lua-binding helpers (`bind_close_reason`, `bind_bool`, the
+// `bind_unit` / `bind_guard` imports, the `dispatch_script` test shim, and
+// the build-audited `REGISTERED_SCRIPT_NAMES` mirror) were retired with
+// the engine-free migration. The 18 actions are now native trait methods
+// on `SessionActionsBinding` (above) and the 3 accept guards are
+// `SessionLinkActions` methods (`cookie_valid` / `half_open_cap_available`
+// / `accept_rate_token`); the compiler enforces the action set via the
+// generated `SessionFsmUnicastActions` trait, so the build-time script
+// name audit (`build.rs::audit_script_names`) is no longer needed and was
+// removed with the crate's build.rs.
 
 #[cfg(test)]
 mod tests {

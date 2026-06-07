@@ -547,3 +547,41 @@ pub mod reassembly_slot {
 pub mod scouting {
     include!(concat!(env!("OUT_DIR"), "/scouting_sm.rs"));
 }
+
+/// SCE-generated unicast session state machine (R311il). The emit comes
+/// from `sources/session/session_fsm_unicast.scxml` via `build.rs`
+/// (codegen'd into `$OUT_DIR/session_fsm_unicast_sm.rs` only under the
+/// `session-unicast` feature). Exposes the `SessionFsmUnicastState` /
+/// `SessionFsmUnicastEvent` enums, the `SessionFsmUnicastActions` host
+/// trait, and the `SessionFsmUnicastPolicy<A>` policy. Fully
+/// script-engine-free (no `IScriptEngine`) and self-timer-free (no
+/// `<send delay>`): every effect is a no-arg native `<sce:action>` trait
+/// call and the host drive loop (wz-runtime-tokio session_glue) owns
+/// every session deadline + pre-classifies the accept guards, so the
+/// module compiles `#![no_std]`. The build script strips the file-head
+/// `#![...]` inner attributes; the lint allows are restored here as outer
+/// attributes on the wrapping module.
+#[cfg(feature = "session-unicast")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod session_fsm_unicast {
+    include!(concat!(env!("OUT_DIR"), "/session_fsm_unicast_sm.rs"));
+}
+
+/// R311il — host-owned handshake deadline config ([`SessionTimeouts`]) +
+/// the runtime-agnostic state -> deadline comparator
+/// ([`session_timeouts::handshake_deadline_for`]) for the engine-free
+/// unicast session FSM. The engine-free FSM arms no `<send delay>`
+/// (NoOpHal); the host drive loop owns the clock and raises each timeout
+/// transition when its spec-sourced (§2.5) deadline elapses. Sibling of
+/// [`lease`] (the Established lease deadline); gated with
+/// `session_fsm_unicast` since the comparator names its state/event enums.
+#[cfg(feature = "session-unicast")]
+pub mod session_timeouts;

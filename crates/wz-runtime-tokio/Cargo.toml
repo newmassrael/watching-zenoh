@@ -330,7 +330,18 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 # at the wz facade Cargo.toml level; this crate does not own them.
 transport-link-tcp = []
 transport-link-udp = []
-transport-unicast = []
+# R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
+# `session-unicast`, which codegens the engine-free unicast session FSM
+# (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
+# runtime-agnostic core — the codegen moved out of this crate's build.rs
+# (now deleted), mirroring the reassembly + scouting FSMs. This crate's
+# `session_glue` then impls the generated `SessionFsmUnicastActions` trait
+# on `SessionActionsBinding` and drives `SessionFsmUnicastPolicy<_>`; the
+# `crate::session_fsm_unicast` path is a `pub use` re-export of
+# `wz_session_core::session_fsm_unicast` (lib.rs). No Lua / IScriptEngine
+# is involved — this completes the runtime-schism resolution (the scouting
+# half landed in R311ik), so `sce-rust-lua` leaves the whole graph.
+transport-unicast = ["wz-session-core/session-unicast"]
 transport-keepalive = []
 # R311eg — forward to the wz-session-core same-named gate so the migrated
 # PeerInitCaps::from_init_syn decoder honors the peer-advertised batch_size
@@ -551,7 +562,11 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 wz-session-core = { path = "../wz-session-core", features = ["alloc"] }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
-sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
+# R311il — sce-rust-lua dropped: the session FSM (the last Lua-bound
+# statechart) is now engine-free (`<sce:action>` native host-trait
+# dispatch, codegen'd in wz-session-core), so no `IScriptEngine` /
+# `LuaEngine` remains in the graph. This completes the runtime-schism
+# resolution begun for scouting in R311ik.
 log = "0.4"
 # R311ei — the HMAC-SHA256 cookie primitive (hmac + sha2) moved to
 # wz-session-core::signing_key (runtime-agnostic, MCU-cross-compiled).

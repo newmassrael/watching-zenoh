@@ -20,18 +20,15 @@
 
 use std::sync::Arc;
 
-use sce_rust_runtime::Engine;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_fsm_unicast::{
-    SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
+use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState};
+use wz_runtime_tokio::session_glue::{
+    new_session_engine, SessionLinkActions, TokioLinkDriverAdapter,
 };
-use wz_runtime_tokio::session_glue::{SessionLinkActions, TokioLinkDriverAdapter};
 use wz_runtime_tokio::TcpDriver;
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
-};
+use wz_runtime_tokio_test_support::fixture_session_init_params;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r60_fsm_drives_real_tcp_loopback() {
@@ -54,18 +51,15 @@ async fn r60_fsm_drives_real_tcp_loopback() {
         Arc::new(TokioLinkDriverAdapter::new(driver, handle));
 
     let actions = SessionLinkActions::new(adapter, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
 
     // ─── drive Init -> LinkOpening -> SentInitSyn ──────────────
     // The session FSM is sync; run it on a blocking task so the
-    // adapter's block_on inside the Lua closure has worker threads
-    // available to make progress. Returning the engine + actions
-    // back to the test for cross-checks.
+    // adapter's block_on inside a native action has worker threads
+    // available to make progress. Returning the trace snapshot back
+    // to the test for cross-checks.
     let actions_for_engine = actions.clone();
-    let lua_for_engine = lua.clone();
     let engine_handle = tokio::task::spawn_blocking(move || {
-        let mut engine: Engine<SessionFsmUnicastPolicy> =
-            Engine::new(SessionFsmUnicastPolicy::new(lua_for_engine));
+        let mut engine = new_session_engine(&actions_for_engine);
         engine.initialize();
         engine.process_event(SessionFsmUnicastEvent::OutboundStart);
         engine.process_event(SessionFsmUnicastEvent::LinkOpened);

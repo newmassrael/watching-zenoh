@@ -39,24 +39,26 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
-use wz_runtime_tokio::session_glue::{BoxedLinkDriver, CloseReason, SessionLinkActions};
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test, LifecycleRecordingDriver,
+use wz_runtime_tokio::session_glue::{
+    new_session_engine, BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionLinkActions,
 };
+use wz_runtime_tokio_test_support::{fixture_session_init_params, LifecycleRecordingDriver};
 
 /// Build a driver + actions + Engine triple for one scenario. Each
 /// call yields an independent `LuaEngine` (R79 per-instance DI), so
 /// concurrent test scenarios cannot contend on shared state.
-fn fresh_engine() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
+fn fresh_engine() -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(LifecycleRecordingDriver::default());
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
 }
 
-fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy>) {
+fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>) {
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
     engine.process_event(E::InitAckReceived);
@@ -71,26 +73,19 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy>) {
 #[cfg(feature = "transport-keepalive")]
 #[test]
 fn r61_listener_path_inbound_to_established() {
-    use wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256;
-
     let (actions, mut engine) = fresh_engine();
     assert_eq!(engine.get_current_state(), S::Init);
 
     engine.process_event(E::InboundStart);
     assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
 
-    // R89 — raw-event-injection bypasses handle_inbound, so the
-    // R86 peer_zid + R89 OpenSyn cookie slots must be seeded
-    // manually to satisfy the dynamic cookie_valid() guard. r61
-    // verifies FSM transition shape, not wire-bytes; the seed
-    // mirrors what handle_inbound would populate on a real
-    // InitSyn + OpenSyn arrival.
-    let fixture_peer_zid = vec![0xB0, 0xB1, 0xB2, 0xB3];
-    *actions.inbound_peer_zid.lock().unwrap() = Some(fixture_peer_zid.clone());
-    let expected_cookie =
-        generate_cookie_hmac_sha256(&actions.params.cookie_signing_key, &fixture_peer_zid);
-    *actions.inbound_opensyn_cookie.lock().unwrap() = Some(expected_cookie);
-
+    // R311il — the accept-side admission guards (cookie_valid /
+    // half_open_cap / accept_rate) moved out of the FSM `cond=` into the
+    // host dispatcher (`poll_and_dispatch_one` pre-classify), so the
+    // engine-free `OpenSynReceived` transition is unconditional and this
+    // raw-event-injection FSM-shape test no longer seeds the cookie slots.
+    // The dynamic cookie HMAC verification is exercised end-to-end (real
+    // wire bytes through the dispatcher) in `session_fsm_accepting_path`.
     engine.process_event(E::InitSynReceived);
     assert_eq!(engine.get_current_state(), S::SentInitAck);
     let t = actions.trace_snapshot();
@@ -105,12 +100,6 @@ fn r61_listener_path_inbound_to_established() {
     assert_eq!(t.enable_rx_tx_regions, 1);
     assert_eq!(t.start_lease_monitor, 1);
     assert_eq!(t.start_keepalive_worker, 1);
-    assert!(
-        t.cookie_valid_check >= 1,
-        "R89 dynamic guard must have fired at least once on the \
-         SentInitAck -> SentOpenAck transition; got count={}",
-        t.cookie_valid_check
-    );
 }
 
 // ── 2. LinkOpening -> link.open_timeout -> Closing (Generic)

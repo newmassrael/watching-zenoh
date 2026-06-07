@@ -25,17 +25,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use sce_rust_runtime::Engine;
 use wz_runtime_core::TimeSource;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_fsm_unicast::{
-    SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
+use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState};
+use wz_runtime_tokio::session_glue::{
+    inbound_to_fsm_event, new_session_engine, BoxedLinkDriver, SessionLinkActions,
 };
-use wz_runtime_tokio::session_glue::{inbound_to_fsm_event, BoxedLinkDriver, SessionLinkActions};
 use wz_runtime_tokio::Reliability;
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
-};
+use wz_runtime_tokio_test_support::fixture_session_init_params;
 
 #[derive(Default)]
 struct NoopDriver {
@@ -83,10 +80,8 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
 fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
 
-    let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     assert_eq!(engine.get_current_state(), SessionFsmUnicastState::Init);
 

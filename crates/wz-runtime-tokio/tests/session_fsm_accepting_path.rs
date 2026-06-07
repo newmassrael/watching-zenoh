@@ -34,7 +34,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, PeerInitCaps, SessionLinkActions,
+    new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, PeerInitCaps,
+    SessionActionsBinding, SessionLinkActions,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
 // transport-keepalive-gated r78 handshake test; gate the import to match
@@ -42,9 +43,7 @@ use wz_runtime_tokio::session_glue::{
 #[cfg(feature = "transport-keepalive")]
 use wz_runtime_tokio::session_glue::DriverLoopOutcome;
 use wz_runtime_tokio::{LinkEvent, Reliability, RxFrame};
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test, NoopOutboundDriver, QueueDriver,
-};
+use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver, QueueDriver};
 
 // ─── Transport-header constants (mirror session_glue::wire_const) ──
 
@@ -102,12 +101,14 @@ fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
     wire
 }
 
-fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
+fn fresh_setup() -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
     let actions =
         SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
 }
@@ -219,8 +220,7 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
     let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver;
     let actions =
         SessionLinkActions::new(driver_arc, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
 
     engine.process_event(E::InboundStart);
@@ -265,8 +265,7 @@ async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
     let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver;
     let actions =
         SessionLinkActions::new(driver_arc, fixture_session_init_params(), TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
 
     engine.process_event(E::InboundStart);
@@ -326,8 +325,7 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver.clone();
     let params = fixture_session_init_params();
     let actions = SessionLinkActions::new(driver_arc, params, TokioTime::new());
-    let lua = install_session_actions_for_test(actions.clone());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
 
     // Init -> AwaitingInitSyn (listener role activation)

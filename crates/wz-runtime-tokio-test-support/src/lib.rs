@@ -12,29 +12,22 @@
 //! and `wz-runtime-tokio`'s own production compile units no longer
 //! carry the test-only code paths at all.
 //!
-//! R79 entry — SCE upstream commits `09906015` / `489e1922` deleted
-//! `lua_engine_singleton` / `sce_rust_lua::register` and reshaped
-//! every generated `Policy::new` to accept a per-instance
-//! `Arc<dyn IScriptEngine>`. `install_session_actions_for_test`
-//! now constructs a fresh `LuaEngine` per call, wires the 17
-//! closures onto it, and returns the typed engine handle for the
-//! caller to pass into `SessionFsmUnicastPolicy::new`. Each test
-//! owns an independent engine — the cross-test namespace race
-//! the R71b carry pointed at is gone by design.
+//! R311il entry — the engine-free session FSM migration retired the Lua
+//! test helpers (`install_session_actions_for_test` / `dispatch_script`)
+//! and the `sce-rust-lua` dependency. Tests build the engine-free engine
+//! directly via `wz_runtime_tokio::session_glue::new_session_engine`
+//! (`SessionFsmUnicastPolicy<SessionActionsBinding>`); this crate retains
+//! the fixtures + link drivers + `TestHal` that the integration tests
+//! consume.
 
 use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use sce_rust_lua::LuaEngine;
-use sce_rust_runtime::scripting::{IScriptEngine, ScriptResult, ScriptValue};
 use sce_rust_runtime::Hal;
 
-use wz_runtime_tokio::session_glue::{
-    install_session_actions, BoxedLinkDriver, SessionInitParams, SessionLinkActions, SigningKey,
-    REGISTERED_SCRIPT_NAMES, SESSION_ID,
-};
+use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
@@ -202,55 +195,14 @@ impl LinkDriver for QueueDriver {
     }
 }
 
-/// Build a fresh `LuaEngine`, wire `actions`'s 17 closures onto it
-/// via the production `install_session_actions` path, and return the
-/// typed engine handle.
-///
-/// The caller passes the returned handle into
-/// `SessionFsmUnicastPolicy::new` so the same engine drives both the
-/// SCE-generated state machine and the script-action dispatch — every
-/// `execute_script` from the Policy resolves the 17 closures from the
-/// engine's `global_functions` map (auto-injected into every session
-/// the engine creates, including the Policy-side `session_N` id).
-///
-/// Each call yields an independent engine, so two concurrent
-/// `#[test]` fns in the same binary cannot collide on a shared
-/// namespace — the R71b cross-test race carry is resolved by SCE
-/// upstream's per-instance DI rather than a watching-zenoh-side
-/// workaround.
-pub fn install_session_actions_for_test(
-    actions: Arc<SessionLinkActions>,
-) -> Arc<dyn IScriptEngine> {
-    let engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    install_session_actions(actions, &engine);
-    engine
-}
-
-/// Direct dispatch shim — invoke a script-action by name on the
-/// supplied engine without driving the generated state machine. The
-/// `name` argument is debug-asserted to be a member of
-/// `REGISTERED_SCRIPT_NAMES` so a typo fires loud at test time rather
-/// than reaching the Lua engine as arbitrary source (which would be a
-/// Lua injection surface in production, hence the test-support-only
-/// placement).
-///
-/// Production callers MUST drive script-actions via
-/// `Engine::process_event` — that path validates the action against
-/// the generated SCXML's transition guards before invoking the Lua
-/// closure, whereas this shim bypasses all of that for direct
-/// codec-output / trace-counter assertions.
-///
-/// R79 — `script_engine` is now an explicit parameter (was implicit
-/// via the retired `lua_engine_singleton`). Callers pass the same
-/// engine they handed to `install_session_actions_for_test`.
-pub fn dispatch_script(script_engine: &dyn IScriptEngine, name: &str) -> ScriptResult<ScriptValue> {
-    debug_assert!(
-        REGISTERED_SCRIPT_NAMES.contains(&name),
-        "dispatch_script: '{name}' is not a registered script-action name; \
-         production scripts must be drive via Engine::process_event"
-    );
-    script_engine.execute_script(SESSION_ID, &format!("{name}()"))
-}
+// R311il — `install_session_actions_for_test` and the `dispatch_script`
+// shim were retired with the engine-free session FSM migration. Tests now
+// build the engine directly via the production
+// `wz_runtime_tokio::session_glue::new_session_engine(&actions)` (the
+// engine-free `SessionFsmUnicastPolicy<SessionActionsBinding>` — no
+// `LuaEngine` / `IScriptEngine`), and exercise individual actions by
+// calling the native `SessionFsmUnicastActions` trait methods on a
+// `SessionActionsBinding` rather than dispatching Lua by name.
 
 /// Process-global synthetic tick state backing [`TestHal`].
 ///

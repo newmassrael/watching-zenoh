@@ -46,10 +46,10 @@ pub mod session_glue;
 #[cfg(test)]
 mod test_fixtures;
 
-// R311eo — generic SCXML script-action binders (bind_unit / bind_guard),
-// extracted from session_glue and generalised over the deps type so the
-// scouting FSM glue reuses them. Neutral module: depends on neither glue.
-mod script_bind;
+// R311il — the `script_bind` module (the generic Lua `bind_unit` /
+// `bind_guard` binders) was retired with the engine-free session FSM
+// migration: scouting dropped it at R311ik and the session FSM was its
+// last consumer, so no SCXML in the workspace is Lua-bound any more.
 
 /// R221 — zenoh keyexpr canonicalization mirror. Mirrors the
 /// structural-only canonicalization performed by zenoh-pico's
@@ -256,39 +256,26 @@ pub mod sync;
 /// §5.P "leaf crates first" guidance.
 pub mod runtime_impl;
 
-/// Generated SCXML state machine for the unicast session FSM. The
-/// emit comes from `sources/session/session_fsm_unicast.scxml` via
-/// `build.rs`. Public re-export is module-form rather than
-/// `pub use ::*` to keep the generated typenames (`StateXxx`,
-/// `EventXxx`, …) namespaced under `session_fsm_unicast::`.
+/// R311il — the engine-free unicast session FSM (the
+/// `SessionFsmUnicastState` / `SessionFsmUnicastEvent` enums, the
+/// `SessionFsmUnicastActions` host trait, and `SessionFsmUnicastPolicy<A>`)
+/// now lives in [`wz_session_core::session_fsm_unicast`] (codegen'd
+/// `--no-std` by wz-session-core's build.rs, gated `session-unicast`,
+/// mirroring the reassembly and scouting FSMs). This crate re-exports it
+/// under the same `session_fsm_unicast` module path so every
+/// `crate::session_fsm_unicast::…` and
+/// `wz_runtime_tokio::session_fsm_unicast::…` callsite is unchanged. The
+/// host side ([`session_glue::SessionActionsBinding`] impl plus the drive
+/// loop) owns every session deadline and the §2.7 admission guards.
 ///
-/// The build script strips every `#![...]` inner attribute from the
-/// emitted file (R40 carry + R54 statechart extension); the lint
-/// allows the generator originally carried are restored here as
-/// OUTER attributes so the generated code's actual warnings (which
-/// trip `warnings = "deny"` workspace policy) stay suppressed.
-#[allow(non_snake_case)]
-#[allow(unused_imports)]
-#[allow(dead_code)]
-#[allow(unused_variables)]
-#[allow(unused_mut)]
-#[allow(unused_labels)]
-#[allow(unreachable_patterns)]
-#[allow(unreachable_code)]
-// R311cb — transport-unicast gates the SCE-generated FSM module. The
-// entire session_glue.rs depends on SessionFsmUnicast{Event,Policy},
-// so cfg-off is intentionally not buildable until transport-multicast
-// (currently reserved) introduces an alternate FSM. Default-on keeps
-// the AP path compiling; the cfg site exists to wire the catalog
-// promise to the source and to give the future multicast cascade a
-// single edit point.
+/// R311cb — `transport-unicast` is FOUNDATIONAL: it gates this re-export
+/// and the entire `session_glue` (which names the `SessionFsmUnicast`
+/// event/policy types). cfg-off is intentionally not buildable until
+/// transport-multicast (reserved) introduces an alternate FSM; default-on
+/// keeps the AP path compiling and gives the future multicast cascade a
+/// single edit point.
 #[cfg(feature = "transport-unicast")]
-#[allow(unused_assignments)]
-#[allow(clippy::style)]
-#[allow(clippy::complexity)]
-pub mod session_fsm_unicast {
-    include!(concat!(env!("OUT_DIR"), "/session_fsm_unicast_sm.rs"));
-}
+pub use wz_session_core::session_fsm_unicast;
 
 // R311ik — scouting FSM <-> multicast-link glue (active mode),
 // engine-free. The SCE-generated FSM (the `ScoutingActions` trait,

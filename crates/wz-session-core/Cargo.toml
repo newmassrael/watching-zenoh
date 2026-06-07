@@ -151,6 +151,31 @@ scouting-static = []
 # IScriptEngine trait the no_std runtime elides is what Lua needs).
 scouting-active = ["dep:sce-rust-runtime"]
 
+# R311il — unicast session FSM (docs/session-fsm.md §2.1/§2.2/§2.4/§2.5/
+# §2.7). Gates the SCE-generated `session_fsm_unicast` statechart module
+# (build.rs codegens sources/session/session_fsm_unicast.scxml with
+# `--no-std` only under this feature). Like `scouting-active` the FSM is
+# engine-free — every effect is a no-arg `<sce:action>` native host-trait
+# call (the generated `SessionFsmUnicastActions` trait, impl'd by
+# wz-runtime-tokio's session_glue) and there is no `<send delay>`
+# self-timer (the host drive loop owns every session deadline), so the
+# emitted `SessionFsmUnicastPolicy<A>` carries no `IScriptEngine` and no
+# scheduler. The two state-referencing accept guards (cookie_valid /
+# half_open_cap_available + accept_rate_token) are NOT native typed
+# guards either — the host dispatcher pre-classifies them into distinct
+# events (mirroring reassembly's SN-consecutive precedent).
+#
+# Pulls `dep:sce-rust-runtime` but — like `scouting-active`, UNLIKE
+# `reassembly` — does NOT force `sce-rust-runtime/no_std` (the same
+# http-send mutual-exclusion rationale documented on `scouting-active`
+# above). Once this feature lands, sce-rust-lua leaves the whole session
+# path: the entire AP build is Lua-free, so a no_std/MCU profile can
+# select `sce-rust-runtime/no_std` and the reassembly AP integration
+# unblocks (the IScriptEngine trait the no_std runtime elides is what Lua
+# needed). The wz-runtime-tokio `transport-unicast` foundational feature
+# forwards here.
+session-unicast = ["dep:sce-rust-runtime"]
+
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the
 # `switchboard::SwitchboardRegistry` (the table + its

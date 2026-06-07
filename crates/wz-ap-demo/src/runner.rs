@@ -69,7 +69,7 @@ use wz::runtime_tokio::session::{
     QueryableOptions, Session, SubscribeOptions, Subscriber,
 };
 use wz::runtime_tokio::session_glue::{
-    drive_session_until_terminal, IterationEvent, SessionLinkActions,
+    drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session, initiate_and_open_session, DialedLink, OpenedSession,
@@ -694,6 +694,10 @@ pub(crate) async fn run_demo(
     //      lives in run_demo's stack, not inside the future).
     //   3. (Future) administrative shutdown via in-process channel
     //      → same Future-drop semantics as (2).
+    // Bound to a `let` (not an inline `&…::spec_defaults()`) so the borrow
+    // outlives the `tokio::select!` future (E0716: a temporary would drop
+    // before the select polls the future).
+    let session_timeouts = SessionTimeouts::spec_defaults();
     let outcome = tokio::select! {
         o = drive_session_until_terminal(
             &mut driver,
@@ -701,6 +705,7 @@ pub(crate) async fn run_demo(
             &mut engine,
             Some(10_000),
             &session_clock,
+            &session_timeouts,
             |event: IterationEvent<'_>| {
                 log::debug!("wz-ap-demo: iteration event = {event:?}");
                 let mut obs = observer_for_dispatch

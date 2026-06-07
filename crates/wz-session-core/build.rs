@@ -36,10 +36,11 @@ fn main() {
 
     let reassembly = std::env::var("CARGO_FEATURE_REASSEMBLY").is_ok();
     let scouting_active = std::env::var("CARGO_FEATURE_SCOUTING_ACTIVE").is_ok();
+    let session_unicast = std::env::var("CARGO_FEATURE_SESSION_UNICAST").is_ok();
 
     // Elidable: skip the sce-codegen lookup entirely when no statechart
     // feature is active.
-    if !reassembly && !scouting_active {
+    if !reassembly && !scouting_active && !session_unicast {
         return;
     }
 
@@ -98,6 +99,27 @@ fn main() {
         // generated ScoutingActions trait and owns the scout deadline.
         emit_one(
             "scouting",
+            &resource_dir,
+            &out_dir,
+            &sce_codegen,
+            &sce_workspace,
+        );
+    }
+
+    if session_unicast {
+        let resource_dir = manifest_dir
+            .join("../../sources/session")
+            .canonicalize()
+            .expect("canonicalize sources/session");
+        println!("cargo:rerun-if-changed={}", resource_dir.display());
+        // Unicast session FSM (R311il). Engine-free + no self-timer; the
+        // host (wz-runtime-tokio session_glue) impls the generated
+        // SessionFsmUnicastActions trait, pre-classifies the accept guards
+        // into distinct events, and owns every session deadline. Migrating
+        // it here drops the last sce-rust-lua binding from the session
+        // path (the scouting half landed in R311ik).
+        emit_one(
+            "session_fsm_unicast",
             &resource_dir,
             &out_dir,
             &sce_codegen,

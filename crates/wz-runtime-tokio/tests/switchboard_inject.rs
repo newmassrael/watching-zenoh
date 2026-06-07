@@ -20,15 +20,18 @@
 
 use std::sync::Arc;
 
-use sce_rust_lua::LuaEngine;
-use sce_rust_runtime::scripting::IScriptEngine;
 use sce_rust_runtime::Engine;
 use wz_codecs::push::{Push, PushOwned, PushOwnedVariant};
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
-use wz_runtime_tokio::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
+use wz_runtime_tokio::session_glue::{
+    new_session_engine, BoxedLinkDriver, DriverLoopOutcome, IterationEvent, NetworkMessage,
+    SessionActionsBinding, SessionLinkActions,
+};
+use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 use wz_statechart_bridge::EngineInjector;
 
 /// Build a wire-inbound Put Push carrying a literal keyexpr (id=0 ⇒
@@ -63,9 +66,11 @@ fn frame_event(push: PushOwned) -> DriverLoopOutcome {
     }
 }
 
-fn fresh_engine() -> Engine<SessionFsmUnicastPolicy> {
-    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+fn fresh_engine() -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding>> {
+    let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let actions =
+        SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     engine
 }

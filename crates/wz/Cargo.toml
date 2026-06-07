@@ -95,7 +95,8 @@ wz-link-lwip = { path = "../wz-link-lwip", optional = true, default-features = f
 # TARGET logic — a second source of truth, anti-pattern.
 lwip-sys = { path = "../lwip-sys", optional = true }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true }
-sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua", optional = true }
+# R311il — sce-rust-lua removed: no wz statechart is Lua-bound any more
+# (the session FSM went engine-free), so the facade pulls no Lua engine.
 
 # ============================================================
 # [features] — 169 entries per R301 catalog
@@ -396,19 +397,22 @@ runtime-no-std = []
 # forwards (no liveliness-* etc.) leaves wz-runtime-tokio compiled
 # with --no-default-features.
 #
-# R311a4 — runtime-tokio now also pulls wz-runtime-core (TimeSource +
-# Allocator + RuntimeError trait surface, alloc-on by default since
-# tokio implies std at the linker level) and the sce-rust-runtime +
-# sce-rust-lua script engine pair (re-exported as `wz::script` for AP
-# consumers). This collapses wz-ap-demo's 6 direct sub-crate deps to a
-# single `wz = { features = preset-ap-client }`, making the facade the
-# first user-visible composable-framework boundary backed by a real
-# Linux + tokio binary.
+# R311a4 — runtime-tokio also pulls wz-runtime-core (TimeSource +
+# Allocator + RuntimeError trait surface, alloc-on by default since tokio
+# implies std at the linker level) and sce-rust-runtime (the statechart
+# `Engine` / `StatePolicy` host that drives the engine-free FSMs). This
+# collapses wz-ap-demo's direct sub-crate deps to a single
+# `wz = { features = preset-ap-client }`, making the facade the first
+# user-visible composable-framework boundary backed by a real Linux +
+# tokio binary.
+#
+# R311il — `sce-rust-lua` dropped from this set: with the session FSM
+# engine-free (the last Lua-bound statechart), no wz statechart needs a
+# script engine, so the facade no longer forces a Lua VM into AP builds.
 runtime-tokio = [
     "dep:wz-runtime-tokio",
     "dep:wz-runtime-core",
     "dep:sce-rust-runtime",
-    "dep:sce-rust-lua",
 ]
 runtime-tokio-uring = ["runtime-tokio"]
 runtime-zero-copy = []

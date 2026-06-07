@@ -83,8 +83,9 @@ pub use wz_link_lwip as link_lwip;
 #[cfg(any(feature = "runtime-tokio", feature = "runtime-lwip"))]
 pub use wz_runtime_core as runtime_core;
 
-#[cfg(feature = "runtime-tokio")]
-pub mod script {
-    pub use sce_rust_lua::LuaEngine;
-    pub use sce_rust_runtime::{Engine, IScriptEngine};
-}
+// R311il — the `wz::script` re-export (sce-rust-lua `LuaEngine` +
+// `IScriptEngine`) was removed. With the session FSM engine-free, no wz
+// statechart is Lua-bound, so the facade no longer forces a Lua VM into
+// AP builds. The framework is now fully Lua-free (the script engine is
+// neither used internally nor exposed); a consumer wanting a Lua engine
+// adds `sce-rust-lua` to its own manifest directly.

@@ -29,25 +29,21 @@
 // R311if — SocketAddr is used only by the static-mode `refused_locator`.
 #[cfg(feature = "scouting-static")]
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 // R311if — only the static-mode tests (via `refused_locator`) need the
 // raw non-listening socket; gate the import with their feature.
 #[cfg(feature = "scouting-static")]
 use socket2::{Domain, Socket, Type};
 
-use sce_rust_lua::LuaEngine;
-use sce_rust_runtime::scripting::IScriptEngine;
-use sce_rust_runtime::Engine;
 use tokio::net::TcpListener;
 #[cfg(feature = "transport-link-udp")]
 use tokio::net::UdpSocket;
 
 use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
 use wz_runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
-use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
+use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
+    new_session_engine, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
     SessionLinkActions,
 };
 use wz_runtime_tokio::session_open::{open_session_at, OpenError, DEFAULT_OPEN_TICK_MS};
@@ -107,10 +103,7 @@ async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, TokioJoin
     let mut params = fixture_session_init_params();
     params.zid = vec![0x02; 4]; // distinct zid from the initiator
     let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
-    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    install_session_actions(actions.clone(), &script_engine);
-    let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     engine.process_event(E::InboundStart);
 
@@ -180,10 +173,7 @@ async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, TokioJoin
     let mut params = fixture_session_init_params();
     params.zid = vec![0x02; 4]; // distinct zid from the initiator
     let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
-    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    install_session_actions(actions.clone(), &script_engine);
-    let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+    let mut engine = new_session_engine(&actions);
     engine.initialize();
     engine.process_event(E::InboundStart);
 

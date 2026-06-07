@@ -137,9 +137,6 @@ mod round2 {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use sce_rust_lua::LuaEngine;
-    use sce_rust_runtime::scripting::IScriptEngine;
-    use sce_rust_runtime::Engine;
     use tokio::net::{TcpListener, UdpSocket};
 
     use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
@@ -147,11 +144,9 @@ mod round2 {
     use wz_runtime_tokio::scouting_glue::{
         drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutingActions,
     };
-    use wz_runtime_tokio::session_fsm_unicast::{
-        SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy,
-    };
+    use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
     use wz_runtime_tokio::session_glue::{
-        install_session_actions, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
+        new_session_engine, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
         SessionLinkActions,
     };
     use wz_runtime_tokio::session_open::{open_session_at, DEFAULT_OPEN_TICK_MS};
@@ -183,10 +178,7 @@ mod round2 {
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4]; // distinct zid from the initiator
         let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
-        let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-        install_session_actions(actions.clone(), &script_engine);
-        let mut engine: Engine<SessionFsmUnicastPolicy> =
-            Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+        let mut engine = new_session_engine(&actions);
         engine.initialize();
         engine.process_event(E::InboundStart);
 

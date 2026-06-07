@@ -28,7 +28,7 @@ use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::Session;
 use wz::runtime_tokio::session_glue::{
-    drive_session_until_terminal, IterationEvent, SessionInitParams, SigningKey,
+    drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, SigningKey,
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
@@ -168,6 +168,10 @@ pub async fn run_acceptor_e2e<H>(
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();
     let actions_for_loop = actions.clone();
+    // Bound to a `let` (not an inline `&…::spec_defaults()`) so the
+    // borrow outlives the `tokio::select!` future (E0716: a temporary
+    // would drop before the select polls the future).
+    let session_timeouts = SessionTimeouts::spec_defaults();
     let outcome = tokio::select! {
         o = drive_session_until_terminal(
             &mut driver,
@@ -175,6 +179,7 @@ pub async fn run_acceptor_e2e<H>(
             &mut engine,
             Some(DRIVE_MAX_ITERS),
             &clock,
+            &session_timeouts,
             |event: IterationEvent<'_>| {
                 observer_for_dispatch
                     .lock()
