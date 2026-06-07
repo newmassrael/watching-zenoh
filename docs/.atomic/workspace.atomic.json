@@ -30700,6 +30700,60 @@
         "SessionTimeouts deploy-config plumbing deferred (values = §2.5 spec_defaults today)"
       ]
     },
+    "Round 311im": {
+      "decision_summary": "reassembly AP integration realized: ReassemblyDispatcher Router (SN-classify + quota + deadline-sweep + staging) over N engine-free slot FSMs; Fragment 0x06 RX seam wired into the session drive loop; SCE pin bump for SceBytes one-emit-both-profiles",
+      "changes_bullets": [
+        "SCE pin vendor/sce 33ed5c4c9 -> 1474091c2: SceBytes/SceTransitionBuf/SceIndexBuf/SceDedupSet profile-resolving aliases so one --no-std emit compiles on both std (AP) and no_std (MCU) runtimes (the bytes-field heapless gap wz reported).",
+        "wz-session-core: drop the reassembly sce-rust-runtime/no_std force; add no_std profile feature (sce-rust-runtime?/no_std) so the runtime flavour is a build-profile choice, not a capability one.",
+        "wz-session-core::reassembly_dispatch: ReassemblyDispatcher<SLOTS,CAP> Router (SN-consecutive classify, per-peer quota quota-first, deadline sweep, slot staging) over N engine-free reassembly_slot Engines; no-alloc, 12 unit tests.",
+        "wz-runtime-tokio: reassembly feature; InboundFrame::Fragment + parse_inbound 0x06 arm; DriverLoopOutcome::Fragment; drive loop owns the dispatcher + report_outcome_reassembling (reassemble -> synthesize FramePayload) + per-iteration sweep.",
+        "run-ci.sh: Layer C1l (host reassembly tests + AP feature-unification guard) + Layer G.8 (MCU no_std reassembly cross-compile)."
+      ],
+      "verification_bullets": [
+        "host: cargo test -p wz-session-core --features reassembly (12 dispatcher tests) + cargo test -p wz-runtime-tokio --features reassembly (3 RX-seam integration tests) green.",
+        "AP feature-unification: cargo build wz-runtime-tokio with wz-session-core/reassembly no longer hits the runtime no_std x http-send compile_error (was the blocker before the force drop + SCE fix).",
+        "MCU: cargo build -p wz-session-core --target thumbv7em-none-eabihf --no-default-features --features reassembly,no_std green.",
+        "regression: default workspace build + 107 wz-session-core + 267 wz-runtime-tokio lib tests pass; clippy --features reassembly --all-targets + fmt clean; default (no-reassembly) clippy green.",
+        "SCE change this session = 0 (pin bump only; the SceBytes fix was authored by the user in the SCE repo per the read-only-SCE rule)."
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/2-3-router-states",
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "carry_forward_bullets": [
+        "reassembly deploy-config plumbing deferred: deploy.yaml buffer_pools.reassembly_pool (slot_count/slot_size/per_peer_quota/reassembly_timeout_ms) is not yet parsed into the dispatcher; the tokio host uses documented baseline consts (4 / 4096 / 2 / 500ms from ap_mcu_pair.yaml).",
+        "reassembly sweep runs once per drive-loop iteration; folding the reassembly deadline into the select! race is a precision refinement.",
+        "reassembly is unicast-session-scoped in the tokio host (peer ZID from inbound_peer_zid); multi-peer / router multi-link wiring is later.",
+        "no MCU session-open consumer yet: the dispatcher is cross-compiled (G.8) + unit-tested but not yet driven by a live MCU loop (bottom-up next step)."
+      ],
+      "publishable_decision_summary": "reassembly AP integration realized: ReassemblyDispatcher Router (SN-classify + quota + deadline-sweep + staging) over N engine-free slot FSMs; Fragment 0x06 RX seam wired into the session drive loop; SCE pin bump for SceBytes one-emit-both-profiles",
+      "publishable_changes_bullets": [
+        "SCE pin vendor/sce 33ed5c4c9 -> 1474091c2: SceBytes/SceTransitionBuf/SceIndexBuf/SceDedupSet profile-resolving aliases so one --no-std emit compiles on both std (AP) and no_std (MCU) runtimes (the bytes-field heapless gap wz reported).",
+        "wz-session-core: drop the reassembly sce-rust-runtime/no_std force; add no_std profile feature (sce-rust-runtime?/no_std) so the runtime flavour is a build-profile choice, not a capability one.",
+        "wz-session-core::reassembly_dispatch: ReassemblyDispatcher<SLOTS,CAP> Router (SN-consecutive classify, per-peer quota quota-first, deadline sweep, slot staging) over N engine-free reassembly_slot Engines; no-alloc, 12 unit tests.",
+        "wz-runtime-tokio: reassembly feature; InboundFrame::Fragment + parse_inbound 0x06 arm; DriverLoopOutcome::Fragment; drive loop owns the dispatcher + report_outcome_reassembling (reassemble -> synthesize FramePayload) + per-iteration sweep.",
+        "run-ci.sh: Layer C1l (host reassembly tests + AP feature-unification guard) + Layer G.8 (MCU no_std reassembly cross-compile)."
+      ],
+      "publishable_verification_bullets": [
+        "host: cargo test -p wz-session-core --features reassembly (12 dispatcher tests) + cargo test -p wz-runtime-tokio --features reassembly (3 RX-seam integration tests) green.",
+        "AP feature-unification: cargo build wz-runtime-tokio with wz-session-core/reassembly no longer hits the runtime no_std x http-send compile_error (was the blocker before the force drop + SCE fix).",
+        "MCU: cargo build -p wz-session-core --target thumbv7em-none-eabihf --no-default-features --features reassembly,no_std green.",
+        "regression: default workspace build + 107 wz-session-core + 267 wz-runtime-tokio lib tests pass; clippy --features reassembly --all-targets + fmt clean; default (no-reassembly) clippy green.",
+        "SCE change this session = 0 (pin bump only; the SceBytes fix was authored by the user in the SCE repo per the read-only-SCE rule)."
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/2-3-router-states",
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "publishable_carry_forward_bullets": [
+        "reassembly deploy-config plumbing deferred: deploy.yaml buffer_pools.reassembly_pool (slot_count/slot_size/per_peer_quota/reassembly_timeout_ms) is not yet parsed into the dispatcher; the tokio host uses documented baseline consts (4 / 4096 / 2 / 500ms from ap_mcu_pair.yaml).",
+        "reassembly sweep runs once per drive-loop iteration; folding the reassembly deadline into the select! race is a precision refinement.",
+        "reassembly is unicast-session-scoped in the tokio host (peer ZID from inbound_peer_zid); multi-peer / router multi-link wiring is later.",
+        "no MCU session-open consumer yet: the dispatcher is cross-compiled (G.8) + unit-tested but not yet driven by a live MCU loop (bottom-up next step)."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
