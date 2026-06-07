@@ -5,23 +5,30 @@
 -->
 <!--
   EventSchema for the `fragment.chunk` event consumed by the reassembly
-  slot FSM (reassembly_slot.scxml). The typed `_event.data` channel that
-  the slot FSM's native host-trait actions read their payload from and
-  that the `more`-bit guard compares against — no script engine.
+  slot FSM (reassembly_slot.scxml). The typed `_event.data` channel the
+  slot FSM's `more`-bit guard compares against — no script engine.
 
-  Fields:
-    - payload : the fragment's raw body bytes (sources/codecs/fragment.scxml
-      decodes sn + payload; the dispatcher stages the payload here).
-      max-size 1472 bounds the per-event heapless buffer to the link MTU
-      (deploy links.*.mtu_bytes).
+  Field:
     - more : the Fragment M (more) flag (fragment.scxml header note: M=1
       means further fragments follow; host-level, not in the codec body).
       uint8 (0 = final fragment, non-zero = more to come); the slot FSM
       guards continue-vs-final on this typed field natively.
 
-  The dispatcher (Router) owns the SN-consecutiveness arithmetic and
-  raises `fragment.chunk` only for an in-order fragment; an out-of-order
-  fragment is raised as the schema-less signal event `fragment.ooo`.
+  R311in — the fragment BODY is deliberately NOT carried on this event.
+  The engine-free Router (ReassemblyDispatcher) owns the data plane: it
+  stages each fragment's body into the chain's slot BoundedVec directly
+  and raises `fragment.chunk` carrying only the `more` bit, so the slot
+  FSM's actions (begin_chain / append_fragment_payload / finalize_message)
+  are pure signals. A `payload: bytes max-size 1472` field here was dead
+  weight: it inlined a 1472-byte heapless buffer into every queued event
+  (x the per-slot event-queue depth x N slots), the no_std MCU-footprint
+  blocker that made the per-slot-Engine reassembly pool non-instantiable
+  on the target SRAM. The body never flowed through the FSM, so the field
+  was removed (the Router's BoundedVec staging is the only body path).
+
+  The dispatcher owns the SN-consecutiveness arithmetic and raises
+  `fragment.chunk` only for an in-order fragment; an out-of-order fragment
+  is raised as the schema-less signal event `fragment.ooo`.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
@@ -29,7 +36,6 @@
        sce:kind="event-schema"
        sce:event-name="fragment.chunk">
   <datamodel>
-    <data id="payload" sce:type="bytes" sce:direction="in" sce:max-size="1472"/>
     <data id="more" sce:type="uint8" sce:direction="in"/>
   </datamodel>
 </scxml>

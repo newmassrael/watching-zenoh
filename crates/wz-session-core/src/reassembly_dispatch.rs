@@ -192,13 +192,13 @@ struct SlotBinding {
 }
 
 impl ReassemblySlotActions for SlotBinding {
-    fn begin_chain(&mut self, _payload: &[u8]) {
+    fn begin_chain(&mut self) {
         self.begins = self.begins.saturating_add(1);
     }
-    fn append_fragment_payload(&mut self, _payload: &[u8]) {
+    fn append_fragment_payload(&mut self) {
         self.appends = self.appends.saturating_add(1);
     }
-    fn finalize_message(&mut self, _payload: &[u8]) {
+    fn finalize_message(&mut self) {
         self.finalizes = self.finalizes.saturating_add(1);
     }
     fn abort_ooo(&mut self) {
@@ -455,16 +455,15 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
     }
 }
 
-/// Build the typed `fragment.chunk` event with an empty payload. The
-/// Router stages the body itself (the binding actions are thin), and the
-/// slot FSM's only guard reads `more`, so the event carries just the wire
-/// M bit — avoiding a redundant copy of the body into the event's bounded
-/// `SceBytes` buffer.
+/// Build the typed `fragment.chunk` event. The slot FSM's only guard
+/// reads `more`, and the body never flows through the FSM (the Router
+/// stages it in the slot's `BoundedVec`), so the event carries just the
+/// wire M bit. R311in removed the schema's former `payload: bytes
+/// max-size 1472` field — it inlined a 1472-byte buffer into every queued
+/// event (x the per-slot queue depth x N slots) and was the no_std
+/// MCU-footprint blocker; the body was never read through the FSM.
 fn chunk_event(more: u8) -> ReassemblySlotFragmentChunkPayload {
-    ReassemblySlotFragmentChunkPayload {
-        more,
-        ..Default::default()
-    }
+    ReassemblySlotFragmentChunkPayload { more }
 }
 
 /// Append `payload` to the slot staging buffer, returning `Err` if the

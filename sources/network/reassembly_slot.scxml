@@ -30,7 +30,7 @@
     `_event.data` fields and literals only, never stored state. So the
     dispatcher resolves in-order-ness and raises distinct typed inject
     events:
-      - in-order fragment      -> `fragment.chunk` (payload + more bit)
+      - in-order fragment      -> `fragment.chunk` (more bit only)
       - out-of-order fragment  -> `fragment.ooo`   (signal-only)
     What stays in the FSM is the wire `more` bit (a real per-fragment
     field, fragment_chunk_schema.scxml), guarded natively to split a
@@ -59,11 +59,13 @@
   cpu-mut/cpu-ref -> free, §6), so one Engine serves successive messages.
 
   Host actions (the generated ReassemblySlotActions trait, one method per
-  distinct `<sce:action name>`):
-    begin_chain(payload)            — init chain + stage the first body
-    append_fragment_payload(payload)— append an in-order continuation
-    finalize_message(payload)       — append the final body + emit the
-                                      reassembled message upstream
+  distinct `<sce:action name>`). R311in — these are pure transition
+  SIGNALS: the body is NOT passed through the FSM (the Router stages it in
+  its BoundedVec, see fragment_chunk_schema.scxml), so none takes a
+  payload arg:
+    begin_chain                     — chain start (Empty -> Receiving)
+    append_fragment_payload         — in-order continuation (stay Receiving)
+    finalize_message                — final fragment (Receiving -> Complete)
     abort_ooo / abort_peer_drop / abort_evicted / abort_codec
                                     — record the abort reason + signal
     record_timeout                  — record the deadline expiry
@@ -86,9 +88,7 @@
        slot, so the chunk is unconditionally a chain start. -->
   <state id="Empty">
     <transition event="fragment.chunk" target="Receiving">
-      <sce:action name="begin_chain">
-        <sce:arg expr="_event.data.payload"/>
-      </sce:action>
+      <sce:action name="begin_chain"/>
     </transition>
   </state>
 
@@ -98,14 +98,10 @@
        fragment (more == 0). Strict in-order parity (§2.5, OQ-W21). -->
   <state id="Receiving">
     <transition event="fragment.chunk" cond="_event.data.more !== 0" target="Receiving">
-      <sce:action name="append_fragment_payload">
-        <sce:arg expr="_event.data.payload"/>
-      </sce:action>
+      <sce:action name="append_fragment_payload"/>
     </transition>
     <transition event="fragment.chunk" cond="_event.data.more === 0" target="Complete">
-      <sce:action name="finalize_message">
-        <sce:arg expr="_event.data.payload"/>
-      </sce:action>
+      <sce:action name="finalize_message"/>
     </transition>
     <transition event="fragment.ooo" target="Aborted">
       <sce:action name="abort_ooo"/>
