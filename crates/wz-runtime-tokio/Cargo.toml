@@ -242,6 +242,14 @@ codec-fragment = ["wz-codecs/codec-fragment"]
 # wz-runtime-tokio cannot terminate a peer's data exchange and is
 # only sensible as a future handshake-only build.
 codec-frame = ["wz-codecs/codec-frame", "wz-session-core/codec-frame"]
+# R311im — transport reassembly (Tier B). Forwards to the
+# wz-session-core `reassembly` feature (the ReassemblyDispatcher + the
+# engine-free slot FSM) and implies `codec-frame`: a reassembled
+# fragment chain re-enters the `T_MID_FRAME` payload decode path
+# (`parse_frame_payload`), so the Frame body codec must be present. Off by
+# default; the AP host wires the dispatcher into `drive_session_until_terminal`
+# and the `InboundFrame::Fragment` parse arm only under this feature.
+reassembly = ["wz-session-core/reassembly", "codec-frame"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +

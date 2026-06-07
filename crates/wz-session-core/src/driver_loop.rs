@@ -76,6 +76,25 @@ pub enum DriverLoopOutcome {
     /// `LinkLost` into the engine so the `link.lost` transition
     /// fires; the cause is returned for logging.
     LinkLost(LostCause),
+    /// R311im — the inbound frame parsed to a transport `Fragment`
+    /// (`T_MID_FRAGMENT`, MID `0x06`). Reassembly is stateful — the slot
+    /// pool ([`crate::reassembly_dispatch::ReassemblyDispatcher`]) lives in
+    /// the drive loop, not in the pure `poll_and_dispatch_one` dispatch
+    /// helper — so the helper surfaces the decoded fragment here and the
+    /// drive loop feeds it to the dispatcher. On chain completion the drive
+    /// loop synthesizes a `FramePayload` from the reassembled bytes (the
+    /// reassembled message re-enters the same per-MID dispatch path a
+    /// `T_MID_FRAME` payload would). The session FSM is unchanged (fragment
+    /// receipt is not a session-state trigger, like `Frame`).
+    #[cfg(feature = "reassembly")]
+    Fragment {
+        reliable: bool,
+        sn: u64,
+        more: bool,
+        payload: Vec<u8>,
+        has_ext: bool,
+        extensions: Vec<ExtEntryOwned>,
+    },
 }
 
 /// R83 — per-iteration event surfaced to the

@@ -1517,6 +1517,7 @@ dependencies = [
  "heapless",
  "hmac",
  "log",
+ "portable-atomic",
  "sce-forge-runtime",
  "sce-rust-runtime",
  "sha2",

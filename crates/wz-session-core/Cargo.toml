@@ -58,12 +58,46 @@ alloc = ["wz-codecs/alloc"]
 # reassembly slot statechart module (build.rs codegens
 # sources/network/reassembly_slot.scxml only under this feature) and the
 # `reassembly` dispatcher that drives N slot Engine instances. Pulls
-# sce-rust-runtime (the generated `Engine`/`StatePolicy` host). The slot
-# FSM is script-engine-free, so the no_std (heapless) variant of
-# sce-rust-runtime — selected by the MCU profile, never by this crate so
-# the AP profile's std `sce-rust-runtime` stays unification-compatible —
-# lets the dispatcher cross-compile bare-metal.
-reassembly = ["dep:sce-rust-runtime", "sce-rust-runtime/no_std"]
+# sce-rust-runtime (the generated `Engine`/`StatePolicy` host) but does
+# NOT force `sce-rust-runtime/no_std`: the std-ness of the runtime is a
+# build-PROFILE decision (the `no_std` feature below forwards it for the
+# MCU profile), not a per-capability one. Forcing `no_std` here makes an
+# AP build that also pulls wz-runtime-tokio (std sce-rust-runtime,
+# `http-send`) hit the runtime's no_std/http-send `compile_error!`
+# mutual-exclusion. R311im dropped the force — it was a documented debt
+# (see the `no_std` comment) harmless only while reassembly stayed
+# session-core/MCU-only; the AP RX-seam integration is what made it bite.
+# The single `--no-std` codegen emit now compiles on the std runtime too
+# (SCE pin 1474091c2 routes the `bytes` payload field through the
+# profile-resolving `SceBytes<N>` alias instead of a raw `heapless::Vec`).
+reassembly = ["dep:sce-rust-runtime"]
+
+# MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
+# build (heapless, no http-send / scripting — those are std-coupled and
+# mutually exclusive with no_std, enforced by a compile_error! in
+# sce-rust-runtime). Weak (`?`) so it only takes effect when an
+# sce-rust-runtime-pulling capability feature (`reassembly` /
+# `scouting-active` / `session-unicast`) is also enabled — `no_std` alone
+# never pulls the optional dep. The MCU reassembly lane builds
+# `--features reassembly,no_std`; the AP profile omits `no_std` and
+# unifies on the std runtime that wz-runtime-tokio brings. Mirrors
+# wz-statechart-bridge's `no_std` (there sce-rust-runtime is non-optional,
+# so it uses the non-weak `sce-rust-runtime/no_std`). The crate body is
+# always `#![no_std]`; this only picks the engine dependency's build.
+#
+# Also pulls `portable-atomic` (with `critical-section`): the no_std
+# sce-rust-runtime Engine host uses `AtomicU64`, which `portable-atomic`
+# cannot provide on a CAS-less target (Cortex-M0+ `thumbv6m`) from
+# `fallback` alone — it needs the `critical-section` software-atomic path.
+# Per the portable-atomic contract a LIBRARY (sce-rust-runtime) must NOT
+# force `critical-section` (it would pin a global atomic backend on every
+# consumer); the CONSUMER/deploy enables it and links the impl. This is
+# the same consumer responsibility wz-runtime-lwip discharges for its own
+# atomics; wz-session-core is the first to cross-compile the no_std Engine
+# host on bare metal, so it enables the backend here. The rlib compiles
+# with the feature alone; the `critical_section` impl is a link-time
+# concern the MCU deploy supplies (cf. Layer G.8).
+no_std = ["sce-rust-runtime?/no_std", "dep:portable-atomic"]
 
 # R311di-11 — body-codec feature forwarders for the NetworkMessage
 # dispatch cluster. Each forwards to wz-codecs/codec-* so the 3-stage
@@ -130,25 +164,19 @@ scouting-static = []
 # emitted `ScoutingPolicy<A>` carries no `IScriptEngine` and no
 # scheduler.
 #
-# This pulls `dep:sce-rust-runtime` but — UNLIKE `reassembly` — does NOT
-# force `sce-rust-runtime/no_std`. Rationale: `no_std` is mutually
-# exclusive with `http-send` (sce-rust-runtime lib.rs `compile_error!`),
-# and `scouting-active` is hosted by wz-runtime-tokio, whose own
-# sce-rust-runtime dep pulls default features (`http-send`). Forcing
-# `no_std` here would make the AP build fail that compile_error. The
-# `--no-std` *codegen* flag already gives the allocator-free / NoOpHal
-# code shape; the runtime's heapless aliases resolve to std types under a
-# std sce-rust-runtime, so the same emit compiles on the AP profile. The
-# std-ness of the runtime is a build-PROFILE decision (the MCU profile
-# selects `sce-rust-runtime/no_std` once the whole build is Lua-free),
-# not a per-capability-feature one — this is what the `reassembly`
-# feature's own comment intends ("selected by the MCU profile, never by
-# this crate"); its feature line forcing `no_std` is a separate debt that
-# only stays harmless while reassembly is session-core/MCU-only (its dep
-# there is default-features=false, so no http-send to conflict). A whole
-# no_std/MCU active-scouting build is unblocked only after the session
-# FSM is also engine-free and sce-rust-lua leaves the graph (the
-# IScriptEngine trait the no_std runtime elides is what Lua needs).
+# This pulls `dep:sce-rust-runtime` but — like `reassembly` and
+# `session-unicast` — does NOT force `sce-rust-runtime/no_std`. Rationale:
+# `no_std` is mutually exclusive with `http-send` (sce-rust-runtime lib.rs
+# `compile_error!`), and `scouting-active` is hosted by wz-runtime-tokio,
+# whose own sce-rust-runtime dep pulls default features (`http-send`).
+# Forcing `no_std` here would make the AP build fail that compile_error.
+# The `--no-std` *codegen* flag already gives the allocator-free / NoOpHal
+# code shape; the runtime's profile-resolving aliases (SceString /
+# SceBytes / StateChain) resolve to std types under a std sce-rust-runtime,
+# so the same emit compiles on the AP profile. The std-ness of the runtime
+# is a build-PROFILE decision (the crate's `no_std` feature forwards
+# `sce-rust-runtime?/no_std` for the MCU profile), not a
+# per-capability-feature one.
 scouting-active = ["dep:sce-rust-runtime"]
 
 # R311il — unicast session FSM (docs/session-fsm.md §2.1/§2.2/§2.4/§2.5/
@@ -165,12 +193,12 @@ scouting-active = ["dep:sce-rust-runtime"]
 # guards either — the host dispatcher pre-classifies them into distinct
 # events (mirroring reassembly's SN-consecutive precedent).
 #
-# Pulls `dep:sce-rust-runtime` but — like `scouting-active`, UNLIKE
+# Pulls `dep:sce-rust-runtime` but — like `scouting-active` and
 # `reassembly` — does NOT force `sce-rust-runtime/no_std` (the same
 # http-send mutual-exclusion rationale documented on `scouting-active`
-# above). Once this feature lands, sce-rust-lua leaves the whole session
-# path: the entire AP build is Lua-free, so a no_std/MCU profile can
-# select `sce-rust-runtime/no_std` and the reassembly AP integration
+# above). With this feature landed, sce-rust-lua is out of the whole
+# session path: the entire AP build is Lua-free, so a no_std/MCU profile
+# can select `sce-rust-runtime?/no_std` and the reassembly AP integration
 # unblocks (the IScriptEngine trait the no_std runtime elides is what Lua
 # needed). The wz-runtime-tokio `transport-unicast` foundational feature
 # forwards here.
@@ -266,9 +294,18 @@ wz-runtime-core = { path = "../wz-runtime-core" }
 # statechart (`Engine<ReassemblySlotPolicy<A>>`). Optional, pulled only by
 # the `reassembly` feature. No feature is forced here: the std default
 # serves the AP profile (shared with wz-runtime-tokio) while the MCU
-# profile selects `sce-rust-runtime/no_std`; forcing either would break
+# profile selects no_std via the crate's `no_std` feature
+# (`sce-rust-runtime?/no_std`); forcing either on this line would break
 # Cargo feature unification on the other profile.
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true, default-features = false }
+# R311im — software-atomic backend for the no_std sce-rust-runtime Engine
+# host on CAS-less MCU targets (Cortex-M0+ `thumbv6m`). Optional + pulled
+# only by the `no_std` feature; the `critical-section` feature routes the
+# emulated `AtomicU64` through `critical_section::with` so the rlib
+# cross-compiles (the impl is linked by the MCU deploy). `fallback` keeps
+# native 64-bit atomics on targets that have them (thumbv7em LDREXD etc.).
+# Mirrors wz-runtime-lwip's portable-atomic declaration.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"], optional = true }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`
 # projection helpers (extract_qos / extract_attachment / extract_source_info).
 # R311hl (Track 2) — `default-features = false` with NO hardcoded `alloc`;

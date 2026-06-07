@@ -4628,6 +4628,26 @@ pub enum InboundFrame {
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
     },
+    /// `_Z_MID_T_FRAGMENT` (0x06). One fragment of a fragmented
+    /// established-session message. Body mirrors `T_MID_FRAME` (VLE `sn`,
+    /// optional Z-gated ext chain, tail `payload`); the per-fragment
+    /// `reliable` (`FLAG_T_FRAGMENT_R`) and `more` (`FLAG_T_FRAGMENT_M`)
+    /// discriminators live in the transport header byte. Not a
+    /// session-state trigger (`inbound_to_fsm_event` returns `None`, like
+    /// `Frame`): the drive loop feeds it to the `ReassemblyDispatcher`,
+    /// which reassembles the chain and re-enters the `T_MID_FRAME` decode
+    /// path on completion. R311im — gated on `reassembly`; when the
+    /// feature is off the `0x06` arm falls through to `Unknown { mid: 0x06 }`,
+    /// mapped to `FramingError` (graceful teardown rather than silent loss).
+    #[cfg(feature = "reassembly")]
+    Fragment {
+        reliable: bool,
+        sn: u64,
+        more: bool,
+        payload: Vec<u8>,
+        has_ext: bool,
+        extensions: Vec<ExtEntryOwned>,
+    },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
 }
@@ -4762,6 +4782,35 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        #[cfg(feature = "reassembly")]
+        wire_const::T_MID_FRAGMENT => {
+            // Body mirrors T_MID_FRAME: VLE sn, optional Z-gated ext chain,
+            // then tail payload. The R (reliable) and M (more) bits live in
+            // the header flags, not the body. (`reassembly` implies
+            // `codec-frame`, so `flags` / `has_ext` / `cursor` are bound.)
+            let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
+            let extensions = if has_ext {
+                decode_ext_chain(&mut cursor)?
+            } else {
+                Vec::new()
+            };
+            let remaining = cursor.remaining();
+            let payload = cursor
+                .peek_slice(remaining)
+                .map_err(InboundParseError::Codec)?
+                .to_vec();
+            cursor
+                .advance(remaining)
+                .map_err(InboundParseError::Codec)?;
+            Ok(InboundFrame::Fragment {
+                reliable: (flags & wire_const::FLAG_T_FRAGMENT_R) != 0,
+                sn,
+                more: (flags & wire_const::FLAG_T_FRAGMENT_M) != 0,
+                payload,
+                has_ext,
+                extensions,
+            })
+        }
         #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => {
             // KeepAlive body is empty (zero-byte payload); the
@@ -4843,6 +4892,12 @@ pub fn inbound_to_fsm_event(
         InboundFrame::KeepAlive { .. } => None,
         #[cfg(feature = "codec-frame")]
         InboundFrame::Frame { .. } => None,
+        // R311im — Fragment is not a session-state trigger (like Frame);
+        // the drive loop routes it to the ReassemblyDispatcher and, on
+        // chain completion, the reassembled message re-enters the Frame
+        // payload dispatch path.
+        #[cfg(feature = "reassembly")]
+        InboundFrame::Fragment { .. } => None,
         InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
 }
@@ -4938,6 +4993,26 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                     },
                     #[cfg(feature = "codec-keep-alive")]
                     InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
+                    // R311im — surface the decoded fragment to the drive
+                    // loop, which owns the stateful ReassemblyDispatcher +
+                    // clock. This pure helper cannot reassemble (no slot
+                    // pool, no `now_ms`), so it hands the fragment up.
+                    #[cfg(feature = "reassembly")]
+                    InboundFrame::Fragment {
+                        reliable,
+                        sn,
+                        more,
+                        payload,
+                        has_ext,
+                        extensions,
+                    } => DriverLoopOutcome::Fragment {
+                        reliable,
+                        sn,
+                        more,
+                        payload,
+                        has_ext,
+                        extensions,
+                    },
                     #[cfg(feature = "codec-init-body")]
                     InboundFrame::Init { .. } => {
                         unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
@@ -5051,6 +5126,103 @@ pub enum DriverOutcome {
     IterationLimit,
 }
 
+// ── R311im — reassembly pool wiring for the steady-state drive loop ──
+
+#[cfg(feature = "reassembly")]
+use wz_session_core::reassembly_dispatch::{
+    Fragment as ReassemblyFragment, ReassemblyConfig, ReassemblyDispatcher,
+};
+
+/// Reassembly slot-pool dimensions for the unicast tokio session. Sourced
+/// as a baseline from `deploy/ap_mcu_pair.yaml`
+/// `buffer_pools.reassembly_pool` (slot_count 4 / slot_size 4096); the
+/// deploy.yaml -> dispatcher plumbing is deferred (mirrors the
+/// `SessionTimeouts::spec_defaults` deferral), so these dims and the
+/// config below stay documented baselines until the deploy loader lands.
+#[cfg(feature = "reassembly")]
+const REASSEMBLY_SLOTS: usize = 4;
+#[cfg(feature = "reassembly")]
+const REASSEMBLY_SLOT_SIZE: usize = 4096;
+
+/// The unicast tokio session's reassembly Router type. The std `alloc`
+/// backing keeps each chain's staging buffer on the heap;
+/// `REASSEMBLY_SLOT_SIZE` is the per-chain cap the dispatcher enforces
+/// explicitly (so reassembly is bounded on the AP profile too).
+#[cfg(feature = "reassembly")]
+pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_SLOT_SIZE>;
+
+/// Baseline reassembly config (per_peer_quota 2 / reassembly_timeout_ms
+/// 500) from the same `deploy/ap_mcu_pair.yaml::reassembly_pool` block;
+/// deploy plumbing deferred.
+#[cfg(feature = "reassembly")]
+fn reassembly_config() -> ReassemblyConfig {
+    ReassemblyConfig::new(2, 500)
+}
+
+/// Report one driver-loop outcome, additionally driving the reassembly
+/// pool when the outcome is a `Fragment`. On chain completion the
+/// reassembled bytes re-enter [`parse_frame_payload`], so the
+/// application's per-MID dispatch sees a reassembled message exactly as it
+/// sees a `T_MID_FRAME` payload; the resulting `FramePayload` (or
+/// `ParseError`) is reported as a second `IterationEvent::Poll`.
+/// Non-terminal ingests (Begun / Continued / Aborted / Refused) report
+/// only the `Fragment` outcome. The peer ZID (the §2.3 chain key) is read
+/// from the session's `inbound_peer_zid` slot.
+#[cfg(feature = "reassembly")]
+fn report_outcome_reassembling<F: FnMut(IterationEvent<'_>)>(
+    outcome: &DriverLoopOutcome,
+    reasm: &mut TokioReassembly,
+    actions: &Arc<SessionLinkActions>,
+    now_ms: u64,
+    on_event: &mut F,
+) {
+    on_event(IterationEvent::Poll(outcome));
+    let DriverLoopOutcome::Fragment {
+        reliable,
+        sn,
+        more,
+        payload,
+        ..
+    } = outcome
+    else {
+        return;
+    };
+    let zid_guard = actions.inbound_peer_zid.lock().unwrap();
+    let zid: &[u8] = zid_guard.as_deref().unwrap_or(&[]);
+    let mut completed: Option<DriverLoopOutcome> = None;
+    reasm.ingest(
+        ReassemblyFragment {
+            zid,
+            reliable: *reliable,
+            sn: *sn,
+            more: u8::from(*more),
+            payload: payload.as_slice(),
+        },
+        now_ms,
+        |msg| {
+            completed = Some(match parse_frame_payload(msg) {
+                Ok(messages) => DriverLoopOutcome::FramePayload {
+                    reliable: *reliable,
+                    sn: *sn,
+                    messages,
+                    // The reassembled bytes are the inner NetworkMessage
+                    // batch; transport ext chains were per-fragment, so the
+                    // reassembled message carries none.
+                    has_ext: false,
+                    extensions: Vec::new(),
+                },
+                Err(codec_err) => {
+                    DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                }
+            });
+        },
+    );
+    drop(zid_guard);
+    if let Some(o) = completed {
+        on_event(IterationEvent::Poll(&o));
+    }
+}
+
 /// R76b — production driver loop. Composes `poll_and_dispatch_one`
 /// (one LinkEvent per iteration) with a `tokio::select!` race
 /// against a lease-deadline `tokio::time::sleep` so a peer that
@@ -5151,6 +5323,12 @@ where
     // `<send delay>`, so this loop owns every handshake deadline; in
     // Established the keepalive-resetting lease deadline takes over.
     let mut deadline_tracker = HandshakeDeadlineTracker::new(*timeouts);
+    // R311im — the steady-state loop owns the reassembly Router (the
+    // stateful slot pool + clock the engine-free slot FSM cannot own).
+    // Established-only: fragments arriving before Established are reported
+    // but not reassembled (this loop runs the data plane).
+    #[cfg(feature = "reassembly")]
+    let mut reasm = TokioReassembly::new(reassembly_config());
     let mut iter: usize = 0;
     loop {
         if engine.is_in_final_state() {
@@ -5161,6 +5339,14 @@ where
                 return DriverOutcome::IterationLimit;
             }
             iter += 1;
+        }
+        // R311im — abort + reclaim any reassembly chain past its deadline.
+        // Swept once per loop iteration (whenever an event or deadline
+        // fires); in Established the lease deadline guarantees the loop
+        // iterates well within the reassembly window.
+        #[cfg(feature = "reassembly")]
+        {
+            reasm.sweep(clock.now_monotonic_ms());
         }
         // This iteration's deadline. During the handshake phases the
         // tracker yields the host-owned handshake deadline; in Established
@@ -5184,6 +5370,15 @@ where
                 let remaining_ms = deadline_ms.saturating_sub(now_ms);
                 tokio::select! {
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
+                        #[cfg(feature = "reassembly")]
+                        report_outcome_reassembling(
+                            &outcome,
+                            &mut reasm,
+                            actions,
+                            clock.now_monotonic_ms(),
+                            &mut on_event,
+                        );
+                        #[cfg(not(feature = "reassembly"))]
                         on_event(IterationEvent::Poll(&outcome));
                     }
                     _ = clock.sleep(remaining_ms) => match kind {
@@ -5206,6 +5401,15 @@ where
             }
             None => {
                 let outcome = poll_and_dispatch_one(driver, actions, engine).await;
+                #[cfg(feature = "reassembly")]
+                report_outcome_reassembling(
+                    &outcome,
+                    &mut reasm,
+                    actions,
+                    clock.now_monotonic_ms(),
+                    &mut on_event,
+                );
+                #[cfg(not(feature = "reassembly"))]
                 on_event(IterationEvent::Poll(&outcome));
             }
         }
@@ -5508,6 +5712,8 @@ mod tests {
                         InboundFrame::Close { .. } => "Close",
                         #[cfg(feature = "codec-keep-alive")]
                         InboundFrame::KeepAlive { .. } => "KeepAlive",
+                        #[cfg(feature = "reassembly")]
+                        InboundFrame::Fragment { .. } => "Fragment",
                         InboundFrame::Unknown { .. } => "Unknown",
                         InboundFrame::Frame { .. } => unreachable!(),
                     }

@@ -523,6 +523,14 @@ pub mod reassembly_slot {
     include!(concat!(env!("OUT_DIR"), "/reassembly_slot_sm.rs"));
 }
 
+/// R311im — the reassembly Router (dispatcher) that drives N
+/// [`reassembly_slot`] FSM instances: the stateful SN-consecutiveness
+/// classification, per-peer quota, staging buffers, and deadline sweep
+/// that the engine-free slot FSM cannot own. See the module docs for the
+/// division of labour with the slot FSM.
+#[cfg(feature = "reassembly")]
+pub mod reassembly_dispatch;
+
 /// SCE-generated active scouting state machine (R311ik). The emit comes
 /// from `sources/session/scouting.scxml` via `build.rs` (codegen'd into
 /// `$OUT_DIR/scouting_sm.rs` only under the `scouting-active` feature).

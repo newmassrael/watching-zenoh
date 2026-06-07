@@ -887,6 +887,28 @@ layer_c1k_cargo_test_scouting_static() {
         && cargo build -p wz-runtime-lwip --features alloc,scouting-static --quiet)
 }
 
+# ─── Layer C1l — reassembly subsystem (Tier B) build + AP unification ─
+#
+# R311im: reassembly is off by default (a Tier B transport capability),
+# so Layer C1's `cargo test --workspace` never builds the wz-session-core
+# reassembly slot module or the ReassemblyDispatcher. This lane:
+#   - runs the dispatcher / slot-FSM unit tests under `--features
+#     reassembly` (std sce-rust-runtime — the AP profile);
+#   - guards the AP feature-unification fix: R311im dropped the
+#     `sce-rust-runtime/no_std` force from the `reassembly` feature, so
+#     building wz-runtime-tokio (std runtime, `http-send`) together with
+#     `wz-session-core/reassembly` in one resolve must NOT trip the
+#     runtime's no_std x http-send `compile_error!`. This is the exact
+#     command that failed before the force was dropped (SCE pin 1474091c2
+#     routes the bytes payload through the profile-resolving SceBytes<N>
+#     alias so the single --no-std emit also builds on the std runtime).
+# The MCU no_std build of the same module is Layer G.8.
+layer_c1l_reassembly() {
+    (cd crates \
+        && cargo test -p wz-session-core --features reassembly --quiet \
+        && cargo test -p wz-runtime-tokio --features reassembly --quiet)
+}
+
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
 #
 # R311bo: mirror the gate to deploy/mcu-qemu-demo (standalone
@@ -1597,6 +1619,23 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.7 scouting-static MCU synth $t FAIL" >&2
             fail=1
         fi
+        # G.8 (R311im) reassembly slot FSM + dispatcher on the MCU profile.
+        # Proves the Tier B reassembly module cross-compiles no_std on every
+        # Phase W target via the `no_std` profile feature
+        # (`sce-rust-runtime?/no_std` — the heapless engine variant). R311im
+        # dropped the `sce-rust-runtime/no_std` force from the `reassembly`
+        # capability feature, so the no_std runtime is now selected by this
+        # PROFILE feature, not forced by the capability — which is what lets
+        # the AP build (std runtime) host the same module (Layer C1l). The
+        # one --no-std codegen emit serves both profiles (SCE pin 1474091c2
+        # SceBytes<N> alias).
+        if (cd crates && cargo build -p wz-session-core \
+            --target "$t" --no-default-features --features reassembly,no_std --quiet); then
+            echo "  G.8 reassembly MCU $t OK"
+        else
+            echo "  G.8 reassembly MCU $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"
@@ -1886,6 +1925,7 @@ run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
+run_layer C1l layer_c1l_reassembly || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
