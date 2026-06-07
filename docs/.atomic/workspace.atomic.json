@@ -30802,6 +30802,46 @@
         "SCE no_std-footprint report (claudedocs/sce-report-no-std-event-queue-footprint.md): queue-depth-64 + metadata levers; metadata done via pin, queue depth moot once events are tiny"
       ]
     },
+    "Round 311io": {
+      "decision_summary": "R311io: closed R311in pool-SSOT carries — §4 table max_frag 16/256->2/44 reconciled; deploy.yaml reassembly_pool mirror retired (by-name scxml ref); shared wz-codegen-build helper extracted",
+      "changes_bullets": [
+        "§4 doc table reconciled: max_fragments_per_message 16/256 -> 2/44 (matches the doc's own §9.1 revision + deploy + scxml; the old 16/256 violated SCE's slot_size>=max_frag*mtu invariant); provenance note now points at the buffer-pool scxml SSOT",
+        "deploy/ap_mcu_pair.yaml reassembly_pool: the inline 5-const value block replaced by { ref: reassembly_pool_{ap,mcu} } by-name; values single-sourced in the scxml. MCU DMA placement (maintain/DMAMUX1_CH3) kept as a doc note (scxml uses cache=none for BoundedVec staging)",
+        "NEW crate wz-codegen-build: shared Codegen::emit_statechart/emit_buffer_pool; wz-session-core (3 statecharts) + wz-runtime-tokio + wz-runtime-lwip build scripts use it as a build-dependency, removing the 3-way sce-codegen-invocation + emit-strip duplication"
+      ],
+      "verification_bullets": [
+        "full run-ci + Layer G EXIT 0; G.8 + G.9 all 7 MCU targets exercise the rewritten build scripts via the helper; 5 codegen paths (3 statechart + 2 buffer-pool) emit byte-identical (12+3+3 tests green); clippy 0; fmt clean",
+        "validate-workspace baseline unchanged (entries/sections/orphans); all changes source/doc/build only"
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction"
+      ],
+      "carry_forward_bullets": [
+        "deploy.yaml-schema-alignment is PARTIAL: the reassembly_pool value mirror is retired, but full alignment to SCE DeployConfig (pools as forge docs referenced by links) + the other buffer_pools (scout_rx/session_rx/session_tx) gaining their own scxml SSOTs is still open",
+        "MCU alloc-profile auto-sweep (reassembly deadline timer task on the lwIP executor) + the live MCU main-loop consumer (reading real lwIP UDP) land with the MCU session drive loop",
+        "AP: fold the reassembly deadline into the drive-loop select! race (today swept per-iteration); multi-peer / router multi-link wiring"
+      ],
+      "publishable_decision_summary": "R311io: closed R311in pool-SSOT carries — §4 table max_frag 16/256->2/44 reconciled; deploy.yaml reassembly_pool mirror retired (by-name scxml ref); shared wz-codegen-build helper extracted",
+      "publishable_changes_bullets": [
+        "§4 doc table reconciled: max_fragments_per_message 16/256 -> 2/44 (matches the doc's own §9.1 revision + deploy + scxml; the old 16/256 violated SCE's slot_size>=max_frag*mtu invariant); provenance note now points at the buffer-pool scxml SSOT",
+        "deploy/ap_mcu_pair.yaml reassembly_pool: the inline 5-const value block replaced by { ref: reassembly_pool_{ap,mcu} } by-name; values single-sourced in the scxml. MCU DMA placement (maintain/DMAMUX1_CH3) kept as a doc note (scxml uses cache=none for BoundedVec staging)",
+        "NEW crate wz-codegen-build: shared Codegen::emit_statechart/emit_buffer_pool; wz-session-core (3 statecharts) + wz-runtime-tokio + wz-runtime-lwip build scripts use it as a build-dependency, removing the 3-way sce-codegen-invocation + emit-strip duplication"
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci + Layer G EXIT 0; G.8 + G.9 all 7 MCU targets exercise the rewritten build scripts via the helper; 5 codegen paths (3 statechart + 2 buffer-pool) emit byte-identical (12+3+3 tests green); clippy 0; fmt clean",
+        "validate-workspace baseline unchanged (entries/sections/orphans); all changes source/doc/build only"
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction"
+      ],
+      "publishable_carry_forward_bullets": [
+        "deploy.yaml-schema-alignment is PARTIAL: the reassembly_pool value mirror is retired, but full alignment to SCE DeployConfig (pools as forge docs referenced by links) + the other buffer_pools (scout_rx/session_rx/session_tx) gaining their own scxml SSOTs is still open",
+        "MCU alloc-profile auto-sweep (reassembly deadline timer task on the lwIP executor) + the live MCU main-loop consumer (reading real lwIP UDP) land with the MCU session drive loop",
+        "AP: fold the reassembly deadline into the drive-loop select! race (today swept per-iteration); multi-peer / router multi-link wiring"
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
