@@ -66,9 +66,10 @@ use heapless::spsc::Queue;
 use heapless::Vec;
 
 use lwip_sys::{
-    err_enum_t_ERR_OK, ip_addr_t, lwip_init, netif_poll_all, pbuf, pbuf_alloc, pbuf_copy_partial,
-    pbuf_free, pbuf_layer_PBUF_TRANSPORT, pbuf_take, pbuf_type_PBUF_RAM, sys_check_timeouts, u16_t,
-    udp_bind, udp_new, udp_pcb, udp_recv, udp_remove, udp_sendto,
+    err_enum_t_ERR_OK, igmp_joingroup, igmp_leavegroup, ip4_addr_t, ip_addr_t, lwip_init,
+    netif_poll_all, pbuf, pbuf_alloc, pbuf_copy_partial, pbuf_free, pbuf_layer_PBUF_TRANSPORT,
+    pbuf_take, pbuf_type_PBUF_RAM, sys_check_timeouts, u16_t, udp_bind, udp_new, udp_pcb, udp_recv,
+    udp_remove, udp_sendto,
 };
 
 // ── R311ip — MCU rx buffer-pool SSOT consumers ──────────────────────
@@ -132,10 +133,24 @@ pub(crate) fn lwip_test_link() -> (std::sync::MutexGuard<'static, ()>, LwipLink)
     let guard = LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Test-only FFI: netif_get_loopif is gated behind LWIP_TESTMODE
+    // (host port only); ip4_set_default_multicast_netif routes multicast
+    // TX over a chosen netif so the multicast-RX smoke can loop a Scout
+    // datagram back into ip_input.
+    use lwip_sys::{ip4_set_default_multicast_netif, netif_get_loopif};
     // SAFETY: exactly one `lwip_init` per process, before any socket bind,
     // honouring the NO_SYS=1 single-thread contract. `LwipLink::init`'s own
     // call path is bypassed here so the second test does not re-init.
-    INIT.call_once(|| unsafe { lwip_init() });
+    INIT.call_once(|| {
+        // SAFETY: single lwip_init per process under the NO_SYS=1 contract.
+        unsafe { lwip_init() };
+        // Route multicast TX over the loopback netif (NETIF_FLAG_IGMP via
+        // LWIP_LOOPIF_MULTICAST) so a multicast send loops back into
+        // ip_input and is accepted on the joined group.
+        // SAFETY: called once, single-threaded; netif_get_loopif returns
+        // lwIP's static loop_netif, valid for the process lifetime.
+        unsafe { ip4_set_default_multicast_netif(netif_get_loopif()) };
+    });
     (
         guard,
         LwipLink {
@@ -190,6 +205,10 @@ pub enum LinkError {
     SendFailed(i8),
     /// pbuf allocation failure on the TX path.
     PbufAlloc,
+    /// `igmp_joingroup` / `igmp_leavegroup` returned a non-OK lwIP
+    /// err_t — no `NETIF_FLAG_IGMP` netif is up, or the IGMP group pool
+    /// (`MEMP_NUM_IGMP_GROUP`) is exhausted.
+    MulticastJoinFailed(i8),
 }
 
 /// Top-level link handle. Owns the `lwip_init` + netif state for the
@@ -236,6 +255,56 @@ impl LwipLink {
     pub fn check_timeouts(&self) {
         // SAFETY: sys_check_timeouts walks lwIP's static timer list.
         unsafe { sys_check_timeouts() };
+    }
+
+    /// Join the IPv4 multicast `group` (network-byte-order u32, e.g.
+    /// [`rx_sockets::SCOUT_MULTICAST_GROUP`]) on every IGMP-capable
+    /// netif. After this, a [`LwipUdpSocket`] bound to the matching port
+    /// receives datagrams addressed to the group — the mechanism zenoh
+    /// multicast scouting (`udp/224.0.0.224:7446`) relies on.
+    ///
+    /// IGMP membership is a netif-level property in lwIP, independent of
+    /// any single pcb; the deploy must have brought up a
+    /// `NETIF_FLAG_IGMP` netif first (the host smoke uses the loopback
+    /// netif, gated on `LWIP_LOOPIF_MULTICAST`).
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::MulticastJoinFailed`] if `igmp_joingroup` returns a
+    /// non-OK `err_t` (no IGMP netif is up, or the group pool is full).
+    pub fn join_multicast_group(&self, group: u32) -> Result<(), LinkError> {
+        // IP4_ADDR_ANY (0.0.0.0) as the interface selector joins on
+        // every IGMP-capable netif.
+        let any: ip4_addr_t = ip4_addr_t { addr: 0 };
+        let grp: ip4_addr_t = ip4_addr_t { addr: group };
+        // SAFETY: both pointers are valid for the duration of the call;
+        // igmp_joingroup only reads them. Under NO_SYS=1 the internal
+        // LWIP_ASSERT_CORE_LOCKED is a no-op.
+        let err = unsafe { igmp_joingroup(&any, &grp) };
+        if err as core::ffi::c_int != err_enum_t_ERR_OK {
+            return Err(LinkError::MulticastJoinFailed(err));
+        }
+        Ok(())
+    }
+
+    /// Leave the IPv4 multicast `group` previously joined via
+    /// [`join_multicast_group`](LwipLink::join_multicast_group).
+    /// Symmetric teardown; deploys that keep the link alive for the
+    /// process lifetime rarely need it.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::MulticastJoinFailed`] if `igmp_leavegroup` returns a
+    /// non-OK `err_t` (the group was not joined).
+    pub fn leave_multicast_group(&self, group: u32) -> Result<(), LinkError> {
+        let any: ip4_addr_t = ip4_addr_t { addr: 0 };
+        let grp: ip4_addr_t = ip4_addr_t { addr: group };
+        // SAFETY: see join_multicast_group.
+        let err = unsafe { igmp_leavegroup(&any, &grp) };
+        if err as core::ffi::c_int != err_enum_t_ERR_OK {
+            return Err(LinkError::MulticastJoinFailed(err));
+        }
+        Ok(())
     }
 }
 

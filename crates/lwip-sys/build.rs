@@ -178,6 +178,10 @@ fn main() {
         "core/ipv4/ip4.c",
         "core/ipv4/ip4_addr.c",
         "core/ipv4/ip4_frag.c",
+        // core/ipv4/igmp.c — multicast membership (R311ir scout RX).
+        // Body is #if LWIP_IGMP-gated; with LWIP_IGMP off it compiles to
+        // ~empty, so it is safe to list unconditionally across ports.
+        "core/ipv4/igmp.c",
         // netif/ — ethernet glue (loopif compiled in via LWIP_NETIF_LOOPBACK)
         "netif/ethernet.c",
     ];
@@ -242,6 +246,11 @@ fn main() {
         .allowlist_function("udp_recv")
         .allowlist_function("udp_send")
         .allowlist_function("udp_sendto")
+        // IGMP multicast membership (R311ir scout RX). join/leave on
+        // IP4_ADDR_ANY apply to every IGMP-capable netif; the udp_pcb
+        // bound to the scout port then receives the joined group.
+        .allowlist_function("igmp_joingroup")
+        .allowlist_function("igmp_leavegroup")
         // pbuf lifecycle (zero-copy buffer chain).
         .allowlist_function("pbuf_alloc")
         .allowlist_function("pbuf_free")
@@ -256,6 +265,12 @@ fn main() {
         // requires explicit poll to drain the loop_netif output queue
         // into ip_input).
         .allowlist_function("netif_poll_all")
+        // Loopback netif handle + multicast TX egress selection
+        // (R311ir). The host smoke routes multicast TX over the loop
+        // netif to exercise scout multicast RX deterministically; real
+        // deploys point this at their ethernet netif.
+        .allowlist_function("netif_get_loopif")
+        .allowlist_function("ip4_set_default_multicast_netif")
         // Top-level init + timer pump.
         .allowlist_function("lwip_init")
         .allowlist_function("sys_check_timeouts")

@@ -47,12 +47,27 @@
 #define LWIP_DHCP                       0
 #define LWIP_AUTOIP                     0
 #define LWIP_DNS                        0
-#define LWIP_IGMP                       0
 #define LWIP_STATS                      0
 
 /* --- Loopback for host smoke tests --- */
 #define LWIP_NETIF_LOOPBACK             1
 #define LWIP_HAVE_LOOPIF                1
+
+/* --- Multicast scouting (zenoh udp/224.0.0.224:7446 RX) --- */
+/* IGMP membership so a udp_pcb can receive multicast scout/hello
+ * datagrams — the MCU mirror of the AP std multicast socket. igmp.c
+ * provides igmp_joingroup, which wz-link-lwip's
+ * LwipLink::join_multicast_group links against. */
+#define LWIP_IGMP                       1
+/* Make the loopback netif IGMP-capable (netif_loopif_init gates
+ * NETIF_FLAG_IGMP on this) so the host smoke exercises multicast RX
+ * over loopback; real deploys receive on their ethernet netif. */
+#define LWIP_LOOPIF_MULTICAST           1
+/* Host-smoke only: exposes netif_get_loopif() (lwIP gates it behind
+ * LWIP_TESTMODE && LWIP_HAVE_LOOPIF) so the multicast-RX test can route
+ * its TX over the loop netif via ip4_set_default_multicast_netif. Not
+ * set on the cross-test / deploy ports — additive test accessor only. */
+#define LWIP_TESTMODE                   1
 
 /* --- Memory: libc malloc-backed --- */
 #define MEM_LIBC_MALLOC                 1

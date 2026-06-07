@@ -54,12 +54,18 @@
 #define LWIP_DHCP                       0
 #define LWIP_AUTOIP                     0
 #define LWIP_DNS                        0
-#define LWIP_IGMP                       0
 #define LWIP_STATS                      0
 
 /* --- Loopback netif kept on: wz-link-lwip allowlists netif_poll_all --- */
 #define LWIP_NETIF_LOOPBACK             1
 #define LWIP_HAVE_LOOPIF                1
+
+/* --- Multicast (IGMP) --- */
+/* igmp.c defines igmp_joingroup, which wz-link-lwip's
+ * LwipLink::join_multicast_group links against on the cross-real lane.
+ * (LWIP_LOOPIF_MULTICAST is host-only — real deploys join on their
+ * ethernet netif, not the loopback.) */
+#define LWIP_IGMP                       1
 
 /* --- Memory: lwIP's own static pool (no libc malloc) --- */
 #define MEM_LIBC_MALLOC                 0

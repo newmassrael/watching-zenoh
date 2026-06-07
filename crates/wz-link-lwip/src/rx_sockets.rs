@@ -48,6 +48,13 @@ pub const SCOUT_RX_SLOT_SIZE: usize = crate::scout_rx_pool_mcu::SLOT_SIZE;
 /// The scouting-link receive socket, pool-sized from `scout_rx_pool_mcu`.
 pub type ScoutRxSocket = LwipUdpSocket<SCOUT_RX_SLOT_SIZE, SCOUT_RX_SLOTS>;
 
+/// The zenoh multicast scouting group, `224.0.0.224`, as a lwIP-native
+/// (network-byte-order) u32 word — the host of zenoh-pico's
+/// `Z_CONFIG_MULTICAST_LOCATOR_DEFAULT` (`udp/224.0.0.224:7446`). The
+/// scout socket joins this group so it receives multicast Scout / Hello
+/// datagrams; the port (7446) is the caller's `bind_scout_rx` argument.
+pub const SCOUT_MULTICAST_GROUP: u32 = u32::from_le_bytes([224, 0, 0, 224]);
+
 /// Session-rx queue depth (`Q`) — from the SCE-codegen'd buffer-pool SSOT
 /// ([`crate::session_rx_pool_mcu`]).
 pub const SESSION_RX_SLOTS: usize = crate::session_rx_pool_mcu::SLOT_COUNT;
@@ -60,11 +67,23 @@ pub const SESSION_RX_SLOT_SIZE: usize = crate::session_rx_pool_mcu::SLOT_SIZE;
 pub type SessionRxSocket = LwipUdpSocket<SESSION_RX_SLOT_SIZE, SESSION_RX_SLOTS>;
 
 /// Bind the scouting-link receive socket on `port` with the scout pool's
-/// dims. (Multicast group join for the deploy's `224.0.0.224:7446` scout
-/// endpoint is a separate lwIP IGMP concern, not yet wired; binding
-/// `IP_ADDR_ANY:port` receives unicast to the port today.)
+/// dims and join the zenoh multicast scouting group
+/// ([`SCOUT_MULTICAST_GROUP`], `224.0.0.224`) so the socket receives
+/// multicast Scout / Hello datagrams — the MCU equivalent of the AP std
+/// multicast socket. The deploy must have brought up a `NETIF_FLAG_IGMP`
+/// netif before this call (the host smoke uses the loopback netif, gated
+/// on `LWIP_LOOPIF_MULTICAST`).
+///
+/// # Errors
+///
+/// - [`LinkError::BindFailed`] / [`LinkError::PcbExhausted`] from the
+///   underlying `udp_bind`.
+/// - [`LinkError::MulticastJoinFailed`] if the IGMP join fails (no
+///   IGMP-capable netif is up).
 pub fn bind_scout_rx(link: &LwipLink, port: u16) -> Result<ScoutRxSocket, LinkError> {
-    ScoutRxSocket::bind(link, port)
+    let sock = ScoutRxSocket::bind(link, port)?;
+    link.join_multicast_group(SCOUT_MULTICAST_GROUP)?;
+    Ok(sock)
 }
 
 /// Bind the session-link receive socket on `port` with the session pool's
@@ -112,5 +131,34 @@ mod tests {
         std::assert_eq!(&dg.data[..], payload);
         std::assert_eq!(dg.src_port, port);
         std::assert_eq!(sock.rx_drop_count(), 0);
+    }
+
+    /// The MCU mirror of the AP multicast scout socket: bind the scout
+    /// socket (which joins 224.0.0.224), loop a Scout-sized datagram to
+    /// the multicast group:port, and verify the recv callback delivers
+    /// it. `lwip_test_link` routes multicast TX over the IGMP-capable
+    /// loop netif, so this exercises the real lwIP IGMP accept path
+    /// (`inp->flags & NETIF_FLAG_IGMP && igmp_lookfor_group`).
+    #[test]
+    fn scout_rx_multicast_loopback_round_trip() {
+        let (_serial, link) = crate::lwip_test_link();
+        let port: u16 = 7446;
+        let mut sock: ScoutRxSocket =
+            bind_scout_rx(&link, port).expect("bind scout rx + join 224.0.0.224");
+
+        let payload: &[u8] = b"r311ir scout multicast hello";
+        sock.send_to(SCOUT_MULTICAST_GROUP, port, payload)
+            .expect("send_to 224.0.0.224");
+        link.poll_loopback();
+        link.check_timeouts();
+
+        let dg = sock.try_recv().expect("expected one multicast datagram");
+        std::assert_eq!(&dg.data[..], payload);
+        std::assert_eq!(dg.src_port, port);
+        std::assert_eq!(sock.rx_drop_count(), 0);
+
+        // Symmetric leave succeeds (the group was joined on the loop netif).
+        link.leave_multicast_group(SCOUT_MULTICAST_GROUP)
+            .expect("leave 224.0.0.224");
     }
 }
