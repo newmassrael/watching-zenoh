@@ -540,9 +540,6 @@ scouting-active = [
 # simply yields the no_std synth alone (no open path, no build error).
 scouting-static = ["wz-session-core/scouting-static"]
 
-[build-dependencies]
-sce-build = { path = "../../vendor/sce/sce-build" }
-
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec

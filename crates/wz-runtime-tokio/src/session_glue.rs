@@ -5133,16 +5133,22 @@ use wz_session_core::reassembly_dispatch::{
     Fragment as ReassemblyFragment, ReassemblyConfig, ReassemblyDispatcher,
 };
 
-/// Reassembly slot-pool dimensions for the unicast tokio session. Sourced
-/// as a baseline from `deploy/ap_mcu_pair.yaml`
-/// `buffer_pools.reassembly_pool` (slot_count 4 / slot_size 4096); the
-/// deploy.yaml -> dispatcher plumbing is deferred (mirrors the
-/// `SessionTimeouts::spec_defaults` deferral), so these dims and the
-/// config below stay documented baselines until the deploy loader lands.
+/// Reassembly slot-pool dimensions for the unicast tokio session. R311in
+/// — sourced from the SCE-codegen'd AP buffer-pool constants
+/// ([`crate::reassembly_pool_ap`]), whose single SSOT is
+/// `sources/network/reassembly_pool_ap.scxml` (`sce:kind="buffer-pool"`).
+/// These replace the prior hand-transcribed `4 / 4096` literals; the
+/// values, the spec §4 table, and the deploy.yaml block no longer drift
+/// because there is now one SCE-owned, build-validated source.
+///
+/// The emit types the slot dims as `usize`, so they bind directly as the
+/// dispatcher const generics (no cast). The AP machine's dims are larger
+/// than the MCU's (32 / 65536 vs 4 / 4096) — the tokio host IS the AP
+/// node, so it correctly uses the AP machine's pool.
 #[cfg(feature = "reassembly")]
-const REASSEMBLY_SLOTS: usize = 4;
+const REASSEMBLY_SLOTS: usize = crate::reassembly_pool_ap::SLOT_COUNT;
 #[cfg(feature = "reassembly")]
-const REASSEMBLY_SLOT_SIZE: usize = 4096;
+const REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_ap::SLOT_SIZE;
 
 /// The unicast tokio session's reassembly Router type. The std `alloc`
 /// backing keeps each chain's staging buffer on the heap;
@@ -5151,12 +5157,16 @@ const REASSEMBLY_SLOT_SIZE: usize = 4096;
 #[cfg(feature = "reassembly")]
 pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_SLOT_SIZE>;
 
-/// Baseline reassembly config (per_peer_quota 2 / reassembly_timeout_ms
-/// 500) from the same `deploy/ap_mcu_pair.yaml::reassembly_pool` block;
-/// deploy plumbing deferred.
+/// Reassembly config (`per_peer_quota` / `reassembly_timeout_ms`) sourced
+/// from the same SCE-codegen'd AP buffer-pool constants. The emit types
+/// them as `u32`; [`ReassemblyConfig`] takes `u16` / `u64`, so the two
+/// widening casts are the only adaptation.
 #[cfg(feature = "reassembly")]
 fn reassembly_config() -> ReassemblyConfig {
-    ReassemblyConfig::new(2, 500)
+    ReassemblyConfig::new(
+        crate::reassembly_pool_ap::PER_PEER_QUOTA as u16,
+        crate::reassembly_pool_ap::REASSEMBLY_TIMEOUT_MS as u64,
+    )
 }
 
 /// Report one driver-loop outcome, additionally driving the reassembly

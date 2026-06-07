@@ -215,6 +215,9 @@ machines:
       scout_rx_pool:    { slot_count: 32, slot_size:  512, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
       session_rx_pool:  { slot_count: 64, slot_size: 4096, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
       session_tx_pool:  { slot_count: 64, slot_size: 4096, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
+      # R311in — parsed SSOT is `sources/network/reassembly_pool_ap.scxml`
+      # (sce:kind=buffer-pool). This block mirrors it by hand; see the
+      # mcu_node.reassembly_pool note above for the full rationale.
       reassembly_pool:
         variant: reassembly
         slot_count: 32

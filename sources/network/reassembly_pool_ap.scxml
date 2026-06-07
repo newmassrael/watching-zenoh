@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  AP reassembly buffer-pool config — the SSOT for the tokio (AP / Linux)
+  host's reassembly slot-pool dimensions and runtime knobs
+  (reassembly-fsm prose-sketch §4 "Timer / quota / pool config").
+
+  R311in — this file replaces the hand-transcribed `4 / 4096 / 2 / 500`
+  constants formerly buried in `wz-runtime-tokio/session_glue.rs`. SCE
+  is the typed SSOT owner of the `sce:kind="buffer-pool"` schema: its
+  `sce-codegen` emits the spec-anchored `SLOT_COUNT` / `SLOT_SIZE` /
+  `MAX_FRAGMENTS_PER_MESSAGE` / `REASSEMBLY_TIMEOUT_MS` / `PER_PEER_QUOTA`
+  constants (plus the `ReassemblySlot` per-slot struct + size drift
+  guards) that the host `ReassemblyDispatcher` consumes. The template
+  comment is explicit that these constants exist "so the algorithm
+  doesn't have to round-trip through the deploy.yaml" — the wz
+  dispatcher is that intended downstream consumer. Authoring the values
+  here once, and codegen'ing them, removes the prior triple-drift
+  (spec §4 table / deploy.yaml inline block / session_glue consts).
+
+  Values mirror `deploy/ap_mcu_pair.yaml` `ap_node.buffer_pools.
+  reassembly_pool` (the AP machine of the canonical asymmetric deploy).
+  The MCU machine has its own, smaller pool — see
+  `reassembly_pool_mcu.scxml`. SCE's cross-doc deploy validators
+  (`slot_size >= max_fragments * mtu`, `peer_table.capacity *
+  per_peer_quota >= slot_count`) hold for these values against the AP
+  link mtu 1472 / peer_table 256: 65536 >= 44*1472 = 64768, and
+  256*8 = 2048 >= 32.
+
+  Only the five reassembly constants are consumed by wz; the buffer-pool
+  template's §5.E DMA slot-lifecycle API (Slot<S> / pool struct) is part
+  of SCE's emit but unused by the AP host (the dispatcher owns its own
+  strict-in-order staging) and compiles as dead code.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="buffer-pool" name="reassembly_pool_ap" version="1.0">
+  <sce:variant>reassembly</sce:variant>
+  <sce:slot-count>32</sce:slot-count>
+  <sce:slot-size>65536</sce:slot-size>
+  <sce:section>heap</sce:section>
+  <sce:alignment>64</sce:alignment>
+  <sce:cache-policy>none</sce:cache-policy>
+  <sce:max-fragments-per-message>44</sce:max-fragments-per-message>
+  <sce:reassembly-timeout-ms>500</sce:reassembly-timeout-ms>
+  <sce:per-peer-quota>8</sce:per-peer-quota>
+</scxml>

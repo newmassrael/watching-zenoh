@@ -1487,7 +1487,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "log",
  "portable-atomic",
- "sce-build",
  "sce-forge-runtime",
  "sce-rust-runtime",
  "socket2",

@@ -38,6 +38,34 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 
 pub mod session_glue;
 
+/// SCE-generated AP reassembly buffer-pool config. The emit comes from
+/// `sources/network/reassembly_pool_ap.scxml` (an `sce:kind="buffer-pool"`
+/// document, the SSOT) via `build.rs` (codegen'd into
+/// `$OUT_DIR/reassembly_pool_ap.rs` only under the `reassembly` feature).
+///
+/// R311in — exposes the spec-anchored pool constants the host
+/// `ReassemblyDispatcher` consumes: `SLOT_COUNT` / `SLOT_SIZE` (the
+/// dispatcher const generics) and `PER_PEER_QUOTA` /
+/// `REASSEMBLY_TIMEOUT_MS` (the `ReassemblyConfig` runtime knobs). This
+/// replaces the formerly hand-transcribed `4 / 4096 / 2 / 500` constants
+/// in `session_glue.rs`; the values now have a single SCE-owned source
+/// (see the scxml header). The build script strips the file-head
+/// `#![...]` inner attributes and the trailing SCE-pool-API
+/// `generated_tests` module; the lint allows are restored here as outer
+/// attributes on the wrapping module. SCE's §5.E DMA slot-pool API in the
+/// emit (`Slot<S>` / the pool struct) is unused by the AP host (the
+/// dispatcher owns its own strict-in-order staging) and is dead code.
+#[cfg(feature = "reassembly")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod reassembly_pool_ap {
+    include!(concat!(env!("OUT_DIR"), "/reassembly_pool_ap.rs"));
+}
+
 // Crate-local fixtures for this crate's OWN unit tests (recording driver
 // + actions builders). Kept in-crate — NOT in the test-support sibling —
 // so unit tests receive this crate's version of `SessionLinkActions`
