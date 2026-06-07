@@ -101,6 +101,15 @@ impl StatePolicy for TimerProbePolicy {
     type Event = Ev;
     type Payload = ();
     type Hal = TestHal;
+    // SCE pin 4ec1aa642 added these two per-machine sizing levers to
+    // `StatePolicy`. This probe exercises the full scheduler-routing
+    // substrate (it schedules with real send_ids), so it keeps the
+    // non-eliding `SceString` send-id store and the default-depth event
+    // queue — the behaviour-preserving choice vs the pre-bump default.
+    type EventQueue = sce_rust_runtime::EventQueueManager<
+        sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>,
+    >;
+    type ScheduledSendId = sce_rust_runtime::SceString;
 
     fn initial_state() -> Self::State {
         St::S0
