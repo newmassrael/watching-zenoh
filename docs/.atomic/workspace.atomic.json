@@ -30902,6 +30902,48 @@
         "R311io carries unchanged: deploy.yaml full top-level alignment to SCE DeployConfig topology: schema (R50/R123b); MCU alloc-profile reassembly auto-sweep + live main-loop consumer; AP reassembly deadline into the drive-loop select! race; multi-peer / router multi-link wiring."
       ]
     },
+    "Round 311iq": {
+      "decision_summary": "R311iq: closed reassembly_pool standalone-yaml mirror carry (R311io/ip) — deploy/mcu_target.yaml + ap_standalone.yaml now by-name ref reassembly_pool_{mcu,ap}.scxml; all 3 deploy yamls uniform",
+      "changes_bullets": [
+        "deploy/mcu_target.yaml: reassembly_pool inline block (variant/slot dims/section/align/dma/cache/frag/timeout/quota) -> { ref: reassembly_pool_mcu }; the eventual DMA-staged placement (cache_policy=maintain + dma_channel=DMAMUX1_CH3) kept as a doc note since the scxml uses cache-policy=none (dispatcher stages in a BoundedVec, not the DMA slot table)",
+        "deploy/ap_standalone.yaml: reassembly_pool inline block -> { ref: reassembly_pool_ap }; AP is heap-resident / cache none so the scxml fully captures the pool (no divergent DMA note needed)",
+        "both refs resolve to codegen-consumed SSOTs (sources/network/reassembly_pool_{mcu,ap}.scxml, emit_buffer_pool) so the ref-iff-SSOT rule holds; matches R311io's deploy/ap_mcu_pair.yaml conversion -> all 3 non-vendor deploy yamls now carry reassembly_pool only in by-name { ref: ... } form"
+      ],
+      "verification_bullets": [
+        "all 3 non-vendor deploy yamls parse as valid YAML (python yaml.safe_load OK); grep confirms `reassembly_pool:` appears only in `{ ref: ... }` form across mcu_target / ap_standalone / ap_mcu_pair",
+        "build unaffected: SCE parse_deploy rejects wz's pre-topology yaml schema (mnemosyne.toml:135) so deploy yamls are not codegen-parsed; codegen reads the scxml SSOTs directly (wz-runtime-tokio/build.rs emit_buffer_pool reassembly_pool_ap; wz-runtime-lwip / wz-link-lwip build.rs for reassembly_pool_mcu)",
+        "no atomic-store Section or scxml mutation in this round (config-doc-only); validate_workspace expected T1 orphan new=0, only this changelog entry added (entries 595 -> 596)"
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions"
+      ],
+      "carry_forward_bullets": [
+        "session_tx_pool (MCU) + all AP-profile pools (scout_rx / session_rx / session_tx_ap) still inline: no live consumer (no tx staging ring; tokio uses a single recv buffer, not a pooled rx ring). Extract each as a scxml SSOT when its consumer lands — the born-with-consumer rule, not pre-emptively.",
+        "scout multicast rx: bind_scout_rx binds IP_ADDR_ANY:port (unicast) today; the deploy scout endpoint 224.0.0.224:7446 needs an lwIP IGMP join (LWIP_IGMP + igmp_joingroup) not yet wired.",
+        "deploy.yaml full top-level alignment to SCE DeployConfig topology schema (R50/R123b); MCU alloc-profile reassembly auto-sweep + live main-loop consumer; AP reassembly deadline into the drive-loop select! race; multi-peer / router multi-link wiring."
+      ],
+      "publishable_decision_summary": "R311iq: closed reassembly_pool standalone-yaml mirror carry (R311io/ip) — deploy/mcu_target.yaml + ap_standalone.yaml now by-name ref reassembly_pool_{mcu,ap}.scxml; all 3 deploy yamls uniform",
+      "publishable_changes_bullets": [
+        "deploy/mcu_target.yaml: reassembly_pool inline block (variant/slot dims/section/align/dma/cache/frag/timeout/quota) -> { ref: reassembly_pool_mcu }; the eventual DMA-staged placement (cache_policy=maintain + dma_channel=DMAMUX1_CH3) kept as a doc note since the scxml uses cache-policy=none (dispatcher stages in a BoundedVec, not the DMA slot table)",
+        "deploy/ap_standalone.yaml: reassembly_pool inline block -> { ref: reassembly_pool_ap }; AP is heap-resident / cache none so the scxml fully captures the pool (no divergent DMA note needed)",
+        "both refs resolve to codegen-consumed SSOTs (sources/network/reassembly_pool_{mcu,ap}.scxml, emit_buffer_pool) so the ref-iff-SSOT rule holds; matches R311io's deploy/ap_mcu_pair.yaml conversion -> all 3 non-vendor deploy yamls now carry reassembly_pool only in by-name { ref: ... } form"
+      ],
+      "publishable_verification_bullets": [
+        "all 3 non-vendor deploy yamls parse as valid YAML (python yaml.safe_load OK); grep confirms `reassembly_pool:` appears only in `{ ref: ... }` form across mcu_target / ap_standalone / ap_mcu_pair",
+        "build unaffected: SCE parse_deploy rejects wz's pre-topology yaml schema (mnemosyne.toml:135) so deploy yamls are not codegen-parsed; codegen reads the scxml SSOTs directly (wz-runtime-tokio/build.rs emit_buffer_pool reassembly_pool_ap; wz-runtime-lwip / wz-link-lwip build.rs for reassembly_pool_mcu)",
+        "no atomic-store Section or scxml mutation in this round (config-doc-only); validate_workspace expected T1 orphan new=0, only this changelog entry added (entries 595 -> 596)"
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session_tx_pool (MCU) + all AP-profile pools (scout_rx / session_rx / session_tx_ap) still inline: no live consumer (no tx staging ring; tokio uses a single recv buffer, not a pooled rx ring). Extract each as a scxml SSOT when its consumer lands — the born-with-consumer rule, not pre-emptively.",
+        "scout multicast rx: bind_scout_rx binds IP_ADDR_ANY:port (unicast) today; the deploy scout endpoint 224.0.0.224:7446 needs an lwIP IGMP join (LWIP_IGMP + igmp_joingroup) not yet wired.",
+        "deploy.yaml full top-level alignment to SCE DeployConfig topology schema (R50/R123b); MCU alloc-profile reassembly auto-sweep + live main-loop consumer; AP reassembly deadline into the drive-loop select! race; multi-peer / router multi-link wiring."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
