@@ -30656,6 +30656,50 @@
         "SCHISM ROOT (for reference): sce-rust-runtime lib.rs has #[cfg(all(no_std, http-send))] compile_error; tokio's runtime dep pulls default http-send; no_std also elides IScriptEngine that sce-rust-lua needs -> full no_std AP is impossible until Lua fully leaves the graph"
       ]
     },
+    "Round 311il": {
+      "decision_summary": "session FSM engine-free (schism session-half done): <sce:action> trait dispatch + host deadline-sweep + dispatcher guards; sce-rust-lua fully leaves graph incl wz facade",
+      "changes_bullets": [
+        "session_fsm_unicast.scxml engine-free; codegen moved to wz-session-core no_std (session-unicast)",
+        "SessionActionsBinding impls generated 18-method trait; accept guards -> dispatcher pre-classify",
+        "HandshakeDeadlineTracker + SessionTimeouts (§2.5); both drive loops host-sweep, no <send delay>",
+        "sce-rust-lua dropped (wz-runtime-tokio + wz facade pub mod script); sce-rust-runtime stays"
+      ],
+      "verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT0 (Layer 0 fmt + C/D/E/F + Layer G 7 MCU); clippy 0",
+        "cargo tree preset-ap-client = 0 sce-rust-lua; 23 tokio test bins + tracker unit tests green",
+        "validate_workspace orphan delta 0 (T1=13 ledger, no new orphan)"
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "carry_forward_bullets": [
+        "reassembly AP integration unblocked: no_std AP build now possible (Lua left the graph)",
+        "TODO ReassemblyDispatcher + RX seam (parse_inbound Fragment 0x06); drop reassembly no_std force",
+        "SessionTimeouts deploy-config plumbing deferred (values = §2.5 spec_defaults today)"
+      ],
+      "publishable_decision_summary": "session FSM engine-free (schism session-half done): <sce:action> trait dispatch + host deadline-sweep + dispatcher guards; sce-rust-lua fully leaves graph incl wz facade",
+      "publishable_changes_bullets": [
+        "session_fsm_unicast.scxml engine-free; codegen moved to wz-session-core no_std (session-unicast)",
+        "SessionActionsBinding impls generated 18-method trait; accept guards -> dispatcher pre-classify",
+        "HandshakeDeadlineTracker + SessionTimeouts (§2.5); both drive loops host-sweep, no <send delay>",
+        "sce-rust-lua dropped (wz-runtime-tokio + wz facade pub mod script); sce-rust-runtime stays"
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT0 (Layer 0 fmt + C/D/E/F + Layer G 7 MCU); clippy 0",
+        "cargo tree preset-ap-client = 0 sce-rust-lua; 23 tokio test bins + tracker unit tests green",
+        "validate_workspace orphan delta 0 (T1=13 ledger, no new orphan)"
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "publishable_carry_forward_bullets": [
+        "reassembly AP integration unblocked: no_std AP build now possible (Lua left the graph)",
+        "TODO ReassemblyDispatcher + RX seam (parse_inbound Fragment 0x06); drop reassembly no_std force",
+        "SessionTimeouts deploy-config plumbing deferred (values = §2.5 spec_defaults today)"
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
