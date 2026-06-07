@@ -30754,6 +30754,54 @@
         "no MCU session-open consumer yet: the dispatcher is cross-compiled (G.8) + unit-tested but not yet driven by a live MCU loop (bottom-up next step)."
       ]
     },
+    "Round 311in": {
+      "decision_summary": "R311in: reassembly pool config from sce buffer-pool SSOT (AP+MCU); fragment.chunk payload field dropped (no_std dispatcher 1.68MB->22KB); live MCU reassembly seam (wz-runtime-lwip)",
+      "changes_bullets": [
+        "carry[0]: sources/network/reassembly_pool_ap.scxml (sce:kind=buffer-pool) + wz-runtime-tokio/build.rs codegen; session_glue reads SLOT_COUNT/SLOT_SIZE/PER_PEER_QUOTA/REASSEMBLY_TIMEOUT_MS; drops hand-transcribed 4/4096/2/500 consts",
+        "pin bump vendor/sce 3f263f65b->4ec1aa642 (no_std EventMetadata elision 1328B->1B); TimerProbePolicy gains StatePolicy EventQueue/ScheduledSendId assoc types",
+        "payload removal: fragment_chunk_schema.scxml drops payload:bytes max-size 1472 (only more bit stays); reassembly_slot.scxml 3 actions become no-arg signals; SlotBinding sigs + chunk_event updated",
+        "carry[3]: sources/network/reassembly_pool_mcu.scxml + wz-runtime-lwip reassembly feature/build.rs/lib.rs wrapper + reassembly_rx seam (mcu_reassembly() drives ReassemblyDispatcher no-alloc); run-ci Layer G.9"
+      ],
+      "verification_bullets": [
+        "full run-ci + Layer G EXIT 0; G.8 + new G.9 reassembly seam cross-compile all 7 Phase W MCU targets incl thumbv6m M0+ no-alloc",
+        "AP reassembly + dispatcher 12 tests + MCU seam 3 tests green; clippy 0 warnings; fmt clean; validate-workspace baseline unchanged",
+        "no_std ReassemblyDispatcher<4,4096> measured 22,192 bytes (was 1,678,864 = 75.6x); fits 128KiB sram2 with 106KiB headroom"
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "reassembly-fsm--prose-sketch/2-3-router-states",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction"
+      ],
+      "carry_forward_bullets": [
+        "spec §4 table max_fragments stale (16/256) vs deploy+scxml (2/44, the SCE-invariant-valid values); reconcile the atomic store §4 section as a follow-up",
+        "deploy.yaml top-level schema differs from SCE DeployConfig so it is unparsed; deploy.yaml-schema-alignment debt to retire the inline pool mirror via a by-name pool reference",
+        "MCU alloc-profile auto-sweep (reassembly deadline timer task on the lwIP executor) lands with the MCU session drive loop; the no-alloc seam takes now_ms from the caller today",
+        "SCE no_std-footprint report (claudedocs/sce-report-no-std-event-queue-footprint.md): queue-depth-64 + metadata levers; metadata done via pin, queue depth moot once events are tiny"
+      ],
+      "publishable_decision_summary": "R311in: reassembly pool config from sce buffer-pool SSOT (AP+MCU); fragment.chunk payload field dropped (no_std dispatcher 1.68MB->22KB); live MCU reassembly seam (wz-runtime-lwip)",
+      "publishable_changes_bullets": [
+        "carry[0]: sources/network/reassembly_pool_ap.scxml (sce:kind=buffer-pool) + wz-runtime-tokio/build.rs codegen; session_glue reads SLOT_COUNT/SLOT_SIZE/PER_PEER_QUOTA/REASSEMBLY_TIMEOUT_MS; drops hand-transcribed 4/4096/2/500 consts",
+        "pin bump vendor/sce 3f263f65b->4ec1aa642 (no_std EventMetadata elision 1328B->1B); TimerProbePolicy gains StatePolicy EventQueue/ScheduledSendId assoc types",
+        "payload removal: fragment_chunk_schema.scxml drops payload:bytes max-size 1472 (only more bit stays); reassembly_slot.scxml 3 actions become no-arg signals; SlotBinding sigs + chunk_event updated",
+        "carry[3]: sources/network/reassembly_pool_mcu.scxml + wz-runtime-lwip reassembly feature/build.rs/lib.rs wrapper + reassembly_rx seam (mcu_reassembly() drives ReassemblyDispatcher no-alloc); run-ci Layer G.9"
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci + Layer G EXIT 0; G.8 + new G.9 reassembly seam cross-compile all 7 Phase W MCU targets incl thumbv6m M0+ no-alloc",
+        "AP reassembly + dispatcher 12 tests + MCU seam 3 tests green; clippy 0 warnings; fmt clean; validate-workspace baseline unchanged",
+        "no_std ReassemblyDispatcher<4,4096> measured 22,192 bytes (was 1,678,864 = 75.6x); fits 128KiB sram2 with 106KiB headroom"
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "reassembly-fsm--prose-sketch/2-3-router-states",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction"
+      ],
+      "publishable_carry_forward_bullets": [
+        "spec §4 table max_fragments stale (16/256) vs deploy+scxml (2/44, the SCE-invariant-valid values); reconcile the atomic store §4 section as a follow-up",
+        "deploy.yaml top-level schema differs from SCE DeployConfig so it is unparsed; deploy.yaml-schema-alignment debt to retire the inline pool mirror via a by-name pool reference",
+        "MCU alloc-profile auto-sweep (reassembly deadline timer task on the lwIP executor) lands with the MCU session drive loop; the no-alloc seam takes now_ms from the caller today",
+        "SCE no_std-footprint report (claudedocs/sce-report-no-std-event-queue-footprint.md): queue-depth-64 + metadata levers; metadata done via pin, queue depth moot once events are tiny"
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
