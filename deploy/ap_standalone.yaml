@@ -259,20 +259,15 @@ machines:
         dma_channel: ~
         cache_policy: none
 
-      reassembly_pool:
-        variant: reassembly
-        slot_count: 32                 # = limits.in_flight_reassembly.
-        slot_size: 65536               # ≥ qos.batch_size; AP
-                                       # routinely reassembles
-                                       # multi-fragment messages.
-        section: heap
-        alignment: 64
-        dma_channel: ~
-        cache_policy: none
-        max_fragments_per_message: 44  # = qos.max_fragment_count.
-        reassembly_timeout_ms: 500
-        per_peer_quota: 8              # invariant: peer_table × quota
-                                       # = 256 × 8 = 2048 ≥ 32. OK.
+      # R311in — reassembly_pool's def lives ONLY in
+      # `sources/network/reassembly_pool_ap.scxml` (sce:kind=buffer-pool),
+      # referenced by name; values NOT duplicated. AP is heap-resident /
+      # cache none, so the scxml fully captures the pool (the §5.M
+      # derivations + invariant `peer_table x per_peer_quota >= slot_count`
+      # live in the scxml header). R311iq retires this standalone-yaml
+      # inline mirror, matching the R311io conversion of
+      # deploy/ap_mcu_pair.yaml's ap_node pool.
+      reassembly_pool: { ref: reassembly_pool_ap }
 
     # ---------------------------------------------------------------
     # extern_symbols — RFC §5.K

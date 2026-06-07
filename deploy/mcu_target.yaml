@@ -347,30 +347,20 @@ machines:
         dma_channel: DMAMUX1_CH2
         cache_policy: maintain
 
-      reassembly_pool:
-        # §5.M reassembly-variant pool. Sized to limits.in_flight_
-        # reassembly with stage-copy WCET checked against
-        # worker_slot_budget_us per §5.M build-time analysis.
-        variant: reassembly
-        slot_count: 4                  # = limits.in_flight_reassembly.
-        slot_size: 4096                # max reassembled message.
-        section: sram2                 # different SRAM region than
-                                       # rx_pool to avoid line-level
-                                       # cross-contamination per §5.E.
-        alignment: 32
-        dma_channel: DMAMUX1_CH3
-        cache_policy: maintain
-        max_fragments_per_message: 2   # = qos.max_fragment_count.
-                                       # See `qos:` block above for
-                                       # derivation; raise both in
-                                       # tandem with `slot_size` per
-                                       # RFC §5.M invariant.
-        reassembly_timeout_ms: 500     # = session.reassembly_timeout_ms.
-        per_peer_quota: 2              # §5.M DoS hardening; satisfies
-                                       # invariant
-                                       # `peer_table × per_peer_quota
-                                       # ≥ slot_count`
-                                       # (16 × 2 = 32 ≥ 4).
+      # R311in — reassembly_pool's def (slot_count / slot_size /
+      # max_fragments_per_message / reassembly_timeout_ms / per_peer_quota)
+      # lives ONLY in its SSOT doc `sources/network/reassembly_pool_mcu.scxml`
+      # (sce:kind=buffer-pool), referenced by name here — values are NOT
+      # duplicated (single source; closes the prior hand-sync mirror). The
+      # scxml header carries the §5.M derivations + SCE deploy invariants
+      # (slot_size >= 2*mtu; peer_table x per_peer_quota >= slot_count).
+      # R311iq retires this standalone-yaml inline mirror, matching the
+      # R311io conversion of deploy/ap_mcu_pair.yaml's mcu_node pool.
+      # NOTE the eventual DMA-staged placement for this pool is
+      # cache_policy=maintain + dma_channel=DMAMUX1_CH3; the scxml uses
+      # cache-policy=none today because the dispatcher stages in a
+      # BoundedVec, not the §5.E DMA slot table (DMA path not yet wired).
+      reassembly_pool: { ref: reassembly_pool_mcu }
 
     # ---------------------------------------------------------------
     # extern_symbols — RFC §5.K + §5.I
