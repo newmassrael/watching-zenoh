@@ -376,6 +376,15 @@ pub mod frame_encode;
 ))]
 pub mod handshake_encode;
 
+/// Outbound pub/sub `Push` network-message builders (`build_push_*` +
+/// the `_with_meta` family) hoisted from
+/// `wz-runtime-tokio::session_glue` so both runtime profiles share one
+/// Push-builder SSOT. Owned `Vec` output (alloc-gated) and `codec-push`
+/// gated — the whole module is dead under a subset that does not compose
+/// the pub/sub data plane.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub mod push_build;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns
