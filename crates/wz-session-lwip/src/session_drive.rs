@@ -99,6 +99,15 @@ where
     F: FnMut(IterationEvent<'_>),
 {
     let mut engine = new_session_engine(actions);
+    // `new_session_engine` returns an un-initialized engine (the AP
+    // convention — the caller runs the SCXML initial transition into the
+    // `Init` state). Without this the `role.start_event()` below lands on an
+    // engine that never entered `Init`, so `inbound.start` / `outbound.start`
+    // does not transition into `AwaitingInitSyn` / `LinkOpening` and the
+    // whole handshake stalls. The Stage 4b smoke never surfaced this (an
+    // acceptor with no inbound peer terminates on `max_iters` regardless of
+    // FSM state); the Stage 5 real-handshake e2e is what exercises it.
+    engine.initialize();
     engine.process_event(role.start_event());
 
     let lease_ms = if actions.params.lease_in_seconds {
