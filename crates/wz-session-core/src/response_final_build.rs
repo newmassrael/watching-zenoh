@@ -44,7 +44,6 @@ use wz_codecs::response_final::ResponseFinalOwned;
 ///
 /// `request_id` MUST equal the `rid` from the matching
 /// `build_request_query` that opened the Query/Reply session.
-#[cfg(feature = "codec-response-final")]
 pub fn build_response_final(request_id: u64) -> ResponseFinalOwned {
     ResponseFinalOwned {
         // MID 0x1A (_Z_MID_N_RESPONSE_FINAL). Z bit-7 stays clear:
@@ -52,5 +51,62 @@ pub fn build_response_final(request_id: u64) -> ResponseFinalOwned {
         header: 0x1A,
         request_id,
         extensions: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use wz_codecs_test_support::TestWire;
+
+    /// R121j-1 — `encode_frame_with_request` produces the same
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.wire()` wrapping as
+    /// the existing `encode_frame_with_push` / `encode_frame_with_declare`
+    /// helpers, with `Request.wire()` as the inner payload bytes.
+    /// Reliable / best-effort header-flag behaviour mirrors the other
+    /// two helpers so the SN-window ordering contract stays uniform
+    /// across PUSH / DECLARE / REQUEST outbound paths.
+    /// R121j-2 — Wire-byte regression gate: `build_response_final`
+    /// emits the zenoh-pico `_z_response_final_encode` shape
+    /// (network.c:368-376). Two vectors lock both the single-byte
+    /// VLE rid and the multi-byte VLE boundary (rid=200) — the same
+    /// boundary R121i-c uses to protect against codegen drift on
+    /// the VLE writer's continuation-bit logic.
+    #[test]
+    fn build_response_final_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — single-byte VLE rid (rid=42).
+        let small = build_response_final(42);
+        let small_wire = small.wire();
+        assert_eq!(
+            small_wire,
+            vec![
+                0x1A, // _Z_MID_N_RESPONSE_FINAL (no Z flag)
+                0x2A, // VLE(rid=42)
+            ],
+            "ResponseFinal small-rid wire bytes must match zenoh-pico reference",
+        );
+
+        // Case 2 — multi-byte VLE rid (rid=200, encodes as 0xC8 0x01).
+        let large = build_response_final(200);
+        let large_wire = large.wire();
+        assert_eq!(
+            large_wire,
+            vec![
+                0x1A, 0xC8, // (200 & 0x7F) | 0x80
+                0x01, // 200 >> 7
+            ],
+            "ResponseFinal multi-byte VLE rid wire bytes must match zenoh-pico reference",
+        );
+
+        assert_eq!(
+            small.header, 0x1A,
+            "header carries MID only; Z (bit-7) clear in minimal shape"
+        );
+        assert_eq!(small.request_id, 42);
+        assert!(
+            small.extensions.is_none(),
+            "minimal shape: no RF-level extensions"
+        );
     }
 }

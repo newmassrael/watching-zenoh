@@ -61,7 +61,6 @@ use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 /// Panics if `mapping_id == 0` — id zero is reserved as the
 /// literal-keyexpr sentinel and a DECLARE with id=0 has no
 /// table-population semantics in zenoh-pico.
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned, CodecError> {
     assert!(
         mapping_id != 0,
@@ -158,7 +157,6 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned
 ///     subscribed keyexpr is the peer's mapping for `N`.
 ///   - `keyexpr_mapping_id == N, suffix = Some(s)`: compound — the
 ///     subscribed keyexpr is mapping `N`'s prefix + `s`.
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_subscriber(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
@@ -238,7 +236,6 @@ pub fn build_declare_subscriber(
 ///   - `(N, None)`: alias — the queried keyexpr is the peer's
 ///     mapping for `N`.
 ///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_queryable(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
@@ -306,7 +303,6 @@ pub fn build_declare_queryable(
 ///
 /// `keyexpr_mapping_id` / `keyexpr_suffix` convention matches the
 /// other DECLARE builders (literal / alias / compound).
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_token(
     token_id: u64,
     keyexpr_mapping_id: u64,
@@ -413,7 +409,6 @@ pub fn build_declare_token(
 ///   VLE(subscriber_id)
 ///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
 /// ```
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_subscriber_nonlocal(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
@@ -460,7 +455,6 @@ pub fn build_declare_subscriber_nonlocal(
 /// (default-state `_z_queryable_infos_t`); a future round adding
 /// `complete` / `distance` will introduce a separate
 /// `build_declare_queryable_nonlocal_with_info` helper.
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_queryable_nonlocal(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
@@ -503,7 +497,6 @@ pub fn build_declare_queryable_nonlocal(
 /// [`build_declare_token`] for the Nonlocal case. Same id=0 rejection
 /// rule as the other `_nonlocal` builders. DeclToken has no extension
 /// surface at all, so the no-ext byte-stability contract is preserved.
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_token_nonlocal(
     token_id: u64,
     keyexpr_mapping_id: u64,
@@ -559,7 +552,6 @@ pub fn build_declare_token_nonlocal(
 /// from a prior `Declare(DeclKexpr)`. The Z bit is bit-7 of the
 /// header and is left clear by every conformant zenoh-pico
 /// emit — wz mirrors that contract.
-#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_kexpr(mapping_id: u64) -> DeclareOwned {
     DeclareOwned {
         header: wire_const::N_MID_DECLARE,
@@ -594,7 +586,6 @@ pub fn build_undeclare_kexpr(mapping_id: u64) -> DeclareOwned {
 ///   [UndeclSubscriber.header = _Z_UNDECL_SUBSCRIBER_MID (0x03)]
 ///   VLE(subscriber_id)
 /// ```
-#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_subscriber(subscriber_id: u64) -> DeclareOwned {
     DeclareOwned {
         header: wire_const::N_MID_DECLARE,
@@ -620,7 +611,6 @@ pub fn build_undeclare_subscriber(subscriber_id: u64) -> DeclareOwned {
 ///   [UndeclQueryable.header = _Z_UNDECL_QUERYABLE_MID (0x05)]
 ///   VLE(queryable_id)
 /// ```
-#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_queryable(queryable_id: u64) -> DeclareOwned {
     DeclareOwned {
         header: wire_const::N_MID_DECLARE,
@@ -646,7 +636,6 @@ pub fn build_undeclare_queryable(queryable_id: u64) -> DeclareOwned {
 ///   [UndeclToken.header = _Z_UNDECL_TOKEN_MID (0x07)]
 ///   VLE(token_id)
 /// ```
-#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_token(token_id: u64) -> DeclareOwned {
     DeclareOwned {
         header: wire_const::N_MID_DECLARE,
@@ -674,7 +663,6 @@ pub fn build_undeclare_token(token_id: u64) -> DeclareOwned {
 /// reply sequence.
 ///
 /// Wire shape: `[N_MID_DECLARE, 0x1A]` — exactly two bytes.
-#[cfg(feature = "codec-declare")]
 pub fn build_declare_final() -> DeclareOwned {
     DeclareOwned {
         header: wire_const::N_MID_DECLARE,
@@ -683,5 +671,909 @@ pub fn build_declare_final() -> DeclareOwned {
         body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal {
             header: wire_const::D_MID_FINAL,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use wz_codecs_test_support::TestWire;
+
+    /// R121g — `build_declare_kexpr` wraps a `DeclKexpr` registering
+    /// `mapping_id -> suffix` in a `Declare` envelope with the
+    /// network MID header and no interest_id / no extensions.
+    /// R121h-pre — under the SCE e10619d3 B5-ν ownership invert, the
+    /// inner DeclKexpr carries the literal suffix via the
+    /// `WireexprLocal` arm (semantically correct: the declared
+    /// keyexpr lives in the local mapping table); DeclKexpr's
+    /// `<sce:import>` site omits `<sce:variant-dispatch>` so no
+    /// parent derive bit is emitted at bit 6.
+    #[test]
+    fn build_declare_kexpr_wraps_decl_kexpr_with_literal_suffix() {
+        let declare = build_declare_kexpr(7, "demo/test").unwrap();
+        assert_eq!(
+            declare.header,
+            wire_const::N_MID_DECLARE,
+            "Declare header must carry N_MID_DECLARE with no flag bits set",
+        );
+        assert!(
+            declare.interest_id.is_none(),
+            "MVP DECLARE has no interest_id"
+        );
+        assert!(
+            declare.extensions.is_none(),
+            "MVP DECLARE has no extensions"
+        );
+        match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(dk) => {
+                assert_eq!(dk.id, 7, "DeclKexpr.id must equal mapping_id argument");
+                assert_eq!(
+                    dk.header, 0x20,
+                    "DeclKexpr.header must carry _Z_DECL_KEXPR_FLAG_N (0x20)"
+                );
+                match &dk.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(
+                            w.id, 0,
+                            "inner Wireexpr.id is the literal-keyexpr sentinel 0"
+                        );
+                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                        assert_eq!(w.suffix_len, Some(9));
+                    }
+                    _ => panic!(
+                        "DeclKexpr.keyexpr must use the WireexprLocal arm under \
+                         the SCE e10619d3 B5-ν invert (the parent's <sce:import> \
+                         site omits <sce:variant-dispatch>, so no parent derive \
+                         bit is emitted regardless of which arm is selected)"
+                    ),
+                }
+            }
+            _ => panic!("build_declare_kexpr must produce a CodecZenohDeclKexpr variant"),
+        }
+    }
+
+    /// R121g — Wire-byte regression gate: the bytes emitted by
+    /// `build_declare_kexpr(7, "demo/test").wire()` must equal
+    /// zenoh-pico's `_z_decl_kexpr_encode` output for the same
+    /// arguments. Authored as a byte-literal compare so a future
+    /// codegen drift on either DeclKexpr.header derivation or
+    /// WireexprNonlocal encoding shape surfaces immediately.
+    ///
+    /// Expected wire bytes from zenoh-pico
+    /// (`vendor/zenoh-pico/src/protocol/codec/declarations.c:52-63`):
+    ///   - DeclKexpr.header = `_Z_DECL_KEXPR_MID(0) | _Z_DECL_KEXPR_FLAG_N(0x20)` = `0x20`
+    ///   - VLE(id=7) = `0x07`
+    ///   - wireexpr.id VLE(0) = `0x00`
+    ///   - wireexpr.suffix string = VLE(9) + 9 bytes of "demo/test"
+    #[test]
+    fn build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
+        let declare = build_declare_kexpr(7, "demo/test").unwrap();
+        let outer = declare.wire();
+        // Skip the outer Declare envelope header (0x1E) — that
+        // single byte is the wz Declare codec's own emit; the rest
+        // is the DeclKexpr inner body. The byte-compare gate sits
+        // on the inner body so a regression in either the inner
+        // header derivation OR the wireexpr body emit fires.
+        let mut expected = vec![
+            wire_const::N_MID_DECLARE, // outer Declare 0x1E
+            0x20,                      // DeclKexpr.header = _Z_DECL_KEXPR_FLAG_N
+            0x07,                      // VLE(mapping_id=7)
+            0x00,                      // wireexpr.id VLE(0)
+            0x09,                      // suffix_len VLE(9)
+        ];
+        expected.extend_from_slice(b"demo/test");
+        assert_eq!(
+            outer, expected,
+            "build_declare_kexpr wire bytes must match zenoh-pico's \
+             _z_decl_kexpr_encode output byte-for-byte"
+        );
+    }
+
+    /// R121g — `build_declare_kexpr` rejects `mapping_id == 0` to
+    /// keep the literal-keyexpr sentinel out of the DECLARE table.
+    #[test]
+    #[should_panic(expected = "build_declare_kexpr requires a non-zero mapping id")]
+    fn build_declare_kexpr_rejects_zero_mapping_id() {
+        let _ = build_declare_kexpr(0, "demo/test");
+    }
+
+    /// R121i — `build_declare_subscriber` produces a Declare envelope
+    /// carrying a `DeclSubscriber` inner body whose author-supplied
+    /// header carries the MID + optional N (suffix gate) but NOT the
+    /// M flag (codegen-derived from parent.M dispatch). Three shapes
+    /// exercise the three semantic cases: pure-alias (id=N + None),
+    /// composite (id=N + Some), and literal (id=0 + Some).
+    #[test]
+    fn build_declare_subscriber_wraps_decl_subscriber_in_declare_envelope() {
+        // Case 1 — pure alias to a peer-declared mapping (suffix=None).
+        let alias = build_declare_subscriber(5, 7, None).unwrap();
+        assert_eq!(
+            alias.header,
+            wire_const::N_MID_DECLARE,
+            "Declare envelope header must carry N_MID_DECLARE",
+        );
+        match &alias.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_eq!(d.id, 5, "DeclSubscriber.id must equal subscriber_id");
+                assert_eq!(
+                    d.header, 0x02,
+                    "header carries MID only; N clear (no suffix) and M is codegen-derived"
+                );
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7, "Wireexpr.id must equal keyexpr_mapping_id");
+                        assert!(w.suffix.is_none(), "alias case has no suffix");
+                        assert!(w.suffix_len.is_none());
+                    }
+                    _ => panic!("DeclSubscriber.keyexpr must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!("build_declare_subscriber must produce CodecZenohDeclSubscriber"),
+        }
+
+        // Case 2 — composite: alias N + tail suffix.
+        let composite = build_declare_subscriber(5, 7, Some("tail")).unwrap();
+        match &composite.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_eq!(
+                    d.header, 0x22,
+                    "header MID 0x02 | N(0x20) when suffix present"
+                );
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                        assert_eq!(w.suffix_len, Some(4));
+                    }
+                    _ => panic!("composite must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!(),
+        }
+
+        // Case 3 — literal: id=0 sentinel + suffix carries the keyexpr.
+        let literal = build_declare_subscriber(5, 0, Some("demo/test")).unwrap();
+        match &literal.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                assert_eq!(d.header, 0x22, "literal case still sets N (suffix present)");
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 0, "literal sentinel id=0");
+                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                    }
+                    _ => panic!("literal must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// R121i — Wire-byte regression gate: the bytes emitted by
+    /// `build_declare_subscriber(5, 7, None).wire()` must equal
+    /// zenoh-pico's `_z_decl_subscriber_encode` /
+    /// `_z_decl_commons_encode` output for the same arguments
+    /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:65-84
+    ///   + the `_z_wireexpr_encode` invocation at declarations.c:84).
+    ///
+    /// Three vectors lock the three semantic cases (alias /
+    /// composite / literal) so a future codegen regression on either
+    /// header derivation, wireexpr arm choice, or the M-bit emit
+    /// path fires immediately.
+    #[test]
+    fn build_declare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (subscriber_id=5, mapping_id=7, no
+        // suffix). Wire shape (per declarations.c):
+        //   outer Declare header 0x1E (N_MID_DECLARE)
+        //   DeclSubscriber.header = MID(0x02) | M(0x40) = 0x42
+        //                            (M=1 codegen-derived from
+        //                             Local arm via the
+        //                             <sce:variant-dispatch
+        //                             flag="header.M"/> import-site
+        //                             declaration in
+        //                             decl_subscriber.scxml)
+        //   VLE(subscriber_id=5)     = 0x05
+        //   wireexpr Local id=7 only = 0x07
+        let alias = build_declare_subscriber(5, 7, None).unwrap();
+        let alias_wire = alias.wire();
+        let alias_expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E
+            0x42,                      // MID(0x02) | M(0x40)
+            0x05,                      // VLE(subscriber_id=5)
+            0x07,                      // wireexpr.id VLE(7)
+        ];
+        assert_eq!(
+            alias_wire, alias_expected,
+            "alias-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — composite (id=7 + tail "abc"):
+        //   DeclSubscriber.header = MID | N | M = 0x62
+        //   VLE(5) = 0x05
+        //   wireexpr.id VLE(7) = 0x07
+        //   suffix_len VLE(3) = 0x03
+        //   suffix bytes = "abc"
+        let composite = build_declare_subscriber(5, 7, Some("abc")).unwrap();
+        let composite_wire = composite.wire();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x62, // MID | N | M
+            0x05,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite_wire, composite_expected,
+            "composite-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 3 — literal (id=0 + suffix "demo/test"):
+        //   DeclSubscriber.header = MID | N | M = 0x62
+        //   VLE(5) = 0x05
+        //   wireexpr.id VLE(0) = 0x00
+        //   suffix_len VLE(9) = 0x09
+        //   suffix bytes = "demo/test"
+        let literal = build_declare_subscriber(5, 0, Some("demo/test")).unwrap();
+        let literal_wire = literal.wire();
+        let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x62, 0x05, 0x00, 0x09];
+        literal_expected.extend_from_slice(b"demo/test");
+        assert_eq!(
+            literal_wire, literal_expected,
+            "literal-case wire bytes must match zenoh-pico reference"
+        );
+    }
+
+    /// R121i-b — `build_declare_queryable` produces a Declare envelope
+    /// carrying a `DeclQueryable` inner body. Mirror of the
+    /// DeclSubscriber structural test, with MID swap 0x02 → 0x04 and
+    /// the `WireexprLocal` arm preserved (M-bit codegen-derivation
+    /// path identical).
+    #[test]
+    fn build_declare_queryable_wraps_decl_queryable_in_declare_envelope() {
+        // Case 1 — pure alias to a peer-declared mapping (suffix=None).
+        let alias = build_declare_queryable(9, 7, None).unwrap();
+        assert_eq!(
+            alias.header,
+            wire_const::N_MID_DECLARE,
+            "Declare envelope header must carry N_MID_DECLARE",
+        );
+        match &alias.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, 9, "DeclQueryable.id must equal queryable_id");
+                assert_eq!(
+                    d.header, 0x04,
+                    "header carries MID 0x04 only; N clear (no suffix), M codegen-derived"
+                );
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7, "Wireexpr.id must equal keyexpr_mapping_id");
+                        assert!(w.suffix.is_none(), "alias case has no suffix");
+                        assert!(w.suffix_len.is_none());
+                    }
+                    _ => panic!("DeclQueryable.keyexpr must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!("build_declare_queryable must produce CodecZenohDeclQueryable"),
+        }
+
+        // Case 2 — composite: alias N + tail suffix.
+        let composite = build_declare_queryable(9, 7, Some("tail")).unwrap();
+        match &composite.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(
+                    d.header, 0x24,
+                    "header MID 0x04 | N(0x20) when suffix present"
+                );
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                        assert_eq!(w.suffix_len, Some(4));
+                    }
+                    _ => panic!("composite must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!(),
+        }
+
+        // Case 3 — literal: id=0 sentinel + suffix carries the keyexpr.
+        let literal = build_declare_queryable(9, 0, Some("demo/test")).unwrap();
+        match &literal.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.header, 0x24, "literal case still sets N (suffix present)");
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 0, "literal sentinel id=0");
+                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                    }
+                    _ => panic!("literal must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// R121i-b — Wire-byte regression gate: the bytes emitted by
+    /// `build_declare_queryable(...).wire()` must equal zenoh-pico's
+    /// `_z_decl_queryable_encode` output for the no-info-ext shape
+    /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:105-118
+    ///   with `has_info_ext = false` short-circuit at line 109).
+    ///
+    /// MID differs from DeclSubscriber (0x02 → 0x04) but the rest of
+    /// the wire (id VLE + wireexpr body + M-bit OR convention) is
+    /// identical — these three vectors lock the same alias /
+    /// composite / literal trio. The `has_info_ext = true` variant
+    /// (future ExtQueryableInfo tail) is out of scope for this round.
+    #[test]
+    fn build_declare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (queryable_id=9, mapping_id=7, no
+        // suffix). Wire shape:
+        //   outer Declare header 0x1E (N_MID_DECLARE)
+        //   DeclQueryable.header = MID(0x04) | M(0x40) = 0x44
+        //   VLE(queryable_id=9)  = 0x09
+        //   wireexpr Local id=7  = 0x07
+        let alias = build_declare_queryable(9, 7, None).unwrap();
+        let alias_wire = alias.wire();
+        let alias_expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E
+            0x44,                      // MID(0x04) | M(0x40)
+            0x09,                      // VLE(queryable_id=9)
+            0x07,                      // wireexpr.id VLE(7)
+        ];
+        assert_eq!(
+            alias_wire, alias_expected,
+            "DeclQueryable alias-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — composite (id=7 + tail "abc"):
+        //   DeclQueryable.header = MID | N | M = 0x64
+        //   VLE(9) = 0x09
+        //   wireexpr.id VLE(7) = 0x07
+        //   suffix_len VLE(3) = 0x03
+        //   suffix bytes = "abc"
+        let composite = build_declare_queryable(9, 7, Some("abc")).unwrap();
+        let composite_wire = composite.wire();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x64, // MID | N | M
+            0x09,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite_wire, composite_expected,
+            "DeclQueryable composite-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 3 — literal (id=0 + suffix "demo/test"):
+        //   DeclQueryable.header = MID | N | M = 0x64
+        //   VLE(9) = 0x09
+        //   wireexpr.id VLE(0) = 0x00
+        //   suffix_len VLE(9) = 0x09
+        //   suffix bytes = "demo/test"
+        let literal = build_declare_queryable(9, 0, Some("demo/test")).unwrap();
+        let literal_wire = literal.wire();
+        let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x64, 0x09, 0x00, 0x09];
+        literal_expected.extend_from_slice(b"demo/test");
+        assert_eq!(
+            literal_wire, literal_expected,
+            "DeclQueryable literal-case wire bytes must match zenoh-pico reference"
+        );
+    }
+
+    /// R121i-b — `build_declare_token` produces a Declare envelope
+    /// carrying a `DeclToken` inner body. Mirror of the DeclSubscriber
+    /// / DeclQueryable structural test, with MID swap to 0x06.
+    #[test]
+    fn build_declare_token_wraps_decl_token_in_declare_envelope() {
+        // Case 1 — pure alias.
+        let alias = build_declare_token(11, 7, None).unwrap();
+        match &alias.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
+                assert_eq!(d.id, 11, "DeclToken.id must equal token_id");
+                assert_eq!(
+                    d.header, 0x06,
+                    "header carries MID 0x06 only; N clear, M codegen-derived"
+                );
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert!(w.suffix.is_none());
+                    }
+                    _ => panic!("DeclToken.keyexpr must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!("build_declare_token must produce CodecZenohDeclToken"),
+        }
+
+        // Case 2 — composite.
+        let composite = build_declare_token(11, 7, Some("tail")).unwrap();
+        match &composite.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
+                assert_eq!(d.header, 0x26, "header MID 0x06 | N(0x20)");
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                    }
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+
+        // Case 3 — literal.
+        let literal = build_declare_token(11, 0, Some("demo/test")).unwrap();
+        match &literal.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
+                assert_eq!(d.header, 0x26);
+                match &d.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 0);
+                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                    }
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// R121i-b — Wire-byte regression gate: the bytes emitted by
+    /// `build_declare_token(...).wire()` must equal zenoh-pico's
+    /// `_z_decl_token_encode` output
+    /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:123-126).
+    ///
+    /// DeclToken's encode is a pure `_z_decl_commons_encode(has_ext =
+    /// false)` wrapper — no extension surface at all. The three
+    /// vectors lock the alias / composite / literal trio with MID
+    /// 0x06.
+    #[test]
+    fn build_declare_token_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (token_id=11, mapping_id=7, no suffix).
+        let alias = build_declare_token(11, 7, None).unwrap();
+        let alias_wire = alias.wire();
+        let alias_expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E
+            0x46,                      // MID(0x06) | M(0x40)
+            0x0B,                      // VLE(token_id=11)
+            0x07,                      // wireexpr.id VLE(7)
+        ];
+        assert_eq!(
+            alias_wire, alias_expected,
+            "DeclToken alias-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — composite (id=7 + tail "abc").
+        let composite = build_declare_token(11, 7, Some("abc")).unwrap();
+        let composite_wire = composite.wire();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x66, // MID(0x06) | N | M
+            0x0B,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite_wire, composite_expected,
+            "DeclToken composite-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 3 — literal (id=0 + suffix "demo/test").
+        let literal = build_declare_token(11, 0, Some("demo/test")).unwrap();
+        let literal_wire = literal.wire();
+        let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x66, 0x0B, 0x00, 0x09];
+        literal_expected.extend_from_slice(b"demo/test");
+        assert_eq!(
+            literal_wire, literal_expected,
+            "DeclToken literal-case wire bytes must match zenoh-pico reference"
+        );
+    }
+
+    /// R121i-d — Wire-byte regression gate for
+    /// `build_declare_subscriber_nonlocal`. Mirror of the Local-arm
+    /// byte-compare with the M-bit OR convention flipped: the
+    /// codegen-derived `_derived_header` at the wireexpr import site
+    /// is 0x00 for the Nonlocal arm (decl_subscriber.scxml +
+    /// wireexpr.scxml `<sce:arm value="0x00" type="wireexpr_nonlocal"/>`),
+    /// so the emitted DeclSubscriber.header carries MID + N only, no
+    /// M bit. Three vectors lock the alias / composite / multi-byte
+    /// VLE boundary cases (literal id=0 is rejected by the builder so
+    /// is exercised in the `_rejects_zero_mapping_id` panic test
+    /// below, not here).
+    #[test]
+    fn build_declare_subscriber_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias to peer's mapping 7 (no suffix).
+        //   DeclSubscriber.header = MID(0x02) | M(0x00) = 0x02
+        let alias = build_declare_subscriber_nonlocal(5, 7, None).unwrap();
+        assert_eq!(
+            alias.wire(),
+            vec![
+                wire_const::N_MID_DECLARE, // 0x1E outer
+                0x02,                      // MID only, no N, no M
+                0x05,                      // VLE(subscriber_id=5)
+                0x07,                      // wireexpr.id VLE(7)
+            ],
+            "DeclSubscriber Nonlocal alias-case wire bytes must match \
+             zenoh-pico reference (M bit clear)",
+        );
+
+        // Case 2 — composite: peer's mapping 7 + tail "abc".
+        //   DeclSubscriber.header = MID | N | M(=0) = 0x22
+        let composite = build_declare_subscriber_nonlocal(5, 7, Some("abc")).unwrap();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x22, // MID | N, no M
+            0x05,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite.wire(),
+            composite_expected,
+            "DeclSubscriber Nonlocal composite-case wire bytes must \
+             match zenoh-pico reference",
+        );
+
+        // Case 3 — multi-byte VLE boundary on the peer's mapping id
+        // (id=200 crosses the 7-bit VLE boundary; first byte = 0xC8,
+        // second byte = 0x01). Pure alias to lock the VLE writer
+        // regression surface on the Nonlocal arm.
+        let large = build_declare_subscriber_nonlocal(5, 200, None).unwrap();
+        assert_eq!(
+            large.wire(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x02,
+                0x05,
+                0xC8, // VLE(200) low 7 + cont bit
+                0x01, // VLE(200) high byte
+            ],
+            "DeclSubscriber Nonlocal multi-byte VLE id wire bytes \
+             must match zenoh-pico reference",
+        );
+
+        // Inner-arm sanity check — must be Nonlocal, not Local.
+        match &alias.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprNonlocal(w) => {
+                    assert_eq!(w.id, 7);
+                    assert!(w.suffix.is_none());
+                }
+                _ => panic!(
+                    "build_declare_subscriber_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                ),
+            },
+            _ => panic!("expected CodecZenohDeclSubscriber"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "build_declare_subscriber_nonlocal requires a non-zero mapping id")]
+    fn build_declare_subscriber_nonlocal_rejects_zero_mapping_id() {
+        let _ = build_declare_subscriber_nonlocal(5, 0, Some("demo/test"));
+    }
+
+    /// R121i-d — Wire-byte regression gate for
+    /// `build_declare_queryable_nonlocal`. Mirror of the Local-arm
+    /// byte-compare with MID swap 0x02 → 0x04 and the M-bit OR
+    /// convention flipped to 0x00. No-info-ext shape (default-state
+    /// `_z_queryable_infos_t`); a future round adding `complete` /
+    /// `distance` will introduce a separate
+    /// `build_declare_queryable_nonlocal_with_info` byte-compare.
+    #[test]
+    fn build_declare_queryable_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias.
+        let alias = build_declare_queryable_nonlocal(9, 7, None).unwrap();
+        assert_eq!(
+            alias.wire(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x04, // MID only, no N, no M
+                0x09,
+                0x07,
+            ],
+            "DeclQueryable Nonlocal alias-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 2 — composite.
+        let composite = build_declare_queryable_nonlocal(9, 7, Some("abc")).unwrap();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x24, // MID | N, no M
+            0x09,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite.wire(),
+            composite_expected,
+            "DeclQueryable Nonlocal composite-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 3 — multi-byte VLE boundary on the peer's mapping id.
+        let large = build_declare_queryable_nonlocal(9, 200, None).unwrap();
+        assert_eq!(
+            large.wire(),
+            vec![wire_const::N_MID_DECLARE, 0x04, 0x09, 0xC8, 0x01,],
+            "DeclQueryable Nonlocal multi-byte VLE id wire bytes must \
+             match zenoh-pico reference",
+        );
+
+        match &alias.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprNonlocal(w) => {
+                    assert_eq!(w.id, 7);
+                    assert!(w.suffix.is_none());
+                }
+                _ => panic!(
+                    "build_declare_queryable_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                ),
+            },
+            _ => panic!("expected CodecZenohDeclQueryable"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "build_declare_queryable_nonlocal requires a non-zero mapping id")]
+    fn build_declare_queryable_nonlocal_rejects_zero_mapping_id() {
+        let _ = build_declare_queryable_nonlocal(9, 0, Some("demo/test"));
+    }
+
+    /// R121i-d — Wire-byte regression gate for
+    /// `build_declare_token_nonlocal`. Mirror of the Local-arm byte-
+    /// compare with MID swap to 0x06 and the M-bit OR flipped to 0x00.
+    /// DeclToken has no extension surface — emit is byte-stable for
+    /// every `(id, mapping, suffix)` input in either arm.
+    #[test]
+    fn build_declare_token_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
+        let alias = build_declare_token_nonlocal(11, 7, None).unwrap();
+        assert_eq!(
+            alias.wire(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x06, // MID only, no N, no M
+                0x0B, // VLE(token_id=11)
+                0x07,
+            ],
+            "DeclToken Nonlocal alias-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        let composite = build_declare_token_nonlocal(11, 7, Some("abc")).unwrap();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x26, // MID | N, no M
+            0x0B,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite.wire(),
+            composite_expected,
+            "DeclToken Nonlocal composite-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        let large = build_declare_token_nonlocal(11, 200, None).unwrap();
+        assert_eq!(
+            large.wire(),
+            vec![wire_const::N_MID_DECLARE, 0x06, 0x0B, 0xC8, 0x01,],
+            "DeclToken Nonlocal multi-byte VLE id wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        match &alias.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprNonlocal(w) => {
+                    assert_eq!(w.id, 7);
+                    assert!(w.suffix.is_none());
+                }
+                _ => panic!(
+                    "build_declare_token_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                ),
+            },
+            _ => panic!("expected CodecZenohDeclToken"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "build_declare_token_nonlocal requires a non-zero mapping id")]
+    fn build_declare_token_nonlocal_rejects_zero_mapping_id() {
+        let _ = build_declare_token_nonlocal(11, 0, Some("demo/test"));
+    }
+
+    /// R121i-c — `build_undeclare_kexpr` produces a `Declare`
+    /// envelope carrying an `UndeclKexpr` body. Two vectors lock both
+    /// the single-byte VLE id case and the multi-byte VLE boundary
+    /// (id >= 128) so a future codegen drift on the VLE writer
+    /// surfaces immediately. Reference: zenoh-pico
+    /// `_z_undecl_kexpr_encode` at declarations.c:86-89 —
+    /// `[header(_Z_UNDECL_KEXPR_MID=0x01), VLE(id)]`, no Z ext, no
+    /// wireexpr body.
+    #[test]
+    fn build_undeclare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — single-byte VLE id (id=42 fits in 7 bits).
+        let small = build_undeclare_kexpr(42);
+        let small_wire = small.wire();
+        let small_expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E outer
+            0x01,                      // _Z_UNDECL_KEXPR_MID
+            0x2A,                      // VLE(42) single byte
+        ];
+        assert_eq!(
+            small_wire, small_expected,
+            "UndeclKexpr small-id wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — multi-byte VLE id (id=200 crosses the 7-bit
+        // boundary; first byte = 0xC8 (low 7 bits 0x48 + cont 0x80),
+        // second byte = 0x01).
+        let large = build_undeclare_kexpr(200);
+        let large_wire = large.wire();
+        let large_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x01,
+            0xC8, // (200 & 0x7F) | 0x80
+            0x01, // 200 >> 7
+        ];
+        assert_eq!(
+            large_wire, large_expected,
+            "UndeclKexpr multi-byte VLE id wire bytes must match zenoh-pico reference"
+        );
+
+        // Inner-arm sanity check on the small-id case.
+        match &small.body {
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(d) => {
+                assert_eq!(d.header, 0x01, "header carries MID only; Z (bit-7) clear");
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_kexpr must produce CodecZenohUndeclKexpr"),
+        }
+    }
+
+    /// R121i-c — `build_undeclare_subscriber` produces a `Declare`
+    /// envelope carrying an `UndeclSubscriber` body in the no-ext
+    /// shape (Z bit clear). Reference: zenoh-pico
+    /// `_z_undecl_subscriber_encode` -> `_z_undecl_encode(.., has_keyexpr_ext=false)`
+    /// at declarations.c:90-103. The wz UndeclSubscriber codec does
+    /// not model the optional ext_keyexpr tail; this contract is
+    /// locked by the two vectors below.
+    #[test]
+    fn build_undeclare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
+        let small = build_undeclare_subscriber(42);
+        let small_wire = small.wire();
+        assert_eq!(
+            small_wire,
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x03, // _Z_UNDECL_SUBSCRIBER_MID
+                0x2A, // VLE(42)
+            ],
+            "UndeclSubscriber small-id wire bytes must match zenoh-pico reference",
+        );
+
+        let large = build_undeclare_subscriber(200);
+        let large_wire = large.wire();
+        assert_eq!(
+            large_wire,
+            vec![wire_const::N_MID_DECLARE, 0x03, 0xC8, 0x01,],
+            "UndeclSubscriber multi-byte VLE id wire bytes must match zenoh-pico reference",
+        );
+
+        match &small.body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(d) => {
+                assert_eq!(d.header, 0x03);
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_subscriber must produce CodecZenohUndeclSubscriber"),
+        }
+    }
+
+    /// R121i-c — `build_undeclare_queryable` produces a `Declare`
+    /// envelope carrying an `UndeclQueryable` body in the no-ext
+    /// shape. MID = 0x05 (_Z_UNDECL_QUERYABLE_MID); rest matches
+    /// `_z_undecl_encode` shape from declarations.c:120-122.
+    #[test]
+    fn build_undeclare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
+        let small = build_undeclare_queryable(42);
+        assert_eq!(
+            small.wire(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x05, // _Z_UNDECL_QUERYABLE_MID
+                0x2A,
+            ],
+            "UndeclQueryable small-id wire bytes must match zenoh-pico reference",
+        );
+
+        let large = build_undeclare_queryable(200);
+        assert_eq!(
+            large.wire(),
+            vec![wire_const::N_MID_DECLARE, 0x05, 0xC8, 0x01,],
+            "UndeclQueryable multi-byte VLE id wire bytes must match zenoh-pico reference",
+        );
+
+        match &small.body {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(d) => {
+                assert_eq!(d.header, 0x05);
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_queryable must produce CodecZenohUndeclQueryable"),
+        }
+    }
+
+    /// R121i-c — `build_undeclare_token` produces a `Declare`
+    /// envelope carrying an `UndeclToken` body in the no-ext shape.
+    /// MID = 0x07 (_Z_UNDECL_TOKEN_MID); rest matches the
+    /// `_z_undecl_encode` shape from declarations.c:128-130.
+    #[test]
+    fn build_undeclare_token_emits_zenoh_pico_compatible_wire_bytes() {
+        let small = build_undeclare_token(42);
+        assert_eq!(
+            small.wire(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x07, // _Z_UNDECL_TOKEN_MID
+                0x2A,
+            ],
+            "UndeclToken small-id wire bytes must match zenoh-pico reference",
+        );
+
+        let large = build_undeclare_token(200);
+        assert_eq!(
+            large.wire(),
+            vec![wire_const::N_MID_DECLARE, 0x07, 0xC8, 0x01,],
+            "UndeclToken multi-byte VLE id wire bytes must match zenoh-pico reference",
+        );
+
+        match &small.body {
+            DeclareOwnedVariant::CodecZenohUndeclToken(d) => {
+                assert_eq!(d.header, 0x07);
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_token must produce CodecZenohUndeclToken"),
+        }
+    }
+
+    /// R121i-c — `build_declare_final` produces a `Declare` envelope
+    /// carrying a single-byte `DeclFinal` marker. Reference: zenoh-
+    /// pico `_z_decl_final_encode` at declarations.c:131-135 —
+    /// `[header(_Z_DECL_FINAL_MID=0x1A)]`, no body, no id, no ext.
+    /// The full wire is exactly 2 bytes (`N_MID_DECLARE` outer +
+    /// `DeclFinal.header` inner); the byte-compare locks both.
+    #[test]
+    fn build_declare_final_emits_two_byte_marker() {
+        let declare = build_declare_final();
+        let wire = declare.wire();
+        assert_eq!(
+            wire,
+            vec![
+                wire_const::N_MID_DECLARE, // 0x1E outer
+                0x1A,                      // _Z_DECL_FINAL_MID inner
+            ],
+            "DeclFinal wire must equal [N_MID_DECLARE, _Z_DECL_FINAL_MID]",
+        );
+
+        match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclFinal(d) => {
+                assert_eq!(
+                    d.header, 0x1A,
+                    "DeclFinal.header must equal _Z_DECL_FINAL_MID"
+                );
+            }
+            _ => panic!("build_declare_final must produce CodecZenohDeclFinal"),
+        }
     }
 }

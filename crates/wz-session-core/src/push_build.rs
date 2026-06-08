@@ -94,7 +94,6 @@ use wz_codecs::ext_zint::ExtZint;
 /// R311h — gated on `codec-push` (return type is the gated
 /// `wz_codecs::push::Push`; principled exemption from the
 /// signature-stability sweep per `feedback_signature_stability`).
-#[cfg(feature = "codec-push")]
 pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwned, CodecError> {
     let suffix_len = keyexpr_suffix.len() as u64;
     let payload_len = value.len() as u64;
@@ -149,7 +148,6 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwne
 /// sentinel (`build_push_literal`'s arm). The split keeps the two
 /// shapes apart at the API surface so a caller cannot silently
 /// invert them.
-#[cfg(feature = "codec-push")]
 pub fn build_push_aliased(
     mapping_id: u64,
     suffix: Option<&str>,
@@ -217,7 +215,6 @@ pub fn build_push_aliased(
 /// `z_sub` sees the Del as a `Received` line with an empty value
 /// substring — distinguishable from a Put-with-empty-value only by
 /// the wz-side codec round-trip witness.
-#[cfg(feature = "codec-push")]
 pub fn build_push_del_literal(keyexpr_suffix: &str) -> Result<PushOwned, CodecError> {
     let suffix_len = keyexpr_suffix.len() as u64;
     Ok(PushOwned {
@@ -253,7 +250,6 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> Result<PushOwned, CodecEr
 /// sentinel ([`build_push_del_literal`]'s arm). The split keeps
 /// the two shapes apart at the API surface so a caller cannot
 /// silently invert them.
-#[cfg(feature = "codec-push")]
 pub fn build_push_del_aliased(
     mapping_id: u64,
     suffix: Option<&str>,
@@ -296,7 +292,6 @@ pub fn build_push_del_aliased(
 /// `MsgPut::encode` / `MsgDel::encode` iterate the chain and the
 /// surrounding wire serializer applies the Z bit at the right
 /// position via the per-entry codec emit.
-#[cfg(feature = "codec-push")]
 fn build_body_extensions(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
@@ -359,7 +354,6 @@ fn build_body_extensions(
 /// the explicit flip pattern in `encode_ext_chain` (used for
 /// transport-message chains) so body / outer Push chains share the
 /// same invariant. Single-entry chains keep Z=0 (terminator).
-#[cfg(feature = "codec-push")]
 fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
     if entries.is_empty() {
         return;
@@ -380,7 +374,6 @@ fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
 /// bit. zenoh-pico mirror: `_z_n_msg_encode_push` outer-ext switch
 /// at network.c — qos lands on the outer chain, source_info /
 /// attachment on the body chain (`_z_push_body_encode_extensions`).
-#[cfg(feature = "codec-push")]
 fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<Vec<ExtEntryOwned>> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
     // Push outer QoS ext (id 0x01) — gated on any of the three QoS-byte
@@ -425,7 +418,6 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
 /// result is forced `None` so the `_Z_FLAG_Z_*_T` (0x20) header bit the
 /// builders OR in stays clear and no timestamp is serialised. The param
 /// keeps the builders' signatures stable across the toggle.
-#[cfg(feature = "codec-push")]
 fn gated_timestamp_field(
     timestamp: Option<&crate::sample::TimestampHint>,
 ) -> Result<Option<wz_codecs::timestamp::TimestampOwned>, CodecError> {
@@ -449,7 +441,6 @@ fn gated_timestamp_field(
 /// header bit the builder ORs in stays clear and no encoding is
 /// serialised. The param keeps the builder's signature stable across
 /// the toggle.
-#[cfg(feature = "codec-push")]
 fn gated_encoding_field(
     encoding: Option<&crate::sample::EncodingHint>,
 ) -> Result<Option<wz_codecs::encoding::EncodingOwned>, CodecError> {
@@ -472,7 +463,6 @@ fn gated_encoding_field(
 /// [`build_body_extensions`]; the SCE-emitted `MsgPut::encode`
 /// surfaces them per zenoh-pico's
 /// `_z_push_body_encode_extensions` order.
-#[cfg(feature = "codec-push")]
 fn build_msg_put_with_meta(
     payload: &[u8],
     timestamp: Option<&crate::sample::TimestampHint>,
@@ -514,7 +504,6 @@ fn build_msg_put_with_meta(
 /// wire path drops it here, keeping wire-vs-loopback parity. Sets
 /// the `_Z_FLAG_Z_D_T` (0x20) header bit when a timestamp is
 /// attached.
-#[cfg(feature = "codec-push")]
 fn build_msg_del_with_meta(
     timestamp: Option<&crate::sample::TimestampHint>,
     source_info: Option<&crate::sample::SourceInfo>,
@@ -542,7 +531,6 @@ fn build_msg_del_with_meta(
 /// source_info / attachment into the body extension chain, and qos
 /// into the outer Push extension chain. The Push-header Z bit (0x80)
 /// is OR'd when an outer extension is present.
-#[cfg(feature = "codec-push")]
 pub fn build_push_literal_with_meta(
     keyexpr_suffix: &str,
     value: &[u8],
@@ -571,7 +559,6 @@ pub fn build_push_literal_with_meta(
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_aliased`].
-#[cfg(feature = "codec-push")]
 pub fn build_push_aliased_with_meta(
     mapping_id: u64,
     suffix: Option<&str>,
@@ -612,7 +599,6 @@ pub fn build_push_aliased_with_meta(
 /// `encoding` is dropped silently because `_z_msg_del_t` carries no
 /// encoding slot — the loopback path enforces the same projection
 /// in `crate::session::build_loopback_sample`.
-#[cfg(feature = "codec-push")]
 pub fn build_push_del_literal_with_meta(
     keyexpr_suffix: &str,
     meta: &PushMetadata,
@@ -638,7 +624,6 @@ pub fn build_push_del_literal_with_meta(
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_del_aliased`].
-#[cfg(feature = "codec-push")]
 pub fn build_push_del_aliased_with_meta(
     mapping_id: u64,
     suffix: Option<&str>,
@@ -675,22 +660,47 @@ pub fn build_push_del_aliased_with_meta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // no_std crate: the `vec!` macro is not in the prelude. Only the
-    // `pubsub-timestamp` tests build a `zid: vec![..]`, so gate to match.
-    #[cfg(feature = "pubsub-encoding")]
-    use crate::sample::EncodingHint;
-    #[cfg(any(
-        feature = "pubsub-priority",
-        feature = "pubsub-congestion-control",
-        feature = "pubsub-express"
-    ))]
-    use crate::sample::QosLevel;
-    #[cfg(feature = "pubsub-source-info")]
-    use crate::sample::SourceInfo;
-    #[cfg(feature = "pubsub-timestamp")]
-    use crate::sample::TimestampHint;
+    // .wire() + Push::decode are named only by the two `_with_meta` round-trip
+    // tests, which both construct every metadata field, so they gate on the
+    // full metadata feature set; vec! (timestamp tests' zid literal) gates on
+    // pubsub-timestamp.
+    use crate::frame_encode::encode_frame_with_push;
+    use crate::inbound::{parse_inbound, InboundFrame};
+    use crate::network_message::{parse_frame_payload, NetworkMessage};
     #[cfg(feature = "pubsub-timestamp")]
     use alloc::vec;
+    #[cfg(all(
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp",
+        feature = "pubsub-encoding",
+        feature = "pubsub-source-info",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
+    use wz_codecs::push::Push;
+    #[cfg(all(
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp",
+        feature = "pubsub-encoding",
+        feature = "pubsub-source-info",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
+    use wz_codecs_test_support::TestWire;
+    // QosLevel + TimestampHint are named ungated by push_metadata_is_empty;
+    // EncodingHint / SourceInfo only by the pubsub-gated encoding / source-info
+    // coverage tests, so they narrow to those features.
+    #[cfg(feature = "pubsub-encoding")]
+    use crate::sample::EncodingHint;
+    #[cfg(feature = "pubsub-source-info")]
+    use crate::sample::SourceInfo;
+    use crate::sample::{QosLevel, TimestampHint};
 
     #[cfg(all(feature = "codec-push", feature = "pubsub-timestamp"))]
     #[test]
@@ -785,7 +795,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_put_with_meta_leaves_extensions_none_on_empty_inputs() {
         let put = build_msg_put_with_meta(b"payload", None, None, None, None).unwrap();
@@ -834,9 +843,464 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_outer_extensions_returns_none_without_qos() {
         assert!(build_push_outer_extensions(None).is_none());
+    }
+
+    /// `build_push_literal` populates the Push struct with the
+    /// header / wireexpr / msg_put shape the wire-spec calls for:
+    /// `N_MID_PUSH | N_flag` in the header (M derives at encode),
+    /// `WireexprLocal { id=0, suffix=Some(s) }` for the literal
+    /// keyexpr, and `MsgPut` with the supplied payload bytes.
+    #[test]
+    fn build_push_literal_shapes_struct_for_literal_keyexpr() {
+        let push = build_push_literal("demo/test", b"hello").unwrap();
+        // header bits: N_MID_PUSH (0x1D) | N flag (0x20) = 0x3D.
+        // M flag (0x40) is set at encode time, not on the struct.
+        assert_eq!(
+            push.header, 0x3D,
+            "Push.header must carry N_MID_PUSH (0x1D) | N flag (0x20); M derives at encode"
+        );
+        match &push.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(arm) => {
+                assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
+                assert_eq!(
+                    arm.suffix.as_deref(),
+                    Some("demo/test"),
+                    "suffix must carry the literal keyexpr string"
+                );
+                assert_eq!(
+                    arm.suffix_len,
+                    Some(9),
+                    "suffix_len must match suffix.len() so the encoder emits the VLE width"
+                );
+            }
+            WireexprOwnedVariant::WireexprNonlocal(_) => {
+                panic!("literal-keyexpr path must select the WireexprLocal arm (M=1)")
+            }
+        }
+        match &push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => {
+                assert_eq!(put.header, 0x01, "MsgPut header MID = 0x01 with no flags");
+                assert_eq!(
+                    put.payload, b"hello",
+                    "MsgPut.payload carries the application bytes verbatim"
+                );
+                assert_eq!(
+                    put.payload_len, 5,
+                    "MsgPut.payload_len must match payload.len() for the VLE writer"
+                );
+                assert!(put.timestamp.is_none(), "no timestamp flag on the MVP path");
+                assert!(put.encoding.is_none(), "no encoding flag on the MVP path");
+                assert!(
+                    put.extensions.is_none(),
+                    "no MsgPut-level extensions on the MVP path"
+                );
+            }
+            other => panic!(
+                "MVP build_push_literal must emit MsgPut body, got {:?}",
+                match other {
+                    PushOwnedVariant::CodecZenohMsgDel(_) => "MsgDel",
+                    PushOwnedVariant::Default { .. } => "Default",
+                    PushOwnedVariant::CodecZenohMsgPut(_) => unreachable!(),
+                }
+            ),
+        }
+        assert!(
+            push.extensions.is_none(),
+            "no Push-level extensions on the MVP path"
+        );
+    }
+
+    /// R121g — `build_push_aliased` produces a `WireexprLocal`
+    /// with the non-zero mapping id, while `build_push_literal`
+    /// produces id=0 + inline suffix. The aliased Push is the
+    /// efficient repeated-keyexpr shape that follows a peer-side
+    /// `DeclKexpr` registration.
+    #[test]
+    fn build_push_aliased_carries_non_zero_id_with_optional_suffix() {
+        let pure = build_push_aliased(7, None, b"hello").unwrap();
+        match &pure.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7, "pure aliased Push id must equal mapping_id");
+                assert_eq!(w.suffix, None, "pure aliased Push must omit suffix");
+                assert_eq!(w.suffix_len, None, "pure aliased Push must omit suffix_len");
+            }
+            _ => panic!("build_push_aliased must produce a WireexprLocal arm"),
+        }
+        match &pure.body {
+            PushOwnedVariant::CodecZenohMsgPut(p) => {
+                assert_eq!(p.payload.as_slice(), b"hello");
+                assert_eq!(p.payload_len, 5);
+            }
+            _ => panic!("build_push_aliased must wrap a MsgPut body"),
+        }
+
+        let composite = build_push_aliased(7, Some("tail"), b"hi").unwrap();
+        match &composite.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(w.suffix_len, Some(4));
+            }
+            _ => panic!("composite aliased Push must produce a WireexprLocal arm"),
+        }
+    }
+
+    /// R121g — `build_push_aliased` rejects `mapping_id == 0` so a
+    /// caller cannot silently produce a literal-keyexpr Push via
+    /// the aliased entry point.
+    #[test]
+    #[should_panic(expected = "build_push_aliased requires a non-zero mapping id")]
+    fn build_push_aliased_rejects_zero_mapping_id() {
+        let _ = build_push_aliased(0, Some("demo"), b"");
+    }
+
+    /// R219 — `build_push_del_literal` produces a literal-keyexpr
+    /// Push whose body is the `MsgDel` arm (inner header 0x02,
+    /// no payload, no timestamp / extensions). The outer Push
+    /// header + WireexprLocal shape match the Put literal path.
+    #[test]
+    fn build_push_del_literal_shapes_struct_for_literal_keyexpr() {
+        let push = build_push_del_literal("demo/test").unwrap();
+        assert_eq!(
+            push.header, 0x3D,
+            "Push.header must carry N_MID_PUSH (0x1D) | N flag (0x20) — same as the Put literal path"
+        );
+        match &push.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(arm) => {
+                assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
+                assert_eq!(
+                    arm.suffix.as_deref(),
+                    Some("demo/test"),
+                    "suffix must carry the literal keyexpr string"
+                );
+                assert_eq!(
+                    arm.suffix_len,
+                    Some(9),
+                    "suffix_len must match suffix.len() for the VLE writer"
+                );
+            }
+            WireexprOwnedVariant::WireexprNonlocal(_) => {
+                panic!("literal-keyexpr path must select the WireexprLocal arm (M=1)")
+            }
+        }
+        match &push.body {
+            PushOwnedVariant::CodecZenohMsgDel(del) => {
+                assert_eq!(del.header, 0x02, "MsgDel header MID = 0x02 with no flags");
+                assert!(
+                    del.timestamp.is_none(),
+                    "MVP Del path emits no timestamp flag"
+                );
+                assert!(
+                    del.extensions.is_none(),
+                    "MVP Del path emits no MsgDel-level extensions"
+                );
+            }
+            other => panic!(
+                "build_push_del_literal must emit MsgDel body, got {:?}",
+                match other {
+                    PushOwnedVariant::CodecZenohMsgPut(_) => "MsgPut",
+                    PushOwnedVariant::Default { .. } => "Default",
+                    PushOwnedVariant::CodecZenohMsgDel(_) => unreachable!(),
+                }
+            ),
+        }
+        assert!(
+            push.extensions.is_none(),
+            "no Push-level extensions on the MVP path"
+        );
+    }
+
+    /// R219 — `build_push_del_aliased` produces a DECLARE-aliased
+    /// Push whose body is the `MsgDel` arm. Both pure-aliased
+    /// (suffix=None) and composite-aliased (suffix=Some) shapes are
+    /// exercised so the N-flag derivation matches the Put aliased
+    /// path. The MsgDel body content is identical across shapes.
+    #[test]
+    fn build_push_del_aliased_carries_non_zero_id_with_optional_suffix() {
+        let pure = build_push_del_aliased(7, None).unwrap();
+        assert_eq!(
+            pure.header,
+            wire_const::N_MID_PUSH,
+            "pure aliased Push (no suffix) must clear the N flag",
+        );
+        match &pure.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7, "pure aliased Push id must equal mapping_id");
+                assert_eq!(w.suffix, None, "pure aliased Push must omit suffix");
+                assert_eq!(w.suffix_len, None, "pure aliased Push must omit suffix_len");
+            }
+            _ => panic!("build_push_del_aliased must produce a WireexprLocal arm"),
+        }
+        match &pure.body {
+            PushOwnedVariant::CodecZenohMsgDel(d) => {
+                assert_eq!(d.header, 0x02);
+            }
+            _ => panic!("build_push_del_aliased must wrap a MsgDel body"),
+        }
+
+        let composite = build_push_del_aliased(7, Some("tail")).unwrap();
+        assert_eq!(
+            composite.header,
+            wire_const::N_MID_PUSH | 0x20,
+            "composite aliased Push (suffix present) must set the N flag",
+        );
+        match &composite.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(w.suffix_len, Some(4));
+            }
+            _ => panic!("composite aliased Push must produce a WireexprLocal arm"),
+        }
+        match &composite.body {
+            PushOwnedVariant::CodecZenohMsgDel(d) => {
+                assert_eq!(d.header, 0x02);
+            }
+            _ => panic!("composite aliased Push must wrap a MsgDel body"),
+        }
+    }
+
+    /// R219 — `build_push_del_aliased` rejects `mapping_id == 0` so
+    /// a caller cannot silently produce a literal-keyexpr Del Push
+    /// via the aliased entry point.
+    #[test]
+    #[should_panic(expected = "build_push_del_aliased requires a non-zero mapping id")]
+    fn build_push_del_aliased_rejects_zero_mapping_id() {
+        let _ = build_push_del_aliased(0, Some("demo"));
+    }
+
+    /// R219 — round-trip the literal-keyexpr Del path through
+    /// `encode_frame_with_push` + `parse_inbound` so the wz
+    /// receive-side parser surfaces the `MsgDel` inner body
+    /// (not `MsgPut`) on the decoded `Push`. Establishes the wire-
+    /// shape witness that pairs with the e2e zenoh-pico interop
+    /// test — z_sub's printout cannot distinguish Del from
+    /// empty-Put, so the codec-level round-trip is the definitive
+    /// proof that the wz-side encoder emits the Del MID.
+    #[test]
+    fn build_push_del_literal_round_trips_through_frame_decode_as_msg_del() {
+        let push = build_push_del_literal("demo/test").unwrap();
+        let wire = encode_frame_with_push(/*sn=*/ 0, push, /*reliable=*/ true);
+        let parsed = parse_inbound(&wire).expect("parse_inbound on Del-bearing Frame");
+        let payload = match parsed {
+            InboundFrame::Frame { payload, .. } => payload,
+            _ => panic!("expected Frame variant from parse_inbound"),
+        };
+        let messages =
+            parse_frame_payload(&payload).expect("parse_frame_payload on Del-bearing Frame");
+        assert_eq!(
+            messages.len(),
+            1,
+            "Frame must carry exactly one Push record after round-trip"
+        );
+        match &messages[0] {
+            NetworkMessage::Push(p) => match &p.body {
+                PushOwnedVariant::CodecZenohMsgDel(d) => {
+                    assert_eq!(
+                        d.header, 0x02,
+                        "round-tripped MsgDel must preserve its MID byte"
+                    );
+                }
+                other => panic!(
+                    "round-tripped Push body must be MsgDel, got {:?}",
+                    match other {
+                        PushOwnedVariant::CodecZenohMsgPut(_) => "MsgPut",
+                        PushOwnedVariant::Default { .. } => "Default",
+                        PushOwnedVariant::CodecZenohMsgDel(_) => unreachable!(),
+                    }
+                ),
+            },
+            _ => panic!("expected NetworkMessage::Push from round-trip"),
+        }
+    }
+
+    #[test]
+    fn push_metadata_is_empty_returns_true_only_when_all_fields_none() {
+        let empty = PushMetadata::default();
+        assert!(empty.is_empty());
+
+        let with_ts = PushMetadata {
+            timestamp: Some(TimestampHint::default()),
+            ..Default::default()
+        };
+        assert!(!with_ts.is_empty());
+
+        let with_qos = PushMetadata {
+            qos: Some(QosLevel::from_raw(0)),
+            ..Default::default()
+        };
+        assert!(!with_qos.is_empty());
+    }
+
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
+    #[test]
+    fn build_push_literal_with_meta_sets_push_header_z_bit_when_qos_attached() {
+        let meta = PushMetadata {
+            qos: Some(QosLevel::from_raw(0x10)),
+            ..Default::default()
+        };
+        let push = build_push_literal_with_meta("home/temp", b"22.5", &meta).unwrap();
+        // Push.header bit 7 (0x80) = Z chain-continuation for outer
+        // extensions. Must be set when an outer extension is present.
+        assert_eq!(push.header & 0x80, 0x80);
+        assert!(push.extensions.is_some());
+        // No body metadata → MsgPut.extensions stays None.
+        if let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body {
+            assert!(put.extensions.is_none());
+            assert!(!put.z(), "MsgPut Z stays clear without body extensions");
+        } else {
+            panic!("CodecZenohMsgPut variant expected");
+        }
+    }
+
+    #[cfg(all(
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp",
+        feature = "pubsub-encoding",
+        feature = "pubsub-source-info",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
+    #[test]
+    fn build_push_literal_with_meta_round_trips_through_codec_encode_decode() {
+        // End-to-end: build → encode_to_vec → decode → field equality.
+        // Validates that the wire form survives SCE's encode/decode
+        // path with every metadata field set, not just that the
+        // in-memory Push struct shape is correct.
+        let meta = PushMetadata {
+            timestamp: Some(TimestampHint {
+                time: 0x1122_3344_5566_7788,
+                zid: vec![0xAA, 0xBB, 0xCC],
+            }),
+            encoding: Some(EncodingHint {
+                packed_id: 5,
+                schema: Some("text/plain".into()),
+            }),
+            source_info: Some(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42)),
+            attachment: Some(b"attach".to_vec()),
+            qos: Some(QosLevel::from_raw(0b0001_1010)),
+        };
+        let push = build_push_literal_with_meta("home/temp", b"payload", &meta).unwrap();
+        let encoded = push.wire();
+
+        // Decode back via SCE-emitted cursor path. wz-codecs re-exports
+        // SceCursor through the runtime crate; use the same path the
+        // dispatcher takes when handling wire-arrived frames.
+        let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
+        let decoded = Push::decode(&mut cursor)
+            .expect("Push round-trip decode")
+            .try_into_owned()
+            .unwrap();
+
+        // Outer Push extensions: qos must round-trip.
+        let outer = decoded
+            .extensions
+            .as_deref()
+            .expect("outer ext chain present");
+        assert_eq!(outer.len(), 1);
+        if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &outer[0].body {
+            assert_eq!(z.value, 0b0001_1010);
+        } else {
+            panic!("qos outer ext must decode to ExtZint");
+        }
+
+        // Inner MsgPut: timestamp/encoding/extensions round-trip.
+        if let PushOwnedVariant::CodecZenohMsgPut(put) = &decoded.body {
+            let ts = put.timestamp.as_ref().expect("timestamp round-trips");
+            assert_eq!(ts.time, 0x1122_3344_5566_7788);
+            assert_eq!(ts.zid.as_slice(), &[0xAA, 0xBB, 0xCC]);
+            let enc = put.encoding.as_ref().expect("encoding round-trips");
+            assert_eq!(enc.packed_id, 5);
+            assert_eq!(enc.schema.as_deref(), Some("text/plain"));
+            let body_exts = put.extensions.as_deref().expect("body ext chain present");
+            assert_eq!(body_exts.len(), 2, "source_info + attachment");
+            // Use the runtime's dispatcher projection to validate the
+            // bytes resolve back to the original metadata.
+            let si = crate::sample::extract_source_info(body_exts)
+                .expect("source_info round-trips through wire");
+            assert_eq!(si.zid_len, 4);
+            assert_eq!(si.zid_prefix(), &[0x01, 0x02, 0x03, 0x04][..]);
+            assert_eq!(si.eid, 7);
+            assert_eq!(si.sn, 42);
+            let att = crate::attachment::decode_attachment_ext(
+                body_exts,
+                crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+            )
+            .map(<[u8]>::to_vec)
+            .expect("attachment round-trips through wire");
+            assert_eq!(att, b"attach");
+        } else {
+            panic!("CodecZenohMsgPut variant expected");
+        }
+    }
+
+    // Constructs every PushMetadata field (incl. encoding / source_info /
+    // qos) to prove the Del wire form DROPS encoding, so it gates on all of
+    // those features even though the encoding is intentionally not emitted.
+    #[cfg(all(
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp",
+        feature = "pubsub-encoding",
+        feature = "pubsub-source-info",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
+    #[test]
+    fn build_push_del_literal_with_meta_round_trips_metadata_minus_encoding() {
+        // Del path: timestamp + source_info + attachment + qos must
+        // round-trip; encoding has no parameter slot so the wire form
+        // cannot carry it. Mirrors the loopback path's projection.
+        let meta = PushMetadata {
+            timestamp: Some(TimestampHint {
+                time: 0xAABB_CCDD,
+                zid: vec![0x42],
+            }),
+            encoding: Some(EncodingHint {
+                packed_id: 99,
+                schema: Some("ignored".into()),
+            }),
+            source_info: Some(SourceInfo::new(&[0xDE, 0xAD], 1, 2)),
+            attachment: Some(b"del-att".to_vec()),
+            qos: Some(QosLevel::from_raw(0x10)),
+        };
+        let push = build_push_del_literal_with_meta("home/temp", &meta).unwrap();
+        let encoded = push.wire();
+        let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
+        let decoded = Push::decode(&mut cursor)
+            .expect("Push(MsgDel) round-trip")
+            .try_into_owned()
+            .unwrap();
+
+        if let PushOwnedVariant::CodecZenohMsgDel(del) = &decoded.body {
+            assert_eq!(del.timestamp.as_ref().unwrap().time, 0xAABB_CCDD);
+            let body_exts = del.extensions.as_deref().expect("body ext chain present");
+            // Del bodies carry source_info + attachment but NOT encoding.
+            assert_eq!(body_exts.len(), 2);
+            let si = crate::sample::extract_source_info(body_exts).unwrap();
+            assert_eq!(si.eid, 1);
+            assert_eq!(si.sn, 2);
+            let att = crate::attachment::decode_attachment_ext(
+                body_exts,
+                crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+            )
+            .map(<[u8]>::to_vec)
+            .unwrap();
+            assert_eq!(att, b"del-att");
+        } else {
+            panic!("CodecZenohMsgDel variant expected");
+        }
     }
 }
