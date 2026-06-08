@@ -52,8 +52,10 @@
 extern crate alloc;
 
 use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use wz::link_lwip::rx_sockets::bind_session_rx;
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
@@ -92,6 +94,15 @@ const FRAG_SN_0: u64 = 10;
 /// fragment's SN), so it is the data-dispatch sentinel in FragmentChain mode.
 #[cfg(feature = "reassembly")]
 const FRAG_SN_1: u64 = 11;
+/// Milliseconds the [`OffsetClock`] jumps the [`DataMode::FragmentChainStalled`]
+/// run forward, once the lone first fragment is INGESTED, to cross the chain's
+/// `reassembly_timeout_ms` (500ms) deadline so the next sweep evicts it. Chosen
+/// in the window `reassembly_timeout_ms (500) < STALL_JUMP_MS < lease (10_000)`
+/// so the sweep fires but the Established lease deadline does NOT — isolating
+/// the reassembly-timeout path. The handshake ran at offset 0 (frozen), safely
+/// inside the 1_000ms `accepting_inactivity_ms` bound.
+#[cfg(feature = "reassembly")]
+const STALL_JUMP_MS: u32 = 2_000;
 /// Iteration cap on the drive loop. The handshake + Frame complete in the
 /// first ~3 iterations; the remainder spin the (no-op, with a frozen clock)
 /// deadline branch. Bounds a regression so it fails fast instead of hanging.
@@ -112,6 +123,18 @@ pub enum DataMode {
     /// QEMU bin enable the feature.
     #[cfg(feature = "reassembly")]
     FragmentChain,
+    /// A single FIRST fragment (`more=1`) of a chain whose continuation never
+    /// arrives. The acceptor arms a reassembly slot; the harness then advances
+    /// its [`OffsetClock`] past the chain's `reassembly_timeout_ms` deadline so
+    /// the swept `run_session` loop evicts the chain (raising
+    /// `ReassemblyTimeout`) — the timeout-eviction path the [`FragmentChain`]
+    /// mode (which completes before any deadline) cannot exercise. Host-only:
+    /// it needs the advancing clock, so the QEMU bin never requests it. Gated
+    /// on `reassembly` like its sibling.
+    ///
+    /// [`FragmentChain`]: DataMode::FragmentChain
+    #[cfg(feature = "reassembly")]
+    FragmentChainStalled,
 }
 
 /// The verdict [`run_acceptor_e2e`] returns. The host test asserts
@@ -127,6 +150,13 @@ pub enum AcceptorE2eOutcome {
     /// `Established` was reached but the application Frame never surfaced as
     /// a `FramePayload` dispatch (data-plane fault).
     FrameNotDispatched,
+    /// `Established` was reached and a reassembly chain was started, but its
+    /// continuation never arrived; the deadline sweep evicted the chain
+    /// (`ReassemblyTimeout`) instead of a dispatch completing. The expected
+    /// verdict for [`DataMode::FragmentChainStalled`] — distinct from
+    /// `FrameNotDispatched` (a fault) because the timeout is the correct
+    /// outcome for an abandoned chain.
+    ReassemblyTimedOut,
 }
 
 /// The full e2e result: the [`AcceptorE2eOutcome`] verdict plus per-stage
@@ -151,6 +181,11 @@ pub struct AcceptorE2eReport {
     pub data_dispatch_msg_count: usize,
     /// Wire/codec parse errors surfaced during dispatch.
     pub parse_error: u32,
+    /// Reassembly chains evicted by the deadline sweep
+    /// (`IterationEvent::ReassemblyTimeout`). Non-zero only when a chain was
+    /// started and abandoned — the `FragmentChainStalled` mode's success
+    /// signal; 0 for `WholeFrame` / `FragmentChain` (which complete in time).
+    pub reassembly_timed_out: u32,
     /// The peer read the acceptor's `InitAck` off its socket.
     pub peer_initack_seen: bool,
     /// Length of the cookie the peer extracted from that `InitAck` (0 = none).
@@ -180,6 +215,30 @@ enum PeerPhase {
     AwaitOpenAck,
     /// Application Frame sent; nothing further for the peer to do.
     Done,
+}
+
+/// A [`ClockSource`] decorator that adds a harness-controlled millisecond
+/// offset to the wrapped clock. The offset stays 0 for every mode except
+/// [`DataMode::FragmentChainStalled`] (and on the QEMU SysTick), so the
+/// frozen-clock determinism of the handshake + completion modes is
+/// unchanged. For the stalled mode the `run_acceptor_e2e` `on_event` hook
+/// bumps it (once, AFTER the lone fragment is ingested — the chain is armed
+/// at the pre-bump `now_ms`) to [`STALL_JUMP_MS`], so the next loop
+/// iteration's deadline sweep sees `now_ms` past the chain deadline and
+/// evicts it. The offset is an `Arc<AtomicU32>` because [`ClockSource`] is
+/// `Send + Sync`; the acceptor crate is already native-atomic-only (it pulls
+/// `alloc::sync::Arc`), so the atomic adds no new target constraint.
+#[derive(Clone)]
+struct OffsetClock<C> {
+    inner: C,
+    offset_ms: Arc<AtomicU32>,
+}
+
+impl<C: ClockSource> ClockSource for OffsetClock<C> {
+    fn now_us(&self) -> u64 {
+        let offset_us = u64::from(self.offset_ms.load(Ordering::Relaxed)).saturating_mul(1000);
+        self.inner.now_us().saturating_add(offset_us)
+    }
 }
 
 /// Drive the acceptor session e2e to a verdict.
@@ -219,7 +278,15 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
     // ── The session machinery (shared SSOT). The actions' clock MUST share
     //    an epoch with the loop clock (R263): build one LwipTime, clone it
     //    into the actions, pass the original to run_session.
-    let runtime = LwipRuntime::new(clock_source);
+    // The clock is wrapped in an `OffsetClock` whose offset stays 0 for every
+    // mode except `FragmentChainStalled`, where the `on_event` hook below bumps
+    // it to cross the reassembly deadline. Always-wrapping keeps one runtime
+    // type across modes; offset 0 is a no-op (an atomic load).
+    let offset_ms = Arc::new(AtomicU32::new(0));
+    let runtime = LwipRuntime::new(OffsetClock {
+        inner: clock_source,
+        offset_ms: offset_ms.clone(),
+    });
     let clock = LwipTime::new(&runtime);
     let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
     let actions = SessionLinkActions::new_generic(driver_sink, acceptor_params(), clock.clone());
@@ -237,6 +304,11 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
     let mut frame_payload = 0u32;
     let mut data_dispatch_msg_count = 0usize;
     let mut parse_error = 0u32;
+    let mut reassembly_timed_out = 0u32;
+    // The stalled mode bumps the clock exactly once, when the lone fragment is
+    // ingested; this guards against a re-bump on any later Fragment outcome.
+    #[cfg(feature = "reassembly")]
+    let mut stall_armed = false;
     let mut peer_initack_seen = false;
     let mut peer_cookie_len = 0usize;
     let mut peer_opensyn_sent = false;
@@ -251,6 +323,10 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         DataMode::WholeFrame => DATA_FRAME_SN,
         #[cfg(feature = "reassembly")]
         DataMode::FragmentChain => FRAG_SN_1,
+        // The stalled chain never completes, so no `FramePayload` ever matches
+        // this SN; the value is inert (the verdict is the timeout count).
+        #[cfg(feature = "reassembly")]
+        DataMode::FragmentChainStalled => FRAG_SN_1,
     };
 
     run_session(
@@ -263,8 +339,8 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         SessionRole::Acceptor,
         Some(MAX_ITERS),
         |event| {
-            if let IterationEvent::Poll(outcome) = event {
-                match outcome {
+            match event {
+                IterationEvent::Poll(outcome) => match outcome {
                     DriverLoopOutcome::AdvancedFsm => advanced_fsm += 1,
                     DriverLoopOutcome::SideEffectOnly => side_effect += 1,
                     DriverLoopOutcome::ParseError(_) => parse_error += 1,
@@ -275,8 +351,29 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
                             data_dispatch_msg_count = messages.len();
                         }
                     }
+                    // FragmentChainStalled: the instant the acceptor dispatches
+                    // the lone first fragment, jump the clock past the chain's
+                    // reassembly deadline. report_outcome_reassembling fires
+                    // this Poll BEFORE it ingests + arms the chain (the arm uses
+                    // the pre-bump now_ms), so the chain is armed at the current
+                    // time and the NEXT iteration's sweep — at now_ms +
+                    // STALL_JUMP_MS — evicts it.
+                    #[cfg(feature = "reassembly")]
+                    DriverLoopOutcome::Fragment { sn, more, .. }
+                        if data_mode == DataMode::FragmentChainStalled
+                            && *more
+                            && *sn == FRAG_SN_0
+                            && !stall_armed =>
+                    {
+                        offset_ms.store(STALL_JUMP_MS, Ordering::Relaxed);
+                        stall_armed = true;
+                    }
                     _ => {}
-                }
+                },
+                // The deadline sweep evicted an abandoned chain — count it (the
+                // FragmentChainStalled verdict).
+                IterationEvent::ReassemblyTimeout(n) => reassembly_timed_out += n as u32,
+                _ => {}
             }
 
             // The reactive peer: deliver the acceptor's just-sent reply to
@@ -341,6 +438,19 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
                                     &craft_fragment_wire(true, false, FRAG_SN_1, &[0x02]),
                                 );
                             }
+                            #[cfg(feature = "reassembly")]
+                            DataMode::FragmentChainStalled => {
+                                // Only the FIRST fragment (more=1). The
+                                // continuation (FRAG_SN_1) is never sent, so the
+                                // acceptor's armed chain is left dangling and the
+                                // deadline sweep evicts it once the OffsetClock
+                                // crosses the reassembly window.
+                                let _ = peer_sock.send_to(
+                                    ipv4_addr_loopback(),
+                                    SESSION_PORT,
+                                    &craft_fragment_wire(true, true, FRAG_SN_0, &[0x01]),
+                                );
+                            }
                         }
                         peer_frame_sent = true;
                         peer_phase = PeerPhase::Done;
@@ -353,10 +463,14 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
 
     let outcome = if !actions.is_established() {
         AcceptorE2eOutcome::NotEstablished
-    } else if !frame_dispatched {
-        AcceptorE2eOutcome::FrameNotDispatched
-    } else {
+    } else if frame_dispatched {
         AcceptorE2eOutcome::EstablishedAndDispatched
+    } else if reassembly_timed_out > 0 {
+        // Established, no dispatch, but a chain was evicted on its deadline —
+        // the abandoned-chain timeout path, not a fault.
+        AcceptorE2eOutcome::ReassemblyTimedOut
+    } else {
+        AcceptorE2eOutcome::FrameNotDispatched
     };
 
     let trace = actions.trace_snapshot();
@@ -368,6 +482,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         frame_payload,
         data_dispatch_msg_count,
         parse_error,
+        reassembly_timed_out,
         peer_initack_seen,
         peer_cookie_len,
         peer_opensyn_sent,

@@ -149,6 +149,15 @@ pub enum IterationEvent<'a> {
     /// verdict is carried here. `Copy` because the enum has only
     /// unit variants.
     Lease(LeaseCheckOutcome),
+    /// The per-iteration reassembly deadline sweep evicted one or more
+    /// chains whose continuation never arrived (the carried `usize` is the
+    /// count). Emitted by [`crate::drive::sweep_reporting`] from both the AP
+    /// and MCU drive loops so the application layer can observe a peer that
+    /// began a fragmented message and abandoned it — the silent-eviction
+    /// counterpart of the `Poll(FramePayload)` chain-completion event.
+    /// `Copy` (a bare `usize`). Consumers that only care about `Poll` ignore
+    /// it via their `if let Poll(..)` partial match.
+    ReassemblyTimeout(usize),
 }
 
 /// R76b — terminal result of a production session drive loop. Runtime-

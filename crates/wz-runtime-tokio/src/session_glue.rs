@@ -596,7 +596,7 @@ use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatche
 // drive loop passes its `TokioReassembly` dims (the `Fragment` type is now
 // named only inside that shared helper).
 #[cfg(feature = "reassembly")]
-use wz_session_core::drive::report_outcome_reassembling;
+use wz_session_core::drive::{report_outcome_reassembling, sweep_reporting};
 
 /// Reassembly slot-pool dimensions for the unicast tokio session. R311in
 /// — sourced from the SCE-codegen'd AP buffer-pool constants
@@ -754,11 +754,11 @@ where
         // R311im — abort + reclaim any reassembly chain past its deadline.
         // Swept once per loop iteration (whenever an event or deadline
         // fires); in Established the lease deadline guarantees the loop
-        // iterates well within the reassembly window.
+        // iterates well within the reassembly window. `sweep_reporting` (the
+        // shared SSOT with the MCU loop) raises a `ReassemblyTimeout` event
+        // when an eviction occurs so the observer sees it.
         #[cfg(feature = "reassembly")]
-        {
-            reasm.sweep(clock.now_monotonic_ms());
-        }
+        sweep_reporting(&mut reasm, clock.now_monotonic_ms(), &mut on_event);
         // This iteration's deadline. During the handshake phases the
         // tracker yields the host-owned handshake deadline; in Established
         // it disarms and the keepalive-resetting lease deadline applies;

@@ -962,11 +962,13 @@ layer_c1m_session_lwip() {
 layer_c1n_mcu_session_acceptor() {
     # Default (no reassembly) — the minimal MCU session build: the
     # WholeFrame data-plane proof (host_acceptor_e2e), reassembly slot pool
-    # compiled out. Then `--features reassembly` — the Tier B build: the
-    # reassembly host test (host_acceptor_reassembly_e2e, a separate binary
-    # so lwIP's process-global NO_SYS single-init holds) drives a
-    # T_MID_FRAGMENT chain through ingest -> reassemble -> dispatch, and the
-    # WholeFrame test still passes with the pool linked in. clippy both
+    # compiled out. Then `--features reassembly` — the Tier B build: two
+    # separate binaries (lwIP's process-global NO_SYS single-init holds per
+    # file) — host_acceptor_reassembly_e2e drives a T_MID_FRAGMENT chain
+    # through ingest -> reassemble -> dispatch (completion path), and
+    # host_acceptor_reassembly_timeout_e2e stalls the chain + advances the
+    # OffsetClock past its deadline so the sweep evicts it (timeout path).
+    # The WholeFrame test still passes with the pool linked in. clippy both
     # configs so the reassembly data path is lint-gated too.
     (cd crates \
         && cargo test -p wz-mcu-session-acceptor --quiet \

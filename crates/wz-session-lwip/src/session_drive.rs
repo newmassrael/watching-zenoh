@@ -35,7 +35,7 @@ use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeout
 #[cfg(feature = "reassembly")]
 use wz_runtime_lwip::reassembly_rx::mcu_reassembly;
 #[cfg(feature = "reassembly")]
-use wz_session_core::drive::report_outcome_reassembling;
+use wz_session_core::drive::{report_outcome_reassembling, sweep_reporting};
 
 use crate::driver::LwipUdpDriver;
 
@@ -139,8 +139,12 @@ where
         runtime.run_until_idle();
 
         let now_ms = clock.now_monotonic_ms();
+        // Sweep expired reassembly chains and surface the eviction count as
+        // an `IterationEvent::ReassemblyTimeout` (the shared SSOT — the AP
+        // loop calls the same primitive). A stalled chain whose continuation
+        // never arrives is reclaimed here once `now_ms` crosses its deadline.
         #[cfg(feature = "reassembly")]
-        reasm.sweep(now_ms);
+        sweep_reporting(&mut reasm, now_ms, &mut on_event);
 
         // Inbound datagram? Dispatch it and loop promptly for the next.
         if let Some(dg) = driver.try_recv() {
