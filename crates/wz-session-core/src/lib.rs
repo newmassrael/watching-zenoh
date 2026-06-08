@@ -394,6 +394,20 @@ pub mod push_build;
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub mod declare_build;
 
+/// Outbound INTEREST network-message builders
+/// (`build_interest_liveliness_subscriber` / `_get` / `build_interest_final`)
+/// hoisted from `wz-runtime-tokio::session_glue`. `InterestOwned` output, so
+/// alloc-gated; the builders carry no codec feature gate (mirroring the
+/// ungated `frame_encode::encode_frame_with_interest`).
+#[cfg(feature = "alloc")]
+pub mod interest_build;
+
+/// Outbound RESPONSE-FINAL network-message builder
+/// (`build_response_final`). Separate from `response_build` because
+/// `codec-response-final` is an independent feature from `codec-response`.
+#[cfg(all(feature = "alloc", feature = "codec-response-final"))]
+pub mod response_final_build;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns

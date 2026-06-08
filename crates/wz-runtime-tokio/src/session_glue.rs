@@ -126,14 +126,13 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 // out with the Push builders (wz-session-core::push_build); the only
 // remaining session_glue use of PushOwnedVariant is the test module, so
 // it is imported there.
-use wz_codecs::interest::InterestOwned;
-use wz_codecs::interest_body::InterestBodyOwned;
+// InterestOwned / InterestBodyOwned / ResponseFinalOwned / Wireexpr* moved
+// out with the interest + response-final builders (wz-session-core
+// interest_build / response_final_build); the Wireexpr types + wire_const
+// are still named by the builder coverage tests, so they import in the test
+// module.
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::ResponseOwned;
-#[cfg(feature = "codec-response-final")]
-use wz_codecs::response_final::ResponseFinalOwned;
-use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-use wz_codecs::wireexpr_local::WireexprLocalOwned;
 // `SessionRuntime` (imported below) extends `wz_runtime_core::Runtime`, so
 // the `R::new_mutex` / `R::with_mutex_mut` calls in the generic
 // `SessionLinkActions` impls resolve through the supertrait — no direct
@@ -208,12 +207,10 @@ pub fn signing_key_from_os_entropy() -> Result<SigningKey, getrandom::Error> {
         .expect("32-byte entropy buffer always satisfies the >= 32 length contract"))
 }
 
-/// R311dl — re-export the wire-spec MID / flag constants from the
-/// wz-codecs single-source-of-truth home. Callsite references
-/// (`wire_const::T_MID_INIT`, `wire_const::FLAG_T_FRAME_R`, etc.)
-/// below keep their existing shape; the constants themselves are
-/// defined in [`wz_codecs::wire_const`].
-use wz_codecs::wire_const;
+// R311dl — the wire_const re-import moved into the test module: after the
+// outbound builders (push/declare/interest/handshake) hoisted to
+// wz-session-core, the only remaining session_glue references to
+// wire_const::* are the builder coverage tests.
 
 // R311ej — SessionInitParams moved to wz-session-core::session_init_params
 // (pure owned value type, no codec coupling; unblocked by R311ei moving
@@ -2651,185 +2648,14 @@ pub use wz_session_core::declare_build::{
     build_undeclare_queryable, build_undeclare_subscriber, build_undeclare_token,
 };
 
-/// R279 — build an `Interest` network-message that subscribes to the
-/// peer's `DeclToken` / `UndeclToken` stream restricted to a specific
-/// keyexpr. Mirrors zenoh-pico `_z_n_interest_encode` at
-/// `vendor/zenoh-pico/src/protocol/codec/network.c:452-486` invoked
-/// from `_z_register_liveliness_subscriber` with
-/// `flags = KEYEXPRS | TOKENS | RESTRICTED | FUTURE [| CURRENT]`
-/// (`vendor/zenoh-pico/src/net/liveliness.c:169-198` via
-/// `vendor/zenoh-pico/src/session/interest.c:204-209`).
-///
-/// Wire shape (composed by `Interest::encode` from the
-/// `sources/codecs/interest.scxml` envelope + `interest_body.scxml`
-/// inner body):
-///
-/// ```text
-///   [outer header = N_MID_INTEREST (0x19)
-///                    | (history ? 0x20 : 0)   // C = CURRENT
-///                    | 0x40                    // F = FUTURE
-///                    | (Z extensions = 0 here)]
-///   VLE(interest_id)
-///   [InterestBody.header = 0x01 (KE) | 0x08 (TO) | 0x10 (R)
-///                          | (suffix.is_some() ? 0x20 : 0) // N
-///                          | 0x40                           // M (Local)
-///                          ]
-///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
-/// ```
-///
-/// N/M bit positions on `InterestBody.header` (bits 5 and 6) coincide
-/// with the C/F bit positions on the outer `Interest.header` — that
-/// is intentional and matches zenoh-pico's `_Z_INTEREST_FLAG_COPY_MASK
-/// = 0x9F` reorder at `vendor/zenoh-pico/src/protocol/codec/interest.c:37`:
-/// the encoder hoists C/F to the outer header, clears them from the
-/// body, and stores N/M (wireexpr codec flags) at the freed positions.
-/// The two `header` bytes are distinct wire bytes so the apparent
-/// overload causes no collision; the body carrier owns its own bit
-/// layout per `interest_body.scxml::header` flags carrier definition.
-///
-/// `history = true` instructs the peer to immediately replay the
-/// current matching `DeclToken` set (zenoh-pico's
-/// `_z_liveliness_subscription_trigger_history` fires after the
-/// register call); `history = false` only registers for future
-/// events. The `FUTURE` (F) bit is always set — a wz liveliness
-/// subscriber that does not want future events would
-/// [`Self::send_interest_final`] immediately after the declare and
-/// the peer would remove the interest before any future event
-/// arrives, which is the wrong shape (use a one-shot Query path for
-/// "current matching set only").
-///
-/// `keyexpr_mapping_id == 0` with `keyexpr_suffix = Some(s)` targets
-/// a literal keyexpr. Pure-alias (mapping_id != 0, suffix=None) and
-/// composite (mapping_id != 0, suffix=Some) forms emit via the
-/// `Local` wireexpr arm; the `Nonlocal` arm (M=0) for keyexprs
-/// rooted in the peer's mapping table is reserved for a future
-/// `_nonlocal` companion builder mirroring the DECLARE pattern.
-pub fn build_interest_liveliness_subscriber(
-    interest_id: u64,
-    history: bool,
-    keyexpr_mapping_id: u64,
-    keyexpr_suffix: Option<&str>,
-) -> Result<InterestOwned, CodecError> {
-    // A liveliness subscriber always sets FUTURE (the subscription stays
-    // live for subsequent peer declarations); CURRENT mirrors the
-    // `history` replay request.
-    build_liveliness_token_interest(
-        interest_id,
-        /*current=*/ history,
-        /*future=*/ true,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
-    )
-}
-
-/// Build a one-shot liveliness GET (snapshot) `Interest`: CURRENT set,
-/// FUTURE clear, restricted to the attached keyexpr. The peer replies
-/// with the currently-alive matching tokens (`interest_id`-tagged
-/// `Declare(DeclToken)`) terminated by an `interest_id`-tagged
-/// `Declare(DeclFinal)`, then — because FUTURE is clear — drops the
-/// interest without streaming future events. Mirrors zenoh-pico's
-/// `_z_liveliness_query` flags
-/// (`KEYEXPRS | TOKENS | RESTRICTED | CURRENT`,
-/// `vendor/zenoh-pico/src/net/liveliness.c:350-352`). Shares the
-/// body-header flag composition with
-/// [`build_interest_liveliness_subscriber`] via
-/// [`build_liveliness_token_interest`] (one SSOT; the two differ only in
-/// the outer C / F bits).
-pub fn build_interest_liveliness_get(
-    interest_id: u64,
-    keyexpr_mapping_id: u64,
-    keyexpr_suffix: Option<&str>,
-) -> Result<InterestOwned, CodecError> {
-    build_liveliness_token_interest(
-        interest_id,
-        /*current=*/ true,
-        /*future=*/ false,
-        keyexpr_mapping_id,
-        keyexpr_suffix,
-    )
-}
-
-/// SSOT for the liveliness-token `Interest` body-header flag composition
-/// (`KE | TO | R | N | M`) shared by the subscriber + get paths. The
-/// only difference between the two is the outer `Interest.header` C
-/// (CURRENT) / F (FUTURE) bits, surfaced here as the `current` / `future`
-/// params. Keeping one constructor avoids the body-header bitset drifting
-/// between the two callers.
-///
-/// N/M bit positions on `InterestBody.header` (bits 5 and 6) coincide
-/// with the C/F positions on the outer `Interest.header`; that is
-/// intentional and matches zenoh-pico's `_Z_INTEREST_FLAG_COPY_MASK`
-/// reorder (the two `header` bytes are distinct wire bytes, so no
-/// collision). The inner body sets KE (carries a keyexpr), TO (wants
-/// token records), and R (restricted to the attached keyexpr); SU/QU/AG
-/// stay clear (the liveliness-token path does not interest on peer
-/// subscribers / queryables / aggregated keyexprs).
-fn build_liveliness_token_interest(
-    interest_id: u64,
-    current: bool,
-    future: bool,
-    keyexpr_mapping_id: u64,
-    keyexpr_suffix: Option<&str>,
-) -> Result<InterestOwned, CodecError> {
-    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
-    let suffix_string = keyexpr_suffix
-        .map(wz_session_core::codec_bound::bounded_string)
-        .transpose()?;
-
-    // Outer header: MID 0x19 | (current ? C) | (future ? F). Z stays
-    // clear — wz emits no Interest-level extensions today; the
-    // wz-codecs envelope leaves bit 7 free for a future ext-chain.
-    let c_flag = if current { 0x20u8 } else { 0x00u8 };
-    let f_flag = if future { 0x40u8 } else { 0x00u8 };
-
-    let ke_flag = 0x01u8;
-    let to_flag = 0x08u8;
-    let r_flag = 0x10u8;
-    let n_flag = if keyexpr_suffix.is_some() {
-        0x20u8
-    } else {
-        0x00u8
-    };
-    let m_flag = 0x40u8; // Local arm (M=1)
-    let body_header = ke_flag | to_flag | r_flag | n_flag | m_flag;
-
-    Ok(InterestOwned {
-        header: wire_const::N_MID_INTEREST | c_flag | f_flag,
-        interest_id,
-        body: Some(InterestBodyOwned {
-            header: body_header,
-            keyexpr: Some(WireexprOwned {
-                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                    id: keyexpr_mapping_id,
-                    suffix_len,
-                    suffix: suffix_string,
-                }),
-            }),
-        }),
-        extensions: None,
-    })
-}
-
-/// R279 — build an `Interest(Final)` network-message (C=0, F=0) that
-/// terminates a previously emitted Interest. Mirrors zenoh-pico's
-/// `_z_make_interest_final` at
-/// `vendor/zenoh-pico/src/protocol/definitions/interest.c:27` and the
-/// encoder-side path through `_z_n_interest_encode(.., is_final=true)`
-/// at `vendor/zenoh-pico/src/protocol/codec/network.c:452-486` (the
-/// `is_final` branch skips the inner body emit per interest.c:43-46).
-///
-/// Wire shape: `[N_MID_INTEREST (0x19), VLE(interest_id)]` — exactly
-/// two bytes for `interest_id <= 0xFF`. No inner body (the
-/// `_Z_INTEREST_NOT_FINAL_MASK` gate at interest.h:35 — C||F — is
-/// clear), no extensions.
-pub fn build_interest_final(interest_id: u64) -> InterestOwned {
-    InterestOwned {
-        header: wire_const::N_MID_INTEREST,
-        interest_id,
-        body: None,
-        extensions: None,
-    }
-}
+// build_interest_* moved to wz-session-core::interest_build (shared
+// INTEREST builders for the tokio AP + lwIP MCU profiles; the private
+// build_liveliness_token_interest body-header SSOT moved with them).
+// Re-exported so the action methods + crate::session_glue::* paths keep
+// the bare names.
+pub use wz_session_core::interest_build::{
+    build_interest_final, build_interest_liveliness_get, build_interest_liveliness_subscriber,
+};
 
 // R311eh — the Request-builder cluster (build_request_query + the five
 // build_request_query_with_{consolidation,parameters,attachment,
@@ -2887,41 +2713,12 @@ pub use wz_session_core::source_info_ext::encode_source_info_ext_body;
 // R311di-8 — QueryTarget moved to wz-session-core::query_mode.
 pub use wz_session_core::query_mode::QueryTarget;
 
-/// R121j-2 — build a `ResponseFinal` network-message that terminates
-/// the multi-Reply sequence for `request_id`. Mirrors zenoh-pico
-/// `_z_response_final_encode` at
-/// `vendor/zenoh-pico/src/protocol/codec/network.c:368-376`:
-///
-/// ```text
-///   [ResponseFinal.header = _Z_MID_N_RESPONSE_FINAL (0x1A)]
-///   VLE(request_id)
-/// ```
-///
-/// AP MVP scope: minimal shape only — no Z(extensions) flag, no
-/// trailing ExtEntry list. Future rounds that need RF-level
-/// extensions (none defined in zenoh-pico today, but the wire format
-/// reserves bit 7 for it via the `_Z_FLAG_Z_Z` carrier) extend this
-/// helper with an exts-present variant.
-///
-/// ResponseFinal is a network-message envelope at the same layer as
-/// `Declare` and `Request` — its `.encode_to_vec()` output is emitted
-/// directly into the Frame payload without an additional wrapper
-/// header. The 0x1A MID lives in the `_Z_MID_N_*` network-message
-/// namespace (distinct from the inner DECLARE-body 0x1A
-/// `_Z_DECL_FINAL_MID`, which is at a different layer).
-///
-/// `request_id` MUST equal the `rid` from the matching
-/// [`build_request_query`] that opened the Query/Reply session.
+// build_response_final moved to wz-session-core::response_final_build
+// (its own codec-response-final vertical, distinct from the
+// codec-response response_build cluster). Re-exported so callers keep
+// the bare name.
 #[cfg(feature = "codec-response-final")]
-pub fn build_response_final(request_id: u64) -> ResponseFinalOwned {
-    ResponseFinalOwned {
-        // MID 0x1A (_Z_MID_N_RESPONSE_FINAL). Z bit-7 stays clear:
-        // minimal shape has no RF-level extensions.
-        header: 0x1A,
-        request_id,
-        extensions: None,
-    }
-}
+pub use wz_session_core::response_final_build::build_response_final;
 
 // encode_frame_envelope + the encode_frame_with_* family moved to
 // wz-session-core::frame_encode (shared outbound encode SSOT for the tokio
@@ -3524,6 +3321,26 @@ mod tests {
     // moved to wz-session-core::declare_build.
     #[cfg(feature = "codec-declare")]
     use wz_codecs::declare::DeclareOwnedVariant;
+    // wire_const + Wireexpr* are named by the builder coverage tests (wire
+    // byte / variant assertions); their lib producers moved to
+    // wz-session-core (push/declare/interest/handshake builders). Each
+    // import gates on the union of the codec test-groups that name it, so an
+    // arbitrary subset that compiles none of those tests carries no unused
+    // import (caught by the C1j BEHAVIOUR matrix).
+    #[cfg(any(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-request",
+        feature = "codec-response-final",
+        feature = "codec-close",
+        feature = "reassembly"
+    ))]
+    use wz_codecs::wire_const;
+    #[cfg(feature = "codec-declare")]
+    use wz_codecs::wireexpr::WireexprOwned;
+    #[cfg(any(feature = "codec-push", feature = "codec-declare"))]
+    use wz_codecs::wireexpr::WireexprOwnedVariant;
 
     // SCE owned-view absorb test helper. The `build_*` fixtures + reply
     // builders return the lifetime-free `*Owned` mirrors, whose wire
