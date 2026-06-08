@@ -10,8 +10,10 @@
 # any one failing fails the workflow.
 #
 # Layer A — Mnemosyne workspace integrity:
-#   mnemosyne-cli validate-workspace must report:
-#     T1 orphan total=0, round-trip mandatory=N/N, GENERATED.md=sync.
+#   mnemosyne-cli validate-workspace must report no NEW T1 orphan
+#   (ledgered carry allowed). R408 (2026-06-04) made the scan
+#   store-direct; the round-trip + GENERATED.md=sync dimensions were
+#   retired upstream (mnemosyne R395-R400).
 #   Drift here means a typed-mutate primitive was bypassed (raw Edit
 #   on a registered doc, direct sidecar JSON edit, or a frozen-ledger
 #   violation). Pre-commit + pre-push hooks already enforce; CI is
@@ -137,16 +139,15 @@ jobs:
       - name: Build sce-codegen (vendor/sce)
         run: bash scripts/build-sce.sh
 
-      - name: Regenerate docs/GENERATED.md (CI fresh-checkout cascade)
-        # R64.4 hotfix: docs/GENERATED.md is .gitignored (byproduct
-        # of atomic mutate cascade). Local mutate auto-regenerates
-        # it so validate-workspace observes GENERATED.md=sync; CI's
-        # fresh checkout has no GENERATED.md (or the wrong one if
-        # previously cached), and validate-workspace fails with
-        # `GENERATED.md=STALE`. Running generate-docs once here
-        # restores the cascade invariant before Layer A.
-        if: env.MNEMOSYNE_SKIP != '1'
-        run: mnemosyne-cli generate-docs
+      # R408 (2026-06-04) retired the GENERATED.md render and the
+      # `generate-docs` cascade upstream (mnemosyne R395-R400): the
+      # atomic store is now the single directly-validated artifact, so
+      # there is no GENERATED.md to regenerate before Layer A. The former
+      # "Regenerate docs/GENERATED.md" step invoked `mnemosyne-cli
+      # generate-docs`, which now hard-errors (`mnemosyne.toml` no longer
+      # carries `[workspace].docs`) and broke every push; it is removed.
+      # validate-workspace (Layer A) runs store-direct and needs no
+      # pre-cascade.
 
       # R65b dedupe: every Layer lane below delegates to
       # scripts/run-ci.sh --layer X. The lane bodies (codec map,
@@ -354,7 +355,11 @@ jobs:
         # cmake + libclang for the sce-codegen / *-sys build scripts;
         # gcc-arm-none-eabi supplies arm-none-eabi-{gcc,size} (the lwIP C
         # cross-compile + the Layer Q.3 footprint `size` measurement);
-        # qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
+        # libnewlib-arm-none-eabi supplies the bare-metal newlib C headers
+        # (string.h etc.) that gcc-arm-none-eabi alone OMITS on Ubuntu's
+        # split packaging — without it the lwIP `def.c` cross-compile fails
+        # `fatal error: string.h: No such file or directory` (Layer G.6 /
+        # G.11). qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -362,6 +367,7 @@ jobs:
             libclang-dev \
             clang \
             gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
             qemu-system-arm
 
       - name: Install Rust toolchain + embedded targets

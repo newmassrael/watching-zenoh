@@ -94,9 +94,10 @@ jobs:
       - name: Build sce-codegen (vendor/sce)
         run: bash scripts/build-sce.sh
 
-      - name: Regenerate docs/GENERATED.md
-        if: env.MNEMOSYNE_SKIP != '1'
-        run: mnemosyne-cli generate-docs
+      # R408 (2026-06-04) retired the GENERATED.md render + `generate-docs`
+      # cascade upstream (mnemosyne R395-R400); the former regenerate step
+      # now hard-errors and is removed. validate-workspace (Layer A) is
+      # store-direct and needs no pre-cascade. Mirrors ci.yml.
 
       # CI mirror — every Layer must pass before the release artefacts
       # land. Delegating to scripts/run-ci.sh keeps the two workflows
