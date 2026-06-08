@@ -24,6 +24,7 @@ use wz_runtime_core::TimeSource;
 
 use crate::driver_loop::DriverLoopOutcome;
 use crate::inbound::inbound_to_fsm_event;
+use crate::lease::LeaseCheckOutcome;
 use crate::link::{LinkEvent, SessionRuntime};
 // `InboundParseError` is named only as `::Codec(..)` in the codec-frame `Frame`
 // arm (and the reassembly re-parse, which implies codec-frame); the `Err(err)`
@@ -153,6 +154,54 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                 DriverLoopOutcome::ParseError(err)
             }
         },
+    }
+}
+
+/// R77/R84 — compare the session's lease baseline against `params.lease` and
+/// inject `SessionFsmUnicastEvent::LeaseExpired` when the window has elapsed,
+/// so the session-fsm `lease.expired -> Closing(Expired)` transition fires.
+/// Generic over `R: SessionRuntime` so the AP tokio loop and the lwIP MCU sync
+/// loop share one lease comparator (Stage 4 SSOT). The two baseline stamps are
+/// read through `R::with_mutex_mut` — the AP `std::sync::Mutex` and the MCU
+/// `critical_section` mutex behind one seam; the reads are SEQUENTIAL, never
+/// nested, so the non-reentrant MCU mutex is safe.
+///
+/// Baseline (R84) = `max(established_at, last_inbound_keepalive_at)`: the
+/// KeepAlive stamp resets the window per peer ping, the established stamp covers
+/// the pre-first-KeepAlive window so the lease has a defined start at Established
+/// entry (session-fsm §2.5). Both `None` -> `NoBaseline` (no FSM mutation).
+///
+/// `now_ms` is parameterised for test determinism; production callers pass
+/// `clock.now_monotonic_ms()` (the same epoch [`SessionLinkActions::clock`]
+/// carries). `params.lease_in_seconds` selects the unit per the `_Z_FLAG_T_OPEN_T`
+/// wire semantics; seconds are scaled to ms before the `>=` so the arithmetic
+/// stays on the `u64` ms scale of the stamps (R294).
+pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    now_ms: u64,
+) -> LeaseCheckOutcome {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    let lease_ms = if actions.params.lease_in_seconds {
+        actions.params.lease.saturating_mul(1000)
+    } else {
+        actions.params.lease
+    };
+    let keepalive = R::with_mutex_mut(&actions.last_inbound_keepalive_at, |g| *g);
+    let established = R::with_mutex_mut(&actions.established_at, |g| *g);
+    let baseline = match (established, keepalive) {
+        (None, None) => None,
+        (Some(e), None) => Some(e),
+        (None, Some(k)) => Some(k),
+        (Some(e), Some(k)) => Some(e.max(k)),
+    };
+    match baseline {
+        None => LeaseCheckOutcome::NoBaseline,
+        Some(stamp_ms) if now_ms.saturating_sub(stamp_ms) >= lease_ms => {
+            engine.process_event(E::LeaseExpired);
+            LeaseCheckOutcome::Expired
+        }
+        Some(_) => LeaseCheckOutcome::WithinLease,
     }
 }
 

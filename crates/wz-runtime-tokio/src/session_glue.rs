@@ -564,65 +564,15 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
 // R311di-7 — LeaseCheckOutcome moved to wz-session-core::lease.
 pub use wz_session_core::lease::LeaseCheckOutcome;
 
-/// R77 — compare `last_inbound_keepalive_at` against `params.lease`
-/// and inject `SessionFsmUnicastEvent::LeaseExpired` when the
-/// window has elapsed.
-///
-/// Production driver loops call this between
-/// `poll_and_dispatch_one` iterations so a peer that stops sending
-/// KeepAlives reaches the `lease.expired -> Closing(Expired)`
-/// transition without the caller hand-wiring the deadline math.
-/// This is the consumer wiring for the R72b `last_inbound_keepalive_at`
-/// slot foreshadowed by `inbound_to_fsm_event`'s `KeepAlive -> None`
-/// branch (lease-timer side effect orthogonal to the state graph).
-///
-/// `now_ms` is parameterised for test determinism. Production
-/// callers pass `clock.now_monotonic_ms()` (the same clock used by
-/// [`SessionLinkActions::clock`]); tests stage a stamp via
-/// `last_inbound_keepalive_at` and pass `stamp_ms + offset_ms` as
-/// `now_ms` so the comparator is deterministic without depending
-/// on wall-clock progression during the test.
-///
-/// `params.lease_in_seconds` picks the integer unit per the
-/// `_Z_FLAG_T_OPEN_T` wire semantics; the comparator multiplies
-/// the seconds reading by 1000 before the `>=` check so the lease
-/// arithmetic stays on the same `u64` ms scale as the stamp / now
-/// inputs (R294 migration from `Duration::from_secs/from_millis`).
-pub fn check_lease_deadline(
-    actions: &Arc<SessionLinkActions>,
-    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy<SessionActionsBinding>>,
-    now_ms: u64,
-) -> LeaseCheckOutcome {
-    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let lease_ms = if actions.params.lease_in_seconds {
-        actions.params.lease.saturating_mul(1000)
-    } else {
-        actions.params.lease
-    };
-    // R84 — baseline is the most recent of established_at and
-    // last_inbound_keepalive_at. The KeepAlive stamp resets the lease
-    // window per peer ping; the established_at stamp covers the
-    // pre-first-KeepAlive window so the lease has a defined
-    // start-of-counting at Established entry per session-fsm §2.5.
-    let baseline = {
-        let keepalive = *actions.last_inbound_keepalive_at.lock().unwrap();
-        let established = *actions.established_at.lock().unwrap();
-        match (established, keepalive) {
-            (None, None) => None,
-            (Some(e), None) => Some(e),
-            (None, Some(k)) => Some(k),
-            (Some(e), Some(k)) => Some(e.max(k)),
-        }
-    };
-    match baseline {
-        None => LeaseCheckOutcome::NoBaseline,
-        Some(stamp_ms) if now_ms.saturating_sub(stamp_ms) >= lease_ms => {
-            engine.process_event(E::LeaseExpired);
-            LeaseCheckOutcome::Expired
-        }
-        Some(_) => LeaseCheckOutcome::WithinLease,
-    }
-}
+// Stage 4b — check_lease_deadline hoisted to the runtime-agnostic
+// wz_session_core::drive (generic over R: SessionRuntime, reading the two
+// baseline stamps through R::with_mutex_mut) so the AP tokio loop and the
+// lwIP MCU sync loop share one lease comparator. Re-exported so
+// drive_session_until_terminal + the callsite tests keep the bare name; a
+// `&Arc<SessionLinkActions>` argument deref-coerces to the generic's
+// `&SessionLinkActions<R, T>` parameter (same pattern as the already-shared
+// report_outcome_reassembling).
+pub use wz_session_core::drive::check_lease_deadline;
 
 // R83 / R311di-12 — IterationEvent extracted to
 // wz-session-core::driver_loop. Re-exported here for callsites in

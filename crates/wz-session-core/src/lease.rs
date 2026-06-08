@@ -2,10 +2,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! Lease-deadline check outcome surfaced by the R77 `check_lease_deadline`
-//! helper. The helper itself stays in wz-runtime-tokio (it mutates the
-//! generated SCXML engine via `engine.process_event`); the outcome enum
-//! is no_std + no_alloc clean and migrates here so MCU profiles can
-//! type-equality-compare lease verdicts without dragging in tokio.
+//! helper. Stage 4b hoisted the helper itself into the runtime-agnostic
+//! [`crate::drive::check_lease_deadline`] (generic over `R: SessionRuntime`,
+//! reading the baseline stamps through `R::with_mutex_mut`) so the AP tokio
+//! loop and the lwIP MCU sync loop share one comparator; wz-runtime-tokio
+//! re-exports it. This outcome enum is no_std + no_alloc clean (it predates
+//! the helper hoist — migrated here at R311di-7 so MCU profiles could
+//! type-equality-compare lease verdicts without dragging in tokio).
 
 /// R77 — outcome of a single lease-deadline check against
 /// `SessionLinkActions`' baseline stamps.
