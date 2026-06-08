@@ -60,9 +60,9 @@ use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 use wz::runtime_lwip::{LwipRuntime, LwipTime};
 use wz::session_lwip::driver::SharedSessionSocket;
 use wz::session_lwip::{run_session, LwipUdpDriver, SessionRole};
-use wz_session_wire_fixtures::{
-    craft_fragment_wire, craft_frame_wire, craft_initsyn_wire, craft_opensyn_wire,
-};
+#[cfg(feature = "reassembly")]
+use wz_session_wire_fixtures::craft_fragment_wire;
+use wz_session_wire_fixtures::{craft_frame_wire, craft_initsyn_wire, craft_opensyn_wire};
 
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the QEMU bin depend only on THIS crate (single-dep facade
@@ -85,10 +85,12 @@ pub const PEER_PORT: u16 = 7461;
 /// identify it in the dispatch stream (handshake frames are not `Frame`s).
 const DATA_FRAME_SN: u64 = 7;
 /// First fragment SN of the [`DataMode::FragmentChain`] reassembly chain.
+#[cfg(feature = "reassembly")]
 const FRAG_SN_0: u64 = 10;
 /// Final fragment SN; the reassembled `FramePayload` is reported at this SN
 /// (`report_outcome_reassembling` stamps the completion with the final
 /// fragment's SN), so it is the data-dispatch sentinel in FragmentChain mode.
+#[cfg(feature = "reassembly")]
 const FRAG_SN_1: u64 = 11;
 /// Iteration cap on the drive loop. The handshake + Frame complete in the
 /// first ~3 iterations; the remainder spin the (no-op, with a frozen clock)
@@ -102,10 +104,13 @@ pub enum DataMode {
     /// One whole `T_MID_FRAME` (the Stage 5 baseline data-plane proof).
     WholeFrame,
     /// A two-fragment `T_MID_FRAGMENT` chain the acceptor reassembles,
-    /// re-parses, and dispatches as one `FramePayload`. Requires the
-    /// `reassembly` feature on the acceptor build (without it the fragments
-    /// decode to `Unknown` and never reassemble) — the host reassembly test
-    /// and the reassembly QEMU bin select it.
+    /// re-parses, and dispatches as one `FramePayload`. Gated on the
+    /// `reassembly` feature so this mode cannot be requested on a build that
+    /// compiled the slot pool out — a build without reassembly literally
+    /// has no `FragmentChain` variant to name (compile-time safety over a
+    /// silent runtime no-op). The host reassembly test and the reassembly
+    /// QEMU bin enable the feature.
+    #[cfg(feature = "reassembly")]
     FragmentChain,
 }
 
@@ -138,6 +143,12 @@ pub struct AcceptorE2eReport {
     pub side_effect: u32,
     /// Application `FramePayload` dispatches.
     pub frame_payload: u32,
+    /// NetworkMessage count of the data-dispatch `FramePayload` (the one at
+    /// the mode's expected SN). WholeFrame's empty payload decodes to 0; a
+    /// reassembled FragmentChain to >= 1 — so the host reassembly test
+    /// asserts the chain's bytes actually re-parsed into a message, not just
+    /// that a `FramePayload` envelope surfaced.
+    pub data_dispatch_msg_count: usize,
     /// Wire/codec parse errors surfaced during dispatch.
     pub parse_error: u32,
     /// The peer read the acceptor's `InitAck` off its socket.
@@ -224,6 +235,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
     let mut advanced_fsm = 0u32;
     let mut side_effect = 0u32;
     let mut frame_payload = 0u32;
+    let mut data_dispatch_msg_count = 0usize;
     let mut parse_error = 0u32;
     let mut peer_initack_seen = false;
     let mut peer_cookie_len = 0usize;
@@ -237,6 +249,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
     // `report_outcome_reassembling` stamps on the completion `FramePayload`).
     let expected_data_sn = match data_mode {
         DataMode::WholeFrame => DATA_FRAME_SN,
+        #[cfg(feature = "reassembly")]
         DataMode::FragmentChain => FRAG_SN_1,
     };
 
@@ -255,10 +268,11 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
                     DriverLoopOutcome::AdvancedFsm => advanced_fsm += 1,
                     DriverLoopOutcome::SideEffectOnly => side_effect += 1,
                     DriverLoopOutcome::ParseError(_) => parse_error += 1,
-                    DriverLoopOutcome::FramePayload { sn, .. } => {
+                    DriverLoopOutcome::FramePayload { sn, messages, .. } => {
                         frame_payload += 1;
                         if *sn == expected_data_sn {
                             frame_dispatched = true;
+                            data_dispatch_msg_count = messages.len();
                         }
                     }
                     _ => {}
@@ -306,6 +320,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
                                     &craft_frame_wire(DATA_FRAME_SN, true),
                                 );
                             }
+                            #[cfg(feature = "reassembly")]
                             DataMode::FragmentChain => {
                                 // A reliable two-fragment chain. The bodies
                                 // [0x01]+[0x02] reassemble to [0x01,0x02],
@@ -351,6 +366,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         advanced_fsm,
         side_effect,
         frame_payload,
+        data_dispatch_msg_count,
         parse_error,
         peer_initack_seen,
         peer_cookie_len,

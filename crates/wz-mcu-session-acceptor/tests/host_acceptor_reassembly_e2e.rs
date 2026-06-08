@@ -49,4 +49,11 @@ fn acceptor_reassembles_fragment_chain_and_dispatches_over_lwip() {
          loopback (ingest -> ReassemblyDispatcher -> parse_frame_payload -> \
          dispatch); report = {report:#?}"
     );
+    assert_eq!(
+        report.data_dispatch_msg_count, 1,
+        "the reassembled [0x01,0x02] chain must re-parse into exactly one \
+         NetworkMessage (an Unknown, mid 0x01) — this asserts the fragment \
+         bodies concatenated into parseable content, not just that a \
+         FramePayload envelope surfaced; report = {report:#?}"
+    );
 }
