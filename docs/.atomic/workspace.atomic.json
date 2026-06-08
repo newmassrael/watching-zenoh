@@ -31042,6 +31042,48 @@
         "acceptor bin carries no Q.3 footprint gate (e2e proof, not a footprint-tracked artifact); a reassembly-path acceptor e2e (Fragment->reassemble->dispatch) is a follow-up axis"
       ]
     },
+    "Round 311it": {
+      "decision_summary": "R311it: hoist craft_*_wire + transport consts to shared no_std wz-session-wire-fixtures; de-dup 3 session_fsm_* tests + wz-mcu-session-acceptor; corrects R311is omission",
+      "changes_bullets": [
+        "new crate crates/wz-session-wire-fixtures (no_std+alloc, publish=false): the single SSOT for synthetic handshake wire bytes — craft_initsyn/opensyn/initack/frame + transport constants + FIXTURE_PEER_ZID/FIXTURE_LISTENER_ZID",
+        "wz-mcu-session-acceptor + the 3 wz-runtime-tokio session_fsm_* drive tests now import from the fixture; local craft_*_wire + transport-const copies removed (craft logic was byte-identical so the wires are unchanged)",
+        "session_fsm_accepting_path inline &[0xB0,0xB1,0xB2,0xB3] cookie/zid literals -> FIXTURE_PEER_ZID so the Initiator zid is a single value, not redeclared per call site",
+        "R71 sibling-fixture pattern (no feature-flag-in-production-crate); no_std so the MCU e2e lib + its QEMU bin name the fixtures on a cross target, where wz-session-core-test-support (host std, declare-specific) could not serve"
+      ],
+      "verification_bullets": [
+        "the 3 AP handshake tests pass unchanged (session_fsm_accepting_path 9 / session_fsm_driver_loop 9 / session_fsm_inbound_dispatch 21); host C1n acceptor e2e PASS; fmt + clippy clean across the fixture + edited files",
+        "byte-identical wires: craft_* bodies copied verbatim into the fixture, FIXTURE_PEER_ZID=[0xB0..0xB3] / FIXTURE_LISTENER_ZID=[0xA0..0xA3] match the prior inline literals",
+        "full host run-ci + Layer G EXIT 0 (the new fixture crate is a pure-alloc leaf, composes in the std workspace test and on the no_std MCU cross target)"
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-1-unicast-states"
+      ],
+      "carry_forward_bullets": [
+        "corrects the R311is carry omission: the craft_*_wire + transport-const duplication (3 session_fsm_* tests + a 4th copy in wz-mcu-session-acceptor) was a real SSOT debt R311is neither shared nor recorded; a session review surfaced it and this round closes it",
+        "remaining R311is carries unchanged: MCU alloc-profile reassembly auto-sweep; deploy/mcu-qemu-demo Q.3 footprint baseline stale at HEAD; reassembly-path acceptor e2e (Fragment->dispatch)",
+        "the wz-integration-tests layer3_* codec tests keep their own self-contained transport constants by design (codec encode/decode oracles, a distinct concern from the handshake-drive fixtures); not converged here"
+      ],
+      "publishable_decision_summary": "R311it: hoist craft_*_wire + transport consts to shared no_std wz-session-wire-fixtures; de-dup 3 session_fsm_* tests + wz-mcu-session-acceptor; corrects R311is omission",
+      "publishable_changes_bullets": [
+        "new crate crates/wz-session-wire-fixtures (no_std+alloc, publish=false): the single SSOT for synthetic handshake wire bytes — craft_initsyn/opensyn/initack/frame + transport constants + FIXTURE_PEER_ZID/FIXTURE_LISTENER_ZID",
+        "wz-mcu-session-acceptor + the 3 wz-runtime-tokio session_fsm_* drive tests now import from the fixture; local craft_*_wire + transport-const copies removed (craft logic was byte-identical so the wires are unchanged)",
+        "session_fsm_accepting_path inline &[0xB0,0xB1,0xB2,0xB3] cookie/zid literals -> FIXTURE_PEER_ZID so the Initiator zid is a single value, not redeclared per call site",
+        "R71 sibling-fixture pattern (no feature-flag-in-production-crate); no_std so the MCU e2e lib + its QEMU bin name the fixtures on a cross target, where wz-session-core-test-support (host std, declare-specific) could not serve"
+      ],
+      "publishable_verification_bullets": [
+        "the 3 AP handshake tests pass unchanged (session_fsm_accepting_path 9 / session_fsm_driver_loop 9 / session_fsm_inbound_dispatch 21); host C1n acceptor e2e PASS; fmt + clippy clean across the fixture + edited files",
+        "byte-identical wires: craft_* bodies copied verbatim into the fixture, FIXTURE_PEER_ZID=[0xB0..0xB3] / FIXTURE_LISTENER_ZID=[0xA0..0xA3] match the prior inline literals",
+        "full host run-ci + Layer G EXIT 0 (the new fixture crate is a pure-alloc leaf, composes in the std workspace test and on the no_std MCU cross target)"
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-1-unicast-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "corrects the R311is carry omission: the craft_*_wire + transport-const duplication (3 session_fsm_* tests + a 4th copy in wz-mcu-session-acceptor) was a real SSOT debt R311is neither shared nor recorded; a session review surfaced it and this round closes it",
+        "remaining R311is carries unchanged: MCU alloc-profile reassembly auto-sweep; deploy/mcu-qemu-demo Q.3 footprint baseline stale at HEAD; reassembly-path acceptor e2e (Fragment->dispatch)",
+        "the wz-integration-tests layer3_* codec tests keep their own self-contained transport constants by design (codec encode/decode oracles, a distinct concern from the handshake-drive fixtures); not converged here"
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
