@@ -103,45 +103,16 @@ pub use wz_session_core::session_timeouts::SessionTimeouts;
 // (R311h..R311k cascade will gate the outbound encode_frame_* family
 // at which point these can fold under the same cfg(any(...))).
 use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
-// SceCursor is consumed only by parse_inbound / parse_frame_payload /
-// decode_ext_chain — every caller sits behind a codec feature gate
-// so the import folds under the same union predicate.
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame"
-))]
-use sce_forge_runtime::codec::SceCursor;
 #[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::decl_final::DeclFinal;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::Declare;
-// R311fe — the borrowed `ExtEntry` is consumed solely by
-// `decode_ext_chain` (the inbound transport-message ext decoder), which
-// is itself gated on the union of codec features whose `parse_inbound`
-// arms call into it. Mirror that exact predicate so an arbitrary subset
-// with every one of those codecs OFF (e.g. bare `--no-default-features`)
-// does not surface a dead `use` under `deny(warnings)`. Same
-// signature-stability shape as the `decode_ext_chain` definition gate
-// (feedback_signature_stability: explicit cfg over `#[allow]`).
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame"
-))]
-use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
-#[cfg(feature = "codec-keep-alive")]
-use wz_codecs::keep_alive::KeepAlive;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBody;
 #[cfg(feature = "codec-push")]
@@ -4551,286 +4522,22 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 
 // ─────────────────────────── inbound parser ───────────────────────────
 
-/// Parsed inbound transport-message frame surfaced by `parse_inbound`.
-///
-/// R68a baseline. The variant set covers the three transport bodies
-/// the Initiator side cares about during handshake + close:
-/// `Init` / `Open` / `Close`. The `has_ext` field on each variant
-/// records whether the parent header's Z flag was set so the caller
-/// can dispatch ext-chain decoding (R68c) without re-parsing the
-/// header byte; the chain itself is decoded by `decode_ext_chain`.
-/// `Unknown { mid }` covers MIDs outside the {INIT, OPEN, CLOSE}
-/// triad — the caller may forward them to a higher-layer dispatch
-/// (e.g. KeepAlive / Frame / Fragment) or drop them.
-///
-/// No `Debug` derive: the wz-codecs structs (`InitBody`/`OpenBody`)
-/// are sce-codegen output and only derive `Default`. Callers
-/// pattern-match the variant and inspect typed fields directly; a
-/// log-style print on the whole frame is rare and can be composed
-/// at the call site if needed.
-pub enum InboundFrame {
-    /// `_Z_MID_T_INIT` (0x01). `is_ack` mirrors the
-    /// `_Z_FLAG_T_INIT_A` discriminator; `has_ext` mirrors the
-    /// transport-header Z flag and corresponds to
-    /// `!extensions.is_empty()` when R68c decode succeeds.
-    #[cfg(feature = "codec-init-body")]
-    Init {
-        is_ack: bool,
-        has_ext: bool,
-        body: InitBodyOwned,
-        extensions: Vec<ExtEntryOwned>,
-    },
-    /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`;
-    /// `lease_in_seconds` mirrors `_Z_FLAG_T_OPEN_T`.
-    #[cfg(feature = "codec-open-body")]
-    Open {
-        is_ack: bool,
-        lease_in_seconds: bool,
-        has_ext: bool,
-        body: OpenBodyOwned,
-        extensions: Vec<ExtEntryOwned>,
-    },
-    /// `_Z_MID_T_CLOSE` (0x03). `reason` is the single body byte.
-    #[cfg(feature = "codec-close")]
-    Close {
-        reason: u8,
-        has_ext: bool,
-        extensions: Vec<ExtEntryOwned>,
-    },
-    /// `_Z_MID_T_KEEP_ALIVE` (0x04). Empty-body liveness ping; the
-    /// only payload is the optional ext chain (Z flag-gated). The
-    /// FSM uses receipt to reset the lease timer per
-    /// session-fsm §2.5 keepalive_interval semantics.
-    #[cfg(feature = "codec-keep-alive")]
-    KeepAlive {
-        has_ext: bool,
-        extensions: Vec<ExtEntryOwned>,
-    },
-    /// `_Z_MID_T_FRAME` (0x05). Established-session payload carrier:
-    /// `reliable` mirrors `_Z_FLAG_T_FRAME_R`; `sn` is the VLE
-    /// sequence number; `payload` is the tail bytes (the inner
-    /// NetworkMessage batch — higher-layer codec dispatch is the
-    /// caller's responsibility). Z-flagged frames have their ext
-    /// chain decoded into `extensions` between `sn` and `payload`
-    /// to mirror zenoh-pico's `_z_msg_ext_skip_non_mandatories`
-    /// path (transport.c::_z_frame_decode L388).
-    ///
-    /// R311g — variant gated on `codec-frame`. When the feature is
-    /// off the `T_MID_FRAME` arm in `parse_inbound` falls through to
-    /// `InboundFrame::Unknown { mid: 0x05 }`, which the FSM dispatch
-    /// in `inbound_to_fsm_event` maps to `FramingError` (graceful
-    /// session teardown rather than silent data loss).
-    #[cfg(feature = "codec-frame")]
-    Frame {
-        reliable: bool,
-        sn: u64,
-        payload: Vec<u8>,
-        has_ext: bool,
-        extensions: Vec<ExtEntryOwned>,
-    },
-    /// `_Z_MID_T_FRAGMENT` (0x06). One fragment of a fragmented
-    /// established-session message. Body mirrors `T_MID_FRAME` (VLE `sn`,
-    /// optional Z-gated ext chain, tail `payload`); the per-fragment
-    /// `reliable` (`FLAG_T_FRAGMENT_R`) and `more` (`FLAG_T_FRAGMENT_M`)
-    /// discriminators live in the transport header byte. Not a
-    /// session-state trigger (`inbound_to_fsm_event` returns `None`, like
-    /// `Frame`): the drive loop feeds it to the `ReassemblyDispatcher`,
-    /// which reassembles the chain and re-enters the `T_MID_FRAME` decode
-    /// path on completion. R311im — gated on `reassembly`; when the
-    /// feature is off the `0x06` arm falls through to `Unknown { mid: 0x06 }`,
-    /// mapped to `FramingError` (graceful teardown rather than silent loss).
-    #[cfg(feature = "reassembly")]
-    Fragment {
-        reliable: bool,
-        sn: u64,
-        more: bool,
-        payload: Vec<u8>,
-        has_ext: bool,
-        extensions: Vec<ExtEntryOwned>,
-    },
-    /// MID outside the handshake/close/keepalive set.
-    Unknown { mid: u8 },
-}
+// InboundFrame + parse_inbound + inbound_to_fsm_event + the
+// decode_ext_chain helper moved to wz-session-core::inbound (the MCU
+// no_std profile needs the decode SSOT; the surrounding parse_error /
+// network_message / driver_loop types were migrated in prior rounds).
+// Re-exported so every callsite
+// (`crate::session_glue::{InboundFrame, parse_inbound, inbound_to_fsm_event}`
+// + the external `wz_runtime_tokio::session_glue::…`) keeps compiling unchanged.
+#[cfg(feature = "transport-unicast")]
+pub use wz_session_core::inbound::inbound_to_fsm_event;
+pub use wz_session_core::inbound::{parse_inbound, InboundFrame};
 
 // R311di-6 — InboundParseError + MAX_EXT_CHAIN_DEPTH moved to
 // wz-session-core::parse_error. Re-exports keep every callsite
 // (session_glue.rs internal + wz-runtime-tokio external) working
 // verbatim across the migration.
 pub use wz_session_core::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
-
-/// Parse a single transport-message frame from `bytes`.
-///
-/// The first byte carries `(flags<<5) | mid` — the low 5 bits are
-/// the message ID, the high 3 bits are the per-MID flag set + the
-/// shared Z flag (`0x80`) for the ext chain. R68a baseline decodes
-/// the body via the wz codec set and reports the Z flag via
-/// `has_ext`; the ext-chain bytes themselves are left in the
-/// trailing portion of `bytes` for R68c to consume.
-///
-/// R311g1 — `has_ext` / `cursor` are conditionally bound via
-/// `#[cfg(any(feature = "codec-init-body", ..))]` matching the union
-/// of feature predicates of the dispatch arms below. A build with
-/// every codec feature off (e.g. `scripts/measure-codec-footprint.sh`
-/// `minus-all-codecs` lane) elides both bindings entirely, leaving
-/// only the Unknown fall-through arm. R311g previously suppressed the
-/// minus-all-codecs warning via `#[allow(unused_variables, unused_mut)]`;
-/// the explicit `cfg(any(...))` predicate is the textbook replacement
-/// per `feedback_signature_stability` MEMORY note's "annotation = last
-/// resort" rule. Adding a new body codec feature (R311h..R311l) extends
-/// this predicate.
-pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
-    let header = *bytes.first().ok_or(InboundParseError::Empty)?;
-    let mid = header & 0x1F;
-    // R311g1 — `flags` extraction is gated on the same predicate as
-    // the dispatch arms that consume it; when every codec-* is off
-    // (minus-all-codecs lane) only the Unknown fall-through arm
-    // remains and `flags` would otherwise be unused.
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive",
-        feature = "codec-frame"
-    ))]
-    let flags = header & 0xE0;
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive",
-        feature = "codec-frame"
-    ))]
-    let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive",
-        feature = "codec-frame"
-    ))]
-    let mut cursor = SceCursor::new(&bytes[1..]);
-    match mid {
-        #[cfg(feature = "codec-init-body")]
-        wire_const::T_MID_INIT => {
-            let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
-                .try_into_owned()?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
-            Ok(InboundFrame::Init {
-                is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
-                has_ext,
-                body,
-                extensions,
-            })
-        }
-        #[cfg(feature = "codec-open-body")]
-        wire_const::T_MID_OPEN => {
-            let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?.try_into_owned()?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
-            Ok(InboundFrame::Open {
-                is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
-                lease_in_seconds: (flags & wire_const::FLAG_T_OPEN_T) != 0,
-                has_ext,
-                body,
-                extensions,
-            })
-        }
-        #[cfg(feature = "codec-close")]
-        wire_const::T_MID_CLOSE => {
-            let body = Close::decode(&mut cursor)?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
-            Ok(InboundFrame::Close {
-                reason: body.reason,
-                has_ext,
-                extensions,
-            })
-        }
-        #[cfg(feature = "codec-frame")]
-        wire_const::T_MID_FRAME => {
-            // sn first (VLE), then optional ext chain (Z-gated),
-            // then tail payload to end of cursor.
-            let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
-            let remaining = cursor.remaining();
-            let payload = cursor
-                .peek_slice(remaining)
-                .map_err(InboundParseError::Codec)?
-                .to_vec();
-            cursor
-                .advance(remaining)
-                .map_err(InboundParseError::Codec)?;
-            Ok(InboundFrame::Frame {
-                reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
-                sn,
-                payload,
-                has_ext,
-                extensions,
-            })
-        }
-        #[cfg(feature = "reassembly")]
-        wire_const::T_MID_FRAGMENT => {
-            // Body mirrors T_MID_FRAME: VLE sn, optional Z-gated ext chain,
-            // then tail payload. The R (reliable) and M (more) bits live in
-            // the header flags, not the body. (`reassembly` implies
-            // `codec-frame`, so `flags` / `has_ext` / `cursor` are bound.)
-            let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
-            let remaining = cursor.remaining();
-            let payload = cursor
-                .peek_slice(remaining)
-                .map_err(InboundParseError::Codec)?
-                .to_vec();
-            cursor
-                .advance(remaining)
-                .map_err(InboundParseError::Codec)?;
-            Ok(InboundFrame::Fragment {
-                reliable: (flags & wire_const::FLAG_T_FRAGMENT_R) != 0,
-                sn,
-                more: (flags & wire_const::FLAG_T_FRAGMENT_M) != 0,
-                payload,
-                has_ext,
-                extensions,
-            })
-        }
-        #[cfg(feature = "codec-keep-alive")]
-        wire_const::T_MID_KEEP_ALIVE => {
-            // KeepAlive body is empty (zero-byte payload); the
-            // decode call is a no-op but kept for symmetry with the
-            // other MIDs and to preserve the "every wire-mapped
-            // codec routes through its generated decoder" invariant.
-            let _body = KeepAlive::decode(&mut cursor)?;
-            let extensions = if has_ext {
-                decode_ext_chain(&mut cursor)?
-            } else {
-                Vec::new()
-            };
-            Ok(InboundFrame::KeepAlive {
-                has_ext,
-                extensions,
-            })
-        }
-        other => Ok(InboundFrame::Unknown { mid: other }),
-    }
-}
 
 // R74 / R311di-11 — NetworkMessage + parse_frame_payload extracted to
 // wz-session-core::network_message. Re-exported here so all callsite
@@ -4844,63 +4551,6 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
 #[cfg(feature = "codec-frame")]
 pub use wz_session_core::network_message::parse_frame_payload;
 pub use wz_session_core::network_message::NetworkMessage;
-
-/// R69b — map a parsed inbound transport frame to the matching
-/// session-FSM external event variant.
-///
-/// Drives the receive half of the unicast session lifecycle:
-/// `inbound bytes ─→ parse_inbound ─→ inbound_to_fsm_event ─→
-/// Engine::process_event` so the FSM consumes peer frames without
-/// the caller hand-writing the discriminator match.
-///
-/// `Unknown { mid }` maps to `FramingError` because an unhandled
-/// MID at this dispatch layer is a wire-spec violation — the peer
-/// sent a transport-message ID the codec set does not implement,
-/// and the FSM's framing-error transition is the correct response
-/// (Close(generic) on the link).
-///
-/// `KeepAlive` returns `None` because it is NOT a state-transition
-/// trigger in `session_fsm_unicast.scxml` — keepalive receipt only
-/// resets the lease timer (a side effect orthogonal to the state
-/// graph). Callers wire that side-effect on the `None` branch
-/// (e.g. invoke `Hal::now_ticks_ms` and reset the lease deadline)
-/// rather than calling `Engine::process_event` with a spurious
-/// event.
-///
-/// `Frame` returns `None` for the same reason at the FSM layer
-/// (Frame receipt is the carrier for application-layer pub/sub
-/// messages, not a session-state trigger). Callers on the `None`
-/// branch route `Frame.payload` through [`parse_frame_payload`] to
-/// surface the in-batch `NetworkMessage` records — see R74 wiring in
-/// [`poll_and_dispatch_one`].
-pub fn inbound_to_fsm_event(
-    frame: &InboundFrame,
-) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
-    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    match frame {
-        #[cfg(feature = "codec-init-body")]
-        InboundFrame::Init { is_ack: false, .. } => Some(E::InitSynReceived),
-        #[cfg(feature = "codec-init-body")]
-        InboundFrame::Init { is_ack: true, .. } => Some(E::InitAckReceived),
-        #[cfg(feature = "codec-open-body")]
-        InboundFrame::Open { is_ack: false, .. } => Some(E::OpenSynReceived),
-        #[cfg(feature = "codec-open-body")]
-        InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
-        #[cfg(feature = "codec-close")]
-        InboundFrame::Close { .. } => Some(E::PeerClose),
-        #[cfg(feature = "codec-keep-alive")]
-        InboundFrame::KeepAlive { .. } => None,
-        #[cfg(feature = "codec-frame")]
-        InboundFrame::Frame { .. } => None,
-        // R311im — Fragment is not a session-state trigger (like Frame);
-        // the drive loop routes it to the ReassemblyDispatcher and, on
-        // chain completion, the reassembled message re-enters the Frame
-        // payload dispatch path.
-        #[cfg(feature = "reassembly")]
-        InboundFrame::Fragment { .. } => None,
-        InboundFrame::Unknown { .. } => Some(E::FramingError),
-    }
-}
 
 // R76 / R311di-12 — DriverLoopOutcome extracted to
 // wz-session-core::driver_loop. Re-exported here so callsites
@@ -5433,37 +5083,6 @@ where
 /// cursor's `peek_slice` raises `NeedMoreBytes` when the wire
 /// truncates mid-entry, which propagates up as `Codec(NeedMoreBytes)`.
 ///
-/// R311g1 — function definition is conditional on the union of all
-/// codec features whose `parse_inbound` arms call into it. The
-/// `minus-all-codecs` lane (all codec-* off) elides every caller and
-/// — under this `cfg(any(...))` predicate — the function definition
-/// itself, removing the previous `#[allow(dead_code)]` annotation.
-/// Adding a new body codec feature (R311h..R311l) extends the
-/// predicate. Per `feedback_signature_stability` MEMORY note's
-/// "annotation = last resort" rule: prefer explicit cfg over allow.
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame"
-))]
-fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
-    let mut entries = Vec::new();
-    for _ in 0..MAX_EXT_CHAIN_DEPTH {
-        let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
-        let z = entry.z();
-        // Deep-copy the borrowed decode view into the lifetime-free
-        // owned mirror so the parsed chain can outlive the input
-        // buffer in `InboundFrame::*.extensions`.
-        entries.push(entry.try_into_owned().map_err(InboundParseError::Codec)?);
-        if !z {
-            return Ok(entries);
-        }
-    }
-    Err(InboundParseError::ExtChainOverflow)
-}
-
 /// Pack the `cbyte` field per zenoh-pico's `_z_whatami_to_uint8`
 /// (transport.c:31-37) + `(zid_len - 1) << 4` (transport.c:189-192).
 #[cfg(feature = "codec-init-body")]

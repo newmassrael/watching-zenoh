@@ -338,6 +338,18 @@ pub mod network_message;
 #[cfg(feature = "alloc")]
 pub mod driver_loop;
 
+/// Inbound transport-frame decode SSOT (`parse_inbound` + `InboundFrame`
+/// + `decode_ext_chain`) and the FSM-event projection
+/// (`inbound_to_fsm_event`). Hoisted from `wz-runtime-tokio::session_glue`
+/// so both runtime profiles (tokio AP + lwIP MCU) decode through one
+/// source — the MCU `#![no_std]` profile cannot depend on the tokio crate.
+/// `InboundFrame` carries owned `Vec` buffers, so alloc-gated like
+/// `network_message` / `driver_loop`; the no-alloc borrowed-decode variant
+/// is a deferred follow-up. `inbound_to_fsm_event` is additionally gated on
+/// `session-unicast` (it names the generated FSM event enum).
+#[cfg(feature = "alloc")]
+pub mod inbound;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns

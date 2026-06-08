@@ -70,7 +70,15 @@ alloc = ["wz-codecs/alloc"]
 # The single `--no-std` codegen emit now compiles on the std runtime too
 # (SCE pin 1474091c2 routes the `bytes` payload field through the
 # profile-resolving `SceBytes<N>` alias instead of a raw `heapless::Vec`).
-reassembly = ["dep:sce-rust-runtime"]
+# Implies `codec-frame`: a `T_MID_FRAGMENT` body is a Frame-shaped body
+# (VLE sn + Z-gated ext chain + tail payload), so the hoisted `inbound`
+# decoder's Fragment arm reuses the `codec-frame`-gated cursor/flags/has_ext
+# bindings. wz-runtime-tokio's `reassembly` already implied `codec-frame`;
+# this restores the same invariant at the session-core SSOT now that
+# `parse_inbound` lives here. `codec-frame` is alloc-independent so the
+# no-alloc MCU reassembly lane (Layer G.8) is unaffected (the alloc-gated
+# `inbound` module is simply not compiled there).
+reassembly = ["dep:sce-rust-runtime", "codec-frame"]
 
 # MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
 # build (heapless, no http-send / scripting — those are std-coupled and
@@ -116,6 +124,17 @@ codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-suppo
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]
 codec-response-final = ["wz-codecs/codec-response-final"]
 codec-declare = ["codec-frame", "wz-codecs/codec-declare"]
+# Handshake / liveness transport-body codecs. Consumed by the hoisted
+# `inbound` decode SSOT (`parse_inbound` Init/Open/Close/KeepAlive arms).
+# Independent of `codec-frame` (each is its own transport MID body), so a
+# subset selecting only the handshake codecs composes without the Frame
+# data-plane. The wz-runtime-tokio side forwards its same-named features
+# here so the 3-stage chain (tokio codec-X -> session-core codec-X ->
+# wz-codecs codec-X) keeps a single ground-truth gate per body codec.
+codec-init-body = ["wz-codecs/codec-init-body"]
+codec-open-body = ["wz-codecs/codec-open-body"]
+codec-keep-alive = ["wz-codecs/codec-keep-alive"]
+codec-close = ["wz-codecs/codec-close"]
 
 # attachment domain primitive: gates the `attachment` SSOT module (the
 # one attachment-ext encode/decode pair). Selected by the

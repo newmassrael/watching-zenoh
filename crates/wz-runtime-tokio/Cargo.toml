@@ -193,8 +193,8 @@ query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]
 query-consolidation = ["query-get"]
-codec-init-body = ["wz-codecs/codec-init-body"]
-codec-open-body = ["wz-codecs/codec-open-body"]
+codec-init-body = ["wz-codecs/codec-init-body", "wz-session-core/codec-init-body"]
+codec-open-body = ["wz-codecs/codec-open-body", "wz-session-core/codec-open-body"]
 # R311b — codec-keep-alive forwards the wz-codecs gate. Session lease
 # refresh path (last_inbound_keepalive_at stamp inside handle_inbound)
 # is gated together with the wire-level KeepAlive parse/handle/FSM
@@ -202,12 +202,12 @@ codec-open-body = ["wz-codecs/codec-open-body"]
 # eventually trips the lease.expired path because no peer KeepAlive
 # can be decoded into a stamp update; the existing established_at
 # baseline remains so short sessions still complete normally.
-codec-keep-alive = ["wz-codecs/codec-keep-alive"]
+codec-keep-alive = ["wz-codecs/codec-keep-alive", "wz-session-core/codec-keep-alive"]
 # R311c — codec-close forwards wz-codecs. Wire encode (encode_close +
 # send_close_with_reason + bind_unit "send_close_frame_with_reason")
 # + decode (parse_inbound T_MID_CLOSE) elide together; FSM-level
 # CloseReason enum + set_close_reason_* bindings stay unconditional.
-codec-close = ["wz-codecs/codec-close"]
+codec-close = ["wz-codecs/codec-close", "wz-session-core/codec-close"]
 # R311d batch — scouting + multicast codecs. This crate forwards the
 # features to wz-codecs for SCXML emit/include elision. session_glue.rs
 # does NOT use Scout/Hello/Join types, so no source-side cfg gates
