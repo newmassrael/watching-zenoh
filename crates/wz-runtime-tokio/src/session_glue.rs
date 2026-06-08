@@ -2272,11 +2272,14 @@ pub fn new_session_engine<T: TimeSource>(
 /// retired `bind_unit(lua, "<name>", actions, |a| { … })` registration,
 /// with `a = &self.inner`.
 ///
-/// Concrete `TokioRuntime` impl (any `T: TimeSource`): the actions reach
-/// through the runtime `R::Mutex` staging slots via `.lock()`, which only
-/// `TokioRuntime`'s `std::sync::Mutex` exposes here. `transport-unicast`
-/// is an AP-hosted feature, so the single concrete impl matches the
-/// `SessionLinkActions<TokioRuntime, T>` inherent impls.
+/// Generic over `R: SessionRuntime` (Stage 2b-②): the actions reach the
+/// runtime-owned `R::Mutex` staging slots through `R::with_mutex_mut` and
+/// the link write seam through the inherent
+/// [`SessionLinkActions::link_driver`] accessor — no profile-specific
+/// `.lock()` or `R::LinkSink` access leaks into the method bodies.
+/// `transport-unicast` is AP-hosted today, so `TokioRuntime` is the only
+/// live `R`; the generic form is the move-enabling shape for the pending
+/// `wz-session-core` hoist (the lwIP MCU profile binds the same trait).
 ///
 /// The wire-emit actions stay gated on their codec / role feature
 /// (`send_init_syn` etc.); cfg-off the method body is a silent no-op —
@@ -2286,11 +2289,13 @@ pub fn new_session_engine<T: TimeSource>(
 /// the host handshake deadline-sweep (see [`drive_session_until_terminal`])
 /// turns the resulting no-emit into an honest `*.timeout -> Closing`
 /// rather than an indefinite hang.
-impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<TokioRuntime, T> {
+impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
+    for SessionActionsBinding<R, T>
+{
     fn link_driver_open(&mut self) {
         let a = &self.inner;
-        a.trace.lock().unwrap().link_driver_open += 1;
-        a.driver.open_blocking();
+        R::with_mutex_mut(&a.trace, |t| t.link_driver_open += 1);
+        a.link_driver().open_blocking();
     }
 
     fn send_init_syn(&mut self) {
@@ -2301,7 +2306,7 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            a.trace.lock().unwrap().send_init_syn += 1;
+            R::with_mutex_mut(&a.trace, |t| t.send_init_syn += 1);
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -2309,7 +2314,7 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
                     ExtChainRole::InitSyn,
                 )
                 .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
-            a.driver.send_blocking(&bytes, Reliability::Reliable);
+            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
         }
     }
 
@@ -2317,11 +2322,15 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
         {
             let a = &self.inner;
-            a.trace.lock().unwrap().send_open_syn += 1;
+            R::with_mutex_mut(&a.trace, |t| t.send_open_syn += 1);
             // RFC §5.M echo contract: prefer the cookie captured from a
             // peer InitAck via handle_inbound; fall back to params.cookie
             // for tests that drive OpenSyn without an inbound parse cycle.
-            let cookie_override = a.inbound_cookie.lock().unwrap().clone();
+            // Cookie cloned out of the slot first — `encode_open_with_role`
+            // re-acquires the ext-chain mutex, and a per-profile mutex is
+            // non-reentrant (lwIP critical_section), so the slot guard must
+            // drop before the encode call (2b-① reentrancy discipline).
+            let cookie_override = R::with_mutex_mut(&a.inbound_cookie, |c| c.clone());
             let bytes = a
                 .encode_open_with_role(
                     /*is_ack=*/ false,
@@ -2329,7 +2338,7 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
                     ExtChainRole::OpenSyn,
                 )
                 .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
-            a.driver.send_blocking(&bytes, Reliability::Reliable);
+            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
         }
     }
 
@@ -2339,7 +2348,7 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            a.trace.lock().unwrap().send_init_ack_with_cookie += 1;
+            R::with_mutex_mut(&a.trace, |t| t.send_init_ack_with_cookie += 1);
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),
@@ -2348,10 +2357,15 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
             // cookie is now bound to the specific peer's claimed
             // identity, not a deploy-static value. Falls back to
             // `params.cookie` verbatim if no peer_zid has been observed.
-            let cookie_hmac: Option<Vec<u8>> =
-                a.inbound_peer_zid.lock().unwrap().as_ref().map(|peer_zid| {
+            // Cookie minted out of the slot first — `encode_init_with_role`
+            // re-acquires `inbound_peer_init_caps` + the ext-chain mutex, so
+            // the `inbound_peer_zid` guard must drop before the encode call
+            // (non-reentrant per-profile mutex; 2b-① reentrancy discipline).
+            let cookie_hmac: Option<Vec<u8>> = R::with_mutex_mut(&a.inbound_peer_zid, |slot| {
+                slot.as_ref().map(|peer_zid| {
                     generate_cookie_hmac_sha256(&a.params.cookie_signing_key, peer_zid)
-                });
+                })
+            });
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ true,
@@ -2359,7 +2373,7 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
                     ExtChainRole::InitAck,
                 )
                 .expect("InitAck cookie is HMAC-SHA256[..16] (16 bytes, within codec cap)");
-            a.driver.send_blocking(&bytes, Reliability::Reliable);
+            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
         }
     }
 
@@ -2367,7 +2381,7 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
-            a.trace.lock().unwrap().send_open_ack += 1;
+            R::with_mutex_mut(&a.trace, |t| t.send_open_ack += 1);
             // Accepting side OpenAck: cookie is consumed by the time we
             // get here (it travelled inbound on OpenSyn and was already
             // MAC-verified); the OpenAck shape omits it (parent.A=1
@@ -2379,7 +2393,7 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
                     ExtChainRole::OpenAck,
                 )
                 .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
-            a.driver.send_blocking(&bytes, Reliability::Reliable);
+            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
         }
     }
 
@@ -2387,39 +2401,46 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
         #[cfg(feature = "codec-close")]
         {
             let a = &self.inner;
-            let reason = a.trace.lock().unwrap().close_reason as u8;
-            a.trace.lock().unwrap().send_close_frame_with_reason += 1;
+            // Single trace lock — read the staged close reason, then bump
+            // the emit counter (read-then-increment preserves the original
+            // two-statement field-access order).
+            let reason = R::with_mutex_mut(&a.trace, |t| {
+                let reason = t.close_reason as u8;
+                t.send_close_frame_with_reason += 1;
+                reason
+            });
             let bytes = encode_close(reason);
-            a.driver.send_blocking(&bytes, Reliability::Reliable);
+            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
         }
     }
 
     fn release_link(&mut self) {
         let a = &self.inner;
-        a.trace.lock().unwrap().release_link += 1;
-        a.driver.close_blocking();
+        R::with_mutex_mut(&a.trace, |t| t.release_link += 1);
+        a.link_driver().close_blocking();
     }
 
     fn enable_rx_tx_regions(&mut self) {
-        self.inner.trace.lock().unwrap().enable_rx_tx_regions += 1;
+        R::with_mutex_mut(&self.inner.trace, |t| t.enable_rx_tx_regions += 1);
     }
 
     fn record_established_at(&mut self) {
         let a = &self.inner;
-        a.trace.lock().unwrap().record_established_at += 1;
+        R::with_mutex_mut(&a.trace, |t| t.record_established_at += 1);
         // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
         // clock (same epoch as last_inbound_keepalive_at +
         // drive_session_until_terminal) so the lease comparator's u64
-        // subtract stays on one scale.
-        *a.established_at.lock().unwrap() = Some(a.clock.now_monotonic_ms());
+        // subtract stays on one scale. Read outside the slot closure.
+        let now = a.clock.now_monotonic_ms();
+        R::with_mutex_mut(&a.established_at, |slot| *slot = Some(now));
     }
 
     fn start_lease_monitor(&mut self) {
-        self.inner.trace.lock().unwrap().start_lease_monitor += 1;
+        R::with_mutex_mut(&self.inner.trace, |t| t.start_lease_monitor += 1);
     }
 
     fn stop_lease_monitor(&mut self) {
-        self.inner.trace.lock().unwrap().stop_lease_monitor += 1;
+        R::with_mutex_mut(&self.inner.trace, |t| t.stop_lease_monitor += 1);
     }
 
     fn start_keepalive_worker(&mut self) {
@@ -2429,43 +2450,47 @@ impl<T: TimeSource> SessionFsmUnicastActionsTrait for SessionActionsBinding<Toki
         // separate axis (codec-keep-alive).
         #[cfg(feature = "transport-keepalive")]
         {
-            self.inner.trace.lock().unwrap().start_keepalive_worker += 1;
+            R::with_mutex_mut(&self.inner.trace, |t| t.start_keepalive_worker += 1);
         }
     }
 
     fn stop_keepalive_worker(&mut self) {
         #[cfg(feature = "transport-keepalive")]
         {
-            self.inner.trace.lock().unwrap().stop_keepalive_worker += 1;
+            R::with_mutex_mut(&self.inner.trace, |t| t.stop_keepalive_worker += 1);
         }
     }
 
     fn free_pool_slots(&mut self) {
-        self.inner.trace.lock().unwrap().free_pool_slots += 1;
+        R::with_mutex_mut(&self.inner.trace, |t| t.free_pool_slots += 1);
     }
 
     fn set_close_reason_generic(&mut self) {
-        let mut trace = self.inner.trace.lock().unwrap();
-        trace.set_close_reason_count += 1;
-        trace.close_reason = CloseReason::Generic;
+        R::with_mutex_mut(&self.inner.trace, |trace| {
+            trace.set_close_reason_count += 1;
+            trace.close_reason = CloseReason::Generic;
+        });
     }
 
     fn set_close_reason_invalid(&mut self) {
-        let mut trace = self.inner.trace.lock().unwrap();
-        trace.set_close_reason_count += 1;
-        trace.close_reason = CloseReason::Invalid;
+        R::with_mutex_mut(&self.inner.trace, |trace| {
+            trace.set_close_reason_count += 1;
+            trace.close_reason = CloseReason::Invalid;
+        });
     }
 
     fn set_close_reason_expired(&mut self) {
-        let mut trace = self.inner.trace.lock().unwrap();
-        trace.set_close_reason_count += 1;
-        trace.close_reason = CloseReason::Expired;
+        R::with_mutex_mut(&self.inner.trace, |trace| {
+            trace.set_close_reason_count += 1;
+            trace.close_reason = CloseReason::Expired;
+        });
     }
 
     fn set_close_reason_unresponsive(&mut self) {
-        let mut trace = self.inner.trace.lock().unwrap();
-        trace.set_close_reason_count += 1;
-        trace.close_reason = CloseReason::Unresponsive;
+        R::with_mutex_mut(&self.inner.trace, |trace| {
+            trace.set_close_reason_count += 1;
+            trace.close_reason = CloseReason::Unresponsive;
+        });
     }
 }
 
