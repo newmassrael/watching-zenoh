@@ -31187,6 +31187,54 @@
         "deploy.yaml reassembly_pool dims still spec-sourced, not yaml-loaded (R311in carry tail)."
       ]
     },
+    "Round 311iw": {
+      "decision_summary": "R311iw session-review hardening: CI now gates Layer G+Q (footprint never auto-ran), fmt-gate auto-discovers workspaces, e2e asserts reassembled msg count; A/B bisect confirms R311iu IGMP root-cause.",
+      "changes_bullets": [
+        "ci.yml: new cross-mcu job runs Layer G+Q (arm-gcc+qemu) so footprint gate runs on every push.",
+        "run-ci Layer 0 fmt-gate auto-discovers deploy/*/ workspaces (was per-crate enum, gap-prone).",
+        "run-ci Q.4 mode loop uses a bash array (drops unquoted word-split).",
+        "DataMode::FragmentChain cfg-gated on reassembly (no inert variant on no-reassembly build).",
+        "AcceptorE2eReport.data_dispatch_msg_count added; reassembly e2e asserts ==1 (content not envelope)."
+      ],
+      "verification_bullets": [
+        "A/B bisect (worktree dd7e018^ vs dd7e018, thumbv7m): IGMP commit alone +1084 text +184 bss.",
+        "Confirms R311iu IGMP root-cause; net +896 = +1084 IGMP -224 intervening +36 tail; bss +184 exact.",
+        "full run-ci G=1 Q=1 all required layers pass; Layer 0 fmt-glob OK 4 workspaces; C1n both configs.",
+        "acceptor default + reassembly both compile+clippy clean; reassembly msg_count==1 asserted."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "reassembly-fsm--prose-sketch"
+      ],
+      "carry_forward_bullets": [
+        "ci.yml cross-mcu job runner steps not locally verifiable (apt arm-gcc/qemu); lanes ARE verified.",
+        "footprint gate stale-DATA fixed (R311iu) + now CI-gated (R311iw); local pre-push still Q-opt-in.",
+        "sweep timeout-eviction e2e + no-alloc M0 reassembly + multi-peer axes still open (R311iv)."
+      ],
+      "publishable_decision_summary": "R311iw session-review hardening: CI now gates Layer G+Q (footprint never auto-ran), fmt-gate auto-discovers workspaces, e2e asserts reassembled msg count; A/B bisect confirms R311iu IGMP root-cause.",
+      "publishable_changes_bullets": [
+        "ci.yml: new cross-mcu job runs Layer G+Q (arm-gcc+qemu) so footprint gate runs on every push.",
+        "run-ci Layer 0 fmt-gate auto-discovers deploy/*/ workspaces (was per-crate enum, gap-prone).",
+        "run-ci Q.4 mode loop uses a bash array (drops unquoted word-split).",
+        "DataMode::FragmentChain cfg-gated on reassembly (no inert variant on no-reassembly build).",
+        "AcceptorE2eReport.data_dispatch_msg_count added; reassembly e2e asserts ==1 (content not envelope)."
+      ],
+      "publishable_verification_bullets": [
+        "A/B bisect (worktree dd7e018^ vs dd7e018, thumbv7m): IGMP commit alone +1084 text +184 bss.",
+        "Confirms R311iu IGMP root-cause; net +896 = +1084 IGMP -224 intervening +36 tail; bss +184 exact.",
+        "full run-ci G=1 Q=1 all required layers pass; Layer 0 fmt-glob OK 4 workspaces; C1n both configs.",
+        "acceptor default + reassembly both compile+clippy clean; reassembly msg_count==1 asserted."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "reassembly-fsm--prose-sketch"
+      ],
+      "publishable_carry_forward_bullets": [
+        "ci.yml cross-mcu job runner steps not locally verifiable (apt arm-gcc/qemu); lanes ARE verified.",
+        "footprint gate stale-DATA fixed (R311iu) + now CI-gated (R311iw); local pre-push still Q-opt-in.",
+        "sweep timeout-eviction e2e + no-alloc M0 reassembly + multi-peer axes still open (R311iv)."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
