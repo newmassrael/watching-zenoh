@@ -121,6 +121,27 @@ reassembly = [
     "wz-session-core/no_std",
 ]
 
+# Stage 4a — unicast session FSM on the MCU profile. The MCU mirror of
+# wz-runtime-tokio's `transport-unicast`: pulls wz-session-core's
+# `session-unicast` capability (the engine-free SessionFsmUnicast FSM +
+# the runtime-agnostic `SessionLinkActions` bundle) plus its `no_std`
+# engine selector (heapless sce-rust-runtime) and `alloc` (the bundle's
+# Vec/String/HashMap fields + the `Arc<SessionLinkActions>` handle).
+# Requires the crate's own `alloc` feature: the `SessionRuntime` binding
+# stores the link sink as `alloc::rc::Rc<dyn BoxedLinkDriver>` and the
+# `impl SessionRuntime for LwipRuntime` sits atop the alloc-gated
+# `impl Runtime for LwipRuntime`. First lands the `SessionRuntime`
+# binding so `SessionLinkActions<LwipRuntime<C>, LwipTime<C>>`
+# type-checks; the sync drive-loop consumer (`session_drive`) reading
+# real lwIP UDP follows.
+session-unicast = [
+    "alloc",
+    "dep:wz-session-core",
+    "wz-session-core/session-unicast",
+    "wz-session-core/alloc",
+    "wz-session-core/no_std",
+]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

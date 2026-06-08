@@ -1653,6 +1653,29 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.9 reassembly seam MCU $t FAIL" >&2
             fail=1
         fi
+        # G.10 (Stage 4a) wz-runtime-lwip --features session-unicast.
+        # Proves the session-tier `impl SessionRuntime for LwipRuntime`
+        # link-sink binding + the `SessionLinkActions<LwipRuntime<C>,
+        # LwipTime<C>>` type-check (the precondition the MCU sync drive
+        # loop consumer depends on) cross-compile on the alloc-capable
+        # MCU targets. SKIPs thumbv6m (Cortex-M0+): session-unicast pulls
+        # the full session_actions bundle, which holds the action handle
+        # in `alloc::sync::Arc` — a direct core-alloc Arc, NOT the
+        # `crate::atomic` portable-atomic polyfill the executor uses
+        # (G.4-alloc) — so it requires `target_has_atomic = "ptr"`, absent
+        # on ARMv6-M. The no-alloc M0+ session consumer (borrowed-decode
+        # variant) is an explicitly deferred follow-up (plan scope note);
+        # the alloc MCU profile (M3/M4/M7/M33 + RISC-V IMAC) is Stage 4's
+        # first target.
+        if [[ "$t" == "thumbv6m-none-eabi" ]]; then
+            echo "  G.10 session-unicast MCU $t SKIP (M0+: session_actions uses alloc::sync::Arc, needs target_has_atomic=ptr; no-alloc M0 consumer deferred)"
+        elif (cd crates && cargo build -p wz-runtime-lwip \
+            --target "$t" --features session-unicast --quiet); then
+            echo "  G.10 session-unicast MCU $t OK"
+        else
+            echo "  G.10 session-unicast MCU $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"

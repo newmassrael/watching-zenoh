@@ -168,6 +168,17 @@ pub use runtime_impl::LwipRuntime;
 #[cfg(feature = "alloc")]
 pub use time::{ClockSource, LwipTime};
 
+// Stage 4a — session-tier `SessionRuntime` binding (the per-profile
+// `BoxedLinkDriver` link-sink storage) for the MCU profile. Gated on
+// `session-unicast` (which pulls wz-session-core + implies `alloc`, so
+// `LwipRuntime` / `LwipTime` are present). The MCU mirror of the AP-side
+// `impl SessionRuntime for TokioRuntime` in `wz_runtime_tokio`; lands the
+// type-check that `SessionLinkActions<LwipRuntime<C>, LwipTime<C>>`
+// composes before the sync drive-loop consumer (`session_drive`) wires it
+// to live lwIP sockets.
+#[cfg(feature = "session-unicast")]
+pub mod session_runtime;
+
 // R311ih — re-export the runtime-agnostic static-scouting synth so the
 // MCU profile reaches it through its runtime crate, mirroring how the AP
 // profile reaches wz-session-core items through wz-runtime-tokio. The
