@@ -385,6 +385,15 @@ pub mod handshake_encode;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
+/// Outbound DECLARE / UNDECLARE network-message builders
+/// (`build_declare_*` / `build_undeclare_*` / `build_declare_final`)
+/// hoisted from `wz-runtime-tokio::session_glue` so both runtime profiles
+/// share one DECLARE-builder SSOT. Owned `Vec` output (alloc-gated) and
+/// `codec-declare` gated. Distinct from the `declare` module (the
+/// remote-declaration registries) — this is the outbound encode side.
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+pub mod declare_build;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns
