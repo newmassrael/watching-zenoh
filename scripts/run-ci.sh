@@ -352,35 +352,31 @@ run_layer() {
 # actionlint stays optional (SKIP if not installed) — yaml workflow
 # lint is a nice-to-have, not a correctness gate.
 layer_0_preflight_lints() {
-    # 0.1 cargo fmt --check across both workspaces (mandatory).
-    # crates/ is the primary workspace; deploy/mcu-qemu-demo is a
-    # standalone workspace (R311be `[workspace]` empty table) that
-    # the crates/ fmt --check does not visit. R311bn mirrors the
-    # gate there so a deploy-side edit (e.g. R311bq main.rs
-    # portable-atomic adoption) cannot ship fmt-dirty either.
-    if ! (cd crates && cargo fmt --all -- --check); then
-        echo "  fmt --check FAIL crates — run \`(cd crates && cargo fmt --all)\`" >&2
-        return 1
-    fi
-    if ! (cd deploy/mcu-qemu-demo && cargo fmt --all -- --check); then
-        echo "  fmt --check FAIL deploy/mcu-qemu-demo — run \`(cd deploy/mcu-qemu-demo && cargo fmt --all)\`" >&2
-        return 1
-    fi
-    # R311hl — deploy/mcu-noheap-probe is a third standalone workspace
-    # (no-heap registry runtime proof; Layer Q.0). Mirror the fmt gate.
-    if ! (cd deploy/mcu-noheap-probe && cargo fmt --all -- --check); then
-        echo "  fmt --check FAIL deploy/mcu-noheap-probe — run \`(cd deploy/mcu-noheap-probe && cargo fmt --all)\`" >&2
-        return 1
-    fi
-    # R311iv — deploy/mcu-session-acceptor is a fourth standalone workspace
-    # (Stage 5 / Tier B acceptor e2e QEMU bin; Layer Q.4). Mirror the gate
-    # so a deploy-side edit (e.g. the reassembly DataMode selection) cannot
-    # ship fmt-dirty either.
-    if ! (cd deploy/mcu-session-acceptor && cargo fmt --all -- --check); then
-        echo "  fmt --check FAIL deploy/mcu-session-acceptor — run \`(cd deploy/mcu-session-acceptor && cargo fmt --all)\`" >&2
-        return 1
-    fi
-    echo "  fmt --check OK (crates + deploy/{mcu-qemu-demo,mcu-noheap-probe,mcu-session-acceptor})"
+    # 0.1 cargo fmt --check across every workspace (mandatory). crates/ is
+    # the primary workspace; each deploy/*/ that carries its OWN
+    # `[workspace]` table is a standalone workspace the crates/ fmt --check
+    # does not visit (R311be `mcu-qemu-demo`, R311hl `mcu-noheap-probe`,
+    # R311iv `mcu-session-acceptor`). R311iw — these were enumerated one
+    # `if`-block per crate, and the enumeration was forgotten for
+    # mcu-session-acceptor (it shipped un-gated until R311iv caught a fmt
+    # FAIL on a full run). Auto-discovery replaces the manual list so a NEW
+    # standalone deploy workspace is fmt-gated the moment it exists — no
+    # manual gate edit, no recurrence of the forgotten-enumeration gap.
+    local fmt_dirs=(crates)
+    local dpath
+    for dpath in deploy/*/; do
+        [[ -f "${dpath}Cargo.toml" ]] || continue
+        grep -q '^\[workspace\]' "${dpath}Cargo.toml" || continue
+        fmt_dirs+=("${dpath%/}")
+    done
+    local fdir
+    for fdir in "${fmt_dirs[@]}"; do
+        if ! (cd "$fdir" && cargo fmt --all -- --check); then
+            echo "  fmt --check FAIL ${fdir} — run \`(cd ${fdir} && cargo fmt --all)\`" >&2
+            return 1
+        fi
+    done
+    echo "  fmt --check OK (${fmt_dirs[*]})"
 
     # 0.2 actionlint (optional)
     if ! command -v actionlint >/dev/null 2>&1; then
@@ -2050,20 +2046,24 @@ layer_q_qemu_mcu_e2e() {
     # boot per mode (lwIP NO_SYS is process-global single-init), built to the
     # same ELF path in sequence. The `reasm` mode is the on-target mirror of
     # the host C1n `--features reassembly` lane.
-    local amachine acpu atarget abin alabel afeat
+    local amachine acpu atarget abin alabel amode
+    local afeat_args
     for lane in "${acceptor_lanes[@]}"; do
         IFS=':' read -r amachine acpu atarget <<< "$lane"
         if ! grep -q "^${atarget}$" <<< "$installed"; then
             echo "  Q.4.${amachine} SKIP (rustup target ${atarget} absent)"
             continue
         fi
-        for amode in "frame:" "reasm:--features reassembly"; do
-            IFS=':' read -r alabel afeat <<< "$amode"
-            # shellcheck disable=SC2086 # $afeat is intentionally word-split
-            # ("" => no feature flag; "--features reassembly" => two args).
+        for amode in frame reasm; do
+            alabel="$amode"
+            # Array (not an unquoted string) so the empty default-mode case
+            # expands to zero args and the reasm case to two, with no
+            # word-splitting footgun.
+            afeat_args=()
+            [[ "$amode" == reasm ]] && afeat_args=(--features reassembly)
             if WZ_LWIP_PORT="$lwip_port" cargo build --release \
                 --manifest-path deploy/mcu-session-acceptor/Cargo.toml \
-                --target "$atarget" --bin mcu-session-acceptor $afeat --quiet; then
+                --target "$atarget" --bin mcu-session-acceptor "${afeat_args[@]}" --quiet; then
                 echo "  Q.4.${amachine}.${alabel} build mcu-session-acceptor ${atarget} OK"
             else
                 echo "  Q.4.${amachine}.${alabel} build mcu-session-acceptor ${atarget} FAIL" >&2

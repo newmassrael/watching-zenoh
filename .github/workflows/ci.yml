@@ -321,3 +321,67 @@ jobs:
 
       - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
         run: bash scripts/run-ci.sh --layer E
+
+  # ─────────────────────────────────────────────────────────────────
+  # R311iw — embedded cross-compile + QEMU job. Layer G (per-triple
+  # no_std cross-compile of the wz crates) and Layer Q (QEMU mps2 /
+  # microbit boot e2e + the ROM-footprint regression gate) need an ARM
+  # cross-toolchain + qemu-system-arm the primary `ci` job's runner does
+  # not carry, so they run in a dedicated job here.
+  #
+  # WHY THIS JOB EXISTS: before R311iw the Layer Q footprint gate ran
+  # NOWHERE automatic. Layer Q is opt-in locally (`--layer Q` /
+  # WZ_RUN_LAYER_Q=1) because qemu/arm are not universal dev deps, and
+  # the pre-push hook does not set WZ_RUN_LAYER_Q. So a footprint baseline
+  # could drift stale for rounds undetected — and did (R311iu rebased a
+  # baseline that had been wrong since the R311ir IGMP landing). Hosting
+  # G + Q on the CI runner (which CAN carry the toolchain) gates the
+  # cross-compile + footprint on every push without slowing the local
+  # pre-push path. Lane logic stays in scripts/run-ci.sh (the R65b single
+  # source of truth shared with pre-push); this job only installs the
+  # toolchain and invokes the lanes, so the two paths cannot drift.
+  cross-mcu:
+    name: cross-compile + QEMU (Layer G + Q)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        # cmake + libclang for the sce-codegen / *-sys build scripts;
+        # gcc-arm-none-eabi supplies arm-none-eabi-{gcc,size} (the lwIP C
+        # cross-compile + the Layer Q.3 footprint `size` measurement);
+        # qemu-system-arm boots the mps2 / microbit ELFs (Q.2 / Q.4).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            libclang-dev \
+            clang \
+            gcc-arm-none-eabi \
+            qemu-system-arm
+
+      - name: Install Rust toolchain + embedded targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: thumbv6m-none-eabi, thumbv7m-none-eabi, thumbv7em-none-eabi, thumbv7em-none-eabihf, thumbv8m.base-none-eabi, thumbv8m.main-none-eabi, thumbv8m.main-none-eabihf, riscv32imac-unknown-none-elf
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Build sce-codegen (vendor/sce)
+        run: bash scripts/build-sce.sh
+
+      - name: Layer G — per-triple no_std cross-compile
+        run: bash scripts/run-ci.sh --layer G
+
+      - name: Layer Q — QEMU mps2/microbit e2e + footprint gate
+        run: bash scripts/run-ci.sh --layer Q
