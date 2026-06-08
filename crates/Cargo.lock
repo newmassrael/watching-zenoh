@@ -1333,6 +1333,7 @@ dependencies = [
  "wz-runtime-core",
  "wz-runtime-lwip",
  "wz-runtime-tokio",
+ "wz-session-lwip",
 ]
 
 [[package]]
@@ -1540,6 +1541,18 @@ name = "wz-session-core-test-support"
 version = "0.1.0"
 dependencies = [
  "wz-codecs",
+]
+
+[[package]]
+name = "wz-session-lwip"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "lwip-sys",
+ "wz-link-lwip",
+ "wz-runtime-core",
+ "wz-runtime-lwip",
+ "wz-session-core",
 ]
 
 [[package]]

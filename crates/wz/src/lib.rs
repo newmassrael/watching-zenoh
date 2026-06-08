@@ -75,6 +75,15 @@ pub use wz_runtime_lwip as runtime_lwip;
 #[cfg(all(feature = "runtime-lwip", lwip_real_build))]
 pub use wz_link_lwip as link_lwip;
 
+// Stage 4b — the MCU session shell re-export. `wz::session_lwip` binds the
+// runtime + link tiers to the session SSOT: `run_session` (the synchronous
+// MCU drive loop) + `LwipUdpDriver` (the BoxedLinkDriver adapter). Gated on
+// the same `lwip_real_build` condition as `link_lwip` (the crate names
+// LwipUdpSocket, present only in a real lwIP build), so the namespace is
+// populated exactly when the underlying crate body is non-empty.
+#[cfg(all(feature = "session-lwip", lwip_real_build))]
+pub use wz_session_lwip as session_lwip;
+
 // `runtime_core` re-export is needed by BOTH profiles (the trait
 // crate authoring §5.P Runtime / TimeSource / Allocator). The
 // cfg(any(..)) merges the two opt-in paths so consumers always

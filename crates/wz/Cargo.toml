@@ -84,6 +84,12 @@ wz-runtime-lwip = { path = "../wz-runtime-lwip", optional = true, default-featur
 # build is host-only at R311az-1; R311az-3b extends it to accept
 # deploy-supplied lwipopts.h for cross-compile).
 wz-link-lwip = { path = "../wz-link-lwip", optional = true, default-features = false }
+# Stage 4b — the MCU session shell (tier-clean integration of
+# wz-runtime-lwip + wz-link-lwip + wz-session-core). Optional, pulled by
+# the `session-lwip` feature. Like wz-link-lwip it carries a crate-level
+# `#![cfg(lwip_real_build)]` gate, so the `wz::session_lwip` re-export is
+# populated on exactly the same condition (host / WZ_LWIP_PORT-cross).
+wz-session-lwip = { path = "../wz-session-lwip", optional = true, default-features = false }
 # R311az-3b-ii — direct optional dep on lwip-sys so the facade's
 # build.rs receives `DEP_LWIP_LWIP_REAL_BUILD` (re-exposed via lwIP-sys's
 # `links = "lwip"` metadata). This lets the facade emit a
@@ -390,6 +396,16 @@ runtime-lwip = [
     # receives `DEP_LWIP_LWIP_REAL_BUILD` and emits `lwip_real_build`
     # in lockstep with wz-link-lwip.
     "dep:lwip-sys",
+]
+# Stage 4b — the MCU session shell. Pulls `runtime-lwip` (the §5.P
+# runtime + §5.C link pair + the lwip-sys edge that drives lwip_real_build)
+# and the wz-session-lwip integration crate binding them to the session
+# SSOT. `wz::session_lwip::{run_session, SessionRole, LwipUdpDriver}` light
+# up together with the lwip_real_build cfg, exactly like the link_lwip
+# re-export. The MCU live-session consumer the R311ir carry awaited.
+session-lwip = [
+    "runtime-lwip",
+    "dep:wz-session-lwip",
 ]
 runtime-no-std = []
 # R302b — runtime-tokio pulls the wz-runtime-tokio crate into the

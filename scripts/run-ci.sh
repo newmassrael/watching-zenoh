@@ -610,7 +610,12 @@ layer_c0_test_discipline() {
 
 # ─── Layer C1 — cargo test --workspace ──────────────────────────────
 layer_c1_cargo_test() {
-    (cd crates && cargo test --workspace --quiet)
+    # Stage 4b — exclude wz-session-lwip: it forces wz-session-core/no_std
+    # (heapless sce-rust-runtime) through non-optional deps, which is
+    # mutually exclusive with the std sce-rust-runtime (http-send) that
+    # wz-runtime-tokio pulls — the two cannot coexist in one feature-
+    # unified graph. The crate is tested ISOLATED in Layer C1m via `-p`.
+    (cd crates && cargo test --workspace --exclude wz-session-lwip --quiet)
 }
 
 # ─── Layer C1b — cargo test -p wz-runtime-core --features alloc ────
@@ -909,6 +914,28 @@ layer_c1l_reassembly() {
         && cargo test -p wz-runtime-tokio --features reassembly --quiet)
 }
 
+# ─── Layer C1m — wz-session-lwip isolated host test + clippy ─────────
+#
+# Stage 4b. wz-session-lwip is the no_std MCU session shell: it forces
+# `wz-session-core/no_std` (the heapless sce-rust-runtime engine) through
+# its non-optional deps. That is mutually exclusive with the std
+# sce-rust-runtime (`http-send`) that wz-runtime-tokio pulls — the
+# sce-rust-runtime `compile_error!` (no_std vs http-send, RFC §5.J.2)
+# fires if both land in one feature-unified graph. So this crate CANNOT
+# participate in the `--workspace` unification (Layer C1 / C2 exclude it);
+# it is built ISOLATED here via `-p`, where cargo resolves only this
+# crate's subgraph (no tokio, no http-send) and `no_std` is correct.
+# Mirrors the Layer G.11 cross-real lane but on the host (real lwIP build
+# = host always has lwip_real_build). Covers the default (non-reassembly)
+# drive path + the reassembly drive path, test + clippy each.
+layer_c1m_session_lwip() {
+    (cd crates \
+        && cargo test -p wz-session-lwip --quiet \
+        && cargo test -p wz-session-lwip --features reassembly --quiet \
+        && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings)
+}
+
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
 #
 # R311bo: mirror the gate to deploy/mcu-qemu-demo (standalone
@@ -922,7 +949,10 @@ layer_c1l_reassembly() {
 # absent so a host-only developer is not forced to install the
 # cross toolchain just to clear C2.
 layer_c2_cargo_clippy() {
-    (cd crates && cargo clippy --workspace --all-targets --quiet -- -D warnings) || return 1
+    # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
+    # exclusive with tokio's http-send in a unified graph; isolated clippy
+    # is in Layer C1m). Same rationale as the Layer C1 exclude.
+    (cd crates && cargo clippy --workspace --all-targets --exclude wz-session-lwip --quiet -- -D warnings) || return 1
 
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
@@ -1676,6 +1706,35 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.10 session-unicast MCU $t FAIL" >&2
             fail=1
         fi
+        # G.11 (Stage 4b) wz-session-lwip + facade session-lwip cross-real.
+        # The tier-clean MCU session shell — run_session sync drive loop +
+        # LwipUdpDriver (BoxedLinkDriver over LwipUdpSocket) — over the real
+        # lwIP build. Like wz-link-lwip the crate is #![cfg(lwip_real_build)]
+        # (empty without WZ_LWIP_PORT), so this mirrors G.6's cross-real
+        # setup: builds the crate with `reassembly` on (exercises the
+        # reassembly drive path) AND the facade `session-lwip` re-export.
+        # SKIPs riscv32imac (no riscv32-unknown-elf-gcc for the lwIP C
+        # cross build, same as G.6) and thumbv6m (M0+: session-lwip pulls
+        # session-unicast -> session_actions' alloc::sync::Arc needs
+        # target_has_atomic=ptr, same constraint as G.10).
+        if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
+            echo "  G.11 session-lwip cross-real $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
+        elif [[ "$t" == "thumbv6m-none-eabi" ]]; then
+            echo "  G.11 session-lwip cross-real $t SKIP (M0+: session_actions alloc::sync::Arc needs target_has_atomic=ptr)"
+        elif (cd crates && \
+                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                cargo build -p wz-session-lwip \
+                    --target "$t" --features reassembly --quiet) && \
+             (cd crates && \
+                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                cargo build -p wz \
+                    --target "$t" --no-default-features \
+                    --features session-lwip --quiet); then
+            echo "  G.11 session-lwip cross-real $t OK"
+        else
+            echo "  G.11 session-lwip cross-real $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"
@@ -1966,6 +2025,7 @@ run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1
+run_layer C1m layer_c1m_session_lwip || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1

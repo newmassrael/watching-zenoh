@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-session-lwip — Stage 4b, the tier-clean MCU session shell.
+#
+# This is the integration tier that sits ABOVE both the §5.P runtime
+# tier (wz-runtime-lwip) and the §5.C link tier (wz-link-lwip), binding
+# them to the runtime-agnostic session SSOT (wz-session-core). It is the
+# MCU analog of what `wz-runtime-tokio::session_glue` is on the AP side:
+# the `drive_session_until_terminal` loop + the `BoxedLinkDriver` adapter
+# over the concrete socket. The AP side co-locates these in
+# wz-runtime-tokio only because tokio happens to provide both the runtime
+# AND the async socket I/O; the MCU profile deliberately split runtime
+# (wz-runtime-lwip) from link (wz-link-lwip), so the session-drive layer
+# that depends on both is its own crate here (the tier-clean structure
+# the AP side will eventually mirror as a `wz-session-tokio`).
+#
+# SSOT: every drive-loop PRIMITIVE — `dispatch_link_event`,
+# `report_outcome_reassembling`, `check_lease_deadline`,
+# `new_session_engine`, `HandshakeDeadlineTracker` — already lives in
+# wz-session-core and is shared with the AP loop. `run_session` here is
+# loop STRUCTURE only (the synchronous, `tokio::select!`-free polling
+# shape); the `LwipUdpDriver` adapter is genuinely MCU-specific (the AP
+# `TokioLinkDriverAdapter` is async, nothing to share).
+#
+# Like wz-link-lwip, the whole crate is `#![cfg(lwip_real_build)]`: it
+# names `LwipUdpSocket`, which only exists in a real lwIP build (host, or
+# cross with WZ_LWIP_PORT). The `lwip-sys` direct dependency exists SOLELY
+# to receive the `DEP_LWIP_LWIP_REAL_BUILD` metadata that build.rs relays
+# into the `lwip_real_build` cfg (the same pattern wz-link-lwip uses);
+# wz-session-lwip calls no lwip-sys FFI directly. Cross builds without
+# WZ_LWIP_PORT collapse to an empty crate (no socket type to bind).
+
+[package]
+name = "wz-session-lwip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Phase W MCU session shell — run_session sync drive loop + BoxedLinkDriver over LwipUdpSocket (tier-clean integration of wz-runtime-lwip + wz-link-lwip + wz-session-core)."
+
+[lib]
+name = "wz_session_lwip"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Transport reassembly (Tier B) on the MCU session loop. Forwards to the
+# wz-runtime-lwip reassembly seam (the LwipReassembly dispatcher +
+# mcu_reassembly() over the SCE buffer-pool SSOT) AND the wz-session-core
+# reassembly capability (the shared report_outcome_reassembling ingest).
+# Off by default; with it on, `run_session` reassembles inbound
+# T_MID_FRAGMENT chains before dispatch, exactly as the AP loop does.
+reassembly = [
+    "wz-runtime-lwip/reassembly",
+    "wz-session-core/reassembly",
+]
+
+[dependencies]
+# §5.P runtime tier: LwipRuntime<C> + LwipTime<C> + the Runtime /
+# TimeSource trait surface (with_mutex_mut, now_monotonic_ms). alloc +
+# session-unicast pull the SessionRuntime binding (Stage 4a) so
+# SessionLinkActions<LwipRuntime<C>, LwipTime<C>> composes.
+wz-runtime-lwip = { path = "../wz-runtime-lwip", features = ["alloc", "session-unicast"] }
+# §5.C link tier: LwipUdpSocket / SessionRxSocket / bind_session_rx /
+# LwipLink. Empty without lwip_real_build (host/WZ_LWIP_PORT only).
+wz-link-lwip = { path = "../wz-link-lwip" }
+# Runtime-agnostic session SSOT: the action bundle, the engine-free FSM,
+# the shared drive-loop primitives. no_std selects the heapless engine;
+# alloc the Vec/String/Arc-backed bundle.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "session-unicast", "no_std"] }
+# The Runtime / TimeSource traits named directly by run_session
+# (with_mutex_mut for the lease-baseline read; now_monotonic_ms).
+wz-runtime-core = { path = "../wz-runtime-core", default-features = false, features = ["alloc"] }
+# lwip-sys direct dep SOLELY for DEP_LWIP_LWIP_REAL_BUILD -> lwip_real_build
+# cfg propagation in build.rs (mirrors wz-link-lwip); no FFI used here.
+lwip-sys = { path = "../lwip-sys" }
+
+[dev-dependencies]
+# critical-section's std impl backs LwipRuntime's critical_section::Mutex
+# + the portable-atomic polyfill on the host test path (the MCU deploy
+# supplies the cortex-m / riscv impl at final-binary link instead).
+critical-section = { version = "1", features = ["std"] }
+
+[lints]
+workspace = true
