@@ -168,10 +168,12 @@ use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
-// `Runtime` stays in scope for the concrete `new` constructor's
-// `TokioRuntime::new_mutex(...)` trait-method calls; the generic
-// SessionLinkActions bound is `R: SessionRuntime` (which extends it).
-use wz_runtime_core::{Runtime, TimeSource};
+// `SessionRuntime` (imported below) extends `wz_runtime_core::Runtime`, so
+// the `R::new_mutex` / `R::with_mutex_mut` calls in the generic
+// `SessionLinkActions` impls resolve through the supertrait — no direct
+// `Runtime` import is needed once the concrete `new` (Stage 2c) delegates
+// to `new_generic` and stops calling `TokioRuntime::new_mutex` directly.
+use wz_runtime_core::TimeSource;
 // R311dz-pre — `SessionLinkActions` impls `ResponseSink` (below) so the
 // application-layer observer can drain replies through the IoC trait
 // rather than this concrete type.
@@ -618,17 +620,17 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
     }
 }
 
-// R311di-pre-f2 — `::new` constructor sits on the TokioRuntime-concrete
-// impl block so callers (`SessionLinkActions::new(driver, params,
-// clock)`) keep inferring `R = TokioRuntime` without a turbofish.
-// Generic-R callers (future MCU profile, post-wz-session-core
-// extraction) will gain a sibling `new_generic<R, T>` factory that
-// composes the same body via `R::new_mutex`; until that factory
-// lands the AP-only profile is the sole live caller, so the concrete
-// constructor is the textbook backward-compat shape (mirrors the
-// `TokioSession` alias / `impl<T> Session<TokioRuntime, T>` pattern
-// from the R311cw-dh cascade — both establish a concrete-bound AP
-// entry point on top of a generic struct).
+// R311di-pre-f2 / Stage 2c — the concrete `::new` constructor sits on the
+// TokioRuntime-concrete impl block so callers (`SessionLinkActions::new(
+// driver, params, clock)`) keep inferring `R = TokioRuntime` without a
+// turbofish; it is now a thin wrapper that delegates to the generic
+// `new_generic<R: SessionRuntime, T>` factory (Stage 2c — composes the same
+// body via `R::new_mutex`). Generic-R callers (the future MCU profile,
+// post-wz-session-core extraction) call `new_generic` directly; today the
+// AP profile is still the sole live caller, so the concrete wrapper is the
+// textbook backward-compat shape (mirrors the `TokioSession` alias /
+// `impl<T> Session<TokioRuntime, T>` pattern from the R311cw-dh cascade —
+// both establish a concrete-bound AP entry point on top of a generic struct).
 // R311dz-pre — bridge the observer's generic reply drain to the concrete
 // tokio actions. The inherent `send_response` / `send_response_final`
 // methods (below, in the `impl<R: Runtime, T: TimeSource>` block) carry
@@ -680,6 +682,59 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     }
 }
 
+/// Generic-`R` constructor (Stage 2c) — the runtime-agnostic body of the
+/// concrete [`SessionLinkActions::new`] below. Every mutex slot is staged
+/// via `R::new_mutex` so the lwIP MCU profile composes the same bundle
+/// against `critical_section::Mutex`; the tokio `new` is a thin
+/// `R = TokioRuntime` wrapper. The `None::<…>` / `Vec::<…>::new()` /
+/// `HashMap::<…>::new()` arg annotations are mandatory: `R::Mutex<T>` is a
+/// GAT projection (non-injective), so the element type cannot be inferred
+/// back from the struct field type — it must be spelled at the `new_mutex`
+/// argument.
+impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
+    /// Construct a session action bundle for one logical FSM instance over
+    /// any `R: SessionRuntime`. `driver` is the per-profile `R::LinkSink`
+    /// (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP `Rc<dyn _>`);
+    /// `params` are captured by value; `clock` is the shared monotonic
+    /// clock (R263 + R294) consumed by [`Self::handle_inbound`] and the
+    /// `record_established_at` action.
+    pub fn new_generic(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Arc<Self> {
+        // R121e — seed the outbound Frame SN with `params.initial_sn`
+        // so the first emitted Frame matches the value announced in
+        // the OpenSyn/OpenAck body. The peer enforces this start
+        // value via its reliable-channel window tracking
+        // (zenoh-pico unicast/transport.c:182-194).
+        let initial_frame_sn = params.initial_sn;
+        Arc::new(Self {
+            driver,
+            params,
+            trace: R::new_mutex(ActionTrace::default()),
+            inbound_cookie: R::new_mutex(None::<Vec<u8>>),
+            last_inbound_keepalive_at: R::new_mutex(None::<u64>),
+            established_at: R::new_mutex(None::<u64>),
+            clock,
+            inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
+            inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
+            // R121f1 — default ext chains seed both Init roles with the
+            // patch-extension entry that zenoh-pico's accept-side
+            // size-negotiation requires. See
+            // [`default_init_patch_ext_entry`] for the wire-spec
+            // citation and the foreign-interop failure mode this
+            // closes.
+            init_syn_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
+            init_ack_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
+            open_syn_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
+            open_ack_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
+            inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
+            outbound_frame_sn: AtomicU64::new(initial_frame_sn),
+            outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
+            next_outbound_request_id: AtomicU64::new(0),
+            next_outbound_token_id: AtomicU64::new(0),
+            next_outbound_interest_id: AtomicU64::new(0),
+        })
+    }
+}
+
 impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
     /// Construct a session action bundle for one logical FSM instance.
     /// The `params` are captured by value; production callers
@@ -690,44 +745,17 @@ impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
     /// the same `TokioTime` that [`drive_session_until_terminal`]
     /// receives so the lease comparator's `now_ms` and the recorded
     /// `keepalive_ms` / `established_ms` share an epoch.
+    ///
+    /// Thin `R = TokioRuntime` wrapper over [`Self::new_generic`]; the
+    /// struct's `<R = TokioRuntime>` default keeps every existing
+    /// `SessionLinkActions::new(driver, params, clock)` call site
+    /// turbofish-free.
     pub fn new(
         driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
         params: SessionInitParams,
         clock: T,
     ) -> Arc<Self> {
-        // R121e — seed the outbound Frame SN with `params.initial_sn`
-        // so the first emitted Frame matches the value announced in
-        // the OpenSyn/OpenAck body. The peer enforces this start
-        // value via its reliable-channel window tracking
-        // (zenoh-pico unicast/transport.c:182-194).
-        let initial_frame_sn = params.initial_sn;
-        Arc::new(Self {
-            driver,
-            params,
-            trace: TokioRuntime::new_mutex(ActionTrace::default()),
-            inbound_cookie: Mutex::new(None),
-            last_inbound_keepalive_at: Mutex::new(None),
-            established_at: Mutex::new(None),
-            clock,
-            inbound_peer_zid: Mutex::new(None),
-            inbound_opensyn_cookie: Mutex::new(None),
-            // R121f1 — default ext chains seed both Init roles with the
-            // patch-extension entry that zenoh-pico's accept-side
-            // size-negotiation requires. See
-            // [`default_init_patch_ext_entry`] for the wire-spec
-            // citation and the foreign-interop failure mode this
-            // closes.
-            init_syn_ext: Mutex::new(vec![default_init_patch_ext_entry()]),
-            init_ack_ext: Mutex::new(vec![default_init_patch_ext_entry()]),
-            open_syn_ext: Mutex::new(Vec::new()),
-            open_ack_ext: Mutex::new(Vec::new()),
-            inbound_peer_init_caps: Mutex::new(None),
-            outbound_frame_sn: AtomicU64::new(initial_frame_sn),
-            outbound_mappings: Mutex::new(HashMap::new()),
-            next_outbound_request_id: AtomicU64::new(0),
-            next_outbound_token_id: AtomicU64::new(0),
-            next_outbound_interest_id: AtomicU64::new(0),
-        })
+        Self::new_generic(driver, params, clock)
     }
 }
 
@@ -2506,9 +2534,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
 /// anti-amplification per the §2.7 trust-class matrix). Engine-free
 /// successors of the retired R89 `register_guard_fns` Lua bindings.
 ///
-/// Concrete `TokioRuntime` impl (the `.lock()` on the `R::Mutex` slots is
-/// `std::sync::Mutex`-only); `transport-unicast` is AP-hosted.
-impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
+/// Generic over `R: SessionRuntime` (Stage 2c): the guard reads the
+/// `R::Mutex` staging slots through `R::with_mutex_mut`; `transport-unicast`
+/// is AP-hosted today, so `TokioRuntime` is the only live `R`.
+impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R57 placeholder constant (`true`) pending the half-open cap-quota
     /// implementation round. Kept as a named method (not inlined as `true`
     /// in the dispatcher) so the admission structure stays explicit and
@@ -2538,15 +2567,16 @@ impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
     /// guard actually fired (vs. R57's `bind_bool` placeholder which never
     /// executed any dynamic check).
     pub fn cookie_valid(&self) -> bool {
-        self.trace.lock().unwrap().cookie_valid_check += 1;
+        R::with_mutex_mut(&self.trace, |t| t.cookie_valid_check += 1);
 
         // Defensive: any missing material rejects. A well-formed handshake
-        // populates both slots before this guard runs.
-        let peer_zid = match self.inbound_peer_zid.lock().unwrap().clone() {
+        // populates both slots before this guard runs. Each slot is read in
+        // its own with_mutex_mut (sequential, no nesting).
+        let peer_zid = match R::with_mutex_mut(&self.inbound_peer_zid, |s| s.clone()) {
             Some(z) => z,
             None => return false,
         };
-        let echoed = match self.inbound_opensyn_cookie.lock().unwrap().clone() {
+        let echoed = match R::with_mutex_mut(&self.inbound_opensyn_cookie, |s| s.clone()) {
             Some(c) => c,
             None => return false,
         };
