@@ -97,32 +97,20 @@ use wz_session_core::session_timeouts::HandshakeDeadlineTracker;
 // type through this crate's session API without a direct wz-session-core dep.
 pub use wz_session_core::session_timeouts::SessionTimeouts;
 
-// R311g1 — CodecError / VecSink / SceSink are still needed in the
-// minus-all-codecs lane because outbound `encode_frame_envelope` +
-// `From<CodecError> for InboundParseError` reach them unconditionally
-// (R311h..R311k cascade will gate the outbound encode_frame_* family
-// at which point these can fold under the same cfg(any(...))).
-use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
+// CodecError + VecSink are consumed by the remaining outbound encoders
+// in this file (encode_init_with_role / encode_close / the build_*
+// helpers). SceSink + encode_frame_envelope moved to
+// wz-session-core::frame_encode with the encode_frame_with_* family.
+use sce_forge_runtime::codec::{CodecError, VecSink};
 #[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::decl_final::DeclFinal;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::declare::Declare;
 use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::InitBody;
-use wz_codecs::interest::Interest;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBody;
-#[cfg(feature = "codec-push")]
-use wz_codecs::push::Push;
-#[cfg(feature = "codec-request")]
-use wz_codecs::request::Request;
-#[cfg(feature = "codec-response")]
-use wz_codecs::response::Response;
-#[cfg(feature = "codec-response-final")]
-use wz_codecs::response_final::ResponseFinal;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_kexpr::UndeclKexpr;
 #[cfg(feature = "codec-declare")]
@@ -172,8 +160,6 @@ use wz_codecs::msg_put::MsgPutOwned;
 use wz_codecs::open_body::OpenBodyOwned;
 #[cfg(feature = "codec-push")]
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
-#[cfg(feature = "codec-request")]
-use wz_codecs::request::RequestOwned;
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::ResponseOwned;
 #[cfg(feature = "codec-response-final")]
@@ -281,19 +267,11 @@ pub use wz_session_core::close_reason::CloseReason;
 // `crate::session_glue::ActionTrace` callsites resolve unchanged. DP3 leaf.
 pub use wz_session_core::action_trace::ActionTrace;
 
-/// Sync RAII shim around an async `LinkDriver`. Production callers
-/// supply this via `TokioLinkDriverAdapter`; tests supply a
-/// recording implementation.
-///
-/// Send + Sync are required because the trait object captured by
-/// each native-fn closure must outlive the closure's `'static`
-/// bound and travel across worker threads on a Tokio multi-thread
-/// runtime.
-pub trait BoxedLinkDriver: Send + Sync {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability);
-    fn open_blocking(&self);
-    fn close_blocking(&self);
-}
+// BoxedLinkDriver trait moved to wz-session-core::link (shared link-write
+// seam for the tokio AP + lwIP MCU profiles). Re-exported so the
+// TokioLinkDriverAdapter / UdpWriteDriver / TcpWriteDriver impls + external
+// callers keep naming crate::session_glue::BoxedLinkDriver.
+pub use wz_session_core::link::BoxedLinkDriver;
 
 /// Tokio multi-thread runtime adapter for a `LinkDriver`
 /// implementation.
@@ -4297,228 +4275,22 @@ pub fn build_response_final(request_id: u64) -> ResponseFinalOwned {
     }
 }
 
-/// R121h-perf-bump-3 — single-allocation transport-envelope encode.
-/// Composes the parent-flags byte, `VLE(sn)`, and a sink-encoded
-/// payload into one growable `Vec`, eliminating the prior
-/// `payload.encode_to_vec()` + `Frame.encode_to_vec()` +
-/// `wire.extend_from_slice(&body_bytes)` chain (3 allocations per
-/// hot-path emit). For typical 1–2 KB payloads the reserved capacity
-/// is also dramatically smaller than the 64 KB `Frame::MAX_ENCODED_BYTES`
-/// ceiling, since the inner codec's worst-case bound is used directly.
-///
-/// The `VLE(sn)` loop is bit-identical to `Frame::encode`'s sn block
-/// — it IS the wire format (zenoh-pico VLE base-128 encoding per
-/// `vendor/zenoh-pico/src/protocol/codec/core.c`), not consumer-tunable
-/// logic. Inlining here does not duplicate semantics.
-fn encode_frame_envelope<P>(
-    sn: u64,
-    parent_flags: u8,
-    worst_case_payload: usize,
-    payload_encode: P,
-) -> Vec<u8>
-where
-    P: FnOnce(&mut VecSink<'_>) -> Result<(), CodecError>,
-{
-    let mut wire = Vec::with_capacity(1 + 10 + worst_case_payload);
-    wire.push(parent_flags | wire_const::T_MID_FRAME);
-    {
-        let mut sink = VecSink::new(&mut wire);
-        let mut _vle = sn;
-        while _vle >= 0x80 {
-            sink.write_u8((_vle as u8 & 0x7F) | 0x80)
-                .expect("VecSink is infallible");
-            _vle >>= 7;
-        }
-        sink.write_u8(_vle as u8).expect("VecSink is infallible");
-        payload_encode(&mut sink).expect("VecSink is infallible");
-    }
-    wire
-}
-
-/// R121j-3 — build the wire bytes for a `Frame` transport-message
-/// carrying a single `Response` network-message in its payload.
-/// Mirror of the other `encode_frame_with_*` helpers (PUSH /
-/// DECLARE / REQUEST / RESPONSE_FINAL).
-///
-/// Reply data delivery is on the reliable channel by default — a
-/// dropped Reply leaves the requester's `z_get` waiting for a
-/// reply that never arrives, then for the matching
-/// `ResponseFinal` that the queryable never re-emits (because from
-/// its perspective the reply was sent). The default `reliable=true`
-/// is the production-safe choice; callers passing `false` accept
-/// the consequence.
-#[cfg(feature = "codec-response")]
-pub fn encode_frame_with_response(sn: u64, response: ResponseOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Response::MAX_ENCODED_BYTES, |sink| {
-        response
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
-}
-
-/// R121j-2 — build the wire bytes for a `Frame` transport-message
-/// carrying a single `ResponseFinal` network-message in its payload.
-/// Mirror of the other `encode_frame_with_*` helpers (PUSH /
-/// DECLARE / REQUEST).
-///
-/// ResponseFinal is unconditionally reliable in zenoh-pico's model:
-/// dropping a ResponseFinal would leave the requesting peer's
-/// `z_get` future hung waiting for sequence termination. The default
-/// `reliable=true` is the production-safe choice; callers passing
-/// `false` accept the consequence (typically only fuzz / negative
-/// tests).
-#[cfg(feature = "codec-response-final")]
-pub fn encode_frame_with_response_final(
-    sn: u64,
-    response_final: ResponseFinalOwned,
-    reliable: bool,
-) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, ResponseFinal::MAX_ENCODED_BYTES, |sink| {
-        response_final
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
-}
-
-/// R121j-1 — build the wire bytes for a `Frame` transport-message
-/// carrying a single `Request` network-message in its payload. Mirror
-/// of [`encode_frame_with_push`] / [`encode_frame_with_declare`] for
-/// the REQUEST outbound path.
-///
-/// Like the DECLARE outbound path, Request(Query) goes on the
-/// reliable channel by default — the peer's responder side needs to
-/// see the Query to dispatch into its queryable callback; an
-/// unreliable Query could silently drop and leave the local
-/// `z_get` future hung without a Response or ResponseFinal. Callers
-/// that pass `reliable=false` accept that risk explicitly.
-#[cfg(feature = "codec-request")]
-pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Request::MAX_ENCODED_BYTES, |sink| {
-        request
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
-}
-
-/// R121g — build the wire bytes for a `Frame` transport-message
-/// carrying a single `Declare` network-message in its payload.
-/// Mirror of [`encode_frame_with_push`] for the DECLARE outbound
-/// path.
-///
-/// `parent_flags` carries `FLAG_T_FRAME_R (0x20)` when `reliable`,
-/// matching zenoh-pico's `_z_frame_encode` at
-/// `vendor/zenoh-pico/src/protocol/codec/transport.c:380`.
-/// DECLARE outbound is always reliable in the AP MVP path — the
-/// session-FSM reliable-channel SN window orders DECLARE before
-/// any dependent aliased Push, so the peer's keyexpr table is
-/// populated before the first resolving Push arrives. Callers
-/// passing `reliable=false` accept that the DECLARE may arrive
-/// after a referencing Push and the peer's resolver will reject
-/// the unknown id — useful only for fuzz / negative tests.
+// encode_frame_envelope + the encode_frame_with_* family moved to
+// wz-session-core::frame_encode (shared outbound encode SSOT for the tokio
+// AP + lwIP MCU profiles). Re-exported so the action methods below + the
+// external wz-ap-demo callsites keep naming
+// crate::session_glue::encode_frame_with_*.
 #[cfg(feature = "codec-declare")]
-pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Declare::MAX_ENCODED_BYTES, |sink| {
-        declare
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
-}
-
-/// R279 — build the wire bytes for a `Frame` transport-message
-/// carrying a single `Interest` network-message in its payload.
-/// Mirror of [`encode_frame_with_declare`] for the INTEREST outbound
-/// path (declarations-discovery / liveliness-subscriber registration).
-///
-/// `parent_flags` carries `FLAG_T_FRAME_R (0x20)` when `reliable`,
-/// matching zenoh-pico's `_z_frame_encode` at
-/// `vendor/zenoh-pico/src/protocol/codec/transport.c:380`. INTEREST
-/// outbound is always reliable in the wz path: the peer's
-/// `_z_interest_process_*` runs against an ordered stream of
-/// DeclToken / UndeclToken / InterestFinal records on the reliable
-/// channel, and the SN-window orders the Interest before any peer
-/// reply just as the DECLARE path orders DeclSubscriber before any
-/// resolving Push. Callers passing `reliable=false` accept that the
-/// Interest may arrive after a peer-side state change and the peer's
-/// resolver may serve a stale history snapshot — useful only for
-/// fuzz / negative tests.
-pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Interest::MAX_ENCODED_BYTES, |sink| {
-        interest
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
-}
-
-/// R121e — build the wire bytes for a `Frame` transport-message
-/// (T_MID_FRAME) carrying a single `Push` network-message in its
-/// payload.
-///
-/// Wire shape (composes the transport-envelope header byte that
-/// lives outside the body codec's scope with `Frame.encode_to_vec()`'s
-/// `VLE(sn) + payload` body):
-///
-/// ```text
-///   [parent_flags | T_MID_FRAME (0x05)]
-///     VLE(sn) | push.encode_bytes
-/// ```
-///
-/// `parent_flags` carries `FLAG_T_FRAME_R` (0x20) when
-/// `reliable`, matching zenoh-pico's `_z_frame_encode` per
-/// `vendor/zenoh-pico/src/protocol/codec/transport.c:380`.
-/// `FLAG_T_Z` (0x80) — Frame-level transport extensions — is not
-/// set: the MVP pub/sub path has no use for transport-level
-/// Frame extensions and the wireless QoS / Auth ext chains live
-/// on the InitSyn / InitAck negotiation paths (see
-/// `ExtChainRole`).
-///
-/// The `Frame { sn, payload }.encode_to_vec()` body is verified
-/// byte-identical to zenoh-pico's `_z_frame_encode` by
-/// `crates/wz-integration-tests/tests/layer3_frame.rs`. This
-/// helper composes only the one transport header byte that
-/// `Frame::encode` does not emit.
+pub use wz_session_core::frame_encode::encode_frame_with_declare;
+pub use wz_session_core::frame_encode::encode_frame_with_interest;
 #[cfg(feature = "codec-push")]
-pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Push::MAX_ENCODED_BYTES, |sink| {
-        push.try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
-}
+pub use wz_session_core::frame_encode::encode_frame_with_push;
+#[cfg(feature = "codec-request")]
+pub use wz_session_core::frame_encode::encode_frame_with_request;
+#[cfg(feature = "codec-response")]
+pub use wz_session_core::frame_encode::encode_frame_with_response;
+#[cfg(feature = "codec-response-final")]
+pub use wz_session_core::frame_encode::encode_frame_with_response_final;
 
 // ─────────────────────────── inbound parser ───────────────────────────
 
@@ -5135,6 +4907,12 @@ mod tests {
         feature = "codec-response-final"
     ))]
     use wz_codecs_test_support::TestWire;
+
+    // Borrowed `Push` for the encode-byte-compare tests. The production
+    // borrowed import moved out with encode_frame_with_push (now
+    // wz-session-core::frame_encode), so the test-only use lands here.
+    #[cfg(feature = "codec-push")]
+    use wz_codecs::push::Push;
 
     /// R69 / R311ei — `signing_key_from_os_entropy` yields a 32-byte
     /// key (satisfies the >= 32 invariant by construction) and two

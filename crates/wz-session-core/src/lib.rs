@@ -350,6 +350,15 @@ pub mod driver_loop;
 #[cfg(feature = "alloc")]
 pub mod inbound;
 
+/// Outbound `T_MID_FRAME` envelope encoders (`encode_frame_envelope` +
+/// the `encode_frame_with_*` family) hoisted from
+/// `wz-runtime-tokio::session_glue` so the session action layer shares
+/// one outbound encode SSOT across the tokio (AP) and lwIP (MCU)
+/// profiles. Owned `Vec` output, so alloc-gated like `inbound` /
+/// `network_message`.
+#[cfg(feature = "alloc")]
+pub mod frame_encode;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns

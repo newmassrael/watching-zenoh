@@ -13,6 +13,27 @@
 
 use alloc::vec::Vec;
 
+use crate::reliability::Reliability;
+
+/// Synchronous outbound link-write seam the session FSM action layer
+/// drives. The FSM's `Arc<dyn BoxedLinkDriver>` slot decouples the
+/// runtime-agnostic `SessionLinkActions` from the concrete transport:
+/// the tokio AP profile wraps an async `LinkDriver` behind a
+/// blocking-enqueue adapter (`TokioLinkDriverAdapter` /
+/// `UdpWriteDriver` / `TcpWriteDriver`); the lwIP MCU profile wraps a
+/// synchronous `LwipUdpSocket::send_to`.
+///
+/// `Send + Sync` are required by the tokio profile (the trait object
+/// captured by each native-fn closure must outlive the closure's
+/// `'static` bound and travel across worker threads on a multi-thread
+/// runtime). A single-core MCU impl satisfies them trivially or wraps
+/// its non-Send inner state accordingly.
+pub trait BoxedLinkDriver: Send + Sync {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability);
+    fn open_blocking(&self);
+    fn close_blocking(&self);
+}
+
 /// Outbound payload to send over a link. The R51 baseline carries
 /// raw bytes; future rounds extend to typed frames (carrying codec
 /// metadata for re-encoding on the link side without copy).
