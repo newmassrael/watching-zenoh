@@ -30988,6 +30988,60 @@
         "AP: fold the reassembly deadline into the drive-loop select! race; multi-peer / router multi-link wiring."
       ]
     },
+    "Round 311is": {
+      "decision_summary": "Stage 5 MCU acceptor e2e: handshake to Established (real cookie round-trip) + Frame dispatch over QEMU lwIP via run_session; session codec/role funnel reaches the MCU profile",
+      "changes_bullets": [
+        "wz-runtime-lwip + crates/wz Cargo.toml: codec-{frame,init-body,open-body,keep-alive,close} + session-unicast-{accept,open} + transport-{keepalive,batching} forwarders to wz-session-core (MCU mirror of the wz-runtime-tokio funnel; facade dual-forwards alongside the tokio edge like scouting-static)",
+        "new crate crates/wz-mcu-session-acceptor (no_std, publish=false): run_acceptor_e2e<C> e2e SSOT; the reactive crafted peer decodes the acceptor's REAL InitAck via parse_inbound and echoes the minted HMAC cookie in OpenSyn (no pre-computed cookie), proving the cookie round-trip",
+        "new crate deploy/mcu-session-acceptor (no_std/no_main QEMU bin): SysTick clock + heap + PASS/FAIL verdict; a separate crate for footprint isolation (deploy/mcu-noheap-probe precedent) rather than a 2nd [[bin]] in mcu-qemu-demo",
+        "fix crates/wz-session-lwip/src/session_drive.rs: run_session was missing engine.initialize() before role.start_event(), so the Stage 4b shell never ran the SCXML initial transition and inbound.start never reached AwaitingInitSyn; latent because the 4b smoke had no inbound peer",
+        "scripts/run-ci.sh: Layer C1n (isolated host e2e) + Layer Q.4 (build+boot mcu-session-acceptor on mps2 M3/M4/M7); C1/C2 --exclude wz-mcu-session-acceptor (no_std forcing, mirrors wz-session-lwip)"
+      ],
+      "verification_bullets": [
+        "host Layer C1n acceptor_handshake_reaches_established_and_dispatches_frame_over_lwip PASS",
+        "Layer Q.4 mps2-an385/an386/an500 boot PASS on real qemu-system-arm (advanced_fsm=2, cookie_len=16, SYS_EXIT=0)",
+        "full host run-ci + Layer G EXIT 0 (all 7 MCU targets G.1-G.11 OK; AP runtime-tokio lanes unaffected since the wz-runtime-lwip? forwards stay inert without the lwip runtime)",
+        "cargo tree confirms wz-session-core resolves codec-init-body + session-unicast-accept on the MCU profile (the funnel reaches the gated send_init_ack_with_cookie / send_open_ack)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311ir carry[2] live MCU main-loop consumer: CLOSED — run_acceptor_e2e proves InitSyn->Established->Frame over QEMU lwIP end-to-end through the Stage 4b run_session sync loop",
+        "MCU alloc-profile reassembly auto-sweep (R311ir carry[2] second clause) still open; the acceptor e2e runs reassembly-off (plain T_MID_FRAME, not Fragment)",
+        "NEW debt: deploy/mcu-qemu-demo Layer Q.3 footprint baseline stale at HEAD (thumbv7m text 23652->24548, stash-proven pre-Stage-5) — needs root-cause + BASELINE_* table + the footprint caveat + a ledger entry",
+        "acceptor bin carries no Q.3 footprint gate (e2e proof, not a footprint-tracked artifact); a reassembly-path acceptor e2e (Fragment->reassemble->dispatch) is a follow-up axis"
+      ],
+      "publishable_decision_summary": "Stage 5 MCU acceptor e2e: handshake to Established (real cookie round-trip) + Frame dispatch over QEMU lwIP via run_session; session codec/role funnel reaches the MCU profile",
+      "publishable_changes_bullets": [
+        "wz-runtime-lwip + crates/wz Cargo.toml: codec-{frame,init-body,open-body,keep-alive,close} + session-unicast-{accept,open} + transport-{keepalive,batching} forwarders to wz-session-core (MCU mirror of the wz-runtime-tokio funnel; facade dual-forwards alongside the tokio edge like scouting-static)",
+        "new crate crates/wz-mcu-session-acceptor (no_std, publish=false): run_acceptor_e2e<C> e2e SSOT; the reactive crafted peer decodes the acceptor's REAL InitAck via parse_inbound and echoes the minted HMAC cookie in OpenSyn (no pre-computed cookie), proving the cookie round-trip",
+        "new crate deploy/mcu-session-acceptor (no_std/no_main QEMU bin): SysTick clock + heap + PASS/FAIL verdict; a separate crate for footprint isolation (deploy/mcu-noheap-probe precedent) rather than a 2nd [[bin]] in mcu-qemu-demo",
+        "fix crates/wz-session-lwip/src/session_drive.rs: run_session was missing engine.initialize() before role.start_event(), so the Stage 4b shell never ran the SCXML initial transition and inbound.start never reached AwaitingInitSyn; latent because the 4b smoke had no inbound peer",
+        "scripts/run-ci.sh: Layer C1n (isolated host e2e) + Layer Q.4 (build+boot mcu-session-acceptor on mps2 M3/M4/M7); C1/C2 --exclude wz-mcu-session-acceptor (no_std forcing, mirrors wz-session-lwip)"
+      ],
+      "publishable_verification_bullets": [
+        "host Layer C1n acceptor_handshake_reaches_established_and_dispatches_frame_over_lwip PASS",
+        "Layer Q.4 mps2-an385/an386/an500 boot PASS on real qemu-system-arm (advanced_fsm=2, cookie_len=16, SYS_EXIT=0)",
+        "full host run-ci + Layer G EXIT 0 (all 7 MCU targets G.1-G.11 OK; AP runtime-tokio lanes unaffected since the wz-runtime-lwip? forwards stay inert without the lwip runtime)",
+        "cargo tree confirms wz-session-core resolves codec-init-body + session-unicast-accept on the MCU profile (the funnel reaches the gated send_init_ack_with_cookie / send_open_ack)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ir carry[2] live MCU main-loop consumer: CLOSED — run_acceptor_e2e proves InitSyn->Established->Frame over QEMU lwIP end-to-end through the Stage 4b run_session sync loop",
+        "MCU alloc-profile reassembly auto-sweep (R311ir carry[2] second clause) still open; the acceptor e2e runs reassembly-off (plain T_MID_FRAME, not Fragment)",
+        "NEW debt: deploy/mcu-qemu-demo Layer Q.3 footprint baseline stale at HEAD (thumbv7m text 23652->24548, stash-proven pre-Stage-5) — needs root-cause + BASELINE_* table + the footprint caveat + a ledger entry",
+        "acceptor bin carries no Q.3 footprint gate (e2e proof, not a footprint-tracked artifact); a reassembly-path acceptor e2e (Fragment->reassemble->dispatch) is a follow-up axis"
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
@@ -37438,5 +37492,5 @@
       "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
     }
   },
-  "schema_version": 8
+  "schema_version": 9
 }
