@@ -31137,6 +31137,56 @@
         "Future: gate IGMP atomically (LWIP_IGMP=0) to reclaim ~900 B text +184 B bss when scouting off."
       ]
     },
+    "Round 311iv": {
+      "decision_summary": "R311iv MCU reassembly-path acceptor e2e: fragment chain -> ReassemblyDispatcher ingest+sweep -> reassembled FramePayload dispatch, proven host + QEMU M3/M4/M7; new wz facade reassembly feature.",
+      "changes_bullets": [
+        "wz facade: new reassembly atomic feature, weak-forwards session-lwip/runtime-lwip/runtime-tokio.",
+        "acceptor run_acceptor_e2e gains DataMode(WholeFrame|FragmentChain) + optional reassembly feature.",
+        "craft_fragment_wire hoisted to wz-session-wire-fixtures SSOT; AP layer3_reassembly_rx consumes it.",
+        "deploy/mcu-session-acceptor reassembly feature selects FragmentChain; host reassembly e2e added.",
+        "run-ci: C1n +reassembly variant, Q.4 frame+reasm modes, Layer 0 fmt gate +mcu-session-acceptor."
+      ],
+      "verification_bullets": [
+        "host_acceptor_reassembly_e2e PASS: 2-fragment chain reassembled+dispatched over real lwIP loopback.",
+        "QEMU Q.4.*.reasm boot PASS on mps2-an385/386/500 (M3/M4/M7), semihost exit 0.",
+        "AP layer3_reassembly_rx 3 tests PASS with hoisted crafter (byte-identical).",
+        "full run-ci G=1 Q=1: all required layers pass; validate T1 new=+0, entries 600->601."
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ],
+      "carry_forward_bullets": [
+        "no-alloc (M0) reassembly consumer still deferred (acceptor pulls alloc::sync::Arc; ARMv6-M out).",
+        "reassembly sweep (timeout eviction) wired+unit-tested, e2e-exercise pending (needs stalled chain).",
+        "multi-peer / out-of-order / capacity reassembly e2e axes covered by unit tests only.",
+        "deploy.yaml reassembly_pool dims still spec-sourced, not yaml-loaded (R311in carry tail)."
+      ],
+      "publishable_decision_summary": "R311iv MCU reassembly-path acceptor e2e: fragment chain -> ReassemblyDispatcher ingest+sweep -> reassembled FramePayload dispatch, proven host + QEMU M3/M4/M7; new wz facade reassembly feature.",
+      "publishable_changes_bullets": [
+        "wz facade: new reassembly atomic feature, weak-forwards session-lwip/runtime-lwip/runtime-tokio.",
+        "acceptor run_acceptor_e2e gains DataMode(WholeFrame|FragmentChain) + optional reassembly feature.",
+        "craft_fragment_wire hoisted to wz-session-wire-fixtures SSOT; AP layer3_reassembly_rx consumes it.",
+        "deploy/mcu-session-acceptor reassembly feature selects FragmentChain; host reassembly e2e added.",
+        "run-ci: C1n +reassembly variant, Q.4 frame+reasm modes, Layer 0 fmt gate +mcu-session-acceptor."
+      ],
+      "publishable_verification_bullets": [
+        "host_acceptor_reassembly_e2e PASS: 2-fragment chain reassembled+dispatched over real lwIP loopback.",
+        "QEMU Q.4.*.reasm boot PASS on mps2-an385/386/500 (M3/M4/M7), semihost exit 0.",
+        "AP layer3_reassembly_rx 3 tests PASS with hoisted crafter (byte-identical).",
+        "full run-ci G=1 Q=1: all required layers pass; validate T1 new=+0, entries 600->601."
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ],
+      "publishable_carry_forward_bullets": [
+        "no-alloc (M0) reassembly consumer still deferred (acceptor pulls alloc::sync::Arc; ARMv6-M out).",
+        "reassembly sweep (timeout eviction) wired+unit-tested, e2e-exercise pending (needs stalled chain).",
+        "multi-peer / out-of-order / capacity reassembly e2e axes covered by unit tests only.",
+        "deploy.yaml reassembly_pool dims still spec-sourced, not yaml-loaded (R311in carry tail)."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
