@@ -29,7 +29,9 @@ use std::sync::{Arc, Mutex};
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
 use crate::runtime_impl::TokioTime;
-use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SessionLinkActions};
+use crate::session_glue::{
+    new_session_actions, BoxedLinkDriver, SessionInitParams, SessionLinkActions,
+};
 use crate::Reliability;
 
 /// Test [`BoxedLinkDriver`] that records every outbound frame so a
@@ -97,6 +99,6 @@ pub(crate) fn recording_actions_with_params(
     let driver = Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
     });
-    let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
+    let actions = new_session_actions(driver.clone(), params, TokioTime::new());
     (actions, driver)
 }

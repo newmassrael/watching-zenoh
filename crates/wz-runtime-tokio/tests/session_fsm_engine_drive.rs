@@ -24,13 +24,13 @@ use std::sync::Arc;
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState};
-use wz_runtime_tokio::session_glue::{new_session_engine, SessionLinkActions};
+use wz_runtime_tokio::session_glue::{new_session_actions, new_session_engine};
 use wz_runtime_tokio_test_support::{fixture_session_init_params, LifecycleRecordingDriver};
 
 #[test]
 fn r55b_engine_drives_link_opening_onentry_script() {
     let driver = Arc::new(LifecycleRecordingDriver::default());
-    let actions = SessionLinkActions::new(
+    let actions = new_session_actions(
         driver.clone(),
         fixture_session_init_params(),
         TokioTime::new(),

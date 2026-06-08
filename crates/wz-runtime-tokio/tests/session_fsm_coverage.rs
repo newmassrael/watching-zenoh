@@ -40,7 +40,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_engine, BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionLinkActions,
+    new_session_actions, new_session_engine, BoxedLinkDriver, CloseReason, SessionActionsBinding,
+    SessionLinkActions,
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, LifecycleRecordingDriver};
 
@@ -53,7 +54,7 @@ fn fresh_engine() -> (
 ) {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> =
         Arc::new(LifecycleRecordingDriver::default());
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)

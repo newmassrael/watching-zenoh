@@ -28,8 +28,8 @@ use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
-    new_session_engine, BoxedLinkDriver, DriverLoopOutcome, IterationEvent, NetworkMessage,
-    SessionActionsBinding, SessionLinkActions,
+    new_session_actions, new_session_engine, BoxedLinkDriver, DriverLoopOutcome, IterationEvent,
+    NetworkMessage, SessionActionsBinding,
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 use wz_statechart_bridge::EngineInjector;
@@ -68,8 +68,7 @@ fn frame_event(push: PushOwned) -> DriverLoopOutcome {
 
 fn fresh_engine() -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding>> {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions =
-        SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     engine

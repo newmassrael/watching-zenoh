@@ -25,7 +25,7 @@ use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState};
 use wz_runtime_tokio::session_glue::{
-    new_session_engine, SessionLinkActions, TokioLinkDriverAdapter,
+    new_session_actions, new_session_engine, TokioLinkDriverAdapter,
 };
 use wz_runtime_tokio::TcpDriver;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -50,7 +50,7 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     let adapter: Arc<TokioLinkDriverAdapter<TcpDriver>> =
         Arc::new(TokioLinkDriverAdapter::new(driver, handle));
 
-    let actions = SessionLinkActions::new(adapter, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(adapter, fixture_session_init_params(), TokioTime::new());
 
     // ─── drive Init -> LinkOpening -> SentInitSyn ──────────────
     // The session FSM is sync; run it on a blocking task so the

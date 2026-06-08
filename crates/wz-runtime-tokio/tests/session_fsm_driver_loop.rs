@@ -27,8 +27,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome,
-    SessionActionsBinding, SessionLinkActions,
+    new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver,
+    DriverLoopOutcome, SessionActionsBinding, SessionLinkActions,
 };
 // `NetworkMessage` is referenced only by the two codec-decode tests
 // below: `r74_rx_frame_unknown_network_mid_absorbs_as_unknown`
@@ -71,8 +71,7 @@ fn fresh_setup() -> (
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions =
-        SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)

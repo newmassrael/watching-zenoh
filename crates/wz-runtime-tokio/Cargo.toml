@@ -154,13 +154,13 @@ liveliness-get = ["declare-interest", "declare-final", "declare-token", "wz-sess
 # R311i — every declare-* feature implies codec-declare so the wire
 # emit path (`send_declare_*` body-cfg branch) is mechanically
 # available whenever the high-level declare surface is on.
-declare-final = ["codec-declare"]
-declare-interest = ["codec-declare"]
-declare-keyexpr = ["codec-declare"]
+declare-final = ["codec-declare", "wz-session-core/declare-final"]
+declare-interest = ["codec-declare", "wz-session-core/declare-interest"]
+declare-keyexpr = ["codec-declare", "wz-session-core/declare-keyexpr"]
 declare-queryable = ["codec-declare", "wz-session-core/declare-queryable"]
 declare-subscriber = ["codec-declare", "wz-session-core/declare-subscriber"]
-declare-token = ["codec-declare"]
-declare-undeclare = ["codec-declare"]
+declare-token = ["codec-declare", "wz-session-core/declare-token"]
+declare-undeclare = ["codec-declare", "wz-session-core/declare-undeclare"]
 # `query-get` implies `query-reply` (the get-side ReplyRegistry tracks
 # pending entries) + `codec-request` (R311j — the wire-emit path
 # `send_request_query` builds on Request/Query types gated by
@@ -350,7 +350,9 @@ transport-link-udp = []
 # is involved — this completes the runtime-schism resolution (the scouting
 # half landed in R311ik), so `sce-rust-lua` leaves the whole graph.
 transport-unicast = ["wz-session-core/session-unicast"]
-transport-keepalive = []
+# chunk-5 — forward to the wz-session-core same-named gate so the migrated
+# start/stop_keepalive_worker action bodies compile under the keepalive axis.
+transport-keepalive = ["wz-session-core/transport-keepalive"]
 # R311eg — forward to the wz-session-core same-named gate so the migrated
 # PeerInitCaps::from_init_syn decoder honors the peer-advertised batch_size
 # consistently (off clamps to full MTU). The min(peer, local) reduction at
@@ -454,8 +456,8 @@ switchboard = ["codec-push", "wz-session-core/switchboard"]
 #                            same codec gates.
 # 7 reserved (extauth, extcompression, extqos, extshm, multicast,
 # resumable, stateless-accept) stay declaration-only at wz facade.
-session-unicast-open = []
-session-unicast-accept = []
+session-unicast-open = ["wz-session-core/session-unicast-open"]
+session-unicast-accept = ["wz-session-core/session-unicast-accept"]
 # R311cf/R311fd — keyexpr domain. The other 7 keyexpr-* features are
 # cluster-wide behaviors with no single anchor cfg site (follow-up
 # cascade per-site wire-up).

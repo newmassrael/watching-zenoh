@@ -29,7 +29,7 @@ use wz_runtime_core::TimeSource;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState};
 use wz_runtime_tokio::session_glue::{
-    inbound_to_fsm_event, new_session_engine, BoxedLinkDriver, SessionLinkActions,
+    inbound_to_fsm_event, new_session_actions, new_session_engine, BoxedLinkDriver,
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -79,7 +79,7 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
 #[test]
 fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
     let mut engine = new_session_engine(&actions);
     engine.initialize();
@@ -299,7 +299,7 @@ fn parse_inbound_decodes_keep_alive_frame() {
 #[test]
 fn handle_inbound_keepalive_updates_last_inbound_keepalive_at() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
     assert!(
         actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
@@ -329,7 +329,7 @@ fn handle_inbound_keepalive_updates_last_inbound_keepalive_at() {
 #[test]
 fn handle_inbound_non_keepalive_does_not_touch_keepalive_slot() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
     // Seed the slot to verify a non-KeepAlive frame leaves it
     // untouched (no spurious overwrite).
@@ -756,7 +756,7 @@ fn r86_handle_inbound_initsyn_captures_peer_zid() {
     use wz_runtime_tokio::session_glue::InboundFrame;
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
     assert!(
         actions.inbound_peer_zid.lock().unwrap().is_none(),
         "slot starts empty"
@@ -800,7 +800,7 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     use wz_runtime_tokio::session_glue::InboundFrame;
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
     // Seed the slot to verify InitAck doesn't overwrite it (InitAck
     // is the Initiator side observing the listener; the listener's

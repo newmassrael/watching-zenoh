@@ -663,3 +663,15 @@ pub mod session_fsm_unicast {
 /// `session_fsm_unicast` since the comparator names its state/event enums.
 #[cfg(feature = "session-unicast")]
 pub mod session_timeouts;
+
+/// chunk-5 — runtime-agnostic `SessionLinkActions` bundle + the
+/// `SessionActionsBinding` newtype carrying the engine-free
+/// [`session_fsm_unicast::SessionFsmUnicastActions`] trait impl (the 18
+/// `<sce:action>` native operations + the accept-side admission guards).
+/// Gated on `session-unicast` (the generated FSM trait the binding impls)
+/// + `alloc` (the bundle owns `Vec` / `HashMap` / `String` staging slots).
+/// The concrete `R = TokioRuntime` constructor (`new_session_actions`) and
+/// the `Engine`-bound `new_session_engine` factory stay AP-side in
+/// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+pub mod session_actions;

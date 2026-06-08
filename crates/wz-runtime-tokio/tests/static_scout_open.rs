@@ -43,8 +43,8 @@ use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
 use wz_runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
 use wz_runtime_tokio::session_glue::{
-    new_session_engine, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
-    SessionLinkActions,
+    new_session_actions, new_session_engine, poll_and_dispatch_one, DriverLoopOutcome,
+    SessionInitParams,
 };
 use wz_runtime_tokio::session_open::{open_session_at, OpenError, DEFAULT_OPEN_TICK_MS};
 // R311if — the static-mode open path is gated on `scouting-static`; the
@@ -102,7 +102,7 @@ async fn drive_acceptor_to_established(listener: TcpListener) -> (u32, TokioJoin
 
     let mut params = fixture_session_init_params();
     params.zid = vec![0x02; 4]; // distinct zid from the initiator
-    let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
+    let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     engine.process_event(E::InboundStart);
@@ -172,7 +172,7 @@ async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, TokioJoin
 
     let mut params = fixture_session_init_params();
     params.zid = vec![0x02; 4]; // distinct zid from the initiator
-    let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
+    let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     engine.process_event(E::InboundStart);

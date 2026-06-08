@@ -34,7 +34,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, PeerInitCaps,
+    new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, PeerInitCaps,
     SessionActionsBinding, SessionLinkActions,
 };
 // R311fr — DriverLoopOutcome is referenced only by the
@@ -106,8 +106,7 @@ fn fresh_setup() -> (
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions =
-        SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
@@ -218,8 +217,7 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
     // transition and the FSM must stay at SentInitAck.
     let recording_driver = Arc::new(NoopOutboundDriver::default());
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
-    let actions =
-        SessionLinkActions::new(driver_arc, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
 
@@ -263,8 +261,7 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
 async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
     let recording_driver = Arc::new(NoopOutboundDriver::default());
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
-    let actions =
-        SessionLinkActions::new(driver_arc, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(driver_arc, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
 
@@ -324,7 +321,7 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     let recording_driver = Arc::new(RecordingOutboundDriver::default());
     let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver.clone();
     let params = fixture_session_init_params();
-    let actions = SessionLinkActions::new(driver_arc, params, TokioTime::new());
+    let actions = new_session_actions(driver_arc, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
 
@@ -482,7 +479,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     params.seq_num_res = 3;
     params.req_id_res = 3;
     params.batch_size = 65535;
-    let actions = SessionLinkActions::new(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new());
 
     // No peer InitSyn parsed yet → init_ack_params returns own
     // params verbatim (the slot is `None`).
@@ -513,7 +510,7 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
     params.seq_num_res = 1;
     params.req_id_res = 1;
     params.batch_size = 512;
-    let actions = SessionLinkActions::new(driver, params, TokioTime::new());
+    let actions = new_session_actions(driver, params, TokioTime::new());
 
     *actions.inbound_peer_init_caps.lock().unwrap() = Some(PeerInitCaps {
         seq_num_res: 3,

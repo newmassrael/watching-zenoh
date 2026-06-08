@@ -29,7 +29,8 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    new_session_engine, BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionLinkActions,
+    new_session_actions, new_session_engine, BoxedLinkDriver, CloseReason, SessionActionsBinding,
+    SessionLinkActions,
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 
@@ -38,8 +39,7 @@ fn fresh_setup() -> (
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
     let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
-    let actions =
-        SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)

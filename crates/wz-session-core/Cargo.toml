@@ -223,6 +223,16 @@ scouting-active = ["dep:sce-rust-runtime"]
 # forwards here.
 session-unicast = ["dep:sce-rust-runtime"]
 
+# chunk-5 (SessionLinkActions struct move) — the handshake-role gates the
+# migrated `SessionFsmUnicastActionsTrait` impl carries on its wire-emit
+# actions: `session-unicast-open` gates the Initiator-side dial
+# (`send_init_syn` / `send_open_syn`), `session-unicast-accept` the
+# Acceptor-side listen (`send_init_ack_with_cookie` / `send_open_ack`).
+# Standalone gate-only (cfg-off = no-emit no-op). The wz-runtime-tokio
+# side forwards here so the role-gated action arms compile consistently.
+session-unicast-open = []
+session-unicast-accept = []
+
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the
 # `switchboard::SwitchboardRegistry` (the table + its
@@ -290,6 +300,17 @@ query-reply = ["codec-response"]
 # declare codec.
 declare-subscriber = ["codec-declare"]
 declare-queryable = ["codec-declare"]
+# chunk-5 (SessionLinkActions struct move) — the finer declare-action
+# gates the migrated `send_declare_*` / `send_undeclare_*` /
+# `send_declare_final` / interest action methods carry. Each mirrors the
+# wz-runtime-tokio same-named feature (`= ["codec-declare"]`); the
+# wz-runtime-tokio side forwards here so the gated action arms compile
+# consistently workspace-wide.
+declare-keyexpr = ["codec-declare"]
+declare-token = ["codec-declare"]
+declare-final = ["codec-declare"]
+declare-interest = ["codec-declare"]
+declare-undeclare = ["codec-declare"]
 liveliness-token = ["codec-declare"]
 liveliness-subscriber = ["codec-declare"]
 # liveliness-get — requester-side snapshot get. The CURRENT Interest +
@@ -306,6 +327,13 @@ liveliness-get = ["codec-declare"]
 # wz-runtime-tokio side forwards its same-named feature here so the INIT
 # handshake batch-size negotiation semantics stay consistent workspace-wide.
 transport-batching = []
+
+# chunk-5 (SessionLinkActions struct move) — transport-keepalive gates
+# the migrated `start_keepalive_worker` / `stop_keepalive_worker` action
+# bodies (the Established-side keepalive cadence). Standalone gate-only
+# (no wz-codecs forward; the wire-level KeepAlive parse is the separate
+# codec-keep-alive axis). The wz-runtime-tokio side forwards here.
+transport-keepalive = []
 
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one

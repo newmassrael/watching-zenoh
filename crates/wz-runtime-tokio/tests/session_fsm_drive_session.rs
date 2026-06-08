@@ -31,8 +31,9 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, new_session_engine, BoxedLinkDriver, DriverLoopOutcome,
-    DriverOutcome, IterationEvent, LeaseCheckOutcome, SessionActionsBinding, SessionLinkActions,
+    drive_session_until_terminal, new_session_actions, new_session_engine, BoxedLinkDriver,
+    DriverLoopOutcome, DriverOutcome, IterationEvent, LeaseCheckOutcome, SessionActionsBinding,
+    SessionLinkActions,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver, QueueDriver};
@@ -77,7 +78,7 @@ fn fresh_setup_with_lease_ms(
     let mut params = fixture_session_init_params();
     params.lease = lease_ms;
     params.lease_in_seconds = false;
-    let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
+    let actions = new_session_actions(outbound, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)

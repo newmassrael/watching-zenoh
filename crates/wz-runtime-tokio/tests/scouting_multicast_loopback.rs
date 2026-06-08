@@ -146,8 +146,8 @@ mod round2 {
     };
     use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
     use wz_runtime_tokio::session_glue::{
-        new_session_engine, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
-        SessionLinkActions,
+        new_session_actions, new_session_engine, poll_and_dispatch_one, DriverLoopOutcome,
+        SessionInitParams, SessionLinkActions,
     };
     use wz_runtime_tokio::session_open::{open_session_at, DEFAULT_OPEN_TICK_MS};
     use wz_runtime_tokio::UdpDriver;
@@ -177,7 +177,7 @@ mod round2 {
 
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4]; // distinct zid from the initiator
-        let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
+        let actions = new_session_actions(outbound, params, TokioTime::new());
         let mut engine = new_session_engine(&actions);
         engine.initialize();
         engine.process_event(E::InboundStart);

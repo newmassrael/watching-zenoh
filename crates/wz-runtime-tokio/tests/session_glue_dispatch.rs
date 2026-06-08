@@ -34,7 +34,7 @@ use std::sync::Arc;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastActions;
 use wz_runtime_tokio::session_glue::{
-    BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionInitParams, SessionLinkActions,
+    new_session_actions, BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionInitParams,
     SigningKey,
 };
 use wz_runtime_tokio::Reliability;
@@ -75,7 +75,7 @@ fn fixture_params() -> SessionInitParams {
 #[test]
 fn r57_session_script_actions_produce_real_wire_bytes() {
     let driver = Arc::new(LifecycleRecordingDriver::default());
-    let actions = SessionLinkActions::new(driver.clone(), fixture_params(), TokioTime::new());
+    let actions = new_session_actions(driver.clone(), fixture_params(), TokioTime::new());
     // R311il — engine-free: dispatch each action by calling the native
     // `SessionFsmUnicastActions` trait method on a binding over `actions`
     // (the successor of the retired Lua `dispatch_script` by-name shim).
@@ -236,7 +236,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // per-instance ScriptEngine isolation assertion: there is no shared
     // Lua namespace to race on at all now.)
     let second_driver = Arc::new(LifecycleRecordingDriver::default());
-    let second_actions = SessionLinkActions::new(
+    let second_actions = new_session_actions(
         second_driver.clone() as Arc<dyn BoxedLinkDriver + Send + Sync>,
         fixture_session_init_params(),
         TokioTime::new(),

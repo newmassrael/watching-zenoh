@@ -36,8 +36,8 @@ use crate::link_pipeline::{dial_tcp, wire_tcp_stream, TcpReadDriver};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
-    new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, CloseReason, DriverLoopOutcome,
-    SessionActionsBinding, SessionInitParams, SessionLinkActions,
+    new_session_actions, new_session_engine, poll_and_dispatch_one, BoxedLinkDriver, CloseReason,
+    DriverLoopOutcome, SessionActionsBinding, SessionInitParams, SessionLinkActions,
 };
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -247,7 +247,7 @@ fn wire_session_engine(
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
-    let actions = SessionLinkActions::new(outbound, params, clock);
+    let actions = new_session_actions(outbound, params, clock);
     let mut engine = new_session_engine(&actions);
     engine.initialize();
     (actions, engine)
