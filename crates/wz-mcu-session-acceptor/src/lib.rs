@@ -53,7 +53,6 @@ extern crate alloc;
 
 use alloc::rc::Rc;
 use alloc::vec;
-use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use wz::link_lwip::rx_sockets::bind_session_rx;
@@ -61,6 +60,7 @@ use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 use wz::runtime_lwip::{LwipRuntime, LwipTime};
 use wz::session_lwip::driver::SharedSessionSocket;
 use wz::session_lwip::{run_session, LwipUdpDriver, SessionRole};
+use wz_session_wire_fixtures::{craft_frame_wire, craft_initsyn_wire, craft_opensyn_wire};
 
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the QEMU bin depend only on THIS crate (single-dep facade
@@ -86,11 +86,6 @@ const DATA_FRAME_SN: u64 = 7;
 /// first ~3 iterations; the remainder spin the (no-op, with a frozen clock)
 /// deadline branch. Bounds a regression so it fails fast instead of hanging.
 const MAX_ITERS: usize = 64;
-
-/// The peer ZID the crafted `InitSyn` advertises (cbyte high nibble = 3 =>
-/// 4-byte zid). The acceptor binds its minted cookie to these bytes (R86),
-/// so the echoed `OpenSyn` cookie must verify against them.
-const PEER_ZID: [u8; 4] = [0xB0, 0xB1, 0xB2, 0xB3];
 
 /// The verdict [`run_acceptor_e2e`] returns. The host test asserts
 /// `EstablishedAndDispatched`; the QEMU bin maps it to a semihost exit code.
@@ -267,7 +262,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C) -> AcceptorE2eReport {
                         let _ = peer_sock.send_to(
                             ipv4_addr_loopback(),
                             SESSION_PORT,
-                            &craft_frame_wire(),
+                            &craft_frame_wire(DATA_FRAME_SN, true),
                         );
                         peer_frame_sent = true;
                         peer_phase = PeerPhase::Done;
@@ -325,54 +320,7 @@ fn acceptor_params() -> SessionInitParams {
     }
 }
 
-// ── Crafted handshake wires (transport header + body). Byte shapes are
-//    verbatim from the AP SSOT `session_fsm_accepting_path.rs` so both
-//    profiles drive the same handshake bytes. The byte layout is itself
-//    verified byte-identical against zenoh-pico by the layer3 codec tests.
-
-const T_MID_INIT: u8 = 0x01;
-const T_MID_OPEN: u8 = 0x02;
-const T_MID_FRAME: u8 = 0x05;
-const FLAG_T_INIT_S: u8 = 0x40;
-const FLAG_T_FRAME_R: u8 = 0x20;
-
-/// Minimal `InitSyn` (parent flag `FLAG_T_INIT_S`, no `_A` so no cookie):
-/// version, cbyte (whatami=Peer wire 0x01 | (zid_len-1)<<4), 4-byte zid,
-/// sn_res, batch_size LE u16.
-fn craft_initsyn_wire() -> Vec<u8> {
-    let mut wire = vec![
-        FLAG_T_INIT_S | T_MID_INIT,
-        0x05, // version
-        0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
-    ];
-    wire.extend_from_slice(&PEER_ZID);
-    wire.extend_from_slice(&[
-        0x00, // sn_res (seq=0, req=0)
-        0x00, 0x00, // batch_size LE u16 = 0
-    ]);
-    wire
-}
-
-/// `OpenSyn` echoing `cookie` (parent flags 0x00 so the cookie carrier is
-/// present and the lease is in ms): lease VLE=0, initial_sn VLE=0,
-/// cookie_len VLE, cookie bytes.
-fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
-    debug_assert!(cookie.len() < 0x80, "single-byte VLE cookie_len only");
-    let mut wire = vec![
-        T_MID_OPEN,
-        0x00,               // lease VLE = 0
-        0x00,               // initial_sn VLE = 0
-        cookie.len() as u8, // cookie_len VLE
-    ];
-    wire.extend_from_slice(cookie);
-    wire
-}
-
-/// Application `Frame` (`FLAG_T_FRAME_R` reliable), sn = [`DATA_FRAME_SN`]
-/// (single-byte VLE), empty payload. Decodes to a `FramePayload` with an
-/// empty NetworkMessage batch — the proof here is that an Established-session
-/// data Frame reaches the application dispatch, not its payload content.
-fn craft_frame_wire() -> Vec<u8> {
-    const { assert!(DATA_FRAME_SN < 0x80, "single-byte VLE sn only") };
-    vec![FLAG_T_FRAME_R | T_MID_FRAME, DATA_FRAME_SN as u8]
-}
+// The synthetic handshake wires (craft_initsyn / craft_opensyn) + the
+// application Frame (craft_frame) come from `wz_session_wire_fixtures`, the
+// no_std SSOT shared with the wz-runtime-tokio session-FSM drive tests, so
+// both profiles inspect byte-identical independent-oracle frames.

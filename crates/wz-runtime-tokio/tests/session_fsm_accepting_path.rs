@@ -44,62 +44,10 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::session_glue::DriverLoopOutcome;
 use wz_runtime_tokio::{LinkEvent, Reliability, RxFrame};
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver, QueueDriver};
-
-// ─── Transport-header constants (mirror session_glue::wire_const) ──
-
-const T_MID_INIT: u8 = 0x01;
-const T_MID_OPEN: u8 = 0x02;
-const FLAG_T_INIT_S: u8 = 0x40;
-
-/// Hand-craft a minimal InitSyn wire frame matching the InitBody
-/// decoder under `parent_flags = FLAG_T_INIT_S`:
-///   - version (1)
-///   - cbyte: whatami(Peer=0x01 wire) | (zid_len-1)<<4  (1)
-///   - zid (4 bytes — `zid_len-1 = 3` in the cbyte high nibble)
-///   - sn_res (1)
-///   - batch_size LE u16 (2)
-///
-/// Cookie fields are gated by `FLAG_T_INIT_A` per zenoh-pico
-/// transport.h §5.M; InitSyn omits the A bit so no cookie payload.
-fn craft_initsyn_wire() -> Vec<u8> {
-    vec![
-        FLAG_T_INIT_S | T_MID_INIT,
-        0x05, // version
-        0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
-        0xB0,
-        0xB1,
-        0xB2,
-        0xB3, // peer zid (4 bytes)
-        0x00, // sn_res (seq=0, req=0)
-        0x00,
-        0x00, // batch_size LE u16 = 0
-    ]
-}
-
-/// Hand-craft an OpenSyn wire frame echoing a cookie. `parent_flags
-/// = 0x00` (no FLAG_T_OPEN_A, no FLAG_T_OPEN_T) so the cookie
-/// carrier is present (gated by `(parent_flags & 0x20) == 0` per
-/// OpenBody decode) and the lease is interpreted in milliseconds:
-///   - lease VLE = 0     (single byte 0x00)
-///   - initial_sn VLE = 0 (single byte 0x00)
-///   - cookie_len VLE = `cookie.len()` (assumed < 0x80 for single-byte VLE)
-///   - cookie bytes
-///
-/// R89 — cookie payload is now required by the `cookie_valid()`
-/// guard's HMAC verification (closes the R86 outbound mint loop).
-/// Pre-R89 this function ignored `cookie` and emitted a zero-length
-/// carrier; the guard was an unconditional `true` placeholder.
-fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
-    assert!(cookie.len() < 0x80, "fixture: single-byte VLE only");
-    let mut wire = vec![
-        T_MID_OPEN,
-        0x00,               // lease VLE = 0
-        0x00,               // initial_sn VLE = 0
-        cookie.len() as u8, // cookie_len VLE
-    ];
-    wire.extend_from_slice(cookie);
-    wire
-}
+// R311it — craft_initsyn/opensyn_wire + FIXTURE_PEER_ZID come from the
+// shared no_std SSOT (was copy-pasted here and in the sibling session_fsm_*
+// test files + re-rolled in wz-mcu-session-acceptor).
+use wz_session_wire_fixtures::{craft_initsyn_wire, craft_opensyn_wire, FIXTURE_PEER_ZID};
 
 fn fresh_setup() -> (
     Arc<SessionLinkActions>,
@@ -157,7 +105,7 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
         // R86 on InitSyn arrival (= [0xB0..0xB3] from craft_initsyn_wire).
         let expected_cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
             &fixture_session_init_params().cookie_signing_key,
-            &[0xB0, 0xB1, 0xB2, 0xB3],
+            &FIXTURE_PEER_ZID,
         );
         let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
             bytes: craft_opensyn_wire(&expected_cookie),
@@ -341,7 +289,7 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     assert_eq!(engine.get_current_state(), S::SentInitAck);
     assert_eq!(
         actions.inbound_peer_zid.lock().unwrap().as_deref(),
-        Some(&[0xB0, 0xB1, 0xB2, 0xB3][..]),
+        Some(&FIXTURE_PEER_ZID[..]),
         "InitSyn dispatch must capture peer_zid before SentInitAck.onentry fires"
     );
 
@@ -370,7 +318,7 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // module's internal constants.
     let expected_cookie = generate_cookie_hmac_sha256(
         &fixture_session_init_params().cookie_signing_key,
-        &[0xB0, 0xB1, 0xB2, 0xB3],
+        &FIXTURE_PEER_ZID,
     );
     assert_eq!(
         cookie.as_slice(),
@@ -405,7 +353,7 @@ async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded()
 
     let cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
         &fixture_session_init_params().cookie_signing_key,
-        &[0xB0, 0xB1, 0xB2, 0xB3],
+        &FIXTURE_PEER_ZID,
     );
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
         bytes: craft_opensyn_wire(&cookie),

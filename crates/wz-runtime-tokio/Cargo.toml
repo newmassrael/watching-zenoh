@@ -651,6 +651,12 @@ wz-statechart-bridge = { path = "../wz-statechart-bridge" }
 # (see [features]) so an isolated subset pulls neither the wz-codecs
 # codec nor the corresponding impl.
 wz-codecs-test-support = { path = "../wz-codecs-test-support" }
+# Stage 5 (R311it) — the no_std SSOT for the synthetic session handshake
+# wire bytes the session-FSM drive tests feed through parse_inbound. These
+# craft_*_wire helpers + transport constants used to be copy-pasted across
+# the three session_fsm_* test files (and re-rolled in wz-mcu-session-
+# acceptor); they now live once in this shared fixture crate.
+wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
 [lints]
 workspace = true

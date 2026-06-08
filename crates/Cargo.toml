@@ -66,6 +66,12 @@ members = [
     # (C1n) exercises its handshake e2e. Mirrors the wz-ap-demo-app
     # lib-owns-the-scenario / bin-stays-thin split on the MCU profile.
     "wz-mcu-session-acceptor",
+    # Stage 5 (R311it) — the no_std SSOT for synthetic session handshake
+    # wire bytes (craft_initsyn/opensyn/initack/frame). De-duplicates the
+    # copies that were in the three wz-runtime-tokio session-FSM test files
+    # + a fourth in wz-mcu-session-acceptor. Pure alloc, no codec deps, so it
+    # composes in the std workspace test AND on the no_std MCU cross target.
+    "wz-session-wire-fixtures",
     # lwip-sys — R311az-1 (Phase W §5.C link tier dependency). FFI
     # bindings to vendored lwIP 2.2.1 (vendor/lwip submodule pin
     # STABLE-2_2_1_RELEASE / 77dcd25a). Host build via cc::Build

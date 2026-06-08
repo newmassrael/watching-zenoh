@@ -33,6 +33,11 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+// R311it — craft_initack_wire comes from the shared no_std SSOT (was
+// copy-pasted here and in session_fsm_driver_loop.rs). The r86 tests below
+// hand-roll their own one-off InitSyn/InitAck wires with literal bytes
+// (distinct zids for the capture assertions), so they stay self-contained.
+use wz_session_wire_fixtures::craft_initack_wire;
 
 #[derive(Default)]
 struct NoopDriver {
@@ -43,37 +48,6 @@ impl BoxedLinkDriver for NoopDriver {
     fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) {}
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
-}
-
-// Transport header + body bits — mirrors session_glue::wire_const
-// (private). Test stays self-contained.
-const T_MID_INIT: u8 = 0x01;
-const FLAG_T_INIT_S: u8 = 0x40;
-const FLAG_T_INIT_A: u8 = 0x20;
-
-/// Hand-craft a minimal InitAck wire frame matching what
-/// `parse_inbound` expects. Avoids pulling zenoh-pico-sys into
-/// `wz-runtime-tokio`'s test dep set — the byte layout is identical
-/// to the pico-encoded fixtures already verified by
-/// `wz-integration-tests/tests/layer3_inbound_init.rs`.
-fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
-    let parent_flags = FLAG_T_INIT_S | FLAG_T_INIT_A;
-    // cbyte = whatami_wire (Peer=0x02 >> 1 = 0x01) | (zid_len_m1=3 << 4) = 0x31.
-    let mut wire = vec![
-        parent_flags | T_MID_INIT,
-        0x05, // version
-        0x31, // cbyte: whatami=Peer, zid_len=4
-        0xA0,
-        0xA1,
-        0xA2,
-        0xA3, // zid (4 bytes)
-        0x00, // sn_res (seq=0, req=0)
-        0x00,
-        0x00,               // batch_size = 0 (LE u16)
-        cookie.len() as u8, // VLE cookie_len (< 0x80 so single byte)
-    ];
-    wire.extend_from_slice(cookie);
-    wire
 }
 
 #[test]

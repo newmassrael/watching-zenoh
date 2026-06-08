@@ -94,6 +94,11 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # propagation in build.rs (mirrors wz-link-lwip / wz-session-lwip). No
 # FFI is called here.
 lwip-sys = { path = "../lwip-sys" }
+# The no_std SSOT for the synthetic handshake wire bytes the reactive peer
+# opens with (craft_initsyn/opensyn) + the application Frame (craft_frame).
+# Shared with the wz-runtime-tokio session-FSM drive tests so both profiles
+# inspect the same independent-oracle bytes.
+wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
 [dev-dependencies]
 # critical-section's std impl backs LwipRuntime's critical_section::Mutex

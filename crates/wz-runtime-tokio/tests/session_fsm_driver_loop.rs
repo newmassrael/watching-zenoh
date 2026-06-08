@@ -39,32 +39,13 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::session_glue::NetworkMessage;
 use wz_runtime_tokio::{LinkEvent, LostCause, RxFrame};
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver, QueueDriver};
-
-// ─── Wire-bytes helpers (mirror session_fsm_inbound_dispatch.rs) ──
-
-const T_MID_INIT: u8 = 0x01;
-const T_MID_KEEP_ALIVE: u8 = 0x04;
-const FLAG_T_INIT_S: u8 = 0x40;
-const FLAG_T_INIT_A: u8 = 0x20;
-
-fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
-    let parent_flags = FLAG_T_INIT_S | FLAG_T_INIT_A;
-    let mut wire = vec![
-        parent_flags | T_MID_INIT,
-        0x05, // version
-        0x31, // cbyte: whatami=Peer, zid_len=4
-        0xA0,
-        0xA1,
-        0xA2,
-        0xA3, // zid (4 bytes)
-        0x00, // sn_res
-        0x00,
-        0x00,               // batch_size LE u16
-        cookie.len() as u8, // VLE cookie_len < 0x80
-    ];
-    wire.extend_from_slice(cookie);
-    wire
-}
+// R311it — craft_initack_wire + the transport constants come from the
+// shared no_std SSOT (was copy-pasted across the session_fsm_* test files).
+// T_MID_INIT / FLAG_T_INIT_S / FLAG_T_INIT_A / T_MID_KEEP_ALIVE stay imported
+// because the malformed-wire + KeepAlive tests below build one-off frames.
+use wz_session_wire_fixtures::{
+    craft_initack_wire, FLAG_T_INIT_A, FLAG_T_INIT_S, T_MID_INIT, T_MID_KEEP_ALIVE,
+};
 
 fn fresh_setup() -> (
     Arc<SessionLinkActions>,

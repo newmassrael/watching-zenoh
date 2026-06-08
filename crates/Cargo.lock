@@ -1478,6 +1478,7 @@ dependencies = [
  "lwip-sys",
  "wz",
  "wz-session-core",
+ "wz-session-wire-fixtures",
 ]
 
 [[package]]
@@ -1514,6 +1515,7 @@ dependencies = [
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
+ "wz-session-wire-fixtures",
  "wz-statechart-bridge",
  "zeroize",
 ]
@@ -1564,6 +1566,10 @@ dependencies = [
  "wz-runtime-lwip",
  "wz-session-core",
 ]
+
+[[package]]
+name = "wz-session-wire-fixtures"
+version = "0.1.0"
 
 [[package]]
 name = "wz-statechart-bridge"

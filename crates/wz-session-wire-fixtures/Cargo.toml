@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-session-wire-fixtures — the single SSOT for synthetic session
+# handshake wire bytes (the "independent oracle" hand-crafted frames the
+# session-FSM drive tests + the MCU acceptor e2e route through the
+# production decoder).
+#
+# Before Stage 5 these craft_*_wire helpers + their transport-header
+# constants were copy-pasted across wz-runtime-tokio/tests/{session_fsm_
+# accepting_path, session_fsm_driver_loop, session_fsm_inbound_dispatch}.rs
+# AND re-rolled a third time inside wz-mcu-session-acceptor. The bytes are
+# byte-identical (verified against zenoh-pico by the wz-integration-tests
+# layer3_* codec tests), so the duplication was pure SSOT debt. This crate
+# hosts them once.
+#
+# Why a NEW sibling (not wz-session-core-test-support): that R71 sibling is
+# host-only std + declare-codec-specific. These fixtures must be #![no_std]
+# (the wz-mcu-session-acceptor e2e lib + its QEMU bin name them on a cross
+# target) and reach NO codec types — they hand-roll bytes as the
+# independent oracle. A second sibling at this tier matches the same
+# tier-separation logic wz-session-core-test-support's header documents.
+# Why not a feature-gated module in wz-session-core: that is the exact R71
+# feature-flag-in-production-crate anti-pattern the sibling pattern exists
+# to avoid (production builds must carry zero test-only code).
+
+[package]
+name = "wz-session-wire-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "SSOT for synthetic zenoh session handshake wire bytes (craft_initsyn/opensyn/initack/frame) shared by the session-FSM drive tests and the MCU acceptor e2e; no_std hand-rolled independent oracle."
+
+[lib]
+name = "wz_session_wire_fixtures"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
