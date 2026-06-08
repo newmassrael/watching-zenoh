@@ -1769,7 +1769,12 @@
         "(f) thumbv6m-none-eabi text=23660 data=4 bss=11868 microbit build OK; Q.2 KNOWN_SKIP heap budget",
         "(g) thumbv8m.main-none-eabi text=24548 data=4 bss=269916 mps2-an505 build OK Q.2 KNOWN_SKIP Lockup",
         "(h) R311bq thumbv6m text 18584 (-5076 vs 23660); microbit Q.2 PASS sync-only main",
-        "R311bz outputs typo fix: keyexpr-include → keyexpr-includes; backtick formatting normalized"
+        "R311bz outputs typo fix: keyexpr-include → keyexpr-includes; backtick formatting normalized",
+        "(i) R311iu footprint rebase, cause R311ir lwIP IGMP scout multicast RX (udp/224.0.0.224:7446).",
+        "(j) R311iu text: thumbv6m=19608 thumbv7m=24548 thumbv7em-hf=24636 thumbv8m.main=25460 (data=4).",
+        "(k) R311iu text grew +896..1024 vs R311bj/bq; thumbv6m highest (ARMv6-M no Thumb-2).",
+        "(l) R311iu cause: LWIP_IGMP=1 links igmp.c via netif_set_up->igmp_start; 761 B igmp_* .text.",
+        "(m) R311iu bss +184 uniform all targets (IGMP memp pool): mps2=270100 thumbv6m=12052; INFO-only."
       ],
       "impact_scope": [
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
@@ -31082,6 +31087,54 @@
         "corrects the R311is carry omission: the craft_*_wire + transport-const duplication (3 session_fsm_* tests + a 4th copy in wz-mcu-session-acceptor) was a real SSOT debt R311is neither shared nor recorded; a session review surfaced it and this round closes it",
         "remaining R311is carries unchanged: MCU alloc-profile reassembly auto-sweep; deploy/mcu-qemu-demo Q.3 footprint baseline stale at HEAD; reassembly-path acceptor e2e (Fragment->dispatch)",
         "the wz-integration-tests layer3_* codec tests keep their own self-contained transport constants by design (codec encode/decode oracles, a distinct concern from the handshake-drive fixtures); not converged here"
+      ]
+    },
+    "Round 311iu": {
+      "decision_summary": "R311iu rebase Layer Q.3 footprint baselines for R311ir lwIP IGMP scout multicast RX; gate was stale at HEAD (Q opt-in unrun), now PASS +0 on 4 MCU targets.",
+      "changes_bullets": [
+        "scripts/check-footprint.sh BASELINE_TEXT rebased: thumbv6m 18584->19608, thumbv7m 23652->24548.",
+        "BASELINE_TEXT cont: thumbv7em-hf 23724->24636, thumbv8m.main 24548->25460 (data=4 unchanged).",
+        "BASELINE_BSS +184 uniform: thumbv6m 11868->12052, mps2 triples 269916->270100 (INFO axis).",
+        "§6.7 caveats (i)-(m) appended: IGMP footprint figures + cause + symbol attribution."
+      ],
+      "verification_bullets": [
+        "check-footprint.sh all 4 targets +0 OK exit 0 (was FAIL, text +896..1024 out of ±256 band).",
+        "Root-cause: thumbv7m ELF nm 761 B igmp_* .text + IGMP memp 139 B .bss (target-independent).",
+        "2f73198 rx_sockets ruled out: demo binds LwipUdpSocket directly (main.rs:298,356), dead-code.",
+        "validate_workspace T1 new=+0, sections 257, T3 warn 4 / T4 info 3 unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "MCU alloc-profile reassembly auto-sweep still open (acceptor e2e ran reassembly-OFF).",
+        "reassembly-path acceptor e2e (Fragment->reassemble->dispatch) follow-up axis open.",
+        "deploy/mcu-session-acceptor bin has no Q.3 footprint gate (e2e proof only).",
+        "Future: gate IGMP atomically (LWIP_IGMP=0) to reclaim ~900 B text +184 B bss when scouting off."
+      ],
+      "publishable_decision_summary": "R311iu rebase Layer Q.3 footprint baselines for R311ir lwIP IGMP scout multicast RX; gate was stale at HEAD (Q opt-in unrun), now PASS +0 on 4 MCU targets.",
+      "publishable_changes_bullets": [
+        "scripts/check-footprint.sh BASELINE_TEXT rebased: thumbv6m 18584->19608, thumbv7m 23652->24548.",
+        "BASELINE_TEXT cont: thumbv7em-hf 23724->24636, thumbv8m.main 24548->25460 (data=4 unchanged).",
+        "BASELINE_BSS +184 uniform: thumbv6m 11868->12052, mps2 triples 269916->270100 (INFO axis).",
+        "§6.7 caveats (i)-(m) appended: IGMP footprint figures + cause + symbol attribution."
+      ],
+      "publishable_verification_bullets": [
+        "check-footprint.sh all 4 targets +0 OK exit 0 (was FAIL, text +896..1024 out of ±256 band).",
+        "Root-cause: thumbv7m ELF nm 761 B igmp_* .text + IGMP memp 139 B .bss (target-independent).",
+        "2f73198 rx_sockets ruled out: demo binds LwipUdpSocket directly (main.rs:298,356), dead-code.",
+        "validate_workspace T1 new=+0, sections 257, T3 warn 4 / T4 info 3 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU alloc-profile reassembly auto-sweep still open (acceptor e2e ran reassembly-OFF).",
+        "reassembly-path acceptor e2e (Fragment->reassemble->dispatch) follow-up axis open.",
+        "deploy/mcu-session-acceptor bin has no Q.3 footprint gate (e2e proof only).",
+        "Future: gate IGMP atomically (LWIP_IGMP=0) to reclaim ~900 B text +184 B bss when scouting off."
       ]
     },
     "Round 311j": {

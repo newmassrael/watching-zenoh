@@ -54,10 +54,23 @@ declare -A BASELINE_TEXT=(
     # elimination drops them. The new figure is the honest "lwIP +
     # cortex-m-rt + portable-atomic + LwipUdpSocket<128, 2> sync
     # send/recv" baseline for nrf51-class deploys.
-    ["thumbv6m-none-eabi"]=18584
-    ["thumbv7m-none-eabi"]=23652
-    ["thumbv7em-none-eabihf"]=23724
-    ["thumbv8m.main-none-eabi"]=24548
+    #
+    # R311iu — all four targets rebased upward for the R311ir lwIP IGMP
+    # feature (scout multicast RX, udp/224.0.0.224:7446). LWIP_IGMP=1
+    # links igmp.c into every runtime-lwip build via netif_set_up ->
+    # igmp_start, independent of whether the Rust side ever joins a
+    # group, so the cost is unconditional on this demo. Symbol-level
+    # attribution on the thumbv7m ELF: 761 B of igmp_* .text (igmp_send
+    # 164 / igmp_input 152 / igmp_lookup_group 76 / igmp_tmr 72 /
+    # igmp_start 52 / igmp_init 28 / ...), the balance being the ip4
+    # multicast-input path + the lwIP cyclic timer table entry + the
+    # netif IGMP wrappers. thumbv6m grows more (+1024 vs +896) because
+    # ARMv6-M lacks Thumb-2 so the same IGMP C compiles to more
+    # instructions. Was: 18584 / 23652 / 23724 / 24548.
+    ["thumbv6m-none-eabi"]=19608
+    ["thumbv7m-none-eabi"]=24548
+    ["thumbv7em-none-eabihf"]=24636
+    ["thumbv8m.main-none-eabi"]=25460
 )
 declare -A BASELINE_DATA=(
     ["thumbv6m-none-eabi"]=4
@@ -66,10 +79,17 @@ declare -A BASELINE_DATA=(
     ["thumbv8m.main-none-eabi"]=4
 )
 declare -A BASELINE_BSS=(
-    ["thumbv6m-none-eabi"]=11868
-    ["thumbv7m-none-eabi"]=269916
-    ["thumbv7em-none-eabihf"]=269916
-    ["thumbv8m.main-none-eabi"]=269916
+    # R311iu — +184 B uniform across all targets: the IGMP memp pool
+    # (memp_memory_IGMP_GROUP_base 131 B + memp_tab_IGMP_GROUP 4 B +
+    # ip4_default_multicast_netif 4 B + netif IGMP state). Target-
+    # independent static pool, which is why the delta is identical on
+    # the slim M0+ <128, 2> socket and the mps2 <1500, 8> default. bss
+    # is INFO-only (HEAP_SIZE-dominated, R311bj caveat (c)); rebased for
+    # an honest INFO delta. Was: 11868 / 269916 / 269916 / 269916.
+    ["thumbv6m-none-eabi"]=12052
+    ["thumbv7m-none-eabi"]=270100
+    ["thumbv7em-none-eabihf"]=270100
+    ["thumbv8m.main-none-eabi"]=270100
 )
 
 # Per-axis tolerance in bytes. Matches the north-star atomic-feature
