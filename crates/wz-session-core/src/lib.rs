@@ -359,6 +359,23 @@ pub mod inbound;
 #[cfg(feature = "alloc")]
 pub mod frame_encode;
 
+/// Outbound transport-handshake / close frame encoders
+/// (`encode_init` / `encode_open` / `encode_close`) hoisted from
+/// `wz-runtime-tokio::session_glue` so the session action layer shares
+/// one handshake encode SSOT across the tokio (AP) and lwIP (MCU)
+/// profiles. Owned `Vec` output, so alloc-gated like `frame_encode`;
+/// additionally gated on at least one handshake codec feature so the
+/// module is absent (rather than empty) under a data-plane-only subset.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close"
+    )
+))]
+pub mod handshake_encode;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns
