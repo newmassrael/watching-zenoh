@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! Stage 3 — runtime-agnostic drive-loop dispatch core.
+//!
+//! `dispatch_link_event` is the synchronous body of
+//! `wz-runtime-tokio::poll_and_dispatch_one` lifted out of the AP shell: it
+//! takes an already-polled `LinkEvent` (the one `.await` — `driver.poll_event()`
+//! — stays in the tokio async wrapper) and drives the engine-free session FSM,
+//! returning the typed `DriverLoopOutcome`. Generic over `R: SessionRuntime` /
+//! `T: TimeSource` so the lwIP MCU sync loop (Stage 4) dispatches through the
+//! same SSOT the tokio loop does.
+//!
+//! `report_outcome_reassembling` drives the const-generic reassembly pool on a
+//! `Fragment` outcome and re-enters `parse_frame_payload` on chain completion;
+//! generic over the pool dims + runtime so the AP (32/65536) and MCU (4/4096)
+//! profiles share one ingest path. The peer ZID (the §2.3 chain key) is read
+//! from `actions.inbound_peer_zid` through `R::with_mutex_mut` (the AP
+//! `std::sync::Mutex` and the MCU `critical_section` mutex behind one seam).
+
+use sce_rust_runtime::Engine;
+
+use wz_runtime_core::TimeSource;
+
+use crate::driver_loop::DriverLoopOutcome;
+use crate::inbound::inbound_to_fsm_event;
+use crate::link::{LinkEvent, SessionRuntime};
+// `InboundParseError` is named only as `::Codec(..)` in the codec-frame `Frame`
+// arm (and the reassembly re-parse, which implies codec-frame); the `Err(err)`
+// arm passes the value without naming the type.
+#[cfg(feature = "codec-frame")]
+use crate::parse_error::InboundParseError;
+use crate::session_actions::{SessionActionsBinding, SessionLinkActions};
+use crate::session_fsm_unicast::SessionFsmUnicastPolicy;
+// `InboundFrame` is named by the ungated `Unknown` match arm; the codec-gated
+// arms (`Frame` / `KeepAlive` / `Fragment` / `Init` / `Open` / `Close`) reuse it.
+use crate::inbound::InboundFrame;
+// parse_frame_payload backs the codec-frame `Frame` arm only.
+#[cfg(feature = "codec-frame")]
+use crate::network_message::parse_frame_payload;
+
+/// Drive one already-polled `LinkEvent` through the inbound chain so the
+/// engine-free session FSM advances. The synchronous core of
+/// `wz-runtime-tokio::poll_and_dispatch_one` (whose sole `.await` —
+/// `driver.poll_event()` — stays in the tokio async wrapper). Generic over the
+/// runtime so the lwIP MCU loop dispatches through the same SSOT.
+pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
+    event: LinkEvent,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> DriverLoopOutcome {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    match event {
+        LinkEvent::Ready => {
+            engine.process_event(E::LinkOpened);
+            DriverLoopOutcome::AdvancedFsm
+        }
+        LinkEvent::Lost { cause } => {
+            engine.process_event(E::LinkLost);
+            DriverLoopOutcome::LinkLost(cause)
+        }
+        LinkEvent::Rx(rx) => match actions.handle_inbound(&rx.bytes) {
+            Ok(frame) => match inbound_to_fsm_event(&frame) {
+                Some(event) => {
+                    // R311il — §2.7 dispatcher admission pre-classify. The
+                    // accept-side caps (half-open + token bucket on
+                    // init_syn; cookie HMAC on open_syn) depend on HOST
+                    // state, not on the triggering frame's wire payload, so
+                    // the engine-free FSM carries no `cond=` for them — the
+                    // dispatcher evaluates admission and injects the event
+                    // only when it passes. Denial drops silently: no Close
+                    // frame, no FSM advance (anti-amplification per the §2.7
+                    // trust-class matrix). Engine-free successor of the
+                    // retired Lua `cond="cookie_valid()"` transition guard.
+                    let admit = match event {
+                        E::InitSynReceived => {
+                            actions.half_open_cap_available() && actions.accept_rate_token()
+                        }
+                        E::OpenSynReceived => actions.cookie_valid(),
+                        _ => true,
+                    };
+                    if !admit {
+                        return DriverLoopOutcome::SideEffectOnly;
+                    }
+                    engine.process_event(event);
+                    DriverLoopOutcome::AdvancedFsm
+                }
+                None => match frame {
+                    #[cfg(feature = "codec-frame")]
+                    InboundFrame::Frame {
+                        reliable,
+                        sn,
+                        payload,
+                        has_ext,
+                        extensions,
+                    } => match parse_frame_payload(&payload) {
+                        Ok(messages) => DriverLoopOutcome::FramePayload {
+                            reliable,
+                            sn,
+                            messages,
+                            has_ext,
+                            extensions,
+                        },
+                        Err(codec_err) => {
+                            engine.process_event(E::FramingError);
+                            DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                        }
+                    },
+                    #[cfg(feature = "codec-keep-alive")]
+                    InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
+                    // R311im — surface the decoded fragment to the drive
+                    // loop, which owns the stateful ReassemblyDispatcher +
+                    // clock. This pure helper cannot reassemble (no slot
+                    // pool, no `now_ms`), so it hands the fragment up.
+                    #[cfg(feature = "reassembly")]
+                    InboundFrame::Fragment {
+                        reliable,
+                        sn,
+                        more,
+                        payload,
+                        has_ext,
+                        extensions,
+                    } => DriverLoopOutcome::Fragment {
+                        reliable,
+                        sn,
+                        more,
+                        payload,
+                        has_ext,
+                        extensions,
+                    },
+                    #[cfg(feature = "codec-init-body")]
+                    InboundFrame::Init { .. } => {
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                    }
+                    #[cfg(feature = "codec-open-body")]
+                    InboundFrame::Open { .. } => {
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                    }
+                    #[cfg(feature = "codec-close")]
+                    InboundFrame::Close { .. } => {
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                    }
+                    InboundFrame::Unknown { .. } => {
+                        // inbound_to_fsm_event projects these to Some(event),
+                        // so the outer Some arm handled them — this branch
+                        // is unreachable.
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                    }
+                },
+            },
+            Err(err) => {
+                engine.process_event(E::FramingError);
+                DriverLoopOutcome::ParseError(err)
+            }
+        },
+    }
+}
+
+// ── reassembly-pool drive (reassembly-gated; `reassembly` implies `codec-frame`,
+//    so `parse_frame_payload` above is in scope here too) ──
+#[cfg(feature = "reassembly")]
+use crate::driver_loop::IterationEvent;
+#[cfg(feature = "reassembly")]
+use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispatcher};
+#[cfg(feature = "reassembly")]
+use alloc::vec::Vec;
+
+/// Report one driver-loop outcome, additionally driving the reassembly pool
+/// when the outcome is a `Fragment`. On chain completion the reassembled bytes
+/// re-enter `parse_frame_payload`, so the application's per-MID dispatch sees a
+/// reassembled message exactly as it sees a `T_MID_FRAME` payload; the
+/// resulting `FramePayload` (or `ParseError`) is reported as a second
+/// `IterationEvent::Poll`. Non-terminal ingests (Begun / Continued / Aborted /
+/// Refused) report only the `Fragment` outcome. The peer ZID (the §2.3 chain
+/// key) is read from `actions.inbound_peer_zid` through `R::with_mutex_mut`.
+///
+/// Generic over the pool dims (`SLOTS` / `CAP`) so the AP (32 / 65536) and MCU
+/// (4 / 4096) profiles share one ingest path; the AP host passes its
+/// `TokioReassembly`, the MCU loop its `LwipReassembly`.
+#[cfg(feature = "reassembly")]
+pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F>(
+    outcome: &DriverLoopOutcome,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    actions: &SessionLinkActions<R, T>,
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    R: SessionRuntime,
+    T: TimeSource,
+    F: FnMut(IterationEvent<'_>),
+{
+    on_event(IterationEvent::Poll(outcome));
+    let DriverLoopOutcome::Fragment {
+        reliable,
+        sn,
+        more,
+        payload,
+        ..
+    } = outcome
+    else {
+        return;
+    };
+    // The peer ZID guard must wrap the whole `ingest` call: the completion
+    // closure borrows `zid` for the chain-key lookup. `with_mutex_mut` scopes
+    // that borrow to the closure (the AP std mutex and the MCU critical_section
+    // mutex behind one seam); the non-reentrant MCU mutex is safe because
+    // `ingest` does not re-enter the session's mutex slots.
+    let mut completed: Option<DriverLoopOutcome> = None;
+    R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+        let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
+        reasm.ingest(
+            ReassemblyFragment {
+                zid,
+                reliable: *reliable,
+                sn: *sn,
+                more: u8::from(*more),
+                payload: payload.as_slice(),
+            },
+            now_ms,
+            |msg| {
+                completed = Some(match parse_frame_payload(msg) {
+                    Ok(messages) => DriverLoopOutcome::FramePayload {
+                        reliable: *reliable,
+                        sn: *sn,
+                        messages,
+                        // The reassembled bytes are the inner NetworkMessage
+                        // batch; transport ext chains were per-fragment, so the
+                        // reassembled message carries none.
+                        has_ext: false,
+                        extensions: Vec::new(),
+                    },
+                    Err(codec_err) => {
+                        DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                    }
+                });
+            },
+        );
+    });
+    if let Some(o) = completed {
+        on_event(IterationEvent::Poll(&o));
+    }
+}

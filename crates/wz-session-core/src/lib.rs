@@ -675,3 +675,11 @@ pub mod session_timeouts;
 /// `wz-runtime-tokio::session_glue` (they name tokio / sce-rust-runtime types).
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub mod session_actions;
+
+/// Stage 3 — runtime-agnostic drive-loop dispatch core. `dispatch_link_event`
+/// (the synchronous body of the AP `poll_and_dispatch_one`) + the const-generic
+/// `report_outcome_reassembling` (reassembly-pool ingest) so the lwIP MCU sync
+/// loop (Stage 4) and the tokio async loop share one dispatch SSOT. Gated like
+/// [`session_actions`] (it names the FSM engine + the action bundle).
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+pub mod drive;
