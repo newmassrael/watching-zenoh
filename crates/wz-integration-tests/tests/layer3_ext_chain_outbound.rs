@@ -183,7 +183,7 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     expected.extend_from_slice(&pico_init_body(parent_flags_no_z));
     expected.extend_from_slice(&pico_oracle_ext_chain());
 
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     actions.set_ext_chain(ExtChainRole::InitAck, wz_oracle_chain());
 
@@ -207,7 +207,7 @@ fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     expected.push(parent_flags | T_MID_INIT);
     expected.extend_from_slice(&pico_init_body(parent_flags));
 
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     // R121f1 — `SessionLinkActions::new` now seeds the Init ext chains
     // with the wire-spec-mandatory patch entry; this test re-asserts
@@ -234,7 +234,7 @@ fn ext_chain_role_isolation() {
     // Setting InitSyn chain must not bleed into InitAck encode.
     // R121f1 — clear both default Init ext chains first so the
     // post-set state isolates exactly one role's override.
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     actions.set_ext_chain(ExtChainRole::InitSyn, Vec::new());
     actions.set_ext_chain(ExtChainRole::InitAck, Vec::new());
@@ -279,7 +279,7 @@ fn ext_chain_role_isolation() {
 /// the wire-spec citation).
 #[test]
 fn default_session_actions_seed_init_chains_with_patch_extension() {
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
 
     let init_syn = actions

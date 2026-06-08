@@ -73,7 +73,7 @@ fn fresh_setup_with_lease_ms(
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
-    let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
     params.lease = lease_ms;
     params.lease_in_seconds = false;

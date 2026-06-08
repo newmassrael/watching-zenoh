@@ -237,7 +237,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // Lua namespace to race on at all now.)
     let second_driver = Arc::new(LifecycleRecordingDriver::default());
     let second_actions = SessionLinkActions::new(
-        second_driver.clone() as Arc<dyn BoxedLinkDriver>,
+        second_driver.clone() as Arc<dyn BoxedLinkDriver + Send + Sync>,
         fixture_session_init_params(),
         TokioTime::new(),
     );

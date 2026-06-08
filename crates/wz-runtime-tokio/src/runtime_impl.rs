@@ -51,7 +51,10 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use core::time::Duration;
 
+use std::sync::Arc;
+
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
+use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
 
 /// AP-profile [`Runtime`] impl: every spawn routes through
 /// `tokio::task::spawn`, every join goes through tokio's
@@ -143,6 +146,27 @@ impl Runtime for TokioRuntime {
         T: Send + Sync + 'static,
     {
         crate::sync::RwLock::new(value)
+    }
+}
+
+/// AP-profile [`SessionRuntime`] binding: the link sink is an
+/// `Arc<dyn BoxedLinkDriver + Send + Sync>` so the driver trait object
+/// can be shared across the multi-thread tokio runtime's worker threads
+/// (each native session action closure captures a clone of the `Arc`).
+/// The `+ Send + Sync` lives on the *stored type* here rather than on
+/// the `BoxedLinkDriver` trait itself, so the lwIP MCU profile is free
+/// to bind a `!Send` `Rc<dyn BoxedLinkDriver>` without an `unsafe impl
+/// Send` hack (see [`wz_session_core::link::BoxedLinkDriver`] doc).
+impl SessionRuntime for TokioRuntime {
+    type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
+
+    fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver {
+        // `&**sink` drops the `+ Send + Sync` auto traits from the
+        // reference target — an allowed `&(dyn T + Send + Sync) ->
+        // &dyn T` coercion at this return position. (`AsRef` does NOT
+        // work here: `Arc<dyn _ + Send + Sync>::AsRef` targets the
+        // `+ Send + Sync` form, never the pure `dyn _`.)
+        &**sink
     }
 }
 
@@ -377,6 +401,21 @@ mod compile_time_assertions {
         _assert_send_sync::<<TokioRuntime as Runtime>::Mutex<String>>();
         _assert_send_sync::<<TokioRuntime as Runtime>::RwLock<u32>>();
         _assert_send_sync::<<TokioRuntime as Runtime>::RwLock<String>>();
+    }
+
+    // Stage 2b — SessionRuntime::LinkSink fixity. Pins that the AP
+    // profile's link sink stays `Send + Sync` (so a shared
+    // `Arc<SessionLinkActions<TokioRuntime>>` remains cross-thread on
+    // the multi-thread tokio runtime) and `Clone` (the shared-by-
+    // refcount contract). A regression that re-binds LinkSink to a
+    // non-Send wrapper, or that re-adds `Send + Sync` onto the pure
+    // `BoxedLinkDriver` trait and breaks the MCU `!Send` Rc binding,
+    // surfaces here at compile time.
+    #[allow(dead_code)]
+    fn tokio_session_runtime_link_sink_bounds_compile() {
+        fn _assert_clone<T: Clone>() {}
+        _assert_send_sync::<<TokioRuntime as SessionRuntime>::LinkSink>();
+        _assert_clone::<<TokioRuntime as SessionRuntime>::LinkSink>();
     }
 
     // R258 — generic composition smoke test. Validates that the

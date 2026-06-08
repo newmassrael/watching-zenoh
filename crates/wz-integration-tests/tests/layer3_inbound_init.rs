@@ -177,7 +177,7 @@ fn handle_inbound_populates_cookie_slot_from_initack() {
         &cookie,
     );
 
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
 
     let pre = actions.inbound_cookie.lock().unwrap().clone();

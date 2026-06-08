@@ -168,6 +168,9 @@ use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
+// `Runtime` stays in scope for the concrete `new` constructor's
+// `TokioRuntime::new_mutex(...)` trait-method calls; the generic
+// SessionLinkActions bound is `R: SessionRuntime` (which extends it).
 use wz_runtime_core::{Runtime, TimeSource};
 // R311dz-pre — `SessionLinkActions` impls `ResponseSink` (below) so the
 // application-layer observer can drain replies through the IoC trait
@@ -272,6 +275,13 @@ pub use wz_session_core::action_trace::ActionTrace;
 // TokioLinkDriverAdapter / UdpWriteDriver / TcpWriteDriver impls + external
 // callers keep naming crate::session_glue::BoxedLinkDriver.
 pub use wz_session_core::link::BoxedLinkDriver;
+// Stage 2b — the runtime-tier extension that owns `R::LinkSink` (the
+// per-profile storage of the link write seam). `SessionLinkActions<R,
+// T>` bounds `R: SessionRuntime` so its `driver` field is `R::LinkSink`
+// instead of a hard-coded `Arc<dyn BoxedLinkDriver>`; the generic
+// action methods reach the seam through the inherent `Self::link_driver`
+// accessor (which forwards to `R::link_driver`).
+use wz_session_core::link::SessionRuntime;
 
 /// Tokio multi-thread runtime adapter for a `LinkDriver`
 /// implementation.
@@ -331,8 +341,12 @@ pub use wz_session_core::send_declare_error::SendDeclareError;
 pub use wz_session_core::send_wire_error::SendWireError;
 
 /// Bundle of state shared across the 17 native script functions.
-pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub driver: Arc<dyn BoxedLinkDriver>,
+pub struct SessionLinkActions<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
+    /// R::LinkSink — the per-profile owning handle to the link write
+    /// seam (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP MCU
+    /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
+    /// pure `&dyn BoxedLinkDriver` through [`Self::link_driver`].
+    pub driver: R::LinkSink,
     pub params: SessionInitParams,
     pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
@@ -624,7 +638,7 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // resolve to the inherent methods (inherent shadows trait in method-call
 // resolution), so there is no recursion. The method set is empty in a
 // build with neither response codec, matching the trait's gated surface.
-impl<R: Runtime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
+impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: ResponseOwned) {
         self.send_response(response);
@@ -676,7 +690,11 @@ impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
     /// the same `TokioTime` that [`drive_session_until_terminal`]
     /// receives so the lease comparator's `now_ms` and the recorded
     /// `keepalive_ms` / `established_ms` share an epoch.
-    pub fn new(driver: Arc<dyn BoxedLinkDriver>, params: SessionInitParams, clock: T) -> Arc<Self> {
+    pub fn new(
+        driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
+        params: SessionInitParams,
+        clock: T,
+    ) -> Arc<Self> {
         // R121e — seed the outbound Frame SN with `params.initial_sn`
         // so the first emitted Frame matches the value announced in
         // the OpenSyn/OpenAck body. The peer enforces this start
@@ -713,7 +731,20 @@ impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
+impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
+    /// Resolve the runtime-owned link sink (`R::LinkSink`) to the pure
+    /// `&dyn BoxedLinkDriver` write seam. `R::LinkSink` is opaque in
+    /// generic-`R` code — the tokio profile binds it to `Arc<dyn
+    /// BoxedLinkDriver + Send + Sync>`, the lwIP MCU profile to `Rc<dyn
+    /// BoxedLinkDriver>` — so the action methods cannot call
+    /// `send_blocking` on `self.driver` directly; this accessor erases
+    /// the per-profile refcount wrapper through [`R::link_driver`]. The
+    /// returned reference borrows `self`, so the seam call composes
+    /// inline (`self.link_driver().send_blocking(&wire, reliability)`).
+    fn link_driver(&self) -> &dyn BoxedLinkDriver {
+        R::link_driver(&self.driver)
+    }
+
     /// R121d — derive the SessionInitParams the Accepting side
     /// will emit on the outbound InitAck. Caps `seq_num_res`,
     /// `req_id_res`, and `batch_size` to `min(self.params.x,
@@ -1052,7 +1083,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1110,7 +1141,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_declare_kexpr(mapping_id, suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             // R234 — record the (mapping_id, suffix) pair in the
             // outbound table so later `publish_aliased_auto` calls
             // can resolve the literal without caller assertion.
@@ -1160,7 +1192,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1193,7 +1225,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1226,7 +1258,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1260,7 +1292,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1289,7 +1321,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1320,7 +1352,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1349,7 +1381,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } else {
                 Reliability::BestEffort
             };
-            self.driver.send_blocking(&wire, reliability);
+            self.link_driver().send_blocking(&wire, reliability);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1402,7 +1434,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             Ok(())
         }
         #[cfg(not(feature = "declare-subscriber"))]
@@ -1450,7 +1483,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             Ok(())
         }
         #[cfg(not(feature = "declare-queryable"))]
@@ -1493,7 +1527,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             Ok(())
         }
         #[cfg(not(feature = "declare-token"))]
@@ -1522,7 +1557,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare(&self, declare: DeclareOwned) {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        self.link_driver()
+            .send_blocking(&wire, Reliability::Reliable);
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
@@ -1550,7 +1586,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_kexpr(mapping_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             // R234 — drop the (mapping_id, suffix) pair so subsequent
             // `publish_aliased_auto` calls return `None` on this id and
             // the caller knows the alias is stale. Idempotent: removing
@@ -1688,7 +1725,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_subscriber(subscriber_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
         }
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
         let _ = subscriber_id;
@@ -1709,7 +1747,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_queryable(queryable_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
         }
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
         let _ = queryable_id;
@@ -1731,7 +1770,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_token(token_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
         }
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = token_id;
@@ -1756,7 +1796,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_declare_final();
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
         }
     }
 
@@ -1830,7 +1871,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             )?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -1871,7 +1913,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 build_interest_liveliness_get(interest_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -1909,7 +1952,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let interest = build_interest_final(interest_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
         }
         #[cfg(not(feature = "declare-interest"))]
         let _ = interest_id;
@@ -1951,7 +1995,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -2034,7 +2079,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let request = builder.build()?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -2074,7 +2120,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let sn = self.next_outbound_frame_sn();
             let wire =
                 encode_frame_with_response_final(sn, response_final, /*reliable=*/ true);
-            self.driver.send_blocking(&wire, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&wire, Reliability::Reliable);
         }
         #[cfg(not(feature = "codec-response-final"))]
         let _ = request_id;
@@ -2115,7 +2162,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_response(&self, response: ResponseOwned) {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_response(sn, response, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        self.link_driver()
+            .send_blocking(&wire, Reliability::Reliable);
     }
 
     /// R284 — encode + dispatch a session-layer `Close` frame
@@ -2164,7 +2212,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         {
             R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
             let bytes = encode_close(reason as u8);
-            self.driver.send_blocking(&bytes, Reliability::Reliable);
+            self.link_driver()
+                .send_blocking(&bytes, Reliability::Reliable);
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
@@ -2186,11 +2235,11 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
 /// `IScriptEngine` / `LuaEngine` is involved and the session path no
 /// longer pulls `sce-rust-lua` — the second half of the runtime-schism
 /// resolution after R311ik did the same for scouting.
-pub struct SessionActionsBinding<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct SessionActionsBinding<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     inner: Arc<SessionLinkActions<R, T>>,
 }
 
-impl<R: Runtime, T: TimeSource> SessionActionsBinding<R, T> {
+impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     /// Wrap a clone of the caller's `Arc<`[`SessionLinkActions`]`>` so the
     /// generated [`SessionFsmUnicastActionsTrait`] dispatches its 18
     /// actions against the shared state the caller reads back. Production

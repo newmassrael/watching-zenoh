@@ -13,25 +13,68 @@
 
 use alloc::vec::Vec;
 
+use wz_runtime_core::Runtime;
+
 use crate::reliability::Reliability;
 
 /// Synchronous outbound link-write seam the session FSM action layer
-/// drives. The FSM's `Arc<dyn BoxedLinkDriver>` slot decouples the
-/// runtime-agnostic `SessionLinkActions` from the concrete transport:
-/// the tokio AP profile wraps an async `LinkDriver` behind a
-/// blocking-enqueue adapter (`TokioLinkDriverAdapter` /
-/// `UdpWriteDriver` / `TcpWriteDriver`); the lwIP MCU profile wraps a
-/// synchronous `LwipUdpSocket::send_to`.
+/// drives. The FSM's link sink (`R::LinkSink`, resolved through
+/// [`SessionRuntime::link_driver`]) decouples the runtime-agnostic
+/// `SessionLinkActions` from the concrete transport: the tokio AP
+/// profile wraps an async `LinkDriver` behind a blocking-enqueue
+/// adapter (`TokioLinkDriverAdapter` / `UdpWriteDriver` /
+/// `TcpWriteDriver`); the lwIP MCU profile wraps a synchronous
+/// `LwipUdpSocket::send_to`.
 ///
-/// `Send + Sync` are required by the tokio profile (the trait object
-/// captured by each native-fn closure must outlive the closure's
-/// `'static` bound and travel across worker threads on a multi-thread
-/// runtime). A single-core MCU impl satisfies them trivially or wraps
-/// its non-Send inner state accordingly.
-pub trait BoxedLinkDriver: Send + Sync {
+/// The trait is deliberately *pure* — it carries no `Send + Sync`
+/// supertrait. Auto-trait requirements are a per-profile *storage*
+/// decision, not a contract of the write seam itself: the tokio
+/// profile shares the driver across worker threads so it binds
+/// [`SessionRuntime::LinkSink`] to `Arc<dyn BoxedLinkDriver + Send +
+/// Sync>`, while the single-task lwIP MCU profile shares the same
+/// `udp_pcb` between its sync drive loop and its driver, so it binds
+/// `LinkSink` to a `Rc<dyn BoxedLinkDriver>` that is intentionally
+/// `!Send` (the MCU socket holds raw `*mut udp_pcb` pointers that
+/// cannot satisfy `Send` without an `unsafe impl`). Baking `Send +
+/// Sync` onto the trait would force that `unsafe` hack onto the MCU
+/// impl; keeping the trait pure lets each profile's `LinkSink` carry
+/// the auto-traits its concurrency model actually needs.
+pub trait BoxedLinkDriver {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability);
     fn open_blocking(&self);
     fn close_blocking(&self);
+}
+
+/// Runtime-tier extension that owns the per-profile *storage* of a
+/// [`BoxedLinkDriver`]. A session-tier trait (rather than a method on
+/// `wz_runtime_core::Runtime`) because `BoxedLinkDriver` lives in
+/// `wz-session-core` — putting `LinkSink` on the lower `Runtime` trait
+/// would invert the dependency direction (runtime-core would have to
+/// know the session link seam). The split mirrors `Runtime::Mutex`:
+/// the runtime owns the concrete type of a concurrency-model-dependent
+/// piece of storage, exposing only the operations generic-`R` code
+/// needs.
+///
+/// `SessionLinkActions<R: SessionRuntime, T>` stores its driver as one
+/// `R::LinkSink` field and reaches the write seam through
+/// [`Self::link_driver`]; no third generic `D: BoxedLinkDriver` is
+/// introduced, so the `<R, T>` arity the rest of the session API uses
+/// stays stable. The `LinkSink: Clone` bound lets both profiles share
+/// the driver by refcount clone (tokio `Arc`, MCU `Rc`).
+pub trait SessionRuntime: Runtime {
+    /// Per-profile owning handle to the link write seam. Tokio binds
+    /// `Arc<dyn BoxedLinkDriver + Send + Sync>` (shared across worker
+    /// threads); the lwIP MCU profile binds `Rc<dyn BoxedLinkDriver>`
+    /// (`!Send`, single-task drive loop). `Clone` is the shared-by-
+    /// refcount contract both profiles satisfy.
+    type LinkSink: Clone;
+
+    /// Erase the per-profile refcount wrapper to the pure
+    /// `&dyn BoxedLinkDriver` the action methods send through. The
+    /// tokio impl is `&**sink` (dropping the `+ Send + Sync` auto
+    /// traits is an allowed reference coercion); the MCU impl is the
+    /// analogous `&**sink` over `Rc`.
+    fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver;
 }
 
 /// Outbound payload to send over a link. The R51 baseline carries

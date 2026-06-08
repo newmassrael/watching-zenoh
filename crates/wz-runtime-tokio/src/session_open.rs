@@ -158,7 +158,11 @@ impl LinkDriver for InboundLink {
 /// shares the socket ([`wire_udp_socket`]).
 pub fn wire_dialed_link(
     dialed: DialedLink,
-) -> (InboundLink, Arc<dyn BoxedLinkDriver>, TokioJoinHandle<()>) {
+) -> (
+    InboundLink,
+    Arc<dyn BoxedLinkDriver + Send + Sync>,
+    TokioJoinHandle<()>,
+) {
     match dialed {
         DialedLink::Tcp(stream) => {
             let (inbound, outbound, handle) = wire_tcp_stream(stream);
@@ -236,7 +240,7 @@ pub enum OpenError {
 /// [`new_session_engine`]; no `LuaEngine` / `IScriptEngine` is involved
 /// (the 18 actions are native trait methods on the binding).
 fn wire_session_engine(
-    outbound: Arc<dyn BoxedLinkDriver>,
+    outbound: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
     clock: TokioTime,
 ) -> (

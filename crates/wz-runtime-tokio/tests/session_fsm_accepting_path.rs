@@ -105,7 +105,7 @@ fn fresh_setup() -> (
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
-    let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions =
         SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
@@ -217,7 +217,7 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
     // R86-minted HMAC. The cookie_valid() guard must reject the
     // transition and the FSM must stay at SentInitAck.
     let recording_driver = Arc::new(NoopOutboundDriver::default());
-    let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver;
+    let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
     let actions =
         SessionLinkActions::new(driver_arc, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
@@ -262,7 +262,7 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
     let recording_driver = Arc::new(NoopOutboundDriver::default());
-    let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver;
+    let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver;
     let actions =
         SessionLinkActions::new(driver_arc, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
@@ -322,7 +322,7 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // Setup with a RecordingOutboundDriver so the InitAck wire bytes
     // are captured for cookie inspection.
     let recording_driver = Arc::new(RecordingOutboundDriver::default());
-    let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver.clone();
+    let driver_arc: Arc<dyn BoxedLinkDriver + Send + Sync> = recording_driver.clone();
     let params = fixture_session_init_params();
     let actions = SessionLinkActions::new(driver_arc, params, TokioTime::new());
     let mut engine = new_session_engine(&actions);
@@ -477,7 +477,7 @@ fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     // permissive ceilings, capture a peer with stricter caps via
     // the inbound slot, and verify `init_ack_params` flattens the
     // three fields to the peer's stricter values.
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
     params.seq_num_res = 3;
     params.req_id_res = 3;
@@ -508,7 +508,7 @@ fn r121d_init_ack_params_keeps_own_when_own_lower() {
     // Symmetric case — when our own announced caps are stricter
     // than the peer's, `min(own, peer) = own`. Verifies the cap
     // never accidentally promotes a value upward.
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let mut params = fixture_session_init_params();
     params.seq_num_res = 1;
     params.req_id_res = 1;

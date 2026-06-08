@@ -67,7 +67,7 @@ fn frame_event(push: PushOwned) -> DriverLoopOutcome {
 }
 
 fn fresh_engine() -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding>> {
-    let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
     let actions =
         SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);

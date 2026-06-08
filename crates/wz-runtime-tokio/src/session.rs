@@ -108,6 +108,11 @@ use wz_codecs::query::Query;
 // surfaces; the import stays unconditional alongside those methods.
 use wz_runtime_core::Runtime;
 use wz_runtime_core::TimeSource;
+// Stage 2b — `Session<R, T>` (and every handle that wraps it) holds an
+// `Arc<SessionLinkActions<R, T>>`, which now bounds `R: SessionRuntime`
+// (the runtime-tier owner of `R::LinkSink`). `SessionRuntime: Runtime`,
+// so the `<R as Runtime>::Mutex<...>` field types still resolve.
+use wz_session_core::link::SessionRuntime;
 
 use crate::runtime_impl::TokioRuntime;
 // R311cw — `TokioTime` is the AP-profile default binding for the
@@ -697,7 +702,7 @@ impl QueryOptions {
 /// loopback dispatches from a background task are observable to the
 /// main `drive_session` loop's `observer.dispatch` calls and vice
 /// versa.
-pub struct Session<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     /// Outbound action handle. Cloned `Arc` — multiple `Session`s
     /// can share the same actions if the application binds several
     /// publish surfaces to the same physical session. R311di-pre-f1b
@@ -745,7 +750,7 @@ pub struct Session<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
 // so the inner mutex alias's and TimeSource impl's Clone-status are
 // irrelevant). R311cw extends the bound set with `T: TimeSource` so
 // `Session<R, T>` clones uniformly across both type parameters.
-impl<R: Runtime, T: TimeSource> Clone for Session<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
     fn clone(&self) -> Self {
         Self {
             actions: self.actions.clone(),
@@ -786,7 +791,7 @@ pub type TokioSession = Session<TokioRuntime, TokioTime>;
 // this resolves to the same `std::sync::Mutex<...>` concrete type so
 // every existing `session.observer().lock()` call site keeps
 // compiling under `R = TokioRuntime` (no breaking change to consumers).
-impl<R: Runtime, T: TimeSource> Session<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// Construct a new session bundle from existing handles.
     /// `actions` typically comes from
     /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
@@ -2674,13 +2679,13 @@ impl From<SendWireError> for QueryAliasError {
 // auto-added `R: Clone` bound (Runtime does not require Clone; inner
 // Session<R> has manual Clone too).
 #[non_exhaustive]
-pub struct Querier<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct Querier<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     keyexpr: String,
     options: QueryOptions,
 }
 
-impl<R: Runtime, T: TimeSource> Clone for Querier<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Clone for Querier<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -2690,7 +2695,7 @@ impl<R: Runtime, T: TimeSource> Clone for Querier<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> Querier<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     /// Borrow the declared keyexpr. The literal form supplied to
     /// [`Session::declare_querier`]; identical to what each
     /// [`Self::get`] call threads to [`Session::query`].
@@ -2835,14 +2840,14 @@ pub struct MatchingStatus {
 // R311cr — R267 helper cascade. Manual Clone impl mirrors Querier
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct QuerierAliased<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct QuerierAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     mapping_id: u64,
     inline_suffix: Option<String>,
     options: QueryOptions,
 }
 
-impl<R: Runtime, T: TimeSource> Clone for QuerierAliased<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Clone for QuerierAliased<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -2853,7 +2858,7 @@ impl<R: Runtime, T: TimeSource> Clone for QuerierAliased<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> QuerierAliased<R, T> {
+impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
     /// The declared mapping id. Must have been previously registered
     /// via [`SessionLinkActions::send_declare_keyexpr`] for
     /// [`Self::get`] to succeed.
@@ -2971,13 +2976,13 @@ impl<R: Runtime, T: TimeSource> QuerierAliased<R, T> {
 // R311cs — R267 helper cascade. Manual Clone impl mirrors Querier
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct Publisher<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     keyexpr: String,
     options: PublishOptions,
 }
 
-impl<R: Runtime, T: TimeSource> Clone for Publisher<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Clone for Publisher<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -2987,7 +2992,7 @@ impl<R: Runtime, T: TimeSource> Clone for Publisher<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> Publisher<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// Borrow the declared keyexpr.
     pub fn keyexpr(&self) -> &str {
         &self.keyexpr
@@ -3085,14 +3090,14 @@ impl<R: Runtime, T: TimeSource> Publisher<R, T> {
 // R311cs — R267 helper cascade. Manual Clone impl mirrors Querier
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct PublisherAliased<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct PublisherAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     mapping_id: u64,
     inline_suffix: Option<String>,
     options: PublishOptions,
 }
 
-impl<R: Runtime, T: TimeSource> Clone for PublisherAliased<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Clone for PublisherAliased<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -3103,7 +3108,7 @@ impl<R: Runtime, T: TimeSource> Clone for PublisherAliased<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> PublisherAliased<R, T> {
+impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
     /// The declared mapping id.
     pub fn mapping_id(&self) -> u64 {
         self.mapping_id
@@ -3252,14 +3257,14 @@ impl SubscribeOptions {
 // Drop is generic via R::with_mutex_mut (R311ct API) so per-profile
 // poison-recovery semantics stay inside the runtime impl.
 #[non_exhaustive]
-pub struct Subscriber<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct Subscriber<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     id: SubscriptionId,
     keyexpr: String,
     options: SubscribeOptions,
 }
 
-impl<R: Runtime, T: TimeSource> Subscriber<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Subscriber<R, T> {
     /// The stable id assigned by
     /// [`crate::pubsub::SubscriberRegistry::register_with_locality`].
     /// Exposed for diagnostics; callers should not rely on the
@@ -3302,7 +3307,7 @@ impl<R: Runtime, T: TimeSource> Subscriber<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> Drop for Subscriber<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Drop for Subscriber<R, T> {
     fn drop(&mut self) {
         // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
         // poison-recovery lives inside the runtime impl (AP: recover
@@ -3411,7 +3416,7 @@ impl QueryableOptions {
 // R311cu — R267 helper cascade. Same pattern as Subscriber: `!Clone`
 // by construction; Drop is generic via R::with_mutex_mut.
 #[non_exhaustive]
-pub struct Queryable<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     // R311ek — `session` is read only by the `query-queryable`-gated
     // observer-unregister in `undeclare` / `Drop`; the handle is only
     // ever constructed inside the same gate (`declare_queryable` returns
@@ -3431,7 +3436,7 @@ pub struct Queryable<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     options: QueryableOptions,
 }
 
-impl<R: Runtime, T: TimeSource> Queryable<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
     /// The stable id assigned by
     /// [`crate::query::QueryableRegistry::register_with_locality`].
     pub fn id(&self) -> QueryableId {
@@ -3470,7 +3475,7 @@ impl<R: Runtime, T: TimeSource> Queryable<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> Drop for Queryable<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Drop for Queryable<R, T> {
     fn drop(&mut self) {
         // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
         // poison-recovery lives inside the runtime impl. unregister is
@@ -3629,14 +3634,14 @@ impl LivelinessOptions {
 // session.actions (concrete Arc<SessionLinkActions>, R-independent)
 // so Drop is generic over R without needing R::with_mutex_mut.
 #[non_exhaustive]
-pub struct LivelinessToken<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct LivelinessToken<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     id: u64,
     keyexpr: String,
     options: LivelinessOptions,
 }
 
-impl<R: Runtime, T: TimeSource> LivelinessToken<R, T> {
+impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
     /// The stable token id allocated at declare time by
     /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
     /// diagnostics; callers should not rely on the exact value
@@ -3690,7 +3695,7 @@ impl<R: Runtime, T: TimeSource> LivelinessToken<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> Drop for LivelinessToken<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessToken<R, T> {
     fn drop(&mut self) {
         // R248 RAII — emit Declare(UndeclToken) so the peer's
         // liveliness subscribers receive the DELETE sample. See
@@ -3908,14 +3913,14 @@ impl LivelinessSubscriberOptions {
 // into_inner on AP; no poison concept on MCU). The peer-side
 // Interest(Final) emit was already unconditional.
 #[non_exhaustive]
-pub struct LivelinessSubscriber<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+pub struct LivelinessSubscriber<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     interest_id: u64,
     keyexpr: String,
     options: LivelinessSubscriberOptions,
 }
 
-impl<R: Runtime, T: TimeSource> LivelinessSubscriber<R, T> {
+impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
     /// The stable interest id allocated at declare time by
     /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
     /// Exposed for diagnostics; callers should not rely on the exact
@@ -4002,7 +4007,7 @@ impl<R: Runtime, T: TimeSource> LivelinessSubscriber<R, T> {
     }
 }
 
-impl<R: Runtime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
     fn drop(&mut self) {
         // R280 / R311cu RAII — unregister the local slot first so any
         // racing inbound dispatch sees no slot, then emit

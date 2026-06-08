@@ -51,7 +51,8 @@ fn fresh_engine() -> (
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(LifecycleRecordingDriver::default());
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> =
+        Arc::new(LifecycleRecordingDriver::default());
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
