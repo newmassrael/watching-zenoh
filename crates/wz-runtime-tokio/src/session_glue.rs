@@ -633,7 +633,7 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // both establish a concrete-bound AP entry point on top of a generic struct).
 // R311dz-pre — bridge the observer's generic reply drain to the concrete
 // tokio actions. The inherent `send_response` / `send_response_final`
-// methods (below, in the `impl<R: Runtime, T: TimeSource>` block) carry
+// methods (below, in the `impl<R: SessionRuntime, T: TimeSource>` block) carry
 // the real encode + enqueue; these trait methods delegate to them so
 // `ApplicationLayerObserver::flush_pending<S: ResponseSink>` can drive any
 // runtime's actions handle. The delegating `self.send_response(..)` calls
