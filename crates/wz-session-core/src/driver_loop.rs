@@ -150,3 +150,23 @@ pub enum IterationEvent<'a> {
     /// unit variants.
     Lease(LeaseCheckOutcome),
 }
+
+/// R76b — terminal result of a production session drive loop. Runtime-
+/// agnostic: the AP `drive_session_until_terminal` (tokio `select!` loop)
+/// and the lwIP MCU `run_session` (sync polling loop) both return this.
+/// Stage 4b hoisted it here from `wz-runtime-tokio::session_glue` so the
+/// two loops share one outcome SSOT; wz-runtime-tokio re-exports it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DriverOutcome {
+    /// The engine reached a terminal state
+    /// (`Engine::is_in_final_state() == true`) via FSM transition.
+    /// Production callers exit the session lifecycle here; the
+    /// outbound driver close has already been dispatched by the
+    /// `Closed.onentry` action chain.
+    Terminated,
+    /// The caller-supplied `max_iters` cap was reached without the
+    /// engine reaching a terminal state. Test callers use this to
+    /// bound runaway loops; production callers pass `None` for
+    /// unlimited iteration.
+    IterationLimit,
+}

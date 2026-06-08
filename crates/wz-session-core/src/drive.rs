@@ -18,6 +18,8 @@
 //! from `actions.inbound_peer_zid` through `R::with_mutex_mut` (the AP
 //! `std::sync::Mutex` and the MCU `critical_section` mutex behind one seam).
 
+use alloc::sync::Arc;
+
 use sce_rust_runtime::Engine;
 
 use wz_runtime_core::TimeSource;
@@ -203,6 +205,22 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
         }
         Some(_) => LeaseCheckOutcome::WithinLease,
     }
+}
+
+/// Build a session [`Engine`] over the generated engine-free
+/// [`SessionFsmUnicastPolicy`], parameterised over a [`SessionActionsBinding`]
+/// wrapping a clone of `actions`. Generic over `R: SessionRuntime` so the AP
+/// tokio loop and the lwIP MCU sync loop construct the FSM engine the same way
+/// (Stage 4b SSOT — wz-runtime-tokio's `new_session_engine<T>` delegates here).
+/// The caller retains `actions` (to read trace / observe link state) and drives
+/// the returned engine with `dispatch_link_event` / `check_lease_deadline`.
+pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
+    actions: &Arc<SessionLinkActions<R, T>>,
+) -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>> {
+    // `SessionActionsBinding.inner` is private to this crate; construct through
+    // the pub `::new` constructor (mirrors the AP `new_session_engine`).
+    let binding = SessionActionsBinding::new(actions.clone());
+    Engine::new(SessionFsmUnicastPolicy::new(binding))
 }
 
 // ── reassembly-pool drive (reassembly-gated; `reassembly` implies `codec-frame`,

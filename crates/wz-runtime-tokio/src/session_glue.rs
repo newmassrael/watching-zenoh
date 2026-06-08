@@ -298,13 +298,16 @@ pub fn new_session_actions<T: TimeSource>(
 /// `actions`. The caller retains `actions` (to read trace / observe link
 /// state) and drives the engine with [`drive_session_until_terminal`].
 /// Mirrors [`crate::scouting_glue::new_scouting_engine`].
+///
+/// Stage 4b — the construction body moved to the runtime-agnostic
+/// [`wz_session_core::drive::new_session_engine`] so the AP profile + the
+/// lwIP MCU sync loop build the FSM engine through one SSOT; this concrete
+/// `R = TokioRuntime` entry delegates (the engine return type fixes `R`, no
+/// call-site ambiguity).
 pub fn new_session_engine<T: TimeSource>(
     actions: &Arc<SessionLinkActions<TokioRuntime, T>>,
 ) -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding<TokioRuntime, T>>> {
-    // chunk-5 — `SessionActionsBinding.inner` is now private to
-    // wz-session-core; construct through the pub `::new` constructor.
-    let binding = SessionActionsBinding::new(actions.clone());
-    Engine::new(SessionFsmUnicastPolicy::new(binding))
+    wz_session_core::drive::new_session_engine(actions)
 }
 
 // ─────────────────────────── codec wiring ───────────────────────────
@@ -579,22 +582,10 @@ pub use wz_session_core::drive::check_lease_deadline;
 // declare/* IterationEvent adapters + drive_session test closures.
 pub use wz_session_core::driver_loop::IterationEvent;
 
-/// R76b — outcome of the production driver loop in
-/// `drive_session_until_terminal`.
-#[derive(Debug, PartialEq, Eq)]
-pub enum DriverOutcome {
-    /// The engine reached a terminal state
-    /// (`Engine::is_in_final_state() == true`) via FSM transition.
-    /// Production callers exit the session lifecycle here; the
-    /// outbound driver close has already been dispatched by the
-    /// `Closed.onentry` script action chain.
-    Terminated,
-    /// The caller-supplied `max_iters` cap was reached without the
-    /// engine reaching a terminal state. Test callers use this to
-    /// bound runaway loops; production callers pass `None` for
-    /// unlimited iteration.
-    IterationLimit,
-}
+// Stage 4b — DriverOutcome hoisted to wz_session_core::driver_loop so the
+// AP drive_session_until_terminal + the lwIP MCU run_session share one
+// terminal-result SSOT. Re-exported so this crate's callers keep the bare name.
+pub use wz_session_core::driver_loop::DriverOutcome;
 
 // ── R311im — reassembly pool wiring for the steady-state drive loop ──
 
