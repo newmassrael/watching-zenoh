@@ -31235,6 +31235,60 @@
         "sweep timeout-eviction e2e + no-alloc M0 reassembly + multi-peer axes still open (R311iv)."
       ]
     },
+    "Round 311ix": {
+      "decision_summary": "R311ix reassembly sweep timeout now observable + e2e: IterationEvent::ReassemblyTimeout via shared sweep_reporting (AP+MCU); FragmentChainStalled + OffsetClock host e2e evicts a stalled chain.",
+      "changes_bullets": [
+        "driver_loop.rs: new IterationEvent::ReassemblyTimeout(usize) variant (ungated; all consumers use a partial `if let Poll` match so it is purely additive).",
+        "drive.rs: shared sweep_reporting<SLOTS,CAP,F> primitive (reassembly-gated) runs the sweep and raises ReassemblyTimeout when an eviction occurs.",
+        "session_drive.rs (MCU) and session_glue.rs (AP): both drive loops call sweep_reporting in place of the bare reasm.sweep, so the timeout seam is symmetric SSOT.",
+        "wz-mcu-session-acceptor: DataMode::FragmentChainStalled + AcceptorE2eOutcome::ReassemblyTimedOut + report.reassembly_timed_out + an OffsetClock<C> (Arc<AtomicU32>) advancing-clock harness.",
+        "new host_acceptor_reassembly_timeout_e2e.rs (separate test binary): the peer sends only the first fragment; the OffsetClock jumps past the 500ms chain deadline; the sweep evicts the chain.",
+        "run-ci.sh C1n comment records the new timeout test alongside the completion test."
+      ],
+      "verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1 EXIT0 (all required layers pass).",
+        "new host e2e PASS: outcome ReassemblyTimedOut, reassembly_timed_out>=1, frame_payload=0, no dispatch.",
+        "G.8/G.9/G.11 reassembly + session-lwip cross-compile OK across the MCU targets (riscv gcc-absent SKIP).",
+        "Q.4 acceptor frame+reasm boot PASS on mps2-an385/386/500 (OffsetClock<SysTick> on-target); footprint +0.",
+        "validate_workspace new=+0, entries 602->603, sections 257, T3/T4 unchanged."
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "no-alloc M0 reassembly consumer still deferred (the acceptor pulls alloc::sync::Arc; native-atomic M3+ only).",
+        "multi-peer / out-of-order / capacity-overflow reassembly e2e remain unit-test-only.",
+        "deploy.yaml reassembly_pool dims are spec-sourced, not yaml-loaded (R311in tail)."
+      ],
+      "publishable_decision_summary": "R311ix reassembly sweep timeout now observable + e2e: IterationEvent::ReassemblyTimeout via shared sweep_reporting (AP+MCU); FragmentChainStalled + OffsetClock host e2e evicts a stalled chain.",
+      "publishable_changes_bullets": [
+        "driver_loop.rs: new IterationEvent::ReassemblyTimeout(usize) variant (ungated; all consumers use a partial `if let Poll` match so it is purely additive).",
+        "drive.rs: shared sweep_reporting<SLOTS,CAP,F> primitive (reassembly-gated) runs the sweep and raises ReassemblyTimeout when an eviction occurs.",
+        "session_drive.rs (MCU) and session_glue.rs (AP): both drive loops call sweep_reporting in place of the bare reasm.sweep, so the timeout seam is symmetric SSOT.",
+        "wz-mcu-session-acceptor: DataMode::FragmentChainStalled + AcceptorE2eOutcome::ReassemblyTimedOut + report.reassembly_timed_out + an OffsetClock<C> (Arc<AtomicU32>) advancing-clock harness.",
+        "new host_acceptor_reassembly_timeout_e2e.rs (separate test binary): the peer sends only the first fragment; the OffsetClock jumps past the 500ms chain deadline; the sweep evicts the chain.",
+        "run-ci.sh C1n comment records the new timeout test alongside the completion test."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1 EXIT0 (all required layers pass).",
+        "new host e2e PASS: outcome ReassemblyTimedOut, reassembly_timed_out>=1, frame_payload=0, no dispatch.",
+        "G.8/G.9/G.11 reassembly + session-lwip cross-compile OK across the MCU targets (riscv gcc-absent SKIP).",
+        "Q.4 acceptor frame+reasm boot PASS on mps2-an385/386/500 (OffsetClock<SysTick> on-target); footprint +0.",
+        "validate_workspace new=+0, entries 602->603, sections 257, T3/T4 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "no-alloc M0 reassembly consumer still deferred (the acceptor pulls alloc::sync::Arc; native-atomic M3+ only).",
+        "multi-peer / out-of-order / capacity-overflow reassembly e2e remain unit-test-only.",
+        "deploy.yaml reassembly_pool dims are spec-sourced, not yaml-loaded (R311in tail)."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
