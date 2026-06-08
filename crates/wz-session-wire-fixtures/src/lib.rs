@@ -38,6 +38,12 @@ pub const T_MID_OPEN: u8 = 0x02;
 pub const T_MID_KEEP_ALIVE: u8 = 0x04;
 /// `_Z_MID_T_FRAME`.
 pub const T_MID_FRAME: u8 = 0x05;
+/// `_Z_MID_T_FRAGMENT` (transport.h §5.M).
+pub const T_MID_FRAGMENT: u8 = 0x06;
+/// `_Z_FLAG_T_FRAGMENT_R` — reliable fragment channel (1<<5).
+pub const FLAG_T_FRAGMENT_R: u8 = 0x20;
+/// `_Z_FLAG_T_FRAGMENT_M` — more-fragments-follow bit (1<<6).
+pub const FLAG_T_FRAGMENT_M: u8 = 0x40;
 /// `_Z_FLAG_T_INIT_S` — InitSyn present / sizing fields follow.
 pub const FLAG_T_INIT_S: u8 = 0x40;
 /// `_Z_FLAG_T_INIT_A` — InitAck (the `A` discriminator on the INIT MID).
@@ -124,4 +130,25 @@ pub fn craft_frame_wire(sn: u64, reliable: bool) -> Vec<u8> {
         T_MID_FRAME
     };
     vec![header, sn as u8]
+}
+
+/// Transport `Fragment` (`T_MID_FRAGMENT`): header byte
+/// `(R?|M?|T_MID_FRAGMENT)`, a single-byte-VLE `sn`, then the tail
+/// `payload`. The body mirrors `T_MID_FRAME` (VLE sn + tail) — only the
+/// MID and the R/M header bits differ; no Z (ext) bit, so the reassembly
+/// body is `sn + payload`. A chain's non-final fragments set `more`; the
+/// final fragment clears it. The concatenated payloads of a chain are the
+/// reassembled message (re-parsed as a `Frame` payload by the drive loop).
+pub fn craft_fragment_wire(reliable: bool, more: bool, sn: u64, payload: &[u8]) -> Vec<u8> {
+    assert!(sn < 0x80, "fixture: single-byte VLE sn only");
+    let mut flags = 0u8;
+    if reliable {
+        flags |= FLAG_T_FRAGMENT_R;
+    }
+    if more {
+        flags |= FLAG_T_FRAGMENT_M;
+    }
+    let mut wire = vec![flags | T_MID_FRAGMENT, sn as u8];
+    wire.extend_from_slice(payload);
+    wire
 }

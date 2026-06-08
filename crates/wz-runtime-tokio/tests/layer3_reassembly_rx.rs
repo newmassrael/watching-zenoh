@@ -13,26 +13,12 @@
 //! transport-header decode (R/M flags, VLE sn, tail payload), not a
 //! hand-rolled fragment struct.
 
-use wz_codecs::wire_const;
 use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame};
 use wz_session_core::reassembly_dispatch::{Fragment, ReassemblyConfig, ReassemblyDispatcher};
-
-/// Build a `T_MID_FRAGMENT` wire frame: header byte `(flags | mid)`, a
-/// single-byte VLE `sn` (callers keep `sn < 128`), then the tail payload.
-/// No Z (ext) bit — the reassembly body is `sn + payload`.
-fn fragment_frame(reliable: bool, more: bool, sn: u8, payload: &[u8]) -> Vec<u8> {
-    assert!(sn < 128, "test helper encodes sn as a 1-byte VLE");
-    let mut flags = 0u8;
-    if reliable {
-        flags |= wire_const::FLAG_T_FRAGMENT_R;
-    }
-    if more {
-        flags |= wire_const::FLAG_T_FRAGMENT_M;
-    }
-    let mut v = vec![flags | wire_const::T_MID_FRAGMENT, sn];
-    v.extend_from_slice(payload);
-    v
-}
+// The `T_MID_FRAGMENT` wire crafter is the shared no_std SSOT (R311it
+// sibling), byte-identical with the MCU reassembly e2e so both profiles
+// inspect the same fragment bytes.
+use wz_session_wire_fixtures::craft_fragment_wire as fragment_frame;
 
 /// `parse_inbound` decodes the transport-header R/M bits, the VLE sn, and
 /// the tail payload into `InboundFrame::Fragment`.
