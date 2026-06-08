@@ -15,6 +15,9 @@ deploy/mcu-qemu-demo/target/
 # R311hl — deploy/mcu-noheap-probe is a third standalone workspace
 # (no-heap registry runtime proof; Layer Q.0). Same target/ policy.
 deploy/mcu-noheap-probe/target/
+# Stage 5 — deploy/mcu-session-acceptor is the fourth standalone
+# workspace (acceptor session e2e bin; Layer Q.4). Same target/ policy.
+deploy/mcu-session-acceptor/target/
 **/*.rs.bk
 
 # Cargo.lock policy: COMMITTED for the wz Rust workspace

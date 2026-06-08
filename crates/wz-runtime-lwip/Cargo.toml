@@ -142,6 +142,33 @@ session-unicast = [
     "wz-session-core/no_std",
 ]
 
+# Stage 5 — the session handshake codec + role gates on the MCU profile.
+# These are the MCU mirror of wz-runtime-tokio's same-named forwarders: the
+# AP facade routes `codec-init-body` etc. through `wz-runtime-tokio?/<f>` to
+# `wz-session-core/<f>`; the MCU facade routes the same atomic feature
+# through `wz-runtime-lwip?/<f>` here, the uniform facade -> runtime -> core
+# funnel already established for `scouting-static` / `reassembly` /
+# `session-unicast`. Without these, the `session-unicast` FSM compiles on the
+# MCU profile but `dispatch_link_event` carries no Init/Open/Frame/KeepAlive/
+# Close decode arms and the acceptor action layer no send_init_ack_with_cookie
+# / send_open_ack — i.e. the Stage 4b shell could not parse a single inbound
+# handshake frame. Each pulls the optional `dep:wz-session-core` (already in
+# the graph via `session-unicast`) and forwards the single ground-truth gate;
+# `codec-*` are alloc-independent at the wz-codecs layer (the owned body types
+# are only named under `all(codec-*, alloc)`, and `session-unicast` brings
+# `alloc`). Atomic: none forces `session-unicast`, so an arbitrary subset
+# composes per the composable-framework north star. The set mirrors
+# preset-mcu-minimal's session/transport slice (crates/wz/Cargo.toml).
+codec-frame = ["dep:wz-session-core", "wz-session-core/codec-frame"]
+codec-init-body = ["dep:wz-session-core", "wz-session-core/codec-init-body"]
+codec-open-body = ["dep:wz-session-core", "wz-session-core/codec-open-body"]
+codec-keep-alive = ["dep:wz-session-core", "wz-session-core/codec-keep-alive"]
+codec-close = ["dep:wz-session-core", "wz-session-core/codec-close"]
+session-unicast-accept = ["dep:wz-session-core", "wz-session-core/session-unicast-accept"]
+session-unicast-open = ["dep:wz-session-core", "wz-session-core/session-unicast-open"]
+transport-keepalive = ["dep:wz-session-core", "wz-session-core/transport-keepalive"]
+transport-batching = ["dep:wz-session-core", "wz-session-core/transport-batching"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

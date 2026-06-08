@@ -141,7 +141,7 @@ attachment-encoding-aware = ["attachment-bytes"]
 # Each gate elides the matching SCXML codegen + InboundFrame variant +
 # session_glue parse/handle path; quantitative footprint delta is
 # measured against the wz-ap-demo binary in the R311a4 audit entry.
-codec-close = ["wz-runtime-tokio?/codec-close"]
+codec-close = ["wz-runtime-tokio?/codec-close", "wz-runtime-lwip?/codec-close"]
 # R311i — codec-declare forwards wz-runtime-tokio (pulls
 # wz-codecs/codec-declare + codec-frame imply). Feature-off elides
 # the wz-runtime-tokio Declare wire surface + the 9 declare-family
@@ -162,15 +162,15 @@ codec-fragment = ["transport-fragmentation", "wz-runtime-tokio?/codec-fragment"]
 # semantics for the R311g interim state and the eventual closure are
 # spelled out in the wz-runtime-tokio + wz-codecs codec-frame comment
 # blocks and the §5.12 codec atomic caveat.
-codec-frame = ["wz-runtime-tokio?/codec-frame"]
+codec-frame = ["wz-runtime-tokio?/codec-frame", "wz-runtime-lwip?/codec-frame"]
 codec-hello = ["wz-runtime-tokio?/codec-hello"]
-codec-init-body = ["wz-runtime-tokio?/codec-init-body"]
+codec-init-body = ["wz-runtime-tokio?/codec-init-body", "wz-runtime-lwip?/codec-init-body"]
 codec-join = ["session-multicast", "wz-runtime-tokio?/codec-join"]
 # R311b — codec-keep-alive forwards to wz-runtime-tokio (and through
 # it to wz-codecs); elision drops the peer-driven lease refresh path
 # along with the wire-mid 0x04 decoder. See §5.12 codec atomic caveat.
-codec-keep-alive = ["wz-runtime-tokio?/codec-keep-alive"]
-codec-open-body = ["wz-runtime-tokio?/codec-open-body"]
+codec-keep-alive = ["wz-runtime-tokio?/codec-keep-alive", "wz-runtime-lwip?/codec-keep-alive"]
+codec-open-body = ["wz-runtime-tokio?/codec-open-body", "wz-runtime-lwip?/codec-open-body"]
 # R311h — codec-push forwards wz-runtime-tokio (which pulls
 # wz-codecs/codec-push + codec-frame imply). Feature-off elides the
 # Push wire emit + parse + 6 send_push_* methods + 8 build_push_*
@@ -466,8 +466,14 @@ session-resumable = []
 session-stateless-accept = []
 # R311cd — session-unicast-* features forward to wz-runtime-tokio
 # bind sites for accept-side / open-side SCXML script-actions.
-session-unicast-accept = ["wz-runtime-tokio?/session-unicast-accept"]
-session-unicast-open = ["wz-runtime-tokio?/session-unicast-open"]
+session-unicast-accept = [
+    "wz-runtime-tokio?/session-unicast-accept",
+    "wz-runtime-lwip?/session-unicast-accept",
+]
+session-unicast-open = [
+    "wz-runtime-tokio?/session-unicast-open",
+    "wz-runtime-lwip?/session-unicast-open",
+]
 
 # ----- domain: storage (4 atomic, all reserved) -----
 storage-aligner = []
@@ -494,10 +500,10 @@ time-timestamp-source = []
 # adding a forward to a missing feature would surface as a Cargo
 # resolver error. They land as wire-up cascades as their behavior
 # arrives (e.g. session-multicast pulls transport-multicast, R311+).
-transport-batching = ["wz-runtime-tokio?/transport-batching"]
+transport-batching = ["wz-runtime-tokio?/transport-batching", "wz-runtime-lwip?/transport-batching"]
 transport-compression = []
 transport-fragmentation = []
-transport-keepalive = ["wz-runtime-tokio?/transport-keepalive"]
+transport-keepalive = ["wz-runtime-tokio?/transport-keepalive", "wz-runtime-lwip?/transport-keepalive"]
 transport-link-quic = []
 transport-link-serial = []
 transport-link-tcp = ["wz-runtime-tokio?/transport-link-tcp"]

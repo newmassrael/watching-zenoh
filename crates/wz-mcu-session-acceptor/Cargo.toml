@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-mcu-session-acceptor — Stage 5, the MCU acceptor session e2e SSOT.
+#
+# A `#![no_std]` library that owns ONE thing: `run_acceptor_e2e<C>` — the
+# acceptor half of the zenoh unicast handshake (InitSyn -> InitAck ->
+# OpenSyn -> OpenAck -> Established) followed by an application Frame
+# dispatch, driven over a real lwIP loopback by the Stage 4b
+# `wz_session_lwip::run_session` sync loop. The session machinery is the
+# shared `wz-session-core` SSOT; this crate is only the e2e TOPOLOGY (two
+# loopback endpoints, a reactive crafted peer) plus the PASS/FAIL verdict.
+#
+# # Why a library (not folded into the deploy bin)
+#
+# The exact same scenario must run in two places: the host integration
+# test (`tests/host_acceptor_e2e.rs`, fast lane, real lwIP on the host
+# build) AND the `deploy/mcu-session-acceptor` QEMU bin (the on-target
+# Layer Q.4 e2e). Factoring the scenario into a `ClockSource`-generic
+# `fn` makes the host test and the QEMU bin share ONE implementation —
+# the host passes a frozen host clock, the QEMU bin passes its SysTick
+# clock, and both assert on the same returned [`AcceptorE2eOutcome`].
+# Mirrors the wz-ap-demo-app lib-owns-the-app / bin-stays-thin split on
+# the MCU profile.
+#
+# # Why it composes via the wz facade
+#
+# The crate enables the session handshake atomic features ON the `wz`
+# facade dep (`codec-init-body` / `codec-open-body` / `codec-frame` /
+# `session-unicast-accept` / ...). That is the composable-framework
+# north star: the e2e proves the MCU session handshake composes through
+# the same facade -> runtime-lwip -> session-core funnel a real deploy
+# uses (Stage 5 wired that funnel; the AP side has always used the
+# mirror funnel through wz-runtime-tokio). The low-level session types
+# the facade does not re-export (SessionLinkActions / SessionInitParams /
+# SigningKey / parse_inbound) come from a direct wz-session-core dep,
+# exactly as wz-ap-demo-app pulls its sce types directly.
+#
+# # Why `#![cfg(lwip_real_build)]`
+#
+# The crate names `wz::session_lwip::run_session`, which only exists in a
+# real lwIP build (host, or cross with WZ_LWIP_PORT). build.rs relays the
+# lwip-sys `DEP_LWIP_LWIP_REAL_BUILD` bit into the `lwip_real_build` cfg;
+# without it the crate collapses to an empty body (mirrors wz-link-lwip /
+# wz-session-lwip). The lwip-sys direct dep exists SOLELY for that metadata
+# relay; no FFI is called here.
+
+[package]
+name = "wz-mcu-session-acceptor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Stage 5 MCU acceptor session e2e SSOT — run_acceptor_e2e<C> drives a real lwIP-loopback unicast handshake to Established + Frame dispatch via wz_session_lwip::run_session, shared by the host test and the QEMU bin."
+
+[lib]
+name = "wz_mcu_session_acceptor"
+path = "src/lib.rs"
+
+[dependencies]
+# The composable-framework boundary. `session-lwip` lights up
+# `wz::{session_lwip, link_lwip, runtime_lwip}` together with the
+# lwip_real_build cfg; the codec + role atomic features wire the session
+# handshake through the Stage-5 facade -> runtime-lwip -> session-core
+# funnel. transport-keepalive is intentionally omitted: the e2e proves
+# handshake + Frame dispatch, not the Established keepalive cadence, so
+# no keepalive worker is spawned onto the cooperative loop.
+wz = { path = "../wz", default-features = false, features = [
+    "session-lwip",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-close",
+    "session-unicast-accept",
+    "session-unicast-open",
+] }
+# The runtime-agnostic session SSOT — the types the facade does not
+# re-export (SessionLinkActions / SessionInitParams / SigningKey /
+# SessionTimeouts / parse_inbound / InboundFrame / IterationEvent /
+# DriverLoopOutcome / link::BoxedLinkDriver). Feature set is the base
+# MCU profile; the codec-* gates arrive via the facade funnel above and
+# unify onto this same wz-session-core instance.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "session-unicast",
+    "no_std",
+] }
+# Direct dep SOLELY for DEP_LWIP_LWIP_REAL_BUILD -> lwip_real_build cfg
+# propagation in build.rs (mirrors wz-link-lwip / wz-session-lwip). No
+# FFI is called here.
+lwip-sys = { path = "../lwip-sys" }
+
+[dev-dependencies]
+# critical-section's std impl backs LwipRuntime's critical_section::Mutex
+# on the host integration-test path (the QEMU bin supplies the cortex-m
+# impl at final-binary link instead).
+critical-section = { version = "1", features = ["std"] }
+
+[lints]
+workspace = true

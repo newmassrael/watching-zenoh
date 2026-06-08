@@ -615,7 +615,12 @@ layer_c1_cargo_test() {
     # mutually exclusive with the std sce-rust-runtime (http-send) that
     # wz-runtime-tokio pulls — the two cannot coexist in one feature-
     # unified graph. The crate is tested ISOLATED in Layer C1m via `-p`.
-    (cd crates && cargo test --workspace --exclude wz-session-lwip --quiet)
+    # Stage 5 — wz-mcu-session-acceptor (the MCU acceptor e2e SSOT) depends
+    # on wz-session-lwip + the facade session-lwip funnel, so it inherits the
+    # same no_std-forcing hazard; excluded here and tested ISOLATED in C1n.
+    (cd crates && cargo test --workspace \
+        --exclude wz-session-lwip \
+        --exclude wz-mcu-session-acceptor --quiet)
 }
 
 # ─── Layer C1b — cargo test -p wz-runtime-core --features alloc ────
@@ -936,6 +941,26 @@ layer_c1m_session_lwip() {
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings)
 }
 
+# ─── Layer C1n — wz-mcu-session-acceptor isolated host e2e + clippy ──
+#
+# Stage 5. wz-mcu-session-acceptor owns the MCU acceptor session e2e SSOT
+# (run_acceptor_e2e<C>, shared verbatim by this host test and the
+# deploy/mcu-session-acceptor QEMU bin). It composes wz-session-lwip + the
+# facade session-lwip funnel, so it inherits wz-session-lwip's no_std
+# forcing and CANNOT participate in the `--workspace` unification (Layer
+# C1 / C2 exclude it). Built ISOLATED here via `-p`, where cargo resolves
+# only this crate's subgraph (no tokio, no http-send) and `no_std` is
+# correct + lwip_real_build holds (host always has a real lwIP build). The
+# host integration test drives the full acceptor handshake (InitSyn ->
+# InitAck -> OpenSyn with the real round-tripped cookie -> OpenAck ->
+# Established) + a post-handshake Frame dispatch over a live lwIP loopback
+# — the same scenario Layer Q.4 boots on QEMU.
+layer_c1n_mcu_session_acceptor() {
+    (cd crates \
+        && cargo test -p wz-mcu-session-acceptor --quiet \
+        && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings)
+}
+
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
 #
 # R311bo: mirror the gate to deploy/mcu-qemu-demo (standalone
@@ -951,8 +976,11 @@ layer_c1m_session_lwip() {
 layer_c2_cargo_clippy() {
     # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
     # exclusive with tokio's http-send in a unified graph; isolated clippy
-    # is in Layer C1m). Same rationale as the Layer C1 exclude.
-    (cd crates && cargo clippy --workspace --all-targets --exclude wz-session-lwip --quiet -- -D warnings) || return 1
+    # is in Layer C1m). Stage 5 — exclude wz-mcu-session-acceptor for the
+    # same reason (isolated clippy in C1n). Same rationale as the C1 exclude.
+    (cd crates && cargo clippy --workspace --all-targets \
+        --exclude wz-session-lwip \
+        --exclude wz-mcu-session-acceptor --quiet -- -D warnings) || return 1
 
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
@@ -1977,6 +2005,59 @@ layer_q_qemu_mcu_e2e() {
         fi
     done
 
+    # ── Q.4 — Stage 5 acceptor session e2e (deploy/mcu-session-acceptor) ──
+    #
+    # Boots wz_mcu_session_acceptor::run_acceptor_e2e on the native-atomic
+    # mps2 machines (M3/M4/M7): the acceptor half of the unicast handshake
+    # (InitSyn -> InitAck -> OpenSyn with the real round-tripped cookie ->
+    # OpenAck -> Established) + a post-handshake Frame dispatch, over a live
+    # lwIP loopback, driven by the Stage 4b run_session sync loop. SYS_EXIT=0
+    # => the on-target handshake reached Established AND dispatched the Frame
+    # (the host mirror of this exact scenario is Layer C1n). Native-atomic
+    # only: the session stack pulls alloc::sync::Arc (target_has_atomic=ptr),
+    # so ARMv6-M / microbit is out of scope (the Layer G.11 boundary). Reaches
+    # here only with arm-none-eabi-gcc present (the Q.1-3 gate above returned
+    # early otherwise). No footprint gate: this bin is an e2e proof, not a
+    # footprint-tracked deploy artifact.
+    local acceptor_lanes=(
+        "mps2-an385:cortex-m3:thumbv7m-none-eabi"
+        "mps2-an386:cortex-m4:thumbv7em-none-eabihf"
+        "mps2-an500:cortex-m7:thumbv7em-none-eabihf"
+    )
+    local amachine acpu atarget abin
+    for lane in "${acceptor_lanes[@]}"; do
+        IFS=':' read -r amachine acpu atarget <<< "$lane"
+        if ! grep -q "^${atarget}$" <<< "$installed"; then
+            echo "  Q.4.${amachine} SKIP (rustup target ${atarget} absent)"
+            continue
+        fi
+        if WZ_LWIP_PORT="$lwip_port" cargo build --release \
+            --manifest-path deploy/mcu-session-acceptor/Cargo.toml \
+            --target "$atarget" --bin mcu-session-acceptor --quiet; then
+            echo "  Q.4.${amachine} build mcu-session-acceptor ${atarget} OK"
+        else
+            echo "  Q.4.${amachine} build mcu-session-acceptor ${atarget} FAIL" >&2
+            fail=1
+            continue
+        fi
+        any_built=1
+
+        if [[ "$has_qemu" -ne 1 ]]; then
+            echo "  Q.4.${amachine} run SKIP (qemu-system-arm not on PATH)"
+            continue
+        fi
+        abin="deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
+        if timeout 10 qemu-system-arm \
+            -cpu "$acpu" -machine "$amachine" \
+            -nographic -semihosting-config enable=on,target=native \
+            -kernel "$abin" >/dev/null 2>&1; then
+            echo "  Q.4.${amachine} run mcu-session-acceptor via qemu-system-arm ${amachine} PASS"
+        else
+            echo "  Q.4.${amachine} run mcu-session-acceptor via qemu-system-arm ${amachine} FAIL" >&2
+            fail=1
+        fi
+    done
+
     if [[ $any_built -eq 0 && $probe_built -eq 0 ]]; then
         echo "Layer Q SKIP (no Layer Q rustup targets installed)"
         return 0
@@ -2026,6 +2107,7 @@ run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1
 run_layer C1m layer_c1m_session_lwip || overall=1
+run_layer C1n layer_c1n_mcu_session_acceptor || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1

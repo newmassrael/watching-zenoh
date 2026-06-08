@@ -58,6 +58,14 @@ members = [
     "lwip-sys",
     "wz-link-lwip",
     "wz-session-lwip",
+    # Stage 5 — the MCU acceptor session e2e scenario SSOT (no_std lib;
+    # run_acceptor_e2e<C> shared verbatim by the host integration test
+    # and the deploy/mcu-session-acceptor QEMU bin). Like wz-session-lwip
+    # it forces wz-session-core/no_std, so the workspace `cargo test`
+    # lanes (C1/C2) `--exclude` it and a dedicated isolated host lane
+    # (C1n) exercises its handshake e2e. Mirrors the wz-ap-demo-app
+    # lib-owns-the-scenario / bin-stays-thin split on the MCU profile.
+    "wz-mcu-session-acceptor",
     # lwip-sys — R311az-1 (Phase W §5.C link tier dependency). FFI
     # bindings to vendored lwIP 2.2.1 (vendor/lwip submodule pin
     # STABLE-2_2_1_RELEASE / 77dcd25a). Host build via cc::Build

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-session-acceptor .cargo/config.toml — Stage 5.
+#
+# Pins this standalone crate to the Cortex-M3 target (the broadest
+# native-atomic Phase W target; M4/M7 are added per-machine by the Layer
+# Q.4 lane via `--target`), wires cortex-m-rt's link script, and makes
+# `cargo run` boot the binary in QEMU with semihosting enabled.
+
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+rustflags = ["-C", "link-arg=-Tlink.x"]
+
+# `cargo run` boots the bin in QEMU (developer ergonomics). The Layer Q.4
+# lane invokes QEMU directly so it can capture the SYS_EXIT code for the
+# semihost PASS/FAIL assertion.
+runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"

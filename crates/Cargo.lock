@@ -1471,6 +1471,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-mcu-session-acceptor"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "lwip-sys",
+ "wz",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-runtime-core"
 version = "0.1.0"
 

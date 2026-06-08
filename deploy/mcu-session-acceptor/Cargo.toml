@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-session-acceptor — Stage 5, the Layer Q.4 acceptor session e2e bin.
+#
+# Boots the MCU acceptor session e2e (`wz_mcu_session_acceptor::
+# run_acceptor_e2e`) under QEMU on a real lwIP cross-build: the acceptor
+# half of the zenoh unicast handshake (InitSyn -> InitAck -> OpenSyn with
+# the real round-tripped cookie -> OpenAck -> Established) followed by an
+# application Frame dispatch, all driven over a live lwIP loopback by the
+# Stage 4b `wz_session_lwip::run_session` sync loop. PASS / FAIL is
+# semihosted + propagated to the QEMU process exit code via SYS_EXIT, so
+# the Layer Q.4 lane in scripts/run-ci.sh can assert on it.
+#
+# This is a STANDALONE crate workspace (`[workspace]` table below) so cargo
+# does not pull it into the `crates/` workspace's default-member build (it
+# is thumbv7m-none-eabi, not the host triple). It is SEPARATE from
+# deploy/mcu-qemu-demo — not a second `[[bin]]` there — so the session
+# stack's feature set + footprint stay isolated from the UDP-loopback echo
+# demo (the same isolation rationale deploy/mcu-noheap-probe uses). The
+# e2e LOGIC is not duplicated: it lives once in the
+# `wz-mcu-session-acceptor` lib, shared verbatim with the host integration
+# test (Layer C1n); this crate is only the SysTick clock + heap + the
+# PASS/FAIL verdict wiring.
+#
+# Native-atomic only (M3 / M4 / M7): the session stack pulls
+# `alloc::sync::Arc` (SessionLinkActions handle), which needs
+# `target_has_atomic = "ptr"`. ARMv6-M (Cortex-M0/M0+) is out of scope for
+# this bin — exactly the boundary Layer G.11 records for wz-session-lwip.
+
+[workspace]
+# Empty workspace table — declares this crate as its own workspace root so
+# cargo does not search upward into `crates/Cargo.toml`'s member list.
+
+[package]
+name = "mcu-session-acceptor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+description = "Stage 5 Layer Q.4 QEMU acceptor session e2e — boots wz_mcu_session_acceptor::run_acceptor_e2e (handshake to Established + Frame dispatch over lwIP loopback) on Cortex-M3/M4/M7."
+
+[[bin]]
+name = "mcu-session-acceptor"
+path = "src/main.rs"
+
+[dependencies]
+# Cortex-M runtime + entry point. `critical-section-single-core` provides
+# the critical_section impl that wz-runtime-lwip::sync + the session-core
+# no_std portable-atomic backend require on Cortex-M.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+
+# Semihosting for the PASS/FAIL line + `debug::exit` (SYS_EXIT -> QEMU
+# process exit code, which the Layer Q.4 lane asserts on).
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+# Heap allocator. The session stack (alloc-backed SessionLinkActions + the
+# engine + the codec byte buffers) needs a #[global_allocator];
+# embedded-alloc is the conventional Cortex-M choice.
+embedded-alloc = "0.6"
+
+# Atomic backend parity with the wz session stack (M3/M4/M7 get native
+# LDREX/STREX; the feature set mirrors the wz-runtime-lwip / session-core
+# declarations so cargo unifies one portable-atomic configuration).
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The SINGLE upstream dep: the MCU acceptor e2e SSOT. Re-exports the
+# `ClockSource` trait this bin impls (SysTick) so the bin never names the
+# wz facade or wz-session-core directly — the lib is the composition
+# boundary (it enables session-lwip + the handshake codecs on the facade).
+wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor" }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
