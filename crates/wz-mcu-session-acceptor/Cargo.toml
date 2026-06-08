@@ -100,6 +100,15 @@ lwip-sys = { path = "../lwip-sys" }
 # inspect the same independent-oracle bytes.
 wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
+[features]
+# Tier B transport reassembly. Threads `wz/reassembly` (the facade atomic
+# feature -> wz-session-lwip/reassembly -> wz-runtime-lwip + wz-session-core)
+# so `run_acceptor_e2e(.., DataMode::FragmentChain)` exercises the
+# `ReassemblyDispatcher` ingest + sweep on the MCU session loop. Off by
+# default: the Stage 5 whole-frame e2e (host_acceptor_e2e + the default QEMU
+# bin) builds with no reassembly slot pool, exactly as a minimal deploy does.
+reassembly = ["wz/reassembly", "wz-session-core/reassembly"]
+
 [dev-dependencies]
 # critical-section's std impl backs LwipRuntime's critical_section::Mutex
 # on the host integration-test path (the QEMU bin supplies the cortex-m

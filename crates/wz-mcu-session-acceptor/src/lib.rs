@@ -60,7 +60,9 @@ use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 use wz::runtime_lwip::{LwipRuntime, LwipTime};
 use wz::session_lwip::driver::SharedSessionSocket;
 use wz::session_lwip::{run_session, LwipUdpDriver, SessionRole};
-use wz_session_wire_fixtures::{craft_frame_wire, craft_initsyn_wire, craft_opensyn_wire};
+use wz_session_wire_fixtures::{
+    craft_fragment_wire, craft_frame_wire, craft_initsyn_wire, craft_opensyn_wire,
+};
 
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the QEMU bin depend only on THIS crate (single-dep facade
@@ -82,10 +84,30 @@ pub const PEER_PORT: u16 = 7461;
 /// Sequence number stamped on the post-handshake application Frame, used to
 /// identify it in the dispatch stream (handshake frames are not `Frame`s).
 const DATA_FRAME_SN: u64 = 7;
+/// First fragment SN of the [`DataMode::FragmentChain`] reassembly chain.
+const FRAG_SN_0: u64 = 10;
+/// Final fragment SN; the reassembled `FramePayload` is reported at this SN
+/// (`report_outcome_reassembling` stamps the completion with the final
+/// fragment's SN), so it is the data-dispatch sentinel in FragmentChain mode.
+const FRAG_SN_1: u64 = 11;
 /// Iteration cap on the drive loop. The handshake + Frame complete in the
 /// first ~3 iterations; the remainder spin the (no-op, with a frozen clock)
 /// deadline branch. Bounds a regression so it fails fast instead of hanging.
 const MAX_ITERS: usize = 64;
+
+/// What the reactive peer sends after the handshake reaches `Established`, to
+/// exercise the acceptor's data plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataMode {
+    /// One whole `T_MID_FRAME` (the Stage 5 baseline data-plane proof).
+    WholeFrame,
+    /// A two-fragment `T_MID_FRAGMENT` chain the acceptor reassembles,
+    /// re-parses, and dispatches as one `FramePayload`. Requires the
+    /// `reassembly` feature on the acceptor build (without it the fragments
+    /// decode to `Unknown` and never reassemble) — the host reassembly test
+    /// and the reassembly QEMU bin select it.
+    FragmentChain,
+}
 
 /// The verdict [`run_acceptor_e2e`] returns. The host test asserts
 /// `EstablishedAndDispatched`; the QEMU bin maps it to a semihost exit code.
@@ -156,7 +178,15 @@ enum PeerPhase {
 /// fires, so the run is fully deterministic); the QEMU bin passes its
 /// SysTick clock (real ms, but the handshake completes in a few iterations,
 /// far under any deadline).
-pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C) -> AcceptorE2eReport {
+///
+/// `data_mode` selects what the reactive peer sends post-`Established`: a
+/// whole [`DataMode::WholeFrame`] or a reassembled
+/// [`DataMode::FragmentChain`]. Both verdicts assert the data dispatch
+/// surfaced as a `FramePayload` (at [`DATA_FRAME_SN`] / [`FRAG_SN_1`]
+/// respectively); FragmentChain additionally exercises the
+/// `ReassemblyDispatcher` ingest + sweep and requires the `reassembly`
+/// feature on the build.
+pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) -> AcceptorE2eReport {
     let link = LwipLink::init();
 
     // ── The acceptor: a session rx socket wrapped in the MCU BoxedLinkDriver.
@@ -202,6 +232,14 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C) -> AcceptorE2eReport {
     let mut peer_frame_sent = false;
     let mut peer_rx_count = 0u32;
 
+    // The SN the data dispatch surfaces at: the whole-frame SN, or — for a
+    // reassembled chain — the final fragment's SN (the SN
+    // `report_outcome_reassembling` stamps on the completion `FramePayload`).
+    let expected_data_sn = match data_mode {
+        DataMode::WholeFrame => DATA_FRAME_SN,
+        DataMode::FragmentChain => FRAG_SN_1,
+    };
+
     run_session(
         &runtime,
         &link,
@@ -219,7 +257,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C) -> AcceptorE2eReport {
                     DriverLoopOutcome::ParseError(_) => parse_error += 1,
                     DriverLoopOutcome::FramePayload { sn, .. } => {
                         frame_payload += 1;
-                        if *sn == DATA_FRAME_SN {
+                        if *sn == expected_data_sn {
                             frame_dispatched = true;
                         }
                     }
@@ -256,14 +294,39 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C) -> AcceptorE2eReport {
                         }
                     }
                     // OpenAck arrived — the acceptor is Established; send the
-                    // application Frame.
+                    // application data (whole Frame, or a fragment chain the
+                    // acceptor reassembles).
                     (PeerPhase::AwaitOpenAck, Ok(InboundFrame::Open { is_ack: true, .. })) => {
                         peer_openack_seen = true;
-                        let _ = peer_sock.send_to(
-                            ipv4_addr_loopback(),
-                            SESSION_PORT,
-                            &craft_frame_wire(DATA_FRAME_SN, true),
-                        );
+                        match data_mode {
+                            DataMode::WholeFrame => {
+                                let _ = peer_sock.send_to(
+                                    ipv4_addr_loopback(),
+                                    SESSION_PORT,
+                                    &craft_frame_wire(DATA_FRAME_SN, true),
+                                );
+                            }
+                            DataMode::FragmentChain => {
+                                // A reliable two-fragment chain. The bodies
+                                // [0x01]+[0x02] reassemble to [0x01,0x02],
+                                // whose lead byte is an N_MID < 0x19 the
+                                // acceptor's parse_frame_payload surfaces as a
+                                // single NetworkMessage::Unknown — i.e. one
+                                // FramePayload at the final fragment's SN. The
+                                // session rx queue (depth 16) holds both
+                                // datagrams; run_session drains one per tick.
+                                let _ = peer_sock.send_to(
+                                    ipv4_addr_loopback(),
+                                    SESSION_PORT,
+                                    &craft_fragment_wire(true, true, FRAG_SN_0, &[0x01]),
+                                );
+                                let _ = peer_sock.send_to(
+                                    ipv4_addr_loopback(),
+                                    SESSION_PORT,
+                                    &craft_fragment_wire(true, false, FRAG_SN_1, &[0x02]),
+                                );
+                            }
+                        }
                         peer_frame_sent = true;
                         peer_phase = PeerPhase::Done;
                     }

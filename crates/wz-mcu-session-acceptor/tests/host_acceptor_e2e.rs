@@ -15,7 +15,7 @@
 //! the whole handshake in one process (a second lwIP-touching test would
 //! need an init-once harness — deferred until one exists, R71 / YAGNI).
 
-use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource};
+use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode};
 
 /// Frozen host clock — `now_us` is constant, so no handshake / lease deadline
 /// ever elapses. The handshake advances purely on crafted-frame arrival, so
@@ -32,7 +32,7 @@ impl ClockSource for FrozenClock {
 
 #[test]
 fn acceptor_handshake_reaches_established_and_dispatches_frame_over_lwip() {
-    let report = run_acceptor_e2e(FrozenClock);
+    let report = run_acceptor_e2e(FrozenClock, DataMode::WholeFrame);
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::EstablishedAndDispatched,

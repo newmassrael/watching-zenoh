@@ -39,7 +39,7 @@ use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 use portable_atomic::{AtomicU32, Ordering};
 
-use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource};
+use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode};
 
 // mps2 family (M3/M4/M7) has 4 MB SRAM, so a generous 256 KB heap holds the
 // alloc-backed session stack (SessionLinkActions handle + the engine + the
@@ -130,13 +130,23 @@ pub extern "C" fn sys_now() -> u32 {
     (GLOBAL_CLOCK.now_us() / 1000) as u32
 }
 
+/// Post-handshake data plane the boot exercises. The default build proves
+/// the whole-`T_MID_FRAME` dispatch (Stage 5); `--features reassembly`
+/// switches it to a `T_MID_FRAGMENT` chain the acceptor reassembles +
+/// dispatches (Tier B on-target proof). Compile-time selection because lwIP
+/// NO_SYS is process-global single-init, so one QEMU boot runs one scenario.
+#[cfg(not(feature = "reassembly"))]
+const DATA_MODE: DataMode = DataMode::WholeFrame;
+#[cfg(feature = "reassembly")]
+const DATA_MODE: DataMode = DataMode::FragmentChain;
+
 #[entry]
 fn main() -> ! {
     init_heap();
     GLOBAL_CLOCK.init();
     hprintln!("Stage5: MCU acceptor session e2e starting");
 
-    let report = run_acceptor_e2e(SystickClockRef);
+    let report = run_acceptor_e2e(SystickClockRef, DATA_MODE);
     match report.outcome {
         AcceptorE2eOutcome::EstablishedAndDispatched => {
             hprintln!(

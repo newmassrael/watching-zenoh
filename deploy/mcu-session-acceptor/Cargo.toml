@@ -73,6 +73,14 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # boundary (it enables session-lwip + the handshake codecs on the facade).
 wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor" }
 
+[features]
+# Tier B on-target reassembly: switches the boot scenario to
+# DataMode::FragmentChain and threads the reassembly slot pool into the
+# session stack (wz-mcu-session-acceptor -> wz/reassembly -> the lwIP loop).
+# The Layer Q.4 reassembly sub-lane builds the bin with this; the default
+# build proves the whole-frame dispatch.
+reassembly = ["wz-mcu-session-acceptor/reassembly"]
+
 [profile.release]
 codegen-units = 1
 opt-level = "s"

@@ -407,6 +407,18 @@ session-lwip = [
     "runtime-lwip",
     "dep:wz-session-lwip",
 ]
+# Transport reassembly (Tier B) — the composable-framework atomic feature
+# that threads the `ReassemblyDispatcher` ingest + sweep into whichever
+# runtime drive loop is active. Weak-forwards (`?/`) so it only lights up
+# for the runtime the build already selected: the MCU session loop
+# (wz-session-lwip -> wz-runtime-lwip -> wz-session-core) or the AP tokio
+# loop (wz-runtime-tokio). Off by default: a deploy that never receives a
+# `T_MID_FRAGMENT` compiles the reassembly slot pool out entirely.
+reassembly = [
+    "wz-session-lwip?/reassembly",
+    "wz-runtime-lwip?/reassembly",
+    "wz-runtime-tokio?/reassembly",
+]
 runtime-no-std = []
 # R302b — runtime-tokio pulls the wz-runtime-tokio crate into the
 # build via `dep:` syntax. Bare `runtime-tokio` with no sub-feature

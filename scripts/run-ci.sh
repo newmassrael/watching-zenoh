@@ -372,7 +372,15 @@ layer_0_preflight_lints() {
         echo "  fmt --check FAIL deploy/mcu-noheap-probe — run \`(cd deploy/mcu-noheap-probe && cargo fmt --all)\`" >&2
         return 1
     fi
-    echo "  fmt --check OK (crates + deploy/mcu-qemu-demo + deploy/mcu-noheap-probe)"
+    # R311iv — deploy/mcu-session-acceptor is a fourth standalone workspace
+    # (Stage 5 / Tier B acceptor e2e QEMU bin; Layer Q.4). Mirror the gate
+    # so a deploy-side edit (e.g. the reassembly DataMode selection) cannot
+    # ship fmt-dirty either.
+    if ! (cd deploy/mcu-session-acceptor && cargo fmt --all -- --check); then
+        echo "  fmt --check FAIL deploy/mcu-session-acceptor — run \`(cd deploy/mcu-session-acceptor && cargo fmt --all)\`" >&2
+        return 1
+    fi
+    echo "  fmt --check OK (crates + deploy/{mcu-qemu-demo,mcu-noheap-probe,mcu-session-acceptor})"
 
     # 0.2 actionlint (optional)
     if ! command -v actionlint >/dev/null 2>&1; then
@@ -956,9 +964,20 @@ layer_c1m_session_lwip() {
 # Established) + a post-handshake Frame dispatch over a live lwIP loopback
 # — the same scenario Layer Q.4 boots on QEMU.
 layer_c1n_mcu_session_acceptor() {
+    # Default (no reassembly) — the minimal MCU session build: the
+    # WholeFrame data-plane proof (host_acceptor_e2e), reassembly slot pool
+    # compiled out. Then `--features reassembly` — the Tier B build: the
+    # reassembly host test (host_acceptor_reassembly_e2e, a separate binary
+    # so lwIP's process-global NO_SYS single-init holds) drives a
+    # T_MID_FRAGMENT chain through ingest -> reassemble -> dispatch, and the
+    # WholeFrame test still passes with the pool linked in. clippy both
+    # configs so the reassembly data path is lint-gated too.
     (cd crates \
         && cargo test -p wz-mcu-session-acceptor --quiet \
-        && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings)
+        && cargo test -p wz-mcu-session-acceptor --features reassembly --quiet \
+        && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-mcu-session-acceptor --features reassembly \
+            --all-targets --quiet -- -D warnings)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -2024,38 +2043,50 @@ layer_q_qemu_mcu_e2e() {
         "mps2-an386:cortex-m4:thumbv7em-none-eabihf"
         "mps2-an500:cortex-m7:thumbv7em-none-eabihf"
     )
-    local amachine acpu atarget abin
+    # Two data-plane modes per machine: the default whole-`T_MID_FRAME`
+    # dispatch (Stage 5) and `--features reassembly` (Tier B), which boots
+    # DataMode::FragmentChain so the acceptor reassembles a `T_MID_FRAGMENT`
+    # chain through the swept slot pool + re-parses + dispatches it. One QEMU
+    # boot per mode (lwIP NO_SYS is process-global single-init), built to the
+    # same ELF path in sequence. The `reasm` mode is the on-target mirror of
+    # the host C1n `--features reassembly` lane.
+    local amachine acpu atarget abin alabel afeat
     for lane in "${acceptor_lanes[@]}"; do
         IFS=':' read -r amachine acpu atarget <<< "$lane"
         if ! grep -q "^${atarget}$" <<< "$installed"; then
             echo "  Q.4.${amachine} SKIP (rustup target ${atarget} absent)"
             continue
         fi
-        if WZ_LWIP_PORT="$lwip_port" cargo build --release \
-            --manifest-path deploy/mcu-session-acceptor/Cargo.toml \
-            --target "$atarget" --bin mcu-session-acceptor --quiet; then
-            echo "  Q.4.${amachine} build mcu-session-acceptor ${atarget} OK"
-        else
-            echo "  Q.4.${amachine} build mcu-session-acceptor ${atarget} FAIL" >&2
-            fail=1
-            continue
-        fi
-        any_built=1
+        for amode in "frame:" "reasm:--features reassembly"; do
+            IFS=':' read -r alabel afeat <<< "$amode"
+            # shellcheck disable=SC2086 # $afeat is intentionally word-split
+            # ("" => no feature flag; "--features reassembly" => two args).
+            if WZ_LWIP_PORT="$lwip_port" cargo build --release \
+                --manifest-path deploy/mcu-session-acceptor/Cargo.toml \
+                --target "$atarget" --bin mcu-session-acceptor $afeat --quiet; then
+                echo "  Q.4.${amachine}.${alabel} build mcu-session-acceptor ${atarget} OK"
+            else
+                echo "  Q.4.${amachine}.${alabel} build mcu-session-acceptor ${atarget} FAIL" >&2
+                fail=1
+                continue
+            fi
+            any_built=1
 
-        if [[ "$has_qemu" -ne 1 ]]; then
-            echo "  Q.4.${amachine} run SKIP (qemu-system-arm not on PATH)"
-            continue
-        fi
-        abin="deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
-        if timeout 10 qemu-system-arm \
-            -cpu "$acpu" -machine "$amachine" \
-            -nographic -semihosting-config enable=on,target=native \
-            -kernel "$abin" >/dev/null 2>&1; then
-            echo "  Q.4.${amachine} run mcu-session-acceptor via qemu-system-arm ${amachine} PASS"
-        else
-            echo "  Q.4.${amachine} run mcu-session-acceptor via qemu-system-arm ${amachine} FAIL" >&2
-            fail=1
-        fi
+            if [[ "$has_qemu" -ne 1 ]]; then
+                echo "  Q.4.${amachine}.${alabel} run SKIP (qemu-system-arm not on PATH)"
+                continue
+            fi
+            abin="deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
+            if timeout 10 qemu-system-arm \
+                -cpu "$acpu" -machine "$amachine" \
+                -nographic -semihosting-config enable=on,target=native \
+                -kernel "$abin" >/dev/null 2>&1; then
+                echo "  Q.4.${amachine}.${alabel} run mcu-session-acceptor via qemu-system-arm ${amachine} PASS"
+            else
+                echo "  Q.4.${amachine}.${alabel} run mcu-session-acceptor via qemu-system-arm ${amachine} FAIL" >&2
+                fail=1
+            fi
+        done
     done
 
     if [[ $any_built -eq 0 && $probe_built -eq 0 ]]; then
