@@ -55,15 +55,27 @@ pub type ScoutRxSocket = LwipUdpSocket<SCOUT_RX_SLOT_SIZE, SCOUT_RX_SLOTS>;
 /// datagrams; the port (7446) is the caller's `bind_scout_rx` argument.
 pub const SCOUT_MULTICAST_GROUP: u32 = u32::from_le_bytes([224, 0, 0, 224]);
 
-/// Session-rx queue depth (`Q`) — from the SCE-codegen'd buffer-pool SSOT
-/// ([`crate::session_rx_pool_mcu`]).
+/// Session-rx queue depth (`Q`) — from the active session-rx buffer-pool
+/// SSOT: default [`crate::session_rx_pool_mcu`] (16), or slim
+/// [`crate::session_rx_pool_mcu_minimal`] (4) under
+/// `buffer-pool-session-rx-slim`.
+#[cfg(not(feature = "buffer-pool-session-rx-slim"))]
 pub const SESSION_RX_SLOTS: usize = crate::session_rx_pool_mcu::SLOT_COUNT;
+#[cfg(feature = "buffer-pool-session-rx-slim")]
+pub const SESSION_RX_SLOTS: usize = crate::session_rx_pool_mcu_minimal::SLOT_COUNT;
 
-/// Session-rx per-datagram payload cap (`N`) — from the same SSOT. Sized
-/// `>= udp_session.mtu_bytes` so a full-MTU datagram fits untruncated.
+/// Session-rx per-datagram payload cap (`N`) — from the same active SSOT.
+/// Default 1536 (`>= udp_session.mtu_bytes`, full-MTU untruncated); slim
+/// 256 (small-control-frame only, deliberately `< mtu_bytes` — see the
+/// minimal scxml header).
+#[cfg(not(feature = "buffer-pool-session-rx-slim"))]
 pub const SESSION_RX_SLOT_SIZE: usize = crate::session_rx_pool_mcu::SLOT_SIZE;
+#[cfg(feature = "buffer-pool-session-rx-slim")]
+pub const SESSION_RX_SLOT_SIZE: usize = crate::session_rx_pool_mcu_minimal::SLOT_SIZE;
 
-/// The session-link receive socket, pool-sized from `session_rx_pool_mcu`.
+/// The session-link receive socket, pool-sized from the active session-rx
+/// profile (default `session_rx_pool_mcu`, or `session_rx_pool_mcu_minimal`
+/// under `buffer-pool-session-rx-slim`).
 pub type SessionRxSocket = LwipUdpSocket<SESSION_RX_SLOT_SIZE, SESSION_RX_SLOTS>;
 
 /// Bind the scouting-link receive socket on `port` with the scout pool's
@@ -98,15 +110,25 @@ mod tests {
     use crate::ipv4_addr_loopback;
 
     /// The socket dims come from the buffer-pool SSOTs: scout 8 / 256
-    /// (`scout_rx_pool_mcu.scxml`), session 16 / 1536
-    /// (`session_rx_pool_mcu.scxml`). This is the link-tier analog of
-    /// reassembly_rx's `mcu_dims_come_from_the_buffer_pool_ssot`.
+    /// (`scout_rx_pool_mcu.scxml`); session 16 / 1536 by default
+    /// (`session_rx_pool_mcu.scxml`), or 4 / 256 under
+    /// `buffer-pool-session-rx-slim` (`session_rx_pool_mcu_minimal.scxml`).
+    /// This is the link-tier analog of reassembly_rx's
+    /// `mcu_dims_come_from_the_buffer_pool_ssot`.
     #[test]
     fn rx_socket_dims_come_from_the_buffer_pool_ssot() {
         std::assert_eq!(SCOUT_RX_SLOTS, 8);
         std::assert_eq!(SCOUT_RX_SLOT_SIZE, 256);
-        std::assert_eq!(SESSION_RX_SLOTS, 16);
-        std::assert_eq!(SESSION_RX_SLOT_SIZE, 1536);
+        #[cfg(not(feature = "buffer-pool-session-rx-slim"))]
+        {
+            std::assert_eq!(SESSION_RX_SLOTS, 16);
+            std::assert_eq!(SESSION_RX_SLOT_SIZE, 1536);
+        }
+        #[cfg(feature = "buffer-pool-session-rx-slim")]
+        {
+            std::assert_eq!(SESSION_RX_SLOTS, 4);
+            std::assert_eq!(SESSION_RX_SLOT_SIZE, 256);
+        }
     }
 
     /// Driving the session rx socket exactly as the MCU main loop will:

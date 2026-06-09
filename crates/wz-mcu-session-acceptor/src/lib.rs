@@ -55,7 +55,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use core::cell::RefCell;
 
-use wz::link_lwip::rx_sockets::bind_session_rx;
+use wz::link_lwip::rx_sockets::{bind_session_rx, SESSION_RX_SLOT_SIZE};
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 use wz::runtime_lwip::{LwipRuntime, LwipTime};
 use wz::session_lwip::driver::SharedSessionSocket;
@@ -85,6 +85,13 @@ use wz_session_core::signing_key::SigningKey;
 pub const SESSION_PORT: u16 = 7460;
 /// UDP port the reactive crafted peer binds to.
 pub const PEER_PORT: u16 = 7461;
+/// Rx queue depth of the reactive peer socket. The peer receives only the
+/// acceptor's session-control replies (InitAck, then OpenAck) one per drive
+/// iteration, so at most 2 are ever outstanding; 4 is ample headroom. Kept
+/// small (vs the default 8) so that under `buffer-pool-session-rx-slim` the
+/// peer is a ~1 KB endpoint, not a ~12 KB one — the 2nd socket that has to
+/// shrink for the whole e2e to fit microbit's 16 KB SRAM.
+const PEER_RX_SLOTS: usize = 4;
 /// Sequence number stamped on the post-handshake application Frame, used to
 /// identify it in the dispatch stream (handshake frames are not `Frame`s).
 const DATA_FRAME_SN: u64 = 7;
@@ -284,8 +291,14 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
         PEER_PORT,
     ));
 
-    // ── The reactive crafted peer: a second real loopback endpoint.
-    let mut peer_sock: LwipUdpSocket =
+    // ── The reactive crafted peer: a second real loopback endpoint. Sized
+    //    off the ACTIVE session-rx slot size (SESSION_RX_SLOT_SIZE: 1536
+    //    default, 256 under buffer-pool-session-rx-slim) since it only
+    //    receives the acceptor's session-control replies (InitAck / OpenAck,
+    //    <= the session slot size), with the slim PEER_RX_SLOTS depth. Under
+    //    the slim feature this is the 2nd endpoint that shrinks (~12 KB ->
+    //    ~1 KB), so the whole two-endpoint e2e fits microbit's 16 KB SRAM.
+    let mut peer_sock: LwipUdpSocket<SESSION_RX_SLOT_SIZE, PEER_RX_SLOTS> =
         LwipUdpSocket::bind(&link, PEER_PORT).expect("bind peer socket");
 
     // ── The session machinery (shared SSOT). The actions' clock MUST share

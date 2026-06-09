@@ -109,6 +109,14 @@ wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 # bin) builds with no reassembly slot pool, exactly as a minimal deploy does.
 reassembly = ["wz/reassembly", "wz-session-core/reassembly"]
 
+# Slim session-rx buffer-pool profile (nrf51-class / Cortex-M0, 16 KB SRAM).
+# Threads `wz/buffer-pool-session-rx-slim` so the e2e binds a slim (4 x 256)
+# acceptor session rx socket; the Phase 4 reactive peer socket tracks
+# SESSION_RX_SLOT_SIZE, so the whole e2e topology fits the microbit 16 KB
+# budget (the deploy/mcu-session-acceptor thumbv6m bin enables this, lifting
+# the Layer Q.4 microbit lane from build-only to a real boot).
+buffer-pool-session-rx-slim = ["wz/buffer-pool-session-rx-slim"]
+
 [dev-dependencies]
 # critical-section's std impl backs LwipRuntime's critical_section::Mutex
 # on the host integration-test path (the QEMU bin supplies the cortex-m

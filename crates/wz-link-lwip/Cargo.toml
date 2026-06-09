@@ -71,5 +71,17 @@ wz-codegen-build = { path = "../wz-codegen-build" }
 [dev-dependencies]
 # (none yet — host smoke uses only the library + lwip-sys FFI.)
 
+[features]
+# Selects the SLIM / constrained session-rx buffer-pool profile
+# (sources/network/session_rx_pool_mcu_minimal.scxml, 4 x 256 ~= 1 KB)
+# over the default full-rate session_rx_pool_mcu (16 x 1536 ~= 24.6 KB).
+# build.rs codegens ONLY the selected variant; rx_sockets reads
+# SessionRxSocket's dims from it. This is the kconfig-style build-time
+# pool-dims selection for nrf51-class (Cortex-M0, 16 KB SRAM total)
+# targets; the derivation lives in the scxml header. NOTE: this is a
+# 2-profile additive-Cargo-feature toggle (default vs slim); a 3rd size
+# profile would need a mutual-exclusion mechanism (documented carry).
+buffer-pool-session-rx-slim = []
+
 [lints]
 workspace = true

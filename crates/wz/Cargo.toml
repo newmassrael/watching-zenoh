@@ -419,6 +419,20 @@ reassembly = [
     "wz-runtime-lwip?/reassembly",
     "wz-runtime-tokio?/reassembly",
 ]
+
+# Slim session-rx buffer-pool profile — the composable-framework atomic
+# feature that selects the constrained nrf51-class session-rx pool dims
+# (session_rx_pool_mcu_minimal.scxml, 4 x 256 ~= 1 KB) over the default
+# full-rate 16 x 1536 (~24.6 KB). Weak-forwards (`?/`) to the §5.C link
+# tier (and the session shell that re-exports its SessionRxSocket alias) so
+# it only lights up for an lwIP-profile build. Bundled by
+# `preset-cortex-m0-minimal`; the derivation + the deliberate sub-MTU trade
+# live in the scxml header. NOTE: 2-profile additive toggle (default vs
+# slim); a 3rd size profile would need mutual exclusion (documented carry).
+buffer-pool-session-rx-slim = [
+    "wz-link-lwip?/buffer-pool-session-rx-slim",
+    "wz-session-lwip?/buffer-pool-session-rx-slim",
+]
 runtime-no-std = []
 # R302b — runtime-tokio pulls the wz-runtime-tokio crate into the
 # build via `dep:` syntax. Bare `runtime-tokio` with no sub-feature
@@ -775,6 +789,57 @@ preset-mcu-minimal = [
     "scouting-static",
     "time-system-clock",
     "time-ntp64",
+]
+
+# preset-cortex-m0-minimal — preset-mcu-minimal specialized for the ultra-
+# constrained Cortex-M0 / nrf51 class (16 KB SRAM total). Identical atomic
+# set to preset-mcu-minimal PLUS `buffer-pool-session-rx-slim`, which selects
+# the 4 x 256 session-rx pool (session_rx_pool_mcu_minimal.scxml) instead of
+# the default 16 x 1536. That drops the MCU acceptor session e2e peak heap
+# from ~32 KB to a measured ~3.15 KB which — with a trimmed lwIP port — lets
+# the full unicast handshake + Frame dispatch BOOT on a real Cortex-M0 (the
+# Layer Q.4 microbit lane). TRADE: the slim 256 B session-rx slot
+# (deliberately < udp_session.mtu_bytes) carries only control / handshake +
+# small-data frames; a node needing full-MTU bulk data uses preset-mcu-minimal
+# (and the SRAM for its 24.6 KB pool). The first cortex-m0 preset; atomic
+# store §6.7-style entry registered R311jc.
+preset-cortex-m0-minimal = [
+    "platform-bare-metal",
+    "runtime-lwip",
+    "runtime-no-std",
+    "transport-link-udp",
+    "transport-unicast",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "codec-push",
+    "codec-declare",
+    "declare-subscriber",
+    "declare-undeclare",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "encoding-bytes",
+    "encoding-empty",
+    "encoding-utf8",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "locator-udp",
+    "routing-client",
+    "scouting-static",
+    "time-system-clock",
+    "time-ntp64",
+    "buffer-pool-session-rx-slim",
 ]
 
 # preset-mcu-extended — preset-mcu-minimal scope + query + liveliness

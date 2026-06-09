@@ -59,6 +59,13 @@ reassembly = [
     "wz-session-core/reassembly",
 ]
 
+# Slim session-rx buffer-pool profile (nrf51-class / Cortex-M0, 16 KB SRAM).
+# Forwards to the wz-link-lwip selector; SharedSessionSocket =
+# Rc<RefCell<SessionRxSocket>> + SessionDatagram = Datagram<SESSION_RX_SLOT_
+# SIZE> follow the slimmed alias automatically (no driver change). See the
+# link-tier feature + session_rx_pool_mcu_minimal.scxml for the derivation.
+buffer-pool-session-rx-slim = ["wz-link-lwip/buffer-pool-session-rx-slim"]
+
 [dependencies]
 # §5.P runtime tier: LwipRuntime<C> + LwipTime<C> + the Runtime /
 # TimeSource trait surface (with_mutex_mut, now_monotonic_ms). alloc +

@@ -51,5 +51,15 @@ fn main() {
 
     let codegen = wz_codegen_build::Codegen::from_manifest(&manifest_dir);
     codegen.emit_buffer_pool("scout_rx_pool_mcu", &resource_dir, &out_dir);
-    codegen.emit_buffer_pool("session_rx_pool_mcu", &resource_dir, &out_dir);
+
+    // Session-rx pool: select the default full-rate profile (16 x 1536) or
+    // the slim nrf51-class profile (4 x 256) by the
+    // `buffer-pool-session-rx-slim` feature. Only the selected variant is
+    // codegen'd + compiled (lib.rs `pub mod` + rx_sockets consts cfg-match
+    // this choice) — the kconfig "build only the selected config" model.
+    if std::env::var_os("CARGO_FEATURE_BUFFER_POOL_SESSION_RX_SLIM").is_some() {
+        codegen.emit_buffer_pool("session_rx_pool_mcu_minimal", &resource_dir, &out_dir);
+    } else {
+        codegen.emit_buffer_pool("session_rx_pool_mcu", &resource_dir, &out_dir);
+    }
 }

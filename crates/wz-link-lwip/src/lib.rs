@@ -101,8 +101,12 @@ pub mod scout_rx_pool_mcu {
     include!(concat!(env!("OUT_DIR"), "/scout_rx_pool_mcu.rs"));
 }
 
-/// SCE-codegen'd MCU session-rx buffer-pool SSOT — `sce:kind="buffer-pool"`
-/// doc `sources/network/session_rx_pool_mcu.scxml`.
+/// SCE-codegen'd MCU session-rx buffer-pool SSOT — the default full-rate
+/// profile `sources/network/session_rx_pool_mcu.scxml` (16 x 1536 ~=
+/// 24.6 KB). Replaced by [`session_rx_pool_mcu_minimal`] under the
+/// `buffer-pool-session-rx-slim` feature; build.rs codegens only the
+/// selected variant, so exactly one of the two modules is compiled.
+#[cfg(not(feature = "buffer-pool-session-rx-slim"))]
 #[allow(non_snake_case)]
 #[allow(unused_imports)]
 #[allow(dead_code)]
@@ -111,6 +115,22 @@ pub mod scout_rx_pool_mcu {
 #[allow(clippy::all)]
 pub mod session_rx_pool_mcu {
     include!(concat!(env!("OUT_DIR"), "/session_rx_pool_mcu.rs"));
+}
+
+/// SCE-codegen'd SLIM MCU session-rx buffer-pool SSOT — the constrained
+/// nrf51-class profile `sources/network/session_rx_pool_mcu_minimal.scxml`
+/// (4 x 256 ~= 1 KB). Selected over [`session_rx_pool_mcu`] by the
+/// `buffer-pool-session-rx-slim` feature for Cortex-M0 / 16 KB-SRAM targets
+/// (see the scxml header for the small-control-frame derivation).
+#[cfg(feature = "buffer-pool-session-rx-slim")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_rx_pool_mcu_minimal {
+    include!(concat!(env!("OUT_DIR"), "/session_rx_pool_mcu_minimal.rs"));
 }
 
 pub mod rx_sockets;
