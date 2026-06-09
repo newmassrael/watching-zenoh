@@ -31341,6 +31341,54 @@
         "no-alloc M0 reassembly consumer + deploy.yaml pool dims remain (unchanged carries)."
       ]
     },
+    "Round 311iz": {
+      "decision_summary": "R311iz review hardening: pin mnemosyne-cli + shared install script (deterministic CI); hoist the test-only advancing clock out of the deploy path via a fragment hook; ooo e2e asserts the specific drop reason.",
+      "changes_bullets": [
+        "CI (F1): new scripts/install-mnemosyne-cli.sh pins the mnemosyne-cli rev (deterministic — a future upstream main change cannot silently break CI) and ci.yml/release.yml delegate to it (de-dup), replacing the non-deterministic --branch main install duplicated across both workflows.",
+        "harness (F2): run_acceptor_e2e is now clock-pure and takes a neutral on_fragment hook; the OffsetClock + advance machinery moves entirely into the stalled host test, so the deploy QEMU binary's clock path carries no test affordance — reversing the R311ix always-wrap (separation-of-concerns over DRY-cheapness).",
+        "test (F3): AcceptorE2eReport.last_drop_reason added; the ooo e2e now asserts ReassemblyDropReason::OutOfOrder specifically, not just that some drop occurred."
+      ],
+      "verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1 EXIT0 (all required layers pass).",
+        "C1n 4 acceptor host tests + clippy both configs green; the relocated advancing clock drives the stalled timeout e2e and the ooo e2e asserts the specific reason.",
+        "Q.4 acceptor frame+reasm boot PASS on mps2-an385/386/500 with the clock-pure deploy bin (no OffsetClock).",
+        "install script syntax (bash -n) + both workflows YAML parse OK; the pinned rev is present on the remote.",
+        "validate_workspace new=+0, entries 604->605, sections 257, T3/T4 unchanged."
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "META (review finding F4): the harder, more north-star-aligned no-alloc M0 reassembly reach keeps deferring behind easier reassembly test increments — prioritize it next.",
+        "reassembly carry#2 remainders still deferred with reasons: capacity-overflow (>4096B vs depth-16 rx/loopback), multi-peer pool-exhaustion (2nd peer endpoint), per-peer-quota unreachable (quota=2).",
+        "no-alloc M0 reassembly consumer + deploy.yaml pool dims remain."
+      ],
+      "publishable_decision_summary": "R311iz review hardening: pin mnemosyne-cli + shared install script (deterministic CI); hoist the test-only advancing clock out of the deploy path via a fragment hook; ooo e2e asserts the specific drop reason.",
+      "publishable_changes_bullets": [
+        "CI (F1): new scripts/install-mnemosyne-cli.sh pins the mnemosyne-cli rev (deterministic — a future upstream main change cannot silently break CI) and ci.yml/release.yml delegate to it (de-dup), replacing the non-deterministic --branch main install duplicated across both workflows.",
+        "harness (F2): run_acceptor_e2e is now clock-pure and takes a neutral on_fragment hook; the OffsetClock + advance machinery moves entirely into the stalled host test, so the deploy QEMU binary's clock path carries no test affordance — reversing the R311ix always-wrap (separation-of-concerns over DRY-cheapness).",
+        "test (F3): AcceptorE2eReport.last_drop_reason added; the ooo e2e now asserts ReassemblyDropReason::OutOfOrder specifically, not just that some drop occurred."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1 EXIT0 (all required layers pass).",
+        "C1n 4 acceptor host tests + clippy both configs green; the relocated advancing clock drives the stalled timeout e2e and the ooo e2e asserts the specific reason.",
+        "Q.4 acceptor frame+reasm boot PASS on mps2-an385/386/500 with the clock-pure deploy bin (no OffsetClock).",
+        "install script syntax (bash -n) + both workflows YAML parse OK; the pinned rev is present on the remote.",
+        "validate_workspace new=+0, entries 604->605, sections 257, T3/T4 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "META (review finding F4): the harder, more north-star-aligned no-alloc M0 reassembly reach keeps deferring behind easier reassembly test increments — prioritize it next.",
+        "reassembly carry#2 remainders still deferred with reasons: capacity-overflow (>4096B vs depth-16 rx/loopback), multi-peer pool-exhaustion (2nd peer endpoint), per-peer-quota unreachable (quota=2).",
+        "no-alloc M0 reassembly consumer + deploy.yaml pool dims remain."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
