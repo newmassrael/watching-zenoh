@@ -1828,8 +1828,9 @@
         "`time-ntp64`",
         "`buffer-pool-session-rx-slim`",
         "R311jc: = preset-mcu-minimal (35 atoms) + buffer-pool-session-rx-slim (the 36th)",
-        "slim 4x256 session-rx: e2e peak heap ~32KB to ~3.15KB; control/small-data only (256B < MTU)",
-        "first cortex-m0 preset; microbit-minimal lwIP port boots handshake+Frame on nrf51 16KB (Q.4)"
+        "slim 4x256 session-rx: e2e peak heap ~32KB to ~3.15KB; pubsub MTU-bounded (256B = node MTU)",
+        "first cortex-m0 preset; microbit-minimal lwIP port boots handshake+Frame on nrf51 16KB (Q.4)",
+        "R311jd: deploy/mcu_minimal.yaml declares udp_session.mtu_bytes 256 = the slim slot_size SSOT anchor"
       ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism": {
@@ -31661,6 +31662,54 @@
         "additive-Cargo-feature 2-profile toggle (default/slim); a 3rd session-rx size profile needs a mutual-exclusion mechanism",
         "slim reassembly pool: 4x4096=16KB does not fit nrf51 so microbit Q.4 is frame-mode only; a slim-reassembly variant would enable M0 reassembly boot",
         "microbit QEMU \"Timer with period zero\" (SysTick CLKSOURCE on nrf51) is benign, boot PASSes; investigate if a real M0 deploy needs accurate SysTick",
+        "carried from R311ja: tokio Session<R,T>.actions -> R::ActionsHandle<T> (R311cw); ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
+      ]
+    },
+    "Round 311jd": {
+      "decision_summary": "R311jd review fix: deploy/mcu_minimal.yaml anchors the slim slot_size to declared udp_session.mtu_bytes 256 (was handshake-derived); scxml/§6.8 reconcile preset-cortex-m0-minimal pubsub coherence; C1n gates slim clippy.",
+      "changes_bullets": [
+        "deploy/mcu_minimal.yaml: focused constrained nrf51 profile declaring udp_session.mtu_bytes 256 + buffer_pools.session_rx_pool {ref: slim}; the deploy-topology anchor wrongly deferred as bloat in s16",
+        "session_rx_pool_mcu_minimal.scxml: re-anchor slot_size derivation handshake-27B -> = declared mtu_bytes 256 (>= MTU, like default 1536 >= 1472); resolves preset pubsub coherence (MTU-bounded, not truncation surprise)",
+        "catalog §6.8 rationale: pubsub MTU-bounded (256B = node MTU) + deploy-anchor note",
+        "run-ci.sh C1n: gate buffer-pool-session-rx-slim test + clippy (acceptor + wz-link-lwip), the slim cfg paths default/reassembly clippy did not cover"
+      ],
+      "verification_bullets": [
+        "slim scxml unchanged codegen (SLOT_COUNT 4 / SLOT_SIZE 256); deploy/mcu_minimal.yaml Layer D validate-deploy OK",
+        "validate T1 new=+0, entries 608 sections 258 unchanged (rationale re-set adds no entry/section)",
+        "full run-ci G=1 Q=1 all required layers pass incl C1n slim test+clippy + Q.4.microbit.slim boot (no regression)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-8-preset-cortex-m0-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "full SCE-DeployConfig expansion of deploy/mcu_minimal.yaml rides the R50 deploy-topology carry (focused profile + scxml are the live SSOT today)",
+        "additive-Cargo-feature 2-profile toggle (default/slim); a 3rd session-rx size profile needs a mutual-exclusion mechanism",
+        "slim reassembly pool (4x4096=16KB doesn't fit nrf51) so microbit Q.4 is frame-only; a slim-reassembly variant would enable M0 reassembly boot",
+        "microbit QEMU 'Timer period zero' SysTick CLKSOURCE note is benign here; investigate if a real M0 deploy needs accurate SysTick",
+        "carried from R311ja: tokio Session<R,T>.actions -> R::ActionsHandle<T> (R311cw); ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
+      ],
+      "publishable_decision_summary": "R311jd review fix: deploy/mcu_minimal.yaml anchors the slim slot_size to declared udp_session.mtu_bytes 256 (was handshake-derived); scxml/§6.8 reconcile preset-cortex-m0-minimal pubsub coherence; C1n gates slim clippy.",
+      "publishable_changes_bullets": [
+        "deploy/mcu_minimal.yaml: focused constrained nrf51 profile declaring udp_session.mtu_bytes 256 + buffer_pools.session_rx_pool {ref: slim}; the deploy-topology anchor wrongly deferred as bloat in s16",
+        "session_rx_pool_mcu_minimal.scxml: re-anchor slot_size derivation handshake-27B -> = declared mtu_bytes 256 (>= MTU, like default 1536 >= 1472); resolves preset pubsub coherence (MTU-bounded, not truncation surprise)",
+        "catalog §6.8 rationale: pubsub MTU-bounded (256B = node MTU) + deploy-anchor note",
+        "run-ci.sh C1n: gate buffer-pool-session-rx-slim test + clippy (acceptor + wz-link-lwip), the slim cfg paths default/reassembly clippy did not cover"
+      ],
+      "publishable_verification_bullets": [
+        "slim scxml unchanged codegen (SLOT_COUNT 4 / SLOT_SIZE 256); deploy/mcu_minimal.yaml Layer D validate-deploy OK",
+        "validate T1 new=+0, entries 608 sections 258 unchanged (rationale re-set adds no entry/section)",
+        "full run-ci G=1 Q=1 all required layers pass incl C1n slim test+clippy + Q.4.microbit.slim boot (no regression)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-8-preset-cortex-m0-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "full SCE-DeployConfig expansion of deploy/mcu_minimal.yaml rides the R50 deploy-topology carry (focused profile + scxml are the live SSOT today)",
+        "additive-Cargo-feature 2-profile toggle (default/slim); a 3rd session-rx size profile needs a mutual-exclusion mechanism",
+        "slim reassembly pool (4x4096=16KB doesn't fit nrf51) so microbit Q.4 is frame-only; a slim-reassembly variant would enable M0 reassembly boot",
+        "microbit QEMU 'Timer period zero' SysTick CLKSOURCE note is benign here; investigate if a real M0 deploy needs accurate SysTick",
         "carried from R311ja: tokio Session<R,T>.actions -> R::ActionsHandle<T> (R311cw); ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
       ]
     },
