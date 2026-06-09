@@ -964,7 +964,9 @@
         "keyexpr-canon cfg-off: callers must pre-canonicalize keyexpr strings (no module access).",
         "7 cluster-deferred features have source behavior but no single cfg anchor (R311 carry).",
         "R311fd: keyexpr-canon foundational/always-on (R311o ungated its types); feature is a no-op marker.",
-        "R311jf: keyexpr-includes implemented + behaviourally tested, no internal consumer yet (exposed)."
+        "R311jf: keyexpr-includes implemented + behaviourally tested, no internal consumer yet (exposed).",
+        "R311jf review: 4 toggles default-on (like alloc); opt out via --no-default-features (MCU).",
+        "AP/tokio forces them on (session-core default edge); full AP strip awaits the tokio-edge DP."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -31756,6 +31758,42 @@
         "keyexpr-includes has no internal consumer yet (exposed + tested); a future routing/aggregation caller wires it (subscriber dedup / queryable completeness).",
         "Preset hygiene follow-up: preset-mcu-minimal/-extended still list keyexpr-includes (now real); consider dropping it from the literal-only minimal presets if strict footprint is wanted (a §6.1/§6.2 contract change).",
         "SCXML sources/algorithms/keyexpr_intersect.scxml + keyexpr_includes.scxml exist but are NOT wired into build.rs; the running matcher is hand-written keyexpr_match.rs, a separate SSOT reconciliation decision (out of scope here)."
+      ]
+    },
+    "Round 311jg": {
+      "decision_summary": "R311jg review-fix: §5.6 caveats disclose keyexpr toggles are default-on; AP/tokio forces them (session-core edge), strip is MCU-path only, full AP strip = deferred tokio-edge DP.",
+      "changes_bullets": [
+        "§5.6 keyexpr: +2 caveats — (1) the 4 toggles ship default-on like alloc, opt out via --no-default-features (MCU path); (2) AP/tokio forces them on via the session-core default edge, full AP strip awaits the tokio-edge DP.",
+        "Catalog-honesty correction: A3 \"active = has a cfg gate\" held, but the section did not disclose that the AP/tokio profile cannot independently exclude the toggles; the caveats close that disclosure gap surfaced in the session self-review."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (13 ledger), T3 warn=4 / T4 info=3 unchanged, entries 610->611, sections 258.",
+        "Catalog/caveat-only change: the R311jf keyexpr cfg gates + the C1o behaviour lane are unchanged; no source/test edit."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "carry_forward_bullets": [
+        "Open: full AP wildcard strip = the tokio->session-core default-features=false DP (large AP feature-graph rewire); the review judged it out of scope on RISK, not merely cost.",
+        "Open: keyexpr_includes_patterns has no internal consumer yet (YAGNI tension) — accept as a framework library primitive, or wire it to a routing/aggregation caller, or remove.",
+        "Open: sources/algorithms/keyexpr_intersect.scxml + keyexpr_includes.scxml are unwired and their v1 exact-uint32-id semantics contradict the hand-written string matcher = code-SSOT reconciliation decision."
+      ],
+      "publishable_decision_summary": "R311jg review-fix: §5.6 caveats disclose keyexpr toggles are default-on; AP/tokio forces them (session-core edge), strip is MCU-path only, full AP strip = deferred tokio-edge DP.",
+      "publishable_changes_bullets": [
+        "§5.6 keyexpr: +2 caveats — (1) the 4 toggles ship default-on like alloc, opt out via --no-default-features (MCU path); (2) AP/tokio forces them on via the session-core default edge, full AP strip awaits the tokio-edge DP.",
+        "Catalog-honesty correction: A3 \"active = has a cfg gate\" held, but the section did not disclose that the AP/tokio profile cannot independently exclude the toggles; the caveats close that disclosure gap surfaced in the session self-review."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (13 ledger), T3 warn=4 / T4 info=3 unchanged, entries 610->611, sections 258.",
+        "Catalog/caveat-only change: the R311jf keyexpr cfg gates + the C1o behaviour lane are unchanged; no source/test edit."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: full AP wildcard strip = the tokio->session-core default-features=false DP (large AP feature-graph rewire); the review judged it out of scope on RISK, not merely cost.",
+        "Open: keyexpr_includes_patterns has no internal consumer yet (YAGNI tension) — accept as a framework library primitive, or wire it to a routing/aggregation caller, or remove.",
+        "Open: sources/algorithms/keyexpr_intersect.scxml + keyexpr_includes.scxml are unwired and their v1 exact-uint32-id semantics contradict the hand-written string matcher = code-SSOT reconciliation decision."
       ]
     },
     "Round 311k": {
