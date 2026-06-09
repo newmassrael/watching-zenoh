@@ -104,6 +104,60 @@ pub fn bind_session_rx(link: &LwipLink, port: u16) -> Result<SessionRxSocket, Li
     SessionRxSocket::bind(link, port)
 }
 
+/// Multicast-session-rx queue depth (`Q`) — from the multicast session-rx
+/// buffer-pool SSOT ([`crate::session_rx_pool_mcu_multicast`], 32 — twice
+/// the unicast pool for the §3.1 multi-peer RxDispatch fan-in).
+pub const SESSION_MULTICAST_RX_SLOTS: usize = crate::session_rx_pool_mcu_multicast::SLOT_COUNT;
+
+/// Multicast-session-rx per-datagram payload cap (`N`) — from the same SSOT
+/// (1536, `>= udp_session.mtu_bytes`, full-MTU untruncated; the multicast
+/// data frame is the same wire shape as the unicast one).
+pub const SESSION_MULTICAST_RX_SLOT_SIZE: usize = crate::session_rx_pool_mcu_multicast::SLOT_SIZE;
+
+/// The multicast-session receive socket, pool-sized from
+/// `session_rx_pool_mcu_multicast`. Distinct from [`SessionRxSocket`] (the
+/// unicast session socket): a node can hold both at once, so they are
+/// separate const-generic instances over separate pool SSOTs.
+pub type SessionMulticastRxSocket =
+    LwipUdpSocket<SESSION_MULTICAST_RX_SLOT_SIZE, SESSION_MULTICAST_RX_SLOTS>;
+
+/// The default zenoh multicast TRANSPORT group, `224.0.0.224`
+/// (`Z_CONFIG_MULTICAST_LOCATOR_DEFAULT` = `udp/224.0.0.224:7446`,
+/// `~/zenoh-pico/include/zenoh-pico/config.h.in:133`). Numerically equal to
+/// [`SCOUT_MULTICAST_GROUP`] because zenoh shares one multicast locator for
+/// scouting AND the multicast transport; kept as a distinct named const so
+/// the transport role is explicit and a deploy can override the group
+/// independently of the scout group. The default port (7446) is the
+/// `bind_session_multicast_rx` caller's argument.
+pub const SESSION_MULTICAST_GROUP_DEFAULT: u32 = SCOUT_MULTICAST_GROUP;
+
+/// Bind the MULTICAST session receive socket on `port` with the multicast
+/// session pool's dims ([`SessionMulticastRxSocket`]) and join the
+/// multicast `group` (default [`SESSION_MULTICAST_GROUP_DEFAULT`],
+/// `224.0.0.224`) so the socket receives the §3.1 multicast transport
+/// datagrams (Join / Frame / Fragment / KeepAlive / Close). The MCU mirror
+/// of the AP `UdpDriver::bind_multicast_v4`; like [`bind_scout_rx`] it folds
+/// bind + IGMP join so the two steps stay consistent, but it carries the
+/// full-MTU data pool (not the small scout pool) and takes the group as a
+/// parameter (the transport locator is deploy-configured). The deploy must
+/// have brought up a `NETIF_FLAG_IGMP` netif before this call.
+///
+/// # Errors
+///
+/// - [`LinkError::BindFailed`] / [`LinkError::PcbExhausted`] from the
+///   underlying `udp_bind`.
+/// - [`LinkError::MulticastJoinFailed`] if the IGMP join fails (no
+///   IGMP-capable netif is up).
+pub fn bind_session_multicast_rx(
+    link: &LwipLink,
+    group: u32,
+    port: u16,
+) -> Result<SessionMulticastRxSocket, LinkError> {
+    let sock = SessionMulticastRxSocket::bind(link, port)?;
+    link.join_multicast_group(group)?;
+    Ok(sock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +178,10 @@ mod tests {
             std::assert_eq!(SESSION_RX_SLOTS, 16);
             std::assert_eq!(SESSION_RX_SLOT_SIZE, 1536);
         }
+        // The multicast session pool is independent of the slim toggle
+        // (always 32 / 1536, twice the unicast Q for multi-peer fan-in).
+        std::assert_eq!(SESSION_MULTICAST_RX_SLOTS, 32);
+        std::assert_eq!(SESSION_MULTICAST_RX_SLOT_SIZE, 1536);
         #[cfg(feature = "buffer-pool-session-rx-slim")]
         {
             std::assert_eq!(SESSION_RX_SLOTS, 4);
@@ -181,6 +239,40 @@ mod tests {
 
         // Symmetric leave succeeds (the group was joined on the loop netif).
         link.leave_multicast_group(SCOUT_MULTICAST_GROUP)
+            .expect("leave 224.0.0.224");
+    }
+
+    /// Round B — the multicast SESSION transport socket: bind
+    /// `bind_session_multicast_rx` (which joins the multicast group), loop a
+    /// full-MTU-shaped data datagram to the group:port, and verify the recv
+    /// callback delivers it into the 32 / 1536 multicast pool. The MCU
+    /// mirror of the AP multicast session socket; exercises the same lwIP
+    /// IGMP accept path as the scout test, but over the larger session-data
+    /// pool. A distinct port (7448) from the scout (7446) / unicast (7447)
+    /// tests; `lwip_test_link` serialises lwIP tests so the group membership
+    /// does not race.
+    #[test]
+    fn session_multicast_rx_loopback_round_trip() {
+        let (_serial, link) = crate::lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7448;
+        let mut sock: SessionMulticastRxSocket = bind_session_multicast_rx(&link, group, port)
+            .expect("bind multicast session rx + join 224.0.0.224");
+
+        // A payload longer than the 256-byte scout slot, to exercise the
+        // full-MTU session pool (1536) the scout pool could not hold.
+        let payload: &[u8] = &[0x5Au8; 600];
+        sock.send_to(group, port, payload)
+            .expect("send_to 224.0.0.224");
+        link.poll_loopback();
+        link.check_timeouts();
+
+        let dg = sock.try_recv().expect("expected one multicast datagram");
+        std::assert_eq!(&dg.data[..], payload);
+        std::assert_eq!(dg.src_port, port);
+        std::assert_eq!(sock.rx_drop_count(), 0);
+
+        link.leave_multicast_group(group)
             .expect("leave 224.0.0.224");
     }
 }

@@ -133,6 +133,29 @@ pub mod session_rx_pool_mcu_minimal {
     include!(concat!(env!("OUT_DIR"), "/session_rx_pool_mcu_minimal.rs"));
 }
 
+/// SCE-codegen'd MCU MULTICAST-session-rx buffer-pool SSOT
+/// (`sources/network/session_rx_pool_mcu_multicast.scxml`, 32 x 1536 ~=
+/// 49 KB) — the dims of the multicast transport receive socket
+/// ([`rx_sockets::SessionMulticastRxSocket`](crate::rx_sockets::SessionMulticastRxSocket)).
+/// A DISTINCT pool from [`session_rx_pool_mcu`] (the unicast session pool):
+/// a node can run a unicast session and a multicast group at once, each
+/// with its own rx-queue, so build.rs always emits this on the real-build
+/// path (independent of the `buffer-pool-session-rx-slim` toggle, which
+/// only selects the unicast profile). 2x the unicast Q for the §3.1
+/// multi-peer RxDispatch fan-in (see the scxml header).
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+pub mod session_rx_pool_mcu_multicast {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/session_rx_pool_mcu_multicast.rs"
+    ));
+}
+
 pub mod rx_sockets;
 
 #[cfg(test)]

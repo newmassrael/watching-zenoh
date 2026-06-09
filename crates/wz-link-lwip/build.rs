@@ -62,4 +62,10 @@ fn main() {
     } else {
         codegen.emit_buffer_pool("session_rx_pool_mcu", &resource_dir, &out_dir);
     }
+
+    // Round B — the multicast session-rx pool is a DISTINCT runtime instance
+    // from the unicast session pool (a node can run both), so it is always
+    // emitted on the real-build path, independent of the slim toggle (which
+    // only selects the unicast session profile).
+    codegen.emit_buffer_pool("session_rx_pool_mcu_multicast", &resource_dir, &out_dir);
 }
