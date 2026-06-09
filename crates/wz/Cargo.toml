@@ -538,20 +538,21 @@ time-ntp64 = []
 time-system-clock = []
 time-timestamp-source = []
 
-# ----- domain: transport (16 atomic, 5 active / 11 reserved) -----
-# R311cb — 5 active features forward to wz-runtime-tokio (TCP/UDP
+# ----- domain: transport (16 atomic, 6 active / 10 reserved) -----
+# R311cb — active features forward to wz-runtime-tokio (TCP/UDP
 # driver, unicast FSM, keepalive worker, INIT batch_size negotiation).
-# 10 reserved features (link-tls/quic/ws/unixsock/vsock/serial,
-# fragmentation, compression, shm, lowlatency) stay declaration-only —
+# The reserved features (link-tls/quic/ws/unixsock/vsock/serial,
+# compression, shm, lowlatency) stay declaration-only —
 # no wz-runtime-tokio counterpart exists yet, and adding a forward to a
 # missing feature would surface as a Cargo resolver error. They land as
-# wire-up cascades as their behavior arrives. `transport-multicast` was
-# the first such cascade: Round C wired it to `wz-runtime-tokio?/
-# transport-multicast` (-> `wz-session-core/session-multicast` + the
-# `multicast_glue` drive loop).
+# wire-up cascades as their behavior arrives. `transport-multicast`
+# (Round C) and `transport-fragmentation` (R311jm — AP TX-side
+# fragmentation + full-duplex `reassembly`; the MCU TX path is deferred,
+# so the `wz-runtime-tokio?/` forward is inert on the lwIP presets) are
+# wired such cascades.
 transport-batching = ["wz-runtime-tokio?/transport-batching", "wz-runtime-lwip?/transport-batching"]
 transport-compression = []
-transport-fragmentation = []
+transport-fragmentation = ["wz-runtime-tokio?/transport-fragmentation"]
 transport-keepalive = ["wz-runtime-tokio?/transport-keepalive", "wz-runtime-lwip?/transport-keepalive"]
 transport-link-quic = []
 transport-link-serial = []

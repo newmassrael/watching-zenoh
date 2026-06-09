@@ -1812,3 +1812,117 @@ mod tests {
         );
     }
 }
+
+/// R311jm — TX-side fragmentation end-to-end: a publisher PUT whose serialized
+/// FRAME exceeds the negotiated `batch_size` (MTU) is split into a
+/// `T_MID_FRAGMENT` chain by the action layer (`dispatch_frame_or_fragment`),
+/// and that chain reassembles — through the same `parse_inbound` +
+/// `ReassemblyDispatcher` the AP drive loop runs — back to the byte-identical
+/// network-message body a single (non-fragmented) PUT produces. The TX
+/// counterpart of `tests/layer3_reassembly_rx.rs` (which proved the RX half),
+/// closing zenoh-pico `_z_transport_tx_send_fragment` parity for the AP push
+/// data plane.
+#[cfg(all(test, feature = "transport-fragmentation", feature = "codec-push"))]
+mod fragment_tx_tests {
+    use super::{parse_inbound, InboundFrame, SessionInitParams};
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_core::reassembly_dispatch::{Fragment, ReassemblyConfig, ReassemblyDispatcher};
+
+    #[test]
+    fn oversize_push_fragments_and_reassembles_to_single_frame_body() {
+        let mtu = 64u16;
+        let keyexpr = "home/sensor/bulk";
+        // 200 bytes: well over the 64-byte MTU, within the MsgPut payload
+        // codec bound (`msg_put.scxml` max-size = 256).
+        let value: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
+
+        // Oversize send: a small negotiated batch_size forces fragmentation of
+        // the ~200-byte PUT.
+        let frag_params = SessionInitParams {
+            batch_size: mtu,
+            ..fixture_session_init_params()
+        };
+        let (actions, driver) = crate::test_fixtures::recording_actions_with_params(frag_params);
+        actions
+            .send_push_literal(keyexpr, &value, /*reliable=*/ true)
+            .expect("send oversize push");
+
+        let n = driver.frame_count();
+        assert!(n > 1, "an oversize PUT must fragment, got {n} frame(s)");
+
+        // Every emitted frame is a FRAGMENT within the MTU; reassemble through
+        // the real RX path and check the SN/M-flag invariants the dispatcher
+        // relies on.
+        let mut reasm: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        let zid: &[u8] = &[0x09; 16];
+        let mut reassembled: Option<Vec<u8>> = None;
+        let mut prev_sn: Option<u64> = None;
+        for i in 0..n {
+            let frame = driver.frame_bytes(i);
+            assert!(
+                frame.len() <= mtu as usize,
+                "fragment {i} is {} bytes, exceeds MTU {mtu}",
+                frame.len()
+            );
+            let InboundFrame::Fragment {
+                reliable,
+                sn,
+                more,
+                payload,
+                ..
+            } = parse_inbound(&frame).expect("parse emitted fragment")
+            else {
+                panic!("emitted frame {i} is not a Fragment");
+            };
+            assert!(reliable, "a reliable PUT keeps the R bit on every fragment");
+            if let Some(p) = prev_sn {
+                assert_eq!(sn, p + 1, "fragment SNs must be consecutive");
+            }
+            prev_sn = Some(sn);
+            assert_eq!(
+                more,
+                i + 1 != n,
+                "M (more) is set on every fragment but the final one",
+            );
+            reasm.ingest(
+                Fragment {
+                    zid,
+                    reliable,
+                    sn,
+                    more: u8::from(more),
+                    payload: &payload,
+                },
+                0,
+                |msg| reassembled = Some(msg.to_vec()),
+            );
+        }
+        let reassembled = reassembled.expect("the fragment chain completes");
+
+        // Reference: the same PUT with the default MTU is a single FRAME; its
+        // body (after the 1-byte header + 1-byte VLE sn=0) is the serialized
+        // Push the fragments must reproduce byte-for-byte.
+        let ref_params = SessionInitParams {
+            batch_size: 0,
+            ..fixture_session_init_params()
+        };
+        let (ref_actions, ref_driver) =
+            crate::test_fixtures::recording_actions_with_params(ref_params);
+        ref_actions
+            .send_push_literal(keyexpr, &value, true)
+            .expect("send reference push");
+        assert_eq!(
+            ref_driver.frame_count(),
+            1,
+            "the default-MTU PUT must be a single frame"
+        );
+        let single = ref_driver.frame_bytes(0);
+        assert_eq!(single[1], 0x00, "fixture initial_sn = 0 -> 1-byte VLE sn");
+        let expected_body = single[2..].to_vec();
+
+        assert_eq!(
+            reassembled, expected_body,
+            "reassembled fragments must reproduce the non-fragmented Push body byte-for-byte",
+        );
+    }
+}

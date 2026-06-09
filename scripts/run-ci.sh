@@ -949,10 +949,19 @@ layer_c1o_keyexpr_gating_behavior() {
 #     routes the bytes payload through the profile-resolving SceBytes<N>
 #     alias so the single --no-std emit also builds on the std runtime).
 # The MCU no_std build of the same module is Layer G.8.
+#
+# R311jm: the same lane also runs `--features transport-fragmentation` —
+# the TX-side fragmentation half (an oversize FRAME splits into a
+# `T_MID_FRAGMENT` chain). transport-fragmentation pulls `reassembly`
+# (full-duplex), so these runs cover both `frame_encode::fragment_*` (the
+# wire split + parse round-trip) and the `send_push_literal`
+# fragment-and-reassemble e2e (session_glue `fragment_tx_tests`).
 layer_c1l_reassembly() {
     (cd crates \
         && cargo test -p wz-session-core --features reassembly --quiet \
-        && cargo test -p wz-runtime-tokio --features reassembly --quiet)
+        && cargo test -p wz-runtime-tokio --features reassembly --quiet \
+        && cargo test -p wz-session-core --features transport-fragmentation --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-fragmentation --quiet)
 }
 
 # ─── Layer C1p — multicast session FSM + dispatcher (Round A) ────────

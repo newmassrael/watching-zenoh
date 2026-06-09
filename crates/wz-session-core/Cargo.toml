@@ -94,6 +94,18 @@ alloc = ["wz-codecs/alloc"]
 # `inbound` module is simply not compiled there).
 reassembly = ["dep:sce-rust-runtime", "codec-frame"]
 
+# transport-fragmentation (R311jm) — TX-side fragmentation: the action
+# layer splits an oversize FRAME into a `T_MID_FRAGMENT` chain
+# (`frame_encode::fragment_body`, gated here). Pulls `codec-fragment` so
+# each fragment body is the byte-verified `wz_codecs::fragment` codec
+# (the SSOT `layer3_fragment.rs` checks against zenoh-pico
+# `_z_fragment_encode`), and `reassembly` so enabling fragmentation also
+# enables the symmetric RX path (full-duplex, mirroring zenoh-pico's
+# single `Z_FEATURE_FRAGMENTATION`); `alloc` for the `Vec<Vec<u8>>`
+# fragment buffers — the TX path is the AP/alloc profile, MCU TX
+# fragmentation is a follow-up.
+transport-fragmentation = ["reassembly", "codec-fragment", "alloc"]
+
 # MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
 # build (heapless, no http-send / scripting — those are std-coupled and
 # mutually exclusive with no_std, enforced by a compile_error! in
@@ -133,6 +145,11 @@ no_std = ["sce-rust-runtime?/no_std", "dep:portable-atomic"]
 # is cfg(all(codec-frame, codec-response-final)), matching the R311e/g
 # decision to keep the body codec independently selectable.
 codec-frame = ["wz-codecs/codec-frame"]
+# codec-fragment forwards the wz-codecs `fragment` body codec (VLE sn +
+# tail payload). The TX fragmentation path (`transport-fragmentation`)
+# emits each fragment body through it so production shares the SSOT
+# `layer3_fragment.rs` byte-verifies against zenoh-pico.
+codec-fragment = ["wz-codecs/codec-fragment"]
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]

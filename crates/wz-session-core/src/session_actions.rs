@@ -772,6 +772,90 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Transport-framing chokepoint for every outbound network message: send
+    /// the already-encoded single `T_MID_FRAME` `wire` (sequence number `sn`)
+    /// as-is when it fits the link MTU, else re-frame its network-message body
+    /// as a `T_MID_FRAGMENT` chain. zenoh-pico `_z_transport_tx_send_n_msg`
+    /// parity (encode the frame, fall back to fragmentation on MTU overflow).
+    /// Routing every `send_*` through one method keeps the fragment decision
+    /// in a single place — declare / request / interest adopt it by the same
+    /// one-line substitution the push / response senders use.
+    ///
+    /// Compiled iff a network-message sender routes through it. This is the
+    /// wire-emit feature union (cf. the `Reliability` import) MINUS the three
+    /// handshake-only codecs (codec-init/open/close): INIT/OPEN/CLOSE carry no
+    /// frame sequence number and are never fragmented, so they keep their own
+    /// direct emit. Keep in sync with the routed `send_*` methods — every
+    /// `encode_frame_with_*` (push / response / response-final / request /
+    /// declare / interest) emit dispatches here.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-final",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn dispatch_frame_or_fragment(&self, wire: Vec<u8>, sn: u64, reliable: bool) {
+        let reliability = if reliable {
+            Reliability::Reliable
+        } else {
+            Reliability::BestEffort
+        };
+        #[cfg(feature = "transport-fragmentation")]
+        {
+            // Outbound MTU = the negotiated session `batch_size`, or a
+            // 65535-byte ceiling when unset (`0`). v1 fragments to the *local*
+            // advertised batch size; honoring the peer's advertised batch_size
+            // (the negotiated minimum) is a follow-up — the local value is a
+            // safe ceiling since the receiver reassembles up to its own slot
+            // capacity regardless of fragment size. (UDP's 65507-byte datagram
+            // cap is below the 65535 default, so a UDP deployment expecting
+            // >64 KB payloads must configure `batch_size <= 65507`.)
+            // zenoh's default batch / the u16 ceiling, used when batch_size is
+            // unset (0) so an unconfigured session never fragments.
+            const UNSET_BATCH_MTU: usize = 65_535;
+            let mtu = match self.params.batch_size {
+                0 => UNSET_BATCH_MTU,
+                n => n as usize,
+            };
+            if wire.len() > mtu {
+                // The FRAME body (the serialized network message) is the tail
+                // after the 1-byte header + `VLE(sn)`; slice it rather than
+                // re-encoding the message (`vle_len` = base-128 width of `sn`).
+                // The discarded oversize FRAME consumed `sn`; the fragment
+                // chain draws a fresh contiguous SN block via a single atomic
+                // fetch-add, so the chunk SNs stay consecutive even if a
+                // concurrent reply mints outbound SNs (the reassembly
+                // dispatcher aborts a non-consecutive chain). The one skipped
+                // SN never reaches the wire and is harmless to the peer.
+                let vle_len = {
+                    let (mut width, mut v) = (1usize, sn);
+                    while v >= 0x80 {
+                        v >>= 7;
+                        width += 1;
+                    }
+                    width
+                };
+                let body = &wire[1 + vle_len..];
+                let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
+                let base = self.outbound_frame_sn.fetch_add(count, Ordering::SeqCst);
+                for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base) {
+                    self.link_driver().send_blocking(&frag, reliability);
+                }
+                return;
+            }
+        }
+        #[cfg(not(feature = "transport-fragmentation"))]
+        let _ = sn;
+        self.link_driver().send_blocking(&wire, reliability);
+    }
+
     /// R239 — outbound `Request.request_id` generator. Returns the
     /// next rid and advances the internal counter by one. Mirrors
     /// zenoh-pico's `_z_unsafe_register_pending_query`
@@ -889,12 +973,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_literal(keyexpr_suffix, value)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -952,8 +1031,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_declare_kexpr(mapping_id, suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             // R234 — record the (mapping_id, suffix) pair in the
             // outbound table so later `publish_aliased_auto` calls
             // can resolve the literal without caller assertion.
@@ -998,12 +1076,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_aliased(mapping_id, suffix, value)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1031,12 +1104,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_del_literal(keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1064,12 +1132,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_del_aliased(mapping_id, suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1098,12 +1161,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_literal_with_meta(keyexpr_suffix, value, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1127,12 +1185,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1158,12 +1211,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_del_literal_with_meta(keyexpr_suffix, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1187,12 +1235,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
-            let reliability = if reliable {
-                Reliability::Reliable
-            } else {
-                Reliability::BestEffort
-            };
-            self.link_driver().send_blocking(&wire, reliability);
+            self.dispatch_frame_or_fragment(wire, sn, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1245,8 +1288,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-subscriber"))]
@@ -1294,8 +1336,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-queryable"))]
@@ -1338,8 +1379,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-token"))]
@@ -1368,8 +1408,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare(&self, declare: DeclareOwned) {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.link_driver()
-            .send_blocking(&wire, Reliability::Reliable);
+        self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
@@ -1397,8 +1436,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_kexpr(mapping_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             // R234 — drop the (mapping_id, suffix) pair so subsequent
             // `publish_aliased_auto` calls return `None` on this id and
             // the caller knows the alias is stale. Idempotent: removing
@@ -1545,8 +1583,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_subscriber(subscriber_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
         }
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
         let _ = subscriber_id;
@@ -1567,8 +1604,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_queryable(queryable_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
         }
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
         let _ = queryable_id;
@@ -1590,8 +1626,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_undeclare_token(token_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
         }
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = token_id;
@@ -1616,8 +1651,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare = build_declare_final();
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
         }
     }
 
@@ -1691,8 +1725,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             )?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -1733,8 +1766,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 build_interest_liveliness_get(interest_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -1772,8 +1804,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let interest = build_interest_final(interest_id);
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
         }
         #[cfg(not(feature = "declare-interest"))]
         let _ = interest_id;
@@ -1815,8 +1846,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -1899,8 +1929,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let request = builder.build()?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -1940,8 +1969,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let sn = self.next_outbound_frame_sn();
             let wire =
                 encode_frame_with_response_final(sn, response_final, /*reliable=*/ true);
-            self.link_driver()
-                .send_blocking(&wire, Reliability::Reliable);
+            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
         }
         #[cfg(not(feature = "codec-response-final"))]
         let _ = request_id;
@@ -1982,8 +2010,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_response(&self, response: ResponseOwned) {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_response(sn, response, /*reliable=*/ true);
-        self.link_driver()
-            .send_blocking(&wire, Reliability::Reliable);
+        self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
     }
 
     /// R284 — encode + dispatch a session-layer `Close` frame

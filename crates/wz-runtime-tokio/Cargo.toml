@@ -254,6 +254,11 @@ codec-frame = ["wz-codecs/codec-frame", "wz-session-core/codec-frame"]
 # default; the AP host wires the dispatcher into `drive_session_until_terminal`
 # and the `InboundFrame::Fragment` parse arm only under this feature.
 reassembly = ["wz-session-core/reassembly", "codec-frame"]
+
+# transport-fragmentation (R311jm) — forwards the session-core TX
+# fragmentation gate + the runtime `reassembly` RX wiring so the AP
+# profile fragments + reassembles full-duplex.
+transport-fragmentation = ["wz-session-core/transport-fragmentation", "reassembly"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +

@@ -577,7 +577,10 @@
         "transport-link-tls forwards transport-link-tcp via Cargo imply but has no source cfg yet (reserved).",
         "Wire-level KeepAlive parse governed by codec-keep-alive (separate from transport-keepalive worker).",
         "Round C: transport-multicast reserved->active (R311ji); gates multicast_glue drive loop.",
-        "transport-multicast -> session-multicast + codec-join; handshake-free JOIN beacon transport."
+        "transport-multicast -> session-multicast + codec-join; handshake-free JOIN beacon transport.",
+        "R311jm: transport-fragmentation reserved->active; gates the TX-side FRAME fragment split.",
+        "transport-fragmentation -> reassembly (full-duplex); AP/tokio TX only, MCU TX deferred.",
+        "Fragments to local batch_size MTU; negotiated-min + MsgPut 256B cap raise are follow-ups."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32052,6 +32055,130 @@
         "Multicast cluster A-H pushed origin/main=340b591; 6 commits 9625953..340b591. Tool: CLI is R422, store schema v11, MCP store tools dead on v11 - use CLI."
       ]
     },
+    "Round 311jm": {
+      "decision_summary": "R311jm: TX fragmentation - push/response split an oversize FRAME into a T_MID_FRAGMENT chain (dispatch_frame_or_fragment); transport-fragmentation reserved->active, AP full-duplex.",
+      "changes_bullets": [
+        "frame_encode::fragment_body/fragment_count: inline VLE+R/M T_MID_FRAGMENT TX wire (frag gated).",
+        "SessionLinkActions::dispatch_frame_or_fragment chokepoint: fits MTU->1 FRAME, else fragment chain.",
+        "Oversize path slices the encoded body, reserves a contiguous SN block (atomic), emits fragments.",
+        "8 push senders + send_response routed through the chokepoint (codec-push/codec-response gated).",
+        "Features: session-core frag=[reassembly,alloc]; tokio forwards +reassembly; facade tokio?-inert.",
+        "inventory transport-fragmentation reserved->active; +3 transport-section TX caveats.",
+        "Tests: frame_encode fragment_tests x3 + session_glue fragment_tx_tests e2e; CI C1l +frag lane."
+      ],
+      "verification_bullets": [
+        "Full host run-ci exit 0 (Layer 0..E2; C1l reassembly+transport-fragmentation; C4 preset matrix).",
+        "fragment_tx e2e: send_push 200B @ batch_size 64 -> fragment chain -> reassembles to 1-frame body.",
+        "clippy -D warnings clean frag ON+OFF; handshake-only subsets (C1j/C4b/C4c/C1m) build via gating.",
+        "validate_workspace: orphan new=+0, T3 warn=4 unchanged, entries 616 sections 258."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "A3 batching next (collect N msgs->1 frame); A4 auto-reconnect; then A1 multicast DATA plane.",
+        "Frag follow-ups: MCU TX path; negotiated-min MTU; raise MsgPut 256B payload cap for >64KB.",
+        "declare/request/interest can adopt dispatch_frame_or_fragment (1-line each) when a sender needs it."
+      ],
+      "publishable_decision_summary": "R311jm: TX fragmentation - push/response split an oversize FRAME into a T_MID_FRAGMENT chain (dispatch_frame_or_fragment); transport-fragmentation reserved->active, AP full-duplex.",
+      "publishable_changes_bullets": [
+        "frame_encode::fragment_body/fragment_count: inline VLE+R/M T_MID_FRAGMENT TX wire (frag gated).",
+        "SessionLinkActions::dispatch_frame_or_fragment chokepoint: fits MTU->1 FRAME, else fragment chain.",
+        "Oversize path slices the encoded body, reserves a contiguous SN block (atomic), emits fragments.",
+        "8 push senders + send_response routed through the chokepoint (codec-push/codec-response gated).",
+        "Features: session-core frag=[reassembly,alloc]; tokio forwards +reassembly; facade tokio?-inert.",
+        "inventory transport-fragmentation reserved->active; +3 transport-section TX caveats.",
+        "Tests: frame_encode fragment_tests x3 + session_glue fragment_tx_tests e2e; CI C1l +frag lane."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci exit 0 (Layer 0..E2; C1l reassembly+transport-fragmentation; C4 preset matrix).",
+        "fragment_tx e2e: send_push 200B @ batch_size 64 -> fragment chain -> reassembles to 1-frame body.",
+        "clippy -D warnings clean frag ON+OFF; handshake-only subsets (C1j/C4b/C4c/C1m) build via gating.",
+        "validate_workspace: orphan new=+0, T3 warn=4 unchanged, entries 616 sections 258."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A3 batching next (collect N msgs->1 frame); A4 auto-reconnect; then A1 multicast DATA plane.",
+        "Frag follow-ups: MCU TX path; negotiated-min MTU; raise MsgPut 256B payload cap for >64KB.",
+        "declare/request/interest can adopt dispatch_frame_or_fragment (1-line each) when a sender needs it."
+      ]
+    },
+    "Round 311jn": {
+      "decision_summary": "R311jn: review refinement - fragment body via the wz_codecs::fragment codec (byte-verified vs zenoh-pico) not hand-rolled VLE; transport-fragmentation +codec-fragment; 65535->named const.",
+      "changes_bullets": [
+        "build_fragment_wire body via wz_codecs::fragment::Fragment::encode; was hand-rolled inline VLE.",
+        "Bytes unchanged - the codec emits the same VLE(sn)+payload; production now shares the SSOT.",
+        "transport-fragmentation +codec-fragment (session-core forward); 65535 MTU default -> named const."
+      ],
+      "verification_bullets": [
+        "Full host run-ci exit 0 (feature-graph change rebuilt presets + C1h/C1j/C4b subset matrices).",
+        "fragment_tests + fragment_tx e2e green; clippy -D warnings clean frag ON+OFF.",
+        "SSOT chain closed: TX body == fragment codec == zenoh-pico _z_fragment_encode (layer3_fragment)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Open: route declare/request/interest through the chokepoint (uniform) vs push/response-only.",
+        "A3 batching / A4 reconnect / multicast DATA-plane roadmap stands (see R311jm carry)."
+      ],
+      "publishable_decision_summary": "R311jn: review refinement - fragment body via the wz_codecs::fragment codec (byte-verified vs zenoh-pico) not hand-rolled VLE; transport-fragmentation +codec-fragment; 65535->named const.",
+      "publishable_changes_bullets": [
+        "build_fragment_wire body via wz_codecs::fragment::Fragment::encode; was hand-rolled inline VLE.",
+        "Bytes unchanged - the codec emits the same VLE(sn)+payload; production now shares the SSOT.",
+        "transport-fragmentation +codec-fragment (session-core forward); 65535 MTU default -> named const."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci exit 0 (feature-graph change rebuilt presets + C1h/C1j/C4b subset matrices).",
+        "fragment_tests + fragment_tx e2e green; clippy -D warnings clean frag ON+OFF.",
+        "SSOT chain closed: TX body == fragment codec == zenoh-pico _z_fragment_encode (layer3_fragment)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: route declare/request/interest through the chokepoint (uniform) vs push/response-only.",
+        "A3 batching / A4 reconnect / multicast DATA-plane roadmap stands (see R311jm carry)."
+      ]
+    },
+    "Round 311jo": {
+      "decision_summary": "R311jo: all network-message senders (push/response/request/declare/interest/response-final) route through dispatch_frame_or_fragment - one framing chokepoint; handshake stays direct (no frame SN).",
+      "changes_bullets": [
+        "Routed declare/request/interest/response-final/undeclare sends through dispatch_frame_or_fragment.",
+        "dispatch gate widened to the network-message-sender union (wire-emit minus handshake codecs).",
+        "Handshake INIT/OPEN/CLOSE stay direct - no frame SN, never fragmented."
+      ],
+      "verification_bullets": [
+        "Full host run-ci exit 0; 9 per-plane subsets + declare+frag build; clippy -D warnings clean.",
+        "Wire bytes unchanged (frag OFF default -> dispatch = plain send, reliable=true preserved)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Resolves the R311jn uniform-chokepoint open item; A3 batching next.",
+        "A4 reconnect / multicast DATA-plane roadmap stands (R311jm carry)."
+      ],
+      "publishable_decision_summary": "R311jo: all network-message senders (push/response/request/declare/interest/response-final) route through dispatch_frame_or_fragment - one framing chokepoint; handshake stays direct (no frame SN).",
+      "publishable_changes_bullets": [
+        "Routed declare/request/interest/response-final/undeclare sends through dispatch_frame_or_fragment.",
+        "dispatch gate widened to the network-message-sender union (wire-emit minus handshake codecs).",
+        "Handshake INIT/OPEN/CLOSE stay direct - no frame SN, never fragmented."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci exit 0; 9 per-plane subsets + declare+frag build; clippy -D warnings clean.",
+        "Wire bytes unchanged (frag OFF default -> dispatch = plain send, reliable=true preserved)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Resolves the R311jn uniform-chokepoint open item; A3 batching next.",
+        "A4 reconnect / multicast DATA-plane roadmap stands (R311jm carry)."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
@@ -38348,7 +38475,7 @@
       "reason": "F=est lz4/zstd wrap; P=zenoh ext compression; C=opt-in per-message, OQ-W4 carry"
     },
     "transport-fragmentation": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "sources/codecs/frame.scxml + fragment.scxml",
       "reason": "F=measured wz codec pair; P=zenoh fragment/reassembly; C=can disable for transport-lowlatency"

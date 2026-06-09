@@ -255,6 +255,100 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
     })
 }
 
+// ── transport fragmentation (transport-fragmentation gated) ───────────────
+// zenoh-pico `_z_transport_tx_send_fragment` parity
+// (`src/transport/common/tx.c`): when a serialized network-message body does
+// not fit the link MTU, split it into `T_MID_FRAGMENT` chunks — M (more) set
+// on every chunk but the last, R (reliable) per the channel — each consuming
+// one outbound frame SN. The fragment wire body is `VLE(sn) + tail payload`
+// (the R/M/Z flags live in the 1-byte header, not the body); it is inlined
+// here for the same reason `encode_frame_envelope` inlines the FRAME
+// `VLE(sn)` — it IS the wire format, and the decode side (`inbound.rs`
+// `T_MID_FRAGMENT` arm) inlines the symmetric `VLE(sn) + tail` parse. The
+// reassembly dispatcher requires the chunk SNs to be consecutive (it aborts a
+// chain on `fragment.ooo`), so the caller draws the SN block atomically.
+
+/// Conservative per-fragment header budget: 1 flags byte + the maximum u64
+/// VLE width (10). Sizing chunks against the *maximum* SN width (rather than
+/// each fragment's actual SN width) makes the fragment count computable
+/// *before* the SN block is reserved, and guarantees every emitted fragment is
+/// `<= mtu` whatever its SN. The few unused payload bytes per fragment are
+/// negligible against a multi-KB body.
+#[cfg(feature = "transport-fragmentation")]
+const FRAG_HEADER_BUDGET: usize = 1 + 10;
+
+/// Per-fragment payload capacity at this `mtu`. Floored at 1 so a pathological
+/// `mtu <= FRAG_HEADER_BUDGET` still terminates (one body byte per fragment)
+/// rather than dividing by zero; production `mtu` is the negotiated batch size,
+/// far above the header budget.
+#[cfg(feature = "transport-fragmentation")]
+fn fragment_chunk_size(mtu: usize) -> usize {
+    mtu.saturating_sub(FRAG_HEADER_BUDGET).max(1)
+}
+
+/// Number of `T_MID_FRAGMENT` frames a `body_len`-byte network message splits
+/// into at this `mtu`. The caller reserves exactly this many consecutive SNs
+/// before calling [`fragment_body`].
+#[cfg(feature = "transport-fragmentation")]
+pub(crate) fn fragment_count(body_len: usize, mtu: usize) -> usize {
+    let chunk = fragment_chunk_size(mtu);
+    // ceil(body_len / chunk), min 1 (an empty body still emits one final
+    // fragment — though the oversize precondition means body is never empty).
+    body_len.div_ceil(chunk).max(1)
+}
+
+/// Split a serialized network-message `body` into the `T_MID_FRAGMENT` wire
+/// frames, SNs drawn from the contiguous block `base_sn ..= base_sn + N - 1`
+/// (where `N == fragment_count(body.len(), mtu)`). Every fragment but the last
+/// carries the M (more) flag; R (reliable) is set per `reliable`. zenoh-pico
+/// `_z_transport_tx_send_fragment_inner` parity.
+#[cfg(feature = "transport-fragmentation")]
+pub fn fragment_body(body: &[u8], reliable: bool, mtu: usize, base_sn: u64) -> Vec<Vec<u8>> {
+    let chunk = fragment_chunk_size(mtu);
+    let mut out = Vec::with_capacity(fragment_count(body.len(), mtu));
+    let mut off = 0usize;
+    let mut sn = base_sn;
+    loop {
+        let end = core::cmp::min(off + chunk, body.len());
+        let more = end < body.len();
+        out.push(build_fragment_wire(sn, &body[off..end], reliable, more));
+        off = end;
+        if !more {
+            break;
+        }
+        sn = sn.wrapping_add(1);
+    }
+    out
+}
+
+/// Encode one `T_MID_FRAGMENT` wire frame: a `[flags | T_MID_FRAGMENT]`
+/// transport-message header byte (R/M ride the header) followed by the
+/// `wz_codecs::fragment` codec body (`VLE(sn) + tail payload`). The body is
+/// the byte-verified SSOT — `layer3_fragment.rs` checks `Fragment::encode`
+/// against zenoh-pico `_z_fragment_encode`, and `inbound.rs` decodes the
+/// symmetric shape — so production TX shares it rather than re-deriving the
+/// VLE wire. Mirrors zenoh-pico, where `_z_transport_message_encode` writes the
+/// header and the fragment codec writes the body.
+#[cfg(feature = "transport-fragmentation")]
+fn build_fragment_wire(sn: u64, payload: &[u8], reliable: bool, more: bool) -> Vec<u8> {
+    let mut flags = 0u8;
+    if reliable {
+        flags |= wire_const::FLAG_T_FRAGMENT_R;
+    }
+    if more {
+        flags |= wire_const::FLAG_T_FRAGMENT_M;
+    }
+    let mut wire = Vec::with_capacity(FRAG_HEADER_BUDGET + payload.len());
+    wire.push(flags | wire_const::T_MID_FRAGMENT);
+    {
+        let mut sink = VecSink::new(&mut wire);
+        wz_codecs::fragment::Fragment { sn, payload }
+            .encode(&mut sink)
+            .expect("VecSink is infallible");
+    }
+    wire
+}
+
 // Each frame test builds a payload via a sibling codec builder, so the
 // whole module gates on the union of those codecs (the ungated
 // encode_frame_with_interest path has its coverage in the layer3 interop
@@ -522,5 +616,95 @@ mod tests {
             wire_const::T_MID_FRAME,
             "best-effort Frame must omit FLAG_T_FRAME_R",
         );
+    }
+}
+
+#[cfg(all(test, feature = "transport-fragmentation"))]
+mod fragment_tests {
+    use super::{fragment_body, fragment_count};
+    use crate::inbound::{parse_inbound, InboundFrame};
+    use alloc::vec::Vec;
+    use wz_codecs::wire_const;
+
+    /// `fragment_count` ceils the body over `mtu - FRAG_HEADER_BUDGET`
+    /// (1 header byte + the 10-byte max-VLE SN budget = 11), so the count is
+    /// known before the SN block is reserved.
+    #[test]
+    fn fragment_count_ceils_body_over_chunk_capacity() {
+        // mtu 64 -> chunk = 64 - 11 = 53.
+        assert_eq!(fragment_count(53, 64), 1, "one full chunk = one fragment");
+        assert_eq!(fragment_count(54, 64), 2, "one byte over = two fragments");
+        assert_eq!(fragment_count(200, 64), 4, "ceil(200 / 53) = 4");
+    }
+
+    /// A >MTU body fragments into `T_MID_FRAGMENT` frames that each fit the
+    /// MTU, carry consecutive SNs from the base, set M (more) on every
+    /// fragment but the last and R per the channel, and whose payloads
+    /// concatenate back to the original body — verified through the real
+    /// `parse_inbound` decode, not a hand-rolled split.
+    #[test]
+    fn fragment_body_round_trips_through_parse_inbound() {
+        let body: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
+        let mtu = 64usize;
+        let base_sn = 7u64;
+
+        let frames = fragment_body(&body, /*reliable=*/ true, mtu, base_sn);
+        assert_eq!(frames.len(), fragment_count(body.len(), mtu));
+        assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
+
+        let mut reassembled = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(
+                frame.len() <= mtu,
+                "fragment {i} is {} bytes, exceeds mtu {mtu}",
+                frame.len()
+            );
+            assert_eq!(
+                frame[0] & 0x1f,
+                wire_const::T_MID_FRAGMENT,
+                "fragment {i} header MID must be T_MID_FRAGMENT",
+            );
+            let InboundFrame::Fragment {
+                reliable,
+                sn,
+                more,
+                payload,
+                ..
+            } = parse_inbound(frame).expect("parse fragment")
+            else {
+                panic!("frame {i} did not decode as a Fragment");
+            };
+            assert!(reliable, "R flag must be set on a reliable chain");
+            assert_eq!(
+                sn,
+                base_sn + i as u64,
+                "fragment SNs must be consecutive from the base",
+            );
+            let is_last = i + 1 == frames.len();
+            assert_eq!(
+                more, !is_last,
+                "M (more) is set on every fragment but the last"
+            );
+            reassembled.extend_from_slice(&payload);
+        }
+        assert_eq!(
+            reassembled, body,
+            "fragment payloads must concatenate back to the original body",
+        );
+    }
+
+    /// A best-effort chain clears the R bit on every fragment.
+    #[test]
+    fn fragment_body_best_effort_clears_r_flag() {
+        let body = alloc::vec![0xABu8; 120];
+        let frames = fragment_body(&body, /*reliable=*/ false, 64, 0);
+        assert!(frames.len() > 1, "120 bytes at mtu 64 must fragment");
+        for frame in &frames {
+            assert_eq!(
+                frame[0] & wire_const::FLAG_T_FRAGMENT_R,
+                0,
+                "best-effort fragment must clear the R bit",
+            );
+        }
     }
 }
