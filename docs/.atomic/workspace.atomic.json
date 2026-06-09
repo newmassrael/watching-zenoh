@@ -3833,6 +3833,10 @@
         "Expired: emit peer-lost event; PeerTable removes at next sweep",
         "Rejection: version/max_sessions/SN-res/QoS mismatch → ignored + diag (not a transition)"
       ],
+      "caveats_bullets": [
+        "Impl: multicast_peer FSM adds a Free pool-slot sentinel, like reassembly_slot Empty (R311jh).",
+        "A validated Join drives Discovered->Active together; Discovered is the init-rx-seq transient."
+      ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
         "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
@@ -31904,6 +31908,48 @@
         "Round D: Layer M real-socket multicast e2e (two peers over bind_multicast_v4 loopback; one emits JOIN, the other admits it) + the 3.4 client-whatami-refuses-multicast deploy guard + final caveats.",
         "Deferred: Frame/KeepAlive/Close RX attribution needs a source-address-carrying driver (UdpDriver recv drops _src); graceful multicast.stop needs a shutdown signal threaded into the select loop.",
         "Deferred: own-zid self-JOIN filter (multicast loopback echoes our own JOIN; ingest_join currently admits it as a self-peer); richer JOIN options (sn_res/batch_size negotiation) for full zenoh interop; data-plane next_sn tracking once multicast Frame TX lands."
+      ]
+    },
+    "Round 311jj": {
+      "decision_summary": "R311jj review fixes: own-zid self-JOIN filter; JOIN decode s-flag uses FLAG_T_JOIN_S (was unused/wrong bit); §3.2 caveats for Free pool-slot + Discovered-transient.",
+      "changes_bullets": [
+        "wz-runtime-tokio multicast_glue: the drive loop now filters our own zid before ingest_join - a node is not its own peer (multicast loopback echoes our JOIN beacon back); +test drive_loop_filters_own_join_echo.",
+        "decode_join_zid: the JOIN s-flag projection was `header >> 5` which reads bit 5 (_Z_FLAG_T_JOIN_T timestamp), not the S flag at bit 6; corrected to `header & FLAG_T_JOIN_S` (zenoh-pico transport.h:61), resolving the unused FLAG_T_JOIN_S constant (YAGNI). Harmless for zid (decoded before the s-gated fields) but wrong for a full-JOIN decode; +test decode_join_with_s_flag_extracts_zid.",
+        "session-fsm §3.2: 2 caveats - the multicast_peer FSM's Free pool-slot sentinel state (SSOT parity with reassembly §2.2's Empty) + the Discovered->Active collapse (a validated Join is a member, Discovered is the init-rx-seq transient)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 6 tests pass (4 prior + own-zid filter + s-flag decode).",
+        "Full host run-ci all required layers pass (exit 0); cargo fmt clean.",
+        "CLI validate-workspace healthy on schema v11; ALL MCP store tools (mutate + validate) are dead on v11 (server stale, expects <=9), so the §3.2 caveats were added via the CLI add-section-caveat."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Review-surfaced, USER DECISION: SessionBinding/PeerBinding (multicast_dispatch) carry dead write-only counter fields - unreadable (SCE buries the binding behind the private Policy.actions) + unused (tests observe via FSM state). YAGNI says drop them (zero-field no-op bindings); alternative = an SCE enhancement to expose Policy.actions so the counters become readable. Same smell exists in reassembly's SlotBinding.",
+        "Tracked north-star incompleteness (R311ji carry): the multicast RxDispatch is JOIN-only because UdpDriver drops the datagram source addr (RxFrame has no src); Frame/KeepAlive/Close peer attribution needs a src-addr-carrying RxFrame (a cross-cutting driver change). This is the main 'not yet complete' item for full multicast transport.",
+        "Tracked: graceful multicast.stop (shutdown signal into the select loop); slim multicast buffer pool (M0 variant); richer JOIN options (sn_res/batch_size negotiation for zenoh interop); Layer M real-socket e2e + §3.4 client-refuses (Round D)."
+      ],
+      "publishable_decision_summary": "R311jj review fixes: own-zid self-JOIN filter; JOIN decode s-flag uses FLAG_T_JOIN_S (was unused/wrong bit); §3.2 caveats for Free pool-slot + Discovered-transient.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio multicast_glue: the drive loop now filters our own zid before ingest_join - a node is not its own peer (multicast loopback echoes our JOIN beacon back); +test drive_loop_filters_own_join_echo.",
+        "decode_join_zid: the JOIN s-flag projection was `header >> 5` which reads bit 5 (_Z_FLAG_T_JOIN_T timestamp), not the S flag at bit 6; corrected to `header & FLAG_T_JOIN_S` (zenoh-pico transport.h:61), resolving the unused FLAG_T_JOIN_S constant (YAGNI). Harmless for zid (decoded before the s-gated fields) but wrong for a full-JOIN decode; +test decode_join_with_s_flag_extracts_zid.",
+        "session-fsm §3.2: 2 caveats - the multicast_peer FSM's Free pool-slot sentinel state (SSOT parity with reassembly §2.2's Empty) + the Discovered->Active collapse (a validated Join is a member, Discovered is the init-rx-seq transient)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 6 tests pass (4 prior + own-zid filter + s-flag decode).",
+        "Full host run-ci all required layers pass (exit 0); cargo fmt clean.",
+        "CLI validate-workspace healthy on schema v11; ALL MCP store tools (mutate + validate) are dead on v11 (server stale, expects <=9), so the §3.2 caveats were added via the CLI add-section-caveat."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Review-surfaced, USER DECISION: SessionBinding/PeerBinding (multicast_dispatch) carry dead write-only counter fields - unreadable (SCE buries the binding behind the private Policy.actions) + unused (tests observe via FSM state). YAGNI says drop them (zero-field no-op bindings); alternative = an SCE enhancement to expose Policy.actions so the counters become readable. Same smell exists in reassembly's SlotBinding.",
+        "Tracked north-star incompleteness (R311ji carry): the multicast RxDispatch is JOIN-only because UdpDriver drops the datagram source addr (RxFrame has no src); Frame/KeepAlive/Close peer attribution needs a src-addr-carrying RxFrame (a cross-cutting driver change). This is the main 'not yet complete' item for full multicast transport.",
+        "Tracked: graceful multicast.stop (shutdown signal into the select loop); slim multicast buffer pool (M0 variant); richer JOIN options (sn_res/batch_size negotiation for zenoh interop); Layer M real-socket e2e + §3.4 client-refuses (Round D)."
       ]
     },
     "Round 311k": {

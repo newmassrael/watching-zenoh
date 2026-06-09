@@ -100,11 +100,14 @@ pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
     if header & 0x1f != wire_const::T_MID_JOIN {
         return None;
     }
-    // High bits carry the JOIN flags; the `S` flag (size-params present)
-    // maps to the codec's `s & 0x01`. A minimal JOIN clears them, so `s`
-    // is 0 here, but extract it from the header so a future richer JOIN
-    // decodes too.
-    let s = header >> 5;
+    // The `join` codec gates its optional sn_res / batch_size on `s & 0x01`,
+    // so project the wire S flag (header bit 6, `FLAG_T_JOIN_S` = 0x40, per
+    // zenoh-pico transport.h:61) to that bit. A minimal JOIN clears S so
+    // `s` is 0, but project from the named flag (not a raw shift) so a
+    // future richer JOIN decodes correctly — header bit 5 is the distinct
+    // `_Z_FLAG_T_JOIN_T` timestamp flag, NOT S, so a `header >> 5` shift
+    // would read the wrong bit.
+    let s = u8::from(header & wire_const::FLAG_T_JOIN_S != 0);
     let mut cursor = SceCursor::new(&bytes[1..]);
     match Join::decode(&mut cursor, s) {
         Ok(join) => Some(join.zid),
@@ -180,12 +183,14 @@ where
                 LinkEvent::Rx(rx) => {
                     // RxDispatch (JOIN-centric, see module docs): a JOIN is
                     // self-attributing (carries the announcer zid) so it
-                    // admits / refreshes the peer. With multicast loopback
-                    // on, our own JOIN echoes back; ingest_join treats it as
-                    // a (harmless) self-peer admit — a real deploy filters
-                    // own-zid, a follow-up once own-zid lives in the loop.
+                    // admits / refreshes the peer. With multicast loopback on
+                    // our own JOIN echoes back, so filter our own zid — a
+                    // node is not its own peer (the §3.2 peer table tracks
+                    // OTHER group members).
                     if let Some(zid) = decode_join_zid(&rx.bytes) {
-                        dispatcher.ingest_join(zid, clock.now_monotonic_ms());
+                        if zid != params.zid.as_slice() {
+                            dispatcher.ingest_join(zid, clock.now_monotonic_ms());
+                        }
                     }
                 }
                 LinkEvent::Lost { cause } => {
@@ -243,6 +248,28 @@ mod tests {
         let dgram = [wire_const::T_MID_KEEP_ALIVE, 0x00];
         assert_eq!(decode_join_zid(&dgram), None);
         assert_eq!(decode_join_zid(&[]), None);
+    }
+
+    /// A richer JOIN with the S flag set (sn_res + batch_size present) still
+    /// yields the announcer zid: the `s`-flag projection reads bit 6
+    /// (`FLAG_T_JOIN_S`), so the optional fields stay aligned and the body
+    /// decodes whole.
+    #[test]
+    fn decode_join_with_s_flag_extracts_zid() {
+        use wz_codecs::join::Join;
+        let zid = [0x11, 0x22, 0x33];
+        let mut join = Join::new();
+        join.version = 0x09;
+        join.set_whatami(0x01);
+        join.set_zid_len_m1((zid.len() - 1) as u8);
+        join.zid = &zid;
+        join.sn_res = Some(0x00);
+        join.batch_size = Some(0xFFFF);
+        join.lease = 5_000;
+        let body = join.encode_to_vec(1); // s=1: sn_res + batch_size written
+        let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
+        dgram.extend_from_slice(&body);
+        assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));
     }
 
     /// A fake in-memory link driver: replays queued inbound datagrams,
@@ -348,5 +375,33 @@ mod tests {
             SessionFsmMulticastState::Stopped
         );
         assert_eq!(dispatcher.active_peers(), 0);
+    }
+
+    /// Our own JOIN echoed back by multicast loopback does NOT admit us as a
+    /// peer — a node is not its own peer (own-zid filter).
+    #[tokio::test]
+    async fn drive_loop_filters_own_join_echo() {
+        let self_zid = [0xAA, 0xBB, 0xCC, 0xDD];
+        // The inbound JOIN carries OUR zid (the loopback echo of our beacon).
+        let mut driver = FakeDriver {
+            inbound: VecDeque::from([encode_join(&params(&self_zid))]),
+            sent: Vec::new(),
+            lost: false,
+        };
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&self_zid),
+            &mut driver,
+            &clock,
+            Some(5),
+            5,
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 0, "own JOIN must not self-admit");
     }
 }
