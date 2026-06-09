@@ -65,14 +65,16 @@ surface and may drift from the store. To read the SSOT, use
   `rfc-open-questions-log.md::Change log`) → append via the CLI:
   `mnemosyne-cli append-changelog-entry --entry-id "Round N"
   --decision <text> --changes-file <path> --verification-file <path>
-  --impact §A,§B --carry-file <path>`. Do NOT use the MCP
-  `append_changelog_entry_v2` tool: it shells to an
-  `append-changelog-entry-v2` subcommand the installed `mnemosyne-cli`
-  does not ship (it exposes only `append-changelog-entry`), so the MCP
-  call fails `unknown command`. Use the CLI directly until the MCP
-  server and CLI binaries are version-aligned. (The other MCP mutate
-  primitives — `set_section_*`, `set_inventory_status`, etc. — are
-  CLI-aligned and remain the preferred path.) New entries must use the
+  --impact §A,§B --carry-file <path>`. (Historical note: an earlier MCP
+  build exposed an `append_changelog_entry_v2` tool that shelled to an
+  `append-changelog-entry-v2` subcommand the CLI never shipped, failing
+  `unknown command`. That tool name is RETIRED as of R423 (`c2dbdf14`):
+  the CLI + MCP binaries are version-aligned again and the MCP server now
+  exposes `append_changelog_entry` (v1). The CLI `append-changelog-entry`
+  above stays the canonical append path; the surviving MCP v1 tool is
+  untested here.) The other MCP mutate primitives — `set_section_*`,
+  `set_inventory_status`, etc. — are CLI-aligned and remain the preferred
+  path. New entries must use the
   configured `entry_id_prefix = "Round "` (the date-based legacy entries
   remain as prose under the section heading; do not retrofit them to
   `Round N` form — frozen-ledger spirit applies even though they predate
