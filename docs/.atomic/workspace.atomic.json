@@ -31289,6 +31289,58 @@
         "deploy.yaml reassembly_pool dims are spec-sourced, not yaml-loaded (R311in tail)."
       ]
     },
+    "Round 311iy": {
+      "decision_summary": "R311iy reassembly ingest drops now observable + e2e: IterationEvent::ReassemblyDropped(ReassemblyDropReason) via report_outcome_reassembling; FragmentChainOoo host e2e aborts a non-consecutive chain.",
+      "changes_bullets": [
+        "driver_loop.rs: new IterationEvent::ReassemblyDropped(ReassemblyDropReason) — the reason enum is an ungated observer-API mirror of the gated AbortReason/RefuseReason so the public event API and every consumer match stay feature-independent.",
+        "drive.rs report_outcome_reassembling: capture the ingest outcome and emit ReassemblyDropped on a terminal Aborted/Refused (previously discarded, so out-of-order/capacity/quota/pool drops were silent); both AP and MCU loops inherit it via the shared helper.",
+        "wz-mcu-session-acceptor: DataMode::FragmentChainOoo + AcceptorE2eOutcome::ReassemblyDropped + report.reassembly_dropped.",
+        "new host_acceptor_reassembly_ooo_e2e.rs (separate binary): the peer sends FRAG_SN_0=10 then FRAG_SN_OOO=12 (skipping 11) so the strict-in-order ingest aborts the chain.",
+        "run-ci.sh C1n comment notes the three reassembly outcome tests (completion / timeout / drop)."
+      ],
+      "verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1 EXIT0 (all required layers pass).",
+        "new ooo host e2e PASS: outcome ReassemblyDropped, reassembly_dropped>=1, reassembly_timed_out=0, frame_payload=0, no dispatch.",
+        "Q.4 acceptor frame+reasm boot PASS on mps2-an385/386/500 (the session-core drop seam compiles + boots on-target).",
+        "validate_workspace new=+0, entries 603->604, sections 257, T3/T4 unchanged."
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "capacity-overflow reassembly e2e still deferred: overflowing CAP (4096) needs >4096B through a depth-16 rx queue, which conflicts with the lwIP loopback datagram limits.",
+        "multi-peer pool-exhaustion / interleaved reassembly e2e needs a second peer endpoint (a harness extension).",
+        "per-peer-quota refuse is unreachable with quota=2 (one peer keys only two (zid,reliable) chains).",
+        "no-alloc M0 reassembly consumer + deploy.yaml pool dims remain (unchanged carries)."
+      ],
+      "publishable_decision_summary": "R311iy reassembly ingest drops now observable + e2e: IterationEvent::ReassemblyDropped(ReassemblyDropReason) via report_outcome_reassembling; FragmentChainOoo host e2e aborts a non-consecutive chain.",
+      "publishable_changes_bullets": [
+        "driver_loop.rs: new IterationEvent::ReassemblyDropped(ReassemblyDropReason) — the reason enum is an ungated observer-API mirror of the gated AbortReason/RefuseReason so the public event API and every consumer match stay feature-independent.",
+        "drive.rs report_outcome_reassembling: capture the ingest outcome and emit ReassemblyDropped on a terminal Aborted/Refused (previously discarded, so out-of-order/capacity/quota/pool drops were silent); both AP and MCU loops inherit it via the shared helper.",
+        "wz-mcu-session-acceptor: DataMode::FragmentChainOoo + AcceptorE2eOutcome::ReassemblyDropped + report.reassembly_dropped.",
+        "new host_acceptor_reassembly_ooo_e2e.rs (separate binary): the peer sends FRAG_SN_0=10 then FRAG_SN_OOO=12 (skipping 11) so the strict-in-order ingest aborts the chain.",
+        "run-ci.sh C1n comment notes the three reassembly outcome tests (completion / timeout / drop)."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1 EXIT0 (all required layers pass).",
+        "new ooo host e2e PASS: outcome ReassemblyDropped, reassembly_dropped>=1, reassembly_timed_out=0, frame_payload=0, no dispatch.",
+        "Q.4 acceptor frame+reasm boot PASS on mps2-an385/386/500 (the session-core drop seam compiles + boots on-target).",
+        "validate_workspace new=+0, entries 603->604, sections 257, T3/T4 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "capacity-overflow reassembly e2e still deferred: overflowing CAP (4096) needs >4096B through a depth-16 rx queue, which conflicts with the lwIP loopback datagram limits.",
+        "multi-peer pool-exhaustion / interleaved reassembly e2e needs a second peer endpoint (a harness extension).",
+        "per-peer-quota refuse is unreachable with quota=2 (one peer keys only two (zid,reliable) chains).",
+        "no-alloc M0 reassembly consumer + deploy.yaml pool dims remain (unchanged carries)."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
