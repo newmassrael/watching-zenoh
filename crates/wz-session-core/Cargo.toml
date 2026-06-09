@@ -247,6 +247,28 @@ session-unicast = ["dep:sce-rust-runtime"]
 session-unicast-open = []
 session-unicast-accept = []
 
+# Round A — multicast session FSM (docs/session-fsm.md §3.1 session-level
+# lifecycle + §3.2 per-peer membership). Gates the two SCE-generated
+# engine-free statechart modules (build.rs codegens
+# sources/session/session_fsm_multicast.scxml + multicast_peer.scxml with
+# `--no-std` only under this feature) and the `multicast_dispatch` Router
+# that drives them. Like `session-unicast` the FSMs are engine-free —
+# every effect is a no-arg `<sce:action>` native host-trait call and there
+# is no `<send delay>` self-timer (the Router owns the Join cadence + lease
+# sweep clock), so the emitted `*Policy<A>` carries no `IScriptEngine`.
+# Multicast is handshake-free (§3.3), so this is a DIFFERENT shape from
+# `session-unicast` (no Init/Open exchange), not a superset.
+#
+# Pulls `dep:sce-rust-runtime` but — like `session-unicast` /
+# `scouting-active` / `reassembly` — does NOT force
+# `sce-rust-runtime/no_std` (the same http-send mutual-exclusion rationale
+# documented on `scouting-active`). The transport-multicast link socket +
+# the host drive loop land in later rounds; this round is the runtime-
+# agnostic FSM + Router core, host-testable with no I/O. The
+# wz-runtime-tokio side forwards a `transport-multicast` foundational
+# feature here when the glue lands.
+session-multicast = ["dep:sce-rust-runtime"]
+
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the
 # `switchboard::SwitchboardRegistry` (the table + its

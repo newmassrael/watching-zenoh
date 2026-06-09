@@ -33,10 +33,11 @@ fn main() {
     let reassembly = std::env::var("CARGO_FEATURE_REASSEMBLY").is_ok();
     let scouting_active = std::env::var("CARGO_FEATURE_SCOUTING_ACTIVE").is_ok();
     let session_unicast = std::env::var("CARGO_FEATURE_SESSION_UNICAST").is_ok();
+    let session_multicast = std::env::var("CARGO_FEATURE_SESSION_MULTICAST").is_ok();
 
     // Elidable: skip the sce-codegen lookup entirely when no statechart
     // feature is active.
-    if !reassembly && !scouting_active && !session_unicast {
+    if !reassembly && !scouting_active && !session_unicast && !session_multicast {
         return;
     }
 
@@ -75,5 +76,19 @@ fn main() {
             .expect("canonicalize sources/session");
         println!("cargo:rerun-if-changed={}", resource_dir.display());
         codegen.emit_statechart("session_fsm_unicast", &resource_dir, &out_dir);
+    }
+
+    if session_multicast {
+        let resource_dir = manifest_dir
+            .join("../../sources/session")
+            .canonicalize()
+            .expect("canonicalize sources/session");
+        println!("cargo:rerun-if-changed={}", resource_dir.display());
+        // Two engine-free statecharts: the session-LEVEL lifecycle
+        // (Idle/LinkOpening/Running/Stopped) and the per-peer membership
+        // FSM (Free/Discovered/Active/Expired), driven one-per-peer by the
+        // `multicast_dispatch` Router (the §3.1 / §3.2 split).
+        codegen.emit_statechart("session_fsm_multicast", &resource_dir, &out_dir);
+        codegen.emit_statechart("multicast_peer", &resource_dir, &out_dir);
     }
 }

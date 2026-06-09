@@ -955,6 +955,22 @@ layer_c1l_reassembly() {
         && cargo test -p wz-runtime-tokio --features reassembly --quiet)
 }
 
+# ─── Layer C1p — multicast session FSM + dispatcher (Round A) ────────
+#
+# Round A: session-multicast is off by default (a transport-tier
+# capability), so Layer C1's `cargo test --workspace` never builds the
+# wz-session-core multicast FSM modules (session_fsm_multicast +
+# multicast_peer) or the MulticastDispatcher Router. This lane runs the
+# Router + per-peer-FSM unit tests under `--features session-multicast`
+# (std sce-rust-runtime — the AP profile). Multicast is handshake-free
+# (§3.3), a different shape from the unicast session FSM, so it is its own
+# lane. The MCU no_std build of the same is Layer G.12. Mirrors the Layer
+# C1l reassembly lane.
+layer_c1p_multicast() {
+    (cd crates \
+        && cargo test -p wz-session-core --features session-multicast --quiet)
+}
+
 # ─── Layer C1m — wz-session-lwip isolated host test + clippy ─────────
 #
 # Stage 4b. wz-session-lwip is the no_std MCU session shell: it forces
@@ -1822,6 +1838,25 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.11 session-lwip cross-real $t FAIL" >&2
             fail=1
         fi
+        # G.12 (Round A) multicast session FSM + per-peer FSM + dispatcher
+        # on the MCU profile. Proves the handshake-free multicast cluster
+        # (session_fsm_multicast.scxml + multicast_peer.scxml + the
+        # multicast_dispatch Router) cross-compiles no_std + no-alloc on
+        # every Phase W target via the `no_std` profile feature
+        # (`sce-rust-runtime?/no_std` + portable-atomic, same as G.8
+        # reassembly). The Router is allocation-free (inline `[PeerSlot;
+        # MAX_PEERS]` pool, fixed ZID buffers), so it rides every target
+        # including thumbv6m (M0+, CAS-less via the critical-section
+        # backend). The lwIP consumer + the real multicast socket land in
+        # the transport-multicast round; this build-checks the session-core
+        # layer, mirroring how G.8 build-checks reassembly.
+        if (cd crates && cargo build -p wz-session-core \
+            --target "$t" --no-default-features --features session-multicast,no_std --quiet); then
+            echo "  G.12 multicast MCU $t OK"
+        else
+            echo "  G.12 multicast MCU $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"
@@ -2229,6 +2264,7 @@ run_layer C1l layer_c1l_reassembly || overall=1
 run_layer C1m layer_c1m_session_lwip || overall=1
 run_layer C1n layer_c1n_mcu_session_acceptor || overall=1
 run_layer C1o layer_c1o_keyexpr_gating_behavior || overall=1
+run_layer C1p layer_c1p_multicast || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1

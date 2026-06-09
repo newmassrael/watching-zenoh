@@ -919,7 +919,9 @@
         "session-unicast-open OFF: FSM Initiator role trips `function not found` at send_init_syn.",
         "session-unicast-accept OFF: FSM Acceptor role trips `function not found` at send_init_ack.",
         "Both features default-on so AP path binds both sides; deploy can disable one for asymmetric profile.",
-        "R311cn audit: 7 reserved 0 cfg (extauth/extcompression/extqos/extshm/multi/resume/stateless)."
+        "R311cn audit: 7 reserved 0 cfg (extauth/extcompression/extqos/extshm/multi/resume/stateless).",
+        "Round A: session-multicast reserved->active (R311jh); now a real cfg toggle, not always-on.",
+        "Active session-domain count now 3 (open/accept/multicast); multicast FSM is handshake-free."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -31796,6 +31798,62 @@
         "Open: sources/algorithms/keyexpr_intersect.scxml + keyexpr_includes.scxml are unwired and their v1 exact-uint32-id semantics contradict the hand-written string matcher = code-SSOT reconciliation decision."
       ]
     },
+    "Round 311jh": {
+      "decision_summary": "R311jh Round A: handshake-free multicast session FSM (3.1 lifecycle + 3.2 per-peer) + MulticastDispatcher Router land in wz-session-core; session-multicast reserved->active.",
+      "changes_bullets": [
+        "Author sources/session/session_fsm_multicast.scxml: engine-free session-level lifecycle (Idle/LinkOpening/Running/Stopped, spec 3.1); Running is a leaf, the host Router owns the parallel JoinEmit/RxDispatch/PeerSweep concerns (no <parallel> in SCE).",
+        "Author sources/session/multicast_peer.scxml: engine-free per-peer membership FSM (Free/Discovered/Active/Expired, spec 3.2), driven one Engine per pool slot - the reassembly_slot one-FSM-per-entity shape.",
+        "wz-session-core: new multicast_dispatch.rs Router - one session Engine + bounded [PeerSlot; MAX_PEERS] pool; ingest_join/refresh_peer/ingest_close/sweep no-I/O surface; owns last_seen + lease arithmetic + Join classification.",
+        "build.rs codegens both statecharts under the new session-multicast cfg feature; lib.rs hosts the two generated modules + the dispatch Router; Cargo session-multicast pulls dep:sce-rust-runtime (no forced no_std).",
+        "Catalog: session-multicast inventory reserved->active; two caveats appended to the 5.4 session section recording the flip (active session-domain count now 3).",
+        "run-ci: Layer C1p host tests (cargo test --features session-multicast) + Layer G.12 no_std MCU cross-compile across 7 Phase W targets."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features session-multicast: 13 multicast_dispatch tests pass (lib 126 OK total).",
+        "Layer G.12 no_std cross-compile OK on all 7 Phase W targets (thumbv6m/7m/7em/8m.base/8m.main/8m.main-hf, riscv32imac); allocation-free Router rides M0+ via portable-atomic critical-section.",
+        "clippy -p wz-session-core --features session-multicast --all-targets clean; default build (feature off) unaffected (modules cfg-gated).",
+        "A3 catalog-status audit green (atoms=143 active=62); validate_workspace orphan delta 0, no new T1."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "session-fsm--prose-level-sketch/3-3-no-close-handshake"
+      ],
+      "carry_forward_bullets": [
+        "Round B: transport-multicast link socket - AP bind_session_multicast_rx + MCU wz-link-lwip rx_sockets + session_rx_pool_mcu_multicast.scxml buffer-pool SSOT.",
+        "Round C: wz-runtime-tokio drive loop (periodic Join TX + RX classify-dispatch + lease-sweep cadence lease/3) + facade transport-multicast forward + MulticastParams (own zid/whatami) for the wire Join emit.",
+        "Round D: e2e multicast loopback (Layer M extension) + the spec 3.4 client-whatami-refuses-multicast guard + final caveats.",
+        "Design notes: spec 3.1 parallel regions realized as host-loop concerns (SCE has no <parallel>); Discovered->Active driven together in admit since a validated Join is a live member (no further handshake, 3.3)."
+      ],
+      "publishable_decision_summary": "R311jh Round A: handshake-free multicast session FSM (3.1 lifecycle + 3.2 per-peer) + MulticastDispatcher Router land in wz-session-core; session-multicast reserved->active.",
+      "publishable_changes_bullets": [
+        "Author sources/session/session_fsm_multicast.scxml: engine-free session-level lifecycle (Idle/LinkOpening/Running/Stopped, spec 3.1); Running is a leaf, the host Router owns the parallel JoinEmit/RxDispatch/PeerSweep concerns (no <parallel> in SCE).",
+        "Author sources/session/multicast_peer.scxml: engine-free per-peer membership FSM (Free/Discovered/Active/Expired, spec 3.2), driven one Engine per pool slot - the reassembly_slot one-FSM-per-entity shape.",
+        "wz-session-core: new multicast_dispatch.rs Router - one session Engine + bounded [PeerSlot; MAX_PEERS] pool; ingest_join/refresh_peer/ingest_close/sweep no-I/O surface; owns last_seen + lease arithmetic + Join classification.",
+        "build.rs codegens both statecharts under the new session-multicast cfg feature; lib.rs hosts the two generated modules + the dispatch Router; Cargo session-multicast pulls dep:sce-rust-runtime (no forced no_std).",
+        "Catalog: session-multicast inventory reserved->active; two caveats appended to the 5.4 session section recording the flip (active session-domain count now 3).",
+        "run-ci: Layer C1p host tests (cargo test --features session-multicast) + Layer G.12 no_std MCU cross-compile across 7 Phase W targets."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features session-multicast: 13 multicast_dispatch tests pass (lib 126 OK total).",
+        "Layer G.12 no_std cross-compile OK on all 7 Phase W targets (thumbv6m/7m/7em/8m.base/8m.main/8m.main-hf, riscv32imac); allocation-free Router rides M0+ via portable-atomic critical-section.",
+        "clippy -p wz-session-core --features session-multicast --all-targets clean; default build (feature off) unaffected (modules cfg-gated).",
+        "A3 catalog-status audit green (atoms=143 active=62); validate_workspace orphan delta 0, no new T1."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "session-fsm--prose-level-sketch/3-3-no-close-handshake"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Round B: transport-multicast link socket - AP bind_session_multicast_rx + MCU wz-link-lwip rx_sockets + session_rx_pool_mcu_multicast.scxml buffer-pool SSOT.",
+        "Round C: wz-runtime-tokio drive loop (periodic Join TX + RX classify-dispatch + lease-sweep cadence lease/3) + facade transport-multicast forward + MulticastParams (own zid/whatami) for the wire Join emit.",
+        "Round D: e2e multicast loopback (Layer M extension) + the spec 3.4 client-whatami-refuses-multicast guard + final caveats.",
+        "Design notes: spec 3.1 parallel regions realized as host-loop concerns (SCE has no <parallel>); Discovered->Active driven together in admit since a validated Join is a live member (no further handshake, 3.3)."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
@@ -37996,10 +38054,10 @@
       "reason": "F=shm handshake; P=zenoh; C=requires transport-shm"
     },
     "session-multicast": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh-pico multicast session FSM",
-      "reason": "F=multicast FSM; P=zenoh-pico; C=indep of unicast, OQ-W9"
+      "reason": "Round A (R311jh): gates the handshake-free multicast session FSM (session_fsm_multicast.scxml + multicast_peer.scxml) + MulticastDispatcher Router in wz-session-core. Real cfg toggle, not always-on."
     },
     "session-resumable": {
       "status": "reserved",

@@ -683,3 +683,67 @@ pub mod session_actions;
 /// [`session_actions`] (it names the FSM engine + the action bundle).
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub mod drive;
+
+/// SCE-generated multicast session-LEVEL state machine (Round A). The emit
+/// comes from `sources/session/session_fsm_multicast.scxml` via `build.rs`
+/// (codegen'd into `$OUT_DIR/session_fsm_multicast_sm.rs` only under the
+/// `session-multicast` feature). Exposes the `SessionFsmMulticastState` /
+/// `SessionFsmMulticastEvent` enums, the `SessionFsmMulticastActions` host
+/// trait, and the `SessionFsmMulticastPolicy<A>` policy. Engine-free (no
+/// `IScriptEngine`) and self-timer-free (no `<send delay>`): the §3.1
+/// lifecycle (Idle/LinkOpening/Running/Stopped) with the §3.1 parallel
+/// Running concerns elided to a leaf owned by the [`multicast_dispatch`]
+/// Router. Handshake-free (§3.3), so a different shape from
+/// [`session_fsm_unicast`]. The build script strips the file-head `#![...]`
+/// inner attributes; the lint allows are restored here as outer attributes.
+#[cfg(feature = "session-multicast")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod session_fsm_multicast {
+    include!(concat!(env!("OUT_DIR"), "/session_fsm_multicast_sm.rs"));
+}
+
+/// SCE-generated multicast per-peer membership state machine (Round A). The
+/// emit comes from `sources/session/multicast_peer.scxml` via `build.rs`
+/// (codegen'd into `$OUT_DIR/multicast_peer_sm.rs` only under the
+/// `session-multicast` feature). Exposes the `MulticastPeerState` /
+/// `MulticastPeerEvent` enums, the `MulticastPeerActions` host trait, and
+/// the `MulticastPeerPolicy<A>` policy. Engine-free; the §3.2 membership
+/// lifecycle (Free/Discovered/Active/Expired) driven one-instance-per-peer
+/// by the [`multicast_dispatch`] Router — the same one-FSM-per-entity shape
+/// [`reassembly_slot`] uses for fragment chains. The build script strips
+/// the file-head `#![...]` inner attributes; the lint allows are restored
+/// here as outer attributes.
+#[cfg(feature = "session-multicast")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod multicast_peer {
+    include!(concat!(env!("OUT_DIR"), "/multicast_peer_sm.rs"));
+}
+
+/// Round A — the multicast Router (dispatcher) that drives the one
+/// [`session_fsm_multicast`] session-level Engine plus a fixed bounded pool
+/// of [`multicast_peer`] per-peer Engines (the §3.2 `multicast_peer_table`).
+/// The handshake-free multicast sibling of [`reassembly_dispatch`]: it owns
+/// everything the engine-free FSMs cannot — the per-peer last_seen + lease
+/// arithmetic, the Join validation / classification, and the lease-sweep
+/// clock — and exposes a no-I/O `ingest_*` / `sweep` surface. The transport
+/// link socket + the host drive loop (the §3.1 JoinEmit / RxDispatch I/O)
+/// land in later rounds. Gated on `session-multicast` (it names the two
+/// generated FSM engines).
+#[cfg(feature = "session-multicast")]
+pub mod multicast_dispatch;

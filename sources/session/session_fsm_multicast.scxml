@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Session FSM — multicast, session-LEVEL lifecycle.
+
+  Lowering of `docs/session-fsm.md` §3.1 multicast session-level states
+  (Idle -> LinkOpening -> Running -> Stopped) into a single SCE
+  statechart-kind SCXML. This is the multicast sibling of
+  `session_fsm_unicast.scxml`, and it is deliberately a DIFFERENT shape:
+  multicast is HANDSHAKE-FREE (§3.3 — no Init/Open exchange, no Closing
+  state). The session-level FSM here owns only the link lifecycle; the
+  per-peer membership lifecycle (§3.2 Discovered -> Active -> Expired) is
+  the separate `multicast_peer.scxml` statechart, driven once per peer by
+  the Rust Router (`multicast_dispatch.rs`), exactly as
+  `reassembly_slot.scxml` is driven once per chain by the reassembly
+  Router.
+
+  Engine-free realization (mirrors scouting.scxml / session_fsm_unicast.scxml
+  / reassembly_slot.scxml):
+    Every effect is a no-arg native `<sce:action name=>` host-trait call —
+    no `<script>` bodies, so the generated `SessionFsmMulticastPolicy<A>`
+    carries no `IScriptEngine` and the module compiles `#![no_std]`
+    (codegen'd in no-std mode by wz-session-core/build.rs behind
+    `#[cfg(feature = "session-multicast")]`). The host supplies behaviour
+    by implementing the generated `SessionFsmMulticastActions` trait in the
+    Router. No-arg `<sce:action>` is admissible in `<onentry>` as well as
+    on a `<transition>` (SCE pin 33ed5c4c9), so the entry effects below are
+    declared once on their state (1:1 with the §3.1 prose).
+
+  Running is a LEAF (no `<parallel>`):
+    §3.1 describes Running as three parallel regions — JoinEmit (periodic
+    Join, default 2500ms), RxDispatch (classify Join/Frame/Fragment/
+    KeepAlive/Close/OAM), PeerSweep (lease/3 eviction). The engine-free SCE
+    surface has no `<parallel>` (verified: zero `State::Parallel` in
+    sce-rust-runtime), and `session_fsm_unicast.scxml` already set the
+    precedent of eliding §2.3's parallel established sub-regions to a leaf
+    and letting the host drive loop own the concurrency. The same split
+    applies here: the host Router owns the three Running concerns (the
+    periodic Join cadence, the inbound classification + per-peer FSM
+    drive, and the lease sweep); the session-level FSM owns only the
+    Idle/LinkOpening/Running/Stopped lifecycle. SSOT is preserved — the
+    parallel regions are spec intent, the Router is their realization, the
+    statechart is the lifecycle.
+
+  No close handshake (§3.3):
+    There is no Closing state — Stopped is reached directly on
+    `multicast.stop` (the deploy tears the session down) or `link.lost`
+    (the multicast link dropped). Peers are never individually closed at
+    the session level; they time out in their own per-peer FSM
+    (`multicast_peer.scxml` lease expiry). This mirrors upstream, which
+    has no multicast `close.rs`.
+
+  Host actions (the generated `SessionFsmMulticastActions` trait, one
+  method per distinct `<sce:action name>`; impl'd by the Router):
+    open_multicast_link    — request the host bring up the multicast link
+                             (bind the session multicast socket + join the
+                             group). The real socket lands in the
+                             transport-multicast round; today a Router-side
+                             binding records the request.
+    enter_running          — the link is ready; the Router arms the
+                             periodic Join cadence + the lease-sweep timer
+                             (the two host-owned Running concerns).
+    release_multicast_link — tear the multicast link down and clear the
+                             peer table (Stopped is terminal).
+
+  Events fed by the host Router:
+    multicast.create — the deploy asks to bring up a multicast session.
+    link.ready       — the host completed the multicast link bring-up.
+    link.lost        — the multicast link dropped.
+    multicast.stop   — the deploy asks to tear the multicast session down.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="session_fsm_multicast"
+       version="1.0"
+       initial="Idle">
+
+  <!-- Waiting for the deploy to request a multicast session. -->
+  <state id="Idle">
+    <transition event="multicast.create" target="LinkOpening"/>
+  </state>
+
+  <!-- Bring up the multicast link (bind socket + join group). The host
+       owns the actual I/O; open_multicast_link records the request and the
+       host raises link.ready when the link is up (or link.lost on
+       failure). §3.1 Idle->LinkOpening on create(multicast_link);
+       LinkOpening->Running on link.ready. -->
+  <state id="LinkOpening">
+    <onentry>
+      <sce:action name="open_multicast_link"/>
+    </onentry>
+    <transition event="link.ready" target="Running"/>
+    <transition event="link.lost" target="Stopped"/>
+  </state>
+
+  <!-- The multicast session is live. Leaf state: the host Router owns the
+       three §3.1 parallel concerns (JoinEmit / RxDispatch / PeerSweep) —
+       see the header "Running is a LEAF". enter_running arms the periodic
+       Join cadence + the lease-sweep timer. No close handshake (§3.3):
+       Stopped is reached directly on stop or link loss. -->
+  <state id="Running">
+    <onentry>
+      <sce:action name="enter_running"/>
+    </onentry>
+    <transition event="multicast.stop" target="Stopped"/>
+    <transition event="link.lost" target="Stopped"/>
+  </state>
+
+  <!-- Terminal. Release the multicast link and clear the peer table. -->
+  <final id="Stopped">
+    <onentry>
+      <sce:action name="release_multicast_link"/>
+    </onentry>
+  </final>
+
+</scxml>

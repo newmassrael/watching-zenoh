@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Multicast per-peer FSM — one membership lifecycle per discovered peer.
+
+  Lowering of `docs/session-fsm.md` §3.2 multicast per-peer states
+  (Discovered -> Active -> Expired) into a single SCE statechart-kind
+  SCXML. This is the multicast peer-table entry's protocol FSM; the Rust
+  Router (`multicast_dispatch.rs`) drives ONE instance of this statechart
+  per live peer (a fixed bounded pool, §3.2 `multicast_peer_table`),
+  exactly as the reassembly Router drives one `reassembly_slot.scxml`
+  instance per fragment chain. The session-LEVEL lifecycle
+  (Idle/LinkOpening/Running/Stopped) is the separate
+  `session_fsm_multicast.scxml` statechart.
+
+  Division of labour with the Router (mirrors reassembly_slot.scxml):
+    - Validation + classification — the Router. A native FSM guard reads
+      only `_event.data` + literals, never stored host state. The §3.2
+      Join validation (version / resolution / batch / qos) and the
+      rejection-without-transition policy ("version/max_sessions/SN-res/
+      QoS mismatch -> ignored + diag") depend on host state, so the
+      Router pre-classifies: it only drives `peer.discovered` for a peer
+      that passed validation; a rejected Join drives nothing (silent drop
+      + diag).
+    - last_seen + lease arithmetic — the Router. "Active: any msg refresh
+      last_seen" and the lease-expiry comparison are stored-state
+      arithmetic the engine-free FSM cannot own; the Router updates
+      last_seen on every inbound message and raises `peer.lost` only into
+      peers past their lease (a recycled slot never sees a stale lease).
+    - The membership lifecycle + its entry effects — the FSM. The
+      Discovered/Active/Expired transitions and the two `<sce:action>`
+      effects below are the protocol logic, SSOT with §3.2.
+
+  Free is the unallocated pool-slot sentinel (mirrors reassembly_slot's
+  Empty), NOT a §3.2 peer-lifecycle state: the §3.2 states are the three
+  live ones (Discovered/Active/Expired). Free is how the Router models an
+  unused entry in the fixed bounded pool so the slot's Engine is reused
+  across peers (Free -> Discovered on allocation; Expired -> Free on
+  recycle) rather than reconstructed.
+
+  No close handshake (§3.3): a peer leaves either on an explicit
+  `Close{zid}` from that peer or on lease expiry — both surface to this
+  FSM as `peer.lost` (the Router decides which; the FSM treats them
+  identically). There is no per-peer Closing state.
+
+  Engine-free realization (mirrors session_fsm_multicast.scxml):
+    Every effect is a no-arg native `<sce:action name=>` host-trait call,
+    so the generated `MulticastPeerPolicy<A>` carries no `IScriptEngine`
+    and compiles `#![no_std]` (codegen'd in no-std mode behind
+    `#[cfg(feature = "session-multicast")]`).
+
+  Host actions (the generated `MulticastPeerActions` trait; impl'd by the
+  Router):
+    init_rx_seq    — Discovered.onentry: initialise the per-peer RX
+                     sequence table for the newly admitted peer (§3.2
+                     "init RX seq table").
+    emit_peer_lost — Expired.onentry: emit the peer-lost event upward
+                     (§3.2 "emit peer-lost event"); the Router removes the
+                     entry at the next recycle.
+
+  Events fed by the host Router:
+    peer.discovered — a validated first Join admitted a new peer.
+    peer.activated  — the admitted peer reached steady-state membership.
+    peer.lost       — the peer sent Close{zid} OR its lease expired.
+    peer.recycle    — the Router reclaims the Expired slot for reuse.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="multicast_peer"
+       version="1.0"
+       initial="Free">
+
+  <!-- Unallocated pool slot (Router-side sentinel, not a §3.2 state). The
+       Router allocates a Free slot to a validated new peer. -->
+  <state id="Free">
+    <transition event="peer.discovered" target="Discovered"/>
+  </state>
+
+  <!-- §3.2 Discovered: the first Join validated. Initialise the per-peer
+       RX seq table on entry; the Router advances to Active once the peer
+       reaches steady-state membership. A peer that leaves before
+       activation (Close / lease) still goes Expired via peer.lost. -->
+  <state id="Discovered">
+    <onentry>
+      <sce:action name="init_rx_seq"/>
+    </onentry>
+    <transition event="peer.activated" target="Active"/>
+    <transition event="peer.lost" target="Expired"/>
+  </state>
+
+  <!-- §3.2 Active: steady-state membership. The Router refreshes last_seen
+       on every inbound message WITHOUT driving the FSM (last_seen is
+       host-side arithmetic), so Active has no self-transition; it holds
+       until the peer leaves. peer.lost = Close{zid} or lease expiry. -->
+  <state id="Active">
+    <transition event="peer.lost" target="Expired"/>
+  </state>
+
+  <!-- §3.2 Expired: the peer is gone. Emit the peer-lost event on entry;
+       the Router reclaims the slot (Expired -> Free) at the next recycle
+       so the entry is reusable for a future peer. -->
+  <state id="Expired">
+    <onentry>
+      <sce:action name="emit_peer_lost"/>
+    </onentry>
+    <transition event="peer.recycle" target="Free"/>
+  </state>
+
+</scxml>
