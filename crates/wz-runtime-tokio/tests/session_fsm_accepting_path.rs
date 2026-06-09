@@ -77,9 +77,7 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
 
     // ── Rx InitSyn via poll_and_dispatch_one ───────────────────────
     {
-        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-            bytes: craft_initsyn_wire(),
-        })]);
+        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
         let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
         assert!(
             matches!(outcome, DriverLoopOutcome::AdvancedFsm),
@@ -107,9 +105,9 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
             &fixture_session_init_params().cookie_signing_key,
             &FIXTURE_PEER_ZID,
         );
-        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-            bytes: craft_opensyn_wire(&expected_cookie),
-        })]);
+        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+            &expected_cookie,
+        )))]);
         let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
         assert!(
             matches!(outcome, DriverLoopOutcome::AdvancedFsm),
@@ -172,18 +170,16 @@ async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
     engine.process_event(E::InboundStart);
     assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
 
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: craft_initsyn_wire(),
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
     // Forged cookie: 16 bytes of 0xFF — guaranteed to mismatch any
     // valid HMAC(cookie_signing_key, peer_zid) output.
     let forged = vec![0xFFu8; 16];
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: craft_opensyn_wire(&forged),
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &forged,
+    )))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
 
     assert_eq!(
@@ -214,9 +210,7 @@ async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
     engine.initialize();
 
     engine.process_event(E::InboundStart);
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: craft_initsyn_wire(),
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
@@ -224,9 +218,7 @@ async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
     // bytes. OpenBody.cookie decodes as Some(Vec::new()) per the
     // present-if gating; the R89 guard sees an empty Vec which
     // never matches a non-empty HMAC output.
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: craft_opensyn_wire(&[]),
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(&[])))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
 
     assert_eq!(
@@ -282,9 +274,8 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // peer_zid -> FSM transitions to SentInitAck -> SentInitAck.onentry
     // fires send_init_ack_with_cookie which (per R86) HMAC-binds the
     // cookie against the captured peer_zid.
-    let mut queue_driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: craft_initsyn_wire(),
-    })]);
+    let mut queue_driver =
+        QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
     let _ = poll_and_dispatch_one(&mut queue_driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
     assert_eq!(
@@ -345,9 +336,7 @@ async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded()
     assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
 
     // Walk the crafted handshake to Established (same wires as r78).
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: craft_initsyn_wire(),
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_initsyn_wire()))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::SentInitAck);
 
@@ -355,9 +344,9 @@ async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded()
         &fixture_session_init_params().cookie_signing_key,
         &FIXTURE_PEER_ZID,
     );
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: craft_opensyn_wire(&cookie),
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
+        &cookie,
+    )))]);
     let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert_eq!(engine.get_current_state(), S::Established);
 

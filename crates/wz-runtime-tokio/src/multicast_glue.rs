@@ -21,22 +21,26 @@
 //!   transport's self-advertisement (the multicast analogue of INIT+OPEN);
 //!   there is no separate keepalive, so the periodic JOIN IS the liveness
 //!   beacon.
-//! - **RxDispatch** — decodes each inbound datagram; a JOIN admits or
-//!   refreshes its announcer via [`MulticastDispatcher::ingest_join`].
+//! - **RxDispatch** — classifies each inbound datagram by its transport MID
+//!   and attributes it by the datagram SOURCE ADDRESS (carried on the
+//!   [`RxFrame`](wz_session_core::link::RxFrame), populated by the multicast
+//!   `UdpDriver`): JOIN -> [`ingest_join`](MulticastDispatcher::ingest_join)
+//!   (admit / refresh by addr, record zid); Frame / KeepAlive ->
+//!   [`refresh_by_src`](MulticastDispatcher::refresh_by_src); Close ->
+//!   [`close_by_src`](MulticastDispatcher::close_by_src).
 //! - **PeerSweep** — evicts peers past their lease via
 //!   [`MulticastDispatcher::sweep`].
 //!
-//! ## RX scope (Round C): JOIN-centric
+//! ## RX attribution: by source address (zenoh-pico parity)
 //!
-//! Only JOIN is routed inbound. A JOIN carries the announcer's zid (the
-//! §3.2 peer-table key), so it is self-attributing. Frame / KeepAlive /
-//! Close do NOT carry a source zid on the wire — in multicast they are
-//! attributed by the datagram SOURCE ADDRESS, which the current
-//! [`UdpDriver`](crate::UdpDriver) drops (`recv_from`'s `_src`). Routing
-//! them therefore needs a source-address-carrying driver, a deferred
-//! follow-up. It is not a correctness gap for liveness: the periodic JOIN
-//! beacon refreshes the lease (a live peer re-JOINs every cadence), and the
-//! lease sweep handles departure — exactly zenoh's multicast model.
+//! Frame / KeepAlive / Close carry NO sender zid on the wire, so — exactly
+//! like zenoh-pico (`_z_find_peer_entry(addr)`) — every inbound message is
+//! attributed to a peer by its datagram source address. JOIN additionally
+//! carries the announcer's zid, recorded as the peer's protocol identity.
+//! The `RxFrame.src` field carries the address; a non-multicast link leaves
+//! it `None` and such messages are ignored here. (Delivering a Frame's
+//! PAYLOAD to the application — multicast pub/sub — is a separate layer
+//! above this transport attribution.)
 //!
 //! ## Stop
 //!
@@ -181,15 +185,39 @@ where
         tokio::select! {
             event = driver.poll_event() => match event {
                 LinkEvent::Rx(rx) => {
-                    // RxDispatch (JOIN-centric, see module docs): a JOIN is
-                    // self-attributing (carries the announcer zid) so it
-                    // admits / refreshes the peer. With multicast loopback on
-                    // our own JOIN echoes back, so filter our own zid — a
-                    // node is not its own peer (the §3.2 peer table tracks
-                    // OTHER group members).
-                    if let Some(zid) = decode_join_zid(&rx.bytes) {
-                        if zid != params.zid.as_slice() {
-                            dispatcher.ingest_join(zid, clock.now_monotonic_ms());
+                    // RxDispatch: every multicast message is attributed by its
+                    // datagram SOURCE ADDRESS (the peer key — Frame / KeepAlive
+                    // / Close carry no zid on the wire). A multicast UdpDriver
+                    // always carries the src; without it (a non-multicast link)
+                    // nothing can be attributed, so the message is ignored.
+                    if let Some(src) = rx.src {
+                        let now = clock.now_monotonic_ms();
+                        match rx.bytes.first().map(|h| h & 0x1f) {
+                            Some(wire_const::T_MID_JOIN) => {
+                                // A JOIN announces its zid; admit / refresh the
+                                // peer at this address. Filter our own zid: with
+                                // multicast loopback on our beacon echoes back,
+                                // and a node is not its own peer.
+                                if let Some(zid) = decode_join_zid(&rx.bytes) {
+                                    if zid != params.zid.as_slice() {
+                                        dispatcher.ingest_join(zid, src, now);
+                                    }
+                                }
+                            }
+                            Some(wire_const::T_MID_FRAME)
+                            | Some(wire_const::T_MID_KEEP_ALIVE) => {
+                                // Any data / liveness message refreshes the
+                                // sender's lease (robustness if its JOINs are
+                                // lost). Delivering the Frame PAYLOAD to the
+                                // app (multicast pub/sub) is a separate layer.
+                                dispatcher.refresh_by_src(src, now);
+                            }
+                            Some(wire_const::T_MID_CLOSE) => {
+                                // Graceful departure (the Close carries no zid,
+                                // so it is attributed by source address).
+                                dispatcher.close_by_src(src);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -212,6 +240,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::collections::VecDeque;
 
     use wz_session_core::link::RxFrame;
@@ -219,6 +248,11 @@ mod tests {
     use wz_session_core::multicast_peer::MulticastPeerState;
 
     use crate::runtime_impl::TokioTime;
+
+    /// A distinct peer source address (the addr-keyed peer-table primary key).
+    fn src(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+    }
 
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
@@ -278,9 +312,21 @@ mod tests {
     /// without a real multicast socket (mirrors how the scouting unit tests
     /// cover the deterministic logic; the real-socket path is Layer M).
     struct FakeDriver {
-        inbound: VecDeque<Vec<u8>>,
+        /// Queued inbound datagrams, each with its source address (the
+        /// multicast peer key).
+        inbound: VecDeque<(Vec<u8>, SocketAddr)>,
         sent: Vec<Vec<u8>>,
         lost: bool,
+    }
+
+    impl FakeDriver {
+        fn with(inbound: impl IntoIterator<Item = (Vec<u8>, SocketAddr)>) -> Self {
+            Self {
+                inbound: inbound.into_iter().collect(),
+                sent: Vec::new(),
+                lost: false,
+            }
+        }
     }
 
     impl LinkDriver for FakeDriver {
@@ -304,8 +350,9 @@ mod tests {
                     cause: LostCause::PeerClosed,
                 };
             }
-            if let Some(dg) = self.inbound.pop_front() {
-                return LinkEvent::Rx(RxFrame { bytes: dg });
+            if let Some((dg, src)) = self.inbound.pop_front() {
+                // A multicast datagram carries its source address.
+                return LinkEvent::Rx(RxFrame::with_src(dg, src));
             }
             // Drained: never resolve so `select!` always takes the sweep
             // tick, advancing the loop to its iteration budget.
@@ -313,16 +360,12 @@ mod tests {
         }
     }
 
-    /// The drive loop admits a peer from an inbound JOIN and emits its own
-    /// JOIN beacon.
+    /// The drive loop admits a peer from an inbound JOIN (keyed by its source
+    /// address) and emits its own JOIN beacon.
     #[tokio::test]
     async fn drive_loop_admits_join_peer_and_emits_beacon() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver {
-            inbound: VecDeque::from([encode_join(&params(&peer_b))]),
-            sent: Vec::new(),
-            lost: false,
-        };
+        let mut driver = FakeDriver::with([(encode_join(&params(&peer_b)), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -337,15 +380,47 @@ mod tests {
         .await;
 
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
-        // The inbound JOIN admitted peer B.
+        // The inbound JOIN admitted peer B (queryable by zid and by src).
         assert_eq!(dispatcher.active_peers(), 1);
         assert_eq!(
             dispatcher.peer_state(&peer_b),
             Some(MulticastPeerState::Active)
         );
+        assert_eq!(
+            dispatcher.peer_state_by_src(src(2)),
+            Some(MulticastPeerState::Active)
+        );
         // At least one self JOIN beacon was multicast, MID-framed correctly.
         assert!(!driver.sent.is_empty(), "expected >= 1 JOIN beacon");
         assert_eq!(driver.sent[0][0], wire_const::T_MID_JOIN);
+    }
+
+    /// An inbound Close (attributed by source address) evicts the peer.
+    #[tokio::test]
+    async fn drive_loop_evicts_peer_on_close() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        // First a JOIN from peer B's address admits it, then a Close from the
+        // SAME address evicts it — the Close carries no zid, so it is keyed
+        // by source address.
+        let mut driver = FakeDriver::with([
+            (encode_join(&params(&peer_b)), src(2)),
+            (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
+        ]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(8),
+            5,
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 0, "Close must evict the peer");
     }
 
     /// A lost link returns `LinkLost` and clears the peer table (§3.1).
@@ -383,11 +458,7 @@ mod tests {
     async fn drive_loop_filters_own_join_echo() {
         let self_zid = [0xAA, 0xBB, 0xCC, 0xDD];
         // The inbound JOIN carries OUR zid (the loopback echo of our beacon).
-        let mut driver = FakeDriver {
-            inbound: VecDeque::from([encode_join(&params(&self_zid))]),
-            sent: Vec::new(),
-            lost: false,
-        };
+        let mut driver = FakeDriver::with([(encode_join(&params(&self_zid)), src(9))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 

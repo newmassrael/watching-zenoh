@@ -24,19 +24,22 @@
 //!   [`stop`](MulticastDispatcher::stop)).
 //! - **The §3.1 Running parallel concerns — the Router.** Running is a leaf
 //!   (the SCE surface has no `<parallel>`); the host owns JoinEmit /
-//!   RxDispatch / PeerSweep. Round A realises RxDispatch
-//!   ([`ingest_join`](MulticastDispatcher::ingest_join) /
-//!   [`refresh_peer`](MulticastDispatcher::refresh_peer) /
-//!   [`ingest_close`](MulticastDispatcher::ingest_close)) + PeerSweep
-//!   ([`sweep`](MulticastDispatcher::sweep)) as a no-I/O surface; the
-//!   periodic JoinEmit cadence + the real socket land in the
-//!   transport-multicast round.
+//!   RxDispatch / PeerSweep. The Router realises RxDispatch
+//!   ([`ingest_join`](MulticastDispatcher::ingest_join) for JOIN /
+//!   [`refresh_by_src`](MulticastDispatcher::refresh_by_src) for Frame /
+//!   KeepAlive / [`close_by_src`](MulticastDispatcher::close_by_src) for
+//!   Close) + PeerSweep ([`sweep`](MulticastDispatcher::sweep)) as a no-I/O
+//!   surface; the periodic JoinEmit cadence + the real socket are the
+//!   `wz-runtime-tokio` drive loop.
 //! - **Per-peer membership — the per-peer FSM.** Free -> Discovered ->
 //!   Active -> Expired is the [`multicast_peer`] statechart, one Engine per
-//!   pool slot. The Router pre-classifies (only a validated Join is
-//!   admitted; a mismatch is dropped without a transition, §3.2) and owns
-//!   last_seen; the FSM owns the lifecycle + its `init_rx_seq` /
-//!   `emit_peer_lost` entry effects.
+//!   pool slot. A peer is keyed by its transport SOURCE ADDRESS (the
+//!   zenoh-pico multicast model — Frame / KeepAlive / Close carry no zid on
+//!   the wire, so they are attributed by `_z_find_peer_entry(addr)`); the
+//!   `zid` from its JOIN is the stored protocol identity. The Router
+//!   pre-classifies (only a validated Join is admitted; a mismatch is
+//!   dropped without a transition, §3.2) and owns last_seen; the FSM owns
+//!   the lifecycle + its `init_rx_seq` / `emit_peer_lost` entry effects.
 //!
 //! ## Lease ownership (§3.1 PeerSweep)
 //!
@@ -71,6 +74,7 @@ use crate::session_fsm_multicast::{
     SessionFsmMulticastActions, SessionFsmMulticastEvent, SessionFsmMulticastPolicy,
     SessionFsmMulticastState,
 };
+use core::net::SocketAddr;
 use sce_rust_runtime::Engine;
 
 /// Maximum ZID byte length (zenoh ZID is up to 16 bytes; the wire form is
@@ -169,11 +173,18 @@ impl MulticastPeerActions for PeerBinding {
 /// holds a live peer (FSM != Free) and `None` when the slot is free.
 struct PeerSlot {
     engine: Engine<MulticastPeerPolicy<PeerBinding>>,
-    /// `Some([zid; len])` while the slot is allocated to a peer; `None`
-    /// when the slot is Free and reusable.
+    /// The peer's transport SOURCE ADDRESS — the slot's primary key. `Some`
+    /// while allocated, `None` when Free. Multicast Frame / KeepAlive /
+    /// Close carry no zid on the wire, so the peer is FOUND by its datagram
+    /// source address (the zenoh-pico multicast model:
+    /// `_z_find_peer_entry(addr)`, peer keyed by `_remote_addr`).
+    src: Option<SocketAddr>,
+    /// The peer's zenoh id, learned from its JOIN — the protocol identity
+    /// (§3.2 "one per zid"), stored alongside the addr key. `Some` iff
+    /// `src.is_some()`.
     zid: Option<([u8; ZID_MAX], u8)>,
     /// Absolute monotonic-ms instant of the peer's most recent inbound
-    /// message (valid iff `zid.is_some()`); the lease is measured from here.
+    /// message (valid iff `src.is_some()`); the lease is measured from here.
     last_seen_ms: u64,
 }
 
@@ -184,17 +195,24 @@ impl PeerSlot {
         engine.initialize();
         Self {
             engine,
+            src: None,
             zid: None,
             last_seen_ms: 0,
         }
     }
 
     fn is_free(&self) -> bool {
-        self.zid.is_none()
+        self.src.is_none()
     }
 
-    /// Does this slot hold the given peer ZID?
-    fn matches(&self, zid: &[u8]) -> bool {
+    /// Does this slot hold the given source address (the primary key)?
+    fn matches_src(&self, src: SocketAddr) -> bool {
+        self.src == Some(src)
+    }
+
+    /// Does this slot hold the given peer ZID (the protocol-identity index,
+    /// used by [`MulticastDispatcher::peer_state`])?
+    fn matches_zid(&self, zid: &[u8]) -> bool {
         match &self.zid {
             Some((buf, len)) => {
                 let n = core::cmp::min(zid.len(), ZID_MAX);
@@ -210,6 +228,7 @@ impl PeerSlot {
     fn evict(&mut self) {
         self.engine.process_event(MulticastPeerEvent::PeerLost);
         self.engine.process_event(MulticastPeerEvent::PeerRecycle);
+        self.src = None;
         self.zid = None;
         self.last_seen_ms = 0;
     }
@@ -249,12 +268,25 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.peers.iter().filter(|p| !p.is_free()).count()
     }
 
-    /// The per-peer FSM state for `zid`, or `None` if no slot holds it
-    /// (test / observability helper).
+    /// The per-peer FSM state for the peer with `zid`, or `None` if no slot
+    /// holds it (test / observability helper — the app asks by protocol
+    /// identity; the wire RX path attributes by [`peer_state_by_src`]).
+    ///
+    /// [`peer_state_by_src`]: MulticastDispatcher::peer_state_by_src
     pub fn peer_state(&self, zid: &[u8]) -> Option<MulticastPeerState> {
         self.peers
             .iter()
-            .find(|p| p.matches(zid))
+            .find(|p| p.matches_zid(zid))
+            .map(|p| p.engine.get_current_state())
+    }
+
+    /// The per-peer FSM state for the peer at source address `src`, or
+    /// `None` if no slot holds it (the address-keyed observability mirror of
+    /// [`peer_state`](MulticastDispatcher::peer_state)).
+    pub fn peer_state_by_src(&self, src: SocketAddr) -> Option<MulticastPeerState> {
+        self.peers
+            .iter()
+            .find(|p| p.matches_src(src))
             .map(|p| p.engine.get_current_state())
     }
 
@@ -309,21 +341,26 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         }
     }
 
-    /// Ingest a validated inbound Join from `zid` (§3.1 RxDispatch).
+    /// Ingest a validated inbound Join from the peer at source address `src`
+    /// announcing zenoh id `zid` (§3.1 RxDispatch).
     ///
-    /// The caller (Round C's RX classifier) has already validated the Join
+    /// The caller (the RX classifier) has already validated the Join
     /// (version / resolution / batch / qos, §3.2); a mismatch is dropped
-    /// before this call (no transition). A first Join from a new peer
-    /// admits it (Free -> Discovered -> Active); a Join from a known peer
-    /// refreshes its lease. `now_ms` is the runtime monotonic clock.
-    pub fn ingest_join(&mut self, zid: &[u8], now_ms: u64) -> JoinOutcome {
+    /// before this call (no transition). The peer is keyed by `src` (the
+    /// zenoh-pico multicast model — `_z_find_peer_entry(addr)`): a Join from
+    /// a NEW address admits a peer (Free -> Discovered -> Active) and records
+    /// its `zid`; a Join from a KNOWN address refreshes its lease (and
+    /// re-records the zid in case the address's occupant changed). `now_ms`
+    /// is the runtime monotonic clock.
+    pub fn ingest_join(&mut self, zid: &[u8], src: SocketAddr, now_ms: u64) -> JoinOutcome {
         if self.session_state() != SessionFsmMulticastState::Running {
             return JoinOutcome::SessionNotRunning;
         }
-        if let Some(idx) = self.find_peer(zid) {
-            // Known peer: a Join is just another inbound message (§3.2
+        if let Some(idx) = self.find_by_src(src) {
+            // Known address: a Join is just another inbound message (§3.2
             // "Active: any msg refresh last_seen"). The FSM stays Active.
             self.peers[idx].last_seen_ms = now_ms;
+            self.peers[idx].zid = Some(copy_zid(zid));
             return JoinOutcome::Refreshed;
         }
         let idx = match self.peers.iter().position(PeerSlot::is_free) {
@@ -335,6 +372,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         // because a multicast peer has no further handshake — a validated
         // Join is a live member (§3.2 "first Join validated" -> steady
         // state Active).
+        self.peers[idx].src = Some(src);
         self.peers[idx].zid = Some(copy_zid(zid));
         self.peers[idx].last_seen_ms = now_ms;
         self.peers[idx]
@@ -346,13 +384,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         JoinOutcome::Admitted
     }
 
-    /// Refresh a live peer's lease on any non-Join inbound message (§3.1
-    /// RxDispatch Frame / Fragment / KeepAlive / OAM -> §3.2 "any msg
-    /// refresh last_seen"). Returns `true` if a live peer matched `zid`.
-    /// The FSM is not driven (last_seen is Router-side state); the peer
-    /// stays Active.
-    pub fn refresh_peer(&mut self, zid: &[u8], now_ms: u64) -> bool {
-        match self.find_peer(zid) {
+    /// Refresh a live peer's lease on any non-Join inbound message attributed
+    /// by source address (§3.1 RxDispatch Frame / Fragment / KeepAlive / OAM,
+    /// which carry NO zid on the wire). Returns `true` if a live peer was at
+    /// `src`. The FSM is not driven (last_seen is Router-side state); the
+    /// peer stays Active.
+    pub fn refresh_by_src(&mut self, src: SocketAddr, now_ms: u64) -> bool {
+        match self.find_by_src(src) {
             Some(idx) => {
                 self.peers[idx].last_seen_ms = now_ms;
                 true
@@ -361,11 +399,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         }
     }
 
-    /// Ingest an explicit `Close{zid}` (§3.2 -> Expired). Drives the peer
-    /// `peer.lost` (`emit_peer_lost`) + recycle and frees the slot. Returns
-    /// `true` if a live peer matched `zid`.
-    pub fn ingest_close(&mut self, zid: &[u8]) -> bool {
-        match self.find_peer(zid) {
+    /// Ingest an explicit Close from the peer at `src` (§3.2 -> Expired; the
+    /// Close carries no zid, so it is attributed by source address). Drives
+    /// the peer `peer.lost` (`emit_peer_lost`) + recycle and frees the slot.
+    /// Returns `true` if a live peer was at `src`.
+    pub fn close_by_src(&mut self, src: SocketAddr) -> bool {
+        match self.find_by_src(src) {
             Some(idx) => {
                 self.peers[idx].evict();
                 true
@@ -394,8 +433,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         expired
     }
 
-    fn find_peer(&self, zid: &[u8]) -> Option<usize> {
-        self.peers.iter().position(|p| p.matches(zid))
+    fn find_by_src(&self, src: SocketAddr) -> Option<usize> {
+        self.peers.iter().position(|p| p.matches_src(src))
     }
 }
 
@@ -411,10 +450,17 @@ fn copy_zid(zid: &[u8]) -> ([u8; ZID_MAX], u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     const ZID_A: &[u8] = &[0xAA; 16];
     const ZID_B: &[u8] = &[0xBB; 16];
     const ZID_C: &[u8] = &[0xCC; 16];
+
+    // Distinct peer source addresses (the addr-keyed peer table's primary
+    // key); the port distinguishes them on a shared loopback host.
+    const SRC_A: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1);
+    const SRC_B: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 2);
+    const SRC_C: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3);
 
     fn running_dispatcher<const N: usize>(lease_ms: u64) -> MulticastDispatcher<N> {
         let mut d = MulticastDispatcher::<N>::new(MulticastConfig::new(lease_ms));
@@ -454,8 +500,8 @@ mod tests {
     #[test]
     fn stop_clears_peer_table() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, 0);
-        d.ingest_join(ZID_B, 0);
+        d.ingest_join(ZID_A, SRC_A, 0);
+        d.ingest_join(ZID_B, SRC_B, 0);
         assert_eq!(d.active_peers(), 2);
         assert_eq!(d.stop(), SessionFsmMulticastState::Stopped);
         assert_eq!(d.active_peers(), 0);
@@ -466,20 +512,23 @@ mod tests {
     #[test]
     fn link_lost_clears_peer_table() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, 0);
+        d.ingest_join(ZID_A, SRC_A, 0);
         assert_eq!(d.active_peers(), 1);
         assert_eq!(d.notify_link_lost(), SessionFsmMulticastState::Stopped);
         assert_eq!(d.active_peers(), 0);
     }
 
-    /// A validated first Join admits the peer to Active (§3.2).
+    /// A validated first Join admits the peer to Active (§3.2). The peer is
+    /// queryable by both its zid (protocol identity) and its src (addr key).
     #[test]
     fn join_admits_peer_to_active() {
         let mut d = running_dispatcher::<4>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
         assert_eq!(d.active_peers(), 1);
         assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
+        assert_eq!(d.peer_state_by_src(SRC_A), Some(MulticastPeerState::Active));
         assert_eq!(d.peer_state(ZID_B), None);
+        assert_eq!(d.peer_state_by_src(SRC_B), None);
     }
 
     /// A Join before the session is Running is refused (no peer admitted).
@@ -487,21 +536,38 @@ mod tests {
     fn join_refused_when_session_not_running() {
         let mut d = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         // Idle: not running.
-        assert_eq!(d.ingest_join(ZID_A, 0), JoinOutcome::SessionNotRunning);
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, 0),
+            JoinOutcome::SessionNotRunning
+        );
         // LinkOpening: still not running.
         d.create();
-        assert_eq!(d.ingest_join(ZID_A, 0), JoinOutcome::SessionNotRunning);
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, 0),
+            JoinOutcome::SessionNotRunning
+        );
         assert_eq!(d.active_peers(), 0);
     }
 
-    /// A repeat Join from a known peer refreshes its lease, not a new slot.
+    /// A repeat Join from a known address refreshes its lease, not a new slot.
     #[test]
     fn duplicate_join_refreshes() {
         let mut d = running_dispatcher::<4>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, 0), JoinOutcome::Admitted);
-        assert_eq!(d.ingest_join(ZID_A, 100), JoinOutcome::Refreshed);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, 100), JoinOutcome::Refreshed);
         assert_eq!(d.active_peers(), 1);
         assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
+    }
+
+    /// The peer table is keyed by ADDRESS: the SAME zid from two distinct
+    /// source addresses is two distinct peers (the zenoh-pico
+    /// `_z_find_peer_entry(addr)` model — addr is the transport identity).
+    #[test]
+    fn same_zid_distinct_src_are_two_peers() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_B, 0), JoinOutcome::Admitted);
+        assert_eq!(d.active_peers(), 2);
     }
 
     /// The peer table is a bounded pool: a Join is refused once every slot
@@ -509,32 +575,32 @@ mod tests {
     #[test]
     fn join_refused_when_peer_table_full() {
         let mut d = running_dispatcher::<2>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, 0), JoinOutcome::Admitted);
-        assert_eq!(d.ingest_join(ZID_B, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, 0), JoinOutcome::Admitted);
         assert_eq!(
-            d.ingest_join(ZID_C, 0),
+            d.ingest_join(ZID_C, SRC_C, 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
         assert_eq!(d.active_peers(), 2);
     }
 
-    /// An explicit Close evicts the peer and frees its slot (§3.2 ->
-    /// Expired -> recycle).
+    /// An explicit Close from a peer's address evicts it and frees the slot
+    /// (§3.2 -> Expired -> recycle).
     #[test]
-    fn close_evicts_peer() {
+    fn close_by_src_evicts_peer() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, 0);
-        assert!(d.ingest_close(ZID_A));
+        d.ingest_join(ZID_A, SRC_A, 0);
+        assert!(d.close_by_src(SRC_A));
         assert_eq!(d.active_peers(), 0);
         assert_eq!(d.peer_state(ZID_A), None);
     }
 
-    /// Closing an unknown peer is a no-op returning `false`.
+    /// Closing an unknown address is a no-op returning `false`.
     #[test]
-    fn close_unknown_peer_returns_false() {
+    fn close_unknown_src_returns_false() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, 0);
-        assert!(!d.ingest_close(ZID_B));
+        d.ingest_join(ZID_A, SRC_A, 0);
+        assert!(!d.close_by_src(SRC_B));
         assert_eq!(d.active_peers(), 1);
     }
 
@@ -544,9 +610,9 @@ mod tests {
     fn sweep_expires_peers_past_lease_only() {
         let mut d = running_dispatcher::<4>(5_000);
         // Peer A last seen at t=0 -> lease deadline 5_000.
-        d.ingest_join(ZID_A, 0);
+        d.ingest_join(ZID_A, SRC_A, 0);
         // Peer B last seen at t=4_000 -> lease deadline 9_000.
-        d.ingest_join(ZID_B, 4_000);
+        d.ingest_join(ZID_B, SRC_B, 4_000);
         // Sweep at t=6_000: only A (deadline 5_000) expires.
         assert_eq!(d.sweep(6_000), 1);
         assert_eq!(d.active_peers(), 1);
@@ -556,22 +622,23 @@ mod tests {
         assert_eq!(d.active_peers(), 0);
     }
 
-    /// A refresh extends a peer's lease so a later sweep does not evict it.
+    /// A src-attributed refresh (Frame / KeepAlive) extends a peer's lease so
+    /// a later sweep does not evict it.
     #[test]
-    fn refresh_extends_lease() {
+    fn refresh_by_src_extends_lease() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, 0); // deadline 5_000
-        assert!(d.refresh_peer(ZID_A, 4_000)); // deadline now 9_000
-                                               // Sweep at t=6_000: A survives because of the refresh.
+        d.ingest_join(ZID_A, SRC_A, 0); // deadline 5_000
+        assert!(d.refresh_by_src(SRC_A, 4_000)); // deadline now 9_000
+                                                 // Sweep at t=6_000: A survives because of the refresh.
         assert_eq!(d.sweep(6_000), 0);
         assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
     }
 
-    /// Refreshing an unknown peer returns `false`.
+    /// Refreshing an unknown address returns `false`.
     #[test]
-    fn refresh_unknown_peer_returns_false() {
+    fn refresh_unknown_src_returns_false() {
         let mut d = running_dispatcher::<4>(5_000);
-        assert!(!d.refresh_peer(ZID_A, 0));
+        assert!(!d.refresh_by_src(SRC_A, 0));
     }
 
     /// After a peer expires, its slot is reusable for a new peer (the
@@ -580,15 +647,15 @@ mod tests {
     fn slot_reuse_after_expiry() {
         // One slot: admit A, close it, then B reuses the slot.
         let mut d = running_dispatcher::<1>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
         // Full while A is live.
         assert_eq!(
-            d.ingest_join(ZID_B, 0),
+            d.ingest_join(ZID_B, SRC_B, 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
-        assert!(d.ingest_close(ZID_A));
+        assert!(d.close_by_src(SRC_A));
         // Slot freed -> B is admitted into the reclaimed slot.
-        assert_eq!(d.ingest_join(ZID_B, 100), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, 100), JoinOutcome::Admitted);
         assert_eq!(d.peer_state(ZID_B), Some(MulticastPeerState::Active));
         assert_eq!(d.peer_state(ZID_A), None);
     }

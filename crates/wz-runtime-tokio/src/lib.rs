@@ -526,9 +526,7 @@ where
                     *read_state = ReadState::Idle;
                     let mut cursor = SceCursor::new(&bytes);
                     return match StreamEnvelope::decode(&mut cursor) {
-                        Ok(env) => LinkEvent::Rx(RxFrame {
-                            bytes: env.payload.to_vec(),
-                        }),
+                        Ok(env) => LinkEvent::Rx(RxFrame::new(env.payload.to_vec())),
                         Err(_) => LinkEvent::Lost {
                             cause: LostCause::PeerClosed,
                         },
@@ -802,9 +800,12 @@ impl LinkDriver for UdpDriver {
         // use a recycled buffer pool (RFC §5.E lifecycle).
         let mut buf = vec![0u8; 65507];
         match socket.recv_from(&mut buf).await {
-            Ok((n, _src)) => {
+            Ok((n, src)) => {
                 buf.truncate(n);
-                LinkEvent::Rx(RxFrame { bytes: buf })
+                // Carry the datagram source so a multicast consumer can
+                // attribute Frame / KeepAlive / Close to a peer by address
+                // (harmless for unicast, which ignores it).
+                LinkEvent::Rx(RxFrame::with_src(buf, src))
             }
             Err(_) => LinkEvent::Lost {
                 cause: LostCause::OsError,

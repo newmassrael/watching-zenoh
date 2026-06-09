@@ -140,6 +140,32 @@ pub struct TxFrame<'a> {
 #[derive(Debug)]
 pub struct RxFrame {
     pub bytes: Vec<u8>,
+    /// The datagram SOURCE address, when the link is a shared medium that
+    /// needs per-message attribution. `None` on point-to-point links
+    /// (unicast TCP/UDP — one peer per socket, so the source is implicit);
+    /// `Some` on a MULTICAST link, where the group carries traffic from
+    /// many peers and inbound Frame / KeepAlive / Close (which do NOT carry
+    /// the sender zid on the wire) are attributed to a peer by their source
+    /// address — the zenoh-pico multicast model (`_z_find_peer_entry(addr)`,
+    /// the peer found by `_remote_addr`). Round C/H.
+    pub src: Option<core::net::SocketAddr>,
+}
+
+impl RxFrame {
+    /// A point-to-point inbound frame (no source attribution needed — the
+    /// link has one implicit peer). The common case for unicast links.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes, src: None }
+    }
+
+    /// A shared-medium (multicast) inbound frame carrying its datagram
+    /// source address for per-peer attribution.
+    pub fn with_src(bytes: Vec<u8>, src: core::net::SocketAddr) -> Self {
+        Self {
+            bytes,
+            src: Some(src),
+        }
+    }
 }
 
 /// Single event source surfaced by a link driver. R51 baseline

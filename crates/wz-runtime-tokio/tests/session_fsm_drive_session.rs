@@ -253,9 +253,7 @@ async fn r85_unlimited_iters_terminates_on_finite_event_sequence() {
     // is_in_final_state() check at iteration top must trip after
     // the Lost arm completes.
     let mut driver = QueueDriver::with(vec![
-        LinkEvent::Rx(wz_runtime_tokio::RxFrame {
-            bytes: vec![0x04], // T_MID_KEEP_ALIVE
-        }),
+        LinkEvent::Rx(wz_runtime_tokio::RxFrame::new(vec![0x04])), // T_MID_KEEP_ALIVE
         LinkEvent::Lost {
             cause: LostCause::PeerClosed,
         },
@@ -307,9 +305,7 @@ async fn r83_observer_captures_framepayload_and_linklost_in_order() {
     // next iteration top.
     let mut driver = QueueDriver::with(vec![
         // T_MID_FRAME (0x05) without R flag, sn=0, empty payload.
-        LinkEvent::Rx(RxFrame {
-            bytes: vec![0x05, 0x00],
-        }),
+        LinkEvent::Rx(RxFrame::new(vec![0x05, 0x00])),
         LinkEvent::Lost {
             cause: LostCause::PeerClosed,
         },
@@ -373,9 +369,7 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
     // RESPONSE pre-R97 and 0x1D=PUSH pre-R90) so
     // FramePayload.messages.len() == 1 deterministically.
     let mut driver = QueueDriver::with(vec![
-        LinkEvent::Rx(RxFrame {
-            bytes: vec![0x05, 0x00, 0x1E, 0xAA],
-        }),
+        LinkEvent::Rx(RxFrame::new(vec![0x05, 0x00, 0x1E, 0xAA])),
         LinkEvent::Lost {
             cause: LostCause::PeerClosed,
         },
@@ -463,7 +457,7 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
     frame_wire.extend_from_slice(&push_bytes);
 
     let mut driver = QueueDriver::with(vec![
-        LinkEvent::Rx(RxFrame { bytes: frame_wire }),
+        LinkEvent::Rx(RxFrame::new(frame_wire)),
         LinkEvent::Lost {
             cause: LostCause::PeerClosed,
         },

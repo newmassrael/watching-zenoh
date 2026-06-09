@@ -3835,7 +3835,9 @@
       ],
       "caveats_bullets": [
         "Impl: multicast_peer FSM adds a Free pool-slot sentinel, like reassembly_slot Empty (R311jh).",
-        "A validated Join drives Discovered->Active together; Discovered is the init-rx-seq transient."
+        "A validated Join drives Discovered->Active together; Discovered is the init-rx-seq transient.",
+        "Impl (R311jk): peer keyed by src ADDRESS (Frame/KeepAlive carry no zid); zid stored from JOIN.",
+        "Found via _z_find_peer_entry(addr) (zenoh-pico parity); table is one-per-peer, addr-indexed."
       ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
@@ -31950,6 +31952,52 @@
         "Review-surfaced, USER DECISION: SessionBinding/PeerBinding (multicast_dispatch) carry dead write-only counter fields - unreadable (SCE buries the binding behind the private Policy.actions) + unused (tests observe via FSM state). YAGNI says drop them (zero-field no-op bindings); alternative = an SCE enhancement to expose Policy.actions so the counters become readable. Same smell exists in reassembly's SlotBinding.",
         "Tracked north-star incompleteness (R311ji carry): the multicast RxDispatch is JOIN-only because UdpDriver drops the datagram source addr (RxFrame has no src); Frame/KeepAlive/Close peer attribution needs a src-addr-carrying RxFrame (a cross-cutting driver change). This is the main 'not yet complete' item for full multicast transport.",
         "Tracked: graceful multicast.stop (shutdown signal into the select loop); slim multicast buffer pool (M0 variant); richer JOIN options (sn_res/batch_size negotiation for zenoh interop); Layer M real-socket e2e + §3.4 client-refuses (Round D)."
+      ]
+    },
+    "Round 311jk": {
+      "decision_summary": "R311jk Round H: multicast RxDispatch complete - peer table addr-keyed (zenoh-pico parity); RxFrame.src + Frame/KeepAlive/Close attribution by source address; §3.2 reconciled.",
+      "changes_bullets": [
+        "wz-session-core link.rs: RxFrame gains src: Option<core::net::SocketAddr> + new()/with_src() constructors; the UdpDriver + udp_pipeline poll_event populate it from recv_from (unicast/scouting/MCU paths use RxFrame::new = None).",
+        "multicast_dispatch RE-KEYED by source ADDRESS (the zenoh-pico _z_find_peer_entry model): PeerSlot.src is the primary key + zid stored from JOIN; ingest_join(zid, src) / refresh_by_src / close_by_src / peer_state_by_src / find_by_src replace the zid-keyed refresh_peer / ingest_close. Frame/KeepAlive/Close carry no zid on the wire (verified vs zenoh-pico) so are attributed by addr.",
+        "multicast_glue RxDispatch now classifies every inbound datagram by transport MID and attributes it by RxFrame.src: JOIN->ingest_join (own-zid filtered), Frame/KeepAlive->refresh_by_src, Close->close_by_src.",
+        "session-fsm §3.2: 2 caveats reconciling \"one per zid\" with the addr-keyed lookup (one-per-peer, addr-indexed, zenoh-pico parity).",
+        "~22 unicast RxFrame { bytes } construction sites migrated to RxFrame::new (behaviour-preserving)."
+      ],
+      "verification_bullets": [
+        "multicast_glue 7 tests (admit-by-src + Close-evict-by-src + own-zid filter + encode/decode) + multicast_dispatch 16 tests (addr-keyed; same-zid-distinct-src = 2 peers) pass; 9 session_fsm tests pass (RxFrame migration preserved behaviour).",
+        "clippy wz-session-core (session-multicast) + wz-runtime-tokio (transport-multicast) clean; G.12 thumbv6m no_std OK (dispatcher uses core::net::SocketAddr); G.11-style lwip cross OK (session_drive RxFrame::new).",
+        "Full host run-ci all required layers pass (exit 0). CLI validate-workspace healthy on schema v11 (the MCP store tools are dead on v11; §3.2 caveats added via CLI)."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Next layer (separate effort): the multicast DATA plane - delivering a Frame's PAYLOAD to the subscriber/observer registries (pub/sub over multicast), which sits above this transport-level peer attribution.",
+        "Tracked: graceful multicast.stop (a shutdown signal into the select loop); slim multicast buffer pool (M0 variant); richer JOIN options (sn_res/batch_size negotiation for full zenoh interop); Layer M real-socket multicast e2e + the §3.4 client-whatami-refuses-multicast guard (Round D).",
+        "reassembly_dispatch's SlotBinding still carries the same dead write-only counters the G cleanup removed from the multicast bindings - a separate pass if wanted."
+      ],
+      "publishable_decision_summary": "R311jk Round H: multicast RxDispatch complete - peer table addr-keyed (zenoh-pico parity); RxFrame.src + Frame/KeepAlive/Close attribution by source address; §3.2 reconciled.",
+      "publishable_changes_bullets": [
+        "wz-session-core link.rs: RxFrame gains src: Option<core::net::SocketAddr> + new()/with_src() constructors; the UdpDriver + udp_pipeline poll_event populate it from recv_from (unicast/scouting/MCU paths use RxFrame::new = None).",
+        "multicast_dispatch RE-KEYED by source ADDRESS (the zenoh-pico _z_find_peer_entry model): PeerSlot.src is the primary key + zid stored from JOIN; ingest_join(zid, src) / refresh_by_src / close_by_src / peer_state_by_src / find_by_src replace the zid-keyed refresh_peer / ingest_close. Frame/KeepAlive/Close carry no zid on the wire (verified vs zenoh-pico) so are attributed by addr.",
+        "multicast_glue RxDispatch now classifies every inbound datagram by transport MID and attributes it by RxFrame.src: JOIN->ingest_join (own-zid filtered), Frame/KeepAlive->refresh_by_src, Close->close_by_src.",
+        "session-fsm §3.2: 2 caveats reconciling \"one per zid\" with the addr-keyed lookup (one-per-peer, addr-indexed, zenoh-pico parity).",
+        "~22 unicast RxFrame { bytes } construction sites migrated to RxFrame::new (behaviour-preserving)."
+      ],
+      "publishable_verification_bullets": [
+        "multicast_glue 7 tests (admit-by-src + Close-evict-by-src + own-zid filter + encode/decode) + multicast_dispatch 16 tests (addr-keyed; same-zid-distinct-src = 2 peers) pass; 9 session_fsm tests pass (RxFrame migration preserved behaviour).",
+        "clippy wz-session-core (session-multicast) + wz-runtime-tokio (transport-multicast) clean; G.12 thumbv6m no_std OK (dispatcher uses core::net::SocketAddr); G.11-style lwip cross OK (session_drive RxFrame::new).",
+        "Full host run-ci all required layers pass (exit 0). CLI validate-workspace healthy on schema v11 (the MCP store tools are dead on v11; §3.2 caveats added via CLI)."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next layer (separate effort): the multicast DATA plane - delivering a Frame's PAYLOAD to the subscriber/observer registries (pub/sub over multicast), which sits above this transport-level peer attribution.",
+        "Tracked: graceful multicast.stop (a shutdown signal into the select loop); slim multicast buffer pool (M0 variant); richer JOIN options (sn_res/batch_size negotiation for full zenoh interop); Layer M real-socket multicast e2e + the §3.4 client-whatami-refuses-multicast guard (Round D).",
+        "reassembly_dispatch's SlotBinding still carries the same dead write-only counters the G cleanup removed from the multicast bindings - a separate pass if wanted."
       ]
     },
     "Round 311k": {

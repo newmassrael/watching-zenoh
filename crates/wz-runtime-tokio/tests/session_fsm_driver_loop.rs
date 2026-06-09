@@ -72,7 +72,7 @@ async fn r76_rx_init_ack_advances_to_got_init_ack() {
 
     let cookie = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     let wire = craft_initack_wire(&cookie);
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame { bytes: wire })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert!(
@@ -101,9 +101,7 @@ async fn r76_rx_keepalive_side_effect_only_populates_lease_slot() {
         "keepalive slot empty before Rx"
     );
 
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![T_MID_KEEP_ALIVE],
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(vec![T_MID_KEEP_ALIVE]))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert!(
@@ -131,9 +129,9 @@ async fn r76_rx_malformed_surfaces_parse_error_and_framing_close() {
     // 2-byte truncated InitAck — header says "InitAck present"
     // but the body cuts off before the version byte. parse_inbound
     // returns NeedMoreBytes, the helper raises FramingError.
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT],
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(vec![
+        FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT,
+    ]))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert!(
@@ -184,9 +182,7 @@ async fn r74_rx_frame_with_empty_payload_surfaces_framepayload() {
     // T_MID_FRAME (0x05) without R flag, sn=0 VLE single byte, empty
     // tail payload. R74 dispatch must surface this as FramePayload
     // (not SideEffectOnly) so the application layer sees the Frame.
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![0x05, 0x00],
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(vec![0x05, 0x00]))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     match outcome {
@@ -235,9 +231,9 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
     // because that was the last un-typed MID; the R97 + R110 + R115
     // catalog completion forced a refactor to a synthetic out-of-range
     // value so the Unknown coverage stays meaningful.
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![0x25, 0x01, 0x00, 0xAA, 0xBB],
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(vec![
+        0x25, 0x01, 0x00, 0xAA, 0xBB,
+    ]))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     match outcome {
@@ -294,7 +290,7 @@ async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
     // tail = push_bytes.
     let mut frame_wire = vec![0x25, 0x02];
     frame_wire.extend_from_slice(&push_bytes);
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame { bytes: frame_wire })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(frame_wire))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     match outcome {
@@ -336,9 +332,7 @@ async fn r74_rx_frame_malformed_request_payload_surfaces_parse_error() {
     // that don't exist. parse_frame_payload returns CodecError;
     // poll_and_dispatch_one must surface ParseError AND fire
     // FramingError into the FSM (SentInitSyn -> Closing edge).
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![0x05, 0x00, 0x1C],
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(vec![0x05, 0x00, 0x1C]))]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert!(

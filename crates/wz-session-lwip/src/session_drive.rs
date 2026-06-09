@@ -148,9 +148,9 @@ where
         if let Some(dg) = driver.try_recv() {
             // Reply to whoever just spoke (the acceptor reply path).
             driver.set_peer(dg.src_addr, dg.src_port);
-            let event = LinkEvent::Rx(RxFrame {
-                bytes: dg.data.as_slice().to_vec(),
-            });
+            // Unicast MCU session shell — one peer per link, so no source
+            // attribution is needed (the multicast MCU drive is a later round).
+            let event = LinkEvent::Rx(RxFrame::new(dg.data.as_slice().to_vec()));
             let outcome = dispatch_link_event(event, actions, &mut engine);
             #[cfg(feature = "reassembly")]
             report_outcome_reassembling(&outcome, &mut reasm, actions, now_ms, &mut on_event);

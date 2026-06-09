@@ -143,9 +143,9 @@ impl LinkDriver for UdpReadDriver {
         // length-prefix reassembly). Single datagram cap = MAX_UDP_PAYLOAD.
         let mut buf = vec![0u8; MAX_UDP_PAYLOAD];
         match self.socket.recv_from(&mut buf).await {
-            Ok((n, _src)) => {
+            Ok((n, src)) => {
                 buf.truncate(n);
-                LinkEvent::Rx(RxFrame { bytes: buf })
+                LinkEvent::Rx(RxFrame::with_src(buf, src))
             }
             Err(_) => LinkEvent::Lost {
                 cause: LostCause::OsError,
