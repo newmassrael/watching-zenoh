@@ -81,13 +81,11 @@ jobs:
             crates -> target
             vendor/sce -> target
 
-      - name: Install mnemosyne-cli
-        # --force + no `command -v` guard: rust-cache caches ~/.cargo/bin,
-        # so a guard would run a STALE cached binary pinned to a pre-R400
-        # schema and fail Layer A `missing field docs`. Mirrors ci.yml.
+      - name: Install mnemosyne-cli (pinned)
+        # Delegated to the shared scripts/install-mnemosyne-cli.sh (pinned
+        # rev + --force), the single source of truth with ci.yml.
         run: |
-          cargo install --git https://github.com/newmassrael/mnemosyne \
-            --branch main --bin mnemosyne-cli --force mnemosyne-cli || {
+          bash scripts/install-mnemosyne-cli.sh || {
             echo "::warning::mnemosyne-cli install failed; Layer A skipped"
             echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
           }

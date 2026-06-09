@@ -113,32 +113,18 @@ jobs:
         # with `Could not find protoc. ... apt-get install protobuf-compiler`.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
 
-      - name: Install mnemosyne-cli
-        # mnemosyne-cli source lives outside this workspace; CI
-        # builds it from the upstream main pin used at memory R286
-        # (binary 0.1.0 c2b0d077). R64.2 hotfix: `cargo install`
-        # does NOT accept `--package` (Cargo's `cargo install
-        # --help` lists CRATE as a positional arg). The R64.1
-        # attempt used `--package mnemosyne-cli` and was rejected
-        # with `error: unexpected argument '--package' found`.
-        # Correct shape: pass the crate name positionally + `--bin`
-        # disambiguates the binary if the crate ships multiple.
-        # The upstream multi-package workspace
-        # (audit-broadcast-bench / cascade-measurement /
-        # codegen-prototype / mnemosyne-cli / mnemosyne-mcp / etc.)
-        # is selected here via the positional crate name.
-        #
-        # ALWAYS reinstall (--force, no `command -v` guard): Swatinem
-        # rust-cache caches ~/.cargo/bin by default, so a `command -v`
-        # guard skips the install and runs a STALE mnemosyne-cli binary
-        # cached from an earlier upstream-main commit. That stale binary
-        # pinned the parser to a pre-R400 schema and rejected the current
-        # mnemosyne.toml (which dropped `[workspace].docs` per R408) with
-        # `missing field docs`, failing Layer A on every push. --force
-        # rebuilds from the current main so CI tracks upstream.
+      - name: Install mnemosyne-cli (pinned)
+        # Delegated to scripts/install-mnemosyne-cli.sh (the single source
+        # of truth shared with release.yml) so the two workflows cannot
+        # drift. The script pins a known-good rev (deterministic — a future
+        # upstream `main` change cannot silently break this CI) and
+        # `--force`-rebuilds it, overriding any stale ~/.cargo/bin the
+        # rust-cache restored (the R408 `missing field docs` failure mode).
+        # The `|| { skip }` fallback keeps Layer A optional if the external
+        # install fails (network / upstream outage), GitHub-Actions-specific
+        # so it stays in the step, not the CI-agnostic script.
         run: |
-          cargo install --git https://github.com/newmassrael/mnemosyne \
-            --branch main --bin mnemosyne-cli --force mnemosyne-cli || {
+          bash scripts/install-mnemosyne-cli.sh || {
             echo "::warning::mnemosyne-cli install failed; Layer A skipped"
             echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
           }
