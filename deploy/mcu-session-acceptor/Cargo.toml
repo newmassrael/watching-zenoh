@@ -88,6 +88,14 @@ wz-mcu-session-acceptor = { path = "../../crates/wz-mcu-session-acceptor" }
 # build proves the whole-frame dispatch.
 reassembly = ["wz-mcu-session-acceptor/reassembly"]
 
+# Slim session-rx buffer-pool profile (nrf51-class / Cortex-M0, 16 KB SRAM).
+# Threads the facade atomic feature down to the wz-link-lwip selector so the
+# acceptor binds a slim (4 x 256) session rx socket + a matching slim peer
+# socket. The Layer Q.4 microbit (thumbv6m) build enables this, dropping the
+# e2e peak heap from ~37.9 KB to ~3.5 KB so it fits nrf51's 16 KB SRAM and
+# the lane boots (vs the build-only fallback on the default full-rate pool).
+buffer-pool-session-rx-slim = ["wz-mcu-session-acceptor/buffer-pool-session-rx-slim"]
+
 [profile.release]
 codegen-units = 1
 opt-level = "s"

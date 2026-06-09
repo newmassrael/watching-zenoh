@@ -4,6 +4,7 @@
 //! Stage 5 — Layer Q.4 QEMU acceptor session e2e.
 //!
 //! Boots [`wz_mcu_session_acceptor::run_acceptor_e2e`] on a Cortex-M3/M4/M7
+//! (and, on the slim buffer-pool profile, Cortex-M0 / microbit)
 //! under QEMU with a real lwIP cross-build: the acceptor half of the zenoh
 //! unicast handshake (InitSyn -> InitAck -> OpenSyn with the real
 //! round-tripped cookie -> OpenAck -> Established) followed by an
@@ -20,11 +21,14 @@
 //!
 //! QEMU's Cortex-M emulation stubs the DWT cycle counter to 0, so monotonic
 //! time comes from SysTick poll mode: `TICKINT` fires the `SysTick`
-//! exception every 1 ms (RELOAD = 24999 cycles at 25 MHz), the handler bumps
-//! a wraparound counter, and `now_us` snaps it either side of the CVR read
-//! (the standard ISR-vs-thread lock-free pattern). SysTick is ARMv7-M base
-//! spec, so the same impl boots on every native-atomic mps2 machine the
-//! Layer Q.4 lane targets (M3 / M4 / M7).
+//! exception every 1 ms (RELOAD = CYCLES_PER_US * 1000 - 1: 24999 at the
+//! mps2 25 MHz, 15999 at the microbit 16 MHz), the handler bumps a
+//! wraparound counter, and `now_us` snaps it either side of the CVR read
+//! (the standard ISR-vs-thread lock-free pattern). SysTick is ARMv6-M base
+//! spec onward, so the same impl boots on every M-class machine the Layer
+//! Q.4 lane targets: the mps2 family (M3 / M4 / M7) and — on the slim
+//! buffer-pool profile (buffer-pool-session-rx-slim) — the microbit
+//! (Cortex-M0), whose ~3.15 KB slim peak heap fits nrf51's 16 KB SRAM.
 
 #![no_std]
 #![no_main]
@@ -41,17 +45,29 @@ use portable_atomic::{AtomicU32, Ordering};
 
 use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode};
 
-// mps2 family (M3/M4/M7) has 4 MB SRAM, so a generous 256 KB heap holds the
-// alloc-backed session stack (SessionLinkActions handle + the engine + the
-// codec byte buffers) with room to spare.
+// Heap sizing fork per target SRAM budget. The mps2 family (M3/M4/M7) has
+// 4 MB SRAM, so a generous 256 KB heap holds the alloc-backed session stack
+// (SessionLinkActions handle + the engine + the codec byte buffers) with
+// room to spare. The microbit (Cortex-M0, nrf51822) has 16 KB SRAM total;
+// the thumbv6m build is the slim profile (buffer-pool-session-rx-slim), whose
+// measured peak heap is ~3.15 KB (vs ~32 KB on the default pool), so a 4 KB
+// heap holds it (matching deploy/mcu-qemu-demo's microbit heap) while leaving
+// lwIP's static MEM_SIZE + stack + .bss inside the remaining ~12 KB.
+#[cfg(target_has_atomic = "32")]
 const HEAP_SIZE: usize = 1024 * 256;
+#[cfg(not(target_has_atomic = "32"))]
+const HEAP_SIZE: usize = 1024 * 4;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-/// QEMU mps2 nominal core clock (MHz). SysTick counts processor cycles when
+/// CPU clock per target (MHz) — QEMU clocks the mps2 family at 25 MHz and the
+/// `microbit` (nrf51) at 16 MHz. SysTick counts processor cycles when
 /// `CSR.CLKSOURCE = 1`; dividing by this yields microseconds.
+#[cfg(target_has_atomic = "32")]
 const CYCLES_PER_US: u64 = 25;
+#[cfg(not(target_has_atomic = "32"))]
+const CYCLES_PER_US: u64 = 16;
 /// SysTick reload sized to a 1 ms tick (RELOAD = 24999 cycles at 25 MHz).
 const SYST_RELOAD: u32 = (CYCLES_PER_US as u32 * 1000) - 1;
 const SYST_PERIOD: u64 = SYST_RELOAD as u64 + 1;
