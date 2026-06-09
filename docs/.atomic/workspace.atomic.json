@@ -3064,7 +3064,8 @@
         "R311av thumbv6m alloc gap: M0+ ARMv6-M lacks atomic CAS so alloc::sync::Arc unavailable; sync-only",
         "Phase W ladder remaining: facade runtime-lwip feature R311ax; first MCU preset R311ay; abort R311az+",
         "R311av self-wake busy-poll SleepFuture/TimeoutFuture; real deadline-keyed timer queue is R311az+",
-        "R311ja resolves R311av M0 gap: handle Arc -> ActionsHandle GAT (lwIP Rc); session-unicast on ARMv6-M"
+        "R311ja resolves R311av M0 gap: handle Arc -> ActionsHandle GAT (lwIP Rc); session-unicast on ARMv6-M",
+        "R311jb: M0 e2e run needs session-rx 24.6KB >nrf51 16KB; Q.4 thumbv6m is build-only cross-compile"
       ],
       "alternatives_rejected": [
         {
@@ -31516,6 +31517,46 @@
         "deploy.yaml reassembly_pool dims still spec-sourced, not yaml-loaded (unchanged carry).",
         "ResponseSink Rc<S> blanket impl deferred until an MCU query/reply consumer actually drains a refcounted sink (no caller on the MCU drive loop today).",
         "A deploy/mcu-session-acceptor thumbv6m (M0) bin + a Layer Q.4 M0 QEMU sub-lane is now a natural follow-up: the session e2e cross-compiles on ARMv6-M, so it could boot under qemu-system-arm -cpu cortex-m0."
+      ]
+    },
+    "Round 311jb": {
+      "decision_summary": "R311jb adds a Cortex-M0 (thumbv6m/microbit) BUILD-ONLY Q.4 sub-lane: acceptor deploy bin + e2e lib cross-compile on ARMv6-M, but ~37KB socket footprint exceeds nrf51 16KB SRAM so M0 is not booted.",
+      "changes_bullets": [
+        "scripts/run-ci.sh Q.4: add microbit/thumbv6m acceptor lane (4th field build); build-only frame+reasm, run SKIP audit-traced",
+        "deploy/mcu-session-acceptor Cargo.toml + build.rs: M0 deferred-follow-up comments -> build-covered (Q.4 microbit)",
+        "5.P caveat: M0 e2e run needs session-rx 24.6KB > nrf51 16KB; thumbv6m is build-only cross-compile"
+      ],
+      "verification_bullets": [
+        "thumbv6m build of deploy bin EXIT0; ELF = ARM EABI5 soft-float, text 57780 / bss 270104 (256KB heap)",
+        "Layer Q WZ_RUN_LAYER_Q=1 Layer Q pass: Q.4.microbit.{frame,reasm} build OK + run SKIP build-only; M3/M4/M7 frame+reasm run PASS no regression",
+        "validate_workspace: T1 new=+0, T3 warn=4 / T4 info=3 unchanged; entries 606->607 sections 257"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "nrf51-class 16KB needs a slim-socket session preset (north-star atomic-feature decomposition) to BOOT the e2e on M0; M0 currently build-only",
+        "tokio Session<R,T>.actions -> R::ActionsHandle<T> in the Session-runtime-agnostic extraction round (R311cw goal; user undecided, deferred)",
+        "ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
+      ],
+      "publishable_decision_summary": "R311jb adds a Cortex-M0 (thumbv6m/microbit) BUILD-ONLY Q.4 sub-lane: acceptor deploy bin + e2e lib cross-compile on ARMv6-M, but ~37KB socket footprint exceeds nrf51 16KB SRAM so M0 is not booted.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh Q.4: add microbit/thumbv6m acceptor lane (4th field build); build-only frame+reasm, run SKIP audit-traced",
+        "deploy/mcu-session-acceptor Cargo.toml + build.rs: M0 deferred-follow-up comments -> build-covered (Q.4 microbit)",
+        "5.P caveat: M0 e2e run needs session-rx 24.6KB > nrf51 16KB; thumbv6m is build-only cross-compile"
+      ],
+      "publishable_verification_bullets": [
+        "thumbv6m build of deploy bin EXIT0; ELF = ARM EABI5 soft-float, text 57780 / bss 270104 (256KB heap)",
+        "Layer Q WZ_RUN_LAYER_Q=1 Layer Q pass: Q.4.microbit.{frame,reasm} build OK + run SKIP build-only; M3/M4/M7 frame+reasm run PASS no regression",
+        "validate_workspace: T1 new=+0, T3 warn=4 / T4 info=3 unchanged; entries 606->607 sections 257"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "nrf51-class 16KB needs a slim-socket session preset (north-star atomic-feature decomposition) to BOOT the e2e on M0; M0 currently build-only",
+        "tokio Session<R,T>.actions -> R::ActionsHandle<T> in the Session-runtime-agnostic extraction round (R311cw goal; user undecided, deferred)",
+        "ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
       ]
     },
     "Round 311k": {
