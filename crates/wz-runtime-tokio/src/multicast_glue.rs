@@ -1,0 +1,352 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! Round C — multicast transport <-> multicast-link drive loop.
+//!
+//! The AP host loop that drives the engine-free
+//! [`MulticastDispatcher`](wz_session_core::multicast_dispatch::MulticastDispatcher)
+//! (the session-fsm §3.1 session-level FSM + the §3.2 per-peer table,
+//! landed in wz-session-core) against a real UDP-multicast link. This is
+//! the multicast sibling of [`crate::scouting_glue`]; the same engine-free
+//! split applies — the dispatcher owns the protocol FSMs + the peer-table
+//! arithmetic, and this loop owns the socket IO + the clock.
+//!
+//! ## What the loop owns (the §3.1 Running parallel concerns)
+//!
+//! §3.1 describes Running as three parallel regions; the SCE surface has no
+//! `<parallel>`, so (as the dispatcher's module docs record) the host loop
+//! realises them:
+//! - **JoinEmit** — multicasts a periodic JOIN beacon every
+//!   [`MulticastParams::join_interval_ms`]. JOIN is the handshake-free
+//!   transport's self-advertisement (the multicast analogue of INIT+OPEN);
+//!   there is no separate keepalive, so the periodic JOIN IS the liveness
+//!   beacon.
+//! - **RxDispatch** — decodes each inbound datagram; a JOIN admits or
+//!   refreshes its announcer via [`MulticastDispatcher::ingest_join`].
+//! - **PeerSweep** — evicts peers past their lease via
+//!   [`MulticastDispatcher::sweep`].
+//!
+//! ## RX scope (Round C): JOIN-centric
+//!
+//! Only JOIN is routed inbound. A JOIN carries the announcer's zid (the
+//! §3.2 peer-table key), so it is self-attributing. Frame / KeepAlive /
+//! Close do NOT carry a source zid on the wire — in multicast they are
+//! attributed by the datagram SOURCE ADDRESS, which the current
+//! [`UdpDriver`](crate::UdpDriver) drops (`recv_from`'s `_src`). Routing
+//! them therefore needs a source-address-carrying driver, a deferred
+//! follow-up. It is not a correctness gap for liveness: the periodic JOIN
+//! beacon refreshes the lease (a live peer re-JOINs every cadence), and the
+//! lease sweep handles departure — exactly zenoh's multicast model.
+//!
+//! ## Stop
+//!
+//! The loop runs until the link is lost (`LinkEvent::Lost` ->
+//! [`MulticastOutcome::LinkLost`]) or the test iteration budget is reached.
+//! A graceful `multicast.stop` (the §3.1 Running -> Stopped event) needs a
+//! shutdown signal threaded into the `select!`; that is a deferred
+//! follow-up (Round C drives until link loss).
+
+use sce_forge_runtime::codec::SceCursor;
+
+use wz_codecs::join::Join;
+use wz_codecs::wire_const;
+use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
+use wz_session_core::multicast_dispatch::MulticastDispatcher;
+use wz_session_core::multicast_params::MulticastParams;
+use wz_session_core::reliability::Reliability;
+use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
+
+use wz_runtime_core::TimeSource;
+
+use crate::LinkDriver;
+
+/// Frame a minimal multicast JOIN datagram for `params`:
+/// `[T_MID_JOIN][version][cbyte][zid][lease vle][next_sn_r vle][next_sn_be vle]`.
+///
+/// "Minimal" = no `sn_res` / `batch_size` resolution negotiation (the
+/// `join` codec's `S`-flag optionals are absent, encoded with `s = 0`), so
+/// the header carries no high flags. Richer JOIN options (resolution
+/// negotiation) are a zenoh-interop follow-up; this is the self-advertising
+/// beacon body. The body codec omits the MID byte, so it is prepended here
+/// (mirror of [`crate::scouting_glue`]'s `scout_emit`).
+pub fn encode_join(params: &MulticastParams) -> Vec<u8> {
+    let zid = &params.zid;
+    let mut join = Join::new();
+    join.version = params.version;
+    join.set_whatami(params.whatami);
+    if !zid.is_empty() {
+        join.set_zid_len_m1((zid.len() - 1) as u8);
+        join.zid = zid.as_slice();
+    }
+    join.lease = params.lease_ms;
+    // A fresh announcer starts both channel sequence numbers at 0; tracking
+    // the live TX sequence is a data-plane follow-up (no data frames yet).
+    join.next_sn_reliable = 0;
+    join.next_sn_best_effort = 0;
+    let body = join.encode_to_vec(0);
+
+    let mut dgram = Vec::with_capacity(1 + body.len());
+    dgram.push(wire_const::T_MID_JOIN);
+    dgram.extend_from_slice(&body);
+    dgram
+}
+
+/// If `bytes` is a multicast JOIN datagram, decode it and return the
+/// announcer's zid (a sub-slice borrow of `bytes`). Returns `None` for a
+/// non-JOIN MID or a malformed body. The returned zid is fed straight to
+/// [`MulticastDispatcher::ingest_join`].
+pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
+    let header = *bytes.first()?;
+    if header & 0x1f != wire_const::T_MID_JOIN {
+        return None;
+    }
+    // High bits carry the JOIN flags; the `S` flag (size-params present)
+    // maps to the codec's `s & 0x01`. A minimal JOIN clears them, so `s`
+    // is 0 here, but extract it from the header so a future richer JOIN
+    // decodes too.
+    let s = header >> 5;
+    let mut cursor = SceCursor::new(&bytes[1..]);
+    match Join::decode(&mut cursor, s) {
+        Ok(join) => Some(join.zid),
+        Err(_) => None,
+    }
+}
+
+/// Outcome of one [`drive_multicast_session`] run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MulticastOutcome {
+    /// The session left Running (e.g. a pre-stopped dispatcher).
+    Stopped,
+    /// The multicast link was lost.
+    LinkLost(LostCause),
+    /// The bounded iteration budget was exhausted (test guard).
+    IterationLimit,
+}
+
+/// Drive a multicast session: bring the link up, then own the §3.1 Running
+/// concerns (periodic JOIN emit, RX classify -> dispatch, lease sweep)
+/// until the link is lost or `max_iters` is reached.
+///
+/// `max_iters` bounds the select loop for tests; production passes `None`.
+/// `tick_ms` is the scheduler cadence (the JOIN interval + lease are
+/// spec-sourced from `params` / the dispatcher config, not duplicated
+/// here). The loop owns the monotonic clock (the engine-free FSMs bind
+/// `NoOpHal` and arm no timer — same split as [`crate::scouting_glue`]).
+pub async fn drive_multicast_session<D, T, const MAX_PEERS: usize>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    params: &MulticastParams,
+    driver: &mut D,
+    clock: &T,
+    max_iters: Option<usize>,
+    tick_ms: u64,
+) -> MulticastOutcome
+where
+    D: LinkDriver,
+    T: TimeSource,
+{
+    // Idle -> LinkOpening -> Running.
+    dispatcher.create();
+    dispatcher.notify_link_ready();
+
+    // Emit the first JOIN beacon immediately, then every join_interval_ms.
+    let mut next_join_ms = clock.now_monotonic_ms();
+
+    let mut iter: usize = 0;
+    loop {
+        if dispatcher.session_state() != SessionFsmMulticastState::Running {
+            return MulticastOutcome::Stopped;
+        }
+        if let Some(limit) = max_iters {
+            if iter >= limit {
+                return MulticastOutcome::IterationLimit;
+            }
+            iter += 1;
+        }
+
+        // JoinEmit: multicast the self-advertising JOIN beacon when due.
+        let now = clock.now_monotonic_ms();
+        if now >= next_join_ms {
+            let dgram = encode_join(params);
+            let frame = TxFrame { bytes: &dgram };
+            // Best-effort: a failed multicast send is non-fatal (the next
+            // cadence retries), so unlike the scout path there is no
+            // tx-failed transition to drive.
+            let _ = driver.send(&frame, Reliability::BestEffort).await;
+            next_join_ms = now.saturating_add(params.join_interval_ms);
+        }
+
+        tokio::select! {
+            event = driver.poll_event() => match event {
+                LinkEvent::Rx(rx) => {
+                    // RxDispatch (JOIN-centric, see module docs): a JOIN is
+                    // self-attributing (carries the announcer zid) so it
+                    // admits / refreshes the peer. With multicast loopback
+                    // on, our own JOIN echoes back; ingest_join treats it as
+                    // a (harmless) self-peer admit — a real deploy filters
+                    // own-zid, a follow-up once own-zid lives in the loop.
+                    if let Some(zid) = decode_join_zid(&rx.bytes) {
+                        dispatcher.ingest_join(zid, clock.now_monotonic_ms());
+                    }
+                }
+                LinkEvent::Lost { cause } => {
+                    dispatcher.notify_link_lost();
+                    return MulticastOutcome::LinkLost(cause);
+                }
+                LinkEvent::Ready => {}
+            },
+            _ = clock.sleep(tick_ms) => {
+                // PeerSweep: evict peers past their lease. Swept every tick
+                // (>= the §3.1 lease/3 cadence; sweeping more often only
+                // sharpens eviction, and sweep is idempotent).
+                dispatcher.sweep(clock.now_monotonic_ms());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    use wz_session_core::link::RxFrame;
+    use wz_session_core::multicast_dispatch::MulticastConfig;
+    use wz_session_core::multicast_peer::MulticastPeerState;
+
+    use crate::runtime_impl::TokioTime;
+
+    fn params(zid: &[u8]) -> MulticastParams {
+        MulticastParams {
+            version: 0x09,
+            whatami: 0x01, // PEER (wire form)
+            zid: zid.to_vec(),
+            lease_ms: 5_000,
+            join_interval_ms: 1,
+        }
+    }
+
+    /// `encode_join` frames a minimal JOIN whose MID is `T_MID_JOIN` and
+    /// whose body round-trips back to the announcer zid through
+    /// `decode_join_zid`.
+    #[test]
+    fn encode_join_round_trips_zid() {
+        let zid = [0xAA, 0xBB, 0xCC, 0xDD];
+        let dgram = encode_join(&params(&zid));
+        assert_eq!(dgram[0], wire_const::T_MID_JOIN);
+        assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));
+    }
+
+    /// `decode_join_zid` rejects a datagram whose MID is not `T_MID_JOIN`.
+    #[test]
+    fn decode_rejects_non_join_mid() {
+        // A T_MID_KEEP_ALIVE (0x04) datagram, not a JOIN.
+        let dgram = [wire_const::T_MID_KEEP_ALIVE, 0x00];
+        assert_eq!(decode_join_zid(&dgram), None);
+        assert_eq!(decode_join_zid(&[]), None);
+    }
+
+    /// A fake in-memory link driver: replays queued inbound datagrams,
+    /// captures sent frames, and (once drained) parks so the loop falls to
+    /// the sweep tick. Lets the async drive loop be exercised deterministically
+    /// without a real multicast socket (mirrors how the scouting unit tests
+    /// cover the deterministic logic; the real-socket path is Layer M).
+    struct FakeDriver {
+        inbound: VecDeque<Vec<u8>>,
+        sent: Vec<Vec<u8>>,
+        lost: bool,
+    }
+
+    impl LinkDriver for FakeDriver {
+        async fn open(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn send(
+            &mut self,
+            frame: &TxFrame<'_>,
+            _reliability: Reliability,
+        ) -> std::io::Result<()> {
+            self.sent.push(frame.bytes.to_vec());
+            Ok(())
+        }
+        async fn close(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn poll_event(&mut self) -> LinkEvent {
+            if self.lost {
+                return LinkEvent::Lost {
+                    cause: LostCause::PeerClosed,
+                };
+            }
+            if let Some(dg) = self.inbound.pop_front() {
+                return LinkEvent::Rx(RxFrame { bytes: dg });
+            }
+            // Drained: never resolve so `select!` always takes the sweep
+            // tick, advancing the loop to its iteration budget.
+            core::future::pending().await
+        }
+    }
+
+    /// The drive loop admits a peer from an inbound JOIN and emits its own
+    /// JOIN beacon.
+    #[tokio::test]
+    async fn drive_loop_admits_join_peer_and_emits_beacon() {
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let mut driver = FakeDriver {
+            inbound: VecDeque::from([encode_join(&params(&peer_b))]),
+            sent: Vec::new(),
+            lost: false,
+        };
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]), // self
+            &mut driver,
+            &clock,
+            Some(5),
+            5,
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        // The inbound JOIN admitted peer B.
+        assert_eq!(dispatcher.active_peers(), 1);
+        assert_eq!(
+            dispatcher.peer_state(&peer_b),
+            Some(MulticastPeerState::Active)
+        );
+        // At least one self JOIN beacon was multicast, MID-framed correctly.
+        assert!(!driver.sent.is_empty(), "expected >= 1 JOIN beacon");
+        assert_eq!(driver.sent[0][0], wire_const::T_MID_JOIN);
+    }
+
+    /// A lost link returns `LinkLost` and clears the peer table (§3.1).
+    #[tokio::test]
+    async fn drive_loop_returns_link_lost() {
+        let mut driver = FakeDriver {
+            inbound: VecDeque::new(),
+            sent: Vec::new(),
+            lost: true,
+        };
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(5),
+            5,
+        )
+        .await;
+
+        assert!(matches!(outcome, MulticastOutcome::LinkLost(_)));
+        assert_eq!(
+            dispatcher.session_state(),
+            SessionFsmMulticastState::Stopped
+        );
+        assert_eq!(dispatcher.active_peers(), 0);
+    }
+}

@@ -971,6 +971,20 @@ layer_c1p_multicast() {
         && cargo test -p wz-session-core --features session-multicast --quiet)
 }
 
+# ─── Layer C1q — multicast transport drive loop (Round C) ────────────
+#
+# Round C: transport-multicast is off by default, so Layer C1's
+# `cargo test --workspace` never builds the wz-runtime-tokio multicast_glue
+# drive loop. This lane runs its deterministic unit tests (JOIN
+# encode/decode round-trip + the fake-driver drive-loop admit/beacon/
+# link-lost paths) under `--features transport-multicast`. The real-socket
+# multicast e2e is Layer M (Round D). Mirrors the Layer C1i scouting-glue
+# lane.
+layer_c1q_multicast_glue() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet)
+}
+
 # ─── Layer C1m — wz-session-lwip isolated host test + clippy ─────────
 #
 # Stage 4b. wz-session-lwip is the no_std MCU session shell: it forces
@@ -2265,6 +2279,7 @@ run_layer C1m layer_c1m_session_lwip || overall=1
 run_layer C1n layer_c1n_mcu_session_acceptor || overall=1
 run_layer C1o layer_c1o_keyexpr_gating_behavior || overall=1
 run_layer C1p layer_c1p_multicast || overall=1
+run_layer C1q layer_c1q_multicast_glue || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1

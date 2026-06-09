@@ -316,6 +316,13 @@ pub use wz_session_core::session_fsm_unicast;
 #[cfg(feature = "scouting-active")]
 pub mod scouting_glue;
 
+/// Round C — multicast transport drive loop (the AP host loop that drives
+/// the `wz-session-core` `MulticastDispatcher` over a UDP-multicast link:
+/// periodic JOIN beacon, RX classify -> dispatch, lease sweep). Gated on
+/// `transport-multicast` (the §5.1 atom forwarding to `session-multicast`).
+#[cfg(feature = "transport-multicast")]
+pub mod multicast_glue;
+
 // R311di-4 — Reliability moved to wz-session-core::reliability; the
 // re-export keeps every `wz_runtime_tokio::Reliability` external
 // callsite (9 caller files across tests / wz-integration-tests /
@@ -724,7 +731,13 @@ impl UdpDriver {
     /// two scouting consumers on one host) is the point where socket2
     /// would enter — flagged here so that decision is explicit, not
     /// silent.
-    #[cfg(feature = "scouting-active")]
+    // Round C — generalised from `scouting-active`-only to also serve the
+    // multicast TRANSPORT (`transport-multicast`): the bind + join + loop
+    // setup is identical for the scout group and the multicast session
+    // group (zenoh shares the `224.0.0.224:7446` locator for both). The
+    // caller passes the group, so the same constructor builds the scout
+    // driver and the multicast session driver.
+    #[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
     pub async fn bind_multicast_v4(group: std::net::Ipv4Addr, port: u16) -> io::Result<Self> {
         let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
         socket.join_multicast_v4(group, std::net::Ipv4Addr::UNSPECIFIED)?;

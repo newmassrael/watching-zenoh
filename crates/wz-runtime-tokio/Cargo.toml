@@ -354,6 +354,13 @@ transport-link-udp = []
 # is involved — this completes the runtime-schism resolution (the scouting
 # half landed in R311ik), so `sce-rust-lua` leaves the whole graph.
 transport-unicast = ["wz-session-core/session-unicast"]
+# Round C — multicast transport gate. Forwards to wz-session-core's
+# `session-multicast` (which codegens the engine-free §3.1 session-level +
+# §3.2 per-peer FSMs into the core) and gates this crate's `multicast_glue`
+# drive loop. Pulls `codec-join` (the JOIN beacon body codec the loop
+# encodes/decodes). The handshake-free multicast sibling of
+# `transport-unicast`; the wz facade `transport-multicast` forwards here.
+transport-multicast = ["wz-session-core/session-multicast", "codec-join"]
 # chunk-5 — forward to the wz-session-core same-named gate so the migrated
 # start/stop_keepalive_worker action bodies compile under the keepalive axis.
 transport-keepalive = ["wz-session-core/transport-keepalive"]

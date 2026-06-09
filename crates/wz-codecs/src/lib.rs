@@ -336,6 +336,23 @@ pub mod wire_const {
     /// Continue-vs-Final on this bit.
     pub const FLAG_T_FRAGMENT_M: u8 = 0x40;
 
+    /// Multicast transport JOIN message id (`_Z_MID_T_JOIN`, transport.h:39).
+    /// JOIN is the handshake-FREE multicast transport's peer-announcement
+    /// beacon (the multicast analogue of INIT+OPEN): a peer periodically
+    /// multicasts a JOIN carrying its zid + lease so group members learn of
+    /// it (session-fsm §3.1/§3.2). Distinct namespace from the scouting
+    /// `S_MID_*` ids; the `join` body codec (`sources/codecs/join.scxml`)
+    /// omits this header byte, so the multicast glue prepends it (mirror of
+    /// the session_glue `T_MID_*` framing).
+    pub const T_MID_JOIN: u8 = 0x07;
+    /// Size-parameters carrier for `T_MID_JOIN` (sn_res + batch_size
+    /// present) per transport.h (`_Z_FLAG_T_JOIN_S`, 1<<6). The `join`
+    /// codec gates its optional `sn_res` / `batch_size` fields on this flag
+    /// (decode `s & 0x01`); a minimal JOIN (no resolution negotiation)
+    /// clears it.
+    #[cfg(feature = "codec-join")]
+    pub const FLAG_T_JOIN_S: u8 = 0x40;
+
     /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
     #[cfg(feature = "codec-init-body")]
     pub const FLAG_T_INIT_A: u8 = 0x20;

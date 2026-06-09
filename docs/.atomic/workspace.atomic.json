@@ -575,7 +575,9 @@
         "transport-keepalive cfg-off makes session FSM fail at start_keepalive_worker SCXML action call.",
         "transport-batching cfg-off forces batch_size = 65535; ignores peer-advertised reduction.",
         "transport-link-tls forwards transport-link-tcp via Cargo imply but has no source cfg yet (reserved).",
-        "Wire-level KeepAlive parse governed by codec-keep-alive (separate from transport-keepalive worker)."
+        "Wire-level KeepAlive parse governed by codec-keep-alive (separate from transport-keepalive worker).",
+        "Round C: transport-multicast reserved->active (R311ji); gates multicast_glue drive loop.",
+        "transport-multicast -> session-multicast + codec-join; handshake-free JOIN beacon transport."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -31854,6 +31856,56 @@
         "Design notes: spec 3.1 parallel regions realized as host-loop concerns (SCE has no <parallel>); Discovered->Active driven together in admit since a validated Join is a live member (no further handshake, 3.3)."
       ]
     },
+    "Round 311ji": {
+      "decision_summary": "R311ji Round C: multicast transport drive loop (multicast_glue: JOIN beacon + RX dispatch + lease sweep over MulticastDispatcher); transport-multicast reserved->active.",
+      "changes_bullets": [
+        "wz-runtime-tokio multicast_glue.rs: drive_multicast_session async loop - create->Running, periodic JOIN beacon TX, RX JOIN->ingest_join, lease sweep over the MulticastDispatcher; + encode_join / decode_join_zid helpers + MulticastOutcome.",
+        "JOIN-centric RX scope (Round C): a JOIN self-attributes via its zid; Frame/KeepAlive/Close need the datagram source addr (UdpDriver drops it) so are deferred - the periodic JOIN is the liveness beacon + lease sweep handles departure (zenoh multicast model).",
+        "wz-codecs wire_const: T_MID_JOIN=0x07 (+ FLAG_T_JOIN_S) per zenoh-pico transport.h:39; wz-session-core multicast_params.rs MulticastParams (version/whatami/zid/lease_ms/join_interval_ms), alloc-gated sibling of ScoutParams.",
+        "Feature chain: wz facade transport-multicast -> wz-runtime-tokio transport-multicast -> wz-session-core/session-multicast + codec-join; bind_multicast_v4 gate generalised to any(scouting-active, transport-multicast).",
+        "Catalog: transport-multicast inventory reserved->active; 2 caveats on the 5.1 transport section; Layer C1q run-ci lane (multicast_glue unit tests)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 4 tests pass (JOIN encode/decode round-trip + fake-driver drive-loop admit+beacon + link-lost clears peer table).",
+        "clippy -p wz-runtime-tokio --features transport-multicast --all-targets clean; build OK; cargo fmt clean.",
+        "A3 catalog-status audit green (atoms=143 active=63); validate_workspace orphan delta 0, no new T1.",
+        "Full host run-ci all required layers pass (exit 0) - incl Layer C4 preset matrix (the 4 presets listing transport-multicast now compose the cluster) + Layer C1q."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "Round D: Layer M real-socket multicast e2e (two peers over bind_multicast_v4 loopback; one emits JOIN, the other admits it) + the 3.4 client-whatami-refuses-multicast deploy guard + final caveats.",
+        "Deferred: Frame/KeepAlive/Close RX attribution needs a source-address-carrying driver (UdpDriver recv drops _src); graceful multicast.stop needs a shutdown signal threaded into the select loop.",
+        "Deferred: own-zid self-JOIN filter (multicast loopback echoes our own JOIN; ingest_join currently admits it as a self-peer); richer JOIN options (sn_res/batch_size negotiation) for full zenoh interop; data-plane next_sn tracking once multicast Frame TX lands."
+      ],
+      "publishable_decision_summary": "R311ji Round C: multicast transport drive loop (multicast_glue: JOIN beacon + RX dispatch + lease sweep over MulticastDispatcher); transport-multicast reserved->active.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio multicast_glue.rs: drive_multicast_session async loop - create->Running, periodic JOIN beacon TX, RX JOIN->ingest_join, lease sweep over the MulticastDispatcher; + encode_join / decode_join_zid helpers + MulticastOutcome.",
+        "JOIN-centric RX scope (Round C): a JOIN self-attributes via its zid; Frame/KeepAlive/Close need the datagram source addr (UdpDriver drops it) so are deferred - the periodic JOIN is the liveness beacon + lease sweep handles departure (zenoh multicast model).",
+        "wz-codecs wire_const: T_MID_JOIN=0x07 (+ FLAG_T_JOIN_S) per zenoh-pico transport.h:39; wz-session-core multicast_params.rs MulticastParams (version/whatami/zid/lease_ms/join_interval_ms), alloc-gated sibling of ScoutParams.",
+        "Feature chain: wz facade transport-multicast -> wz-runtime-tokio transport-multicast -> wz-session-core/session-multicast + codec-join; bind_multicast_v4 gate generalised to any(scouting-active, transport-multicast).",
+        "Catalog: transport-multicast inventory reserved->active; 2 caveats on the 5.1 transport section; Layer C1q run-ci lane (multicast_glue unit tests)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 4 tests pass (JOIN encode/decode round-trip + fake-driver drive-loop admit+beacon + link-lost clears peer table).",
+        "clippy -p wz-runtime-tokio --features transport-multicast --all-targets clean; build OK; cargo fmt clean.",
+        "A3 catalog-status audit green (atoms=143 active=63); validate_workspace orphan delta 0, no new T1.",
+        "Full host run-ci all required layers pass (exit 0) - incl Layer C4 preset matrix (the 4 presets listing transport-multicast now compose the cluster) + Layer C1q."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Round D: Layer M real-socket multicast e2e (two peers over bind_multicast_v4 loopback; one emits JOIN, the other admits it) + the 3.4 client-whatami-refuses-multicast deploy guard + final caveats.",
+        "Deferred: Frame/KeepAlive/Close RX attribution needs a source-address-carrying driver (UdpDriver recv drops _src); graceful multicast.stop needs a shutdown signal threaded into the select loop.",
+        "Deferred: own-zid self-JOIN filter (multicast loopback echoes our own JOIN; ingest_join currently admits it as a self-peer); richer JOIN options (sn_res/batch_size negotiation) for full zenoh interop; data-plane next_sn tracking once multicast Frame TX lands."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
@@ -38216,10 +38268,10 @@
       "reason": "F=small no-fragmentation path; P=zenoh lowlatency mode; C=alternative to transport-fragmentation"
     },
     "transport-multicast": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-pico src/transport/multicast/",
-      "reason": "F=~2KLOC est from zenoh-pico; P=zenoh-pico multicast surface; C=independent of unicast; OQ-W9 carry"
+      "reason": "Round C (R311ji): gates the wz-runtime-tokio multicast_glue drive loop (periodic JOIN beacon + RX classify->dispatch + lease sweep over a multicast UdpDriver) + the generalised bind_multicast_v4. Forwards to session-multicast + codec-join."
     },
     "transport-shm": {
       "status": "reserved",
@@ -38234,5 +38286,6 @@
       "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
     }
   },
-  "schema_version": 9
+  "confirmation_events": {},
+  "schema_version": 11
 }

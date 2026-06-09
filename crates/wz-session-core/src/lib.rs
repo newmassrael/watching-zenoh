@@ -218,6 +218,14 @@ pub mod scout_trace;
 #[cfg(feature = "alloc")]
 pub mod scout_params;
 
+/// Round C — per-deploy multicast-transport JOIN parameters
+/// (`MulticastParams`: version / whatami / zid / lease / join cadence).
+/// Pure owned value type; alloc-gated (Vec zid), like [`scout_params`]. The
+/// inputs the AP multicast drive loop (`wz-runtime-tokio::multicast_glue`)
+/// packs into each periodic JOIN beacon (session-fsm §3.1/§3.2).
+#[cfg(feature = "alloc")]
+pub mod multicast_params;
+
 /// R311eq — static scouting mode: `ScoutingMode` discriminator +
 /// `synth_static_locators` (host-side locator synthesis from
 /// `deploy.connect[]`, docs/scouting-fsm.md §2.4.3). Pure alloc value
