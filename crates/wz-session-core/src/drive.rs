@@ -226,9 +226,11 @@ pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
 // ── reassembly-pool drive (reassembly-gated; `reassembly` implies `codec-frame`,
 //    so `parse_frame_payload` above is in scope here too) ──
 #[cfg(feature = "reassembly")]
-use crate::driver_loop::IterationEvent;
+use crate::driver_loop::{IterationEvent, ReassemblyDropReason};
 #[cfg(feature = "reassembly")]
-use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispatcher};
+use crate::reassembly_dispatch::{
+    AbortReason, Fragment as ReassemblyFragment, IngestOutcome, ReassemblyDispatcher, RefuseReason,
+};
 #[cfg(feature = "reassembly")]
 use alloc::vec::Vec;
 
@@ -273,7 +275,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
     // mutex behind one seam); the non-reentrant MCU mutex is safe because
     // `ingest` does not re-enter the session's mutex slots.
     let mut completed: Option<DriverLoopOutcome> = None;
-    R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+    let ingest_outcome = R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         reasm.ingest(
             ReassemblyFragment {
@@ -301,10 +303,29 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
                     }
                 });
             },
-        );
+        )
     });
     if let Some(o) = completed {
         on_event(IterationEvent::Poll(&o));
+    }
+    // A terminal non-completion ingest — an out-of-order / capacity-overflow
+    // Abort, or a per-peer-quota / pool-exhaustion Refusal — is otherwise
+    // silent. Surface it (mapped to the feature-independent observer reason)
+    // so the application can observe a malformed or abusive fragment stream
+    // (the drop counterpart of the FramePayload completion).
+    let drop_reason = match ingest_outcome {
+        IngestOutcome::Aborted(AbortReason::OutOfOrder) => Some(ReassemblyDropReason::OutOfOrder),
+        IngestOutcome::Aborted(AbortReason::CapacityOverflow) => {
+            Some(ReassemblyDropReason::CapacityOverflow)
+        }
+        IngestOutcome::Refused(RefuseReason::PeerQuota) => Some(ReassemblyDropReason::PeerQuota),
+        IngestOutcome::Refused(RefuseReason::PoolExhausted) => {
+            Some(ReassemblyDropReason::PoolExhausted)
+        }
+        IngestOutcome::Begun | IngestOutcome::Continued | IngestOutcome::Reassembled => None,
+    };
+    if let Some(reason) = drop_reason {
+        on_event(IterationEvent::ReassemblyDropped(reason));
     }
 }
 

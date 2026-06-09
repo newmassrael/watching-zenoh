@@ -158,6 +158,36 @@ pub enum IterationEvent<'a> {
     /// `Copy` (a bare `usize`). Consumers that only care about `Poll` ignore
     /// it via their `if let Poll(..)` partial match.
     ReassemblyTimeout(usize),
+    /// A reassembly chain was dropped at ingest — an out-of-order /
+    /// capacity-overflow abort, or a per-peer-quota / pool-exhaustion
+    /// refusal. Emitted by [`crate::drive::report_outcome_reassembling`] when
+    /// a fragment ingest returns a terminal non-completion outcome, so the
+    /// application can observe a malformed / abusive fragment stream — the
+    /// drop counterpart of `Poll(FramePayload)` (completion) and
+    /// `ReassemblyTimeout` (deadline). Carries an ungated
+    /// [`ReassemblyDropReason`] (a stable observer-API mirror of the
+    /// reassembly-internal abort/refuse reasons) so this variant — and every
+    /// consumer's match — stays feature-independent.
+    ReassemblyDropped(ReassemblyDropReason),
+}
+
+/// Why a reassembly chain was dropped at ingest, surfaced on
+/// [`IterationEvent::ReassemblyDropped`]. A stable, feature-independent
+/// mirror of the reassembly-internal `AbortReason` / `RefuseReason` (which
+/// live behind the `reassembly` feature); kept separate so the public
+/// observer API does not leak the gated dispatcher types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReassemblyDropReason {
+    /// A continuation arrived whose SN was not the chain's expected next SN —
+    /// strict in-order policy aborted the chain (§2.5, `fragment.ooo`).
+    OutOfOrder,
+    /// Staging the fragment would exceed the slot's capacity — the §7.1
+    /// reassembly-capacity hard error.
+    CapacityOverflow,
+    /// The peer already held `per_peer_quota` open chains (§5.M quota-first).
+    PeerQuota,
+    /// Every slot was occupied by another peer's in-progress chain.
+    PoolExhausted,
 }
 
 /// R76b — terminal result of a production session drive loop. Runtime-

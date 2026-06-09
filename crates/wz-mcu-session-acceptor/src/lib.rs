@@ -94,6 +94,11 @@ const FRAG_SN_0: u64 = 10;
 /// fragment's SN), so it is the data-dispatch sentinel in FragmentChain mode.
 #[cfg(feature = "reassembly")]
 const FRAG_SN_1: u64 = 11;
+/// Non-consecutive SN the [`DataMode::FragmentChainOoo`] peer sends as the
+/// second fragment (the expected next after FRAG_SN_0=10 is 11; sending 12
+/// skips 11), tripping the strict-in-order `fragment.ooo` abort.
+#[cfg(feature = "reassembly")]
+const FRAG_SN_OOO: u64 = 12;
 /// Milliseconds the [`OffsetClock`] jumps the [`DataMode::FragmentChainStalled`]
 /// run forward, once the lone first fragment is INGESTED, to cross the chain's
 /// `reassembly_timeout_ms` (500ms) deadline so the next sweep evicts it. Chosen
@@ -135,6 +140,14 @@ pub enum DataMode {
     /// [`FragmentChain`]: DataMode::FragmentChain
     #[cfg(feature = "reassembly")]
     FragmentChainStalled,
+    /// A two-fragment chain whose second fragment carries a NON-CONSECUTIVE SN
+    /// (FRAG_SN_0=10 then FRAG_SN_OOO=12, skipping 11). The strict-in-order
+    /// policy (§2.5) aborts the chain on ingest (`fragment.ooo`), which
+    /// surfaces as `IterationEvent::ReassemblyDropped(OutOfOrder)` — the
+    /// abort-path proof. No advancing clock needed (the abort is immediate on
+    /// the second fragment), so a frozen clock suffices. Gated on `reassembly`.
+    #[cfg(feature = "reassembly")]
+    FragmentChainOoo,
 }
 
 /// The verdict [`run_acceptor_e2e`] returns. The host test asserts
@@ -157,6 +170,11 @@ pub enum AcceptorE2eOutcome {
     /// `FrameNotDispatched` (a fault) because the timeout is the correct
     /// outcome for an abandoned chain.
     ReassemblyTimedOut,
+    /// `Established` was reached and a reassembly chain was started, but a
+    /// fragment ingest aborted/refused it (`IterationEvent::ReassemblyDropped`)
+    /// instead of completing — e.g. the out-of-order abort. The expected
+    /// verdict for [`DataMode::FragmentChainOoo`].
+    ReassemblyDropped,
 }
 
 /// The full e2e result: the [`AcceptorE2eOutcome`] verdict plus per-stage
@@ -186,6 +204,10 @@ pub struct AcceptorE2eReport {
     /// started and abandoned — the `FragmentChainStalled` mode's success
     /// signal; 0 for `WholeFrame` / `FragmentChain` (which complete in time).
     pub reassembly_timed_out: u32,
+    /// Reassembly chains dropped at ingest (`IterationEvent::ReassemblyDropped`
+    /// — out-of-order / capacity abort, or quota / pool refusal). Non-zero in
+    /// the `FragmentChainOoo` mode (an OutOfOrder abort); 0 otherwise.
+    pub reassembly_dropped: u32,
     /// The peer read the acceptor's `InitAck` off its socket.
     pub peer_initack_seen: bool,
     /// Length of the cookie the peer extracted from that `InitAck` (0 = none).
@@ -305,6 +327,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
     let mut data_dispatch_msg_count = 0usize;
     let mut parse_error = 0u32;
     let mut reassembly_timed_out = 0u32;
+    let mut reassembly_dropped = 0u32;
     // The stalled mode bumps the clock exactly once, when the lone fragment is
     // ingested; this guards against a re-bump on any later Fragment outcome.
     #[cfg(feature = "reassembly")]
@@ -327,6 +350,10 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         // this SN; the value is inert (the verdict is the timeout count).
         #[cfg(feature = "reassembly")]
         DataMode::FragmentChainStalled => FRAG_SN_1,
+        // The ooo chain aborts before completion, so this SN is never matched
+        // either; inert (the verdict is the drop count).
+        #[cfg(feature = "reassembly")]
+        DataMode::FragmentChainOoo => FRAG_SN_1,
     };
 
     run_session(
@@ -373,6 +400,9 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
                 // The deadline sweep evicted an abandoned chain — count it (the
                 // FragmentChainStalled verdict).
                 IterationEvent::ReassemblyTimeout(n) => reassembly_timed_out += n as u32,
+                // A fragment ingest aborted/refused a chain — count it (the
+                // FragmentChainOoo verdict; the mode produces only OutOfOrder).
+                IterationEvent::ReassemblyDropped(_) => reassembly_dropped += 1,
                 _ => {}
             }
 
@@ -451,6 +481,23 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
                                     &craft_fragment_wire(true, true, FRAG_SN_0, &[0x01]),
                                 );
                             }
+                            #[cfg(feature = "reassembly")]
+                            DataMode::FragmentChainOoo => {
+                                // First fragment (sn=10, more=1) arms the chain;
+                                // the second carries a NON-CONSECUTIVE sn=12
+                                // (skipping the expected 11), so strict in-order
+                                // aborts the chain (fragment.ooo) on ingest.
+                                let _ = peer_sock.send_to(
+                                    ipv4_addr_loopback(),
+                                    SESSION_PORT,
+                                    &craft_fragment_wire(true, true, FRAG_SN_0, &[0x01]),
+                                );
+                                let _ = peer_sock.send_to(
+                                    ipv4_addr_loopback(),
+                                    SESSION_PORT,
+                                    &craft_fragment_wire(true, true, FRAG_SN_OOO, &[0x02]),
+                                );
+                            }
                         }
                         peer_frame_sent = true;
                         peer_phase = PeerPhase::Done;
@@ -469,6 +516,10 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         // Established, no dispatch, but a chain was evicted on its deadline —
         // the abandoned-chain timeout path, not a fault.
         AcceptorE2eOutcome::ReassemblyTimedOut
+    } else if reassembly_dropped > 0 {
+        // Established, no dispatch, but a chain was aborted/refused at ingest
+        // (e.g. out-of-order) — the malformed-stream drop path, not a fault.
+        AcceptorE2eOutcome::ReassemblyDropped
     } else {
         AcceptorE2eOutcome::FrameNotDispatched
     };
@@ -483,6 +534,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         data_dispatch_msg_count,
         parse_error,
         reassembly_timed_out,
+        reassembly_dropped,
         peer_initack_seen,
         peer_cookie_len,
         peer_opensyn_sent,

@@ -964,12 +964,14 @@ layer_c1n_mcu_session_acceptor() {
     # WholeFrame data-plane proof (host_acceptor_e2e), reassembly slot pool
     # compiled out. Then `--features reassembly` — the Tier B build: two
     # separate binaries (lwIP's process-global NO_SYS single-init holds per
-    # file) — host_acceptor_reassembly_e2e drives a T_MID_FRAGMENT chain
-    # through ingest -> reassemble -> dispatch (completion path), and
+    # file) covering the three reassembly outcomes — host_acceptor_reassembly_e2e
+    # drives a chain through ingest -> reassemble -> dispatch (completion);
     # host_acceptor_reassembly_timeout_e2e stalls the chain + advances the
-    # OffsetClock past its deadline so the sweep evicts it (timeout path).
-    # The WholeFrame test still passes with the pool linked in. clippy both
-    # configs so the reassembly data path is lint-gated too.
+    # OffsetClock past its deadline so the sweep evicts it (timeout); and
+    # host_acceptor_reassembly_ooo_e2e sends a non-consecutive fragment so the
+    # strict-in-order ingest aborts the chain (drop). The WholeFrame test still
+    # passes with the pool linked in. clippy both configs so the reassembly
+    # data path is lint-gated too.
     (cd crates \
         && cargo test -p wz-mcu-session-acceptor --quiet \
         && cargo test -p wz-mcu-session-acceptor --features reassembly --quiet \
