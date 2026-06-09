@@ -24,16 +24,19 @@
   stack fit. This constrained profile therefore carries the session
   link as a SMALL-CONTROL-FRAME path, not a full-MTU data path:
 
-    - slot_size 256 — this constrained session carries only the
-      unicast handshake + small control frames; the largest is the
-      InitAck (3 hdr + 4 zid + 4 sn/batch/cookie_len + 16 cookie =
-      27 bytes), so 256 is a ~9x margin. Matches scout_rx_pool_mcu's
-      256 control-plane slot_size (same small-frame class). This is
-      DELIBERATELY below udp_session.mtu_bytes (1472): a full-MTU data
-      datagram would be truncated here. The trade is explicit — this
-      profile is for control / handshake-class traffic on ultra-
-      constrained SRAM; a node needing full-MTU data uses the default
-      session_rx_pool_mcu (and must have the SRAM for it).
+    - slot_size 256 — derived `>= udp_session.mtu_bytes` exactly as the
+      default pool's 1536 derives from the M7 node's 1472, but anchored
+      to THIS profile's small MTU: deploy/mcu_minimal.yaml declares the
+      nrf51 node's `udp_session.mtu_bytes = 256` (a framer-imposed small
+      MTU for the 16 KB-SRAM class — the same 256 the scout link already
+      uses on the M7 profile). So 256 is a principled, deploy-anchored
+      slot size, NOT a handshake-sized guess. All session traffic on
+      this node — the handshake (largest frame: InitAck, 27 B), control,
+      and small declared-keyexpr pubsub — is 256 B-bounded BY THE LINK
+      MTU; a frame larger than the MTU is a protocol violation on any
+      link, not a truncation specific to this pool. A node needing a
+      larger session MTU uses the default session_rx_pool_mcu (and the
+      SRAM for its 24.6 KB pool).
     - slot_count 4 — handshake depth (InitSyn / OpenSyn + a 2-fragment
       chain = at most 2 datagrams queued at once) plus headroom, vs
       the default 16 burst-absorption for a 200 pps full-rate node. A
@@ -53,11 +56,13 @@
   Consumed by: wz-link-lwip::rx_sockets::SessionRxSocket when the
   `buffer-pool-session-rx-slim` feature is active (the link tier
   selects this pool's SLOT_COUNT / SLOT_SIZE over the default). The
-  live deploy topology that selects it is the `preset-cortex-m0-
-  minimal` Cargo preset; a full deploy/*.yaml constrained topology
-  that `{ ref: session_rx_pool_mcu_minimal }`s this pool (the
-  topology-doc twin of deploy/mcu_target.yaml's default-pool ref)
-  follows the R50 deploy-topology carry, not codegen-live today.
+  Cargo-level consumer is the `preset-cortex-m0-minimal` preset; the
+  deploy-topology twin is deploy/mcu_minimal.yaml, whose
+  `mcu_minimal_node.buffer_pools.session_rx_pool: { ref:
+  session_rx_pool_mcu_minimal }` selects this pool and whose
+  `udp_session.mtu_bytes = 256` is the MTU this slot_size derives from
+  (the topology-doc twin of deploy/mcu_target.yaml's default-pool ref).
+  A full SCE-DeployConfig expansion rides the R50 deploy-topology carry.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"

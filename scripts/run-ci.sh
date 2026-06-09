@@ -972,11 +972,21 @@ layer_c1n_mcu_session_acceptor() {
     # strict-in-order ingest aborts the chain (drop). The WholeFrame test still
     # passes with the pool linked in. clippy both configs so the reassembly
     # data path is lint-gated too.
+    # R311jd — also gate the `buffer-pool-session-rx-slim` config (the slim
+    # session-rx pool the Layer Q.4 microbit boot uses): the host e2e under
+    # the slim pool + clippy on the slim-gated cfg paths in the acceptor AND
+    # the wz-link-lwip link tier (rx_sockets const select + the cfg'd pool
+    # module), which the default/reassembly clippy passes do not cover.
     (cd crates \
         && cargo test -p wz-mcu-session-acceptor --quiet \
         && cargo test -p wz-mcu-session-acceptor --features reassembly --quiet \
+        && cargo test -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim --quiet \
         && cargo clippy -p wz-mcu-session-acceptor --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-mcu-session-acceptor --features reassembly \
+            --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-mcu-session-acceptor --features buffer-pool-session-rx-slim \
+            --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-link-lwip --features buffer-pool-session-rx-slim \
             --all-targets --quiet -- -D warnings)
 }
 

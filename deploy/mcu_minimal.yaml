@@ -1,0 +1,77 @@
+# deploy/mcu_minimal.yaml — ultra-constrained Cortex-M0 / nrf51 profile.
+#
+# Reference board: BBC micro:bit (nrf51822, Cortex-M0 @ 16 MHz, 16 KB SRAM).
+# The deploy-topology twin of the `preset-cortex-m0-minimal` Cargo preset
+# and the `session_rx_pool_mcu_minimal.scxml` buffer pool (R311jc).
+#
+# This is a FOCUSED profile, not a full skeleton: it declares only what
+# DISTINGUISHES the constrained node from deploy/mcu_target.yaml (the M7
+# canonical) — the Cortex-M0 platform, the small session MTU, and the slim
+# buffer-pool ref. Every other field (qos, scouting, limits, the scout pool,
+# the OQ-W* defaults) is inherited unchanged from mcu_target.yaml's mcu_node;
+# a full SCE-DeployConfig expansion of this profile rides the R50 deploy-
+# topology carry like the canonical one.
+#
+# WHY THE 256 B udp_session.mtu_bytes (the SSOT anchor that R311jc adds):
+# the default mcu_node carries a 1472 B session MTU, and its session_rx_pool
+# slot_size (1536) is derived `>= mtu_bytes` (session_rx_pool_mcu.scxml). On
+# a 16 KB-SRAM nrf51, a 1536 B x 16 pool (24.6 KB) does not fit, so this
+# profile declares a SMALL session link MTU (256 B — the same framer-imposed
+# size the scout link already uses on the M7 profile). The slim pool's
+# slot_size (256) is then derived from THIS mtu_bytes exactly as the default
+# pool's 1536 derives from 1472 — a principled, deploy-anchored value, not a
+# handshake-sized guess. All session traffic on this node (handshake, control,
+# and small declared-keyexpr pubsub) is 256 B-bounded BY THE LINK MTU; a frame
+# larger than the MTU is a protocol violation on any link, not a silent
+# truncation specific to this pool.
+
+machines:
+  mcu_minimal_node:
+    # ---------------------------------------------------------------
+    # platform — RFC §5.K platform block (the distinguishing fields)
+    # ---------------------------------------------------------------
+    platform:
+      class: mcu
+      os: bare_metal                   # lwIP NO_SYS runtime.
+      soc: nrf51822
+      core: cortex_m0                  # ARMv6-M; no native CAS (portable-
+                                       # atomic critical-section polyfill) and
+                                       # no unaligned access — the session
+                                       # stack reaches it since R311ja/jc.
+      has_dcache: false                # Cortex-M0 has no data cache.
+      dcache_line_size: 0
+      has_speculative_prefetch: false
+      core_count: 1
+      clock_freq_mhz: 16               # nrf51 @ 16 MHz.
+      memcpy_cycles_per_byte: 1.0
+
+    # ---------------------------------------------------------------
+    # links — only udp_session differs from mcu_target.yaml: a SMALL
+    # session MTU is the SSOT source the slim session_rx_pool slot_size
+    # derives from. Other links (udp_scout) inherit mcu_target defaults.
+    # ---------------------------------------------------------------
+    links:
+      udp_session:
+        bind: "0.0.0.0:7447"
+        driver: lwip_udp
+        mtu_bytes: 256                 # framer-imposed small MTU for the
+                                       # 16 KB-SRAM class. The slim
+                                       # session_rx_pool slot_size (256) is
+                                       # `>= mtu_bytes`, mirroring the M7
+                                       # node's 1536 `>= 1472`.
+        expected_p99_bytes: 256
+        burst_pps: 50                  # low-rate constrained node.
+        rx_dispatch: isr_to_pool
+        open_timeout_ms: 5000
+        domain_attrs:
+          trust_class: session_arming
+          untrusted_source: false
+
+    # ---------------------------------------------------------------
+    # buffer_pools — the slim session_rx_pool. Dims live ONLY in
+    # sources/network/session_rx_pool_mcu_minimal.scxml (sce:kind=buffer-
+    # pool, 4 x 256), referenced by name; values are NOT duplicated. The
+    # scout / reassembly / tx pools are inherited from mcu_target.yaml.
+    # ---------------------------------------------------------------
+    buffer_pools:
+      session_rx_pool: { ref: session_rx_pool_mcu_minimal }
