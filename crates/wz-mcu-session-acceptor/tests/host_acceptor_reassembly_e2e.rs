@@ -40,7 +40,8 @@ impl ClockSource for FrozenClock {
 
 #[test]
 fn acceptor_reassembles_fragment_chain_and_dispatches_over_lwip() {
-    let report = run_acceptor_e2e(FrozenClock, DataMode::FragmentChain);
+    // No-op fragment hook: the chain completes on a frozen clock, no advance.
+    let report = run_acceptor_e2e(FrozenClock, DataMode::FragmentChain, || {});
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::EstablishedAndDispatched,

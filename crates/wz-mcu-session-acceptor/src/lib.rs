@@ -52,10 +52,8 @@
 extern crate alloc;
 
 use alloc::rc::Rc;
-use alloc::sync::Arc;
 use alloc::vec;
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicU32, Ordering};
 
 use wz::link_lwip::rx_sockets::bind_session_rx;
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
@@ -70,6 +68,10 @@ use wz_session_wire_fixtures::{craft_frame_wire, craft_initsyn_wire, craft_opens
 // host test and the QEMU bin depend only on THIS crate (single-dep facade
 // boundary) rather than reaching into the wz facade themselves.
 pub use wz::runtime_lwip::ClockSource;
+// Re-export the drop-reason enum so a host test can assert the SPECIFIC
+// reason (e.g. OutOfOrder) carried on a `ReassemblyDropped` event, not just
+// that some drop happened.
+pub use wz_session_core::driver_loop::ReassemblyDropReason;
 
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
@@ -99,15 +101,6 @@ const FRAG_SN_1: u64 = 11;
 /// skips 11), tripping the strict-in-order `fragment.ooo` abort.
 #[cfg(feature = "reassembly")]
 const FRAG_SN_OOO: u64 = 12;
-/// Milliseconds the [`OffsetClock`] jumps the [`DataMode::FragmentChainStalled`]
-/// run forward, once the lone first fragment is INGESTED, to cross the chain's
-/// `reassembly_timeout_ms` (500ms) deadline so the next sweep evicts it. Chosen
-/// in the window `reassembly_timeout_ms (500) < STALL_JUMP_MS < lease (10_000)`
-/// so the sweep fires but the Established lease deadline does NOT — isolating
-/// the reassembly-timeout path. The handshake ran at offset 0 (frozen), safely
-/// inside the 1_000ms `accepting_inactivity_ms` bound.
-#[cfg(feature = "reassembly")]
-const STALL_JUMP_MS: u32 = 2_000;
 /// Iteration cap on the drive loop. The handshake + Frame complete in the
 /// first ~3 iterations; the remainder spin the (no-op, with a frozen clock)
 /// deadline branch. Bounds a regression so it fails fast instead of hanging.
@@ -208,6 +201,10 @@ pub struct AcceptorE2eReport {
     /// — out-of-order / capacity abort, or quota / pool refusal). Non-zero in
     /// the `FragmentChainOoo` mode (an OutOfOrder abort); 0 otherwise.
     pub reassembly_dropped: u32,
+    /// The reason of the most recent reassembly drop (`None` if none). Lets a
+    /// test assert the SPECIFIC reason (e.g. `OutOfOrder`) rather than only
+    /// that a drop occurred.
+    pub last_drop_reason: Option<ReassemblyDropReason>,
     /// The peer read the acceptor's `InitAck` off its socket.
     pub peer_initack_seen: bool,
     /// Length of the cookie the peer extracted from that `InitAck` (0 = none).
@@ -239,30 +236,6 @@ enum PeerPhase {
     Done,
 }
 
-/// A [`ClockSource`] decorator that adds a harness-controlled millisecond
-/// offset to the wrapped clock. The offset stays 0 for every mode except
-/// [`DataMode::FragmentChainStalled`] (and on the QEMU SysTick), so the
-/// frozen-clock determinism of the handshake + completion modes is
-/// unchanged. For the stalled mode the `run_acceptor_e2e` `on_event` hook
-/// bumps it (once, AFTER the lone fragment is ingested — the chain is armed
-/// at the pre-bump `now_ms`) to [`STALL_JUMP_MS`], so the next loop
-/// iteration's deadline sweep sees `now_ms` past the chain deadline and
-/// evicts it. The offset is an `Arc<AtomicU32>` because [`ClockSource`] is
-/// `Send + Sync`; the acceptor crate is already native-atomic-only (it pulls
-/// `alloc::sync::Arc`), so the atomic adds no new target constraint.
-#[derive(Clone)]
-struct OffsetClock<C> {
-    inner: C,
-    offset_ms: Arc<AtomicU32>,
-}
-
-impl<C: ClockSource> ClockSource for OffsetClock<C> {
-    fn now_us(&self) -> u64 {
-        let offset_us = u64::from(self.offset_ms.load(Ordering::Relaxed)).saturating_mul(1000);
-        self.inner.now_us().saturating_add(offset_us)
-    }
-}
-
 /// Drive the acceptor session e2e to a verdict.
 ///
 /// `clock_source` is the monotonic time the [`LwipRuntime`] and the lease
@@ -278,7 +251,25 @@ impl<C: ClockSource> ClockSource for OffsetClock<C> {
 /// respectively); FragmentChain additionally exercises the
 /// `ReassemblyDispatcher` ingest + sweep and requires the `reassembly`
 /// feature on the build.
-pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) -> AcceptorE2eReport {
+///
+/// `on_fragment` fires once per DISPATCHED fragment (the `Fragment` Poll),
+/// BEFORE the reassembly ingest arms/continues the chain (the arm reads the
+/// pre-call `now_ms`). It is a neutral seam: the production QEMU bin and the
+/// completion/ooo host tests pass a no-op; the `FragmentChainStalled` host
+/// test passes a closure that advances its own controllable clock past the
+/// chain deadline — so the test-only advancing-clock machinery stays in the
+/// test and the deploy binary's clock path is pristine. Only fires under the
+/// `reassembly` feature (`DriverLoopOutcome::Fragment` is gated).
+pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
+    clock_source: C,
+    data_mode: DataMode,
+    mut on_fragment: H,
+) -> AcceptorE2eReport {
+    // The hook only fires under `reassembly` (the Fragment outcome is gated);
+    // reference it so the non-reassembly build does not flag an unused param.
+    #[cfg(not(feature = "reassembly"))]
+    let _ = &mut on_fragment;
+
     let link = LwipLink::init();
 
     // ── The acceptor: a session rx socket wrapped in the MCU BoxedLinkDriver.
@@ -300,15 +291,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
     // ── The session machinery (shared SSOT). The actions' clock MUST share
     //    an epoch with the loop clock (R263): build one LwipTime, clone it
     //    into the actions, pass the original to run_session.
-    // The clock is wrapped in an `OffsetClock` whose offset stays 0 for every
-    // mode except `FragmentChainStalled`, where the `on_event` hook below bumps
-    // it to cross the reassembly deadline. Always-wrapping keeps one runtime
-    // type across modes; offset 0 is a no-op (an atomic load).
-    let offset_ms = Arc::new(AtomicU32::new(0));
-    let runtime = LwipRuntime::new(OffsetClock {
-        inner: clock_source,
-        offset_ms: offset_ms.clone(),
-    });
+    let runtime = LwipRuntime::new(clock_source);
     let clock = LwipTime::new(&runtime);
     let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
     let actions = SessionLinkActions::new_generic(driver_sink, acceptor_params(), clock.clone());
@@ -328,10 +311,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
     let mut parse_error = 0u32;
     let mut reassembly_timed_out = 0u32;
     let mut reassembly_dropped = 0u32;
-    // The stalled mode bumps the clock exactly once, when the lone fragment is
-    // ingested; this guards against a re-bump on any later Fragment outcome.
-    #[cfg(feature = "reassembly")]
-    let mut stall_armed = false;
+    let mut last_drop_reason: Option<ReassemblyDropReason> = None;
     let mut peer_initack_seen = false;
     let mut peer_cookie_len = 0usize;
     let mut peer_opensyn_sent = false;
@@ -378,31 +358,23 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
                             data_dispatch_msg_count = messages.len();
                         }
                     }
-                    // FragmentChainStalled: the instant the acceptor dispatches
-                    // the lone first fragment, jump the clock past the chain's
-                    // reassembly deadline. report_outcome_reassembling fires
-                    // this Poll BEFORE it ingests + arms the chain (the arm uses
-                    // the pre-bump now_ms), so the chain is armed at the current
-                    // time and the NEXT iteration's sweep — at now_ms +
-                    // STALL_JUMP_MS — evicts it.
+                    // A fragment was dispatched (before the ingest arms the
+                    // chain). Notify the caller's hook — the stalled host test
+                    // uses it to advance its clock past the chain deadline so
+                    // the next sweep evicts; every other caller passes a no-op.
                     #[cfg(feature = "reassembly")]
-                    DriverLoopOutcome::Fragment { sn, more, .. }
-                        if data_mode == DataMode::FragmentChainStalled
-                            && *more
-                            && *sn == FRAG_SN_0
-                            && !stall_armed =>
-                    {
-                        offset_ms.store(STALL_JUMP_MS, Ordering::Relaxed);
-                        stall_armed = true;
-                    }
+                    DriverLoopOutcome::Fragment { .. } => on_fragment(),
                     _ => {}
                 },
                 // The deadline sweep evicted an abandoned chain — count it (the
                 // FragmentChainStalled verdict).
                 IterationEvent::ReassemblyTimeout(n) => reassembly_timed_out += n as u32,
-                // A fragment ingest aborted/refused a chain — count it (the
-                // FragmentChainOoo verdict; the mode produces only OutOfOrder).
-                IterationEvent::ReassemblyDropped(_) => reassembly_dropped += 1,
+                // A fragment ingest aborted/refused a chain — count it + record
+                // the reason (the FragmentChainOoo verdict asserts OutOfOrder).
+                IterationEvent::ReassemblyDropped(reason) => {
+                    reassembly_dropped += 1;
+                    last_drop_reason = Some(reason);
+                }
                 _ => {}
             }
 
@@ -535,6 +507,7 @@ pub fn run_acceptor_e2e<C: ClockSource>(clock_source: C, data_mode: DataMode) ->
         parse_error,
         reassembly_timed_out,
         reassembly_dropped,
+        last_drop_reason,
         peer_initack_seen,
         peer_cookie_len,
         peer_opensyn_sent,

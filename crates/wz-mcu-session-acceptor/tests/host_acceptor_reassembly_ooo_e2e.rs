@@ -24,7 +24,9 @@
 //! resource; each cargo integration-test file is its own process). Mirrors the
 //! per-file split of the other acceptor host tests.
 
-use wz_mcu_session_acceptor::{run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode};
+use wz_mcu_session_acceptor::{
+    run_acceptor_e2e, AcceptorE2eOutcome, ClockSource, DataMode, ReassemblyDropReason,
+};
 
 /// Frozen host clock — `now_us` is constant; the ooo abort is event-driven
 /// (the second fragment), so no deadline ever needs to fire.
@@ -39,7 +41,8 @@ impl ClockSource for FrozenClock {
 
 #[test]
 fn acceptor_aborts_out_of_order_fragment_chain_over_lwip() {
-    let report = run_acceptor_e2e(FrozenClock, DataMode::FragmentChainOoo);
+    // No-op fragment hook: the abort is event-driven (no clock advance needed).
+    let report = run_acceptor_e2e(FrozenClock, DataMode::FragmentChainOoo, || {});
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::ReassemblyDropped,
@@ -52,6 +55,13 @@ fn acceptor_aborts_out_of_order_fragment_chain_over_lwip() {
         report.reassembly_dropped >= 1,
         "at least one chain must have been dropped at ingest (the out-of-order \
          abort); report = {report:#?}"
+    );
+    assert_eq!(
+        report.last_drop_reason,
+        Some(ReassemblyDropReason::OutOfOrder),
+        "the drop must specifically be the strict-in-order abort (the second \
+         fragment's non-consecutive SN), not a capacity / quota / pool drop; \
+         report = {report:#?}"
     );
     assert_eq!(
         report.reassembly_timed_out, 0,

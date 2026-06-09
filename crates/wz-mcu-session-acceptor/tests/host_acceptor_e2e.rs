@@ -32,7 +32,8 @@ impl ClockSource for FrozenClock {
 
 #[test]
 fn acceptor_handshake_reaches_established_and_dispatches_frame_over_lwip() {
-    let report = run_acceptor_e2e(FrozenClock, DataMode::WholeFrame);
+    // No-op fragment hook: WholeFrame sends no fragments, so it never fires.
+    let report = run_acceptor_e2e(FrozenClock, DataMode::WholeFrame, || {});
     assert_eq!(
         report.outcome,
         AcceptorE2eOutcome::EstablishedAndDispatched,

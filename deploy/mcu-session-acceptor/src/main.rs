@@ -146,7 +146,9 @@ fn main() -> ! {
     GLOBAL_CLOCK.init();
     hprintln!("Stage5: MCU acceptor session e2e starting");
 
-    let report = run_acceptor_e2e(SystickClockRef, DATA_MODE);
+    // No-op fragment hook: the on-target clock is the real SysTick (never
+    // artificially advanced); the advancing-clock seam is host-test-only.
+    let report = run_acceptor_e2e(SystickClockRef, DATA_MODE, || {});
     match report.outcome {
         AcceptorE2eOutcome::EstablishedAndDispatched => {
             hprintln!(
