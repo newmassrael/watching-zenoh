@@ -294,7 +294,15 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
     let runtime = LwipRuntime::new(clock_source);
     let clock = LwipTime::new(&runtime);
     let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
-    let actions = SessionLinkActions::new_generic(driver_sink, acceptor_params(), clock.clone());
+    // R311ja — annotate `R = LwipRuntime<C>` explicitly: `new_generic` now
+    // returns the non-injective `R::ActionsHandle<T>` (this profile's `Rc` —
+    // the no-alloc M0 handle), so the `Rc<dyn _>` driver arg cannot back-infer
+    // `R`. The `Rc` (not `Arc`) is exactly what lets this stack reach ARMv6-M.
+    let actions = SessionLinkActions::<LwipRuntime<C>, LwipTime<C>>::new_generic(
+        driver_sink,
+        acceptor_params(),
+        clock.clone(),
+    );
     let timeouts = SessionTimeouts::spec_defaults();
 
     // Open the handshake: the initiator's first move. The reactive peer

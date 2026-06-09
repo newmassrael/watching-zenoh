@@ -289,7 +289,11 @@ pub fn new_session_actions<T: TimeSource>(
     params: SessionInitParams,
     clock: T,
 ) -> Arc<SessionLinkActions<TokioRuntime, T>> {
-    SessionLinkActions::new_generic(driver, params, clock)
+    // R311ja — annotate `R = TokioRuntime` explicitly: `new_generic` now
+    // returns the non-injective `R::ActionsHandle<T>` (this profile's `Arc`),
+    // so neither the `Arc<dyn _>` driver arg nor the declared return type can
+    // back-infer `R` the way the former `Arc<Self>` return did.
+    SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock)
 }
 
 /// Build a production session engine: an [`Engine`] over the generated

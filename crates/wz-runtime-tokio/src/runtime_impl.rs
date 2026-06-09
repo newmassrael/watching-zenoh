@@ -55,6 +55,11 @@ use std::sync::Arc;
 
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+// `SessionLinkActions` lives behind wz-session-core's `session-unicast` gate,
+// which `transport-unicast` forwards (the only AP path that enables it); the
+// `ActionsHandle` GAT binding below is gated to match.
+#[cfg(feature = "transport-unicast")]
+use wz_session_core::session_actions::SessionLinkActions;
 
 /// AP-profile [`Runtime`] impl: every spawn routes through
 /// `tokio::task::spawn`, every join goes through tokio's
@@ -159,6 +164,20 @@ impl Runtime for TokioRuntime {
 /// Send` hack (see [`wz_session_core::link::BoxedLinkDriver`] doc).
 impl SessionRuntime for TokioRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
+
+    // R311ja — the AP action handle is `Arc`: the multi-thread runtime
+    // clones it into spawned query / reply tasks that may move across
+    // worker threads, so the refcount must be atomic (`Send + Sync`). The
+    // lwIP MCU profile binds `Rc` instead (single-task, no atomics → M0+).
+    // Gated on `transport-unicast` to match the trait's `session-unicast`
+    // gate on the GAT (the bundle type it names is session-unicast-only).
+    #[cfg(feature = "transport-unicast")]
+    type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
+
+    #[cfg(feature = "transport-unicast")]
+    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
+        Arc::new(actions)
+    }
 
     fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver {
         // `&**sink` drops the `+ Send + Sync` auto traits from the

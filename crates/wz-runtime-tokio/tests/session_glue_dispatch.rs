@@ -31,7 +31,7 @@
 
 use std::sync::Arc;
 
-use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastActions;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionInitParams,
@@ -81,7 +81,10 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // (the successor of the retired Lua `dispatch_script` by-name shim).
     // The walk-through fires the actions in a fixed sequence and asserts
     // the recorded wire bytes inline.
-    let mut binding = SessionActionsBinding::new(actions.clone());
+    // R311ja — annotate `R = TokioRuntime`: `SessionActionsBinding::new` now
+    // takes the non-injective `R::ActionsHandle<T>`, so the `Arc` arg alone
+    // cannot back-infer `R`.
+    let mut binding = SessionActionsBinding::<TokioRuntime, TokioTime>::new(actions.clone());
 
     // ─── Step 1: initiator handshake path ───────────────────────
     binding.link_driver_open();
@@ -241,7 +244,8 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
         fixture_session_init_params(),
         TokioTime::new(),
     );
-    let mut second_binding = SessionActionsBinding::new(second_actions.clone());
+    let mut second_binding =
+        SessionActionsBinding::<TokioRuntime, TokioTime>::new(second_actions.clone());
     second_binding.link_driver_open();
     let second_trace = second_actions.trace_snapshot();
     assert_eq!(

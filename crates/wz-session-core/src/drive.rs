@@ -18,8 +18,6 @@
 //! from `actions.inbound_peer_zid` through `R::with_mutex_mut` (the AP
 //! `std::sync::Mutex` and the MCU `critical_section` mutex behind one seam).
 
-use alloc::sync::Arc;
-
 use sce_rust_runtime::Engine;
 
 use wz_runtime_core::TimeSource;
@@ -215,7 +213,7 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
 /// The caller retains `actions` (to read trace / observe link state) and drives
 /// the returned engine with `dispatch_link_event` / `check_lease_deadline`.
 pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
-    actions: &Arc<SessionLinkActions<R, T>>,
+    actions: &R::ActionsHandle<T>,
 ) -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>> {
     // `SessionActionsBinding.inner` is private to this crate; construct through
     // the pub `::new` constructor (mirrors the AP `new_session_engine`).

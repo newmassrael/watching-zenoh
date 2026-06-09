@@ -17,6 +17,17 @@ use wz_runtime_core::Runtime;
 
 use crate::reliability::Reliability;
 
+// The `ActionsHandle` GAT below references `SessionLinkActions`, which lives
+// behind the same `all(alloc, session-unicast)` gate as the action bundle
+// itself (lib.rs); these imports + the GAT are therefore gated identically so
+// the `SessionRuntime` trait still compiles on a minus-session-unicast subset.
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+use crate::session_actions::SessionLinkActions;
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+use core::ops::Deref;
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+use wz_runtime_core::TimeSource;
+
 /// Synchronous outbound link-write seam the session FSM action layer
 /// drives. The FSM's link sink (`R::LinkSink`, resolved through
 /// [`SessionRuntime::link_driver`]) decouples the runtime-agnostic
@@ -61,13 +72,52 @@ pub trait BoxedLinkDriver {
 /// introduced, so the `<R, T>` arity the rest of the session API uses
 /// stays stable. The `LinkSink: Clone` bound lets both profiles share
 /// the driver by refcount clone (tokio `Arc`, MCU `Rc`).
-pub trait SessionRuntime: Runtime {
+// `Sized` supertrait: the `ActionsHandle` GAT names `SessionLinkActions<Self,
+// T>`, whose `R` parameter is `Sized` by the struct's implicit bound, so
+// `Self` must be `Sized` here. Every runtime is a concrete `Send + Sync +
+// 'static` value (no `dyn SessionRuntime` exists), so this is a no-op on the
+// impls while letting generic-`R` session code embed `Self` in the bundle type.
+pub trait SessionRuntime: Runtime + Sized {
     /// Per-profile owning handle to the link write seam. Tokio binds
     /// `Arc<dyn BoxedLinkDriver + Send + Sync>` (shared across worker
     /// threads); the lwIP MCU profile binds `Rc<dyn BoxedLinkDriver>`
     /// (`!Send`, single-task drive loop). `Clone` is the shared-by-
     /// refcount contract both profiles satisfy.
     type LinkSink: Clone;
+
+    /// Per-profile shared handle to the [`SessionLinkActions`] bundle one
+    /// logical FSM instance drives. The tokio AP profile binds
+    /// `Arc<SessionLinkActions<Self, T>>` because the handle is cloned into
+    /// spawned query / reply tasks the multi-thread runtime may move across
+    /// worker threads (`Send + Sync` required); the single-task lwIP MCU
+    /// profile binds `Rc<SessionLinkActions<Self, T>>` — its sync drive loop
+    /// shares the bundle only with the FSM action binding within that one
+    /// task, so an atomic refcount is pure waste *and* a hard portability
+    /// wall: `alloc::sync::Arc` needs `target_has_atomic = "ptr"`, absent on
+    /// ARMv6-M (Cortex-M0/M0+), whereas `Rc` lowers to plain loads / stores
+    /// and composes on every MCU target. Mirrors the [`LinkSink`] per-
+    /// profile-pointer split: each profile carries exactly the auto-traits +
+    /// refcount discipline its concurrency model needs — no `unsafe`, no
+    /// atomics the model never uses.
+    ///
+    /// A generic associated type over `T: TimeSource` because the bundle is
+    /// parameterised by the monotonic clock the handle cannot itself fix.
+    /// The `Deref` bound lets generic-`R` code (the
+    /// [`SessionActionsBinding`](crate::session_actions::SessionActionsBinding)
+    /// action methods, [`new_session_engine`](crate::drive::new_session_engine))
+    /// reach the bundle through the opaque handle without naming `Arc` / `Rc`.
+    ///
+    /// [`LinkSink`]: SessionRuntime::LinkSink
+    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
+    type ActionsHandle<T: TimeSource>: Clone + Deref<Target = SessionLinkActions<Self, T>>;
+
+    /// Wrap an owned [`SessionLinkActions`] bundle in the per-profile shared
+    /// handle (tokio `Arc::new`, lwIP `Rc::new`). The sole construction seam
+    /// [`SessionLinkActions::new_generic`](crate::session_actions::SessionLinkActions::new_generic)
+    /// routes through this so generic-`R` code never names the concrete
+    /// pointer type.
+    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
+    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T>;
 
     /// Erase the per-profile refcount wrapper to the pure
     /// `&dyn BoxedLinkDriver` the action methods send through. The

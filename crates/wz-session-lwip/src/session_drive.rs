@@ -20,8 +20,6 @@
 //! - outbound is transparent: the FSM action methods call
 //!   `link_driver().send_blocking` -> [`LwipUdpDriver`]'s `socket.send_to`.
 
-use alloc::sync::Arc;
-
 use wz_link_lwip::LwipLink;
 use wz_runtime_core::{Runtime, TimeSource};
 use wz_runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
@@ -87,7 +85,7 @@ pub fn run_session<C, F>(
     runtime: &LwipRuntime<C>,
     link: &LwipLink,
     driver: &alloc::rc::Rc<LwipUdpDriver>,
-    actions: &Arc<SessionLinkActions<LwipRuntime<C>, LwipTime<C>>>,
+    actions: &alloc::rc::Rc<SessionLinkActions<LwipRuntime<C>, LwipTime<C>>>,
     clock: &LwipTime<C>,
     timeouts: &SessionTimeouts,
     role: SessionRole,
@@ -287,8 +285,15 @@ mod tests {
             let runtime = LwipRuntime::new(FrozenClock);
             let clock = LwipTime::new(&runtime);
             let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+            // R311ja — `R = LwipRuntime<FrozenClock>` annotated: `new_generic`
+            // returns the non-injective `R::ActionsHandle<T>` (lwIP `Rc`), so
+            // the `Rc<dyn _>` driver arg cannot back-infer `R`.
             let actions =
-                SessionLinkActions::new_generic(driver_sink, test_params(), clock.clone());
+                SessionLinkActions::<LwipRuntime<FrozenClock>, LwipTime<FrozenClock>>::new_generic(
+                    driver_sink,
+                    test_params(),
+                    clock.clone(),
+                );
 
             let timeouts = SessionTimeouts::spec_defaults();
             let outcome = run_session(

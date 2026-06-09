@@ -21,7 +21,6 @@
 //! cfg-off is a documented no-emit no-op, not a build error.
 
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -497,14 +496,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `params` are captured by value; `clock` is the shared monotonic
     /// clock (R263 + R294) consumed by [`Self::handle_inbound`] and the
     /// `record_established_at` action.
-    pub fn new_generic(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Arc<Self> {
+    pub fn new_generic(
+        driver: R::LinkSink,
+        params: SessionInitParams,
+        clock: T,
+    ) -> R::ActionsHandle<T> {
         // R121e — seed the outbound Frame SN with `params.initial_sn`
         // so the first emitted Frame matches the value announced in
         // the OpenSyn/OpenAck body. The peer enforces this start
         // value via its reliable-channel window tracking
         // (zenoh-pico unicast/transport.c:182-194).
         let initial_frame_sn = params.initial_sn;
-        Arc::new(Self {
+        // R311ja — wrap through the per-profile `wrap_actions` seam (tokio
+        // `Arc`, lwIP `Rc`) so this one constructor serves both the
+        // multi-thread AP handle and the single-task MCU handle without
+        // naming a concrete pointer. `alloc::sync::Arc` here would wall the
+        // bundle off ARMv6-M (no `target_has_atomic = "ptr"`).
+        R::wrap_actions(Self {
             driver,
             params,
             trace: R::new_mutex(ActionTrace::default()),
@@ -2035,11 +2043,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 /// R311il — thin newtype that carries the generated
 /// [`SessionFsmUnicastActionsTrait`] impl for the
 /// [`crate::session_fsm_unicast::SessionFsmUnicastPolicy`] to own by
-/// value. Wraps a clone of the caller's `Arc<`[`SessionLinkActions`]`>`
-/// so the 18 native actions mutate the same shared state (trace / staging
-/// slots / link driver) the caller reads back; the orphan rule forbids
-/// impl'ing the foreign trait on `Arc<SessionLinkActions>` directly, so
-/// the local newtype carries the impl.
+/// value. Wraps a clone of the caller's
+/// [`R::ActionsHandle<T>`](crate::link::SessionRuntime::ActionsHandle) (the
+/// per-profile shared bundle handle — tokio `Arc`, lwIP `Rc`) so the 18
+/// native actions mutate the same shared state (trace / staging slots /
+/// link driver) the caller reads back; the orphan rule forbids impl'ing the
+/// foreign trait on the bare handle directly, so the local newtype carries
+/// the impl. The methods reach the bundle through the handle's `Deref`.
 ///
 /// Engine-free successor of the R79 Lua binding
 /// (`install_session_actions` + the `register_*` family): the generated
@@ -2048,17 +2058,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 /// longer pulls `sce-rust-lua` — the second half of the runtime-schism
 /// resolution after R311ik did the same for scouting.
 pub struct SessionActionsBinding<R: SessionRuntime, T: TimeSource> {
-    inner: Arc<SessionLinkActions<R, T>>,
+    inner: R::ActionsHandle<T>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
-    /// Wrap a clone of the caller's `Arc<`[`SessionLinkActions`]`>` so the
-    /// generated [`SessionFsmUnicastActionsTrait`] dispatches its 18
+    /// Wrap a clone of the caller's
+    /// [`R::ActionsHandle<T>`](crate::link::SessionRuntime::ActionsHandle) so
+    /// the generated [`SessionFsmUnicastActionsTrait`] dispatches its 18
     /// actions against the shared state the caller reads back. Production
     /// callers reach this through `new_session_engine`; it is `pub` so a
     /// test can drive an individual action method directly (the
     /// engine-free successor of the retired `dispatch_script` shim).
-    pub fn new(actions: Arc<SessionLinkActions<R, T>>) -> Self {
+    pub fn new(actions: R::ActionsHandle<T>) -> Self {
         Self { inner: actions }
     }
 }

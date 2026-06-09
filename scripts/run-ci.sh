@@ -1735,18 +1735,15 @@ layer_g_cross_compile_cortex_m() {
         # link-sink binding + the `SessionLinkActions<LwipRuntime<C>,
         # LwipTime<C>>` type-check (the precondition the MCU sync drive
         # loop consumer depends on) cross-compile on the alloc-capable
-        # MCU targets. SKIPs thumbv6m (Cortex-M0+): session-unicast pulls
-        # the full session_actions bundle, which holds the action handle
-        # in `alloc::sync::Arc` — a direct core-alloc Arc, NOT the
-        # `crate::atomic` portable-atomic polyfill the executor uses
-        # (G.4-alloc) — so it requires `target_has_atomic = "ptr"`, absent
-        # on ARMv6-M. The no-alloc M0+ session consumer (borrowed-decode
-        # variant) is an explicitly deferred follow-up (plan scope note);
-        # the alloc MCU profile (M3/M4/M7/M33 + RISC-V IMAC) is Stage 4's
-        # first target.
-        if [[ "$t" == "thumbv6m-none-eabi" ]]; then
-            echo "  G.10 session-unicast MCU $t SKIP (M0+: session_actions uses alloc::sync::Arc, needs target_has_atomic=ptr; no-alloc M0 consumer deferred)"
-        elif (cd crates && cargo build -p wz-runtime-lwip \
+        # MCU targets — INCLUDING thumbv6m (Cortex-M0/M0+) since R311ja. The
+        # session_actions bundle handle was lifted from a hard-coded
+        # `alloc::sync::Arc` to the per-profile `SessionRuntime::ActionsHandle`
+        # GAT: tokio binds `Arc` (multi-thread), the lwIP MCU profile binds
+        # `Rc` (single-task drive loop). `Rc` lowers to plain loads / stores,
+        # so session-unicast no longer needs `target_has_atomic = "ptr"` and
+        # cross-compiles on ARMv6-M. This IS the no-alloc M0 session reach the
+        # prior rounds deferred; M3/M4/M7/M33 + RISC-V IMAC keep building too.
+        if (cd crates && cargo build -p wz-runtime-lwip \
             --target "$t" --features session-unicast --quiet); then
             echo "  G.10 session-unicast MCU $t OK"
         else
@@ -1761,13 +1758,12 @@ layer_g_cross_compile_cortex_m() {
         # setup: builds the crate with `reassembly` on (exercises the
         # reassembly drive path) AND the facade `session-lwip` re-export.
         # SKIPs riscv32imac (no riscv32-unknown-elf-gcc for the lwIP C
-        # cross build, same as G.6) and thumbv6m (M0+: session-lwip pulls
-        # session-unicast -> session_actions' alloc::sync::Arc needs
-        # target_has_atomic=ptr, same constraint as G.10).
+        # cross build, same as G.6). thumbv6m (M0+) NO LONGER SKIPs since
+        # R311ja: the `Rc` ActionsHandle (see G.10) lets the whole MCU
+        # session shell — handshake + reassembly consumer + facade — cross-
+        # compile on ARMv6-M, the no-alloc M0 session reach end to end.
         if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
             echo "  G.11 session-lwip cross-real $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
-        elif [[ "$t" == "thumbv6m-none-eabi" ]]; then
-            echo "  G.11 session-lwip cross-real $t SKIP (M0+: session_actions alloc::sync::Arc needs target_has_atomic=ptr)"
         elif (cd crates && \
                 WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
                 cargo build -p wz-session-lwip \

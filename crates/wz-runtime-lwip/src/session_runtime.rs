@@ -32,14 +32,21 @@
 //!
 //! `SessionLinkActions<LwipRuntime<C>, LwipTime<C>>` is consequently
 //! `!Send`; that is correct, not a limitation — the bundle lives on the
-//! drive loop's stack and is never spawned. `new_generic` wraps it in an
-//! `alloc::sync::Arc` for shared read access within that one task; the
-//! `Arc` is `!Send` here because its contents are, which the sync loop
-//! never violates.
+//! drive loop's stack and is never spawned. `new_generic` wraps it in the
+//! profile [`SessionRuntime::ActionsHandle`] — `Rc` here (R311ja), not
+//! `Arc` — for shared read access within that one task: the FSM action
+//! binding and the drive loop read the same bundle, but never across
+//! threads, so an atomic refcount would be pure waste *and* would wall the
+//! session off ARMv6-M (`alloc::sync::Arc` needs `target_has_atomic =
+//! "ptr"`, absent on Cortex-M0/M0+). The single-task `Rc` is exactly what
+//! lets the MCU session stack — handshake + reassembly consumer — reach
+//! ARMv6-M, the no-alloc M0 session reach the AP `Arc` blocked.
 
 use alloc::rc::Rc;
 
+use wz_runtime_core::TimeSource;
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+use wz_session_core::session_actions::SessionLinkActions;
 
 use crate::runtime_impl::LwipRuntime;
 use crate::time::{ClockSource, LwipTime};
@@ -50,6 +57,18 @@ use crate::time::{ClockSource, LwipTime};
 /// shape (see module doc).
 impl<C: ClockSource> SessionRuntime for LwipRuntime<C> {
     type LinkSink = Rc<dyn BoxedLinkDriver>;
+
+    // R311ja — the MCU action handle is `Rc`, not `Arc`: the single-task
+    // sync drive loop shares the bundle only with its own FSM binding, never
+    // across threads, so the refcount needs no atomics. This is the seam
+    // that unblocks the no-alloc M0+ session reach — `alloc::sync::Arc`
+    // requires `target_has_atomic = "ptr"`, which ARMv6-M lacks; `Rc` lowers
+    // to plain loads / stores and cross-compiles on every Phase W target.
+    type ActionsHandle<T: TimeSource> = Rc<SessionLinkActions<Self, T>>;
+
+    fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T> {
+        Rc::new(actions)
+    }
 
     fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver {
         // `&**sink` reborrows through `Rc<dyn BoxedLinkDriver>` to the

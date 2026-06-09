@@ -74,7 +74,7 @@ pub trait ResponseSink {
 }
 
 // Smart-pointer / reference transparency: an `Arc`-shared or borrowed
-// sink is still a sink. Production callers hold the actions handle as
+// sink is still a sink. Production AP callers hold the actions handle as
 // `Arc<SessionLinkActions>` (shared across the driver + per-query tasks),
 // so these blanket impls let `flush_pending<S: ResponseSink>` accept the
 // Arc (or a `&SessionLinkActions`) directly without unwrapping — the same
@@ -100,6 +100,16 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
     }
 }
 
+// R311ja — gated on `target_has_atomic = "ptr"`: `alloc::sync::Arc` itself is
+// unavailable on ARMv6-M (Cortex-M0/M0+), so naming it in an impl header would
+// fail the no-alloc M0 session cross-compile. The AP profile (which has atomic
+// `Arc` and is the only profile that hands an `Arc`-shared sink to
+// `flush_pending`) keeps it; the single-task MCU profile reaches a shared sink
+// through the unconditional `&S` impl or the bundle's own `ResponseSink` impl,
+// never an `Arc`. An `Rc<S>` mirror is intentionally omitted until an MCU
+// query / reply consumer actually drains through a refcounted sink (no caller
+// today — the MCU drive loop does not run `flush_pending`).
+#[cfg(target_has_atomic = "ptr")]
 impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: ResponseOwned) {
