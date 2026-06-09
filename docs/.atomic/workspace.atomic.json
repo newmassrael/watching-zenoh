@@ -933,7 +933,8 @@
       "decision_status": "active",
       "intent": "Link domain catalog: 5 atomic features all reserved (transport-* already gates batching/fragmentation; link-* is routing-layer abstraction not yet wired).",
       "caveats_bullets": [
-        "R311ci audit: link-* overlaps transport-* (RFC §5.C link tier is higher abstraction)."
+        "R311ci audit: link-* overlaps transport-* (RFC §5.C link tier is higher abstraction).",
+        "R311jc: buffer-pool-session-rx-slim atomic selects 4x256 session-rx (vs 16x1536) for nrf51 16KB"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -1781,6 +1782,54 @@
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ]
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-8-preset-cortex-m0-minimal": {
+      "title": "§6.8 preset-cortex-m0-minimal v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
+      "intent": "Ultra-constrained Cortex-M0 / nrf51 (16 KB SRAM) session node = preset-mcu-minimal 35 atoms + buffer-pool-session-rx-slim; first cortex-m0 preset, boots the acceptor e2e on microbit.",
+      "rationale_bullets": [
+        "`platform-bare-metal`",
+        "`runtime-lwip`",
+        "`runtime-no-std`",
+        "`transport-link-udp`",
+        "`transport-unicast`",
+        "`transport-keepalive`",
+        "`transport-batching`",
+        "`session-unicast-open`",
+        "`session-unicast-accept`",
+        "`codec-frame`",
+        "`codec-keep-alive`",
+        "`codec-init-body`",
+        "`codec-open-body`",
+        "`codec-close`",
+        "`codec-push`",
+        "`codec-declare`",
+        "`declare-subscriber`",
+        "`declare-undeclare`",
+        "`pubsub-put`",
+        "`pubsub-delete`",
+        "`pubsub-sample`",
+        "`pubsub-encoding`",
+        "`pubsub-timestamp`",
+        "`encoding-bytes`",
+        "`encoding-empty`",
+        "`encoding-utf8`",
+        "`keyexpr-literal`",
+        "`keyexpr-canon`",
+        "`keyexpr-includes`",
+        "`keyexpr-intersect`",
+        "`locator-udp`",
+        "`routing-client`",
+        "`scouting-static`",
+        "`time-system-clock`",
+        "`time-ntp64`",
+        "`buffer-pool-session-rx-slim`",
+        "R311jc: = preset-mcu-minimal (35 atoms) + buffer-pool-session-rx-slim (the 36th)",
+        "slim 4x256 session-rx: e2e peak heap ~32KB to ~3.15KB; control/small-data only (256B < MTU)",
+        "first cortex-m0 preset; microbit-minimal lwIP port boots handshake+Frame on nrf51 16KB (Q.4)"
       ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism": {
@@ -31557,6 +31606,62 @@
         "nrf51-class 16KB needs a slim-socket session preset (north-star atomic-feature decomposition) to BOOT the e2e on M0; M0 currently build-only",
         "tokio Session<R,T>.actions -> R::ActionsHandle<T> in the Session-runtime-agnostic extraction round (R311cw goal; user undecided, deferred)",
         "ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
+      ]
+    },
+    "Round 311jc": {
+      "decision_summary": "R311jc: buffer-pool-session-rx-slim atomic + preset-cortex-m0-minimal lift the Q.4 microbit acceptor from build-only to a REAL Cortex-M0 boot (nrf51 16KB handshake + Frame dispatch).",
+      "changes_bullets": [
+        "sources/network/session_rx_pool_mcu_minimal.scxml: slim session-rx SSOT (slot-count 4, slot-size 256), derivation-anchored to nrf51 constraint",
+        "wz-link-lwip build.rs/lib.rs/rx_sockets/Cargo: buffer-pool-session-rx-slim feature selects slim pool (kconfig build-time, link tier); forwarded session-lwip/wz/acceptor/deploy bin",
+        "wz-mcu-session-acceptor: reactive peer socket tracks SESSION_RX_SLOT_SIZE so the 2nd endpoint slims too",
+        "facade preset-cortex-m0-minimal (=preset-mcu-minimal+slim) + C4 lane; catalog §6.8 section + §5.5-link caveat",
+        "deploy/mcu-session-acceptor: memory-microbit.x + build.rs target branch + heap/clock fork; new crates/lwip-sys/port/microbit-minimal trimmed lwipopts",
+        "run-ci.sh Q.4: microbit build-only -> real boot block (microbit-minimal port + slim feature, frame-mode)"
+      ],
+      "verification_bullets": [
+        "MEASURED peak heap default 31968B -> slim 3152B (10x); stack M3 default 6588B -> slim 1724B; M0 overflowed at 4.2KB stack -> trimmed lwIP frees room",
+        "microbit thumbv6m BOOT PASS (Established advanced_fsm=2 cookie_len=16); bss 12056 -> 8792 (stack ~7.4KB)",
+        "Layer Q all required layers pass: Q.4.microbit.slim build+run PASS, mps2 M3/M4/M7 frame+reasm no regression; C4 preset-cortex-m0-minimal host build OK",
+        "validate T1 new=+0; entries+1 sections+1 (new §6.8)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-8-preset-cortex-m0-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "full deploy/*.yaml constrained nrf51 topology that {ref:session_rx_pool_mcu_minimal}s the slim pool (R50 deploy-topology carry; scxml is live SSOT, preset is live consumer)",
+        "additive-Cargo-feature 2-profile toggle (default/slim); a 3rd session-rx size profile needs a mutual-exclusion mechanism",
+        "slim reassembly pool: 4x4096=16KB does not fit nrf51 so microbit Q.4 is frame-mode only; a slim-reassembly variant would enable M0 reassembly boot",
+        "microbit QEMU \"Timer with period zero\" (SysTick CLKSOURCE on nrf51) is benign, boot PASSes; investigate if a real M0 deploy needs accurate SysTick",
+        "carried from R311ja: tokio Session<R,T>.actions -> R::ActionsHandle<T> (R311cw); ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
+      ],
+      "publishable_decision_summary": "R311jc: buffer-pool-session-rx-slim atomic + preset-cortex-m0-minimal lift the Q.4 microbit acceptor from build-only to a REAL Cortex-M0 boot (nrf51 16KB handshake + Frame dispatch).",
+      "publishable_changes_bullets": [
+        "sources/network/session_rx_pool_mcu_minimal.scxml: slim session-rx SSOT (slot-count 4, slot-size 256), derivation-anchored to nrf51 constraint",
+        "wz-link-lwip build.rs/lib.rs/rx_sockets/Cargo: buffer-pool-session-rx-slim feature selects slim pool (kconfig build-time, link tier); forwarded session-lwip/wz/acceptor/deploy bin",
+        "wz-mcu-session-acceptor: reactive peer socket tracks SESSION_RX_SLOT_SIZE so the 2nd endpoint slims too",
+        "facade preset-cortex-m0-minimal (=preset-mcu-minimal+slim) + C4 lane; catalog §6.8 section + §5.5-link caveat",
+        "deploy/mcu-session-acceptor: memory-microbit.x + build.rs target branch + heap/clock fork; new crates/lwip-sys/port/microbit-minimal trimmed lwipopts",
+        "run-ci.sh Q.4: microbit build-only -> real boot block (microbit-minimal port + slim feature, frame-mode)"
+      ],
+      "publishable_verification_bullets": [
+        "MEASURED peak heap default 31968B -> slim 3152B (10x); stack M3 default 6588B -> slim 1724B; M0 overflowed at 4.2KB stack -> trimmed lwIP frees room",
+        "microbit thumbv6m BOOT PASS (Established advanced_fsm=2 cookie_len=16); bss 12056 -> 8792 (stack ~7.4KB)",
+        "Layer Q all required layers pass: Q.4.microbit.slim build+run PASS, mps2 M3/M4/M7 frame+reasm no regression; C4 preset-cortex-m0-minimal host build OK",
+        "validate T1 new=+0; entries+1 sections+1 (new §6.8)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-8-preset-cortex-m0-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "full deploy/*.yaml constrained nrf51 topology that {ref:session_rx_pool_mcu_minimal}s the slim pool (R50 deploy-topology carry; scxml is live SSOT, preset is live consumer)",
+        "additive-Cargo-feature 2-profile toggle (default/slim); a 3rd session-rx size profile needs a mutual-exclusion mechanism",
+        "slim reassembly pool: 4x4096=16KB does not fit nrf51 so microbit Q.4 is frame-mode only; a slim-reassembly variant would enable M0 reassembly boot",
+        "microbit QEMU \"Timer with period zero\" (SysTick CLKSOURCE on nrf51) is benign, boot PASSes; investigate if a real M0 deploy needs accurate SysTick",
+        "carried from R311ja: tokio Session<R,T>.actions -> R::ActionsHandle<T> (R311cw); ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
       ]
     },
     "Round 311k": {
