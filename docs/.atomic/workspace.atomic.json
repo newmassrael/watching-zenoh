@@ -32000,6 +32000,58 @@
         "reassembly_dispatch's SlotBinding still carries the same dead write-only counters the G cleanup removed from the multicast bindings - a separate pass if wanted."
       ]
     },
+    "Round 311jl": {
+      "decision_summary": "R311jl decision-only: zenoh-pico parity assessed (~90% client TCP/UDP, ~70-75% default build, ~50% all-optional); next-work priority = unicast robustness before multicast data plane.",
+      "changes_bullets": [
+        "No code change. Assessed watching-zenoh vs zenoh-pico from zenoh-pico Z_FEATURE_* (37 flags, config.h.in) + wire MIDs (transport.h) + wz actual code/tests (2 Explore surveys + direct reads).",
+        "Parity result: client-over-TCP/UDP ~90% (pub/sub, query/queryable, declare/undeclare, liveliness token+subscriber, scouting, keyexpr all wire-byte-compatible vs zenoh-pico per layer3_* + wz-e2e-* vs zenohd); zenoh-pico DEFAULT-feature build ~70-75%; everything incl default-OFF optional ~50-55%.",
+        "NOTE: the wz catalog active=63/143 (~46%) is a DIFFERENT denominator - it includes non-pico MS3+ atoms (router/storage/SHM/QUIC), so it is NOT the zenoh-pico parity number.",
+        "Corrected a stale survey claim: the multicast cluster (Rounds A-H, pushed 340b591) is DONE - session FSM + per-peer FSM (addr-keyed, zenoh-pico _z_find_peer_entry parity) + Join beacon + RX classify + lease sweep; transport-multicast is ACTIVE. NOT 'stub/absent'.",
+        "Confirmed remaining gaps by direct grep: batching (only batch_size MTU negotiation, no real msg-grouping), auto-reconnect (comments only), fragmentation (codec+dispatcher present, AP drive-loop + e2e incomplete), multicast DATA plane (transport done, Frame-payload->subscriber delivery NOT wired), liveliness-get + query-source-info-rx (stubs)."
+      ],
+      "verification_bullets": [
+        "Evidence base: ~/zenoh-pico/include/zenoh-pico/config.h.in (37 Z_FEATURE_* flags) + protocol/definitions/transport.h (MIDs) + src/transport/multicast/rx.c (_z_find_peer_entry by addr); wz layer3_*.rs wire-byte-compare tests + crates/wz-e2e-* round-trips vs zenohd; claudedocs/composability-audit-2026-06-05.md.",
+        "Full host run-ci was green at 340b591 (this entry is assessment-only, no code change)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "NEXT-WORK PRIORITY (ratified) - finish UNICAST robustness FIRST (client-over-TCP/UDP is the common deployment, ~90%->100%): (A2) fragmentation completion = wire the reassembly dispatcher into the AP drive loop + a >1-MTU payload e2e; (A3) batching = collect N network messages into one transport frame + flush; (A4) auto-reconnect = re-dial + re-handshake on link loss.",
+        "THEN (A1) multicast DATA plane = decode multicast Frame PAYLOAD and deliver to the subscriber/queryable registries (pub/sub over multicast) - the layer above the transport peer-attribution Rounds A-H added.",
+        "SMALL wins: liveliness-get (CURRENT token snapshot); query-source-info RX (codec exists, add the receive arm); matching-listener callback.",
+        "THEN (B, optional - pico default-OFF too): TLS/serial/WS/BT links, advanced publisher/subscriber, admin space, RX cache, multicast declarations.",
+        "NOT zenoh-pico parity (pico itself lacks): router/routing, storage, full access-control, SHM, gossip scouting, QUIC/vsock/unixsock - these are wz north-star MS3+ only.",
+        "Multicast cluster A-H pushed origin/main=340b591; 6 commits 9625953..340b591. Tool: CLI is R422, store schema v11, MCP store tools dead on v11 - use CLI."
+      ],
+      "publishable_decision_summary": "R311jl decision-only: zenoh-pico parity assessed (~90% client TCP/UDP, ~70-75% default build, ~50% all-optional); next-work priority = unicast robustness before multicast data plane.",
+      "publishable_changes_bullets": [
+        "No code change. Assessed watching-zenoh vs zenoh-pico from zenoh-pico Z_FEATURE_* (37 flags, config.h.in) + wire MIDs (transport.h) + wz actual code/tests (2 Explore surveys + direct reads).",
+        "Parity result: client-over-TCP/UDP ~90% (pub/sub, query/queryable, declare/undeclare, liveliness token+subscriber, scouting, keyexpr all wire-byte-compatible vs zenoh-pico per layer3_* + wz-e2e-* vs zenohd); zenoh-pico DEFAULT-feature build ~70-75%; everything incl default-OFF optional ~50-55%.",
+        "NOTE: the wz catalog active=63/143 (~46%) is a DIFFERENT denominator - it includes non-pico MS3+ atoms (router/storage/SHM/QUIC), so it is NOT the zenoh-pico parity number.",
+        "Corrected a stale survey claim: the multicast cluster (Rounds A-H, pushed 340b591) is DONE - session FSM + per-peer FSM (addr-keyed, zenoh-pico _z_find_peer_entry parity) + Join beacon + RX classify + lease sweep; transport-multicast is ACTIVE. NOT 'stub/absent'.",
+        "Confirmed remaining gaps by direct grep: batching (only batch_size MTU negotiation, no real msg-grouping), auto-reconnect (comments only), fragmentation (codec+dispatcher present, AP drive-loop + e2e incomplete), multicast DATA plane (transport done, Frame-payload->subscriber delivery NOT wired), liveliness-get + query-source-info-rx (stubs)."
+      ],
+      "publishable_verification_bullets": [
+        "Evidence base: ~/zenoh-pico/include/zenoh-pico/config.h.in (37 Z_FEATURE_* flags) + protocol/definitions/transport.h (MIDs) + src/transport/multicast/rx.c (_z_find_peer_entry by addr); wz layer3_*.rs wire-byte-compare tests + crates/wz-e2e-* round-trips vs zenohd; claudedocs/composability-audit-2026-06-05.md.",
+        "Full host run-ci was green at 340b591 (this entry is assessment-only, no code change)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NEXT-WORK PRIORITY (ratified) - finish UNICAST robustness FIRST (client-over-TCP/UDP is the common deployment, ~90%->100%): (A2) fragmentation completion = wire the reassembly dispatcher into the AP drive loop + a >1-MTU payload e2e; (A3) batching = collect N network messages into one transport frame + flush; (A4) auto-reconnect = re-dial + re-handshake on link loss.",
+        "THEN (A1) multicast DATA plane = decode multicast Frame PAYLOAD and deliver to the subscriber/queryable registries (pub/sub over multicast) - the layer above the transport peer-attribution Rounds A-H added.",
+        "SMALL wins: liveliness-get (CURRENT token snapshot); query-source-info RX (codec exists, add the receive arm); matching-listener callback.",
+        "THEN (B, optional - pico default-OFF too): TLS/serial/WS/BT links, advanced publisher/subscriber, admin space, RX cache, multicast declarations.",
+        "NOT zenoh-pico parity (pico itself lacks): router/routing, storage, full access-control, SHM, gossip scouting, QUIC/vsock/unixsock - these are wz north-star MS3+ only.",
+        "Multicast cluster A-H pushed origin/main=340b591; 6 commits 9625953..340b591. Tool: CLI is R422, store schema v11, MCP store tools dead on v11 - use CLI."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
