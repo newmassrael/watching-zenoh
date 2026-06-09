@@ -946,26 +946,25 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
       "decision_status": "active",
-      "intent": "Keyexpr domain catalog: 8 atomic features (0 active toggles; all 8 foundational-reserved — matchers ship always-on, no per-feature cfg gate).",
+      "intent": "Keyexpr domain: 8 atomic features — 4 active matching toggles (wildcard-single/double, dollar-star, includes) + 4 foundational (canon, literal, mapping, intersect).",
       "rationale_bullets": [
-        "Keyexpr is a cluster-wide concern: matchers + canonicalize + mapping table all touch many files.",
-        "keyexpr-canon is FOUNDATIONAL (lib.rs:70): pub mod always compiled, no cfg gate despite the feature.",
-        "Other features are spread across pubsub.rs / session_glue.rs / declare/ — no single anchor.",
-        "R311ht: all 8 reclassified foundational-reserved; active = real cfg toggles only (none here).",
-        "Follow-up cascade could land per-site cfg gates, turning some into real toggles (then active)."
+        "R311jf: matchers gained per-site cfg gates in wz-session-core/src/keyexpr_match.rs.",
+        "4 active toggles: wildcard-single (*), wildcard-double (**), dollar-star ($*), includes.",
+        "Off-semantics: a disabled wildcard token degrades to a literal chunk compare (no panic).",
+        "4 foundational (reserved + marker): literal, canon, mapping, intersect; all consumers need them.",
+        "intersect foundational: subscriber/queryable has_matching calls it unconditionally under alloc."
       ],
       "outputs_bullets": [
-        "Active set (0): no keyexpr atom has its own cfg toggle today.",
-        "keyexpr-canon: pub mod keyexpr_canon always compiled (FOUNDATIONAL, lib.rs:70), not cfg-gated.",
-        "Foundational-reserved (8): -canon, -literal, -mapping, -intersect, -includes,",
-        "Foundational-reserved cont: -dollar-star, -wildcard-single, -wildcard-double.",
-        "Each has source behavior across 4+ files (keyexpr_match.rs etc.); per-site cfg wire-up pending.",
-        "R311ht: reclassified 1-active/7-deferred -> 0 active / 8 foundational-reserved (matchers always-on)."
+        "Active set (4): keyexpr-wildcard-single, -wildcard-double, -dollar-star, -includes.",
+        "Foundational-reserved (4): keyexpr-canon, -literal, -mapping, -intersect (no cfg toggle).",
+        "Gates in keyexpr_match.rs, forwarded session-core -> runtime-tokio/lwip -> facade per-site.",
+        "Behavioural guard: run-ci Layer C1o proves wildcards-off degrades **, *, $* to literal."
       ],
       "caveats_bullets": [
         "keyexpr-canon cfg-off: callers must pre-canonicalize keyexpr strings (no module access).",
         "7 cluster-deferred features have source behavior but no single cfg anchor (R311 carry).",
-        "R311fd: keyexpr-canon foundational/always-on (R311o ungated its types); feature is a no-op marker."
+        "R311fd: keyexpr-canon foundational/always-on (R311o ungated its types); feature is a no-op marker.",
+        "R311jf: keyexpr-includes implemented + behaviourally tested, no internal consumer yet (exposed)."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -31713,6 +31712,52 @@
         "carried from R311ja: tokio Session<R,T>.actions -> R::ActionsHandle<T> (R311cw); ResponseSink Rc<S> mirror when an MCU query/reply consumer lands"
       ]
     },
+    "Round 311jf": {
+      "decision_summary": "R311jf keyexpr matching toggles: wildcard-single/double, dollar-star + new includes cfg-gated (reserved->active x4); literal/canon/mapping/intersect stay foundational always-on.",
+      "changes_bullets": [
+        "wz-session-core/src/keyexpr_match.rs: per-site #[cfg] gates on the *, ** and $* branches of matches_chunks / chunk_matches / intersect; off-semantics degrades the token to a literal chunk compare.",
+        "wz-session-core/src/keyexpr_match.rs: new keyexpr_includes_patterns (directional pattern-includes-pattern, zenoh-pico _z_keyexpr_includes), gated keyexpr-includes; tests for asymmetry + DSL anchoring.",
+        "Cargo features keyexpr-wildcard-single/-double, keyexpr-dollar-star, keyexpr-includes added to wz-session-core; forwarded via wz-runtime-tokio (in its default), wz-runtime-lwip and the wz facade.",
+        "scripts/run-ci.sh: new Layer C1o keyexpr gating BEHAVIOUR lane (keyexpr_match tests wildcards-OFF asserting degrade-to-literal, then wildcards-ON asserting glob + includes).",
+        "Inventory: keyexpr-wildcard-single/-double, -dollar-star, -includes reserved->active (now real cfg gates); §5.6 body intent/rationale/outputs/caveat updated to 4 active + 4 foundational."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core both configs: default (wildcards off) runs the off-degrade tests; all-toggles-on runs 11 keyexpr_match tests incl includes asymmetry + DSL anchoring (all pass).",
+        "cargo clippy --all-targets -D warnings clean on wz-session-core (wildcards off + all-on) and on the wz facade preset-mcu-minimal build.",
+        "Presets build host: ap-client/-full/-router/-zenoh-cpp (all keyexpr on) + mcu-minimal/-extended/cortex-m0-minimal (wildcards stripped) all exit 0.",
+        "run-ci Layer C1o pass (OFF 4 degrade tests, ON 11 tests); A3 audit-catalog-status OK (active 57->61, active<=>gated holds); validate_workspace T1 new=+0, T3 warn=4 unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "carry_forward_bullets": [
+        "keyexpr-includes has no internal consumer yet (exposed + tested); a future routing/aggregation caller wires it (subscriber dedup / queryable completeness).",
+        "Preset hygiene follow-up: preset-mcu-minimal/-extended still list keyexpr-includes (now real); consider dropping it from the literal-only minimal presets if strict footprint is wanted (a §6.1/§6.2 contract change).",
+        "SCXML sources/algorithms/keyexpr_intersect.scxml + keyexpr_includes.scxml exist but are NOT wired into build.rs; the running matcher is hand-written keyexpr_match.rs, a separate SSOT reconciliation decision (out of scope here)."
+      ],
+      "publishable_decision_summary": "R311jf keyexpr matching toggles: wildcard-single/double, dollar-star + new includes cfg-gated (reserved->active x4); literal/canon/mapping/intersect stay foundational always-on.",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/keyexpr_match.rs: per-site #[cfg] gates on the *, ** and $* branches of matches_chunks / chunk_matches / intersect; off-semantics degrades the token to a literal chunk compare.",
+        "wz-session-core/src/keyexpr_match.rs: new keyexpr_includes_patterns (directional pattern-includes-pattern, zenoh-pico _z_keyexpr_includes), gated keyexpr-includes; tests for asymmetry + DSL anchoring.",
+        "Cargo features keyexpr-wildcard-single/-double, keyexpr-dollar-star, keyexpr-includes added to wz-session-core; forwarded via wz-runtime-tokio (in its default), wz-runtime-lwip and the wz facade.",
+        "scripts/run-ci.sh: new Layer C1o keyexpr gating BEHAVIOUR lane (keyexpr_match tests wildcards-OFF asserting degrade-to-literal, then wildcards-ON asserting glob + includes).",
+        "Inventory: keyexpr-wildcard-single/-double, -dollar-star, -includes reserved->active (now real cfg gates); §5.6 body intent/rationale/outputs/caveat updated to 4 active + 4 foundational."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core both configs: default (wildcards off) runs the off-degrade tests; all-toggles-on runs 11 keyexpr_match tests incl includes asymmetry + DSL anchoring (all pass).",
+        "cargo clippy --all-targets -D warnings clean on wz-session-core (wildcards off + all-on) and on the wz facade preset-mcu-minimal build.",
+        "Presets build host: ap-client/-full/-router/-zenoh-cpp (all keyexpr on) + mcu-minimal/-extended/cortex-m0-minimal (wildcards stripped) all exit 0.",
+        "run-ci Layer C1o pass (OFF 4 degrade tests, ON 11 tests); A3 audit-catalog-status OK (active 57->61, active<=>gated holds); validate_workspace T1 new=+0, T3 warn=4 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "publishable_carry_forward_bullets": [
+        "keyexpr-includes has no internal consumer yet (exposed + tested); a future routing/aggregation caller wires it (subscriber dedup / queryable completeness).",
+        "Preset hygiene follow-up: preset-mcu-minimal/-extended still list keyexpr-includes (now real); consider dropping it from the literal-only minimal presets if strict footprint is wanted (a §6.1/§6.2 contract change).",
+        "SCXML sources/algorithms/keyexpr_intersect.scxml + keyexpr_includes.scxml exist but are NOT wired into build.rs; the running matcher is hand-written keyexpr_match.rs, a separate SSOT reconciliation decision (out of scope here)."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
@@ -37427,16 +37472,16 @@
       "reason": "FOUNDATIONAL always-on, no cfg toggle; F=canonize fn; P=zenoh-pico _z_keyexpr_canonize; C=mandatory for outbound wire safety"
     },
     "keyexpr-dollar-star": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs $*",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=non-greedy single-seg wildcard; P=zenoh $*; C=opt-in extension over wildcard-single"
+      "reason": "F=`$*` intra-chunk substring DSL; P=zenoh `$*`; C=R311jf real cfg toggle in keyexpr_match.rs (off degrades to literal); extension over wildcard-single"
     },
     "keyexpr-includes": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "sources/algorithms/keyexpr_includes.scxml at R299",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=includes algorithm; P=zenoh _z_keyexpr_includes; C=required for declare-keyexpr alias check"
+      "reason": "F=directional pattern-includes-pattern; P=zenoh _z_keyexpr_includes; C=R311jf real cfg toggle in keyexpr_match.rs (keyexpr_includes_patterns); no internal consumer yet (exposed+tested)"
     },
     "keyexpr-intersect": {
       "status": "reserved",
@@ -37457,16 +37502,16 @@
       "reason": "FOUNDATIONAL always-on, no cfg toggle; F=alias table; P=zenoh kexpr resolver; C=required when declare-keyexpr enabled"
     },
     "keyexpr-wildcard-double": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=double-star chunk + canon rules; P=zenoh keyexpr **; C=R299 documented divergence pins"
+      "reason": "F=`**` multi-chunk wildcard + backtrack frame; P=zenoh keyexpr `**`; C=R311jf real cfg toggle in keyexpr_match.rs (off degrades `**` to literal chunk)"
     },
     "keyexpr-wildcard-single": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
-      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=star chunk handling; P=zenoh keyexpr *; C=opt-in pattern, indep of double-wildcard"
+      "reason": "F=`*` whole-chunk wildcard arm; P=zenoh keyexpr `*`; C=R311jf real cfg toggle in wz-session-core/src/keyexpr_match.rs (off degrades `*` to literal chunk); indep of double-wildcard"
     },
     "link-batching": {
       "status": "reserved",
