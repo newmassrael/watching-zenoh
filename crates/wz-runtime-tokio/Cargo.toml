@@ -132,6 +132,10 @@ default = [
     "session-unicast-open",
     "session-unicast-accept",
     "keyexpr-canon",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "keyexpr-includes",
     "query-attachment",
     "query-selector-parameters",
     "query-reply-err",
@@ -474,6 +478,17 @@ session-unicast-accept = ["wz-session-core/session-unicast-accept"]
 #     facade forwards that list it keep resolving; toggling it changes
 #     nothing. Genuine exclusion is blocked by signature-stability.
 keyexpr-canon = []
+# R311jf — keyexpr matching composition toggles. Each forwards to the
+# wz-session-core same-named gate (which strips a branch in
+# keyexpr_match.rs); listed in this crate's `default` (below) so
+# `cargo test --workspace` unifies them ON for the session-core matcher
+# tests. A facade preset that omits one strips the corresponding
+# wildcard / DSL / includes code. The foundational keyexpr capabilities
+# (literal / mapping / intersect) have no toggle.
+keyexpr-wildcard-single = ["wz-session-core/keyexpr-wildcard-single"]
+keyexpr-wildcard-double = ["wz-session-core/keyexpr-wildcard-double"]
+keyexpr-dollar-star = ["wz-session-core/keyexpr-dollar-star"]
+keyexpr-includes = ["wz-session-core/keyexpr-includes"]
 # R311cj — query domain 3 additional wire-ups (6 active -> 9 active):
 #   query-attachment            — Query inbound attachment ext extraction.
 #                                 cfg-off: callback observes None.

@@ -38,7 +38,21 @@ readme.workspace = true
 description = "R311di proper — runtime-agnostic Session / SessionLinkActions / helper surface (Phase W §5.P + §5.C consumer)."
 
 [features]
-default = ["alloc"]
+# Batteries-included default (standard Rust opt-out idiom, same shape as
+# `alloc`): the full keyexpr matcher ships by default so any
+# `cargo test -p wz-session-core --features <subset>` exercises the real
+# matcher. A minimal profile opts OUT via `--no-default-features` (the
+# MCU crates set `default-features = false` and then select only the
+# wildcard kinds they use — e.g. mcu-noheap-probe picks
+# keyexpr-wildcard-single/-double; preset-mcu-minimal omits them and the
+# matcher degrades to literal-only). R311jf.
+default = [
+    "alloc",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "keyexpr-includes",
+]
 # `alloc` brings `Box`/`Vec`/`String` into scope so the session machinery
 # (HashMap-backed mapping tables, Vec-backed ext chains, owned codec
 # byte buffers) can compose. R311di-2+ will gate the alloc-bound surface
@@ -300,6 +314,21 @@ query-reply = ["codec-response"]
 # declare codec.
 declare-subscriber = ["codec-declare"]
 declare-queryable = ["codec-declare"]
+# R311jf — keyexpr matching composition toggles (§5.6). Gate-only (no
+# dep): each strips a branch in `keyexpr_match.rs` (an always-compiled
+# module). Off-semantics = the pattern token degrades to a literal
+# chunk compare. In `default` (above) so the matcher is batteries-
+# included for AP + every `cargo test -p wz-session-core` subset; a
+# minimal profile opts out via `--no-default-features` (MCU) and the
+# `--no-default-features` build matrix (C1h) + the C1o behaviour lane
+# exercise the stripped path. The foundational keyexpr capabilities
+# (literal / canon / mapping / intersect) ship always-on with no feature
+# here (intersect is called unconditionally by the always-compiled
+# subscriber/queryable has_matching).
+keyexpr-wildcard-single = []
+keyexpr-wildcard-double = []
+keyexpr-dollar-star = []
+keyexpr-includes = []
 # chunk-5 (SessionLinkActions struct move) — the finer declare-action
 # gates the migrated `send_declare_*` / `send_undeclare_*` /
 # `send_declare_final` / interest action methods carry. Each mirrors the

@@ -220,24 +220,45 @@ encoding-mime = []
 encoding-protobuf = []
 encoding-utf8 = []
 
-# ----- domain: keyexpr (8 atomic; keyexpr-canon foundational, 7 deferred) -----
-# R311cf/R311fd — keyexpr-canon is FOUNDATIONAL (always-on), not an
-# excludable atomic: R311o made `OutboundKeyexprError` unconditional, so
-# the keyexpr_canon module + its consumers are always present and the
-# wz-runtime-tokio re-export gate was removed (R311fd) — toggling this
-# feature is a no-op, retained only so this forward + presets keep
-# resolving. The remaining 7 features (-literal, -mapping, -intersect,
-# -includes, -wildcard-single, -wildcard-double, -dollar-star) are
-# cluster-wide behaviors with no single anchor cfg site (follow-up
-# cascade per-site wire-up).
+# ----- domain: keyexpr (8 atomic; 4 active toggles / 4 foundational) -----
+# R311jf — the matching capabilities now carry real per-site cfg gates
+# in wz-session-core::keyexpr_match (replacing the R311cf/fd "cluster-
+# wide, no anchor" carry). Four are user-excludable composition toggles
+# that forward through the active runtime to the matcher gate; omitting
+# one (e.g. a literal-only MCU preset) strips the corresponding branch.
+keyexpr-wildcard-single = [
+    "wz-runtime-tokio?/keyexpr-wildcard-single",
+    "wz-runtime-lwip?/keyexpr-wildcard-single",
+]
+keyexpr-wildcard-double = [
+    "wz-runtime-tokio?/keyexpr-wildcard-double",
+    "wz-runtime-lwip?/keyexpr-wildcard-double",
+]
+keyexpr-dollar-star = [
+    "wz-runtime-tokio?/keyexpr-dollar-star",
+    "wz-runtime-lwip?/keyexpr-dollar-star",
+]
+keyexpr-includes = [
+    "wz-runtime-tokio?/keyexpr-includes",
+    "wz-runtime-lwip?/keyexpr-includes",
+]
+# FOUNDATIONAL (always-on, not user-flippable): every consumer needs
+# them, so they ship ungated and are retained here only as no-op
+# compatibility markers so presets / domain-keyexpr / forwards keep
+# resolving.
+#   keyexpr-canon    — structural canonicalize; R311fd phantom-gate fix.
+#   keyexpr-literal  — exact byte chunk compare, the irreducible base.
+#   keyexpr-mapping  — wire keyexpr-id resolution (wireexpr_resolve);
+#                      every inbound declare/query/reply path needs it.
+#   keyexpr-intersect — pattern∩pattern; the always-compiled subscriber
+#                      / queryable `has_matching` calls it unconditionally
+#                      (its wildcard sub-branches are gated by the four
+#                      toggles above, so intersect-with-wildcards-off
+#                      degrades to literal-set intersection).
 keyexpr-canon = ["wz-runtime-tokio?/keyexpr-canon"]
-keyexpr-dollar-star = []
-keyexpr-includes = []
 keyexpr-intersect = []
 keyexpr-literal = []
 keyexpr-mapping = []
-keyexpr-wildcard-double = []
-keyexpr-wildcard-single = []
 
 # ----- domain: link (5 atomic, 0 active / 5 reserved) -----
 # R311ci — audit-only ratify. link-* features overlap conceptually

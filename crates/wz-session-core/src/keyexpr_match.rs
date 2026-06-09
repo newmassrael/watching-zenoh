@@ -19,6 +19,40 @@
 //! observable (the test cases stay in `wz-runtime-tokio::pubsub` for
 //! now under the R311dn-tests carry; their identity-via-re-export
 //! callsite checks the moved bodies).
+//!
+//! ## Per-capability cfg gating (R311jf)
+//!
+//! The keyexpr wildcard / DSL capabilities are atomic catalog features
+//! (`§5.6`), no longer always-on. Three are user-excludable composition
+//! toggles; their branches carry a `#[cfg(feature = …)]` so a profile
+//! that omits them strips the code (a literal-only MCU client does not
+//! pay for the `**` backtrack frame or the `$*` substring DSL):
+//!
+//! * `keyexpr-wildcard-single` — the whole-chunk `*` arm.
+//! * `keyexpr-wildcard-double` — the multi-chunk `**` arm + backtrack.
+//! * `keyexpr-dollar-star` — the intra-chunk `$*` substring DSL.
+//!
+//! When a toggle is off the corresponding pattern token loses its
+//! special meaning and **degrades to a literal chunk compare** (no
+//! panic, no compile error — a pattern `home/**` simply ceases to
+//! wildcard-match and is treated as the literal chunk `**`). This is
+//! the same compile-flag elision shape zenoh-pico uses.
+//!
+//! `keyexpr-literal` (exact byte compare) and `keyexpr-mapping` (wire
+//! keyexpr-id resolution, see `wireexpr_resolve`) are FOUNDATIONAL —
+//! every consumer needs them, so they ship always-on and are not gated
+//! here. `keyexpr-intersect` ([`keyexpr_intersect_patterns`]) is also
+//! foundational: the always-compiled subscriber / queryable registry
+//! `has_matching` calls it unconditionally, so it cannot be excluded
+//! without breaking pub/sub matching. Its *wildcard sub-branches* are
+//! still gated by the three toggles above (intersect with wildcards off
+//! degrades to literal-set intersection).
+//!
+//! `keyexpr-includes` ([`keyexpr_includes_patterns`]) is a real toggle:
+//! the directional pattern⊇pattern predicate (zenoh-pico
+//! `_z_keyexpr_includes`) ships only under its feature. It has no
+//! internal consumer yet (exposed + tested + cross-compiled, awaiting a
+//! routing/aggregation caller — the bottom-up framework pattern).
 
 use crate::bounded::BoundedVec;
 
@@ -36,17 +70,23 @@ pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 /// Match a `/`-separated zenoh keyexpr `target` (Push's suffix) against
 /// a pattern split into chunks. Pattern chunks are:
 ///
-/// * `**` — matches zero or more target chunks.
-/// * `*`  — matches exactly one target chunk (any content).
+/// * `**` — matches zero or more target chunks
+///   (`keyexpr-wildcard-double`).
+/// * `*`  — matches exactly one target chunk (any content)
+///   (`keyexpr-wildcard-single`).
 /// * a chunk containing `$*` — intra-chunk substring wildcard
-///   (R220). The chunk is split on `$*` into sub-parts; the leading
-///   sub-part (if non-empty) must be a prefix of the target chunk,
-///   the trailing sub-part (if non-empty) must be a suffix, and
-///   each middle sub-part must appear in order in the remaining
-///   slice without overlap. See [`chunk_matches_with_dsl`] for the
-///   full algorithm.
+///   (R220, `keyexpr-dollar-star`). The chunk is split on `$*` into
+///   sub-parts; the leading sub-part (if non-empty) must be a prefix
+///   of the target chunk, the trailing sub-part (if non-empty) must
+///   be a suffix, and each middle sub-part must appear in order in
+///   the remaining slice without overlap. See
+///   [`chunk_matches_with_dsl`] for the full algorithm.
 /// * any other chunk — must compare byte-for-byte against the
-///   corresponding target chunk.
+///   corresponding target chunk (`keyexpr-literal`, foundational).
+///
+/// When a wildcard feature is disabled its token degrades to a literal
+/// chunk compare (a `**` chunk only matches the literal target chunk
+/// `**`).
 ///
 /// Returns `true` when the target is covered by the pattern.
 ///
@@ -76,20 +116,31 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
     // Backtrack frame for the last `**` encountered. When a
     // subsequent literal mismatch occurs we rewind pattern to one-
     // past-`**` and advance target by one, letting `**` consume one
-    // more chunk before re-attempting the suffix.
+    // more chunk before re-attempting the suffix. Present only when
+    // `keyexpr-wildcard-double` is enabled — without it there is no
+    // `**` token to backtrack over.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     let mut star_star_pi: Option<usize> = None;
+    #[cfg(feature = "keyexpr-wildcard-double")]
     let mut star_star_ti: usize = 0;
 
     while ti < target.len() {
         if pi < pattern.len() {
             let pat = pattern[pi];
+            #[cfg(feature = "keyexpr-wildcard-double")]
             if pat == "**" {
                 star_star_pi = Some(pi);
                 star_star_ti = ti;
                 pi += 1;
                 continue;
             }
-            if pat == "*" || chunk_matches(pat, target[ti]) {
+            #[cfg(feature = "keyexpr-wildcard-single")]
+            if pat == "*" {
+                pi += 1;
+                ti += 1;
+                continue;
+            }
+            if chunk_matches(pat, target[ti]) {
                 pi += 1;
                 ti += 1;
                 continue;
@@ -98,16 +149,18 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
         // Mismatch (literal differs, or pattern is exhausted while
         // target still has chunks). If we are inside a `**` frame,
         // backtrack by absorbing one more target chunk into `**`.
+        #[cfg(feature = "keyexpr-wildcard-double")]
         if let Some(saved_pi) = star_star_pi {
             star_star_ti += 1;
             ti = star_star_ti;
             pi = saved_pi + 1;
-        } else {
-            return false;
+            continue;
         }
+        return false;
     }
     // Target exhausted. Pattern must be exhausted too, except for a
     // trailing `**` which matches zero chunks.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     while pi < pattern.len() && pattern[pi] == "**" {
         pi += 1;
     }
@@ -118,13 +171,15 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
 /// the DSL path ([`chunk_matches_with_dsl`]) and a byte-equal
 /// fast-path based on whether the pattern chunk contains the `$*`
 /// token. The `*` and `**` whole-chunk wildcards are handled by the
-/// caller before reaching this function.
+/// caller before reaching this function. With `keyexpr-dollar-star`
+/// off the `$*` route is elided and every chunk takes the literal
+/// byte-equal path.
 fn chunk_matches(pattern: &str, target: &str) -> bool {
+    #[cfg(feature = "keyexpr-dollar-star")]
     if pattern.contains("$*") {
-        chunk_matches_with_dsl(pattern, target)
-    } else {
-        pattern == target
+        return chunk_matches_with_dsl(pattern, target);
     }
+    pattern == target
 }
 
 /// Intra-chunk substring DSL matcher. The pattern chunk is split on
@@ -145,6 +200,7 @@ fn chunk_matches(pattern: &str, target: &str) -> bool {
 /// `$*$*` runs, since canonical zenoh collapses them) are treated
 /// as no-ops so the matcher remains equivalent to the canonical
 /// form `$*`.
+#[cfg(feature = "keyexpr-dollar-star")]
 fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
     debug_assert!(
         pattern.contains("$*"),
@@ -202,6 +258,12 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
 /// (the contract matches [`keyexpr_pattern_matches`]'s pattern
 /// argument); pass `&['/'.split() of the string]`.
 ///
+/// FOUNDATIONAL (not behind a `keyexpr-intersect` cfg): the
+/// always-compiled subscriber / queryable `has_matching` calls this
+/// unconditionally. Its `**` / `*` / `$*` sub-branches are gated by
+/// the three wildcard toggles, so intersect with wildcards off
+/// degrades to literal-set intersection (chunk equality).
+///
 /// Wildcard chunk types handled symmetrically on either side:
 ///
 /// * `**` — zero or more literal chunks (the standard zenoh
@@ -252,6 +314,7 @@ pub fn keyexpr_intersect_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool 
 fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
     match (a.first(), b.first()) {
         (None, None) => true,
+        #[cfg(feature = "keyexpr-wildcard-double")]
         (Some(&"**"), _) => {
             // ** on a-side consumes 0+ chunks from b-side. Try 0
             // consumed (advance a past **) first, then 1+ (advance
@@ -264,11 +327,13 @@ fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
             }
             intersect_chunks(a, &b[1..])
         }
+        #[cfg(feature = "keyexpr-wildcard-double")]
         (_, Some(&"**")) => intersect_chunks(b, a),
         (None, _) | (_, None) => {
             // One side exhausted while the other still has chunks
             // (none of which can be `**` — that case is handled
-            // above). Mismatch.
+            // above when the feature is on; off, `**` is a literal
+            // chunk and falls to the `(Some, Some)` arm). Mismatch.
             false
         }
         (Some(ap), Some(bp)) => {
@@ -283,63 +348,155 @@ fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
 /// Two-side chunk intersection. Routes between the literal /
 /// `*` / `$*`-DSL cases on each side. Used by
 /// [`intersect_chunks`] to decide whether two single chunks can
-/// share at least one literal value.
+/// share at least one literal value. With both wildcard toggles
+/// off this reduces to chunk equality.
 fn chunk_intersects(a: &str, b: &str) -> bool {
     // `*` on either side matches any single chunk; both-sides `*`
     // trivially intersect.
+    #[cfg(feature = "keyexpr-wildcard-single")]
     if a == "*" || b == "*" {
         return true;
     }
-    let a_has_dsl = a.contains("$*");
-    let b_has_dsl = b.contains("$*");
-    match (a_has_dsl, b_has_dsl) {
-        (false, false) => a == b,
-        (true, false) => chunk_matches_with_dsl(a, b),
-        (false, true) => chunk_matches_with_dsl(b, a),
-        (true, true) => {
-            // Two-side `$*`. Equivalent to zenoh-pico's
-            // intersects-mode chunk matcher
-            // (`_z_chunk_forward_intersects` → `forward_backward` →
-            // `chunk_special_intersects`) for canonical inputs.
-            //
-            // The algorithm: each chunk decomposes on `$*` into a
-            // leading anchor + ordered middle sub-parts + trailing
-            // anchor. Two chunk patterns share at least one literal
-            // iff their leading anchors are prefix-compatible (one
-            // is a prefix of the other — the empty string is a
-            // prefix of any string) AND their trailing anchors are
-            // suffix-compatible.
-            //
-            // Middle sub-parts are unconstrained: any two ordered
-            // sub-part sequences `[A1, A2, …, AN]` and `[B1, B2,
-            // …, BM]` always admit a shared chunk literal where
-            // both occur sequentially — e.g. the alternating
-            // concatenation `A1 B1 A2 B2 …` (each side independently
-            // floats its sub-parts through its own `$*` runs).
-            // zenoh-pico's `chunk_special_intersects` confirms this
-            // via the `right contains $*` over-approximation on
-            // line 156 of `keyexpr_match_template.h`: every (true,
-            // true) input lands in that branch and zenoh-pico
-            // returns YES. So the lead/trail anchor pair is also a
-            // necessary condition (failing it rejects both
-            // matchers) and the sufficient condition (passing it
-            // accepts both matchers). R293 originally labelled this
-            // "over-approximation"; R296 closure: the algorithm is
-            // exact for intersects mode in the two-side `$*` case.
-            // Only the leading and trailing anchors are needed, so the
-            // former `Vec<&str> = split("$*").collect()` is replaced by
-            // a head/tail extraction: `split` head is `parts[0]`,
-            // `rsplit` head is `parts[len - 1]`. Both sides contain
-            // `$*` here, so `next()` is always `Some`.
-            let a_lead = a.split("$*").next().unwrap_or("");
-            let a_trail = a.rsplit("$*").next().unwrap_or("");
-            let b_lead = b.split("$*").next().unwrap_or("");
-            let b_trail = b.rsplit("$*").next().unwrap_or("");
-            let lead_compat = a_lead.starts_with(b_lead) || b_lead.starts_with(a_lead);
-            let trail_compat = a_trail.ends_with(b_trail) || b_trail.ends_with(a_trail);
-            lead_compat && trail_compat
+    #[cfg(feature = "keyexpr-dollar-star")]
+    {
+        let a_has_dsl = a.contains("$*");
+        let b_has_dsl = b.contains("$*");
+        if a_has_dsl || b_has_dsl {
+            return match (a_has_dsl, b_has_dsl) {
+                (true, false) => chunk_matches_with_dsl(a, b),
+                (false, true) => chunk_matches_with_dsl(b, a),
+                (true, true) => {
+                    // Two-side `$*`. Equivalent to zenoh-pico's
+                    // intersects-mode chunk matcher
+                    // (`_z_chunk_forward_intersects` → `forward_backward` →
+                    // `chunk_special_intersects`) for canonical inputs.
+                    //
+                    // Each chunk decomposes on `$*` into a leading anchor +
+                    // ordered middle sub-parts + trailing anchor. Two chunk
+                    // patterns share at least one literal iff their leading
+                    // anchors are prefix-compatible (one is a prefix of the
+                    // other — the empty string is a prefix of any string)
+                    // AND their trailing anchors are suffix-compatible.
+                    // Middle sub-parts are unconstrained (R296 closure: the
+                    // alternating concatenation realises any two ordered
+                    // sub-part sequences in one shared literal). Only the
+                    // leading and trailing anchors are needed.
+                    let a_lead = a.split("$*").next().unwrap_or("");
+                    let a_trail = a.rsplit("$*").next().unwrap_or("");
+                    let b_lead = b.split("$*").next().unwrap_or("");
+                    let b_trail = b.rsplit("$*").next().unwrap_or("");
+                    let lead_compat = a_lead.starts_with(b_lead) || b_lead.starts_with(a_lead);
+                    let trail_compat = a_trail.ends_with(b_trail) || b_trail.ends_with(a_trail);
+                    lead_compat && trail_compat
+                }
+                // Unreachable under the `a_has_dsl || b_has_dsl` guard;
+                // the literal-literal answer is chunk equality.
+                (false, false) => a == b,
+            };
         }
     }
+    a == b
+}
+
+/// R311jf — directional keyexpr inclusion: returns `true` iff
+/// `a_chunks` **includes** `b_chunks`, i.e. every literal
+/// `/`-separated keyexpr covered by `b` is also covered by `a`
+/// (`a ⊇ b`). Mirror of zenoh-pico `_z_keyexpr_includes`
+/// (`left` includes `right`). Both inputs are pre-split chunk
+/// slices, same contract as [`keyexpr_intersect_patterns`].
+///
+/// Unlike [`keyexpr_intersect_patterns`] this is **directional /
+/// asymmetric**: `includes(a, b)` is generally not `includes(b, a)`.
+/// The chunk rules (a = superset side, b = subset side):
+///
+/// * a `**` consumes zero or more b chunks (a can be wider).
+/// * a b-side `**` with a non-`**` a-chunk ⇒ NO: a's finite
+///   non-`**` chunk cannot cover b's arbitrarily-many chunks.
+/// * a `*` covers any single b chunk (literal, `*`, or `$*`-DSL).
+/// * a b-side `*` with a non-`*`/`**` a-chunk ⇒ NO: only `*`/`**`
+///   cover every single-chunk value `*` can take.
+/// * a-DSL vs b (literal or DSL): a's `$*` set must contain b's set,
+///   computed by [`chunk_matches_with_dsl`] over b's raw chunk
+///   string as the haystack (anchored prefix/suffix + ordered
+///   middle search — exactly the inclusion predicate, verified
+///   against the zenoh-pico template's includes branch).
+/// * a-literal vs b-DSL ⇒ NO: a single literal cannot cover a DSL
+///   set (which always denotes more than one string).
+///
+/// Gated behind `keyexpr-includes`: ships only when selected. No
+/// internal consumer yet (exposed + tested, awaiting a routing /
+/// aggregation caller — the bottom-up framework pattern).
+#[cfg(feature = "keyexpr-includes")]
+pub fn keyexpr_includes_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool {
+    includes_chunks(a_chunks, b_chunks)
+}
+
+#[cfg(feature = "keyexpr-includes")]
+fn includes_chunks(a: &[&str], b: &[&str]) -> bool {
+    match (a.first(), b.first()) {
+        (None, None) => true,
+        #[cfg(feature = "keyexpr-wildcard-double")]
+        (Some(&"**"), _) => {
+            // a's ** can cover 0+ of b's chunks. Try consuming 0
+            // (advance a past **), then 1+ (advance b by one, keep
+            // a's ** to cover more). a `**` also includes b `**`.
+            if includes_chunks(&a[1..], b) {
+                return true;
+            }
+            if b.is_empty() {
+                return false;
+            }
+            includes_chunks(a, &b[1..])
+        }
+        #[cfg(feature = "keyexpr-wildcard-double")]
+        (_, Some(&"**")) => {
+            // b has `**` but a does not start with `**` (handled
+            // above): a's single non-`**` chunk cannot cover b's
+            // arbitrarily-many chunks. Asymmetric vs intersect.
+            false
+        }
+        (None, _) | (_, None) => false,
+        (Some(ap), Some(bp)) => {
+            if !chunk_includes(ap, bp) {
+                return false;
+            }
+            includes_chunks(&a[1..], &b[1..])
+        }
+    }
+}
+
+/// Single-chunk directional inclusion (`a ⊇ b`, neither chunk is
+/// `**` — that is resolved at the [`includes_chunks`] recursion
+/// level). With both wildcard toggles off this reduces to chunk
+/// equality.
+#[cfg(feature = "keyexpr-includes")]
+fn chunk_includes(a: &str, b: &str) -> bool {
+    #[cfg(feature = "keyexpr-wildcard-single")]
+    {
+        // a `*` covers any single chunk.
+        if a == "*" {
+            return true;
+        }
+        // b `*` (a is not `*`/`**`) cannot be covered by a finite
+        // literal / DSL chunk.
+        if b == "*" {
+            return false;
+        }
+    }
+    #[cfg(feature = "keyexpr-dollar-star")]
+    {
+        if a.contains("$*") {
+            // a's DSL set ⊇ b (b literal or DSL): b's raw chunk
+            // string is the haystack for a's anchored sub-part walk.
+            return chunk_matches_with_dsl(a, b);
+        }
+        if b.contains("$*") {
+            // a literal vs b DSL: a denotes one string, b denotes a
+            // set of >1, so a cannot include b.
+            return false;
+        }
+    }
+    a == b
 }
 
 #[cfg(test)]
@@ -349,16 +506,36 @@ mod tests {
     // Profile-agnostic behaviour guard. The exhaustive R220/R293/R296
     // ratchet cases live in the alloc-gated `pubsub.rs`; these run in
     // BOTH the alloc and the no-alloc build so the BoundedVec /
-    // peekable rewrites are covered on the MCU profile too.
+    // peekable rewrites are covered on the MCU profile too. Each
+    // wildcard / DSL group is gated by its own feature so the literal-
+    // only subset still has a passing, applicable test set.
 
     #[test]
-    fn literal_and_single_wildcard() {
+    fn literal_matching() {
         assert!(keyexpr_pattern_matches(&["home", "temp"], "home/temp"));
         assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/humid"));
-        assert!(keyexpr_pattern_matches(&["home", "*"], "home/temp"));
-        assert!(!keyexpr_pattern_matches(&["home", "*"], "home/a/b"));
+        assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/temp/x"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
+    #[test]
+    fn single_wildcard() {
+        assert!(keyexpr_pattern_matches(&["home", "*"], "home/temp"));
+        assert!(!keyexpr_pattern_matches(&["home", "*"], "home/a/b"));
+        assert!(keyexpr_pattern_matches(&["*", "temp"], "home/temp"));
+    }
+
+    // Off-semantics guard: with `keyexpr-wildcard-single` disabled the
+    // `*` chunk loses its wildcard meaning and is a literal chunk.
+    #[cfg(not(feature = "keyexpr-wildcard-single"))]
+    #[test]
+    fn single_wildcard_off_degrades_to_literal() {
+        // `*` matches only the literal chunk `*`, not an arbitrary one.
+        assert!(!keyexpr_pattern_matches(&["home", "*"], "home/temp"));
+        assert!(keyexpr_pattern_matches(&["home", "*"], "home/*"));
+    }
+
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn double_wildcard() {
         assert!(keyexpr_pattern_matches(&["home", "**"], "home/a/b/c"));
@@ -366,6 +543,16 @@ mod tests {
         assert!(keyexpr_pattern_matches(&["**", "temp"], "a/b/temp"));
     }
 
+    // Off-semantics guard: with `keyexpr-wildcard-double` disabled the
+    // `**` chunk is a literal chunk (matches only the literal `**`).
+    #[cfg(not(feature = "keyexpr-wildcard-double"))]
+    #[test]
+    fn double_wildcard_off_degrades_to_literal() {
+        assert!(!keyexpr_pattern_matches(&["home", "**"], "home/a/b/c"));
+        assert!(keyexpr_pattern_matches(&["home", "**"], "home/**"));
+    }
+
+    #[cfg(feature = "keyexpr-dollar-star")]
     #[test]
     fn intra_chunk_dsl() {
         // peekable rewrite of chunk_matches_with_dsl
@@ -375,6 +562,7 @@ mod tests {
         assert!(!keyexpr_pattern_matches(&["a$*c"], "axxb"));
     }
 
+    #[cfg(feature = "keyexpr-dollar-star")]
     #[test]
     fn intersection_two_sided_dsl() {
         // split/rsplit head-tail extraction of the (true,true) arm
@@ -383,10 +571,89 @@ mod tests {
         assert!(!keyexpr_intersect_patterns(&["x$*"], &["y$*"]));
     }
 
+    // Intersect is foundational, so a literal-set intersection test runs
+    // on every profile (wildcards on or off).
+    #[test]
+    fn intersection_literal() {
+        assert!(keyexpr_intersect_patterns(
+            &["home", "temp"],
+            &["home", "temp"]
+        ));
+        assert!(!keyexpr_intersect_patterns(
+            &["home", "temp"],
+            &["home", "humid"]
+        ));
+    }
+
+    #[cfg(all(feature = "keyexpr-includes", feature = "keyexpr-wildcard-double"))]
+    #[test]
+    fn includes_directional_double_wildcard() {
+        // a ⊇ b: `home/**` includes any concrete `home/...`.
+        assert!(keyexpr_includes_patterns(
+            &["home", "**"],
+            &["home", "a", "b"]
+        ));
+        // asymmetric: the reverse does NOT include.
+        assert!(!keyexpr_includes_patterns(
+            &["home", "a", "b"],
+            &["home", "**"]
+        ));
+        // `**` includes `**`.
+        assert!(keyexpr_includes_patterns(&["**"], &["**"]));
+        // a non-`**` chunk cannot include a b-side `**`.
+        assert!(!keyexpr_includes_patterns(&["home", "*"], &["home", "**"]));
+    }
+
+    #[cfg(all(feature = "keyexpr-includes", feature = "keyexpr-wildcard-single"))]
+    #[test]
+    fn includes_directional_single_wildcard() {
+        // `*` includes any single chunk.
+        assert!(keyexpr_includes_patterns(&["home", "*"], &["home", "temp"]));
+        // a literal does NOT include `*`.
+        assert!(!keyexpr_includes_patterns(
+            &["home", "temp"],
+            &["home", "*"]
+        ));
+        // `*` includes `*`.
+        assert!(keyexpr_includes_patterns(&["*"], &["*"]));
+    }
+
+    #[cfg(all(feature = "keyexpr-includes", feature = "keyexpr-dollar-star"))]
+    #[test]
+    fn includes_directional_dsl() {
+        // a's DSL set ⊇ a concrete literal it matches.
+        assert!(keyexpr_includes_patterns(&["sensor$*"], &["sensor42"]));
+        // a literal does NOT include a DSL set.
+        assert!(!keyexpr_includes_patterns(&["sensor42"], &["sensor$*"]));
+        // a's broader DSL ⊇ b's narrower DSL (a anchored prefix `x` is a
+        // prefix of b's `x...` strings).
+        assert!(keyexpr_includes_patterns(&["x$*"], &["x$*y"]));
+        // anchoring: `x$*` does NOT include `zx$*` (b's strings start
+        // with `z`, a requires the `x` prefix).
+        assert!(!keyexpr_includes_patterns(&["x$*"], &["zx$*"]));
+        // trailing anchor: `$*c` includes `x$*c`, not `x$*`.
+        assert!(keyexpr_includes_patterns(&["$*c"], &["x$*c"]));
+        assert!(!keyexpr_includes_patterns(&["$*c"], &["x$*"]));
+    }
+
+    #[cfg(feature = "keyexpr-includes")]
+    #[test]
+    fn includes_literal_equality() {
+        assert!(keyexpr_includes_patterns(
+            &["home", "temp"],
+            &["home", "temp"]
+        ));
+        assert!(!keyexpr_includes_patterns(
+            &["home", "temp"],
+            &["home", "humid"]
+        ));
+    }
+
     // No-alloc backing only: a target deeper than MAX_KEYEXPR_CHUNKS is
     // conservatively no-match. On the alloc backing the BoundedVec grows
-    // past the declared bound, so this assertion is gated off it.
-    #[cfg(not(feature = "alloc"))]
+    // past the declared bound, so this assertion is gated off it. Uses
+    // `**` so it requires the double-wildcard toggle.
+    #[cfg(all(not(feature = "alloc"), feature = "keyexpr-wildcard-double"))]
     #[test]
     fn over_depth_target_is_conservative_no_match_no_alloc() {
         // MAX_KEYEXPR_CHUNKS + 1 chunks, all matched by `**`.
@@ -402,7 +669,7 @@ mod tests {
         assert!(!keyexpr_pattern_matches(&["**"], deep));
     }
 
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", feature = "keyexpr-wildcard-double"))]
     #[test]
     fn over_depth_target_matches_on_alloc() {
         let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a";

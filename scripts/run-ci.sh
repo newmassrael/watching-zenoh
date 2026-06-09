@@ -94,6 +94,12 @@
 #              synth unit tests + the wz-runtime-tokio static_scout_open
 #              seam under --features scouting-static, which Layer C1 stops
 #              building once the static tests gain the gate.)
+#   Layer C1o — keyexpr matching composition gating BEHAVIOUR
+#              (R311jf; runs the keyexpr_match test module twice —
+#              wildcards OFF asserts `**`/`*`/`$*` degrade to a literal
+#              chunk compare, wildcards ON asserts the glob + directional
+#              `includes` semantics. The behavioural composability guard
+#              that proves the per-site cfg gates ACT, not just build.)
 #   Layer C1j — wz-runtime-tokio arbitrary-subset BEHAVIOUR matrix
 #              (R311ff; `cargo test`s the runtime crate under the same
 #              SSOT coherent subsets C4c builds — handshake-only /
@@ -899,6 +905,32 @@ layer_c1k_cargo_test_scouting_static() {
         && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \
         && cargo build -p wz-runtime-lwip --features scouting-static --quiet \
         && cargo build -p wz-runtime-lwip --features alloc,scouting-static --quiet)
+}
+
+# ─── Layer C1o — keyexpr matching composition gating BEHAVIOUR ───────
+#
+# R311jf — the keyexpr wildcard / DSL / includes capabilities became
+# real atomic toggles (§5.6); Layer C1's `cargo test --workspace`
+# unifies them ON (wz-runtime-tokio's default forwards them), so C1
+# only ever exercises the wildcards-ON matcher. This lane is the
+# behavioural composability guard the audit flagged as missing: it runs
+# the SAME keyexpr_match test module twice and proves the gate ACTS —
+#   - wildcards OFF (alloc only): the off-degrade tests assert `**`/`*`
+#     lose wildcard meaning and match only the literal chunk; the
+#     wildcard / includes tests are cfg'd out (not run);
+#   - wildcards ON: the `**`/`*`/`$*` glob + directional `includes`
+#     tests run and pass.
+# A regression that ungated a branch (made it always-on again) would
+# make the OFF arm fail (a `**` would wrongly match multi-chunk),
+# catching exactly the "implemented-but-not-excludable" drift this
+# round closed. The no_std MCU strip is Layer G's cross-compile job.
+layer_c1o_keyexpr_gating_behavior() {
+    (cd crates \
+        && cargo test -p wz-session-core --no-default-features --features alloc \
+            --lib keyexpr_match --quiet \
+        && cargo test -p wz-session-core --no-default-features \
+            --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
+            --lib keyexpr_match --quiet)
 }
 
 # ─── Layer C1l — reassembly subsystem (Tier B) build + AP unification ─
@@ -2196,6 +2228,7 @@ run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1
 run_layer C1m layer_c1m_session_lwip || overall=1
 run_layer C1n layer_c1n_mcu_session_acceptor || overall=1
+run_layer C1o layer_c1o_keyexpr_gating_behavior || overall=1
 run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1

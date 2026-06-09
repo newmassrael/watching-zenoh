@@ -69,9 +69,17 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # heapless bounded backing. `liveliness-token` (R311ho) adds the
 # declarer-side `LocalTokenRegistry` no-heap surface; it implies
 # `codec-declare` but NOT `alloc`, so the heapless backing holds.
+# keyexpr wildcard toggles (R311jf): the probe asserts both wildcard
+# kinds, so now that the matchers are real composition toggles it must
+# SELECT the capabilities it consumes (off degrades the token to a
+# literal chunk and the matching stages fire zero):
+#   - `keyexpr-wildcard-double` — registries (`svc/**`, `live/**`,
+#     `group1/**`) in the query / liveliness / local-token stages;
+#   - `keyexpr-wildcard-single` — the generated switchboard dispatch
+#     matches `home/*/temp` (stage 7, mps2-class cores only).
 # Cross-workspace path dep; cargo resolves its workspace inheritance
 # against `crates/Cargo.toml`.
-wz-session-core = { path = "../../crates/wz-session-core", default-features = false, features = ["liveliness-token"] }
+wz-session-core = { path = "../../crates/wz-session-core", default-features = false, features = ["liveliness-token", "keyexpr-wildcard-single", "keyexpr-wildcard-double"] }
 
 # R311ho — the declarer-side liveliness-token no-heap EMIT proof. The
 # registry stages borrowed `DeclResponseItem`s; this probe (acting as the
