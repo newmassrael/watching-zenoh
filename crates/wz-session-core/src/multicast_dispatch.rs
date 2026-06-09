@@ -49,16 +49,20 @@
 //! split: value = spec ([`MulticastConfig::lease_ms`]), transition =
 //! statechart, clock = runtime.
 //!
-//! ## No-`Default` bindings (write-only)
+//! ## Effect-point bindings (no-op)
 //!
-//! As in [`reassembly_dispatch`], the generated `*Policy<A>`'s `actions`
-//! field is private, so the per-Engine [`SessionBinding`] / [`PeerBinding`]
-//! counters are unreadable through the `Engine`. They exist only to satisfy
-//! the `<sce:action>` trait contract at compile time; behaviour is observed
-//! through the FSM state ([`session_state`](MulticastDispatcher::session_state)
-//! / [`peer_state`](MulticastDispatcher::peer_state)) and the `ingest_*`
-//! return values. The `#[derive(Debug)]` on each binding is what marks the
-//! count fields read (else dead-code), mirroring `SlotBinding`.
+//! The generated `*Policy<A>`'s `actions` field is private, so a binding
+//! buried in the `Engine` cannot reach the Router-owned link / peer table
+//! and cannot be read back. The `<sce:action>` effect points are therefore
+//! realised by the Router (which observes the FSM state), and the
+//! [`SessionBinding`] / [`PeerBinding`] action bodies are honest no-ops —
+//! zero-field markers of the SPEC's effect points (SSOT with §3.1 / §3.2),
+//! not dead counters. Behaviour is verified through the FSM state
+//! ([`session_state`](MulticastDispatcher::session_state) /
+//! [`peer_state`](MulticastDispatcher::peer_state)) and the `ingest_*`
+//! return values. (`reassembly_dispatch`'s `SlotBinding` still carries
+//! similarly-unreadable counters — the same simplification applies there,
+//! a separate cleanup.)
 
 use crate::multicast_peer::{
     MulticastPeerActions, MulticastPeerEvent, MulticastPeerPolicy, MulticastPeerState,
@@ -125,46 +129,39 @@ pub enum JoinOutcome {
     SessionNotRunning,
 }
 
-/// Thin host binding for the generated [`SessionFsmMulticastActions`]. The
-/// Router owns the link + peer table itself (see the module "write-only"
-/// note), so these actions only count dispatches to satisfy the
-/// `<sce:action>` contract. `#[derive(Debug)]` marks the fields read.
-#[derive(Debug, Default, Clone, Copy)]
-struct SessionBinding {
-    opens: u32,
-    runs: u32,
-    releases: u32,
-}
+/// Host binding for the generated [`SessionFsmMulticastActions`]. The three
+/// `<sce:action>` effect points (`open_multicast_link` / `enter_running` /
+/// `release_multicast_link`) are realised by the Router OUTSIDE the FSM —
+/// the engine-free split: a binding buried in the generated `Policy` cannot
+/// reach the Router-owned link / peer table, so the Router does the work by
+/// observing the FSM state (e.g. [`MulticastDispatcher::clear_peers_if_stopped`]
+/// clears the table on Stopped). These bodies are therefore deliberate
+/// no-ops: the `<sce:action>` is the SPEC's effect-point marker (SSOT with
+/// §3.1), the Router is its realisation. Zero-field — the generated
+/// `Policy.actions` is private so any per-action counter would be unreadable
+/// (behaviour is verified through the FSM state, not dispatch counts), and a
+/// dead counter is worse than an honest no-op.
+struct SessionBinding;
 
 impl SessionFsmMulticastActions for SessionBinding {
-    fn open_multicast_link(&mut self) {
-        self.opens = self.opens.saturating_add(1);
-    }
-    fn enter_running(&mut self) {
-        self.runs = self.runs.saturating_add(1);
-    }
-    fn release_multicast_link(&mut self) {
-        self.releases = self.releases.saturating_add(1);
-    }
+    fn open_multicast_link(&mut self) {}
+    fn enter_running(&mut self) {}
+    fn release_multicast_link(&mut self) {}
 }
 
-/// Thin host binding for the generated [`MulticastPeerActions`]; one per
-/// pool slot. Write-only counters (the `actions` field is private), present
-/// to satisfy the `<sce:action>` contract; `#[derive(Debug)]` marks them
-/// read.
-#[derive(Debug, Default, Clone, Copy)]
-struct PeerBinding {
-    rx_seq_inits: u32,
-    lost_emits: u32,
-}
+/// Host binding for the generated [`MulticastPeerActions`]; one per pool
+/// slot. Like [`SessionBinding`], the two `<sce:action>` effect points
+/// (`init_rx_seq` on Discovered entry, `emit_peer_lost` on Expired entry)
+/// are Router-realised — a per-peer RX-seq table and the upward peer-lost
+/// event are Router/host state the buried binding cannot reach (engine-free
+/// split). No-op bodies: the SCXML marks WHERE the effect goes (SSOT with
+/// §3.2), the Router realises it (today deferred — see the module deferral
+/// notes). Zero-field, no dead counters.
+struct PeerBinding;
 
 impl MulticastPeerActions for PeerBinding {
-    fn init_rx_seq(&mut self) {
-        self.rx_seq_inits = self.rx_seq_inits.saturating_add(1);
-    }
-    fn emit_peer_lost(&mut self) {
-        self.lost_emits = self.lost_emits.saturating_add(1);
-    }
+    fn init_rx_seq(&mut self) {}
+    fn emit_peer_lost(&mut self) {}
 }
 
 /// One peer-table slot: the engine-free per-peer FSM plus the Router-owned
@@ -182,7 +179,7 @@ struct PeerSlot {
 
 impl PeerSlot {
     fn new() -> Self {
-        let mut engine = Engine::new(MulticastPeerPolicy::new(PeerBinding::default()));
+        let mut engine = Engine::new(MulticastPeerPolicy::new(PeerBinding));
         // W3C SCXML 3.3: enter the initial `Free` leaf.
         engine.initialize();
         Self {
@@ -231,7 +228,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Build a Router with an Idle session and `MAX_PEERS` free slots over
     /// `config`.
     pub fn new(config: MulticastConfig) -> Self {
-        let mut session = Engine::new(SessionFsmMulticastPolicy::new(SessionBinding::default()));
+        let mut session = Engine::new(SessionFsmMulticastPolicy::new(SessionBinding));
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
         session.initialize();
         Self {
