@@ -3063,7 +3063,8 @@
         "R311av lands LwipRuntime cooperative task pool + LwipTime own ClockSource; Phase W ladder mantissa",
         "R311av thumbv6m alloc gap: M0+ ARMv6-M lacks atomic CAS so alloc::sync::Arc unavailable; sync-only",
         "Phase W ladder remaining: facade runtime-lwip feature R311ax; first MCU preset R311ay; abort R311az+",
-        "R311av self-wake busy-poll SleepFuture/TimeoutFuture; real deadline-keyed timer queue is R311az+"
+        "R311av self-wake busy-poll SleepFuture/TimeoutFuture; real deadline-keyed timer queue is R311az+",
+        "R311ja resolves R311av M0 gap: handle Arc -> ActionsHandle GAT (lwIP Rc); session-unicast on ARMv6-M"
       ],
       "alternatives_rejected": [
         {
@@ -31457,6 +31458,64 @@
         "Tier 3 measurement automation carry forward — extend scripts/measure-codec-footprint.sh + CI Layer F to auto-verify each codec-* feature has a non-trivial mechanical delta WHEN the dependent high-level features are ALSO turned off (the imply chain makes single-feature elision misleading at the catalog level). Multi-feature elision lanes (e.g. `minus-codec-request --features=no-query-*`) become the truthful measurement for body codecs after R311h..R311k cascade closure.",
         "Architectural carries unchanged: R267 Session<R,T> reparam (MCU prerequisite + type-ungating carrier for declare-*/query-* signatures), R284 uniform Established gate, R283 peer-side Interest inbound bilateral, R301 §8 SCE cross-repo, Q_B / Q_E codec slots, Phase W full lwIP (north star MCU half), R299 carry #2 / #3, R300 narrow, R301 §7 cargo wz-config tool, R304 stderr non-UTF-8 source, keyexpr_canon proptest filter.",
         "Signature-stability principle preserved — send_request_query + send_request_query_with_meta retrofit per R311g1 pattern. 6 build_request_query_* + encode_frame_with_request + RequestQueryBuilder all principled exemption per `feedback_signature_stability` (Request return type is feature-gated)."
+      ]
+    },
+    "Round 311ja": {
+      "decision_summary": "R311ja no-alloc M0 session reach: SessionRuntime gains an ActionsHandle GAT (tokio Arc / lwIP Rc) replacing the hard-coded alloc::sync::Arc handle; Layer G.10/G.11 thumbv6m now build.",
+      "changes_bullets": [
+        "link.rs: SessionRuntime gains an ActionsHandle<T> GAT + wrap_actions seam (gated all(alloc,session-unicast)); trait is now : Runtime + Sized so Self embeds in SessionLinkActions<Self,T>.",
+        "session_actions.rs: new_generic returns R::ActionsHandle<T> via R::wrap_actions (was Arc<Self>); SessionActionsBinding.inner + ::new take R::ActionsHandle<T>; alloc::sync::Arc import dropped.",
+        "runtime_impl.rs (tokio): ActionsHandle<T> = Arc<SessionLinkActions<Self,T>>, wrap_actions = Arc::new (gated transport-unicast).",
+        "session_runtime.rs (lwip): ActionsHandle<T> = Rc<SessionLinkActions<Self,T>>, wrap_actions = Rc::new; module doc updated to the Rc reach.",
+        "session_drive.rs (lwip): run_session takes &Rc<SessionLinkActions<..>>; Arc import dropped.",
+        "response_sink.rs: impl ResponseSink for alloc::sync::Arc<S> gated on target_has_atomic=ptr (Rc mirror deferred, no MCU caller).",
+        "call sites annotate R via turbofish (session_glue new_session_actions, wz-mcu-session-acceptor, wz-session-lwip + wz-runtime-tokio session_glue_dispatch tests) since R::ActionsHandle<T> is non-injective and cannot back-infer R from the Arc/Rc arg.",
+        "run-ci.sh: Layer G.10 session-unicast + G.11 session-lwip cross-real drop the thumbv6m SKIP and build on ARMv6-M."
+      ],
+      "verification_bullets": [
+        "Layer G all Phase W targets pass: thumbv6m-none-eabi G.10 session-unicast OK + G.11 session-lwip cross-real OK (both were SKIP) — the no-alloc M0 session reach end to end (handshake + reassembly consumer + facade).",
+        "M3/M4F/M7/M33/M55 + RISC-V IMAC G.8/G.9/G.10/G.11 still OK (no regression).",
+        "host: wz-session-core default + --features session-unicast build OK; wz-runtime-tokio default build OK.",
+        "host: wz-mcu-session-acceptor WholeFrame e2e + reassembly e2e (completion/timeout/ooo) pass through the Rc handle; wz-session-lwip session_drive test pass.",
+        "full host run-ci (Layer 0..E + C1n + C2) exit 0."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ],
+      "carry_forward_bullets": [
+        "deploy.yaml reassembly_pool dims still spec-sourced, not yaml-loaded (unchanged carry).",
+        "ResponseSink Rc<S> blanket impl deferred until an MCU query/reply consumer actually drains a refcounted sink (no caller on the MCU drive loop today).",
+        "A deploy/mcu-session-acceptor thumbv6m (M0) bin + a Layer Q.4 M0 QEMU sub-lane is now a natural follow-up: the session e2e cross-compiles on ARMv6-M, so it could boot under qemu-system-arm -cpu cortex-m0."
+      ],
+      "publishable_decision_summary": "R311ja no-alloc M0 session reach: SessionRuntime gains an ActionsHandle GAT (tokio Arc / lwIP Rc) replacing the hard-coded alloc::sync::Arc handle; Layer G.10/G.11 thumbv6m now build.",
+      "publishable_changes_bullets": [
+        "link.rs: SessionRuntime gains an ActionsHandle<T> GAT + wrap_actions seam (gated all(alloc,session-unicast)); trait is now : Runtime + Sized so Self embeds in SessionLinkActions<Self,T>.",
+        "session_actions.rs: new_generic returns R::ActionsHandle<T> via R::wrap_actions (was Arc<Self>); SessionActionsBinding.inner + ::new take R::ActionsHandle<T>; alloc::sync::Arc import dropped.",
+        "runtime_impl.rs (tokio): ActionsHandle<T> = Arc<SessionLinkActions<Self,T>>, wrap_actions = Arc::new (gated transport-unicast).",
+        "session_runtime.rs (lwip): ActionsHandle<T> = Rc<SessionLinkActions<Self,T>>, wrap_actions = Rc::new; module doc updated to the Rc reach.",
+        "session_drive.rs (lwip): run_session takes &Rc<SessionLinkActions<..>>; Arc import dropped.",
+        "response_sink.rs: impl ResponseSink for alloc::sync::Arc<S> gated on target_has_atomic=ptr (Rc mirror deferred, no MCU caller).",
+        "call sites annotate R via turbofish (session_glue new_session_actions, wz-mcu-session-acceptor, wz-session-lwip + wz-runtime-tokio session_glue_dispatch tests) since R::ActionsHandle<T> is non-injective and cannot back-infer R from the Arc/Rc arg.",
+        "run-ci.sh: Layer G.10 session-unicast + G.11 session-lwip cross-real drop the thumbv6m SKIP and build on ARMv6-M."
+      ],
+      "publishable_verification_bullets": [
+        "Layer G all Phase W targets pass: thumbv6m-none-eabi G.10 session-unicast OK + G.11 session-lwip cross-real OK (both were SKIP) — the no-alloc M0 session reach end to end (handshake + reassembly consumer + facade).",
+        "M3/M4F/M7/M33/M55 + RISC-V IMAC G.8/G.9/G.10/G.11 still OK (no regression).",
+        "host: wz-session-core default + --features session-unicast build OK; wz-runtime-tokio default build OK.",
+        "host: wz-mcu-session-acceptor WholeFrame e2e + reassembly e2e (completion/timeout/ooo) pass through the Rc handle; wz-session-lwip session_drive test pass.",
+        "full host run-ci (Layer 0..E + C1n + C2) exit 0."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ],
+      "publishable_carry_forward_bullets": [
+        "deploy.yaml reassembly_pool dims still spec-sourced, not yaml-loaded (unchanged carry).",
+        "ResponseSink Rc<S> blanket impl deferred until an MCU query/reply consumer actually drains a refcounted sink (no caller on the MCU drive loop today).",
+        "A deploy/mcu-session-acceptor thumbv6m (M0) bin + a Layer Q.4 M0 QEMU sub-lane is now a natural follow-up: the session e2e cross-compiles on ARMv6-M, so it could boot under qemu-system-arm -cpu cortex-m0."
       ]
     },
     "Round 311k": {
