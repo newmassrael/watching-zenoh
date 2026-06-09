@@ -9,7 +9,11 @@
 // deploy/mcu-session-acceptor/Cargo.toml` from the workspace root does not
 // see this crate's `.cargo/config.toml`, which walks from CWD). Same shape
 // as deploy/mcu-qemu-demo's build.rs minus the microbit branch — this bin
-// is native-atomic only (M3/M4/M7), all on the mps2 4 MB / 4 MB layout.
+// targets M3 (mps2-an385, 4 MB / 4 MB layout) as the representative QEMU
+// machine; M4/M7 ride the same layout. Since R311ja the session stack also
+// cross-compiles on ARMv6-M (Cortex-M0/M0+) - the alloc::sync::Arc handle
+// became the per-profile Rc-backed ActionsHandle - so an M0 bin variant
+// (microbit memory.x) is a deferred follow-up, not a hard atomic constraint.
 
 use std::env;
 use std::fs;

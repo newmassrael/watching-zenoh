@@ -1684,8 +1684,9 @@ layer_g_cross_compile_cortex_m() {
         # tiny static-only deploys), and that the facade -> wz-runtime-lwip
         # -> wz-session-core funnel cross-compiles with scouting-static on.
         # No-alloc: the synth builds onto BoundedVec/BoundedString, so it
-        # rides every target including thumbv6m (Cortex-M0+), where the
-        # alloc::sync::Arc the rest of session-core uses is unavailable.
+        # rides every target including thumbv6m (Cortex-M0+). (Since R311ja
+        # the session-unicast subset rides thumbv6m too — G.10 — so this is
+        # no longer the only session-core path that clears ARMv6-M.)
         if (cd crates && cargo build -p wz-session-core \
             --target "$t" --no-default-features --features scouting-static --quiet) \
            && (cd crates && cargo build -p wz \
@@ -2028,12 +2029,14 @@ layer_q_qemu_mcu_e2e() {
     # OpenAck -> Established) + a post-handshake Frame dispatch, over a live
     # lwIP loopback, driven by the Stage 4b run_session sync loop. SYS_EXIT=0
     # => the on-target handshake reached Established AND dispatched the Frame
-    # (the host mirror of this exact scenario is Layer C1n). Native-atomic
-    # only: the session stack pulls alloc::sync::Arc (target_has_atomic=ptr),
-    # so ARMv6-M / microbit is out of scope (the Layer G.11 boundary). Reaches
-    # here only with arm-none-eabi-gcc present (the Q.1-3 gate above returned
-    # early otherwise). No footprint gate: this bin is an e2e proof, not a
-    # footprint-tracked deploy artifact.
+    # (the host mirror of this exact scenario is Layer C1n). Runs on the
+    # mps2 M3/M4/M7 machines as the representative targets; since R311ja the
+    # session stack also cross-compiles on ARMv6-M (G.10/G.11 build thumbv6m),
+    # so an M0 acceptor lane — a microbit memory.x + heap variant of the bin —
+    # is a deferred follow-up, no longer blocked by an atomic-Arc constraint.
+    # Reaches here only with arm-none-eabi-gcc present (the Q.1-3 gate above
+    # returned early otherwise). No footprint gate: this bin is an e2e proof,
+    # not a footprint-tracked deploy artifact.
     local acceptor_lanes=(
         "mps2-an385:cortex-m3:thumbv7m-none-eabi"
         "mps2-an386:cortex-m4:thumbv7em-none-eabihf"

@@ -23,10 +23,14 @@
 # test (Layer C1n); this crate is only the SysTick clock + heap + the
 # PASS/FAIL verdict wiring.
 #
-# Native-atomic only (M3 / M4 / M7): the session stack pulls
-# `alloc::sync::Arc` (SessionLinkActions handle), which needs
-# `target_has_atomic = "ptr"`. ARMv6-M (Cortex-M0/M0+) is out of scope for
-# this bin — exactly the boundary Layer G.11 records for wz-session-lwip.
+# Targets M3 (mps2-an385) as the representative QEMU machine; M4 / M7 are
+# added per-machine by the Layer Q.4 lane via `--target`. R311ja lifted the
+# `SessionLinkActions` handle from a hard-coded `alloc::sync::Arc` to the
+# per-profile `SessionRuntime::ActionsHandle` (lwIP `Rc`), so the session
+# stack now ALSO cross-compiles on ARMv6-M (Cortex-M0/M0+) — Layer G.10/G.11
+# build thumbv6m since R311ja. A Cortex-M0 variant of THIS bin (microbit
+# memory.x + thumbv6m `.cargo/config`) is a deferred follow-up, no longer
+# blocked by an atomic-Arc constraint.
 
 [workspace]
 # Empty workspace table — declares this crate as its own workspace root so
