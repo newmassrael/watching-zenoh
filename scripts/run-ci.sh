@@ -2030,17 +2030,26 @@ layer_q_qemu_mcu_e2e() {
     # lwIP loopback, driven by the Stage 4b run_session sync loop. SYS_EXIT=0
     # => the on-target handshake reached Established AND dispatched the Frame
     # (the host mirror of this exact scenario is Layer C1n). Runs on the
-    # mps2 M3/M4/M7 machines as the representative targets; since R311ja the
-    # session stack also cross-compiles on ARMv6-M (G.10/G.11 build thumbv6m),
-    # so an M0 acceptor lane — a microbit memory.x + heap variant of the bin —
-    # is a deferred follow-up, no longer blocked by an atomic-Arc constraint.
+    # mps2 M3/M4/M7 machines (native-atomic, MB-scale SRAM). R311jb adds a
+    # Cortex-M0 (thumbv6m / microbit) entry as BUILD-ONLY: since R311ja the
+    # session stack cross-compiles on ARMv6-M (G.10/G.11), and this lane
+    # extends that to the *deploy bin* + the wz-mcu-session-acceptor e2e lib
+    # (which no G lane builds). It is NOT booted: the only QEMU Cortex-M0
+    # machine is microbit (nrf51, 16 KB SRAM total), but the e2e binds a
+    # session rx socket sized from session_rx_pool_mcu (1536 B x 16 ~= 24.6 KB)
+    # plus a reactive peer socket (~12 KB), so ~37 KB of UDP buffers cannot fit
+    # 16 KB — a microbit boot would OOM at bind_session_rx. Honest catalog
+    # feedback: nrf51-class SRAM needs a slim-socket session preset the
+    # framework does not yet ship (§5.P R311jb caveat). The 4th lane field is
+    # the run disposition: run boots under QEMU, build is cross-compile only.
     # Reaches here only with arm-none-eabi-gcc present (the Q.1-3 gate above
     # returned early otherwise). No footprint gate: this bin is an e2e proof,
     # not a footprint-tracked deploy artifact.
     local acceptor_lanes=(
-        "mps2-an385:cortex-m3:thumbv7m-none-eabi"
-        "mps2-an386:cortex-m4:thumbv7em-none-eabihf"
-        "mps2-an500:cortex-m7:thumbv7em-none-eabihf"
+        "mps2-an385:cortex-m3:thumbv7m-none-eabi:run"
+        "mps2-an386:cortex-m4:thumbv7em-none-eabihf:run"
+        "mps2-an500:cortex-m7:thumbv7em-none-eabihf:run"
+        "microbit:cortex-m0:thumbv6m-none-eabi:build"
     )
     # Two data-plane modes per machine: the default whole-`T_MID_FRAME`
     # dispatch (Stage 5) and `--features reassembly` (Tier B), which boots
@@ -2049,10 +2058,10 @@ layer_q_qemu_mcu_e2e() {
     # boot per mode (lwIP NO_SYS is process-global single-init), built to the
     # same ELF path in sequence. The `reasm` mode is the on-target mirror of
     # the host C1n `--features reassembly` lane.
-    local amachine acpu atarget abin alabel amode
+    local amachine acpu atarget arun abin alabel amode
     local afeat_args
     for lane in "${acceptor_lanes[@]}"; do
-        IFS=':' read -r amachine acpu atarget <<< "$lane"
+        IFS=':' read -r amachine acpu atarget arun <<< "$lane"
         if ! grep -q "^${atarget}$" <<< "$installed"; then
             echo "  Q.4.${amachine} SKIP (rustup target ${atarget} absent)"
             continue
@@ -2074,6 +2083,16 @@ layer_q_qemu_mcu_e2e() {
                 continue
             fi
             any_built=1
+
+            # A `:build` lane (Cortex-M0 / microbit) is cross-compile only:
+            # the deploy bin links for thumbv6m but the e2e topology cannot
+            # fit the only QEMU Cortex-M0 machine's 16 KB SRAM (see the lane
+            # header). Record the build pass + the audit-traced reason; do not
+            # attempt a boot (it would OOM at bind_session_rx, not a real FAIL).
+            if [[ "$arun" != run ]]; then
+                echo "  Q.4.${amachine}.${alabel} run SKIP (build-only: e2e session-rx ~24.6 KB + peer ~12 KB > nrf51 16 KB SRAM; M0 cross-compile-proven)"
+                continue
+            fi
 
             if [[ "$has_qemu" -ne 1 ]]; then
                 echo "  Q.4.${amachine}.${alabel} run SKIP (qemu-system-arm not on PATH)"

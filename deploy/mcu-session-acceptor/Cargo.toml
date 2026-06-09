@@ -28,9 +28,12 @@
 # `SessionLinkActions` handle from a hard-coded `alloc::sync::Arc` to the
 # per-profile `SessionRuntime::ActionsHandle` (lwIP `Rc`), so the session
 # stack now ALSO cross-compiles on ARMv6-M (Cortex-M0/M0+) — Layer G.10/G.11
-# build thumbv6m since R311ja. A Cortex-M0 variant of THIS bin (microbit
-# memory.x + thumbv6m `.cargo/config`) is a deferred follow-up, no longer
-# blocked by an atomic-Arc constraint.
+# build thumbv6m since R311ja. R311jb extends that to THIS bin: the Layer Q.4
+# microbit sub-lane cross-compiles the deploy bin for thumbv6m (BUILD-ONLY).
+# It is not booted — the only QEMU Cortex-M0 machine (microbit / nrf51) has
+# 16 KB SRAM, but the e2e binds a session rx socket (~24.6 KB) + peer socket
+# (~12 KB) that cannot fit it; nrf51-class run support needs a slim-socket
+# session preset the framework does not yet ship.
 
 [workspace]
 # Empty workspace table — declares this crate as its own workspace root so

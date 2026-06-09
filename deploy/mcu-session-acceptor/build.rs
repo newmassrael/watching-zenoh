@@ -12,8 +12,10 @@
 // targets M3 (mps2-an385, 4 MB / 4 MB layout) as the representative QEMU
 // machine; M4/M7 ride the same layout. Since R311ja the session stack also
 // cross-compiles on ARMv6-M (Cortex-M0/M0+) - the alloc::sync::Arc handle
-// became the per-profile Rc-backed ActionsHandle - so an M0 bin variant
-// (microbit memory.x) is a deferred follow-up, not a hard atomic constraint.
+// became the per-profile Rc-backed ActionsHandle. R311jb's Layer Q.4 microbit
+// sub-lane cross-compiles this bin for thumbv6m BUILD-ONLY (it reuses the mps2
+// 4 MB layout — a microbit-fitting layout is moot: the e2e's ~37 KB of UDP
+// sockets cannot fit nrf51's 16 KB SRAM, so M0 is not booted, only built).
 
 use std::env;
 use std::fs;
