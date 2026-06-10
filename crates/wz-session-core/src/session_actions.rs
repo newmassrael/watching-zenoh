@@ -164,7 +164,13 @@ use crate::response_final_build::*;
 /// frame is open yet. `count` mirrors pico's batch counter for
 /// observability and tests; the flush trigger is the byte budget
 /// (`params.batch_size`), never the count.
-#[cfg(feature = "transport-batching")]
+///
+/// R311kf — the struct (and the `batch_tx` mutex around it) is UNGATED:
+/// the mutex doubles as the session's TX-ORDER serialization lock (pico
+/// holds its TX mutex across SN mint + wire write for every sender,
+/// common/tx.c:273-305), which every build needs — with
+/// `transport-batching` off, `active` stays `false` forever and only the
+/// lock role remains (the empty `buf` costs three words).
 #[derive(Debug, Default)]
 pub struct BatchTx {
     /// `zp_batch_start` .. `zp_batch_stop` window flag
@@ -326,7 +332,9 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// accumulation; see [`BatchTx`] for the buffer shape — the
     /// absorb/overflow state machine lives in the chokepoint itself
     /// (R311jq, all emits under the lock).
-    #[cfg(feature = "transport-batching")]
+    /// R311kf — ungated: this mutex is ALSO the TX-order serialization
+    /// lock (mint + emit under one hold, pico TX-mutex parity); see the
+    /// [`BatchTx`] doc.
     pub batch_tx: R::Mutex<BatchTx>,
     /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
     /// `_z_session_t._local_resources` slot: every time
@@ -617,7 +625,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             rx_sn: R::new_mutex(crate::sn::RxSn::default()),
-            #[cfg(feature = "transport-batching")]
             batch_tx: R::new_mutex(BatchTx::default()),
             outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
             #[cfg(feature = "session-reconnect")]
@@ -1070,26 +1077,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session mutex scopes stay disjoint by discipline.
         let sn_mask = self.negotiated_sn_mask();
 
-        // R311jq batching path — the WHOLE absorb / overflow-reopen /
-        // oversize decision and every emit it triggers run under the batch
-        // lock, so concurrent senders cannot interleave a later frame
-        // ahead of an earlier one (the peer's half-window SN check drops
-        // reordered frames). pico holds its TX mutex across the same
-        // region. AP profile: std Mutex around a writer-channel enqueue —
-        // cheap. MCU profile: critical_section — single-task drive model,
-        // and the lwIP send under the section is bounded by `batch_size`;
+        // R311jq / R311kf — ONE `batch_tx` lock hold covers the WHOLE TX
+        // decision: the batching absorb / overflow-reopen / oversize arms
+        // AND the immediate frame-per-message path, mint through emit.
+        // pico holds its TX mutex across SN mint + wire write for EVERY
+        // sender (common/tx.c:273-305 — `_z_transport_tx_get_sn` runs
+        // inside `_z_transport_tx_send_n_msg_inner` under the mutex), so
+        // mint order == wire order. Before R311kf the immediate path
+        // minted outside the lock and emitted after it: two concurrent
+        // non-batched senders could put a later SN on the wire first, and
+        // the peer's half-window RX gate drops the earlier frame as stale
+        // (the mint-vs-enqueue carry). One lock also closes the
+        // batch_start boundary race — a sender that saw the window closed
+        // cannot emit between a concurrent absorb's mint and its flush.
+        // AP profile: std Mutex around a writer-channel enqueue — cheap.
+        // MCU profile: critical_section — single-task drive model, and the
+        // lwIP send under the section is bounded by the negotiated MTU;
         // revisit if a preemptive MCU profile lands (documented caveat).
-        #[cfg(feature = "transport-batching")]
-        {
-            use crate::frame_encode::{begin_frame, frame_flags, frame_wire_reliability};
-            let encode_into = |buf: &mut Vec<u8>| {
-                let mut sink = sce_forge_runtime::codec::VecSink::new(buf);
-                encode_body(&mut sink).expect("VecSink is infallible");
-            };
-            let absorbed = R::with_mutex_mut(&self.batch_tx, |batch| {
-                if !batch.active {
-                    return false;
-                }
+        R::with_mutex_mut(&self.batch_tx, |batch| {
+            #[cfg(feature = "transport-batching")]
+            if batch.active {
+                use crate::frame_encode::{begin_frame, frame_flags, frame_wire_reliability};
+                let encode_into = |buf: &mut Vec<u8>| {
+                    let mut sink = sce_forge_runtime::codec::VecSink::new(buf);
+                    encode_body(&mut sink).expect("VecSink is infallible");
+                };
                 // At most two iterations: an overflow flushes the open
                 // frame and falls through to the open-fresh-frame arm
                 // (pico `_z_transport_tx_batch_overflow` rollback+retry).
@@ -1110,13 +1122,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         } else {
                             batch.count = 1;
                         }
-                        return true;
+                        return;
                     }
                     let wpos = batch.buf.len();
                     encode_into(&mut batch.buf);
                     if batch.buf.len() <= mtu {
                         batch.count += 1;
-                        return true;
+                        return;
                     }
                     // Overflow: roll the partial encode back, flush the
                     // open frame, loop into the open-fresh-frame arm.
@@ -1126,21 +1138,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let channel = frame_wire_reliability(&prev);
                     self.link_driver().send_blocking(&prev, channel);
                 }
-            });
-            if absorbed {
-                return Ok(());
             }
-        }
+            // With transport-batching off the window flag never reads
+            // true; the binding only serves the lock role (R311g1
+            // signature-stable closure under the gate).
+            #[cfg(not(feature = "transport-batching"))]
+            let _ = batch;
 
-        // Immediate path (batching off or window closed): frame-per-message.
-        let sn = self.next_outbound_frame_sn(sn_mask);
-        let wire = crate::frame_encode::encode_frame_envelope(
-            sn,
-            crate::frame_encode::frame_flags(reliable),
-            worst_case_payload,
-            &encode_body,
-        );
-        self.emit_frame_or_fragments(&wire, sn, reliable, mtu, sn_mask);
+            // Immediate path (batching off or window closed):
+            // frame-per-message, mint + encode + emit under the SAME lock
+            // hold (pico TX-mutex parity, R311kf).
+            let sn = self.next_outbound_frame_sn(sn_mask);
+            let wire = crate::frame_encode::encode_frame_envelope(
+                sn,
+                crate::frame_encode::frame_flags(reliable),
+                worst_case_payload,
+                &encode_body,
+            );
+            self.emit_frame_or_fragments(&wire, sn, reliable, mtu, sn_mask);
+        });
         Ok(())
     }
 
@@ -2782,7 +2798,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
             R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxSn::default());
-            #[cfg(feature = "transport-batching")]
             R::with_mutex_mut(&self.batch_tx, |batch| *batch = BatchTx::default());
             // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
             // reset must not reorder against a straggling in-flight mint.

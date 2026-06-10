@@ -1970,6 +1970,55 @@ mod fragment_tx_tests {
     }
 }
 
+/// R311kf — TX serialization parity: SN mint order == wire order under
+/// concurrent senders. pico holds its TX mutex across mint + write
+/// (common/tx.c:273-305); wz's `batch_tx` lock now covers the immediate
+/// path's mint + emit too, so the recorded wire SN sequence of N
+/// concurrent frame-per-message sends is exactly the mint sequence. Any
+/// regression that re-opens the mint→emit window surfaces here as an
+/// out-of-order SN (a peer's half-window RX gate would drop that frame).
+#[cfg(all(test, feature = "codec-push", feature = "codec-frame"))]
+mod tx_order_tests {
+    use super::{parse_inbound, InboundFrame};
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+
+    #[test]
+    fn concurrent_sends_keep_mint_order_on_the_wire() {
+        // 4 threads x 25 sends = 100 frames, inside the fixture's 7-bit
+        // ring (seq_num_res=0 -> mask 127), so the expected wire sequence
+        // is exactly 0..100 with no wrap arithmetic.
+        let (actions, driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..25 {
+                        actions
+                            .send_push_literal("home/t", b"v", /*reliable=*/ true)
+                            .expect("send");
+                    }
+                });
+            }
+        });
+        assert_eq!(driver.frame_count(), 100);
+        let mut sns = Vec::with_capacity(100);
+        for i in 0..100 {
+            let bytes = driver.frame_bytes(i);
+            let InboundFrame::Frame { sn, .. } =
+                parse_inbound(&bytes).expect("parse emitted frame")
+            else {
+                panic!("frame {i} is not a T_MID_FRAME");
+            };
+            sns.push(sn);
+        }
+        let expected: Vec<u64> = (0..100).collect();
+        assert_eq!(
+            sns, expected,
+            "wire SN order must equal mint order (single mint+emit lock hold)"
+        );
+    }
+}
+
 /// R311kd — negotiated-min MTU: the outbound frame budget is
 /// `min(own batch_size, peer-advertised batch_size)` with `0` as the
 /// unset/65535 sentinel on either side (zenoh-pico sizes its TX wbuf to
