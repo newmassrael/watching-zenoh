@@ -2032,6 +2032,20 @@ mod batch_tx_tests {
             frame, expected,
             "batched frame must be the unbatched frame + appended message bodies, byte-for-byte"
         );
+
+        // R311jq pin — the 3-message batch consumed exactly ONE frame SN:
+        // the next frame after the window is sn=1, gap-free (frame-scoped
+        // SN; see batch_stop_drains_and_deactivates for the half-window
+        // rationale).
+        actions.batch_stop().expect("batch_stop");
+        actions
+            .send_push_literal("home/batch", b"after", true)
+            .expect("post-window push");
+        let (next_sn, _) = decode_frame(&driver.frame_bytes(1));
+        assert_eq!(
+            next_sn, 1,
+            "a 3-message batch must consume exactly one frame SN"
+        );
     }
 
     /// Overflow parity (`_z_transport_tx_batch_overflow`): when the next
@@ -2097,12 +2111,20 @@ mod batch_tx_tests {
             2,
             "after stop, sends flush per message again"
         );
-        // The post-stop direct frame's SN reflects the batched gap contract:
-        // SNs stay strictly monotonic (gaps are harmless per zenoh-pico
-        // unicast/rx.c "only monotonic SNs are ensured").
+        // R311jq pin — SNs are FRAME-scoped: batching never burns an SN on
+        // an appended message, so consecutive frames carry consecutive SNs
+        // whatever the batch length. (The R311jp message-scoped mint left
+        // gaps that could exceed the peer's `_z_sn_precedes` HALF-WINDOW —
+        // zenoh-pico `src/transport/utils.c:80` — at small `seq_num_res`;
+        // an equality assert here fires loud if per-message minting ever
+        // creeps back.)
         let (sn0, _) = decode_frame(&driver.frame_bytes(0));
         let (sn1, _) = decode_frame(&driver.frame_bytes(1));
-        assert!(sn1 > sn0, "outbound SNs must stay strictly monotonic");
+        assert_eq!(
+            sn1,
+            sn0 + 1,
+            "frame SNs must be consecutive — appended messages mint no SN"
+        );
     }
 
     /// Express parity (`_z_transport_tx_get_express_status` arm): an

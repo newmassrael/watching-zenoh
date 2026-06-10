@@ -56,9 +56,10 @@ use crate::link::{BoxedLinkDriver, SessionRuntime};
 use crate::peer_init_caps::PeerInitCaps;
 // Reliability is the second arg of every `link_driver().send_blocking(..)`,
 // so it is used iff at least one wire-emit body is active: the handshake /
-// close encoders OR any consumer-plane frame emit (the frame_encode union)
-// OR the R311jp batch-flush emit (`transport-batching` — flushing the open
-// batch frame re-derives the channel from the frame header's R flag).
+// close encoders OR any consumer-plane frame emit (the frame_encode union).
+// The R311jq batch-flush emits derive their channel via
+// `frame_encode::frame_wire_reliability` (full-path return type), so
+// `transport-batching` alone does not need this import.
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -74,7 +75,6 @@ use crate::peer_init_caps::PeerInitCaps;
     feature = "declare-token",
     feature = "declare-final",
     feature = "liveliness-token",
-    feature = "transport-batching",
 ))]
 use crate::reliability::Reliability;
 use crate::response_sink::ResponseSink;
@@ -141,20 +141,6 @@ use crate::declare::local_token::{build_final_reply, build_token_reply};
     feature = "declare-final",
 ))]
 use crate::declare_build::*;
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "declare-interest",
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
-    feature = "declare-final",
-    feature = "liveliness-token",
-))]
-use crate::frame_encode::*;
 #[cfg(feature = "declare-interest")]
 use crate::interest_build::*;
 #[cfg(feature = "codec-push")]
@@ -183,26 +169,6 @@ pub struct BatchTx {
     pub buf: Vec<u8>,
     /// Network messages absorbed into the open frame.
     pub count: usize,
-}
-
-/// R311jp — derive the link-driver [`Reliability`] of an already-encoded
-/// outbound `T_MID_FRAME` from its header's R flag. The batch flush paths
-/// re-emit a frame that was opened by an earlier message, so the channel
-/// must come from the frame bytes, not from the currently-dispatched
-/// message (pico appends mixed-reliability messages into whatever frame is
-/// open — the OPENING message's flag governs, `tx.c`
-/// `_z_transport_tx_send_n_msg_inner` mints the header only when the
-/// buffer is empty).
-#[cfg(feature = "transport-batching")]
-fn frame_wire_reliability(bytes: &[u8]) -> Reliability {
-    let reliable = bytes
-        .first()
-        .is_some_and(|h| h & wz_codecs::wire_const::FLAG_T_FRAME_R != 0);
-    if reliable {
-        Reliability::Reliable
-    } else {
-        Reliability::BestEffort
-    }
 }
 
 pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
@@ -339,10 +305,11 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
-    /// every [`Self::dispatch_frame_or_fragment`] call flushes
+    /// every [`Self::dispatch_network_message`] call flushes
     /// immediately, the pre-A3 behavior. [`Self::batch_start`] activates
-    /// accumulation; see [`BatchTx`] for the buffer shape and
-    /// [`Self::try_batch_absorb`] for the append/overflow state machine.
+    /// accumulation; see [`BatchTx`] for the buffer shape — the
+    /// absorb/overflow state machine lives in the chokepoint itself
+    /// (R311jq, all emits under the lock).
     #[cfg(feature = "transport-batching")]
     pub batch_tx: R::Mutex<BatchTx>,
     /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
@@ -827,22 +794,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Transport-framing chokepoint for every outbound network message: send
-    /// the already-encoded single `T_MID_FRAME` `wire` (sequence number `sn`)
-    /// as-is when it fits the link MTU, else re-frame its network-message body
-    /// as a `T_MID_FRAGMENT` chain. zenoh-pico `_z_transport_tx_send_n_msg`
-    /// parity (encode the frame, fall back to fragmentation on MTU overflow).
-    /// Routing every `send_*` through one method keeps the fragment decision
-    /// in a single place — declare / request / interest adopt it by the same
-    /// one-line substitution the push / response senders use.
+    /// Transport-framing chokepoint for every outbound network message —
+    /// zenoh-pico `_z_transport_tx_send_n_msg_inner` parity
+    /// (`src/transport/common/tx.c`). The chokepoint OWNS the frame
+    /// sequence number (R311jq): SNs are frame-scoped, minted only when a
+    /// frame opens, so batching never burns SNs on appended messages and
+    /// the wire SN cadence stays inside the peer's `_z_sn_precedes`
+    /// half-window whatever the batch length (zenoh-pico
+    /// `src/transport/utils.c:80` — `distance <= half(window)`; the
+    /// R311jp message-scoped mint could exceed it at small
+    /// `seq_num_res`). Senders hand a per-type body encoder
+    /// (`crate::frame_encode::*_body`) plus the codec's worst-case bound;
+    /// the chokepoint decides framing:
+    ///
+    /// ```text
+    ///   batching active → absorb into the open frame under the batch
+    ///                     lock (open / append / overflow-reopen /
+    ///                     oversize — all emits inside the lock so
+    ///                     concurrent senders cannot reorder frames)
+    ///   otherwise       → mint SN, encode one frame, emit (fragmenting
+    ///                     on MTU overflow per transport-fragmentation)
+    /// ```
     ///
     /// Compiled iff a network-message sender routes through it. This is the
     /// wire-emit feature union (cf. the `Reliability` import) MINUS the three
     /// handshake-only codecs (codec-init/open/close): INIT/OPEN/CLOSE carry no
     /// frame sequence number and are never fragmented, so they keep their own
     /// direct emit. Keep in sync with the routed `send_*` methods — every
-    /// `encode_frame_with_*` (push / response / response-final / request /
-    /// declare / interest) emit dispatches here.
+    /// `dispatch_*` typed wrapper (push / response / response-final /
+    /// request / declare / interest) lands here.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -856,12 +836,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn dispatch_frame_or_fragment(&self, wire: Vec<u8>, sn: u64, reliable: bool) {
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
+    fn dispatch_network_message<P>(&self, reliable: bool, worst_case_payload: usize, encode_body: P)
+    where
+        P: Fn(
+            &mut sce_forge_runtime::codec::VecSink<'_>,
+        ) -> Result<(), sce_forge_runtime::codec::CodecError>,
+    {
         // Outbound MTU = the negotiated session `batch_size`, or a
         // 65535-byte ceiling when unset (`0`). v1 sizes against the *local*
         // advertised batch size; honoring the peer's advertised batch_size
@@ -874,7 +854,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // unset (0) so an unconfigured session never fragments. R311jp —
         // the same budget bounds the batching accumulator (pico shares one
         // `_wbuf` capacity between both concerns).
-        #[cfg(any(feature = "transport-fragmentation", feature = "transport-batching"))]
         let mtu = {
             const UNSET_BATCH_MTU: usize = 65_535;
             match self.params.batch_size {
@@ -882,32 +861,120 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 n => n as usize,
             }
         };
-        // R311jp — batching pre-step: while a `batch_start` window is open,
-        // absorb this frame into the batch accumulator instead of flushing
-        // per message. `None` = absorbed (nothing left to send here);
-        // `Some(wire)` = continue on the immediate path (batching inactive,
-        // or the message alone exceeds `mtu` and belongs to the fragment /
-        // oversize path below — the absorber has already drained the open
-        // frame in that case so wire order is preserved).
+
+        // R311jq batching path — the WHOLE absorb / overflow-reopen /
+        // oversize decision and every emit it triggers run under the batch
+        // lock, so concurrent senders cannot interleave a later frame
+        // ahead of an earlier one (the peer's half-window SN check drops
+        // reordered frames). pico holds its TX mutex across the same
+        // region. AP profile: std Mutex around a writer-channel enqueue —
+        // cheap. MCU profile: critical_section — single-task drive model,
+        // and the lwIP send under the section is bounded by `batch_size`;
+        // revisit if a preemptive MCU profile lands (documented caveat).
         #[cfg(feature = "transport-batching")]
-        let wire = match self.try_batch_absorb(wire, sn, mtu) {
-            None => return,
-            Some(wire) => wire,
+        {
+            use crate::frame_encode::{begin_frame, frame_flags, frame_wire_reliability};
+            let encode_into = |buf: &mut Vec<u8>| {
+                let mut sink = sce_forge_runtime::codec::VecSink::new(buf);
+                encode_body(&mut sink).expect("VecSink is infallible");
+            };
+            let absorbed = R::with_mutex_mut(&self.batch_tx, |batch| {
+                if !batch.active {
+                    return false;
+                }
+                // At most two iterations: an overflow flushes the open
+                // frame and falls through to the open-fresh-frame arm
+                // (pico `_z_transport_tx_batch_overflow` rollback+retry).
+                loop {
+                    if batch.buf.is_empty() {
+                        let sn = self.next_outbound_frame_sn();
+                        batch.buf.reserve(1 + 10 + worst_case_payload);
+                        begin_frame(&mut batch.buf, sn, frame_flags(reliable));
+                        encode_into(&mut batch.buf);
+                        if batch.buf.len() > mtu {
+                            // The message alone exceeds the budget — the
+                            // batch cannot carry it; emit it through the
+                            // oversize path (fragment chain, or as-is when
+                            // fragmentation is off), still under the lock.
+                            let frame = core::mem::take(&mut batch.buf);
+                            batch.count = 0;
+                            self.emit_frame_or_fragments(&frame, sn, reliable, mtu);
+                        } else {
+                            batch.count = 1;
+                        }
+                        return true;
+                    }
+                    let wpos = batch.buf.len();
+                    encode_into(&mut batch.buf);
+                    if batch.buf.len() <= mtu {
+                        batch.count += 1;
+                        return true;
+                    }
+                    // Overflow: roll the partial encode back, flush the
+                    // open frame, loop into the open-fresh-frame arm.
+                    batch.buf.truncate(wpos);
+                    let prev = core::mem::take(&mut batch.buf);
+                    batch.count = 0;
+                    let channel = frame_wire_reliability(&prev);
+                    self.link_driver().send_blocking(&prev, channel);
+                }
+            });
+            if absorbed {
+                return;
+            }
+        }
+
+        // Immediate path (batching off or window closed): frame-per-message.
+        let sn = self.next_outbound_frame_sn();
+        let wire = crate::frame_encode::encode_frame_envelope(
+            sn,
+            crate::frame_encode::frame_flags(reliable),
+            worst_case_payload,
+            &encode_body,
+        );
+        self.emit_frame_or_fragments(&wire, sn, reliable, mtu);
+    }
+
+    /// R311jq — terminal emit for one already-encoded outbound frame:
+    /// send as-is when it fits `mtu`, else re-frame the network-message
+    /// body as a `T_MID_FRAGMENT` chain (zenoh-pico
+    /// `_z_transport_tx_send_fragment` parity). Shared by the immediate
+    /// path and the batching oversize arm so the fragment decision stays
+    /// in one place.
+    ///
+    /// The FRAME body is the tail after the 1-byte header + `VLE(sn)`;
+    /// slice it rather than re-encoding (`vle_width` = base-128 width of
+    /// `sn`). The discarded oversize FRAME consumed `sn`; the fragment
+    /// chain draws a fresh contiguous SN block via a single atomic
+    /// fetch-add, so the chunk SNs stay consecutive even if a concurrent
+    /// sender mints outbound SNs (the reassembly dispatcher aborts a
+    /// non-consecutive chain). The one skipped SN per oversize message
+    /// never reaches the wire and stays far inside the peer's SN
+    /// half-window (bounded: 1 per oversize message, vs the fragment
+    /// chain consuming `count` SNs itself).
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-final",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn emit_frame_or_fragments(&self, frame: &[u8], sn: u64, reliable: bool, mtu: usize) {
+        let reliability = if reliable {
+            Reliability::Reliable
+        } else {
+            Reliability::BestEffort
         };
         #[cfg(feature = "transport-fragmentation")]
         {
-            if wire.len() > mtu {
-                // The FRAME body (the serialized network message) is the tail
-                // after the 1-byte header + `VLE(sn)`; slice it rather than
-                // re-encoding the message (`vle_width` = base-128 width of
-                // `sn`). The discarded oversize FRAME consumed `sn`; the
-                // fragment chain draws a fresh contiguous SN block via a
-                // single atomic fetch-add, so the chunk SNs stay consecutive
-                // even if a concurrent reply mints outbound SNs (the
-                // reassembly dispatcher aborts a non-consecutive chain). The
-                // one skipped SN never reaches the wire and is harmless to
-                // the peer.
-                let body = &wire[1 + crate::frame_encode::vle_width(sn)..];
+            if frame.len() > mtu {
+                let body = &frame[1 + crate::frame_encode::vle_width(sn)..];
                 let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
                 let base = self.outbound_frame_sn.fetch_add(count, Ordering::SeqCst);
                 for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base) {
@@ -916,113 +983,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 return;
             }
         }
-        #[cfg(not(any(feature = "transport-fragmentation", feature = "transport-batching")))]
-        let _ = sn;
-        self.link_driver().send_blocking(&wire, reliability);
+        #[cfg(not(feature = "transport-fragmentation"))]
+        let _ = (sn, mtu);
+        self.link_driver().send_blocking(frame, reliability);
     }
 
-    /// R311jp — batching pre-step for [`Self::dispatch_frame_or_fragment`]:
-    /// absorb the single-message FRAME `wire` into the open batch frame and
-    /// return `None`, or hand the bytes back as `Some(wire)` for the
-    /// immediate-dispatch path. zenoh-pico state map
-    /// (`src/transport/common/tx.c`):
-    ///
-    /// ```text
-    ///   inactive                  → Some(wire)   (pre-A3 per-message flush)
-    ///   active, oversize (> mtu)  → drain open frame, Some(wire)
-    ///                               (`_z_transport_tx_send_fragment` fallback;
-    ///                               draining first preserves wire order)
-    ///   active, buf empty, fits   → wire OPENS the frame
-    ///                               (`__unsafe_z_prepare_wbuf` + encode)
-    ///   active, buf open, fits    → message body appended
-    ///                               (`_z_transport_tx_flush_or_incr_batch`)
-    ///   active, buf open, overflow→ flush open frame, wire re-opens
-    ///                               (`_z_transport_tx_batch_overflow`)
-    /// ```
-    ///
-    /// An appended message's already-minted `sn` goes unused — the open
-    /// frame keeps the SN of the message that opened it. That is the same
-    /// documented-harmless SN gap as the fragmentation path's discarded
-    /// oversize-frame SN: outbound SNs stay strictly monotonic and the peer
-    /// requires monotonicity only (zenoh-pico unicast/rx.c:107 "only
-    /// monotonic SNs are ensured"; gaps drop nothing). Mixed-reliability
-    /// appends inherit the open frame's channel, exactly like pico (the
-    /// frame header is minted only when the buffer is empty).
-    ///
-    /// cfg mirrors its single caller [`Self::dispatch_frame_or_fragment`]
-    /// (the wire-emit union) AND `transport-batching` — a no-sender subset
-    /// must not carry the dead symbol (`-D warnings` lanes).
-    #[cfg(all(
-        feature = "transport-batching",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-final",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    fn try_batch_absorb(&self, wire: Vec<u8>, sn: u64, mtu: usize) -> Option<Vec<u8>> {
-        let mut wire_slot = Some(wire);
-        let mut flush: Option<Vec<u8>> = None;
-        R::with_mutex_mut(&self.batch_tx, |batch| {
-            if !batch.active {
-                return;
-            }
-            let wire = wire_slot.take().expect("set above; taken once");
-            if wire.len() > mtu {
-                if !batch.buf.is_empty() {
-                    flush = Some(core::mem::take(&mut batch.buf));
-                    batch.count = 0;
-                }
-                wire_slot = Some(wire);
-                return;
-            }
-            if batch.buf.is_empty() {
-                batch.buf = wire;
-                batch.count = 1;
-                return;
-            }
-            let body_at = 1 + crate::frame_encode::vle_width(sn);
-            if batch.buf.len() + (wire.len() - body_at) > mtu {
-                flush = Some(core::mem::replace(&mut batch.buf, wire));
-                batch.count = 1;
-            } else {
-                batch.buf.extend_from_slice(&wire[body_at..]);
-                batch.count += 1;
-            }
-        });
-        if let Some(bytes) = flush {
-            let channel = frame_wire_reliability(&bytes);
-            self.link_driver().send_blocking(&bytes, channel);
-        }
-        wire_slot
-    }
-
-    /// R311jp — drain the open batch frame to the link, if any. Private
+    /// R311jq — drain the open batch frame to the link, if any. Private
     /// emit engine shared by [`Self::batch_flush`] / [`Self::batch_stop`] /
     /// the pre-CLOSE drain in [`Self::send_close_with_reason`] / the
     /// express post-dispatch flush. Keeps the `active` flag untouched.
+    /// The emit runs INSIDE the batch lock so a drain cannot interleave
+    /// with a concurrent absorb's flush (frame order is wire-visible —
+    /// the peer's half-window SN check drops reordered frames).
     #[cfg(feature = "transport-batching")]
     fn flush_open_batch(&self) {
-        let pending = R::with_mutex_mut(&self.batch_tx, |batch| {
+        R::with_mutex_mut(&self.batch_tx, |batch| {
             if batch.buf.is_empty() {
-                None
-            } else {
-                batch.count = 0;
-                Some(core::mem::take(&mut batch.buf))
+                return;
             }
+            batch.count = 0;
+            let frame = core::mem::take(&mut batch.buf);
+            let channel = crate::frame_encode::frame_wire_reliability(&frame);
+            self.link_driver().send_blocking(&frame, channel);
         });
-        if let Some(bytes) = pending {
-            let channel = frame_wire_reliability(&bytes);
-            self.link_driver().send_blocking(&bytes, channel);
-        }
     }
 
     /// zenoh-pico `zp_batch_start` parity — open a batching window: every
@@ -1076,6 +1059,81 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "transport-batching"))]
         Err(SendWireError::FeatureDisabled)
+    }
+
+    /// R311jq — typed chokepoint entries: each hands its per-type body
+    /// encoder (`crate::frame_encode::*_body`, the single home of the
+    /// encode projection) to [`Self::dispatch_network_message`], which
+    /// owns the frame SN. cfg = the union of the routed `send_*` callers
+    /// (a build where no caller exists must not carry the dead symbol).
+    #[cfg(feature = "codec-push")]
+    fn dispatch_push(&self, push: wz_codecs::push::PushOwned, reliable: bool) {
+        self.dispatch_network_message(
+            reliable,
+            wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            crate::frame_encode::push_body(&push),
+        );
+    }
+
+    /// See [`Self::dispatch_push`].
+    #[cfg(any(
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-final",
+        feature = "liveliness-token",
+    ))]
+    fn dispatch_declare(&self, declare: wz_codecs::declare::DeclareOwned, reliable: bool) {
+        self.dispatch_network_message(
+            reliable,
+            wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
+            crate::frame_encode::declare_body(&declare),
+        );
+    }
+
+    /// See [`Self::dispatch_push`].
+    #[cfg(feature = "codec-request")]
+    fn dispatch_request(&self, request: wz_codecs::request::RequestOwned, reliable: bool) {
+        self.dispatch_network_message(
+            reliable,
+            wz_codecs::request::Request::MAX_ENCODED_BYTES,
+            crate::frame_encode::request_body(&request),
+        );
+    }
+
+    /// See [`Self::dispatch_push`].
+    #[cfg(feature = "codec-response")]
+    fn dispatch_response(&self, response: wz_codecs::response::ResponseOwned, reliable: bool) {
+        self.dispatch_network_message(
+            reliable,
+            wz_codecs::response::Response::MAX_ENCODED_BYTES,
+            crate::frame_encode::response_body(&response),
+        );
+    }
+
+    /// See [`Self::dispatch_push`].
+    #[cfg(feature = "codec-response-final")]
+    fn dispatch_response_final(
+        &self,
+        response_final: wz_codecs::response_final::ResponseFinalOwned,
+        reliable: bool,
+    ) {
+        self.dispatch_network_message(
+            reliable,
+            wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
+            crate::frame_encode::response_final_body(&response_final),
+        );
+    }
+
+    /// See [`Self::dispatch_push`].
+    #[cfg(feature = "declare-interest")]
+    fn dispatch_interest(&self, interest: wz_codecs::interest::InterestOwned, reliable: bool) {
+        self.dispatch_network_message(
+            reliable,
+            wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
+            crate::frame_encode::interest_body(&interest),
+        );
     }
 
     /// R311jp — express short-circuit, zenoh-pico parity: an
@@ -1215,9 +1273,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_literal(keyexpr_suffix, value)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1273,9 +1329,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             check_outbound_keyexpr_pico_safe(suffix)?;
             let declare = build_declare_kexpr(mapping_id, suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
             // R234 — record the (mapping_id, suffix) pair in the
             // outbound table so later `publish_aliased_auto` calls
             // can resolve the literal without caller assertion.
@@ -1318,9 +1372,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_aliased(mapping_id, suffix, value)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1346,9 +1398,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_literal(keyexpr_suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1374,9 +1424,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_aliased(mapping_id, suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1403,9 +1451,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_literal_with_meta(keyexpr_suffix, value, meta)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1428,9 +1474,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1455,9 +1499,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_literal_with_meta(keyexpr_suffix, meta)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1480,9 +1522,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_push(sn, push, reliable);
-            self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.dispatch_push(push, reliable);
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1534,9 +1574,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare =
                 build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-subscriber"))]
@@ -1582,9 +1620,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare =
                 build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-queryable"))]
@@ -1625,9 +1661,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-token"))]
@@ -1654,9 +1688,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `encode_frame_with_declare` is in scope.
     #[cfg(feature = "liveliness-token")]
     pub fn send_declare(&self, declare: DeclareOwned) {
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+        self.dispatch_declare(declare, /*reliable=*/ true);
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
@@ -1682,9 +1714,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_kexpr(mapping_id);
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
             // R234 — drop the (mapping_id, suffix) pair so subsequent
             // `publish_aliased_auto` calls return `None` on this id and
             // the caller knows the alias is stale. Idempotent: removing
@@ -1829,9 +1859,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_subscriber(subscriber_id);
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
         }
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
         let _ = subscriber_id;
@@ -1850,9 +1878,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_queryable(queryable_id);
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
         }
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
         let _ = queryable_id;
@@ -1872,9 +1898,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_token(token_id);
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
         }
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = token_id;
@@ -1897,9 +1921,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "declare-final")]
         {
             let declare = build_declare_final();
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true);
         }
     }
 
@@ -1971,9 +1993,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_interest(interest, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -2012,9 +2032,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let interest =
                 build_interest_liveliness_get(interest_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_interest(interest, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -2050,9 +2068,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "declare-interest")]
         {
             let interest = build_interest_final(interest_id);
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_interest(interest, /*reliable=*/ true);
         }
         #[cfg(not(feature = "declare-interest"))]
         let _ = interest_id;
@@ -2092,9 +2108,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-request")]
         {
             let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_request(request, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -2175,9 +2189,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 builder = builder.request_timeout_ms(meta.timeout_ms as u64);
             }
             let request = builder.build()?;
-            let sn = self.next_outbound_frame_sn();
-            let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_request(request, /*reliable=*/ true);
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -2214,10 +2226,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-response-final")]
         {
             let response_final = build_response_final(request_id);
-            let sn = self.next_outbound_frame_sn();
-            let wire =
-                encode_frame_with_response_final(sn, response_final, /*reliable=*/ true);
-            self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+            self.dispatch_response_final(response_final, /*reliable=*/ true);
         }
         #[cfg(not(feature = "codec-response-final"))]
         let _ = request_id;
@@ -2256,9 +2265,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R267 Session<R,T> reparam-adjacent architectural cascade).
     #[cfg(feature = "codec-response")]
     pub fn send_response(&self, response: ResponseOwned) {
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_response(sn, response, /*reliable=*/ true);
-        self.dispatch_frame_or_fragment(wire, sn, /*reliable=*/ true);
+        self.dispatch_response(response, /*reliable=*/ true);
     }
 
     /// R284 — encode + dispatch a session-layer `Close` frame

@@ -32222,6 +32222,46 @@
         "NEXT: A4 auto-reconnect (re-dial + re-handshake on link loss), then A1 multicast DATA plane"
       ]
     },
+    "Round 311jq": {
+      "decision_summary": "R311jq: corrects R311jp - SN is frame-scoped (minted at frame open; appends mint none); pico sn_precedes is HALF-WINDOW (utils.c:80) so per-msg SN gaps could drop frames at small seq_num_res.",
+      "changes_bullets": [
+        "dispatch_network_message owns the SN; senders hand frame_encode::*_body encoders (6 typed entries)",
+        "batching sink-encodes into the open frame (begin_frame + wpos rollback); ALL batch emits under lock",
+        "frame_encode SSOT: begin_frame/frame_flags/*_body/frame_wire_reliability; vle_width frag-only again",
+        "batch tests pin gap-free consecutive frame SNs (a 3-msg batch consumes exactly one SN)"
+      ],
+      "verification_bullets": [
+        "evidence: zenoh-pico utils.c:80 distance<=half(window) falsifies the R311jp \"gaps drop nothing\"",
+        "6 batch_tx_tests + 221 runtime-tokio lib tests + session-core matrix; full host run-ci EXIT 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "pre-existing mint-vs-enqueue order race on NON-batched concurrent sends remains (pico holds tx mtx)",
+        "MCU critical_section spans lwip send during batch emits - bounded by batch_size; revisit if preempt",
+        "negotiated-min MTU (peer batch_size) carry stands (R311jm); NEXT=A4 auto-reconnect"
+      ],
+      "publishable_decision_summary": "R311jq: corrects R311jp - SN is frame-scoped (minted at frame open; appends mint none); pico sn_precedes is HALF-WINDOW (utils.c:80) so per-msg SN gaps could drop frames at small seq_num_res.",
+      "publishable_changes_bullets": [
+        "dispatch_network_message owns the SN; senders hand frame_encode::*_body encoders (6 typed entries)",
+        "batching sink-encodes into the open frame (begin_frame + wpos rollback); ALL batch emits under lock",
+        "frame_encode SSOT: begin_frame/frame_flags/*_body/frame_wire_reliability; vle_width frag-only again",
+        "batch tests pin gap-free consecutive frame SNs (a 3-msg batch consumes exactly one SN)"
+      ],
+      "publishable_verification_bullets": [
+        "evidence: zenoh-pico utils.c:80 distance<=half(window) falsifies the R311jp \"gaps drop nothing\"",
+        "6 batch_tx_tests + 221 runtime-tokio lib tests + session-core matrix; full host run-ci EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "pre-existing mint-vs-enqueue order race on NON-batched concurrent sends remains (pico holds tx mtx)",
+        "MCU critical_section spans lwip send during batch emits - bounded by batch_size; revisit if preempt",
+        "negotiated-min MTU (peer batch_size) carry stands (R311jm); NEXT=A4 auto-reconnect"
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [

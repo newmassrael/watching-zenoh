@@ -32,6 +32,66 @@ use wz_codecs::response::{Response, ResponseOwned};
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 
+/// R311jq — the FRAME parent-flags byte for a channel: `FLAG_T_FRAME_R`
+/// (0x20) when reliable, 0 otherwise, matching zenoh-pico's
+/// `_z_frame_encode` (`src/protocol/codec/transport.c:380`). `FLAG_T_Z`
+/// (0x80, Frame-level transport extensions) is never set — the MVP data
+/// path has no Frame-level ext chain (see `ExtChainRole` for the
+/// handshake chains).
+pub(crate) fn frame_flags(reliable: bool) -> u8 {
+    if reliable {
+        wire_const::FLAG_T_FRAME_R
+    } else {
+        0u8
+    }
+}
+
+/// R311jq — write the FRAME prefix (header byte + `VLE(sn)`) into `buf`.
+/// The single home of the prefix wire format, shared by the
+/// immediate-path [`encode_frame_envelope`] and the batching open-frame
+/// writer in `SessionLinkActions`.
+///
+/// The `VLE(sn)` loop is bit-identical to `Frame::encode`'s sn block
+/// — it IS the wire format (zenoh-pico VLE base-128 encoding per
+/// `vendor/zenoh-pico/src/protocol/codec/core.c`), not consumer-tunable
+/// logic.
+pub(crate) fn begin_frame(buf: &mut Vec<u8>, sn: u64, parent_flags: u8) {
+    buf.push(parent_flags | wire_const::T_MID_FRAME);
+    let mut sink = VecSink::new(buf);
+    let mut vle = sn;
+    while vle >= 0x80 {
+        sink.write_u8((vle as u8 & 0x7F) | 0x80)
+            .expect("VecSink is infallible");
+        vle >>= 7;
+    }
+    sink.write_u8(vle as u8).expect("VecSink is infallible");
+}
+
+/// R311jq — derive the link-driver [`Reliability`] of an already-encoded
+/// outbound `T_MID_FRAME` from its header's R flag. The batch flush
+/// paths re-emit a frame that was opened by an earlier message, so the
+/// channel must come from the frame bytes, not from the
+/// currently-dispatched message (zenoh-pico appends mixed-reliability
+/// messages into whatever frame is open — the OPENING message's flag
+/// governs; `tx.c _z_transport_tx_send_n_msg_inner` mints the header
+/// only when the buffer is empty).
+///
+/// cfg adds `session-unicast`: every consumer (the batch flush emits)
+/// lives in `session_actions`, which is gated `all(alloc,
+/// session-unicast)` — a batching-without-session subset must not carry
+/// the dead symbol (`-D warnings` C1h lanes).
+#[cfg(all(feature = "transport-batching", feature = "session-unicast"))]
+pub(crate) fn frame_wire_reliability(bytes: &[u8]) -> crate::reliability::Reliability {
+    let reliable = bytes
+        .first()
+        .is_some_and(|h| h & wire_const::FLAG_T_FRAME_R != 0);
+    if reliable {
+        crate::reliability::Reliability::Reliable
+    } else {
+        crate::reliability::Reliability::BestEffort
+    }
+}
+
 /// R121h-perf-bump-3 — single-allocation transport-envelope encode.
 /// Composes the parent-flags byte, `VLE(sn)`, and a sink-encoded
 /// payload into one growable `Vec`, eliminating the prior
@@ -40,11 +100,8 @@ use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 /// hot-path emit). For typical 1–2 KB payloads the reserved capacity
 /// is also dramatically smaller than the 64 KB `Frame::MAX_ENCODED_BYTES`
 /// ceiling, since the inner codec's worst-case bound is used directly.
-///
-/// The `VLE(sn)` loop is bit-identical to `Frame::encode`'s sn block
-/// — it IS the wire format (zenoh-pico VLE base-128 encoding per
-/// `vendor/zenoh-pico/src/protocol/codec/core.c`), not consumer-tunable
-/// logic. Inlining here does not duplicate semantics.
+/// R311jq lifts the prefix write into [`begin_frame`] so the batching
+/// open-frame writer shares the same bytes-producing code.
 pub(crate) fn encode_frame_envelope<P>(
     sn: u64,
     parent_flags: u8,
@@ -55,19 +112,112 @@ where
     P: FnOnce(&mut VecSink<'_>) -> Result<(), CodecError>,
 {
     let mut wire = Vec::with_capacity(1 + 10 + worst_case_payload);
-    wire.push(parent_flags | wire_const::T_MID_FRAME);
+    begin_frame(&mut wire, sn, parent_flags);
     {
         let mut sink = VecSink::new(&mut wire);
-        let mut _vle = sn;
-        while _vle >= 0x80 {
-            sink.write_u8((_vle as u8 & 0x7F) | 0x80)
-                .expect("VecSink is infallible");
-            _vle >>= 7;
-        }
-        sink.write_u8(_vle as u8).expect("VecSink is infallible");
         payload_encode(&mut sink).expect("VecSink is infallible");
     }
     wire
+}
+
+/// R311jq — per-type network-message body encoder: the single home of
+/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// immediate-path `encode_frame_with_*` reference wrapper and the
+/// batching-path direct-into-buffer append in `SessionLinkActions`
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+#[cfg(feature = "codec-push")]
+pub(crate) fn push_body(
+    push: &PushOwned,
+) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+    move |sink| {
+        push.try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
+    }
+}
+
+/// R311jq — per-type network-message body encoder: the single home of
+/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// immediate-path `encode_frame_with_*` reference wrapper and the
+/// batching-path direct-into-buffer append in `SessionLinkActions`
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+#[cfg(feature = "codec-declare")]
+pub(crate) fn declare_body(
+    declare: &DeclareOwned,
+) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+    move |sink| {
+        declare
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
+    }
+}
+
+/// R311jq — per-type network-message body encoder: the single home of
+/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// immediate-path `encode_frame_with_*` reference wrapper and the
+/// batching-path direct-into-buffer append in `SessionLinkActions`
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+#[cfg(feature = "codec-request")]
+pub(crate) fn request_body(
+    request: &RequestOwned,
+) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+    move |sink| {
+        request
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
+    }
+}
+
+/// R311jq — per-type network-message body encoder: the single home of
+/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// immediate-path `encode_frame_with_*` reference wrapper and the
+/// batching-path direct-into-buffer append in `SessionLinkActions`
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+#[cfg(feature = "codec-response")]
+pub(crate) fn response_body(
+    response: &ResponseOwned,
+) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+    move |sink| {
+        response
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
+    }
+}
+
+/// R311jq — per-type network-message body encoder: the single home of
+/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// immediate-path `encode_frame_with_*` reference wrapper and the
+/// batching-path direct-into-buffer append in `SessionLinkActions`
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+#[cfg(feature = "codec-response-final")]
+pub(crate) fn response_final_body(
+    response_final: &ResponseFinalOwned,
+) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+    move |sink| {
+        response_final
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
+    }
+}
+
+/// R311jq — per-type network-message body encoder: the single home of
+/// the `try_as_borrowed().encode(sink)` projection, shared by the
+/// immediate-path `encode_frame_with_*` reference wrapper and the
+/// batching-path direct-into-buffer append in `SessionLinkActions`
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+pub(crate) fn interest_body(
+    interest: &InterestOwned,
+) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+    move |sink| {
+        interest
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
+    }
 }
 
 /// R121j-3 — build the wire bytes for a `Frame` transport-message
@@ -84,17 +234,12 @@ where
 /// the consequence.
 #[cfg(feature = "codec-response")]
 pub fn encode_frame_with_response(sn: u64, response: ResponseOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Response::MAX_ENCODED_BYTES, |sink| {
-        response
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
+    encode_frame_envelope(
+        sn,
+        frame_flags(reliable),
+        Response::MAX_ENCODED_BYTES,
+        response_body(&response),
+    )
 }
 
 /// R121j-2 — build the wire bytes for a `Frame` transport-message
@@ -114,17 +259,12 @@ pub fn encode_frame_with_response_final(
     response_final: ResponseFinalOwned,
     reliable: bool,
 ) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, ResponseFinal::MAX_ENCODED_BYTES, |sink| {
-        response_final
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
+    encode_frame_envelope(
+        sn,
+        frame_flags(reliable),
+        ResponseFinal::MAX_ENCODED_BYTES,
+        response_final_body(&response_final),
+    )
 }
 
 /// R121j-1 — build the wire bytes for a `Frame` transport-message
@@ -140,17 +280,12 @@ pub fn encode_frame_with_response_final(
 /// that pass `reliable=false` accept that risk explicitly.
 #[cfg(feature = "codec-request")]
 pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Request::MAX_ENCODED_BYTES, |sink| {
-        request
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
+    encode_frame_envelope(
+        sn,
+        frame_flags(reliable),
+        Request::MAX_ENCODED_BYTES,
+        request_body(&request),
+    )
 }
 
 /// R121g — build the wire bytes for a `Frame` transport-message
@@ -170,17 +305,12 @@ pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool)
 /// the unknown id — useful only for fuzz / negative tests.
 #[cfg(feature = "codec-declare")]
 pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Declare::MAX_ENCODED_BYTES, |sink| {
-        declare
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
+    encode_frame_envelope(
+        sn,
+        frame_flags(reliable),
+        Declare::MAX_ENCODED_BYTES,
+        declare_body(&declare),
+    )
 }
 
 /// R279 — build the wire bytes for a `Frame` transport-message
@@ -201,17 +331,12 @@ pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool)
 /// resolver may serve a stale history snapshot — useful only for
 /// fuzz / negative tests.
 pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Interest::MAX_ENCODED_BYTES, |sink| {
-        interest
-            .try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
+    encode_frame_envelope(
+        sn,
+        frame_flags(reliable),
+        Interest::MAX_ENCODED_BYTES,
+        interest_body(&interest),
+    )
 }
 
 /// R121e — build the wire bytes for a `Frame` transport-message
@@ -243,16 +368,12 @@ pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bo
 /// `Frame::encode` does not emit.
 #[cfg(feature = "codec-push")]
 pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u8> {
-    let parent_flags = if reliable {
-        wire_const::FLAG_T_FRAME_R
-    } else {
-        0u8
-    };
-    encode_frame_envelope(sn, parent_flags, Push::MAX_ENCODED_BYTES, |sink| {
-        push.try_as_borrowed()
-            .expect("wz builders emit <=N exts by construction")
-            .encode(sink)
-    })
+    encode_frame_envelope(
+        sn,
+        frame_flags(reliable),
+        Push::MAX_ENCODED_BYTES,
+        push_body(&push),
+    )
 }
 
 // ── transport fragmentation (transport-fragmentation gated) ───────────────
@@ -268,19 +389,20 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 // reassembly dispatcher requires the chunk SNs to be consecutive (it aborts a
 // chain on `fragment.ooo`), so the caller draws the SN block atomically.
 
-/// Base-128 VLE byte width of `sn` — the offset math both the fragmentation
-/// body-slice and the R311jp batching body-append use to locate a FRAME's
-/// network-message tail behind the 1-byte header + `VLE(sn)` prefix that
-/// [`encode_frame_envelope`] wrote. Mirrors the encoder's emit loop exactly;
-/// it IS the wire format, not consumer-tunable logic.
+/// Base-128 VLE byte width of `sn` — the offset math the fragmentation
+/// body-slice uses to locate a FRAME's network-message tail behind the
+/// 1-byte header + `VLE(sn)` prefix that [`encode_frame_envelope`] wrote.
+/// Mirrors the encoder's emit loop exactly; it IS the wire format, not
+/// consumer-tunable logic.
 ///
-/// cfg = (fragmentation OR batching) AND the wire-emit union: both consumers
-/// live inside `dispatch_frame_or_fragment`, which only exists when at least
-/// one network-message sender is compiled — a transport-only subset (e.g.
-/// handshake + transport-batching, no senders) has no caller and must not
-/// carry the dead symbol (`-D warnings` lanes).
+/// cfg = fragmentation AND the wire-emit union: the only consumer is the
+/// fragment body-slice in `emit_frame_or_fragments`, which exists when at
+/// least one network-message sender is compiled — a no-sender subset must
+/// not carry the dead symbol (`-D warnings` lanes). (R311jq: the batching
+/// append no longer slices — it sink-encodes into the open frame
+/// directly, so batching dropped out of this cfg.)
 #[cfg(all(
-    any(feature = "transport-fragmentation", feature = "transport-batching"),
+    feature = "transport-fragmentation",
     any(
         feature = "codec-push",
         feature = "codec-request",
