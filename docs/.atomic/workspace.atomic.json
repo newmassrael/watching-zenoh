@@ -33063,6 +33063,52 @@
         "debt track remaining: matching-listener callback; MCU reconnect seam"
       ]
     },
+    "Round 311kh": {
+      "decision_summary": "R311kh matching-listener callback surface (pico Z_FEATURE_MATCHING parity): flip-fire watch lists on the remote subscriber/queryable registries + Publisher/Querier declare_matching_listener; session-matching atom active, 4 AP presets carry it.",
+      "changes_bullets": [
+        "wz-session-core declare::matching (session-matching atom, pico Z_FEATURE_MATCHING default-ON): MatchingSink seam + BoxedMatchingSink + flip-fire MatchingWatchList (register seeds current verdict; reevaluate fires on VERDICT FLIP only - pico transition-only semantics, filtering.c:69-84)",
+        "RemoteSubscriberRegistry + RemoteQueryableRegistry: matching_watches field + declare/undeclare_matching_listener; dispatch_declare re-evaluates after every membership mutation; shared declared_intersects free-fn consult (has_matching DRY + disjoint-field borrow)",
+        "tokio Publisher/Querier::declare_matching_listener -> MatchingListener handle (explicit undeclare; no Drop hook) + MatchingListenerError::FeatureDisabled (R311g1 stable signature)",
+        "features: session-core session-matching=[alloc]; tokio forward + default; facade forward + domain-session + 4 AP presets (pico default-ON parity); inventory atom active at catalog 5.4"
+      ],
+      "verification_bullets": [
+        "core watch-list unit x2 (flip-only firing incl registration-silent + per-watch independence) + registry flip test through production dispatch_declare (non-matching silent, decl flips true, undecl flips false, post-undeclare silent)",
+        "session-tier x2: publisher listener over remote subscribers + querier listener over remote queryables, driven via observer dispatch; poll get_matching_status agrees with callback verdict",
+        "R311g1 NEG: session-matching off -> Err(FeatureDisabled) (rides C1j subset lanes)",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0; preset-ap-client --no-default-features check clean"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions"
+      ],
+      "carry_forward_bullets": [
+        "AP-only: the watch keyexprs are alloc Strings; a no-heap MCU watch backing binds when a no-heap MCU session runtime exists (same staging as the session-reconnect MCU seam)",
+        "no Drop-undeclare on the handle (explicit undeclare only, consistent with the other wz handles); revisit if the zenoh-cpp parity surface requires background listeners (pico declare_background_matching_listener)",
+        "debt track remaining: MCU reconnect seam (single-task swap; bounded no-alloc cache deferred to the no-heap session runtime)"
+      ],
+      "publishable_decision_summary": "R311kh matching-listener callback surface (pico Z_FEATURE_MATCHING parity): flip-fire watch lists on the remote subscriber/queryable registries + Publisher/Querier declare_matching_listener; session-matching atom active, 4 AP presets carry it.",
+      "publishable_changes_bullets": [
+        "wz-session-core declare::matching (session-matching atom, pico Z_FEATURE_MATCHING default-ON): MatchingSink seam + BoxedMatchingSink + flip-fire MatchingWatchList (register seeds current verdict; reevaluate fires on VERDICT FLIP only - pico transition-only semantics, filtering.c:69-84)",
+        "RemoteSubscriberRegistry + RemoteQueryableRegistry: matching_watches field + declare/undeclare_matching_listener; dispatch_declare re-evaluates after every membership mutation; shared declared_intersects free-fn consult (has_matching DRY + disjoint-field borrow)",
+        "tokio Publisher/Querier::declare_matching_listener -> MatchingListener handle (explicit undeclare; no Drop hook) + MatchingListenerError::FeatureDisabled (R311g1 stable signature)",
+        "features: session-core session-matching=[alloc]; tokio forward + default; facade forward + domain-session + 4 AP presets (pico default-ON parity); inventory atom active at catalog 5.4"
+      ],
+      "publishable_verification_bullets": [
+        "core watch-list unit x2 (flip-only firing incl registration-silent + per-watch independence) + registry flip test through production dispatch_declare (non-matching silent, decl flips true, undecl flips false, post-undeclare silent)",
+        "session-tier x2: publisher listener over remote subscribers + querier listener over remote queryables, driven via observer dispatch; poll get_matching_status agrees with callback verdict",
+        "R311g1 NEG: session-matching off -> Err(FeatureDisabled) (rides C1j subset lanes)",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0; preset-ap-client --no-default-features check clean"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "AP-only: the watch keyexprs are alloc Strings; a no-heap MCU watch backing binds when a no-heap MCU session runtime exists (same staging as the session-reconnect MCU seam)",
+        "no Drop-undeclare on the handle (explicit undeclare only, consistent with the other wz handles); revisit if the zenoh-cpp parity surface requires background listeners (pico declare_background_matching_listener)",
+        "debt track remaining: MCU reconnect seam (single-task swap; bounded no-alloc cache deferred to the no-heap session runtime)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
@@ -39194,6 +39240,10 @@
       "source": "zenoh Z_EXT_SHM",
       "reason": "F=shm handshake; P=zenoh; C=requires transport-shm"
     },
+    "session-matching": {
+      "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+    },
     "session-multicast": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
@@ -39383,6 +39433,7 @@
   },
   "confirmation_events": {},
   "frames": {},
+  "branches": {},
   "narrative_facts": {},
-  "schema_version": 13
+  "schema_version": 14
 }
