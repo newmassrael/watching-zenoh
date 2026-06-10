@@ -73,8 +73,11 @@ pub const fn decrement(mask: u64, sn: u64) -> u64 {
 }
 
 /// Modular increment (`_z_sn_increment`): the TX-side step on the same
-/// ring (the multicast TX path mints with this; the unicast chokepoint
-/// owns its own monotonic mint).
+/// ring. The multicast TX path mints with this directly ([`TxSn`]); the
+/// unicast chokepoint keeps a raw monotonic counter and projects each
+/// minted value onto the ring (`fetch_add & mask` — the equivalent walk,
+/// see `SessionLinkActions::next_outbound_frame_sn`), and the fragment
+/// walk (`frame_encode::fragment_body`) steps with this (R311kb).
 pub const fn increment(mask: u64, sn: u64) -> u64 {
     sn.wrapping_add(1) & mask
 }

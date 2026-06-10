@@ -1043,29 +1043,48 @@ mod tests {
     }
 
     /// `SessionLinkActions::next_outbound_frame_sn` starts at
-    /// `params.initial_sn` and increments by one per call. This
-    /// pairs the SN seed contract with the increment contract so
-    /// a regression on either side (off-by-one seed, wrong stride)
-    /// fires loud.
+    /// `params.initial_sn` and walks the ring of the passed mask one
+    /// step per call. This pairs the SN seed contract with the
+    /// increment contract so a regression on either side (off-by-one
+    /// seed, wrong stride) fires loud.
     #[test]
     fn next_outbound_frame_sn_seeds_at_initial_sn_then_increments() {
         // The SN counter seeds from initial_sn; the driver is unused
         // (we only read the counter), so the `recording_actions_with_params`
         // SSOT driver discards the never-emitted frames.
+        let mask = wz_session_core::sn::mask_from_res(0x02);
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 42;
         let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
         assert_eq!(
-            actions.next_outbound_frame_sn(),
+            actions.next_outbound_frame_sn(mask),
             42,
             "first SN must equal params.initial_sn"
         );
         assert_eq!(
-            actions.next_outbound_frame_sn(),
+            actions.next_outbound_frame_sn(mask),
             43,
             "subsequent SNs must increment by 1"
         );
-        assert_eq!(actions.next_outbound_frame_sn(), 44);
+        assert_eq!(actions.next_outbound_frame_sn(mask), 44);
+    }
+
+    /// R311kb — the mint wraps at the ring seam: an `initial_sn` at the
+    /// top of a 7-bit ring is followed by 0, not `mask + 1` (zenoh-pico
+    /// `_z_sn_increment` parity; the R121e explicit-modulo carry).
+    #[test]
+    fn next_outbound_frame_sn_wraps_at_ring_seam() {
+        let mask = wz_session_core::sn::mask_from_res(0x00); // 7-bit ring
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = mask;
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        assert_eq!(actions.next_outbound_frame_sn(mask), mask);
+        assert_eq!(
+            actions.next_outbound_frame_sn(mask),
+            0,
+            "the mint must wrap mask -> 0 on the negotiated ring"
+        );
+        assert_eq!(actions.next_outbound_frame_sn(mask), 1);
     }
 
     // ── R311hw / R311hx (R311hz refactor) — codec & declare behavioural

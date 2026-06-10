@@ -456,16 +456,25 @@ pub(crate) fn fragment_count(body_len: usize, mtu: usize) -> usize {
 }
 
 /// Split a serialized network-message `body` into the `T_MID_FRAGMENT` wire
-/// frames, SNs drawn from the contiguous block `base_sn ..= base_sn + N - 1`
-/// (where `N == fragment_count(body.len(), mtu)`). Every fragment but the last
-/// carries the M (more) flag; R (reliable) is set per `reliable`. zenoh-pico
-/// `_z_transport_tx_send_fragment_inner` parity.
+/// frames, SNs walking the ring of `sn_mask` from `base_sn & sn_mask` for
+/// `N == fragment_count(body.len(), mtu)` steps ([`crate::sn::increment`],
+/// zenoh-pico `_z_sn_increment` — R311kb closed the unmasked walk that
+/// diverged at the ring seam). `base_sn` may be the raw reserved counter
+/// value; this walk is the chain's single masking point. Every fragment but
+/// the last carries the M (more) flag; R (reliable) is set per `reliable`.
+/// zenoh-pico `_z_transport_tx_send_fragment_inner` parity.
 #[cfg(feature = "transport-fragmentation")]
-pub fn fragment_body(body: &[u8], reliable: bool, mtu: usize, base_sn: u64) -> Vec<Vec<u8>> {
+pub fn fragment_body(
+    body: &[u8],
+    reliable: bool,
+    mtu: usize,
+    base_sn: u64,
+    sn_mask: u64,
+) -> Vec<Vec<u8>> {
     let chunk = fragment_chunk_size(mtu);
     let mut out = Vec::with_capacity(fragment_count(body.len(), mtu));
     let mut off = 0usize;
-    let mut sn = base_sn;
+    let mut sn = base_sn & sn_mask;
     loop {
         let end = core::cmp::min(off + chunk, body.len());
         let more = end < body.len();
@@ -474,7 +483,7 @@ pub fn fragment_body(body: &[u8], reliable: bool, mtu: usize, base_sn: u64) -> V
         if !more {
             break;
         }
-        sn = sn.wrapping_add(1);
+        sn = crate::sn::increment(sn_mask, sn);
     }
     out
 }
@@ -806,7 +815,13 @@ mod fragment_tests {
         let mtu = 64usize;
         let base_sn = 7u64;
 
-        let frames = fragment_body(&body, /*reliable=*/ true, mtu, base_sn);
+        let frames = fragment_body(
+            &body,
+            /*reliable=*/ true,
+            mtu,
+            base_sn,
+            crate::sn::mask_from_res(0x02),
+        );
         assert_eq!(frames.len(), fragment_count(body.len(), mtu));
         assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
 
@@ -851,11 +866,47 @@ mod fragment_tests {
         );
     }
 
+    /// R311kb — a chain whose reserved block crosses the ring seam walks
+    /// `mask -> 0` (zenoh-pico `_z_sn_increment` parity); the prior
+    /// unmasked `wrapping_add(1)` emitted `mask + 1` there, which the
+    /// peer's ring-consecutive gate rejects. A raw (un-masked) reserved
+    /// base projects onto the ring too.
+    #[test]
+    fn fragment_body_sn_walk_wraps_at_ring_seam() {
+        use super::super::sn;
+        let mask = sn::mask_from_res(0x00); // 7-bit ring, seam at 127
+        let body = alloc::vec![0x5Au8; 200]; // 4 fragments at mtu 64
+                                             // Raw counter base one whole ring above 126: projects to 126.
+        let frames = fragment_body(&body, true, 64, 126 + (mask + 1), mask);
+        assert_eq!(frames.len(), 4);
+        let sns: Vec<u64> = frames
+            .iter()
+            .map(|f| {
+                let InboundFrame::Fragment { sn, .. } = parse_inbound(f).expect("parse fragment")
+                else {
+                    panic!("not a Fragment");
+                };
+                sn
+            })
+            .collect();
+        assert_eq!(
+            sns,
+            alloc::vec![126, 127, 0, 1],
+            "the SN walk must wrap mask -> 0 on the ring"
+        );
+    }
+
     /// A best-effort chain clears the R bit on every fragment.
     #[test]
     fn fragment_body_best_effort_clears_r_flag() {
         let body = alloc::vec![0xABu8; 120];
-        let frames = fragment_body(&body, /*reliable=*/ false, 64, 0);
+        let frames = fragment_body(
+            &body,
+            /*reliable=*/ false,
+            64,
+            0,
+            crate::sn::mask_from_res(0x02),
+        );
         assert!(frames.len() > 1, "120 bytes at mtu 64 must fragment");
         for frame in &frames {
             assert_eq!(

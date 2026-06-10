@@ -296,16 +296,16 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// uses `params.initial_sn` (matching the value announced in
     /// the OpenSyn/OpenAck body so the peer's reliable-channel
     /// SN-window tracking starts from the agreed origin) and
-    /// each subsequent Frame uses the next integer modulo the
-    /// SN resolution window (`params.seq_num_res` → 8/16/32/
-    /// 64-bit per Zenoh RFC §5.O). For the AP MVP path the
-    /// `AtomicU64` counter does not enforce explicit modulo —
-    /// a session that emits more than `1 << sn_bits` frames
-    /// will rely on the natural u64 wrap, which exceeds every
-    /// configurable SN window. Production code with long-running
-    /// sessions or strict SN-window validation needs the
-    /// explicit modulo at `next_outbound_frame_sn` (R121e
-    /// carry — surface when a measurement justifies it).
+    /// each subsequent Frame uses the next position on the
+    /// negotiated SN ring (`seq_num_res` → 7/14/28/63-bit per
+    /// Zenoh RFC §5.O). The counter itself stays raw monotonic —
+    /// the `u64` wrap is ring-transparent, `(n + 1) & mask` is
+    /// the ring successor of `n & mask` across the `u64`
+    /// boundary too — and the wire-visible value is masked at
+    /// the mint ([`Self::next_outbound_frame_sn`]) and at the
+    /// fragment walk (`frame_encode::fragment_body`). R311kb
+    /// realized the R121e explicit-modulo carry via zenoh-pico
+    /// `_z_sn_increment` parity (the F-5 consolidation).
     pub outbound_frame_sn: AtomicU64,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
@@ -854,27 +854,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Ok(frame)
     }
 
-    /// R121e — outbound Frame sequence-number generator. Returns
-    /// the SN to use for the next outbound Frame and advances the
-    /// internal counter by one.
+    /// R121e / R311kb — outbound Frame sequence-number mint. Returns
+    /// the SN for the next outbound Frame as a position on the ring of
+    /// `sn_mask` ([`Self::negotiated_sn_mask`]) and advances the
+    /// internal counter by one — zenoh-pico `_z_sn_increment` parity,
+    /// closing the R121e explicit-modulo carry.
     ///
-    /// The first call returns `params.initial_sn` (seeded by
-    /// `new_session_actions`); subsequent calls return
-    /// successive integers. The natural u64 wrap exceeds every
-    /// configurable SN resolution window
-    /// (`params.seq_num_res = 0..=3` → 8/16/32/64-bit per Zenoh
-    /// RFC §5.O), so a session that emits fewer than `1 << 32`
-    /// frames never reaches the boundary. Production code with
-    /// long-running sessions OR strict SN-window validation must
-    /// apply the explicit modulo here once a measurement justifies
-    /// the cost (R121e carry — no consumer surfaces it yet).
+    /// The first call returns `params.initial_sn & sn_mask` (the
+    /// counter is seeded by `new_session_actions`; a conforming
+    /// `initial_sn` is already on the ring, so the announced
+    /// OpenSyn/OpenAck origin and the first wire SN agree); subsequent
+    /// calls return successive ring positions. Masking the returned
+    /// value of a raw monotonic `fetch_add` IS the ring walk:
+    /// consecutive counter values project to ring-consecutive masked
+    /// values, across both the mask seam and the `u64` wrap.
     ///
     /// Atomic `SeqCst` is the textbook default for cross-task
     /// monotonicity. The hot path is one outbound Frame per
     /// application-layer batch — the atomic cost is in the noise
     /// vs. the codec encode + TCP write below it.
-    pub fn next_outbound_frame_sn(&self) -> u64 {
-        self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst)
+    pub fn next_outbound_frame_sn(&self, sn_mask: u64) -> u64 {
+        self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst) & sn_mask
     }
 
     /// Transport-framing chokepoint for every outbound network message —
@@ -959,6 +959,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
         };
 
+        // R311kb — the negotiated SN ring every mint below walks
+        // ([`Self::negotiated_sn_mask`]). Resolved here, before the batch
+        // lock: the accessor takes the `inbound_peer_init_caps` mutex, and
+        // session mutex scopes stay disjoint by discipline.
+        let sn_mask = self.negotiated_sn_mask();
+
         // R311jq batching path — the WHOLE absorb / overflow-reopen /
         // oversize decision and every emit it triggers run under the batch
         // lock, so concurrent senders cannot interleave a later frame
@@ -984,7 +990,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // (pico `_z_transport_tx_batch_overflow` rollback+retry).
                 loop {
                     if batch.buf.is_empty() {
-                        let sn = self.next_outbound_frame_sn();
+                        let sn = self.next_outbound_frame_sn(sn_mask);
                         batch.buf.reserve(1 + 10 + worst_case_payload);
                         begin_frame(&mut batch.buf, sn, frame_flags(reliable));
                         encode_into(&mut batch.buf);
@@ -995,7 +1001,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             // fragmentation is off), still under the lock.
                             let frame = core::mem::take(&mut batch.buf);
                             batch.count = 0;
-                            self.emit_frame_or_fragments(&frame, sn, reliable, mtu);
+                            self.emit_frame_or_fragments(&frame, sn, reliable, mtu, sn_mask);
                         } else {
                             batch.count = 1;
                         }
@@ -1022,14 +1028,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
 
         // Immediate path (batching off or window closed): frame-per-message.
-        let sn = self.next_outbound_frame_sn();
+        let sn = self.next_outbound_frame_sn(sn_mask);
         let wire = crate::frame_encode::encode_frame_envelope(
             sn,
             crate::frame_encode::frame_flags(reliable),
             worst_case_payload,
             &encode_body,
         );
-        self.emit_frame_or_fragments(&wire, sn, reliable, mtu);
+        self.emit_frame_or_fragments(&wire, sn, reliable, mtu, sn_mask);
         Ok(())
     }
 
@@ -1043,13 +1049,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The FRAME body is the tail after the 1-byte header + `VLE(sn)`;
     /// slice it rather than re-encoding (`vle_width` = base-128 width of
     /// `sn`). The discarded oversize FRAME consumed `sn`; the fragment
-    /// chain draws a fresh contiguous SN block via a single atomic
-    /// fetch-add, so the chunk SNs stay consecutive even if a concurrent
-    /// sender mints outbound SNs (the reassembly dispatcher aborts a
-    /// non-consecutive chain). The one skipped SN per oversize message
-    /// never reaches the wire and stays far inside the peer's SN
-    /// half-window (bounded: 1 per oversize message, vs the fragment
-    /// chain consuming `count` SNs itself).
+    /// chain reserves a fresh contiguous counter block via a single
+    /// atomic fetch-add — `fragment_body` projects it onto the ring of
+    /// `sn_mask` (R311kb) — so the chunk SNs stay ring-consecutive even
+    /// if a concurrent sender mints outbound SNs (the reassembly
+    /// dispatcher aborts a non-consecutive chain). The one skipped SN
+    /// per oversize message never reaches the wire and stays far inside
+    /// the peer's SN half-window (bounded: 1 per oversize message, vs
+    /// the fragment chain consuming `count` SNs itself).
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1063,7 +1070,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn emit_frame_or_fragments(&self, frame: &[u8], sn: u64, reliable: bool, mtu: usize) {
+    fn emit_frame_or_fragments(
+        &self,
+        frame: &[u8],
+        sn: u64,
+        reliable: bool,
+        mtu: usize,
+        sn_mask: u64,
+    ) {
         let reliability = if reliable {
             Reliability::Reliable
         } else {
@@ -1075,14 +1089,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let body = &frame[1 + crate::frame_encode::vle_width(sn)..];
                 let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
                 let base = self.outbound_frame_sn.fetch_add(count, Ordering::SeqCst);
-                for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base) {
+                for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base, sn_mask) {
                     self.link_driver().send_blocking(&frag, reliability);
                 }
                 return;
             }
         }
         #[cfg(not(feature = "transport-fragmentation"))]
-        let _ = (sn, mtu);
+        let _ = (sn, mtu, sn_mask);
         self.link_driver().send_blocking(frame, reliability);
     }
 
