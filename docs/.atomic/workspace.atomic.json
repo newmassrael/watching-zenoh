@@ -33652,6 +33652,54 @@
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
       ]
     },
+    "Round 311ku": {
+      "decision_summary": "R311ku session-review Findings A+B: lease wire-unit SSOT (lease_to_wire/from_wire) — SessionInitParams goes lease_ms-only, encode_open derives T like pico make_open, parse boundaries project back to ms, 5 scattered projections collapse.",
+      "changes_bullets": [
+        "lease::lease_to_wire / lease_from_wire (wz-session-core, const fns) — the ONE home for the _Z_FLAG_T_*_T wire-unit rule both transports consume (session-review Finding B closed: the projection previously lived in 5 scattered sites — drive.rs / session_glue.rs / session_drive.rs consumer triplication + the JOIN encode/decode inline pair)",
+        "SessionInitParams.lease + lease_in_seconds -> lease_ms (always milliseconds on both sides, MulticastParams precedent): encode_open derives T itself via lease_to_wire (pico _z_t_msg_make_open_syn/_ack parity, definitions/transport.c:196-214 — Finding A closed: wz used to send lease 10000 as T=0+VLE 10000 where pico always compacts to T=1+VLE 10, and JOIN auto-derived while OPEN was a manual knob)",
+        "parse_inbound OPEN arm projects body.lease back to ms at the wire boundary (lease_from_wire) and the InboundFrame::Open lease_in_seconds field is REMOVED (produced-but-never-consumed; same boundary rule as multicast_join::decode_join)",
+        "the three consumer projection blocks collapse to params.lease_ms direct reads; multicast_join encode/decode re-consume the SSOT pair; 9 construction sites converted (unit-correct: lease 10/true -> lease_ms 10_000 at mcu-acceptor + session-lwip, lease 30/true -> 30_000 at session_glue_dispatch)",
+        "tests: lease_wire_unit_round_trips + lease_from_wire_saturates (SSOT pair), encode_open_derives_t_flag_from_lease + parse_inbound_projects_open_lease_to_ms (boundary pins)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features codec-open-body,codec-init-body --lib: 132 passed 0 failed (4 new lease-unit tests)",
+        "cargo test -p wz-runtime-tokio (lib + all integration bins incl. session_glue_dispatch / session_fsm_*): 0 failures; wz-session-lwip isolated cargo check clean",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (unpiped; ledger appended after green)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "session-review Findings A-D all closed (kt: C+D, ku: A+B)",
+        "NEW unicast peer-lease parity gap (verified, not regressed by ku): pico unicast adopts min(peer OPEN-advertised lease, Z_TRANSPORT_LEASE) as the session lease (transport.c:193/269 — the same min(advertised, local-cap) shape R311ks gave multicast) and sweeps by it (unicast/lease.c); wz check_lease_deadline uses only the LOCAL params.lease_ms — the peer's OPEN lease is parsed (now correctly in ms post-ku) but unconsumed",
+        "no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ],
+      "publishable_decision_summary": "R311ku session-review Findings A+B: lease wire-unit SSOT (lease_to_wire/from_wire) — SessionInitParams goes lease_ms-only, encode_open derives T like pico make_open, parse boundaries project back to ms, 5 scattered projections collapse.",
+      "publishable_changes_bullets": [
+        "lease::lease_to_wire / lease_from_wire (wz-session-core, const fns) — the ONE home for the _Z_FLAG_T_*_T wire-unit rule both transports consume (session-review Finding B closed: the projection previously lived in 5 scattered sites — drive.rs / session_glue.rs / session_drive.rs consumer triplication + the JOIN encode/decode inline pair)",
+        "SessionInitParams.lease + lease_in_seconds -> lease_ms (always milliseconds on both sides, MulticastParams precedent): encode_open derives T itself via lease_to_wire (pico _z_t_msg_make_open_syn/_ack parity, definitions/transport.c:196-214 — Finding A closed: wz used to send lease 10000 as T=0+VLE 10000 where pico always compacts to T=1+VLE 10, and JOIN auto-derived while OPEN was a manual knob)",
+        "parse_inbound OPEN arm projects body.lease back to ms at the wire boundary (lease_from_wire) and the InboundFrame::Open lease_in_seconds field is REMOVED (produced-but-never-consumed; same boundary rule as multicast_join::decode_join)",
+        "the three consumer projection blocks collapse to params.lease_ms direct reads; multicast_join encode/decode re-consume the SSOT pair; 9 construction sites converted (unit-correct: lease 10/true -> lease_ms 10_000 at mcu-acceptor + session-lwip, lease 30/true -> 30_000 at session_glue_dispatch)",
+        "tests: lease_wire_unit_round_trips + lease_from_wire_saturates (SSOT pair), encode_open_derives_t_flag_from_lease + parse_inbound_projects_open_lease_to_ms (boundary pins)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features codec-open-body,codec-init-body --lib: 132 passed 0 failed (4 new lease-unit tests)",
+        "cargo test -p wz-runtime-tokio (lib + all integration bins incl. session_glue_dispatch / session_fsm_*): 0 failures; wz-session-lwip isolated cargo check clean",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (unpiped; ledger appended after green)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session-review Findings A-D all closed (kt: C+D, ku: A+B)",
+        "NEW unicast peer-lease parity gap (verified, not regressed by ku): pico unicast adopts min(peer OPEN-advertised lease, Z_TRANSPORT_LEASE) as the session lease (transport.c:193/269 — the same min(advertised, local-cap) shape R311ks gave multicast) and sweeps by it (unicast/lease.c); wz check_lease_deadline uses only the LOCAL params.lease_ms — the peer's OPEN lease is parsed (now correctly in ms post-ku) but unconsumed",
+        "no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
