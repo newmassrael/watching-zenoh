@@ -591,7 +591,8 @@
         "R311kn: multicast TX still frame-only - oversize split (fragment_body at TX seam) is follow-up.",
         "R311ko: multicast TX fragment split wired at the Push seam; batch_size knob + JOIN mismatch reject",
         "R311kq: JOIN omitted optional = protocol default (8192/0x02); off-default config advertises S=1",
-        "R311kr: JOIN T flag = lease wire-unit seconds (whole-second leases); decode projects back to ms"
+        "R311kr: JOIN T flag = lease wire-unit seconds (whole-second leases); decode projects back to ms",
+        "R311ks: peer sweep holds each peer per ITS JOIN-advertised lease, capped by the local config bound"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -33561,6 +33562,48 @@
         "F-6 deferred-fire (R311kj carry) stays open",
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop",
         "NEW per-peer advertised-lease sweep gap: pico stores the JOIN lease per peer entry (multicast/rx.c:393) and evicts each peer by ITS advertised lease (multicast/lease.c:124); wz sweeps every peer by the local MulticastConfig::lease_ms and the decoded join.lease is unconsumed on RX"
+      ]
+    },
+    "Round 311ks": {
+      "decision_summary": "R311ks per-peer advertised-lease sweep: each multicast peer is held for the lease its own JOIN advertised (pico entry->_lease parity), capped by the local config bound so the bounded pool stays drainable.",
+      "changes_bullets": [
+        "PeerSlot.lease_ms — each peer stores the lease ITS OWN JOIN advertised, set at admit AND refresh through seed_from_join (renamed from seed_rx_sn; zenoh-pico entry->_lease = msg->_lease, multicast/rx.c:393/456 — pico copies SN baselines and lease at the same two sites)",
+        "sweep/sweep_with — per-peer hold window: evict at last_seen + min(advertised, MulticastConfig::lease_ms) (pico evicts against peer->_lease, lease.c:124); the local cap is the deadline-model equivalent of pico's group-min sweep cadence (_z_get_minimum_lease) and keeps the bounded pool drainable when a peer advertises an absurd lease (u64::MAX would otherwise pin a slot forever -> PeerTableFull wedge)",
+        "MulticastConfig::lease_ms re-documented: \"the lease window\" -> the local MAXIMUM hold bound; no signature change, all construction sites untouched",
+        "JoinSnBaseline renamed JoinBaseline + lease_ms field (R311kp rename precedent): validate_join stays the single JOIN->Router projection home, passing join.lease through (always ms post-R311kr decode projection); lease is NOT validated, any advertisement admitted (pico parity)",
+        "tests: sweep_holds_each_peer_per_its_advertised_lease + sweep_caps_advertised_lease_at_local_bound + rejoin_updates_advertised_lease (dispatch) + validate_join_passes_advertised_lease (glue wire->baseline flow); sn0() fixture advertises the config cap so pre-R311ks sweep arithmetic is untouched"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features session-multicast --lib multicast_dispatch: 32 passed 0 failed (3 new per-peer lease tests)",
+        "C1q all three arms green: multicast_glue 19 / +reassembly 23 / +transport-fragmentation 25 passed, 0 failed",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (both unpiped exit-code capture)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ],
+      "publishable_decision_summary": "R311ks per-peer advertised-lease sweep: each multicast peer is held for the lease its own JOIN advertised (pico entry->_lease parity), capped by the local config bound so the bounded pool stays drainable.",
+      "publishable_changes_bullets": [
+        "PeerSlot.lease_ms — each peer stores the lease ITS OWN JOIN advertised, set at admit AND refresh through seed_from_join (renamed from seed_rx_sn; zenoh-pico entry->_lease = msg->_lease, multicast/rx.c:393/456 — pico copies SN baselines and lease at the same two sites)",
+        "sweep/sweep_with — per-peer hold window: evict at last_seen + min(advertised, MulticastConfig::lease_ms) (pico evicts against peer->_lease, lease.c:124); the local cap is the deadline-model equivalent of pico's group-min sweep cadence (_z_get_minimum_lease) and keeps the bounded pool drainable when a peer advertises an absurd lease (u64::MAX would otherwise pin a slot forever -> PeerTableFull wedge)",
+        "MulticastConfig::lease_ms re-documented: \"the lease window\" -> the local MAXIMUM hold bound; no signature change, all construction sites untouched",
+        "JoinSnBaseline renamed JoinBaseline + lease_ms field (R311kp rename precedent): validate_join stays the single JOIN->Router projection home, passing join.lease through (always ms post-R311kr decode projection); lease is NOT validated, any advertisement admitted (pico parity)",
+        "tests: sweep_holds_each_peer_per_its_advertised_lease + sweep_caps_advertised_lease_at_local_bound + rejoin_updates_advertised_lease (dispatch) + validate_join_passes_advertised_lease (glue wire->baseline flow); sn0() fixture advertises the config cap so pre-R311ks sweep arithmetic is untouched"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features session-multicast --lib multicast_dispatch: 32 passed 0 failed (3 new per-peer lease tests)",
+        "C1q all three arms green: multicast_glue 19 / +reassembly 23 / +transport-fragmentation 25 passed, 0 failed",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (both unpiped exit-code capture)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
       ]
     },
     "Round 311n": {
