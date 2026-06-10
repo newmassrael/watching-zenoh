@@ -589,7 +589,8 @@
         "R311kl supersedes cfg-off-forces-65535: negotiation core (ungated); cfg-off = no coalescing only.",
         "R311kn: multicast Fragment RX wired (transport-multicast x reassembly); per-peer-slot chains.",
         "R311kn: multicast TX still frame-only - oversize split (fragment_body at TX seam) is follow-up.",
-        "R311ko: multicast TX fragment split wired at the Push seam; batch_size knob + JOIN mismatch reject"
+        "R311ko: multicast TX fragment split wired at the Push seam; batch_size knob + JOIN mismatch reject",
+        "R311kq: JOIN omitted optional = protocol default (8192/0x02); off-default config advertises S=1"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -33469,6 +33470,50 @@
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
       ],
       "publishable_carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ]
+    },
+    "Round 311kq": {
+      "decision_summary": "R311kq session-review fix: JOIN omitted optionals mean the PROTOCOL defaults (8192/0x02) and a non-default config advertises S=1 (pico make_join parity); resolution cbyte decomposed into seq+req; frame_wire_body SSOT.",
+      "changes_bullets": [
+        "PROTOCOL_DEFAULT_RESOLUTION/BATCH_SIZE (8192) consts + pack/unpack_res_cbyte (host decompose SSOT)",
+        "MulticastParams.req_id_res; encode_join advertises S=1 when off-default (pico make_join parity)",
+        "validate_join: omitted optional = PROTOCOL default (was local); res cbyte decomposed seq+req",
+        "frame_encode::frame_wire_body - FRAME-prefix offset single home (unicast+multicast re-framers)",
+        "TX seam docs refreshed (MulticastTxItem / outbound param); 4 new validate/encode JOIN tests"
+      ],
+      "verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped capture)",
+        "Layer M opt-in EXIT=0 (both pubsub e2e legs; non-default groups now advertise S=1)",
+        "C1q arms 16/20/22 green; pre-fix whole-byte cbyte compare refused compatible S=1 announcers"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "JOIN T-flag (lease-in-seconds) decode unmodeled; default pico lease 10000ms sets T - interop gap",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ],
+      "publishable_decision_summary": "R311kq session-review fix: JOIN omitted optionals mean the PROTOCOL defaults (8192/0x02) and a non-default config advertises S=1 (pico make_join parity); resolution cbyte decomposed into seq+req; frame_wire_body SSOT.",
+      "publishable_changes_bullets": [
+        "PROTOCOL_DEFAULT_RESOLUTION/BATCH_SIZE (8192) consts + pack/unpack_res_cbyte (host decompose SSOT)",
+        "MulticastParams.req_id_res; encode_join advertises S=1 when off-default (pico make_join parity)",
+        "validate_join: omitted optional = PROTOCOL default (was local); res cbyte decomposed seq+req",
+        "frame_encode::frame_wire_body - FRAME-prefix offset single home (unicast+multicast re-framers)",
+        "TX seam docs refreshed (MulticastTxItem / outbound param); 4 new validate/encode JOIN tests"
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped capture)",
+        "Layer M opt-in EXIT=0 (both pubsub e2e legs; non-default groups now advertise S=1)",
+        "C1q arms 16/20/22 green; pre-fix whole-byte cbyte compare refused compatible S=1 announcers"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "JOIN T-flag (lease-in-seconds) decode unmodeled; default pico lease 10000ms sets T - interop gap",
         "F-6 deferred-fire (R311kj carry) stays open",
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
       ]
