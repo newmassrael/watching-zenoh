@@ -586,7 +586,9 @@
         "R311jv: transport-multicast forward grew codec-frame (kconfig select for the data plane).",
         "R311jw: multicast TX half landed (TxSn + outbound seam + Layer M e2e) - data plane full-duplex.",
         "R311ka: Frame fan routes Declare too - multicast-declarations RX half implicitly live, TX pending.",
-        "R311kl supersedes cfg-off-forces-65535: negotiation core (ungated); cfg-off = no coalescing only."
+        "R311kl supersedes cfg-off-forces-65535: negotiation core (ungated); cfg-off = no coalescing only.",
+        "R311kn: multicast Fragment RX wired (transport-multicast x reassembly); per-peer-slot chains.",
+        "R311kn: multicast TX still frame-only - oversize split (fragment_body at TX seam) is follow-up."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -33338,6 +33340,54 @@
       "publishable_carry_forward_bullets": [
         "F-6 (R311kj carry) stays open: deferred-fire (callbacks outside the observer lock) cross-cutting redesign awaits a dedicated round",
         "R311kj carry triple fully resolved: F-5 (R311kl) + F-8 (R311km) closed, F-6 carried deliberately"
+      ]
+    },
+    "Round 311kn": {
+      "decision_summary": "R311kn multicast Fragment RX: per-peer dbuf parity - fragments SN-gate per peer slot, reassemble under slot-index chain keys via the shared Router, and fan to the same observer event as frames.",
+      "changes_bullets": [
+        "session-core: FragmentIngest + ingest_fragment_by_src - fragments share the frame SN ring per peer",
+        "multicast_chain_key slot-index keys + abort_peer_chains + sweep_with eviction observer",
+        "shared ingest_multicast_fragment pipeline (alloc-gated); fans the same observer event as frames",
+        "driver_loop: reassembled_frame_outcome + ReassemblyDropReason::from_ingest; unicast rewired (SSOT)",
+        "multicast_glue: T_MID_FRAGMENT arm; frame-OOO chain abort; Close/sweep abort before slot reuse",
+        "run-ci C1p/C1q reassembly-union arms; 17 new tests incl slot-reuse + frame-OOO pins"
+      ],
+      "verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 direct capture; opt-in Layer M e2e EXIT 0",
+        "no-alloc union cargo check (session-multicast,reassembly,no_std) EXIT 0 after caught E0432",
+        "pico direct read: multicast/rx.c fragment_inner precedes->consecutive->dbuf; frame-OOO clears dbuf"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "multicast TX fragmentation unwired: compose frame_encode::fragment_body at the MulticastTxItem seam",
+        "chain gate compares chain-internal last_sn (R311kb precedent); pico uses channel rx_sn - doc'd",
+        "ReassemblyFragment.zid carries a non-zid slot key on multicast; peer_key rename candidate",
+        "F-6 deferred-fire (R311kj carry) stays open"
+      ],
+      "publishable_decision_summary": "R311kn multicast Fragment RX: per-peer dbuf parity - fragments SN-gate per peer slot, reassemble under slot-index chain keys via the shared Router, and fan to the same observer event as frames.",
+      "publishable_changes_bullets": [
+        "session-core: FragmentIngest + ingest_fragment_by_src - fragments share the frame SN ring per peer",
+        "multicast_chain_key slot-index keys + abort_peer_chains + sweep_with eviction observer",
+        "shared ingest_multicast_fragment pipeline (alloc-gated); fans the same observer event as frames",
+        "driver_loop: reassembled_frame_outcome + ReassemblyDropReason::from_ingest; unicast rewired (SSOT)",
+        "multicast_glue: T_MID_FRAGMENT arm; frame-OOO chain abort; Close/sweep abort before slot reuse",
+        "run-ci C1p/C1q reassembly-union arms; 17 new tests incl slot-reuse + frame-OOO pins"
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 direct capture; opt-in Layer M e2e EXIT 0",
+        "no-alloc union cargo check (session-multicast,reassembly,no_std) EXIT 0 after caught E0432",
+        "pico direct read: multicast/rx.c fragment_inner precedes->consecutive->dbuf; frame-OOO clears dbuf"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "multicast TX fragmentation unwired: compose frame_encode::fragment_body at the MulticastTxItem seam",
+        "chain gate compares chain-internal last_sn (R311kb precedent); pico uses channel rx_sn - doc'd",
+        "ReassemblyFragment.zid carries a non-zid slot key on multicast; peer_key rename candidate",
+        "F-6 deferred-fire (R311kj carry) stays open"
       ]
     },
     "Round 311n": {
