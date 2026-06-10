@@ -96,9 +96,27 @@ pub(crate) fn recording_actions() -> (Arc<SessionLinkActions>, Arc<RecordingLink
 pub(crate) fn recording_actions_with_params(
     params: SessionInitParams,
 ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
-    let driver = Arc::new(RecordingLinkDriver {
-        frames: Mutex::new(Vec::new()),
-    });
+    let driver = recording_driver();
     let actions = new_session_actions(driver.clone(), params, TokioTime::new());
     (actions, driver)
+}
+
+/// A4 — a bare [`RecordingLinkDriver`] handle, for tests that wire the
+/// recorder BEHIND another [`BoxedLinkDriver`] layer (the `SwappableLink`
+/// transport-replacement seam) instead of using it as the actions driver
+/// directly.
+pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
+    Arc::new(RecordingLinkDriver {
+        frames: Mutex::new(Vec::new()),
+    })
+}
+
+/// A4 — [`recording_actions`] variant that accepts the caller's driver
+/// (e.g. a `SwappableLink` wrapping a [`RecordingLinkDriver`]) so a test
+/// can interpose on the link seam while keeping the deterministic
+/// [`fixture_session_init_params`].
+pub(crate) fn recording_actions_with_driver(
+    driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
+) -> Arc<SessionLinkActions> {
+    new_session_actions(driver, fixture_session_init_params(), TokioTime::new())
 }

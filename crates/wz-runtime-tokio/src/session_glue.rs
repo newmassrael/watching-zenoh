@@ -2225,3 +2225,238 @@ mod batch_tx_tests {
         }
     }
 }
+
+/// A4 (session-reconnect) — declaration-cache + transport-replacement
+/// behavioural guards. zenoh-pico `Z_FEATURE_AUTO_RECONNECT` parity at the
+/// actions tier: declares append cache entries (`_z_cache_declaration`),
+/// undeclares prune them (`_z_prune_declaration`), `reset_for_reopen`
+/// clears exactly the handshake-scoped state (pico recreating
+/// `_z_transport_t` while `_z_session_t` survives), and
+/// `replay_declarations` re-emits the recorded entries byte-identically
+/// onto the post-reset link (`_z_client_reopen_task_fn`'s cache walk). The
+/// re-dial supervisor riding these seams is A4b.
+#[cfg(all(
+    test,
+    feature = "session-reconnect",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "declare-undeclare",
+    feature = "codec-push"
+))]
+mod reconnect_tx_tests {
+    use std::sync::Arc;
+
+    use wz_session_core::reconnect::{CachedDeclaration, SwappableLink};
+
+    use crate::runtime_impl::TokioRuntime;
+
+    /// Every cached-kind declare appends one entry in emit order; each
+    /// matching undeclare prunes exactly its own entry (first-match,
+    /// pico `_z_prune_declaration` filter semantics).
+    #[test]
+    fn declares_populate_and_undeclares_prune_the_cache() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_declare_keyexpr(7, "home/base")
+            .expect("declare keyexpr");
+        actions
+            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .expect("declare subscriber");
+        actions
+            .send_declare_queryable(11, 0, Some("home/qry"))
+            .expect("declare queryable");
+        actions
+            .send_declare_token(12, 0, Some("home/tok"))
+            .expect("declare token");
+        actions
+            .send_interest_liveliness_subscriber(13, /*history=*/ false, 0, Some("home/liv"))
+            .expect("liveliness subscriber interest");
+        actions
+            .send_interest_liveliness_get(14, 0, Some("home/get"))
+            .expect("liveliness get interest");
+
+        let cache = actions.declaration_cache_snapshot();
+        assert_eq!(cache.len(), 6, "every cached-kind emit appends one entry");
+        assert_eq!(
+            cache[0],
+            CachedDeclaration::Keyexpr {
+                mapping_id: 7,
+                suffix: "home/base".into()
+            },
+            "entries record in emit order (DeclKexpr first)"
+        );
+
+        // Prune one kind at a time; unrelated entries must survive.
+        actions.send_undeclare_subscriber(10);
+        assert_eq!(actions.declaration_cache_snapshot().len(), 5);
+        actions.send_undeclare_queryable(11);
+        actions.send_undeclare_token(12);
+        actions.send_interest_final(13);
+        actions.send_interest_final(14);
+        let cache = actions.declaration_cache_snapshot();
+        assert_eq!(
+            cache,
+            vec![CachedDeclaration::Keyexpr {
+                mapping_id: 7,
+                suffix: "home/base".into()
+            }],
+            "only the never-undeclared DeclKexpr entry survives"
+        );
+        actions.send_undeclare_kexpr(7);
+        assert!(
+            actions.declaration_cache_snapshot().is_empty(),
+            "the final undeclare drains the cache"
+        );
+
+        // Unknown-id undeclare is a no-op prune (pico drop_first_filter
+        // finding no match).
+        actions.send_undeclare_subscriber(999);
+        assert!(actions.declaration_cache_snapshot().is_empty());
+    }
+
+    /// `replay_declarations` after `reset_for_reopen` re-emits wire bytes
+    /// byte-identical to the original declares: the SN re-seed makes the
+    /// replayed frames repeat the original frame SNs, and the builders
+    /// re-derive identical bodies from the cached argument tuples.
+    #[test]
+    fn replay_after_reset_re_emits_identical_wire_bytes() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_declare_keyexpr(7, "home/base")
+            .expect("declare keyexpr");
+        actions
+            .send_declare_subscriber(10, 7, Some("/tail"))
+            .expect("aliased subscriber declare");
+        actions
+            .send_interest_liveliness_subscriber(13, true, 0, Some("home/liv"))
+            .expect("liveliness subscriber interest");
+        let original: Vec<Vec<u8>> = (0..3).map(|i| driver.frame_bytes(i)).collect();
+
+        actions.reset_for_reopen();
+        let replayed = actions
+            .replay_declarations()
+            .expect("replay over validated cache entries cannot reject");
+        assert_eq!(replayed, 3, "every cached entry replays");
+        assert_eq!(driver.frame_count(), 6, "replay emits one frame per entry");
+        for (i, expected) in original.iter().enumerate() {
+            assert_eq!(
+                &driver.frame_bytes(3 + i),
+                expected,
+                "replayed frame {i} must be byte-identical (same SN seed, \
+                 same builder args, same alias order)"
+            );
+        }
+        assert_eq!(
+            actions.declaration_cache_snapshot().len(),
+            3,
+            "replay must not re-append (cache stays ready for the NEXT reconnect)"
+        );
+    }
+
+    /// `reset_for_reopen` clears exactly the handshake-scoped state and
+    /// preserves the session-scoped state (pico: new `_z_transport_t`,
+    /// surviving `_z_session_t`).
+    #[test]
+    fn reset_for_reopen_clears_handshake_scoped_state_only() {
+        use wz_runtime_core::Runtime;
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_declare_keyexpr(7, "home/base")
+            .expect("declare keyexpr");
+
+        // Stamp the handshake-scoped slots the open path would populate.
+        TokioRuntime::with_mutex_mut(&actions.established_at, |slot| *slot = Some(42));
+        TokioRuntime::with_mutex_mut(&actions.last_inbound_keepalive_at, |slot| *slot = Some(43));
+        TokioRuntime::with_mutex_mut(&actions.inbound_cookie, |slot| *slot = Some(vec![1, 2]));
+        TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot = Some(vec![9; 4]));
+        assert!(actions.is_established());
+
+        actions.reset_for_reopen();
+
+        assert!(
+            !actions.is_established(),
+            "reset must drop Established so declare gates hold until re-handshake"
+        );
+        assert!(TokioRuntime::with_mutex_mut(
+            &actions.last_inbound_keepalive_at,
+            |slot| slot.is_none()
+        ));
+        assert!(TokioRuntime::with_mutex_mut(
+            &actions.inbound_cookie,
+            |slot| slot.is_none()
+        ));
+        assert!(TokioRuntime::with_mutex_mut(
+            &actions.inbound_peer_zid,
+            |slot| slot.is_none()
+        ));
+        // Session-scoped survivors.
+        assert_eq!(
+            actions.resolve_outbound_mapping(7).as_deref(),
+            Some("home/base"),
+            "outbound mapping table survives the reset (replay re-declares it \
+             to the PEER; local resolution never lapsed)"
+        );
+        assert_eq!(
+            actions.declaration_cache_snapshot().len(),
+            1,
+            "the declaration cache IS the replay source — must survive"
+        );
+        // SN re-seed: the next emitted frame repeats the initial SN.
+        let pre_reset_first_frame = driver.frame_bytes(0);
+        actions
+            .send_push_literal("home/x", b"p", true)
+            .expect("post-reset push");
+        let post = driver.frame_bytes(driver.frame_count() - 1);
+        assert_eq!(
+            post[1], pre_reset_first_frame[1],
+            "post-reset frame must restart at params.initial_sn (1-byte VLE \
+             SN at offset 1 for the fixture params)"
+        );
+    }
+
+    /// `SwappableLink` delegates to whatever sink `swap` installed last —
+    /// the transport-replacement seam the A4b supervisor swaps after
+    /// re-dial (pico replacing `_z_session_t._tp` under the transport
+    /// mutex). The supervisor's handle discipline is mirrored here: keep
+    /// the TYPED `Arc<SwappableLink<_>>` for swapping and hand a coerced
+    /// `Arc<dyn BoxedLinkDriver + Send + Sync>` clone to the actions
+    /// bundle as its driver.
+    #[test]
+    fn swappable_link_redirects_sends_after_swap() {
+        let first = crate::test_fixtures::recording_driver();
+        let second = crate::test_fixtures::recording_driver();
+        let link = Arc::new(SwappableLink::<TokioRuntime>::new(first.clone()));
+
+        let actions = crate::test_fixtures::recording_actions_with_driver(link.clone());
+        actions
+            .send_declare_keyexpr(7, "home/base")
+            .expect("declare via swappable link");
+        assert_eq!(
+            first.frame_count(),
+            1,
+            "pre-swap emits land on the first sink"
+        );
+        assert_eq!(second.frame_count(), 0);
+
+        let old = link.swap(second.clone());
+        drop(old);
+
+        actions
+            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .expect("declare after swap");
+        assert_eq!(
+            first.frame_count(),
+            1,
+            "post-swap emits must not reach the replaced sink"
+        );
+        assert_eq!(
+            second.frame_count(),
+            1,
+            "post-swap emits land on the new sink"
+        );
+    }
+}

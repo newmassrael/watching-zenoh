@@ -927,7 +927,10 @@
         "Both features default-on so AP path binds both sides; deploy can disable one for asymmetric profile.",
         "R311cn audit: 7 reserved 0 cfg (extauth/extcompression/extqos/extshm/multi/resume/stateless).",
         "Round A: session-multicast reserved->active (R311jh); now a real cfg toggle, not always-on.",
-        "Active session-domain count now 3 (open/accept/multicast); multicast FSM is handshake-free."
+        "Active session-domain count now 3 (open/accept/multicast); multicast FSM is handshake-free.",
+        "session-reconnect (R311jr) = state tier only; re-dial supervisor is the A4b carry, not yet e2e.",
+        "SwappableLink needs LinkSink: Send — lwIP Rc sink is !Send; MCU reconnect = follow-up seam.",
+        "reset re-seeds params.initial_sn where pico mints a fresh random SN; OpenSyn renegotiates either."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32262,6 +32265,58 @@
         "negotiated-min MTU (peer batch_size) carry stands (R311jm); NEXT=A4 auto-reconnect"
       ]
     },
+    "Round 311jr": {
+      "decision_summary": "R311jr A4a session-reconnect groundwork: declaration cache (pico _z_cache/_z_prune parity) + reset_for_reopen + replay_declarations + SwappableLink swap seam; re-dial supervisor = A4b.",
+      "changes_bullets": [
+        "wz-session-core reconnect.rs (new): CachedDeclaration 6 kinds + ReplayDeclarationsError + SwappableLink<R> (R::Mutex<R::LinkSink> BoxedLinkDriver delegate, swap returns old sink)",
+        "declaration_cache field on SessionLinkActions; success-only append hooks in 6 typed emits (4 declares + 2 liveliness interests, pico _z_cache_declaration parity)",
+        "prune hooks in 4 send_undeclare_* + send_interest_final (first-match by id, pico _z_prune_declaration filter parity; interest filter matches both Interest kinds)",
+        "reset_for_reopen clears handshake-scoped state only (cookies/established_at/keepalive/peer zid+caps/batch window; SN re-seed params.initial_sn); mappings/id allocators/cache survive",
+        "replay_declarations re-emits cache in recorded order via builders + dispatch chokepoint (fresh frame SN per R311jq); replay/reset/snapshot trio signature-stable when feature off",
+        "Cargo: session-core session-reconnect=[\"alloc\"]; wz-runtime-tokio same-named forward + batteries-included default (pico Z_FEATURE_AUTO_RECONNECT default ON parity)"
+      ],
+      "verification_bullets": [
+        "4 reconnect_tx_tests: cache populate/prune per kind; replay byte-identical post-reset (3 frames incl aliased subscriber after DeclKexpr); reset clears only handshake scope + SN restart pin; SwappableLink redirect after swap",
+        "225 wz-runtime-tokio lib tests + 113 wz-session-core tests pass; clippy --all-targets 0 warnings",
+        "reconnect-off subset (--no-default-features alloc+session-unicast) compiles: signature-stability holds",
+        "full host run-ci EXIT 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "A4b: tokio reconnect supervisor - re-dial retained locator+params on retryable loss (1s transient cadence + permanent give-up, pico _z_client_reopen_task_fn parity), SwappableLink wiring into the open path, fresh engine on same actions, post-Established replay, e2e peer drop->re-accept, CI NEG lane (FeatureDisabled when off)",
+        "A4c: facade wz forward + presets (ap-client/-full/zenoh-cpp follow pico default-ON) + session-fsm.md prose note",
+        "MCU follow-up: Rc<dyn> sink is !Send so SwappableLink is AP-only; bounded no-alloc cache + single-task swap seam (same staging as MCU TX fragmentation R311jm)",
+        "accepted parity gap (caveat on 5-4-session): pico mints fresh random initial_sn per reopen; wz re-seeds params.initial_sn - equivalent because OpenSyn renegotiates the start value",
+        "prior carries unchanged: negotiated-min MTU (R311jm); non-batched mint-vs-enqueue order race; MCU critical_section span during batch emits (R311jq)"
+      ],
+      "publishable_decision_summary": "R311jr A4a session-reconnect groundwork: declaration cache (pico _z_cache/_z_prune parity) + reset_for_reopen + replay_declarations + SwappableLink swap seam; re-dial supervisor = A4b.",
+      "publishable_changes_bullets": [
+        "wz-session-core reconnect.rs (new): CachedDeclaration 6 kinds + ReplayDeclarationsError + SwappableLink<R> (R::Mutex<R::LinkSink> BoxedLinkDriver delegate, swap returns old sink)",
+        "declaration_cache field on SessionLinkActions; success-only append hooks in 6 typed emits (4 declares + 2 liveliness interests, pico _z_cache_declaration parity)",
+        "prune hooks in 4 send_undeclare_* + send_interest_final (first-match by id, pico _z_prune_declaration filter parity; interest filter matches both Interest kinds)",
+        "reset_for_reopen clears handshake-scoped state only (cookies/established_at/keepalive/peer zid+caps/batch window; SN re-seed params.initial_sn); mappings/id allocators/cache survive",
+        "replay_declarations re-emits cache in recorded order via builders + dispatch chokepoint (fresh frame SN per R311jq); replay/reset/snapshot trio signature-stable when feature off",
+        "Cargo: session-core session-reconnect=[\"alloc\"]; wz-runtime-tokio same-named forward + batteries-included default (pico Z_FEATURE_AUTO_RECONNECT default ON parity)"
+      ],
+      "publishable_verification_bullets": [
+        "4 reconnect_tx_tests: cache populate/prune per kind; replay byte-identical post-reset (3 frames incl aliased subscriber after DeclKexpr); reset clears only handshake scope + SN restart pin; SwappableLink redirect after swap",
+        "225 wz-runtime-tokio lib tests + 113 wz-session-core tests pass; clippy --all-targets 0 warnings",
+        "reconnect-off subset (--no-default-features alloc+session-unicast) compiles: signature-stability holds",
+        "full host run-ci EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A4b: tokio reconnect supervisor - re-dial retained locator+params on retryable loss (1s transient cadence + permanent give-up, pico _z_client_reopen_task_fn parity), SwappableLink wiring into the open path, fresh engine on same actions, post-Established replay, e2e peer drop->re-accept, CI NEG lane (FeatureDisabled when off)",
+        "A4c: facade wz forward + presets (ap-client/-full/zenoh-cpp follow pico default-ON) + session-fsm.md prose note",
+        "MCU follow-up: Rc<dyn> sink is !Send so SwappableLink is AP-only; bounded no-alloc cache + single-task swap seam (same staging as MCU TX fragmentation R311jm)",
+        "accepted parity gap (caveat on 5-4-session): pico mints fresh random initial_sn per reopen; wz re-seeds params.initial_sn - equivalent because OpenSyn renegotiates the start value",
+        "prior carries unchanged: negotiated-min MTU (R311jm); non-batched mint-vs-enqueue order race; MCU critical_section span during batch emits (R311jq)"
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
@@ -38466,6 +38521,12 @@
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh-pico multicast session FSM",
       "reason": "Round A (R311jh): gates the handshake-free multicast session FSM (session_fsm_multicast.scxml + multicast_peer.scxml) + MulticastDispatcher Router in wz-session-core. Real cfg toggle, not always-on."
+    },
+    "session-reconnect": {
+      "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+      "source": "crates/wz-session-core/src/reconnect.rs + session_actions declaration_cache",
+      "reason": "F=declaration cache + reset_for_reopen/replay_declarations + SwappableLink swap seam; P=zenoh-pico Z_FEATURE_AUTO_RECONNECT; C=A4a state tier (re-dial supervisor=A4b carry), tokio default ON per pico parity"
     },
     "session-resumable": {
       "status": "reserved",

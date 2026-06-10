@@ -131,6 +131,7 @@ default = [
     "pubsub-express",
     "session-unicast-open",
     "session-unicast-accept",
+    "session-reconnect",
     "keyexpr-canon",
     "keyexpr-wildcard-single",
     "keyexpr-wildcard-double",
@@ -374,6 +375,13 @@ transport-keepalive = ["wz-session-core/transport-keepalive"]
 # consistently (off clamps to full MTU). The min(peer, local) reduction at
 # the OpenAck arm stays gated in this crate.
 transport-batching = ["wz-session-core/transport-batching"]
+# A4 — forward to the wz-session-core same-named gate (declaration cache
+# storage + reset_for_reopen / replay_declarations bodies). zenoh-pico
+# Z_FEATURE_AUTO_RECONNECT parity; pico defaults it ON (CMakeLists
+# Z_FEATURE_AUTO_RECONNECT=1), so this crate's batteries-included default
+# set carries it like transport-batching/-keepalive. The re-dial +
+# re-handshake supervisor loop is this crate's side (A4b).
+session-reconnect = ["wz-session-core/session-reconnect"]
 # R311cc — pubsub domain wire-up. 9 atomic features (Cargo.toml
 # authoring intent: "11 atomic, 9 active / 2 reserved"). After the
 # R311du SubscriberRegistry move + R311fv attachment SSOT, only TWO

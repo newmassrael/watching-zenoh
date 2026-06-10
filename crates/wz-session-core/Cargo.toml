@@ -403,6 +403,19 @@ transport-batching = []
 # codec-keep-alive axis). The wz-runtime-tokio side forwards here.
 transport-keepalive = []
 
+# A4 — session-reconnect gates the declaration-cache STORAGE on the
+# actions bundle (`declaration_cache` field + the append/prune hooks in
+# the send_declare_* / send_undeclare_* / send_interest_* emit paths) and
+# the `reset_for_reopen` / `replay_declarations` bodies. zenoh-pico
+# `Z_FEATURE_AUTO_RECONNECT` parity (`_z_session_t._declaration_cache`,
+# `_z_cache_declaration` / `_z_prune_declaration`,
+# `_z_client_reopen_task_fn`). Pulls `alloc` for the `Vec<CachedDeclaration>`
+# cache backing (the AP profile; a bounded no-alloc MCU cache is a
+# follow-up, same staging as MCU TX fragmentation). The reconnect
+# SUPERVISOR (re-dial + re-handshake loop) is runtime-side
+# (wz-runtime-tokio), which forwards its same-named feature here.
+session-reconnect = ["alloc"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

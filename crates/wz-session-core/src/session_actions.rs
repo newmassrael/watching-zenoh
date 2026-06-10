@@ -54,6 +54,11 @@ use crate::close_reason::CloseReason;
 use crate::ext_chain_role::ExtChainRole;
 use crate::link::{BoxedLinkDriver, SessionRuntime};
 use crate::peer_init_caps::PeerInitCaps;
+// A4 — the CachedDeclaration / ReplayDeclarationsError types stay ungated
+// (the reconnect module rides this module's own alloc+session-unicast gate)
+// so the signature-stable `replay_declarations` / `declaration_cache_snapshot`
+// surface keeps its types when `session-reconnect` is off (R311g1).
+use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
 // Reliability is the second arg of every `link_driver().send_blocking(..)`,
 // so it is used iff at least one wire-emit body is active: the handshake /
 // close encoders OR any consumer-plane frame emit (the frame_encode union).
@@ -329,6 +334,27 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// would dwarf the read parallelism gain at the expected
     /// access pattern.
     pub outbound_mappings: R::Mutex<HashMap<u64, String>>,
+    /// A4 (session-reconnect) — declaration cache. Mirrors zenoh-pico's
+    /// `_z_session_t._declaration_cache` slot
+    /// (`include/zenoh-pico/net/session.h` under
+    /// `Z_FEATURE_AUTO_RECONNECT`): every successful
+    /// `send_declare_{keyexpr,subscriber,queryable,token}` /
+    /// `send_interest_liveliness_{subscriber,get}` emit appends its
+    /// argument tuple here (pico `_z_cache_declaration` at
+    /// `_z_send_declare`, `src/net/primitives.c:52-63`); every successful
+    /// `send_undeclare_*` / `send_interest_final` removes the first
+    /// matching entry (pico `_z_prune_declaration` at
+    /// `_z_send_undeclare`). After a transport re-open,
+    /// [`Self::replay_declarations`] re-emits the entries in recorded
+    /// order so the peer's declaration tables are rebuilt — entry order
+    /// matters because an aliased declare must replay after the
+    /// `DeclKexpr` that registered its `mapping_id`.
+    ///
+    /// Append/prune mirror pico's success-only discipline: a rejected
+    /// emit caches nothing, and an undeclare whose emit path is
+    /// feature-elided prunes nothing.
+    #[cfg(feature = "session-reconnect")]
+    pub declaration_cache: R::Mutex<Vec<CachedDeclaration>>,
     /// R239 — monotonic outbound `Request.request_id` allocator.
     /// Mirrors zenoh-pico's `_z_session_t._query_id` slot
     /// (`vendor/zenoh-pico/src/session/query.c:99` —
@@ -557,6 +583,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-batching")]
             batch_tx: R::new_mutex(BatchTx::default()),
             outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
+            #[cfg(feature = "session-reconnect")]
+            declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
             next_outbound_request_id: AtomicU64::new(0),
             next_outbound_token_id: AtomicU64::new(0),
             next_outbound_interest_id: AtomicU64::new(0),
@@ -1340,6 +1368,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.outbound_mappings, |table| {
                 table.insert(mapping_id, suffix.to_string());
             });
+            // A4 — record for post-reconnect replay (pico
+            // `_z_cache_declaration` on `_Z_RES_OK`).
+            #[cfg(feature = "session-reconnect")]
+            self.cache_declaration(CachedDeclaration::Keyexpr {
+                mapping_id,
+                suffix: suffix.to_string(),
+            });
             Ok(())
         }
         #[cfg(not(feature = "declare-keyexpr"))]
@@ -1575,6 +1610,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare =
                 build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_declare(declare, /*reliable=*/ true);
+            // A4 — record for post-reconnect replay (pico
+            // `_z_cache_declaration` on `_Z_RES_OK`).
+            #[cfg(feature = "session-reconnect")]
+            self.cache_declaration(CachedDeclaration::Subscriber {
+                subscriber_id,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix.map(ToString::to_string),
+            });
             Ok(())
         }
         #[cfg(not(feature = "declare-subscriber"))]
@@ -1621,6 +1664,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let declare =
                 build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_declare(declare, /*reliable=*/ true);
+            // A4 — record for post-reconnect replay (pico
+            // `_z_cache_declaration` on `_Z_RES_OK`).
+            #[cfg(feature = "session-reconnect")]
+            self.cache_declaration(CachedDeclaration::Queryable {
+                queryable_id,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix.map(ToString::to_string),
+            });
             Ok(())
         }
         #[cfg(not(feature = "declare-queryable"))]
@@ -1662,6 +1713,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_declare(declare, /*reliable=*/ true);
+            // A4 — record for post-reconnect replay (pico
+            // `_z_cache_declaration` on `_Z_RES_OK`).
+            #[cfg(feature = "session-reconnect")]
+            self.cache_declaration(CachedDeclaration::Token {
+                token_id,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix.map(ToString::to_string),
+            });
             Ok(())
         }
         #[cfg(not(feature = "declare-token"))]
@@ -1723,6 +1782,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // undeclare emit path.
             R::with_mutex_mut(&self.outbound_mappings, |table| {
                 table.remove(&mapping_id);
+            });
+            // A4 — drop the matching replay entry (pico
+            // `_z_prune_declaration` undeclare-filter on `_id`).
+            #[cfg(feature = "session-reconnect")]
+            self.prune_declaration(|entry| {
+                matches!(entry, CachedDeclaration::Keyexpr { mapping_id: m, .. } if *m == mapping_id)
             });
         }
         #[cfg(not(all(feature = "declare-keyexpr", feature = "declare-undeclare")))]
@@ -1860,6 +1925,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let declare = build_undeclare_subscriber(subscriber_id);
             self.dispatch_declare(declare, /*reliable=*/ true);
+            // A4 — drop the matching replay entry (pico
+            // `_z_prune_declaration` undeclare-filter on `_id`).
+            #[cfg(feature = "session-reconnect")]
+            self.prune_declaration(|entry| {
+                matches!(entry, CachedDeclaration::Subscriber { subscriber_id: s, .. } if *s == subscriber_id)
+            });
         }
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
         let _ = subscriber_id;
@@ -1879,6 +1950,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let declare = build_undeclare_queryable(queryable_id);
             self.dispatch_declare(declare, /*reliable=*/ true);
+            // A4 — drop the matching replay entry (pico
+            // `_z_prune_declaration` undeclare-filter on `_id`).
+            #[cfg(feature = "session-reconnect")]
+            self.prune_declaration(|entry| {
+                matches!(entry, CachedDeclaration::Queryable { queryable_id: q, .. } if *q == queryable_id)
+            });
         }
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
         let _ = queryable_id;
@@ -1899,6 +1976,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let declare = build_undeclare_token(token_id);
             self.dispatch_declare(declare, /*reliable=*/ true);
+            // A4 — drop the matching replay entry (pico
+            // `_z_prune_declaration` undeclare-filter on `_id`).
+            #[cfg(feature = "session-reconnect")]
+            self.prune_declaration(|entry| {
+                matches!(entry, CachedDeclaration::Token { token_id: t, .. } if *t == token_id)
+            });
         }
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = token_id;
@@ -1994,6 +2077,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 keyexpr_suffix,
             )?;
             self.dispatch_interest(interest, /*reliable=*/ true);
+            // A4 — record for post-reconnect replay (pico caches the
+            // liveliness Interest via `_z_send_declare`,
+            // `net/liveliness.c:209`).
+            #[cfg(feature = "session-reconnect")]
+            self.cache_declaration(CachedDeclaration::LivelinessSubscriberInterest {
+                interest_id,
+                history,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix.map(ToString::to_string),
+            });
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -2033,6 +2126,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let interest =
                 build_interest_liveliness_get(interest_id, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_interest(interest, /*reliable=*/ true);
+            // A4 — record for post-reconnect replay (pico caches the
+            // one-shot CURRENT Interest via `_z_send_declare`,
+            // `net/liveliness.c:355`; never pruned there either — the
+            // post-reconnect replay is a harmless re-snapshot whose
+            // replies find no pending query).
+            #[cfg(feature = "session-reconnect")]
+            self.cache_declaration(CachedDeclaration::LivelinessGetInterest {
+                interest_id,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix.map(ToString::to_string),
+            });
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -2069,6 +2173,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let interest = build_interest_final(interest_id);
             self.dispatch_interest(interest, /*reliable=*/ true);
+            // A4 — drop the matching replay entry. pico's interest prune
+            // filter matches any cached `_Z_N_INTEREST` by `_id`
+            // (`_z_cache_declaration_undeclare_filter_interest`), so both
+            // the subscriber and get Interest forms prune here.
+            #[cfg(feature = "session-reconnect")]
+            self.prune_declaration(|entry| entry.interest_id() == Some(interest_id));
         }
         #[cfg(not(feature = "declare-interest"))]
         let _ = interest_id;
@@ -2327,6 +2437,233 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
+    }
+
+    /// A4 — append one replay entry to the declaration cache. The
+    /// success-only call sites (after each `dispatch_declare` /
+    /// `dispatch_interest` in the typed emit methods) mirror pico's
+    /// `_z_cache_declaration` running only on `_Z_RES_OK` from
+    /// `_z_send_n_msg` (`src/net/primitives.c:56-60`).
+    #[cfg(feature = "session-reconnect")]
+    fn cache_declaration(&self, entry: CachedDeclaration) {
+        R::with_mutex_mut(&self.declaration_cache, |cache| cache.push(entry));
+    }
+
+    /// A4 — remove the FIRST cache entry matching `pred`. First-match
+    /// (not retain-all) mirrors pico's
+    /// `_z_network_message_slist_drop_first_filter` in
+    /// `_z_prune_declaration`: one undeclare retracts one declare, so
+    /// re-declared ids keep their later entries.
+    #[cfg(feature = "session-reconnect")]
+    fn prune_declaration(&self, pred: impl Fn(&CachedDeclaration) -> bool) {
+        R::with_mutex_mut(&self.declaration_cache, |cache| {
+            if let Some(pos) = cache.iter().position(pred) {
+                cache.remove(pos);
+            }
+        });
+    }
+
+    /// A4 — snapshot of the declaration cache, in recorded (replay)
+    /// order. Test/diagnostic surface; the replay itself goes through
+    /// [`Self::replay_declarations`].
+    ///
+    /// R311g1 — signature-stability: always present; returns the empty
+    /// vec when `session-reconnect` is off (no cache storage exists).
+    pub fn declaration_cache_snapshot(&self) -> Vec<CachedDeclaration> {
+        #[cfg(feature = "session-reconnect")]
+        {
+            R::with_mutex_mut(&self.declaration_cache, |cache| cache.clone())
+        }
+        #[cfg(not(feature = "session-reconnect"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// A4 — reset the handshake-scoped half of the bundle so a fresh
+    /// open-handshake can run over a replacement link. The wz mirror of
+    /// pico's reopen creating a NEW `_z_transport_t` while
+    /// `_z_session_t` survives (`_z_client_reopen_task_fn` re-running
+    /// `_z_open`): wz's per-transport state lives on this bundle, so it
+    /// is cleared field-by-field instead of being dropped wholesale.
+    ///
+    /// Cleared (per-transport): `inbound_cookie`,
+    /// `inbound_opensyn_cookie`, `last_inbound_keepalive_at`,
+    /// `established_at` (so [`Self::is_established`] reads `false` until
+    /// the re-handshake completes), `inbound_peer_zid`,
+    /// `inbound_peer_init_caps`, the open batching window
+    /// (`transport-batching`), and `outbound_frame_sn` (re-seeded to
+    /// `params.initial_sn`, the value the re-handshake's OpenSyn
+    /// announces — pico mints a fresh random initial SN per `_z_open`;
+    /// wz reuses the params seed, equivalent because the peer adopts
+    /// whatever the OpenSyn carries).
+    ///
+    /// Preserved (session-scoped): the declaration cache (the replay
+    /// source), `outbound_mappings`, every `next_outbound_*` id
+    /// allocator (handles hold issued ids across the reconnect), the
+    /// ext-chain staging slots (outbound configuration, not peer
+    /// state), and the action trace (cumulative diagnostics).
+    ///
+    /// R311g1 — signature-stability: silent no-op when
+    /// `session-reconnect` is off.
+    pub fn reset_for_reopen(&self) {
+        #[cfg(feature = "session-reconnect")]
+        {
+            R::with_mutex_mut(&self.inbound_cookie, |slot| *slot = None);
+            R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
+            R::with_mutex_mut(&self.last_inbound_keepalive_at, |slot| *slot = None);
+            R::with_mutex_mut(&self.established_at, |slot| *slot = None);
+            R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
+            R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
+            #[cfg(feature = "transport-batching")]
+            R::with_mutex_mut(&self.batch_tx, |batch| *batch = BatchTx::default());
+            // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
+            // reset must not reorder against a straggling in-flight mint.
+            self.outbound_frame_sn
+                .store(self.params.initial_sn, Ordering::SeqCst);
+        }
+    }
+
+    /// A4 — re-emit every cached declaration, in recorded order, onto
+    /// the (replacement) link. pico `_z_client_reopen_task_fn`'s
+    /// declaration-cache walk (`src/net/session.c:255-270`): after the
+    /// re-handshake reaches Established, the peer's declaration tables
+    /// are empty, so the recorded `Declare` / `Interest` emits are
+    /// replayed to rebuild them. Recorded order matters — an aliased
+    /// declare replays after the `DeclKexpr` that registered its
+    /// `mapping_id`.
+    ///
+    /// Re-runs the same builders as the original emits and routes
+    /// through the same `dispatch_declare` / `dispatch_interest`
+    /// chokepoint (fresh frame SN per R311jq — pico re-sends the cached
+    /// *network* message through `_z_send_n_msg`, which also mints a
+    /// fresh transport SN). Deliberately does NOT re-run the caching
+    /// hooks (the entries are already cached) nor the R300 outbound
+    /// gates / mapping-table insert (both ran at original declare time;
+    /// the mapping table survives [`Self::reset_for_reopen`]).
+    ///
+    /// Returns the number of replayed entries. `Err` wraps a builder
+    /// reject — an invariant breach for arguments that already built
+    /// once (see [`ReplayDeclarationsError`]).
+    ///
+    /// R311g1 — signature-stability: `Err(FeatureDisabled)` when
+    /// `session-reconnect` is off.
+    pub fn replay_declarations(&self) -> Result<usize, ReplayDeclarationsError> {
+        #[cfg(feature = "session-reconnect")]
+        {
+            let snapshot = R::with_mutex_mut(&self.declaration_cache, |cache| cache.clone());
+            let count = snapshot.len();
+            for entry in snapshot {
+                self.replay_one(entry)?;
+            }
+            Ok(count)
+        }
+        #[cfg(not(feature = "session-reconnect"))]
+        {
+            Err(ReplayDeclarationsError::FeatureDisabled)
+        }
+    }
+
+    /// A4 — replay one cache entry. Each arm re-runs the original
+    /// emit's builder + dispatch under that emit's feature gate; the
+    /// gated-off arms are unreachable by construction (the append hook
+    /// that records a variant lives inside the same feature gate as the
+    /// emit that replays it), kept as explicit no-ops so the match
+    /// stays total across feature states.
+    #[cfg(feature = "session-reconnect")]
+    fn replay_one(&self, entry: CachedDeclaration) -> Result<(), ReplayDeclarationsError> {
+        match entry {
+            CachedDeclaration::Keyexpr { mapping_id, suffix } => {
+                #[cfg(feature = "declare-keyexpr")]
+                {
+                    let declare = build_declare_kexpr(mapping_id, &suffix)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    self.dispatch_declare(declare, /*reliable=*/ true);
+                }
+                #[cfg(not(feature = "declare-keyexpr"))]
+                let _ = (mapping_id, suffix);
+            }
+            CachedDeclaration::Subscriber {
+                subscriber_id,
+                mapping_id,
+                suffix,
+            } => {
+                #[cfg(feature = "declare-subscriber")]
+                {
+                    let declare =
+                        build_declare_subscriber(subscriber_id, mapping_id, suffix.as_deref())
+                            .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    self.dispatch_declare(declare, /*reliable=*/ true);
+                }
+                #[cfg(not(feature = "declare-subscriber"))]
+                let _ = (subscriber_id, mapping_id, suffix);
+            }
+            CachedDeclaration::Queryable {
+                queryable_id,
+                mapping_id,
+                suffix,
+            } => {
+                #[cfg(feature = "declare-queryable")]
+                {
+                    let declare =
+                        build_declare_queryable(queryable_id, mapping_id, suffix.as_deref())
+                            .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    self.dispatch_declare(declare, /*reliable=*/ true);
+                }
+                #[cfg(not(feature = "declare-queryable"))]
+                let _ = (queryable_id, mapping_id, suffix);
+            }
+            CachedDeclaration::Token {
+                token_id,
+                mapping_id,
+                suffix,
+            } => {
+                #[cfg(feature = "declare-token")]
+                {
+                    let declare = build_declare_token(token_id, mapping_id, suffix.as_deref())
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    self.dispatch_declare(declare, /*reliable=*/ true);
+                }
+                #[cfg(not(feature = "declare-token"))]
+                let _ = (token_id, mapping_id, suffix);
+            }
+            CachedDeclaration::LivelinessSubscriberInterest {
+                interest_id,
+                history,
+                mapping_id,
+                suffix,
+            } => {
+                #[cfg(feature = "declare-interest")]
+                {
+                    let interest = build_interest_liveliness_subscriber(
+                        interest_id,
+                        history,
+                        mapping_id,
+                        suffix.as_deref(),
+                    )
+                    .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
+                    self.dispatch_interest(interest, /*reliable=*/ true);
+                }
+                #[cfg(not(feature = "declare-interest"))]
+                let _ = (interest_id, history, mapping_id, suffix);
+            }
+            CachedDeclaration::LivelinessGetInterest {
+                interest_id,
+                mapping_id,
+                suffix,
+            } => {
+                #[cfg(feature = "declare-interest")]
+                {
+                    let interest =
+                        build_interest_liveliness_get(interest_id, mapping_id, suffix.as_deref())
+                            .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
+                    self.dispatch_interest(interest, /*reliable=*/ true);
+                }
+                #[cfg(not(feature = "declare-interest"))]
+                let _ = (interest_id, mapping_id, suffix);
+            }
+        }
+        Ok(())
     }
 }
 

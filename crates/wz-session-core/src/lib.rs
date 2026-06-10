@@ -684,6 +684,20 @@ pub mod session_timeouts;
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub mod session_actions;
 
+/// A4 (session-reconnect) — re-dial + re-handshake support types: the
+/// [`reconnect::CachedDeclaration`] declaration-cache entry (zenoh-pico
+/// `_z_session_t._declaration_cache` parity), the
+/// [`reconnect::ReplayDeclarationsError`] typed reject, and the
+/// [`reconnect::SwappableLink`] transport-replacement seam. Gated like
+/// [`session_actions`] (the cache types name `SendDeclareError` /
+/// `SendWireError` and the swap seam names `SessionRuntime`'s link sink);
+/// the cache STORAGE on the actions bundle additionally gates on the
+/// `session-reconnect` feature — these types stay compiled so the
+/// signature-stable `replay_declarations` / `declaration_cache_snapshot`
+/// surface keeps its types across feature states (R311g1).
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+pub mod reconnect;
+
 /// Stage 3 — runtime-agnostic drive-loop dispatch core. `dispatch_link_event`
 /// (the synchronous body of the AP `poll_and_dispatch_one`) + the const-generic
 /// `report_outcome_reassembling` (reassembly-pool ingest) so the lwIP MCU sync
