@@ -162,9 +162,8 @@ impl core::error::Error for ReplayDeclarationsError {}
 /// `R::LinkSink: Send` bound: the per-profile mutex projection
 /// (`Runtime::Mutex<T>` requires `T: Send`) — satisfied by the AP profile
 /// (`Arc<dyn BoxedLinkDriver + Send + Sync>`). The lwIP MCU profile's
-/// `Rc<dyn BoxedLinkDriver>` sink is `!Send` and cannot host a
-/// `SwappableLink` until it grows a single-task swap seam — MCU reconnect
-/// is a follow-up, same staging as MCU TX fragmentation (R311jm).
+/// `Rc<dyn BoxedLinkDriver>` sink is `!Send` and cannot satisfy this
+/// bound; its single-task swap seam is [`LocalSwappableLink`] (R311ki).
 pub struct SwappableLink<R: SessionRuntime>
 where
     R::LinkSink: Send + 'static,
@@ -214,5 +213,63 @@ where
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).close_blocking();
         });
+    }
+}
+
+/// R311ki — single-task transport-replacement seam, the MCU twin of
+/// [`SwappableLink`] (the MCU-reconnect carry: the lwIP profile's
+/// `Rc<dyn BoxedLinkDriver>` sink is `!Send`, and `Runtime::Mutex<T>`
+/// requires `T: Send`, so the mutex-backed seam cannot exist there).
+///
+/// A `RefCell` replaces the per-profile mutex: the single-task
+/// cooperative drive model (the same invariant behind the lwIP `Rc`
+/// sink itself) means delegation and [`swap`](Self::swap) always run on
+/// the one task, so interior mutability without `Sync` is exactly
+/// sufficient. `!Sync` by construction — the type CANNOT be shared
+/// across threads, which is the honest encoding of the profile
+/// invariant (the AP profile keeps the `Send`-bounded [`SwappableLink`]
+/// because its supervisor and senders live on different tasks).
+///
+/// NOT re-entrant: a [`BoxedLinkDriver`] implementation reached through
+/// the delegation must not call back into this seam (the `RefCell`
+/// borrow would panic loudly) — the same non-reentrancy discipline the
+/// MCU critical_section mutex already imposes on the actions bundle.
+///
+/// No live consumer yet: the MCU reconnect SUPERVISOR (re-dial +
+/// re-handshake loop) needs the larger MCU session-open runtime —
+/// bottom-up framework staging, same as `scout_static` (R311ih) shipped
+/// exposed + tested + cross-compiled awaiting its consumer.
+pub struct LocalSwappableLink<R: SessionRuntime> {
+    inner: core::cell::RefCell<R::LinkSink>,
+}
+
+impl<R: SessionRuntime> LocalSwappableLink<R> {
+    /// Wrap the initial link sink (see [`SwappableLink::new`]; the
+    /// caller keeps a second `Rc` handle for later swaps).
+    pub fn new(initial: R::LinkSink) -> Self {
+        Self {
+            inner: core::cell::RefCell::new(initial),
+        }
+    }
+
+    /// Install `next` as the delegation target, returning the previous
+    /// sink so the supervisor can drop the dead transport outside any
+    /// borrow.
+    pub fn swap(&self, next: R::LinkSink) -> R::LinkSink {
+        core::mem::replace(&mut self.inner.borrow_mut(), next)
+    }
+}
+
+impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
+        R::link_driver(&self.inner.borrow()).send_blocking(bytes, reliability);
+    }
+
+    fn open_blocking(&self) {
+        R::link_driver(&self.inner.borrow()).open_blocking();
+    }
+
+    fn close_blocking(&self) {
+        R::link_driver(&self.inner.borrow()).close_blocking();
     }
 }

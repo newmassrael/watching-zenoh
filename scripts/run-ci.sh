@@ -1888,6 +1888,26 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.12 multicast MCU $t FAIL" >&2
             fail=1
         fi
+        # G.13 (R311ki) session-reconnect MCU composition. Proves the
+        # reconnect module - the declaration cache, reset/replay, and the
+        # LocalSwappableLink single-task swap seam (the RefCell-backed,
+        # no-Send twin of SwappableLink the lwIP Rc sink requires) -
+        # cross-compiles on every Phase W target. session-reconnect pulls
+        # alloc; session-unicast is the reconnect module's gate; the
+        # declare-keyexpr + declare-undeclare pair keeps the subset
+        # COHERENT (the cache append/prune hooks live in those send
+        # paths - a reconnect build with no declare emits has a dead
+        # cache and fails deny-warnings, by design). The MCU reconnect
+        # SUPERVISOR (re-dial loop) awaits the MCU session-open runtime;
+        # this build-checks the seam layer, as G.12 does for multicast.
+        if (cd crates && cargo build -p wz-session-core \
+            --target "$t" --no-default-features \
+            --features session-reconnect,session-unicast,declare-keyexpr,declare-undeclare,no_std --quiet); then
+            echo "  G.13 session-reconnect MCU $t OK"
+        else
+            echo "  G.13 session-reconnect MCU $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"

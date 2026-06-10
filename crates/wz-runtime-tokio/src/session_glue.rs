@@ -2814,4 +2814,44 @@ mod reconnect_tx_tests {
             "post-swap emits land on the new sink"
         );
     }
+
+    /// R311ki — `LocalSwappableLink` (the single-task / MCU twin of
+    /// `SwappableLink`, RefCell-backed, no `Send` bound on the sink)
+    /// delegates and redirects exactly as the mutex-backed seam does.
+    /// `!Sync` by construction, so it CANNOT be the tokio actions
+    /// driver (that is the point — it is the lwIP `Rc`-sink seam);
+    /// the delegation contract is driven directly through the
+    /// `BoxedLinkDriver` trait on one task here, and the no-`Send`
+    /// composition with the lwIP profile is proved by the Layer G
+    /// session-core cross-compile.
+    #[test]
+    fn local_swappable_link_redirects_sends_after_swap() {
+        use wz_session_core::link::BoxedLinkDriver as _;
+        use wz_session_core::reconnect::LocalSwappableLink;
+        use wz_session_core::reliability::Reliability;
+
+        let first = crate::test_fixtures::recording_driver();
+        let second = crate::test_fixtures::recording_driver();
+        let link = LocalSwappableLink::<TokioRuntime>::new(first.clone());
+
+        link.send_blocking(b"frame-a", Reliability::Reliable);
+        assert_eq!(first.frame_count(), 1, "pre-swap emit lands on first");
+        assert_eq!(second.frame_count(), 0);
+
+        let old = link.swap(second.clone());
+        drop(old);
+
+        link.send_blocking(b"frame-b", Reliability::Reliable);
+        assert_eq!(
+            first.frame_count(),
+            1,
+            "post-swap emits must not reach the replaced sink"
+        );
+        assert_eq!(
+            second.frame_count(),
+            1,
+            "post-swap emits land on the new sink"
+        );
+        assert_eq!(second.frame_bytes(0), b"frame-b".to_vec());
+    }
 }
