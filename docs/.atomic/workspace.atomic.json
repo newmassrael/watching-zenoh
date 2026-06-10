@@ -590,7 +590,8 @@
         "R311kn: multicast Fragment RX wired (transport-multicast x reassembly); per-peer-slot chains.",
         "R311kn: multicast TX still frame-only - oversize split (fragment_body at TX seam) is follow-up.",
         "R311ko: multicast TX fragment split wired at the Push seam; batch_size knob + JOIN mismatch reject",
-        "R311kq: JOIN omitted optional = protocol default (8192/0x02); off-default config advertises S=1"
+        "R311kq: JOIN omitted optional = protocol default (8192/0x02); off-default config advertises S=1",
+        "R311kr: JOIN T flag = lease wire-unit seconds (whole-second leases); decode projects back to ms"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -33516,6 +33517,50 @@
         "JOIN T-flag (lease-in-seconds) decode unmodeled; default pico lease 10000ms sets T - interop gap",
         "F-6 deferred-fire (R311kj carry) stays open",
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ]
+    },
+    "Round 311kr": {
+      "decision_summary": "R311kr JOIN T-flag lease-unit parity: decode projects the seconds form back to ms (pico default beacons were mis-read 1000x) and encode rides T for whole-second leases (make_join parity).",
+      "changes_bullets": [
+        "multicast_glue::decode_join — _Z_FLAG_T_JOIN_T projection: T=1 means the lease VLE is in SECONDS, saturating x1000 back to ms (pico codec/transport.c:161-164); the returned lease is ALWAYS milliseconds, consumers never see the wire unit",
+        "multicast_glue::encode_join — lease_ms % 1000 == 0 sets T and encodes lease_ms/1000 (pico make_join definitions/transport.c:113-115 + codec divide codec/transport.c:59-62); fractional leases stay raw ms with T=0",
+        "wz-codecs wire_const::FLAG_T_JOIN_T (0x20, codec-join gated) — named flag const; the join body codec stays raw-VLE and the glue owns the unit projection (mirror of the OPEN lease_in_seconds convention)",
+        "MulticastParams::lease_ms doc — field stays milliseconds on both sides; the wire unit is a glue concern (R311kr note)",
+        "tests: encode_join_whole_second_lease_rides_t_flag + encode_join_fractional_lease_stays_in_ms (glue unit), layer3_join_t_flag_lease_in_seconds (pico FFI byte parity: wz glue-division == pico codec-division wire); encode_join_is_minimal_at_protocol_defaults assert updated (fixture 5000ms lease now rides T)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 18 passed 0 failed (2 new lease-unit tests)",
+        "cargo test -p wz-integration-tests --test layer3_join: 4 passed 0 failed (new T-flag parity test green against pico _z_join_encode FFI)",
+        "cargo fmt --all --check EXIT=0; full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped exit-code capture)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop",
+        "NEW per-peer advertised-lease sweep gap: pico stores the JOIN lease per peer entry (multicast/rx.c:393) and evicts each peer by ITS advertised lease (multicast/lease.c:124); wz sweeps every peer by the local MulticastConfig::lease_ms and the decoded join.lease is unconsumed on RX"
+      ],
+      "publishable_decision_summary": "R311kr JOIN T-flag lease-unit parity: decode projects the seconds form back to ms (pico default beacons were mis-read 1000x) and encode rides T for whole-second leases (make_join parity).",
+      "publishable_changes_bullets": [
+        "multicast_glue::decode_join — _Z_FLAG_T_JOIN_T projection: T=1 means the lease VLE is in SECONDS, saturating x1000 back to ms (pico codec/transport.c:161-164); the returned lease is ALWAYS milliseconds, consumers never see the wire unit",
+        "multicast_glue::encode_join — lease_ms % 1000 == 0 sets T and encodes lease_ms/1000 (pico make_join definitions/transport.c:113-115 + codec divide codec/transport.c:59-62); fractional leases stay raw ms with T=0",
+        "wz-codecs wire_const::FLAG_T_JOIN_T (0x20, codec-join gated) — named flag const; the join body codec stays raw-VLE and the glue owns the unit projection (mirror of the OPEN lease_in_seconds convention)",
+        "MulticastParams::lease_ms doc — field stays milliseconds on both sides; the wire unit is a glue concern (R311kr note)",
+        "tests: encode_join_whole_second_lease_rides_t_flag + encode_join_fractional_lease_stays_in_ms (glue unit), layer3_join_t_flag_lease_in_seconds (pico FFI byte parity: wz glue-division == pico codec-division wire); encode_join_is_minimal_at_protocol_defaults assert updated (fixture 5000ms lease now rides T)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 18 passed 0 failed (2 new lease-unit tests)",
+        "cargo test -p wz-integration-tests --test layer3_join: 4 passed 0 failed (new T-flag parity test green against pico _z_join_encode FFI)",
+        "cargo fmt --all --check EXIT=0; full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped exit-code capture)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop",
+        "NEW per-peer advertised-lease sweep gap: pico stores the JOIN lease per peer entry (multicast/rx.c:393) and evicts each peer by ITS advertised lease (multicast/lease.c:124); wz sweeps every peer by the local MulticastConfig::lease_ms and the decoded join.lease is unconsumed on RX"
       ]
     },
     "Round 311n": {
