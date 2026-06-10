@@ -588,7 +588,8 @@
         "R311ka: Frame fan routes Declare too - multicast-declarations RX half implicitly live, TX pending.",
         "R311kl supersedes cfg-off-forces-65535: negotiation core (ungated); cfg-off = no coalescing only.",
         "R311kn: multicast Fragment RX wired (transport-multicast x reassembly); per-peer-slot chains.",
-        "R311kn: multicast TX still frame-only - oversize split (fragment_body at TX seam) is follow-up."
+        "R311kn: multicast TX still frame-only - oversize split (fragment_body at TX seam) is follow-up.",
+        "R311ko: multicast TX fragment split wired at the Push seam; batch_size knob + JOIN mismatch reject"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -33390,6 +33391,50 @@
         "F-6 deferred-fire (R311kj carry) stays open"
       ]
     },
+    "Round 311ko": {
+      "decision_summary": "R311ko multicast Fragment TX: oversize publish re-frames as a fragment chain at the Push seam (multicast_frame_or_fragments SSOT); MulticastParams.batch_size group budget, JOIN-rejected on mismatch.",
+      "changes_bullets": [
+        "frame_encode::multicast_frame_or_fragments - egress SSOT; first fragment rides the minted frame SN",
+        "MulticastParams.batch_size (pico Z_BATCH_MULTICAST_SIZE dflt 2048); validate_join rejects mismatch",
+        "multicast_glue Push arm composes the helper at mtu=batch_size; vle_width cfg widened to frag-only",
+        "run-ci: C1q fragmentation-union arm; Layer M pubsub invocation grew transport-fragmentation",
+        "tests: 2 frame_encode units + 2 C1q glue (chain shape, TX->RX peer-loop round-trip) + Layer M e2e"
+      ],
+      "verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped; first run caught a fmt FAIL, fixed)",
+        "Layer M opt-in EXIT=0; oversize socket e2e 10/10 repeats, 0 flake",
+        "C1q 3 arms green (plain 12 / reassembly 16 / fragmentation 18 tests)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "ReassemblyFragment.zid carries a non-zid slot key on multicast; peer_key rename candidate",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ],
+      "publishable_decision_summary": "R311ko multicast Fragment TX: oversize publish re-frames as a fragment chain at the Push seam (multicast_frame_or_fragments SSOT); MulticastParams.batch_size group budget, JOIN-rejected on mismatch.",
+      "publishable_changes_bullets": [
+        "frame_encode::multicast_frame_or_fragments - egress SSOT; first fragment rides the minted frame SN",
+        "MulticastParams.batch_size (pico Z_BATCH_MULTICAST_SIZE dflt 2048); validate_join rejects mismatch",
+        "multicast_glue Push arm composes the helper at mtu=batch_size; vle_width cfg widened to frag-only",
+        "run-ci: C1q fragmentation-union arm; Layer M pubsub invocation grew transport-fragmentation",
+        "tests: 2 frame_encode units + 2 C1q glue (chain shape, TX->RX peer-loop round-trip) + Layer M e2e"
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped; first run caught a fmt FAIL, fixed)",
+        "Layer M opt-in EXIT=0; oversize socket e2e 10/10 repeats, 0 flake",
+        "C1q 3 arms green (plain 12 / reassembly 16 / fragmentation 18 tests)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "ReassemblyFragment.zid carries a non-zid slot key on multicast; peer_key rename candidate",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
@@ -39716,6 +39761,7 @@
   "frames": {},
   "branches": {},
   "entities": {},
+  "predicates": {},
   "narrative_facts": {},
-  "schema_version": 18
+  "schema_version": 19
 }
