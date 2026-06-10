@@ -33302,6 +33302,44 @@
         "F-6 (R311kj carry) stays open: deferred-fire (callbacks outside the observer lock) cross-cutting redesign awaits a dedicated round"
       ]
     },
+    "Round 311km": {
+      "decision_summary": "R311km F-8: batch_tx field renamed tx_mutex - the name leads with the ungated TX-order-lock role (pico _z_transport_common_t._mutex_tx parity); BatchTx keeps naming the guarded coalescing state.",
+      "changes_bullets": [
+        "session_actions.rs: pub field batch_tx -> tx_mutex (decl + init + 7 R::with_mutex_mut lock sites); a rename note rides the field doc, the R311kf dual-role doc text updated to the new name",
+        "session_glue.rs: the R311kf TX-order parity doc references the new name; the batch_tx_tests module name is KEPT - it pins BatchTx coalescing behaviour and is named after the struct (which keeps naming the guarded state), not the field",
+        "the R311kj tx_window candidate is REJECTED: \"window\" collides with the SN half-window vocabulary (sn::RxSn) and still understates the lock role; tx_mutex is the pico-greppable name (_z_transport_common_t._mutex_tx)"
+      ],
+      "verification_bullets": [
+        "full host run-ci EXIT=0 captured without a pipeline (RUNCI_EXIT=0, /tmp/runci_r311km.log) - all required layers pass",
+        "mechanical rename, zero behaviour delta: the lock-span semantics chain (R311jq one-hold TX, R311kf immediate-path parity, R311kg span ratify, R311kj whole-chain correction) is untouched",
+        "grep batch_tx over crates+scripts returns only the batch_tx_tests module name and the rename note"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "F-6 (R311kj carry) stays open: deferred-fire (callbacks outside the observer lock) cross-cutting redesign awaits a dedicated round",
+        "R311kj carry triple fully resolved: F-5 (R311kl) + F-8 (R311km) closed, F-6 carried deliberately"
+      ],
+      "publishable_decision_summary": "R311km F-8: batch_tx field renamed tx_mutex - the name leads with the ungated TX-order-lock role (pico _z_transport_common_t._mutex_tx parity); BatchTx keeps naming the guarded coalescing state.",
+      "publishable_changes_bullets": [
+        "session_actions.rs: pub field batch_tx -> tx_mutex (decl + init + 7 R::with_mutex_mut lock sites); a rename note rides the field doc, the R311kf dual-role doc text updated to the new name",
+        "session_glue.rs: the R311kf TX-order parity doc references the new name; the batch_tx_tests module name is KEPT - it pins BatchTx coalescing behaviour and is named after the struct (which keeps naming the guarded state), not the field",
+        "the R311kj tx_window candidate is REJECTED: \"window\" collides with the SN half-window vocabulary (sn::RxSn) and still understates the lock role; tx_mutex is the pico-greppable name (_z_transport_common_t._mutex_tx)"
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci EXIT=0 captured without a pipeline (RUNCI_EXIT=0, /tmp/runci_r311km.log) - all required layers pass",
+        "mechanical rename, zero behaviour delta: the lock-span semantics chain (R311jq one-hold TX, R311kf immediate-path parity, R311kg span ratify, R311kj whole-chain correction) is untouched",
+        "grep batch_tx over crates+scripts returns only the batch_tx_tests module name and the rename note"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-6 (R311kj carry) stays open: deferred-fire (callbacks outside the observer lock) cross-cutting redesign awaits a dedicated round",
+        "R311kj carry triple fully resolved: F-5 (R311kl) + F-8 (R311km) closed, F-6 carried deliberately"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
