@@ -63,6 +63,32 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
         LinkEvent::Rx(rx) => match actions.handle_inbound(&rx.bytes) {
             Ok(frame) => match inbound_to_fsm_event(&frame) {
                 Some(event) => {
+                    // R311kc — initiator InitAck params validation (zenoh-pico
+                    // unicast/transport.c:123-140): a pre-Established InitAck
+                    // whose size parameters exceed our InitSyn advertisement
+                    // REJECTS the session — `framing.error` drives Closing
+                    // with `CloseReason::Invalid` (wire Close(INVALID)) and
+                    // the typed outcome surfaces the reason to the open loop.
+                    // Unlike the silent-drop admissions below, the reject must
+                    // advance the FSM: hanging until the handshake timeout
+                    // would mislabel a non-conforming peer as a silent one.
+                    // `handle_inbound` already captured the (rejected) caps
+                    // into `inbound_peer_init_caps`; inert — the session is
+                    // torn down before any mint reads them. Scoped to
+                    // `!is_established()` so an unsolicited steady-state
+                    // InitAck stays an ignored no-event (pico drops it).
+                    #[cfg(feature = "codec-init-body")]
+                    if let InboundFrame::Init {
+                        is_ack: true, body, ..
+                    } = &frame
+                    {
+                        if !actions.is_established()
+                            && !actions.init_ack_caps_acceptable(body.sn_res, body.batch_size)
+                        {
+                            engine.process_event(E::FramingError);
+                            return DriverLoopOutcome::InitAckCapsRejected;
+                        }
+                    }
                     // R311il — §2.7 dispatcher admission pre-classify. The
                     // accept-side caps (half-open + token bucket on
                     // init_syn; cookie HMAC on open_syn) depend on HOST

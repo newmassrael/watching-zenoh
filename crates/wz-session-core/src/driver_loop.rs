@@ -76,6 +76,20 @@ pub enum DriverLoopOutcome {
     /// `LinkLost` into the engine so the `link.lost` transition
     /// fires; the cause is returned for logging.
     LinkLost(LostCause),
+    /// R311kc — the InitAck's size parameters exceeded our InitSyn
+    /// advertisement (the zenoh-pico
+    /// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection,
+    /// unicast/transport.c:123-140: "Any of the size parameters in the
+    /// InitAck must be less or equal than the one in the InitSyn").
+    /// The dispatcher has already injected `FramingError` so the FSM's
+    /// `framing.error` arm tears the session down with
+    /// `CloseReason::Invalid` (wire Close(INVALID) — pico aborts
+    /// without a Close frame; wz spends the one frame on a clean
+    /// teardown since the initiator-side reply is not an amplification
+    /// vector). Surfaced as its own variant so the open loop maps it to
+    /// a typed open error instead of folding it into `Terminal`.
+    #[cfg(feature = "codec-init-body")]
+    InitAckCapsRejected,
     /// R311im — the inbound frame parsed to a transport `Fragment`
     /// (`T_MID_FRAGMENT`, MID `0x06`). Reassembly is stateful — the slot
     /// pool ([`crate::reassembly_dispatch::ReassemblyDispatcher`]) lives in

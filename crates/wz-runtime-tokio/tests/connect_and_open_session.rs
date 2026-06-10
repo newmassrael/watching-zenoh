@@ -148,3 +148,56 @@ async fn silent_peer_surfaces_handshake_timeout() {
     }
     acceptor.abort();
 }
+
+/// R311kc — a peer whose InitAck ENLARGES a size parameter beyond our
+/// InitSyn advertisement must surface the typed
+/// [`OpenError::InitAckCapsRejected`] (zenoh-pico
+/// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` parity, unicast/transport.c:
+/// 123-140), not fold into `Terminal` or hang to the handshake timeout.
+/// The fake acceptor speaks raw length-prefixed wire (`StreamEnvelope`:
+/// u16 LE prefix + payload): it drains the initiator's InitSyn envelope
+/// and answers with a crafted InitAck advertising seq_num_res=1 — the
+/// fixture initiator advertised 0, so adoption is non-conforming.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enlarging_init_ack_surfaces_caps_rejected() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let acceptor = tokio::spawn(async move {
+        let (mut stream, _peer) = listener.accept().await.expect("accept");
+        // Drain the InitSyn envelope (u16 LE length prefix + payload).
+        let mut len = [0u8; 2];
+        stream.read_exact(&mut len).await.expect("read prefix");
+        let mut body = vec![0u8; u16::from_le_bytes(len) as usize];
+        stream.read_exact(&mut body).await.expect("read InitSyn");
+        // Reply with an InitAck enlarging seq_num_res to 1 (> advertised 0).
+        let initack = craft_initack_wire_with_caps(&[0xC0, 0x01], 0x01, 0);
+        let mut wire = (initack.len() as u16).to_le_bytes().to_vec();
+        wire.extend_from_slice(&initack);
+        stream.write_all(&wire).await.expect("write InitAck");
+        // Hold the stream so the initiator's verdict is the params
+        // rejection, not a racing peer-closed link event.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        drop(stream);
+    });
+
+    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let result = connect_and_open_session(
+        locator,
+        fixture_session_init_params(),
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await;
+
+    match result {
+        Err(OpenError::InitAckCapsRejected) => {}
+        Err(other) => panic!("expected InitAckCapsRejected, got {other:?}"),
+        Ok(_) => panic!("enlarging InitAck must not reach Established"),
+    }
+    acceptor.abort();
+}

@@ -219,6 +219,14 @@ pub enum OpenError {
     /// `set_close_reason_count >= 1` with `CloseReason::Generic`), whereas a
     /// peer Close / link loss reaches `Closed` without a close-reason action.
     HandshakeTimeout,
+    /// R311kc — the peer's InitAck size parameters exceeded our InitSyn
+    /// advertisement (zenoh-pico `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION`,
+    /// unicast/transport.c:123-140: every InitAck size parameter must be
+    /// `<=` the InitSyn's). The dispatcher rejected the session — the FSM
+    /// took the `framing.error` arm (Closing with `CloseReason::Invalid`,
+    /// wire Close(INVALID)) and the open loop surfaces the typed reason
+    /// here instead of folding it into [`Self::Terminal`].
+    InitAckCapsRejected,
     /// The bounded iteration budget elapsed before Established (test guard;
     /// production passes `None`).
     IterationLimit,
@@ -349,8 +357,20 @@ pub(crate) async fn drive_open_loop(
         // handshake without waiting for the next tick.
         tokio::select! {
             outcome = poll_and_dispatch_one(&mut inbound, &actions, &mut engine) => {
-                if let DriverLoopOutcome::LinkLost(cause) = outcome {
-                    return Err(OpenError::LinkLost(cause));
+                match outcome {
+                    DriverLoopOutcome::LinkLost(cause) => {
+                        return Err(OpenError::LinkLost(cause));
+                    }
+                    // R311kc — the dispatcher rejected a non-conforming
+                    // InitAck (size params exceed our advertisement); the
+                    // FSM is already Closing with CloseReason::Invalid.
+                    // Surface the typed reason instead of looping to the
+                    // generic terminal classification.
+                    #[cfg(feature = "codec-init-body")]
+                    DriverLoopOutcome::InitAckCapsRejected => {
+                        return Err(OpenError::InitAckCapsRejected);
+                    }
+                    _ => {}
                 }
             }
             _ = clock.sleep(tick_interval_ms) => {

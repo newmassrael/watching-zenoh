@@ -101,6 +101,32 @@ pub fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
     wire
 }
 
+/// R311kc — [`craft_initack_wire`] with an explicit sizing advertisement:
+/// the packed `sn_res` byte (`(seq & 0x03) | ((req & 0x03) << 2)`) and the
+/// LE `batch_size` are caller-supplied so the InitAck params-validation
+/// tests can craft an acceptor that ENLARGES a parameter beyond the
+/// initiator's InitSyn (the pico
+/// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection condition,
+/// unicast/transport.c:123-140). `craft_initack_wire` keeps the all-zero
+/// caps the conforming-handshake tests rely on.
+pub fn craft_initack_wire_with_caps(cookie: &[u8], sn_res_byte: u8, batch_size: u16) -> Vec<u8> {
+    assert!(
+        cookie.len() < 0x80,
+        "fixture: single-byte VLE cookie_len only"
+    );
+    let mut wire = vec![
+        FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT,
+        0x05, // version
+        0x31, // cbyte: whatami=Peer, zid_len=4
+    ];
+    wire.extend_from_slice(&FIXTURE_LISTENER_ZID);
+    wire.push(sn_res_byte);
+    wire.extend_from_slice(&batch_size.to_le_bytes());
+    wire.push(cookie.len() as u8); // VLE cookie_len (< 0x80 single byte)
+    wire.extend_from_slice(cookie);
+    wire
+}
+
 /// `OpenSyn` echoing `cookie` (parent flags 0x00 so the cookie carrier is
 /// present and the lease is in ms): lease VLE=0, initial_sn VLE=0,
 /// cookie_len VLE, cookie bytes.

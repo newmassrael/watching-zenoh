@@ -369,3 +369,70 @@ async fn r76_ready_maps_to_link_opened_event() {
         "Ready -> LinkOpened must advance LinkOpening -> SentInitSyn"
     );
 }
+
+// ── R311kc Scenario: Rx(InitAck enlarging a size param) →
+//                    InitAckCapsRejected + framing.error teardown
+//
+// pico parity (`_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION`,
+// unicast/transport.c:123-140): the fixture initiator advertises
+// seq/req/batch = 0/0/0 (fixture_session_init_params), so an InitAck
+// claiming seq_num_res=1 ENLARGES the advertisement and must reject the
+// session — Closing with CloseReason::Invalid, not a silent min()
+// adoption (the F-b carry this closes). The conforming-caps positive
+// arm is Scenario 1 above (all-zero InitAck caps == the advertisement).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311kc_rx_init_ack_enlarged_caps_rejects_session() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let cookie = vec![0xC0, 0x01];
+    // sn_res byte 0x01 = seq_num_res 1 (> advertised 0), req 0; batch 0.
+    let wire = craft_initack_wire_with_caps(&cookie, 0x01, 0);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
+        "enlarged InitAck caps must surface InitAckCapsRejected; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::Closing,
+        "params rejection must drive the framing.error arm to Closing"
+    );
+    let trace = actions.trace_snapshot();
+    assert!(
+        trace.set_close_reason_count >= 1,
+        "Closing entry must record a close reason"
+    );
+    assert_eq!(
+        trace.close_reason,
+        CloseReason::Invalid,
+        "params rejection closes with INVALID (wire 'invalid parameters')"
+    );
+}
+
+// ── R311kc NEG: an InitAck whose batch_size enlarges the advertisement
+//               rejects even though seq/req conform — pico validates the
+//               three parameters independently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // seq/req = 0/0 conform; batch_size 1024 > advertised 0.
+    let wire = craft_initack_wire_with_caps(&[0xC0, 0x01], 0x00, 1024);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
+        "enlarged batch_size must reject independently; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+}

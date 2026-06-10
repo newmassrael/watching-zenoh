@@ -854,6 +854,36 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Ok(frame)
     }
 
+    /// R311kc — initiator-side InitAck params admission, the dispatcher
+    /// pre-classify twin of [`Self::cookie_valid`] /
+    /// [`Self::half_open_cap_available`]: every InitAck size parameter
+    /// must be `<=` our InitSyn advertisement (`self.params`), the
+    /// zenoh-pico `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection
+    /// condition (unicast/transport.c:123-140). `false` means the peer
+    /// ENLARGED a parameter and the session must be rejected — the
+    /// dispatcher drives the FSM's `framing.error` arm (Closing with
+    /// `CloseReason::Invalid`, the wire's "invalid parameters" close
+    /// reason) instead of admitting `InitAckReceived`.
+    ///
+    /// Validates the RAW wire fields the caller pulls off the decoded
+    /// InitAck body — NOT the captured [`PeerInitCaps`] slot, whose
+    /// `transport-batching`-off projection clamps the peer batch_size to
+    /// 65535 and would mask exactly the enlargement this guard rejects.
+    #[cfg(feature = "codec-init-body")]
+    pub fn init_ack_caps_acceptable(
+        &self,
+        sn_res_byte: Option<u8>,
+        batch_size: Option<u16>,
+    ) -> bool {
+        !crate::peer_init_caps::init_ack_exceeds_advertisement(
+            self.params.seq_num_res,
+            self.params.req_id_res,
+            self.params.batch_size,
+            sn_res_byte,
+            batch_size,
+        )
+    }
+
     /// R121e / R311kb — outbound Frame sequence-number mint. Returns
     /// the SN for the next outbound Frame as a position on the ring of
     /// `sn_mask` ([`Self::negotiated_sn_mask`]) and advances the
