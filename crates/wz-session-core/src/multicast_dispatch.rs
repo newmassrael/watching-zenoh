@@ -47,10 +47,17 @@
 //! NoOpHal`, so a `<send delay>` is a dead element). The Router owns the
 //! clock: each live peer carries `last_seen_ms`, refreshed on every inbound
 //! message; [`MulticastDispatcher::sweep`] drives `peer.lost` into only the
-//! peers whose `last_seen + lease` has elapsed (a recycled slot is `Free`
-//! and cannot see a stale lease). Mirrors the reassembly Router's deadline
-//! split: value = spec ([`MulticastConfig::lease_ms`]), transition =
-//! statechart, clock = runtime.
+//! peers whose hold window has elapsed (a recycled slot is `Free` and
+//! cannot see a stale lease). R311ks — the window is PER PEER: each peer
+//! is held for the lease ITS OWN JOIN advertised (zenoh-pico stores
+//! `entry->_lease = msg->_lease`, multicast/rx.c:393/456, and logs the
+//! eviction against it, lease.c:124), capped by the local
+//! [`MulticastConfig::lease_ms`] bound — the deadline-model equivalent of
+//! pico's received-flag sweep, whose group-min cadence bounds every
+//! peer's hold regardless of what it advertised (without the cap one
+//! absurd advertisement would pin a bounded pool slot forever). Mirrors
+//! the reassembly Router's deadline split: value = wire advertisement +
+//! local cap, transition = statechart, clock = runtime.
 //!
 //! ## Effect-point bindings (no-op)
 //!
@@ -105,10 +112,16 @@ const ZID_MAX: usize = 16;
 /// follow-up; callers pass spec values today.
 #[derive(Debug, Clone, Copy)]
 pub struct MulticastConfig {
-    /// Per-peer lease window in milliseconds. Refreshed on every inbound
-    /// message; [`MulticastDispatcher::sweep`] evicts a peer whose
-    /// `last_seen + lease_ms` has elapsed (§3.1 "evict PeerTable entries
-    /// with last_seen > lease"). The §3.1 sweep CADENCE is `lease/3` — a
+    /// The local MAXIMUM hold window in milliseconds (R311ks). A peer is
+    /// held for the lease its own JOIN advertised
+    /// ([`JoinBaseline::lease_ms`], §3.1 "evict PeerTable entries with
+    /// last_seen > lease"), but never longer than this bound:
+    /// [`MulticastDispatcher::sweep`] evicts a peer whose
+    /// `last_seen + min(advertised, lease_ms)` has elapsed. The cap is
+    /// the deadline-model equivalent of zenoh-pico's group-min sweep
+    /// cadence (lease.c `_z_get_minimum_lease(peers, local_lease)`) —
+    /// it keeps the bounded peer pool drainable when a peer advertises
+    /// an absurd lease. The §3.1 sweep CADENCE is `lease/3` — a
     /// host-loop concern (how often `sweep` is called), not a Router field.
     pub lease_ms: u64,
 }
@@ -130,18 +143,22 @@ pub enum JoinRefuse {
     PeerTableFull,
 }
 
-/// The SN baseline a validated JOIN advertises (§3.2 "initialize RX
-/// seq-num table" — the `init_rx_seq` effect point, realised by the
-/// Router). `next_sn_*` is the next SN the announcer WILL send per
-/// channel; the Router seeds the peer's last-seen SN one BEFORE it
-/// (zenoh-pico `_z_conduit_sn_list_copy` + `_z_conduit_sn_list_decrement`,
+/// The per-peer baselines a validated JOIN advertises and the Router
+/// stores (R311ks rename from `JoinSnBaseline` — the lease joined the
+/// SN pair; zenoh-pico copies both at the same admit/refresh sites,
+/// multicast/rx.c:388-394 / 453-456).
+///
+/// `next_sn_*` is the next SN the announcer WILL send per channel; the
+/// Router seeds the peer's last-seen SN one BEFORE it (zenoh-pico
+/// `_z_conduit_sn_list_copy` + `_z_conduit_sn_list_decrement`,
 /// multicast/rx.c) so the first data frame at exactly `next_sn` passes
-/// the half-window gate. `sn_res` is the announcer's 2-bit `seq_num_res`
-/// wire code — the RX classifier has already checked it is compatible
-/// (§3.2 rejection rules); the Router derives the peer's ring mask from
-/// it ([`sn::mask_from_res`]).
+/// the half-window gate (§3.2 "initialize RX seq-num table" — the
+/// `init_rx_seq` effect point, realised by the Router). `sn_res` is the
+/// announcer's 2-bit `seq_num_res` wire code — the RX classifier has
+/// already checked it is compatible (§3.2 rejection rules); the Router
+/// derives the peer's ring mask from it ([`sn::mask_from_res`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JoinSnBaseline {
+pub struct JoinBaseline {
     /// The announcer's `seq_num_res` wire code (a JOIN that omits the
     /// optional advertises the protocol default — the caller projects
     /// that default before constructing this).
@@ -150,6 +167,13 @@ pub struct JoinSnBaseline {
     pub next_sn_reliable: u64,
     /// Next SN the announcer will send on the best-effort channel.
     pub next_sn_best_effort: u64,
+    /// The lease window the announcer advertises, in milliseconds (the
+    /// JOIN wire T-flag seconds form is already projected back by the
+    /// decoder, R311kr). The Router holds the peer alive for
+    /// `min(this, MulticastConfig::lease_ms)` after each inbound
+    /// message (R311ks; zenoh-pico `entry->_lease = msg->_lease`,
+    /// multicast/rx.c:393/456).
+    pub lease_ms: u64,
 }
 
 /// Outcome of one [`MulticastDispatcher::ingest_frame_by_src`] admission
@@ -250,7 +274,7 @@ impl SessionFsmMulticastActions for SessionBinding {
 /// event are Router/host state the buried binding cannot reach (engine-free
 /// split). No-op bodies: the SCXML marks WHERE the effect goes (SSOT with
 /// §3.2), the Router realises it — `init_rx_seq` as
-/// [`PeerSlot::seed_rx_sn`] on JOIN admission (A1a), `emit_peer_lost` as
+/// [`PeerSlot::seed_from_join`] on JOIN admission (A1a), `emit_peer_lost` as
 /// the upward peer-lost surface (still deferred — see the module deferral
 /// notes). Zero-field, no dead counters.
 struct PeerBinding;
@@ -278,6 +302,11 @@ struct PeerSlot {
     /// Absolute monotonic-ms instant of the peer's most recent inbound
     /// message (valid iff `src.is_some()`); the lease is measured from here.
     last_seen_ms: u64,
+    /// The lease window this peer's JOIN advertised, in milliseconds
+    /// (R311ks; zenoh-pico `entry->_lease = msg->_lease`,
+    /// multicast/rx.c:393/456). Valid iff `src.is_some()`; the sweep
+    /// holds the peer for `min(this, MulticastConfig::lease_ms)`.
+    lease_ms: u64,
     /// The peer's SN ring mask, derived from its JOIN-advertised
     /// `seq_num_res` ([`sn::mask_from_res`]; zenoh-pico
     /// `entry->_sn_res = _z_sn_max(msg->_seq_num_res)`). Valid iff
@@ -300,19 +329,24 @@ impl PeerSlot {
             src: None,
             zid: None,
             last_seen_ms: 0,
+            lease_ms: 0,
             sn_mask: 0,
             rx_sn_reliable: 0,
             rx_sn_best_effort: 0,
         }
     }
 
-    /// Seed the per-channel RX SN baselines from a JOIN's advertised
-    /// `next_sn` (§3.2 `init_rx_seq`: baseline = one before, so the first
-    /// frame at exactly `next_sn` passes the half-window gate).
-    fn seed_rx_sn(&mut self, baseline: JoinSnBaseline) {
+    /// Store the per-peer state a JOIN advertises: the per-channel RX SN
+    /// baselines (§3.2 `init_rx_seq`: baseline = one before, so the first
+    /// frame at exactly `next_sn` passes the half-window gate) and the
+    /// announcer's lease window (R311ks). One home, mirroring zenoh-pico's
+    /// adjacent copies at both the admit and refresh sites
+    /// (multicast/rx.c:388-394 / 453-456).
+    fn seed_from_join(&mut self, baseline: JoinBaseline) {
         self.sn_mask = sn::mask_from_res(baseline.sn_res);
         self.rx_sn_reliable = sn::decrement(self.sn_mask, baseline.next_sn_reliable);
         self.rx_sn_best_effort = sn::decrement(self.sn_mask, baseline.next_sn_best_effort);
+        self.lease_ms = baseline.lease_ms;
     }
 
     fn is_free(&self) -> bool {
@@ -345,6 +379,7 @@ impl PeerSlot {
         self.src = None;
         self.zid = None;
         self.last_seen_ms = 0;
+        self.lease_ms = 0;
         self.sn_mask = 0;
         self.rx_sn_reliable = 0;
         self.rx_sn_best_effort = 0;
@@ -466,17 +501,18 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// before this call (no transition). The peer is keyed by `src` (the
     /// zenoh-pico multicast model — `_z_find_peer_entry(addr)`): a Join from
     /// a NEW address admits a peer (Free -> Discovered -> Active), records
-    /// its `zid`, and seeds its RX SN baselines from `sn_baseline` (the
-    /// §3.2 `init_rx_seq` effect point, realised here by the Router); a
-    /// Join from a KNOWN address refreshes its lease, re-records the zid,
-    /// and RE-seeds the SN baselines (zenoh-pico re-copies `_sn_rx_sns`
-    /// from every JOIN — the announcer's `next_sn` is authoritative).
-    /// `now_ms` is the runtime monotonic clock.
+    /// its `zid`, and stores the advertised baselines from `baseline` (the
+    /// §3.2 `init_rx_seq` effect point + the R311ks per-peer lease window,
+    /// realised here by the Router); a Join from a KNOWN address refreshes
+    /// its lease, re-records the zid, and RE-stores the baselines
+    /// (zenoh-pico re-copies `_sn_rx_sns` AND `_lease` from every JOIN,
+    /// multicast/rx.c:453-456 — the announcer's advertisement is
+    /// authoritative). `now_ms` is the runtime monotonic clock.
     pub fn ingest_join(
         &mut self,
         zid: &[u8],
         src: SocketAddr,
-        sn_baseline: JoinSnBaseline,
+        baseline: JoinBaseline,
         now_ms: u64,
     ) -> JoinOutcome {
         if self.session_state() != SessionFsmMulticastState::Running {
@@ -485,10 +521,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         if let Some(idx) = self.find_by_src(src) {
             // Known address: a Join is just another inbound message (§3.2
             // "Active: any msg refresh last_seen"). The FSM stays Active;
-            // the SN baselines re-seed from the fresh advertisement.
+            // the baselines re-store from the fresh advertisement.
             self.peers[idx].last_seen_ms = now_ms;
             self.peers[idx].zid = Some(copy_zid(zid));
-            self.peers[idx].seed_rx_sn(sn_baseline);
+            self.peers[idx].seed_from_join(baseline);
             return JoinOutcome::Refreshed;
         }
         let idx = match self.peers.iter().position(PeerSlot::is_free) {
@@ -503,7 +539,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.peers[idx].src = Some(src);
         self.peers[idx].zid = Some(copy_zid(zid));
         self.peers[idx].last_seen_ms = now_ms;
-        self.peers[idx].seed_rx_sn(sn_baseline);
+        self.peers[idx].seed_from_join(baseline);
         self.peers[idx]
             .engine
             .process_event(MulticastPeerEvent::PeerDiscovered);
@@ -652,10 +688,14 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         }
     }
 
-    /// Evict every live peer whose lease (`last_seen + lease_ms`) has
-    /// elapsed at `now_ms`, driving `peer.lost` (`emit_peer_lost`) + recycle
-    /// into only those slots (a recycled slot is Free and cannot fire a
-    /// stale lease). Returns the number of peers expired (§3.1 PeerSweep).
+    /// Evict every live peer whose hold window
+    /// (`last_seen + min(advertised lease, MulticastConfig::lease_ms)`)
+    /// has elapsed at `now_ms`, driving `peer.lost` (`emit_peer_lost`) +
+    /// recycle into only those slots (a recycled slot is Free and cannot
+    /// fire a stale lease). R311ks — each peer is held per ITS OWN
+    /// JOIN-advertised lease (zenoh-pico evicts against `peer->_lease`,
+    /// multicast/lease.c:124), capped by the local config bound. Returns
+    /// the number of peers expired (§3.1 PeerSweep).
     pub fn sweep(&mut self, now_ms: u64) -> usize {
         self.sweep_with(now_ms, |_| {})
     }
@@ -667,13 +707,14 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// with the peer entry; the wz chains are keyed by slot index, so they
     /// must be aborted before the index can be re-issued to a new peer).
     pub fn sweep_with(&mut self, now_ms: u64, mut on_evict: impl FnMut(usize)) -> usize {
-        let lease = self.config.lease_ms;
+        let cap = self.config.lease_ms;
         let mut expired = 0;
         for (idx, slot) in self.peers.iter_mut().enumerate() {
             if slot.is_free() {
                 continue;
             }
-            if now_ms < slot.last_seen_ms.saturating_add(lease) {
+            let window = slot.lease_ms.min(cap);
+            if now_ms < slot.last_seen_ms.saturating_add(window) {
                 continue;
             }
             on_evict(idx);
@@ -821,12 +862,15 @@ mod tests {
 
     /// A fresh announcer's JOIN baseline (`next_sn` 0 on both channels at
     /// the wz unicast-default 28-bit resolution) — the membership tests
-    /// only need SOME valid baseline.
-    fn sn0() -> JoinSnBaseline {
-        JoinSnBaseline {
+    /// only need SOME valid baseline. The advertised lease equals the
+    /// fixture config cap (5_000), so `min()` leaves the pre-R311ks sweep
+    /// arithmetic untouched for these tests.
+    fn sn0() -> JoinBaseline {
+        JoinBaseline {
             sn_res: 0x02,
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
+            lease_ms: 5_000,
         }
     }
 
@@ -986,6 +1030,93 @@ mod tests {
         assert_eq!(d.active_peers(), 0);
     }
 
+    /// R311ks — each peer is held for the lease ITS OWN JOIN advertised
+    /// (zenoh-pico `entry->_lease`, multicast/rx.c:393; evicted against
+    /// it, lease.c:124): two peers admitted at the same instant expire at
+    /// different deadlines.
+    #[test]
+    fn sweep_holds_each_peer_per_its_advertised_lease() {
+        let mut d = running_dispatcher::<4>(10_000); // cap above both
+        d.ingest_join(
+            ZID_A,
+            SRC_A,
+            JoinBaseline {
+                lease_ms: 2_000,
+                ..sn0()
+            },
+            0,
+        );
+        d.ingest_join(
+            ZID_B,
+            SRC_B,
+            JoinBaseline {
+                lease_ms: 8_000,
+                ..sn0()
+            },
+            0,
+        );
+        // t=3_000: A (window 2_000) expires, B (window 8_000) survives.
+        assert_eq!(d.sweep(3_000), 1);
+        assert_eq!(d.peer_state(ZID_A), None);
+        assert_eq!(d.peer_state(ZID_B), Some(MulticastPeerState::Active));
+        // t=8_000: B's own deadline arrives.
+        assert_eq!(d.sweep(8_000), 1);
+        assert_eq!(d.active_peers(), 0);
+    }
+
+    /// R311ks — the local config bound caps the hold window: a peer
+    /// advertising an absurd lease (u64::MAX) cannot pin its bounded
+    /// pool slot past the cap (the deadline-model equivalent of pico's
+    /// group-min sweep cadence).
+    #[test]
+    fn sweep_caps_advertised_lease_at_local_bound() {
+        let mut d = running_dispatcher::<4>(5_000);
+        d.ingest_join(
+            ZID_A,
+            SRC_A,
+            JoinBaseline {
+                lease_ms: u64::MAX,
+                ..sn0()
+            },
+            0,
+        );
+        assert_eq!(d.sweep(4_999), 0, "inside the cap");
+        assert_eq!(d.sweep(5_000), 1, "cap bounds the hold");
+    }
+
+    /// R311ks — a re-JOIN re-stores the advertised lease (zenoh-pico
+    /// re-copies `_lease` on every JOIN, multicast/rx.c:456): the fresh
+    /// advertisement governs the next deadline.
+    #[test]
+    fn rejoin_updates_advertised_lease() {
+        let mut d = running_dispatcher::<4>(10_000);
+        d.ingest_join(
+            ZID_A,
+            SRC_A,
+            JoinBaseline {
+                lease_ms: 2_000,
+                ..sn0()
+            },
+            0,
+        );
+        // Re-JOIN at t=1_000 advertising a longer lease.
+        assert_eq!(
+            d.ingest_join(
+                ZID_A,
+                SRC_A,
+                JoinBaseline {
+                    lease_ms: 8_000,
+                    ..sn0()
+                },
+                1_000
+            ),
+            JoinOutcome::Refreshed
+        );
+        // Old window would have expired at 3_000; the new one holds to 9_000.
+        assert_eq!(d.sweep(4_000), 0);
+        assert_eq!(d.sweep(9_000), 1);
+    }
+
     /// A src-attributed refresh (Frame / KeepAlive) extends a peer's lease so
     /// a later sweep does not evict it.
     #[test]
@@ -1058,10 +1189,11 @@ mod tests {
     #[test]
     fn first_frame_at_advertised_next_sn_is_admitted() {
         let mut d = running_dispatcher::<4>(5_000);
-        let baseline = JoinSnBaseline {
+        let baseline = JoinBaseline {
             sn_res: 0x02,
             next_sn_reliable: 42,
             next_sn_best_effort: 7,
+            lease_ms: 5_000,
         };
         assert_eq!(
             d.ingest_join(ZID_A, SRC_A, baseline, 0),
@@ -1087,10 +1219,11 @@ mod tests {
     #[test]
     fn frame_sn_channels_are_independent() {
         let mut d = running_dispatcher::<4>(5_000);
-        let baseline = JoinSnBaseline {
+        let baseline = JoinBaseline {
             sn_res: 0x02,
             next_sn_reliable: 10,
             next_sn_best_effort: 100,
+            lease_ms: 5_000,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
         assert_eq!(
@@ -1150,10 +1283,11 @@ mod tests {
     fn frame_sn_half_window_rule() {
         let mut d = running_dispatcher::<4>(5_000);
         // 7-bit ring (mask 0x7F, half = 63) keeps the vectors readable.
-        let baseline = JoinSnBaseline {
+        let baseline = JoinBaseline {
             sn_res: 0x00,
             next_sn_reliable: 0,
             next_sn_best_effort: 0,
+            lease_ms: 5_000,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
         assert_eq!(
@@ -1176,10 +1310,11 @@ mod tests {
             d.ingest_frame_by_src(SRC_A, true, 1, 4),
             FrameIngest::OutOfOrder
         );
-        let rejoin = JoinSnBaseline {
+        let rejoin = JoinBaseline {
             sn_res: 0x00,
             next_sn_reliable: 1,
             next_sn_best_effort: 0,
+            lease_ms: 5_000,
         };
         assert_eq!(
             d.ingest_join(ZID_A, SRC_A, rejoin, 5),
@@ -1224,10 +1359,11 @@ mod tests {
     #[test]
     fn fragment_gate_shares_the_frame_sn_ring() {
         let mut d = running_dispatcher::<4>(5_000);
-        let baseline = JoinSnBaseline {
+        let baseline = JoinBaseline {
             sn_res: 0x02,
             next_sn_reliable: 42,
             next_sn_best_effort: 0,
+            lease_ms: 5_000,
         };
         assert_eq!(
             d.ingest_join(ZID_A, SRC_A, baseline, 0),
@@ -1278,10 +1414,11 @@ mod tests {
     #[test]
     fn fragment_sn_channels_are_independent() {
         let mut d = running_dispatcher::<4>(5_000);
-        let baseline = JoinSnBaseline {
+        let baseline = JoinBaseline {
             sn_res: 0x02,
             next_sn_reliable: 10,
             next_sn_best_effort: 100,
+            lease_ms: 5_000,
         };
         d.ingest_join(ZID_A, SRC_A, baseline, 0);
         assert!(matches!(
@@ -1373,10 +1510,11 @@ mod tests {
         #[test]
         fn two_fragment_chain_delivers_frame_payload() {
             let mut d = running_dispatcher::<4>(5_000);
-            let baseline = JoinSnBaseline {
+            let baseline = JoinBaseline {
                 sn_res: 0x02,
                 next_sn_reliable: 5,
                 next_sn_best_effort: 0,
+                lease_ms: 5_000,
             };
             d.ingest_join(ZID_A, SRC_A, baseline, 0);
             let mut r = reasm();

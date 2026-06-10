@@ -37,8 +37,10 @@
 //!   [`refresh_by_src`](MulticastDispatcher::refresh_by_src); Close ->
 //!   [`close_by_src`](MulticastDispatcher::close_by_src) (chains aborted
 //!   first — pico's per-entry dbufs die with the peer entry).
-//! - **PeerSweep** — evicts peers past their lease via
-//!   [`MulticastDispatcher::sweep`].
+//! - **PeerSweep** — evicts peers past their hold window via
+//!   [`MulticastDispatcher::sweep`] (R311ks: each peer is held for the
+//!   lease ITS JOIN advertised, capped by the local config bound —
+//!   zenoh-pico `entry->_lease`, multicast/rx.c:393).
 //!
 //! ## A1b — the multicast DATA plane (§3.1 `Frame -> per-peer RxDispatch`)
 //!
@@ -95,7 +97,7 @@ use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 use wz_session_core::multicast_dispatch::{
     abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
 };
-use wz_session_core::multicast_dispatch::{FrameIngest, JoinSnBaseline, MulticastDispatcher};
+use wz_session_core::multicast_dispatch::{FrameIngest, JoinBaseline, MulticastDispatcher};
 use wz_session_core::multicast_params::{
     pack_res_cbyte, unpack_res_cbyte, MulticastParams, PROTOCOL_DEFAULT_BATCH_SIZE,
     PROTOCOL_DEFAULT_RESOLUTION,
@@ -282,9 +284,13 @@ pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
 /// codec carries it opaque, so it is decomposed here
 /// ([`unpack_res_cbyte`]) — comparing the whole byte against the 2-bit
 /// `seq_num_res` would refuse every compatible S=1 announcer.
-/// Returns the admitted SN baseline, or `None` when the announcement
-/// must be ignored (a diagnostic event, not a peer-FSM transition).
-pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinSnBaseline> {
+/// Returns the admitted baselines (per-channel SN + the announcer's
+/// advertised lease, both stored per peer by
+/// [`MulticastDispatcher::ingest_join`] — R311ks), or `None` when the
+/// announcement must be ignored (a diagnostic event, not a peer-FSM
+/// transition). The lease is NOT validated — any advertisement is
+/// accepted (pico parity; the Router caps the hold window locally).
+pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinBaseline> {
     if join.version != params.version {
         return None;
     }
@@ -299,10 +305,13 @@ pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinSn
     if join.batch_size.unwrap_or(PROTOCOL_DEFAULT_BATCH_SIZE) != params.batch_size {
         return None;
     }
-    Some(JoinSnBaseline {
+    Some(JoinBaseline {
         sn_res: seq_num_res,
         next_sn_reliable: join.next_sn_reliable,
         next_sn_best_effort: join.next_sn_best_effort,
+        // Always milliseconds here — decode_join projected the wire
+        // T-flag seconds form back before this point (R311kr).
+        lease_ms: join.lease,
     })
 }
 
@@ -740,6 +749,20 @@ mod tests {
         assert_eq!(dgram[0] & wire_const::FLAG_T_JOIN_T, 0, "T flag clear");
         let join = decode_join(&dgram).expect("JOIN decodes");
         assert_eq!(join.lease, 1_500);
+    }
+
+    /// R311ks — the wire-advertised lease flows through `validate_join`
+    /// into the admitted baseline (zenoh-pico `entry->_lease =
+    /// msg->_lease`, multicast/rx.c:393), already projected to ms by
+    /// `decode_join` (the 7s lease rides the T-flag seconds form).
+    #[test]
+    fn validate_join_passes_advertised_lease() {
+        let mut p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
+        p.lease_ms = 7_000;
+        let dgram = join0(&p);
+        let join = decode_join(&dgram).expect("JOIN decodes");
+        let baseline = validate_join(&join, &p).expect("admitted");
+        assert_eq!(baseline.lease_ms, 7_000);
     }
 
     /// R311kq — pico omitted-optional semantics: a minimal JOIN means
