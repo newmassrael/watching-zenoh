@@ -59,12 +59,13 @@ use crate::peer_init_caps::PeerInitCaps;
 // so the signature-stable `replay_declarations` / `declaration_cache_snapshot`
 // surface keeps its types when `session-reconnect` is off (R311g1).
 use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
-// Reliability is the second arg of every `link_driver().send_blocking(..)`,
-// so it is used iff at least one wire-emit body is active: the handshake /
-// close encoders OR any consumer-plane frame emit (the frame_encode union).
-// The R311jq batch-flush emits derive their channel via
-// `frame_encode::frame_wire_reliability` (full-path return type), so
-// `transport-batching` alone does not need this import.
+// Reliability is the signature type of the R311kw `send_wire` seam, so it
+// is used iff at least one wire-emit body is active: the handshake / close
+// encoders, any consumer-plane frame emit (the frame_encode union), OR the
+// batch flush (`transport-batching` — its emits route through the seam
+// since R311kw, so the former "full-path return type only" exclusion no
+// longer holds). `send_wire` itself carries the same cfg union; the two
+// move together.
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -80,6 +81,7 @@ use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
     feature = "declare-token",
     feature = "declare-final",
     feature = "liveliness-token",
+    feature = "transport-batching",
 ))]
 use crate::reliability::Reliability;
 use crate::response_sink::ResponseSink;
@@ -242,6 +244,20 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
     /// window governs alone.
     pub peer_open_lease_ms: R::Mutex<Option<u64>>,
+    /// R311kw — monotonic timestamp in milliseconds of the most recent
+    /// outbound wire emit on this link. Stamped by the [`Self::send_wire`]
+    /// seam every TX path funnels through (handshake t_msg, CLOSE, Frame /
+    /// Fragment, batch flush), the deadline-model equivalent of zenoh-pico's
+    /// `_z_transport_common_t._transmitted` flag (transport.h:176; set on
+    /// every send in common/tx.c:98/153, consumed by the keepalive tasks in
+    /// unicast/lease.c:183/196 + multicast/lease.c:171 to suppress a
+    /// KeepAlive when the line already spoke). pico resets the flag each
+    /// `lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR` tick; wz stores the stamp and
+    /// the keepalive emitter compares `now - stamp >= lease/factor` — the
+    /// same store-raw / compare-at-check split as the R311ks multicast
+    /// per-peer sweep. `None` until the first emit; storage form and clock
+    /// epoch match `last_inbound_keepalive_at` (u64 ms, R294 scale).
+    pub last_outbound_at: R::Mutex<Option<u64>>,
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
     /// every field that needs a `now_monotonic_ms()` read holds a
@@ -625,6 +641,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             last_inbound_keepalive_at: R::new_mutex(None::<u64>),
             established_at: R::new_mutex(None::<u64>),
             peer_open_lease_ms: R::new_mutex(None::<u64>),
+            last_outbound_at: R::new_mutex(None::<u64>),
             transport_available: R::new_mutex(true),
             clock,
             inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
@@ -665,6 +682,46 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// inline (`self.link_driver().send_blocking(&wire, reliability)`).
     fn link_driver(&self) -> &dyn BoxedLinkDriver {
         R::link_driver(&self.driver)
+    }
+
+    /// R311kw — the one wire-emit seam: stamp [`Self::last_outbound_at`]
+    /// and forward to the link driver. Every production TX path routes
+    /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
+    /// batch flush) so the keepalive emitter's idle window sees EVERY
+    /// send — zenoh-pico parity: `_z_transport_tx_send_t_msg` /
+    /// `_send_n_msg_inner` set `_transmitted = true` for every sender
+    /// (common/tx.c:98/153); a TX path that bypassed the seam would
+    /// make the emitter inject a redundant KeepAlive after real traffic.
+    /// The stamp is read outside the slot closure (R294 discipline) and
+    /// the slot guard drops before the blocking send so the
+    /// non-reentrant MCU mutex never spans link IO.
+    ///
+    /// cfg = the union of the routed emit bodies (the `Reliability`
+    /// import union above): the handshake / close encoders, the
+    /// frame_encode consumer-plane union, and the batch flush. A build
+    /// with no active wire-emit body must not carry the dead seam
+    /// (CI denies warnings on the minimal MCU lanes).
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-interest",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-final",
+        feature = "liveliness-token",
+        feature = "transport-batching",
+    ))]
+    fn send_wire(&self, bytes: &[u8], reliability: Reliability) {
+        let now = self.clock.now_monotonic_ms();
+        R::with_mutex_mut(&self.last_outbound_at, |slot| *slot = Some(now));
+        self.link_driver().send_blocking(bytes, reliability);
     }
 
     /// R121d — derive the SessionInitParams the Accepting side
@@ -1178,7 +1235,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let prev = core::mem::take(&mut batch.buf);
                     batch.count = 0;
                     let channel = frame_wire_reliability(&prev);
-                    self.link_driver().send_blocking(&prev, channel);
+                    self.send_wire(&prev, channel);
                 }
             }
             // With transport-batching off the window flag never reads
@@ -1253,14 +1310,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
                 let base = self.outbound_frame_sn.fetch_add(count, Ordering::SeqCst);
                 for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base, sn_mask) {
-                    self.link_driver().send_blocking(&frag, reliability);
+                    self.send_wire(&frag, reliability);
                 }
                 return;
             }
         }
         #[cfg(not(feature = "transport-fragmentation"))]
         let _ = (sn, mtu, sn_mask);
-        self.link_driver().send_blocking(frame, reliability);
+        self.send_wire(frame, reliability);
     }
 
     /// R311jq — drain the open batch frame to the link, if any. Private
@@ -1279,7 +1336,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             batch.count = 0;
             let frame = core::mem::take(&mut batch.buf);
             let channel = crate::frame_encode::frame_wire_reliability(&frame);
-            self.link_driver().send_blocking(&frame, channel);
+            self.send_wire(&frame, channel);
         });
     }
 
@@ -2721,8 +2778,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.flush_open_batch();
             R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
             let bytes = encode_close(reason as u8);
-            self.link_driver()
-                .send_blocking(&bytes, Reliability::Reliable);
+            self.send_wire(&bytes, Reliability::Reliable);
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
@@ -2835,6 +2891,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
             R::with_mutex_mut(&self.last_inbound_keepalive_at, |slot| *slot = None);
             R::with_mutex_mut(&self.established_at, |slot| *slot = None);
+            // R311kw — the outbound stamp is per-transport: the replacement
+            // link starts with no TX history (pico's fresh transport
+            // initializes `_transmitted = 0`, unicast/transport.c:65).
+            R::with_mutex_mut(&self.last_outbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
             // R311ke — the RX SN gate is handshake-scoped: the reopen
@@ -3079,7 +3139,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::InitSyn,
                 )
                 .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
-            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable);
         }
     }
 
@@ -3103,7 +3163,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::OpenSyn,
                 )
                 .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
-            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable);
         }
     }
 
@@ -3138,7 +3198,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::InitAck,
                 )
                 .expect("InitAck cookie is HMAC-SHA256[..16] (16 bytes, within codec cap)");
-            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable);
         }
     }
 
@@ -3158,7 +3218,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                     ExtChainRole::OpenAck,
                 )
                 .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
-            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable);
         }
     }
 
@@ -3175,7 +3235,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 reason
             });
             let bytes = encode_close(reason);
-            a.link_driver().send_blocking(&bytes, Reliability::Reliable);
+            a.send_wire(&bytes, Reliability::Reliable);
         }
     }
 
