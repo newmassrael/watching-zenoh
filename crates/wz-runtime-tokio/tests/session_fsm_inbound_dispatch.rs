@@ -846,3 +846,29 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
          (R86 capture is Accepting-side InitSyn only)"
     );
 }
+
+/// R311kv — handle_inbound captures the peer's OPEN-advertised lease
+/// into `peer_open_lease_ms` (pico adopts it at the same arrival
+/// points, unicast/transport.c:193/269). The wire rides the R311ku
+/// compact seconds form (7000ms -> T=1 + VLE 7), so this also pins the
+/// full chain: encode compacts -> parse projects back -> capture is ms.
+#[test]
+fn inbound_openack_captures_peer_advertised_lease_ms() {
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
+    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    assert_eq!(*actions.peer_open_lease_ms.lock().unwrap(), None);
+
+    let mut peer_params = fixture_session_init_params();
+    peer_params.lease_ms = 7_000;
+    let wire = wz_session_core::handshake_encode::encode_open(&peer_params, true, None, &[])
+        .expect("synthetic OpenAck encodes");
+
+    actions
+        .handle_inbound(&wire)
+        .expect("handle_inbound on synthetic OpenAck");
+    assert_eq!(
+        *actions.peer_open_lease_ms.lock().unwrap(),
+        Some(7_000),
+        "peer's advertised lease captured in milliseconds"
+    );
+}

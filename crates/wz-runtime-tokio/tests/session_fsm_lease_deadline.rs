@@ -276,3 +276,46 @@ fn r77_expired_at_exact_lease_boundary() {
     );
     assert_eq!(engine.get_current_state(), S::Closing);
 }
+
+// ── R311kv: the governing window is min(local, peer-advertised) —
+//    pico adopts min(open._lease, Z_TRANSPORT_LEASE) at OPEN arrival
+//    (unicast/transport.c:193/269) and expires the session by it.
+#[test]
+fn r311kv_shorter_peer_lease_governs_deadline() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    let stamp = actions.clock.now_monotonic_ms();
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    // Peer advertised 2s in its OPEN; local window is the fixture 10s.
+    *actions.peer_open_lease_ms.lock().unwrap() = Some(2_000);
+
+    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 1_999);
+    assert_eq!(outcome, LeaseCheckOutcome::WithinLease, "inside 2s window");
+    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 2_000);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::Expired,
+        "the peer's 2s advertisement governs, not the local 10s"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+}
+
+// ── R311kv: a peer advertising LONGER than the local window cannot
+//    extend the hold past the local cap (min(), the deadline-model
+//    twin of the R311ks multicast sweep cap).
+#[test]
+fn r311kv_local_cap_bounds_longer_peer_lease() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    let stamp = actions.clock.now_monotonic_ms();
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    *actions.peer_open_lease_ms.lock().unwrap() = Some(60_000);
+
+    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 10_000);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::Expired,
+        "local 10s cap bounds the peer's 60s advertisement"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+}

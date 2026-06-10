@@ -236,13 +236,24 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
 /// carries). `params.lease_ms` is milliseconds by contract (R311ku —
 /// the wire unit is an encode/decode boundary concern, `crate::lease`),
 /// matching the `u64` ms scale of the stamps (R294).
+///
+/// R311kv — the governing window is `min(local, peer-advertised)`:
+/// zenoh-pico adopts `min(open._lease, Z_TRANSPORT_LEASE)` when the
+/// peer's OPEN arrives (unicast/transport.c:193/269) and expires the
+/// session by it (unicast/lease.c:147). The same min(advertised,
+/// local-cap) shape the multicast per-peer sweep applies (R311ks);
+/// pre-OPEN (`peer_open_lease_ms` empty) the local window governs alone.
 pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     now_ms: u64,
 ) -> LeaseCheckOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let lease_ms = actions.params.lease_ms;
+    let peer_lease = R::with_mutex_mut(&actions.peer_open_lease_ms, |g| *g);
+    let lease_ms = match peer_lease {
+        Some(advertised) => advertised.min(actions.params.lease_ms),
+        None => actions.params.lease_ms,
+    };
     let keepalive = R::with_mutex_mut(&actions.last_inbound_keepalive_at, |g| *g);
     let established = R::with_mutex_mut(&actions.established_at, |g| *g);
     let baseline = match (established, keepalive) {

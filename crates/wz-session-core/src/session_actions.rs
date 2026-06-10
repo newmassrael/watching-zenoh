@@ -229,6 +229,19 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// from `std::time::Instant`); the lease comparator subtracts
     /// them as pure `u64` arithmetic.
     pub established_at: R::Mutex<Option<u64>>,
+    /// R311kv — the lease window the peer advertised in its OPEN body
+    /// (milliseconds; `parse_inbound` already projected the wire T-flag
+    /// seconds form back, R311ku). Captured by [`Self::handle_inbound`]
+    /// from BOTH OpenSyn (accepting side) and OpenAck (initiating side)
+    /// — zenoh-pico adopts `min(advertised, Z_TRANSPORT_LEASE)` at the
+    /// same two arrival points (unicast/transport.c:193/269) and expires
+    /// the session by it (unicast/lease.c:147). wz stores the raw
+    /// advertisement; the deadline comparator applies the local cap
+    /// ([`crate::drive::check_lease_deadline`]: `min(this,
+    /// params.lease_ms)`) — the same store-raw / cap-at-check split as
+    /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
+    /// window governs alone.
+    pub peer_open_lease_ms: R::Mutex<Option<u64>>,
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
     /// every field that needs a `now_monotonic_ms()` read holds a
@@ -611,6 +624,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             inbound_cookie: R::new_mutex(None::<Vec<u8>>),
             last_inbound_keepalive_at: R::new_mutex(None::<u64>),
             established_at: R::new_mutex(None::<u64>),
+            peer_open_lease_ms: R::new_mutex(None::<u64>),
             transport_available: R::new_mutex(true),
             clock,
             inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
@@ -904,6 +918,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // inbound_peer_init_caps), never nested.
                 let mask = self.negotiated_sn_mask();
                 R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, body.initial_sn));
+                // R311kv — capture the peer's advertised lease (ms,
+                // R311ku boundary projection) for the deadline
+                // comparator's min(); pico adopts it at this same
+                // OpenSyn arrival (unicast/transport.c:269).
+                R::with_mutex_mut(&self.peer_open_lease_ms, |slot| {
+                    *slot = Some(body.lease);
+                });
             }
             #[cfg(feature = "codec-open-body")]
             InboundFrame::Open {
@@ -915,6 +936,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // `_initial_sn_rx` from either body, transport.c:196/270).
                 let mask = self.negotiated_sn_mask();
                 R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, body.initial_sn));
+                // R311kv — OpenAck mirror of the OpenSyn lease capture
+                // (pico unicast/transport.c:193).
+                R::with_mutex_mut(&self.peer_open_lease_ms, |slot| {
+                    *slot = Some(body.lease);
+                });
             }
             #[cfg(feature = "codec-keep-alive")]
             InboundFrame::KeepAlive { .. } => {
