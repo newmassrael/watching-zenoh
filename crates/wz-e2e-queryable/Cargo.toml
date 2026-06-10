@@ -45,16 +45,11 @@ path = "src/main.rs"
 # Composition of this subset (vs the C4b `queryable-only` BUILD subset
 # `codec-request,codec-response,query-queryable,query-reply-err`):
 #
-#   * transport-batching — load-bearing for the FOREIGN handshake, not
-#     the queryable data plane. Identical finding to wz-e2e-pubsub
-#     (R311fg): `PeerInitCaps::from_init_syn` ignores the peer's
-#     advertised batch_size and forces 65535 when it is off, so
-#     zenoh-pico rejects the resulting InitAck (SentInitAck -> Closed,
-#     "Unable to open session!"). The handshake is plane-independent, so
-#     every wz-e2e-* binary that completes a session with zenoh-pico
-#     pins it. It builds fine without it (C4b passes) and two wz peers
-#     interoperate without it (both force 65535) — the divergence is
-#     specifically the foreign-peer handshake.
+#   * (R311kl) transport-batching is NO LONGER pinned — the R311fg-era
+#     foreign-handshake dependency was a symptom of the R311cb gate over
+#     the INIT batch_size negotiation, removed in R311kl (negotiation is
+#     core transport, pico parity). The foreign handshake now succeeds
+#     without the feature; this e2e proves it on the wire.
 #   * codec-response-final — the queryable terminates its reply chain
 #     with one ResponseFinal (R121j-5c Final scheduling). zenoh-pico
 #     z_get prints ">> Received query final notification" on it and
@@ -62,11 +57,11 @@ path = "src/main.rs"
 #     back to its query timeout. query-queryable does NOT imply
 #     codec-response-final (it implies only codec-request + codec-
 #     response, the Reply emit), so the C4b `queryable-only` BUILD
-#     subset omits it. This is the same shape as R311fg's transport-
-#     batching finding generalised to the queryable plane: the
-#     foreign-interop-coherent subset is strictly larger than the
-#     build-coherent one — a clean Final is part of interop-correct
-#     queryable behaviour but invisible to a type-check.
+#     subset omits it. This is the same shape the R311fg transport-
+#     batching finding had (before R311kl dissolved that one at the
+#     root): the foreign-interop-coherent subset is strictly larger
+#     than the build-coherent one — a clean Final is part of
+#     interop-correct queryable behaviour but invisible to a type-check.
 #   * keyexpr-literal/-canon, the handshake codec quartet, keepalive,
 #     and the unicast open/accept session features are the same shared
 #     core every wz-e2e-* binary pins.
@@ -81,7 +76,6 @@ wz = { path = "../wz", default-features = false, features = [
     "transport-unicast",
     "transport-link-tcp",
     "transport-keepalive",
-    "transport-batching",
     "session-unicast-open",
     "session-unicast-accept",
     "codec-frame",

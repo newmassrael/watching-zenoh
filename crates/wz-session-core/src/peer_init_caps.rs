@@ -12,11 +12,17 @@
 //! response capabilities; an MCU profile decodes the same wire fields
 //! with the same typed API as the tokio AP profile.
 //!
-//! The `transport-batching` gate inside `from_init_body` (whether to honor
-//! the peer-advertised `batch_size` or clamp to the full MTU) moves here
-//! with the decoder, so `wz-session-core` now owns a `transport-batching`
-//! gate-only feature; `wz-runtime-tokio`'s same-named feature forwards to
-//! it so the negotiation semantics stay consistent across the workspace.
+//! R311kl — the decoder is UNGATED: peer `batch_size` honoring is core
+//! transport, zenoh-pico parity (the `param->_batch_size` min adoption
+//! and the TX wbuf sizing live outside every `Z_FEATURE_BATCHING` gate,
+//! unicast/transport.c:47 + 102 + 135-140; the feature gates only the
+//! coalescing machinery, transport.c:35-38). The former R311cb
+//! `transport-batching` gate here forced 65535 with the feature off,
+//! which made the InitAck ENLARGE a smaller InitSyn advertisement and
+//! foreign pico initiators rejected the session (R311fg finding) — the
+//! root cause every wz-e2e-* binary worked around by pinning the
+//! feature. `transport-batching` now gates exactly what pico's
+//! `Z_FEATURE_BATCHING` gates: the TX coalescing window.
 //! The live `inbound_peer_init_caps: R::Mutex<Option<PeerInitCaps>>` slot
 //! is runtime-bound and stays in `session_glue.rs`, which keeps a
 //! `pub use` re-export so the `crate::session_glue::PeerInitCaps`
@@ -46,10 +52,10 @@ pub struct PeerInitCaps {
 /// the S-bit-clear defaults applied (`_Z_DEFAULT_RESOLUTION_SIZE = 2`,
 /// `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`). Returns
 /// `(seq_num_res, req_id_res, batch_size)` exactly as the peer put them
-/// on the wire: no feature-gate honoring — [`PeerInitCaps::from_init_body`]
-/// layers the `transport-batching` projection on top, and
-/// [`init_ack_exceeds_advertisement`] validates against the unprojected
-/// values (the wire-conformance rule is feature-independent).
+/// on the wire: [`PeerInitCaps::from_init_body`] layers the defensive
+/// 0-normalization on top, and [`init_ack_exceeds_advertisement`]
+/// validates against the unprojected values (a wire 0 must compare as
+/// 0, not as the normalized 65535 ceiling).
 fn decode_wire_caps(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> (u8, u8, u16) {
     let (seq_num_res, req_id_res) = match sn_res_byte {
         Some(b) => (b & 0x03, (b >> 2) & 0x03),
@@ -70,11 +76,11 @@ fn decode_wire_caps(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> (u8, u8
 /// but silently tolerated a non-conforming acceptor (F-b carry).
 ///
 /// Compares the RAW wire advertisement (S-bit-clear defaults applied via
-/// [`decode_wire_caps`]), not the `transport-batching`-honored projection
-/// `PeerInitCaps::from_init_body` stores: wire conformance is
-/// feature-independent, and the cfg-off projection clamps the peer field
-/// to 65535, which would falsify exactly the comparison this predicate
-/// exists to make.
+/// [`decode_wire_caps`]), not the projection `PeerInitCaps::
+/// from_init_body` stores: its defensive 0-normalization turns a wire 0
+/// into the 65535 ceiling, which would falsify exactly the comparison
+/// this predicate exists to make (a non-conforming peer's literal 0
+/// conforms to any advertisement; a normalized 65535 rarely does).
 pub fn init_ack_exceeds_advertisement(
     own_seq_num_res: u8,
     own_req_id_res: u8,
@@ -96,29 +102,17 @@ impl PeerInitCaps {
     pub fn from_init_body(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
         // R311kj — ONE wire decoder: the raw triple comes from
         // [`decode_wire_caps`] (S-clear defaults applied), and this
-        // constructor layers the two PROJECTIONS on top:
-        //
-        // - R311cb — transport-batching gates the peer-advertised
-        //   batch_size honoring. cfg-off forces 65535 (full MTU): the
-        //   honest semantic is "we always batch up to the wire limit
-        //   and never reduce."
-        // - R311kj — a wire 0 normalizes to the 65535 ceiling
-        //   defensively: wz itself never emits 0 any more
-        //   (`SessionInitParams::effective_batch_size` is the
-        //   advertisement SSOT), so a 0 here is a pre-R311kj wz or a
-        //   non-conforming peer, and "unset" beats a zero TX budget.
+        // constructor layers ONE projection on top: a wire 0
+        // normalizes to the 65535 ceiling defensively. wz itself never
+        // emits 0 any more (`SessionInitParams::effective_batch_size`
+        // is the advertisement SSOT), so a 0 here is a pre-R311kj wz
+        // or a non-conforming peer, and "unset" beats a zero TX
+        // budget. R311kl — the honoring itself is unconditional (core
+        // transport, pico parity); see the module doc.
         let (seq_num_res, req_id_res, wire_batch) = decode_wire_caps(sn_res_byte, batch_size);
-        #[cfg(feature = "transport-batching")]
         let batch_size = match wire_batch {
             0 => 65535,
             n => n,
-        };
-        #[cfg(not(feature = "transport-batching"))]
-        let batch_size = {
-            // Bind the raw value to `_` so the signature stays stable
-            // under the gate (signature-stability, R311g1).
-            let _ = wire_batch;
-            65535u16
         };
         Self {
             seq_num_res,
@@ -203,39 +197,39 @@ mod init_ack_validation_tests {
     }
 }
 
-// ── transport-batching receive-side field-drop NEG ──
+// ── R311kl core honoring (feature-independent) ──
 //
-// `from_init_body` honors the peer-advertised InitSyn `batch_size` only
-// when `transport-batching` is ON; with it OFF the peer value is
-// discarded and the field is forced to 65535 (full MTU). The ON arm is
-// behaviourally covered by wz-runtime-tokio's
-// `r121d_peer_init_caps_decodes_packed_sn_res_byte` (which asserts the
-// honored 1024 under `cfg(feature = "transport-batching")`, and runs in
-// Layer C1's workspace test because the runtime crate's defaults enable
-// the feature). The OFF arm had no behavioural test — Layer C1h subset
-// #1/#7 only `cargo build`s the gate, proving it compiles, not that the
-// peer value is dropped. This NEG pins it: with the feature off, the
-// same `Some(1024)` peer advertisement must NOT survive into
-// `batch_size`, while the packed `sn_res` byte (feature-independent)
-// still decodes. The gate selects the OFF arm; it runs in the isolated
-// `cargo test -p wz-session-core` lanes (C1c/d/e), whose feature set
-// leaves transport-batching off (the workspace build unifies it ON from
-// the runtime crate, where the POS arm above runs instead).
+// `from_init_body` honors the peer-advertised `batch_size` in EVERY
+// build — the R311cb `transport-batching` gate here was removed because
+// it broke foreign interop with the feature off (the InitAck enlarged a
+// smaller InitSyn advertisement and pico rejected the session, R311fg).
+// This replaces the retired OFF-arm NEG (`peer_batch_size_discarded_
+// when_transport_batching_off`), which pinned exactly the projection
+// R311kl removed; it runs ungated in the isolated
+// `cargo test -p wz-session-core` lanes (C1c/d/e) AND the workspace
+// lane, so the honoring is pinned on both sides of the feature.
 #[cfg(test)]
-#[cfg(not(feature = "transport-batching"))]
 mod tests {
     use super::*;
 
     #[test]
-    fn peer_batch_size_discarded_when_transport_batching_off() {
+    fn peer_batch_size_honored_in_every_build() {
         // sn_res 0x09 = seq 1 | (req 2 << 2); peer advertises batch 1024.
         let caps = PeerInitCaps::from_init_body(Some(0x09), Some(1024));
-        assert_eq!(caps.seq_num_res, 1, "packed sn_res still decodes");
-        assert_eq!(caps.req_id_res, 2, "packed sn_res still decodes");
+        assert_eq!(caps.seq_num_res, 1, "packed sn_res decodes");
+        assert_eq!(caps.req_id_res, 2, "packed sn_res decodes");
         assert_eq!(
-            caps.batch_size, 65535,
-            "peer-advertised batch_size must be discarded (clamped to full \
-             MTU) when transport-batching is off"
+            caps.batch_size, 1024,
+            "peer-advertised batch_size is honored unconditionally \
+             (core transport, pico parity — R311kl)"
         );
+    }
+
+    #[test]
+    fn wire_zero_batch_size_normalizes_to_ceiling() {
+        // R311kj defensive projection survives the R311kl ungate: a
+        // non-conforming wire 0 must not become a zero TX budget.
+        let caps = PeerInitCaps::from_init_body(Some(0x09), Some(0));
+        assert_eq!(caps.batch_size, 65535, "wire 0 = unset, not a 0 budget");
     }
 }

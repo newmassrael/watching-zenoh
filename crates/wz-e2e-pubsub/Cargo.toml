@@ -44,24 +44,20 @@ path = "src/main.rs"
 # a foreign zenoh-pico peer, default-features off so no other plane
 # leaks in.
 #
-# R311fg finding — this is the C4b `pubsub-only` BUILD subset PLUS
-# `transport-batching`. The Layer E2 e2e proved transport-batching is
-# load-bearing for FOREIGN interop: with it off, `PeerInitCaps::
-# from_init_syn` ignores the peer's advertised batch_size and forces
-# 65535, and zenoh-pico's z_sub rejects the resulting InitAck
-# (handshake closes at SentInitAck -> Closed, "Unable to open
-# session!"). It builds fine without it (C4b passes) and two wz peers
-# interoperate without it (both force 65535, so they agree) — the
-# divergence is specifically the foreign-peer handshake, which is
-# exactly what only an e2e-vs-zenoh-pico guard can catch. So the
-# foreign-interop-coherent pubsub subset is strictly larger than the
-# build-coherent one; this manifest pins the former.
+# R311kl — this is the C4b `pubsub-only` BUILD subset verbatim. The
+# R311fg-era `transport-batching` pin is GONE: that finding (with the
+# feature off, `from_init_body` forced batch_size 65535, the InitAck
+# enlarged the peer's InitSyn advertisement, and zenoh-pico's z_sub
+# rejected the session) was a symptom of the R311cb gate over the INIT
+# negotiation, which R311kl removed — negotiation is core transport now
+# (pico parity), so the foreign handshake no longer needs the feature.
+# This e2e thereby behaviourally proves the ungate against a real
+# foreign peer: the build-coherent subset IS interop-coherent again.
 wz = { path = "../wz", default-features = false, features = [
     "runtime-tokio",
     "transport-unicast",
     "transport-link-tcp",
     "transport-keepalive",
-    "transport-batching",
     "session-unicast-open",
     "session-unicast-accept",
     "codec-frame",

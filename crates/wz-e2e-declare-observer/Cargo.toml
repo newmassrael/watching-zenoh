@@ -84,12 +84,11 @@ path = "src/main.rs"
 #     byte-identical to the C4b matrix entry whose behavioural twin this
 #     binary is; their arms are build-proven by C4b and behaviour-proven
 #     in-process, this e2e exercises the subscriber arm on the wire.
-#   * transport-batching — load-bearing for the FOREIGN handshake, not
-#     the declare plane. Same finding as every other wz-e2e-* binary
-#     (R311fg): `PeerInitCaps::from_init_syn` forces batch_size 65535
-#     when it is off, so zenoh-pico rejects the InitAck. The handshake is
-#     plane-independent, so every binary that completes a session with
-#     zenoh-pico pins it.
+#   * (R311kl) transport-batching is NO LONGER pinned — the R311fg-era
+#     foreign-handshake dependency was a symptom of the R311cb gate over
+#     the INIT batch_size negotiation, removed in R311kl (negotiation is
+#     core transport, pico parity). The foreign handshake now succeeds
+#     without the feature; this e2e proves it on the wire.
 #   * keyexpr-literal/-canon, the handshake codec quartet, keepalive, and
 #     the unicast open/accept session features are the shared core every
 #     wz-e2e-* binary pins (the wz-e2e-harness intersection).
@@ -98,7 +97,6 @@ wz = { path = "../wz", default-features = false, features = [
     "transport-unicast",
     "transport-link-tcp",
     "transport-keepalive",
-    "transport-batching",
     "session-unicast-open",
     "session-unicast-accept",
     "codec-frame",

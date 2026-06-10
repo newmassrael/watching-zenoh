@@ -62,8 +62,9 @@ path = "src/main.rs"
 # declare-final), plus `declare-interest` + `codec-declare` listed
 # explicitly for manifest legibility (the outbound liveliness Interest
 # emit + the inbound Declare(Token/UndeclToken) decode the subscriber
-# registry dispatches). `transport-batching` is the same load-bearing
-# foreign-handshake feature every wz-e2e-* binary pins (R311fg finding).
+# registry dispatches). The R311fg-era `transport-batching` pin is gone
+# (R311kl): the INIT batch_size negotiation is core transport now, so
+# the foreign handshake no longer needs the feature.
 # No codec-push / query-* / pubsub-* — this binary neither publishes nor
 # queries; it only observes liveliness samples.
 wz = { path = "../wz", default-features = false, features = [
@@ -71,7 +72,6 @@ wz = { path = "../wz", default-features = false, features = [
     "transport-unicast",
     "transport-link-tcp",
     "transport-keepalive",
-    "transport-batching",
     "session-unicast-open",
     "session-unicast-accept",
     "codec-frame",

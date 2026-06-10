@@ -43,12 +43,14 @@ description = "Shared acceptor scaffolding for the wz-e2e-* facade-subset e2e bi
 # pubsub-* / liveliness-*). Feature unification re-adds each binary's
 # plane in that binary's build graph; this dep never widens a binary's
 # subset because every binary already pins this exact core.
+# R311kl — transport-batching left the intersection: the INIT batch_size
+# negotiation is core transport now, so the foreign handshake no longer
+# needs the feature and no wz-e2e-* binary pins it.
 wz = { path = "../wz", default-features = false, features = [
     "runtime-tokio",
     "transport-unicast",
     "transport-link-tcp",
     "transport-keepalive",
-    "transport-batching",
     "session-unicast-open",
     "session-unicast-accept",
     "codec-frame",

@@ -827,9 +827,9 @@ layer_c1g_cargo_test_observer() {
 #   5. declare-observer  +codec-declare +declare/liveliness  (peer-declare + liveliness observer, NO query/reply
 #                                                      — builds the observer with the queryables slot elided)
 #   6. codec-declare-bare +codec-declare             (registries present, zero consumer features)
-#   7. transport-batching +transport-batching        (R311eg: PeerInitCaps::from_init_syn honors the
-#                                                      peer-advertised batch_size; guards the gate-ON arm
-#                                                      that the alloc-only subset #1 leaves OFF)
+#   7. transport-batching +transport-batching        (R311kl: the gate covers ONLY the BatchTx coalescing
+#                                                      machinery now — negotiation is core; guards the
+#                                                      gate-ON arm that the alloc-only subset #1 leaves OFF)
 #
 # R311gb (Track 2) — no-alloc (MCU no-heap) subsets 8-13. Every subset
 # above pins `alloc`; these drop it, so they exercise the bounded
@@ -1194,15 +1194,15 @@ layer_c4_preset_matrix() {
 # plane (codec-response-final INCLUDED), consistent with declare-observer
 # already being its full bundle. Previously the build matrices listed
 # query-reply-err but NOT codec-response-final, while wz-e2e-queryable
-# (interop) pinned the reverse — one name, two feature sets. Now build
-# extras superset interop extras for EVERY plane, so the sole
-# build-vs-interop delta is transport-batching: a uniform transport/base
-# feature (R311fg foreign handshake), NOT a per-plane one. That collapses
-# the 3 historical deltas (transport-batching R311fg, codec-response-final
-# R311fh, query-reply R311fm) into ONE uniform base delta, carried by
-# Layer E2's wz-e2e-* binaries (which add transport-batching + tcp). It
-# also closes the R311fh gap at the BUILD layer: the queryable build now
-# includes the terminating Final.
+# (interop) pinned the reverse — one name, two feature sets. R311fp made
+# build extras superset interop extras for EVERY plane, leaving one
+# uniform base delta: transport-batching (R311fg foreign handshake).
+# R311kl dissolved that last delta at the root (the INIT batch_size
+# negotiation is core transport now; no wz-e2e-* binary pins
+# transport-batching), so build-coherent == interop-coherent and Layer
+# E2's binaries add only tcp over these subsets. It also closes the
+# R311fh gap at the BUILD layer: the queryable build now includes the
+# terminating Final.
 #
 # handshake-only = empty extras (bare session core, no consumer plane).
 # transport-unicast / keyexpr-canon are FOUNDATIONAL and live in each
@@ -1256,14 +1256,15 @@ _wz_consumer_plane_subsets() {
 # subsets. Ruling: NO. C4b and Layer E2 are different guards. C4b's value
 # is testing the MINIMAL incomplete shape (a smaller feature set is a
 # STRONGER over-broad-import guard); pinning a superset would (1) stop
-# exercising the superset-OFF facade build two wz peers legitimately use
-# (transport-batching OFF → both force 65535), (2) duplicate the build
-# each wz-e2e-* binary already performs under its interop superset
-# (Layer E2), and (3) erase the build-vs-interop distinction that is the
-# reason Layer E2 exists. Interop supersets live with the wz-e2e-* binaries
-# + Layer E2; the per-plane deltas were since collapsed to the single
-# uniform transport-batching delta (see the SSOT block above). This closes
-# the C4b-ruling carry.
+# exercising the superset-OFF facade build two wz peers legitimately use,
+# (2) duplicate the build each wz-e2e-* binary already performs under its
+# interop superset (Layer E2), and (3) erase the build-vs-interop
+# distinction that is the reason Layer E2 exists. Interop supersets live
+# with the wz-e2e-* binaries + Layer E2; the per-plane deltas were since
+# collapsed to the single uniform transport-batching delta, and R311kl
+# then dissolved that one too (negotiation is core transport; no wz-e2e-*
+# binary pins transport-batching any more — the interop superset is now
+# exactly the build subset + tcp). This closes the C4b-ruling carry.
 #
 # R311fp SSOT — C4b consumes _wz_consumer_plane_subsets (the one plane map
 # shared with C4c/C1j/C4d) instead of its own copy. It prepends the FACADE

@@ -383,10 +383,9 @@ fn r121d_peer_init_caps_from_init_body_uses_defaults_when_s_bit_clear() {
     assert_eq!(caps.batch_size, 65535);
 }
 
-// R311fr — PeerInitCaps decode is `transport-batching`-gated; the SSOT
-// consumer-plane subsets omit transport-batching, so this caps-behaviour
-// test runs only where the caps decoder is compiled in.
-#[cfg(feature = "transport-batching")]
+// R311kl — PeerInitCaps decode is feature-independent (the R311fr-era
+// `transport-batching` gate over the honoring was removed; negotiation
+// is core transport), so this caps-behaviour test runs in every lane.
 #[test]
 fn r121d_peer_init_caps_decodes_packed_sn_res_byte() {
     // The InitSyn `sn_res` byte is packed
@@ -400,8 +399,8 @@ fn r121d_peer_init_caps_decodes_packed_sn_res_byte() {
     assert_eq!(caps.batch_size, 1024);
 }
 
-// R311fr — InitAck caps negotiation is `transport-batching` behaviour.
-#[cfg(feature = "transport-batching")]
+// R311kl — InitAck caps negotiation is core transport behaviour
+// (formerly `transport-batching`-gated, R311fr); runs in every lane.
 #[test]
 fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     // The wire-spec invariant `InitAck.size <= InitSyn.size`

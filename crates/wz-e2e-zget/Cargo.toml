@@ -89,14 +89,11 @@ path = "src/main.rs"
 # same role wz-e2e-pubsub (transport-batching) and wz-e2e-queryable
 # (codec-response-final) play for their planes.
 #
-#   * transport-batching — load-bearing for the FOREIGN handshake, not
-#     the query data plane. Identical finding to wz-e2e-pubsub (R311fg) /
-#     wz-e2e-queryable (R311fh): `PeerInitCaps::from_init_syn` forces
-#     batch_size 65535 when it is off, so zenoh-pico rejects the InitAck.
-#     The handshake is plane-independent, so every wz-e2e-* binary that
-#     completes a session with zenoh-pico pins it. It builds fine without
-#     it (C4c passes) and two wz peers interoperate without it (both
-#     force 65535) — the divergence is specifically the foreign handshake.
+#   * (R311kl) transport-batching is NO LONGER pinned — the R311fg-era
+#     foreign-handshake dependency was a symptom of the R311cb gate over
+#     the INIT batch_size negotiation, removed in R311kl (negotiation is
+#     core transport, pico parity). The foreign handshake now succeeds
+#     without the feature; this e2e proves it on the wire.
 #   * keyexpr-literal/-canon, the handshake codec quartet, keepalive, and
 #     the unicast open/accept session features are the same shared core
 #     every wz-e2e-* binary pins (the wz-e2e-harness intersection).
@@ -105,7 +102,6 @@ wz = { path = "../wz", default-features = false, features = [
     "transport-unicast",
     "transport-link-tcp",
     "transport-keepalive",
-    "transport-batching",
     "session-unicast-open",
     "session-unicast-accept",
     "codec-frame",

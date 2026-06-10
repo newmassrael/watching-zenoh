@@ -48,9 +48,10 @@ path = "src/main.rs"
 # AND answers an inbound liveliness Interest (R283), default-features off
 # so no other plane leaks in.
 #
-# Composition: the shared handshake core (incl. transport-batching, the
-# load-bearing foreign-handshake feature every wz-e2e-* binary pins per
-# the R311fg finding) + `liveliness-token`. The declarer needs NO
+# Composition: the shared handshake core + `liveliness-token`. The
+# R311fg-era `transport-batching` pin is gone (R311kl): the INIT
+# batch_size negotiation is core transport now, so the foreign
+# handshake no longer needs the feature. The declarer needs NO
 # `declare-interest` (that is the SUBSCRIBER's outbound-Interest feature);
 # it RECEIVES the inbound Interest (always-decoded, ungated) and REPLIES
 # via `codec-declare`, which `liveliness-token` transitively pulls
@@ -61,7 +62,6 @@ wz = { path = "../wz", default-features = false, features = [
     "transport-unicast",
     "transport-link-tcp",
     "transport-keepalive",
-    "transport-batching",
     "session-unicast-open",
     "session-unicast-accept",
     "codec-frame",

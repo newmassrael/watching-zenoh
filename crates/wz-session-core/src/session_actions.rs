@@ -674,17 +674,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if let Some(p) = peer {
             params.seq_num_res = params.seq_num_res.min(p.seq_num_res);
             params.req_id_res = params.req_id_res.min(p.req_id_res);
-            // R311cb — transport-batching gates the min(local, peer)
-            // reduction on batch_size. cfg-off keeps the local
-            // advertised batch_size as-is (no downward negotiation).
+            // R311kl — the min(local, peer) reduction on batch_size is
+            // core transport (pico runs it outside every
+            // Z_FEATURE_BATCHING gate, unicast/transport.c:135-140).
+            // The former R311cb transport-batching gate skipped the
+            // reduction with the feature off, so the InitAck ENLARGED
+            // a smaller InitSyn advertisement and foreign pico
+            // initiators rejected the session (R311fg).
             // R311kj — min over the EFFECTIVE own advertisement (0 =
             // unset would otherwise pin the InitAck to a literal 0 on
             // the wire); the peer side is already 0-normalized by the
             // from_init_body projection.
-            #[cfg(feature = "transport-batching")]
-            {
-                params.batch_size = params.effective_batch_size().min(p.batch_size);
-            }
+            params.batch_size = params.effective_batch_size().min(p.batch_size);
         }
         params
     }
@@ -726,9 +727,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`) and ADOPTS a literal 0
     /// (transport.c:135-136), which is exactly why wz must not emit it.
     ///
-    /// `transport-batching` off: the peer projection clamps to 65535
-    /// ("never reduce", R311cb) and the min degrades to the local
-    /// advertisement — the pre-R311kd behavior.
+    /// R311kl — feature-independent: the peer projection honors the
+    /// advertisement in every build (the former R311cb
+    /// `transport-batching` clamp made batching-off builds ignore the
+    /// peer RX budget even for fragment sizing).
     pub fn negotiated_batch_mtu(&self) -> usize {
         // R311kj — both sides are 0-normalized at their SSOT
         // (own: effective_batch_size, the same value the InitSyn wire
@@ -942,8 +944,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// Validates the RAW wire fields the caller pulls off the decoded
     /// InitAck body — NOT the captured [`PeerInitCaps`] slot, whose
-    /// `transport-batching`-off projection clamps the peer batch_size to
-    /// 65535 and would mask exactly the enlargement this guard rejects.
+    /// defensive 0-normalization (wire 0 -> 65535, R311kj) would turn a
+    /// conforming literal 0 into exactly the enlargement this guard
+    /// rejects.
     #[cfg(feature = "codec-init-body")]
     pub fn init_ack_caps_acceptable(
         &self,

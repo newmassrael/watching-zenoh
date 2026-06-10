@@ -339,11 +339,12 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 #                            Wire-level KeepAlive parse stays governed
 #                            by codec-keep-alive — transport-keepalive
 #                            disables only the active sender side.
-#   transport-batching     — INIT handshake batch_size negotiation in
-#                            PeerInitCaps::from_init_syn. Feature-off
-#                            forces batch_size = 65535 (full MTU) and
-#                            skips the min(peer, local) reduction at
-#                            the OpenAck arm.
+#   transport-batching     — TX coalescing window (BatchTx accumulation
+#                            + batch_start/flush/stop), zenoh-pico
+#                            Z_FEATURE_BATCHING parity. The INIT
+#                            batch_size negotiation is CORE (ungated)
+#                            since R311kl — pico negotiates outside its
+#                            batching gate (unicast/transport.c:135-140).
 # 11 reserved (link-tls/quic/ws/unixsock/vsock/serial, multicast,
 # fragmentation, compression, shm, lowlatency) stay declaration-only
 # at the wz facade Cargo.toml level; this crate does not own them.
@@ -378,10 +379,11 @@ transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec
 # chunk-5 — forward to the wz-session-core same-named gate so the migrated
 # start/stop_keepalive_worker action bodies compile under the keepalive axis.
 transport-keepalive = ["wz-session-core/transport-keepalive"]
-# R311eg — forward to the wz-session-core same-named gate so the migrated
-# PeerInitCaps::from_init_syn decoder honors the peer-advertised batch_size
-# consistently (off clamps to full MTU). The min(peer, local) reduction at
-# the OpenAck arm stays gated in this crate.
+# R311kl — forward to the wz-session-core same-named gate, which now
+# covers ONLY the TX coalescing machinery (BatchTx accumulation arm +
+# batch_start/flush/stop window). The INIT batch_size negotiation
+# (PeerInitCaps honoring + the min reduction) is core transport there,
+# ungated — pico parity (Z_FEATURE_BATCHING never gated negotiation).
 transport-batching = ["wz-session-core/transport-batching"]
 # A4 — forward to the wz-session-core same-named gate (declaration cache
 # storage + reset_for_reopen / replay_declarations bodies). zenoh-pico

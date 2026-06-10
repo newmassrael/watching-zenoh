@@ -388,12 +388,17 @@ liveliness-subscriber = ["codec-declare"]
 # `reply_sink::ReplySink` seam, so no query-get / codec-response edge.
 liveliness-get = ["codec-declare"]
 
-# R311eg — transport-batching gate for the migrated PeerInitCaps decoder
-# (`wz-session-core::peer_init_caps`). Standalone gate-only (no wz-codecs
-# forward): off forces `from_init_syn` to clamp the peer-advertised
-# batch_size to the full MTU (65535) instead of honoring it. The
-# wz-runtime-tokio side forwards its same-named feature here so the INIT
-# handshake batch-size negotiation semantics stay consistent workspace-wide.
+# R311kl — transport-batching gates ONLY the TX coalescing machinery
+# (`BatchTx` accumulation arm + the batch_start/flush/stop window),
+# zenoh-pico Z_FEATURE_BATCHING parity (transport.c:35-38 + common/tx.c).
+# The INIT batch_size negotiation (PeerInitCaps honoring + the
+# min(local, peer) InitAck reduction) is CORE transport — pico runs it
+# outside every Z_FEATURE_BATCHING gate (unicast/transport.c:47 + 102 +
+# 135-140). The former R311eg/R311cb shape gated the honoring here too,
+# which made batching-off builds answer an InitSyn with an ENLARGED
+# InitAck and foreign pico initiators rejected the session (R311fg).
+# Standalone gate-only (no wz-codecs forward); wz-runtime-tokio forwards
+# its same-named feature here.
 transport-batching = []
 
 # chunk-5 (SessionLinkActions struct move) — transport-keepalive gates

@@ -261,8 +261,8 @@ pub type SessionActionsBinding<R = TokioRuntime, T = TokioTime> =
     wz_session_core::session_actions::SessionActionsBinding<R, T>;
 
 // R311eg — PeerInitCaps + its from_init_body decoder moved to
-// wz-session-core::peer_init_caps (pure no_std/no_alloc; the
-// transport-batching gate moved with the decoder). Re-exported so the
+// wz-session-core::peer_init_caps (pure no_std/no_alloc; the decoder is
+// feature-independent since R311kl). Re-exported so the
 // `crate::session_glue::PeerInitCaps` callsites (the
 // inbound_peer_init_caps slot, the InitSyn dispatch arm, and the
 // session_fsm_accepting_path tests) resolve unchanged. The live
@@ -2024,11 +2024,11 @@ mod tx_order_tests {
 /// unset/65535 sentinel on either side (zenoh-pico sizes its TX wbuf to
 /// `min(link MTU, negotiated batch_size)`, unicast/transport.c:47-49 —
 /// the R311jm "honor the peer's advertised batch_size" carry).
-/// `transport-batching` gates the PEER projection (`from_init_body`
-/// clamps to 65535 with it off, R311cb), so the honoring arms below
-/// require the feature; `codec-init-body` is needed to capture the caps
-/// off a crafted InitAck through the production `handle_inbound` path.
-#[cfg(all(test, feature = "transport-batching", feature = "codec-init-body"))]
+/// Feature-independent since R311kl (the peer projection honors the
+/// advertisement in every build); `codec-init-body` is needed to
+/// capture the caps off a crafted InitAck through the production
+/// `handle_inbound` path.
+#[cfg(all(test, feature = "codec-init-body"))]
 mod negotiated_mtu_tests {
     use super::SessionInitParams;
     use wz_runtime_tokio_test_support::fixture_session_init_params;

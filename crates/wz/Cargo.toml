@@ -555,7 +555,8 @@ time-timestamp-source = []
 
 # ----- domain: transport (16 atomic, 6 active / 10 reserved) -----
 # R311cb — active features forward to wz-runtime-tokio (TCP/UDP
-# driver, unicast FSM, keepalive worker, INIT batch_size negotiation).
+# driver, unicast FSM, keepalive worker, TX batching window — the INIT
+# batch_size negotiation is core transport since R311kl, ungated).
 # The reserved features (link-tls/quic/ws/unixsock/vsock/serial,
 # compression, shm, lowlatency) stay declaration-only —
 # no wz-runtime-tokio counterpart exists yet, and adding a forward to a
