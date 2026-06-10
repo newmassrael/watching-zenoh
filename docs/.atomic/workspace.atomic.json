@@ -33435,6 +33435,44 @@
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
       ]
     },
+    "Round 311kp": {
+      "decision_summary": "R311kp ReassemblyFragment.zid renamed to peer_key: the chain key is transport-neutral peer identity (unicast peer zid / multicast pool-slot key), closing the R311kn naming carry; identifier-only.",
+      "changes_bullets": [
+        "reassembly_dispatch: Fragment.zid -> peer_key; ChainKey/find_active/abort_channel params follow",
+        "ZID_MAX -> PEER_KEY_MAX (16 = widest key: unicast zid; multicast slot key is 4 bytes)",
+        "construction sites rewired: drive.rs (zid), multicast_dispatch (slot key), 2 test fixtures",
+        "field doc names both feeders; multicast wire-zid-is-attacker-chosen rationale cross-linked"
+      ],
+      "verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped capture)",
+        "rename is identifier-only: no behavior delta, lanes prove API closure across profiles"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ],
+      "publishable_decision_summary": "R311kp ReassemblyFragment.zid renamed to peer_key: the chain key is transport-neutral peer identity (unicast peer zid / multicast pool-slot key), closing the R311kn naming carry; identifier-only.",
+      "publishable_changes_bullets": [
+        "reassembly_dispatch: Fragment.zid -> peer_key; ChainKey/find_active/abort_channel params follow",
+        "ZID_MAX -> PEER_KEY_MAX (16 = widest key: unicast zid; multicast slot key is 4 bytes)",
+        "construction sites rewired: drive.rs (zid), multicast_dispatch (slot key), 2 test fixtures",
+        "field doc names both feeders; multicast wire-zid-is-attacker-chosen rationale cross-linked"
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 (unpiped capture)",
+        "rename is identifier-only: no behavior delta, lanes prove API closure across profiles"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
