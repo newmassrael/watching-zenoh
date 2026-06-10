@@ -580,7 +580,8 @@
         "transport-multicast -> session-multicast + codec-join; handshake-free JOIN beacon transport.",
         "R311jm: transport-fragmentation reserved->active; gates the TX-side FRAME fragment split.",
         "transport-fragmentation -> reassembly (full-duplex); AP/tokio TX only, MCU TX deferred.",
-        "Fragments to local batch_size MTU; negotiated-min + MsgPut 256B cap raise are follow-ups."
+        "Fragments to local batch_size MTU; negotiated-min + MsgPut 256B cap raise are follow-ups.",
+        "batching appends inherit the open frame's channel (opening msg's R flag) - pico tx.c parity (R311jp)"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32177,6 +32178,48 @@
       "publishable_carry_forward_bullets": [
         "Resolves the R311jn uniform-chokepoint open item; A3 batching next.",
         "A4 reconnect / multicast DATA-plane roadmap stands (R311jm carry)."
+      ]
+    },
+    "Round 311jp": {
+      "decision_summary": "R311jp: TX batching - batch_start/flush/stop windows coalesce N network msgs into one FRAME within batch_size; chokepoint absorb with overflow/express/oversize/CLOSE drains per zenoh-pico tx.c.",
+      "changes_bullets": [
+        "SessionLinkActions.batch_tx (BatchTx active/buf/count) + try_batch_absorb in the dispatch chokepoint",
+        "batch_start/flush/stop stable API + Session delegation; CLOSE pre-drain; express post-flush",
+        "frame_encode::vle_width hoist - fragment body-slice and batch body-append share the offset math",
+        "run-ci C1l comment notes the batching x fragmentation interplay carriage"
+      ],
+      "verification_bullets": [
+        "6 batch_tx_tests e2e: coalesce byte-exact vs unbatched, overflow, stop, express, CLOSE order, frag",
+        "FeatureDisabled NEG rides C1j subsets (base omits transport-batching); full host run-ci EXIT 0",
+        "RX half preexisting: parse_frame_payload already loops N msgs per frame (TX was the only gap)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "negotiated-min MTU (honor peer batch_size) still open (R311jm carry); also bounds the batch budget",
+        "future unicast t_msg senders (keepalive worker emit) must take the same pre-drain as CLOSE",
+        "NEXT: A4 auto-reconnect (re-dial + re-handshake on link loss), then A1 multicast DATA plane"
+      ],
+      "publishable_decision_summary": "R311jp: TX batching - batch_start/flush/stop windows coalesce N network msgs into one FRAME within batch_size; chokepoint absorb with overflow/express/oversize/CLOSE drains per zenoh-pico tx.c.",
+      "publishable_changes_bullets": [
+        "SessionLinkActions.batch_tx (BatchTx active/buf/count) + try_batch_absorb in the dispatch chokepoint",
+        "batch_start/flush/stop stable API + Session delegation; CLOSE pre-drain; express post-flush",
+        "frame_encode::vle_width hoist - fragment body-slice and batch body-append share the offset math",
+        "run-ci C1l comment notes the batching x fragmentation interplay carriage"
+      ],
+      "publishable_verification_bullets": [
+        "6 batch_tx_tests e2e: coalesce byte-exact vs unbatched, overflow, stop, express, CLOSE order, frag",
+        "FeatureDisabled NEG rides C1j subsets (base omits transport-batching); full host run-ci EXIT 0",
+        "RX half preexisting: parse_frame_payload already loops N msgs per frame (TX was the only gap)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "negotiated-min MTU (honor peer batch_size) still open (R311jm carry); also bounds the batch budget",
+        "future unicast t_msg senders (keepalive worker emit) must take the same pre-drain as CLOSE",
+        "NEXT: A4 auto-reconnect (re-dial + re-handshake on link loss), then A1 multicast DATA plane"
       ]
     },
     "Round 311k": {

@@ -268,6 +268,42 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 // reassembly dispatcher requires the chunk SNs to be consecutive (it aborts a
 // chain on `fragment.ooo`), so the caller draws the SN block atomically.
 
+/// Base-128 VLE byte width of `sn` — the offset math both the fragmentation
+/// body-slice and the R311jp batching body-append use to locate a FRAME's
+/// network-message tail behind the 1-byte header + `VLE(sn)` prefix that
+/// [`encode_frame_envelope`] wrote. Mirrors the encoder's emit loop exactly;
+/// it IS the wire format, not consumer-tunable logic.
+///
+/// cfg = (fragmentation OR batching) AND the wire-emit union: both consumers
+/// live inside `dispatch_frame_or_fragment`, which only exists when at least
+/// one network-message sender is compiled — a transport-only subset (e.g.
+/// handshake + transport-batching, no senders) has no caller and must not
+/// carry the dead symbol (`-D warnings` lanes).
+#[cfg(all(
+    any(feature = "transport-fragmentation", feature = "transport-batching"),
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-final",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+pub(crate) fn vle_width(sn: u64) -> usize {
+    let (mut width, mut v) = (1usize, sn);
+    while v >= 0x80 {
+        v >>= 7;
+        width += 1;
+    }
+    width
+}
+
 /// Conservative per-fragment header budget: 1 flags byte + the maximum u64
 /// VLE width (10). Sizing chunks against the *maximum* SN width (rather than
 /// each fragment's actual SN width) makes the fragment count computable

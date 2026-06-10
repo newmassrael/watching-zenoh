@@ -443,6 +443,35 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         self.actions.is_established()
     }
 
+    /// R311jp — zenoh-pico `zp_batch_start` parity: open a TX batching
+    /// window. Subsequent network-message sends on this session (puts /
+    /// queries / declares / replies) accumulate into one outbound
+    /// transport frame — up to the negotiated `batch_size` byte budget —
+    /// instead of flushing per message, until [`Self::batch_flush`] /
+    /// [`Self::batch_stop`] drains the window (an overflow or an
+    /// express-flagged publish drains it implicitly, mirroring pico).
+    /// Idempotent on an already-open window.
+    ///
+    /// Errors with `SendWireError::FeatureDisabled` when the
+    /// `transport-batching` feature is off (R311g signature stability).
+    pub fn batch_start(&self) -> Result<(), SendWireError> {
+        self.actions.batch_start()
+    }
+
+    /// R311jp — zenoh-pico `zp_batch_flush` parity: send the currently
+    /// batched messages now, keeping the batching window open. No-op when
+    /// nothing is batched.
+    pub fn batch_flush(&self) -> Result<(), SendWireError> {
+        self.actions.batch_flush()
+    }
+
+    /// R311jp — zenoh-pico `zp_batch_stop` parity: close the batching
+    /// window and send the currently batched messages. Sends after this
+    /// call flush per message again.
+    pub fn batch_stop(&self) -> Result<(), SendWireError> {
+        self.actions.batch_stop()
+    }
+
     /// R231 — forward this session's own zid (1..=16 bytes) to the
     /// inbound subscriber registry so wire-arrived self-echoes (a
     /// `Locality::Any` publish that the network routes back to its

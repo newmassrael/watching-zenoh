@@ -956,6 +956,14 @@ layer_c1o_keyexpr_gating_behavior() {
 # (full-duplex), so these runs cover both `frame_encode::fragment_*` (the
 # wire split + parse round-trip) and the `send_push_literal`
 # fragment-and-reassemble e2e (session_glue `fragment_tx_tests`).
+#
+# R311jp: the transport-fragmentation invocation also carries the batching
+# x fragmentation interplay test (session_glue `batch_tx_tests::
+# oversize_publish_drains_open_frame_then_fragments`) — default features
+# keep transport-batching ON, so the oversize-while-batching drain order
+# is pinned here; the rest of `batch_tx_tests` rides the default Layer C1
+# workspace run, and the FeatureDisabled NEG rides the C1j subsets (their
+# base omits transport-batching).
 layer_c1l_reassembly() {
     (cd crates \
         && cargo test -p wz-session-core --features reassembly --quiet \

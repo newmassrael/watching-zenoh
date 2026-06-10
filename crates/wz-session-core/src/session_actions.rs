@@ -56,7 +56,9 @@ use crate::link::{BoxedLinkDriver, SessionRuntime};
 use crate::peer_init_caps::PeerInitCaps;
 // Reliability is the second arg of every `link_driver().send_blocking(..)`,
 // so it is used iff at least one wire-emit body is active: the handshake /
-// close encoders OR any consumer-plane frame emit (the frame_encode union).
+// close encoders OR any consumer-plane frame emit (the frame_encode union)
+// OR the R311jp batch-flush emit (`transport-batching` — flushing the open
+// batch frame re-derives the channel from the frame header's R flag).
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -72,6 +74,7 @@ use crate::peer_init_caps::PeerInitCaps;
     feature = "declare-token",
     feature = "declare-final",
     feature = "liveliness-token",
+    feature = "transport-batching",
 ))]
 use crate::reliability::Reliability;
 use crate::response_sink::ResponseSink;
@@ -160,6 +163,47 @@ use crate::push_build::*;
 use crate::request_build::*;
 #[cfg(feature = "codec-response-final")]
 use crate::response_final_build::*;
+
+/// R311jp — TX batching accumulator state (zenoh-pico
+/// `_z_transport_common_t::{_batch_state,_batch_count}` plus the shared TX
+/// `_wbuf`, `Z_FEATURE_BATCHING` parity). `active == false` (the default)
+/// preserves the pre-A3 per-message flush behavior. While active, `buf`
+/// holds the OPEN outbound `T_MID_FRAME` — transport header byte +
+/// `VLE(sn)` + N appended network-message bodies; an empty `buf` means no
+/// frame is open yet. `count` mirrors pico's batch counter for
+/// observability and tests; the flush trigger is the byte budget
+/// (`params.batch_size`), never the count.
+#[cfg(feature = "transport-batching")]
+#[derive(Debug, Default)]
+pub struct BatchTx {
+    /// `zp_batch_start` .. `zp_batch_stop` window flag
+    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`).
+    pub active: bool,
+    /// The open outbound frame bytes (empty = none open).
+    pub buf: Vec<u8>,
+    /// Network messages absorbed into the open frame.
+    pub count: usize,
+}
+
+/// R311jp — derive the link-driver [`Reliability`] of an already-encoded
+/// outbound `T_MID_FRAME` from its header's R flag. The batch flush paths
+/// re-emit a frame that was opened by an earlier message, so the channel
+/// must come from the frame bytes, not from the currently-dispatched
+/// message (pico appends mixed-reliability messages into whatever frame is
+/// open — the OPENING message's flag governs, `tx.c`
+/// `_z_transport_tx_send_n_msg_inner` mints the header only when the
+/// buffer is empty).
+#[cfg(feature = "transport-batching")]
+fn frame_wire_reliability(bytes: &[u8]) -> Reliability {
+    let reliable = bytes
+        .first()
+        .is_some_and(|h| h & wz_codecs::wire_const::FLAG_T_FRAME_R != 0);
+    if reliable {
+        Reliability::Reliable
+    } else {
+        Reliability::BestEffort
+    }
+}
 
 pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// R::LinkSink — the per-profile owning handle to the link write
@@ -292,6 +336,15 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// explicit modulo at `next_outbound_frame_sn` (R121e
     /// carry — surface when a measurement justifies it).
     pub outbound_frame_sn: AtomicU64,
+    /// R311jp — TX batching accumulator (zenoh-pico
+    /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
+    /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
+    /// every [`Self::dispatch_frame_or_fragment`] call flushes
+    /// immediately, the pre-A3 behavior. [`Self::batch_start`] activates
+    /// accumulation; see [`BatchTx`] for the buffer shape and
+    /// [`Self::try_batch_absorb`] for the append/overflow state machine.
+    #[cfg(feature = "transport-batching")]
+    pub batch_tx: R::Mutex<BatchTx>,
     /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
     /// `_z_session_t._local_resources` slot: every time
     /// [`Self::send_declare_keyexpr`] emits a `Declare(DeclKexpr)`
@@ -534,6 +587,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             open_ack_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
+            #[cfg(feature = "transport-batching")]
+            batch_tx: R::new_mutex(BatchTx::default()),
             outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
             next_outbound_request_id: AtomicU64::new(0),
             next_outbound_token_id: AtomicU64::new(0),
@@ -807,42 +862,52 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } else {
             Reliability::BestEffort
         };
-        #[cfg(feature = "transport-fragmentation")]
-        {
-            // Outbound MTU = the negotiated session `batch_size`, or a
-            // 65535-byte ceiling when unset (`0`). v1 fragments to the *local*
-            // advertised batch size; honoring the peer's advertised batch_size
-            // (the negotiated minimum) is a follow-up — the local value is a
-            // safe ceiling since the receiver reassembles up to its own slot
-            // capacity regardless of fragment size. (UDP's 65507-byte datagram
-            // cap is below the 65535 default, so a UDP deployment expecting
-            // >64 KB payloads must configure `batch_size <= 65507`.)
-            // zenoh's default batch / the u16 ceiling, used when batch_size is
-            // unset (0) so an unconfigured session never fragments.
+        // Outbound MTU = the negotiated session `batch_size`, or a
+        // 65535-byte ceiling when unset (`0`). v1 sizes against the *local*
+        // advertised batch size; honoring the peer's advertised batch_size
+        // (the negotiated minimum) is a follow-up — the local value is a
+        // safe ceiling since the receiver reassembles up to its own slot
+        // capacity regardless of fragment size. (UDP's 65507-byte datagram
+        // cap is below the 65535 default, so a UDP deployment expecting
+        // >64 KB payloads must configure `batch_size <= 65507`.)
+        // zenoh's default batch / the u16 ceiling, used when batch_size is
+        // unset (0) so an unconfigured session never fragments. R311jp —
+        // the same budget bounds the batching accumulator (pico shares one
+        // `_wbuf` capacity between both concerns).
+        #[cfg(any(feature = "transport-fragmentation", feature = "transport-batching"))]
+        let mtu = {
             const UNSET_BATCH_MTU: usize = 65_535;
-            let mtu = match self.params.batch_size {
+            match self.params.batch_size {
                 0 => UNSET_BATCH_MTU,
                 n => n as usize,
-            };
+            }
+        };
+        // R311jp — batching pre-step: while a `batch_start` window is open,
+        // absorb this frame into the batch accumulator instead of flushing
+        // per message. `None` = absorbed (nothing left to send here);
+        // `Some(wire)` = continue on the immediate path (batching inactive,
+        // or the message alone exceeds `mtu` and belongs to the fragment /
+        // oversize path below — the absorber has already drained the open
+        // frame in that case so wire order is preserved).
+        #[cfg(feature = "transport-batching")]
+        let wire = match self.try_batch_absorb(wire, sn, mtu) {
+            None => return,
+            Some(wire) => wire,
+        };
+        #[cfg(feature = "transport-fragmentation")]
+        {
             if wire.len() > mtu {
                 // The FRAME body (the serialized network message) is the tail
                 // after the 1-byte header + `VLE(sn)`; slice it rather than
-                // re-encoding the message (`vle_len` = base-128 width of `sn`).
-                // The discarded oversize FRAME consumed `sn`; the fragment
-                // chain draws a fresh contiguous SN block via a single atomic
-                // fetch-add, so the chunk SNs stay consecutive even if a
-                // concurrent reply mints outbound SNs (the reassembly
-                // dispatcher aborts a non-consecutive chain). The one skipped
-                // SN never reaches the wire and is harmless to the peer.
-                let vle_len = {
-                    let (mut width, mut v) = (1usize, sn);
-                    while v >= 0x80 {
-                        v >>= 7;
-                        width += 1;
-                    }
-                    width
-                };
-                let body = &wire[1 + vle_len..];
+                // re-encoding the message (`vle_width` = base-128 width of
+                // `sn`). The discarded oversize FRAME consumed `sn`; the
+                // fragment chain draws a fresh contiguous SN block via a
+                // single atomic fetch-add, so the chunk SNs stay consecutive
+                // even if a concurrent reply mints outbound SNs (the
+                // reassembly dispatcher aborts a non-consecutive chain). The
+                // one skipped SN never reaches the wire and is harmless to
+                // the peer.
+                let body = &wire[1 + crate::frame_encode::vle_width(sn)..];
                 let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
                 let base = self.outbound_frame_sn.fetch_add(count, Ordering::SeqCst);
                 for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base) {
@@ -851,9 +916,188 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 return;
             }
         }
-        #[cfg(not(feature = "transport-fragmentation"))]
+        #[cfg(not(any(feature = "transport-fragmentation", feature = "transport-batching")))]
         let _ = sn;
         self.link_driver().send_blocking(&wire, reliability);
+    }
+
+    /// R311jp — batching pre-step for [`Self::dispatch_frame_or_fragment`]:
+    /// absorb the single-message FRAME `wire` into the open batch frame and
+    /// return `None`, or hand the bytes back as `Some(wire)` for the
+    /// immediate-dispatch path. zenoh-pico state map
+    /// (`src/transport/common/tx.c`):
+    ///
+    /// ```text
+    ///   inactive                  → Some(wire)   (pre-A3 per-message flush)
+    ///   active, oversize (> mtu)  → drain open frame, Some(wire)
+    ///                               (`_z_transport_tx_send_fragment` fallback;
+    ///                               draining first preserves wire order)
+    ///   active, buf empty, fits   → wire OPENS the frame
+    ///                               (`__unsafe_z_prepare_wbuf` + encode)
+    ///   active, buf open, fits    → message body appended
+    ///                               (`_z_transport_tx_flush_or_incr_batch`)
+    ///   active, buf open, overflow→ flush open frame, wire re-opens
+    ///                               (`_z_transport_tx_batch_overflow`)
+    /// ```
+    ///
+    /// An appended message's already-minted `sn` goes unused — the open
+    /// frame keeps the SN of the message that opened it. That is the same
+    /// documented-harmless SN gap as the fragmentation path's discarded
+    /// oversize-frame SN: outbound SNs stay strictly monotonic and the peer
+    /// requires monotonicity only (zenoh-pico unicast/rx.c:107 "only
+    /// monotonic SNs are ensured"; gaps drop nothing). Mixed-reliability
+    /// appends inherit the open frame's channel, exactly like pico (the
+    /// frame header is minted only when the buffer is empty).
+    ///
+    /// cfg mirrors its single caller [`Self::dispatch_frame_or_fragment`]
+    /// (the wire-emit union) AND `transport-batching` — a no-sender subset
+    /// must not carry the dead symbol (`-D warnings` lanes).
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-final",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn try_batch_absorb(&self, wire: Vec<u8>, sn: u64, mtu: usize) -> Option<Vec<u8>> {
+        let mut wire_slot = Some(wire);
+        let mut flush: Option<Vec<u8>> = None;
+        R::with_mutex_mut(&self.batch_tx, |batch| {
+            if !batch.active {
+                return;
+            }
+            let wire = wire_slot.take().expect("set above; taken once");
+            if wire.len() > mtu {
+                if !batch.buf.is_empty() {
+                    flush = Some(core::mem::take(&mut batch.buf));
+                    batch.count = 0;
+                }
+                wire_slot = Some(wire);
+                return;
+            }
+            if batch.buf.is_empty() {
+                batch.buf = wire;
+                batch.count = 1;
+                return;
+            }
+            let body_at = 1 + crate::frame_encode::vle_width(sn);
+            if batch.buf.len() + (wire.len() - body_at) > mtu {
+                flush = Some(core::mem::replace(&mut batch.buf, wire));
+                batch.count = 1;
+            } else {
+                batch.buf.extend_from_slice(&wire[body_at..]);
+                batch.count += 1;
+            }
+        });
+        if let Some(bytes) = flush {
+            let channel = frame_wire_reliability(&bytes);
+            self.link_driver().send_blocking(&bytes, channel);
+        }
+        wire_slot
+    }
+
+    /// R311jp — drain the open batch frame to the link, if any. Private
+    /// emit engine shared by [`Self::batch_flush`] / [`Self::batch_stop`] /
+    /// the pre-CLOSE drain in [`Self::send_close_with_reason`] / the
+    /// express post-dispatch flush. Keeps the `active` flag untouched.
+    #[cfg(feature = "transport-batching")]
+    fn flush_open_batch(&self) {
+        let pending = R::with_mutex_mut(&self.batch_tx, |batch| {
+            if batch.buf.is_empty() {
+                None
+            } else {
+                batch.count = 0;
+                Some(core::mem::take(&mut batch.buf))
+            }
+        });
+        if let Some(bytes) = pending {
+            let channel = frame_wire_reliability(&bytes);
+            self.link_driver().send_blocking(&bytes, channel);
+        }
+    }
+
+    /// zenoh-pico `zp_batch_start` parity — open a batching window: every
+    /// subsequent network-message send accumulates into one outbound
+    /// `T_MID_FRAME` (up to the `batch_size` byte budget) instead of
+    /// flushing per message, until [`Self::batch_flush`] /
+    /// [`Self::batch_stop`] / an overflow / an express message drains it.
+    ///
+    /// Idempotent: re-starting an already-active window is a no-op that
+    /// keeps the open frame. (pico returns an error there, but only because
+    /// `_z_transport_start_batching` HOLDS the TX mutex for the whole
+    /// window — re-entry would self-deadlock. wz locks per operation, so
+    /// double-start has no hazard to guard.)
+    ///
+    /// R311g signature-stability — the method exists across feature
+    /// states; minus `transport-batching` it rejects with
+    /// [`SendWireError::FeatureDisabled`].
+    pub fn batch_start(&self) -> Result<(), SendWireError> {
+        #[cfg(feature = "transport-batching")]
+        {
+            R::with_mutex_mut(&self.batch_tx, |batch| batch.active = true);
+            Ok(())
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        Err(SendWireError::FeatureDisabled)
+    }
+
+    /// zenoh-pico `zp_batch_flush` parity — send the currently batched
+    /// messages now, keeping the batching window active.
+    pub fn batch_flush(&self) -> Result<(), SendWireError> {
+        #[cfg(feature = "transport-batching")]
+        {
+            self.flush_open_batch();
+            Ok(())
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        Err(SendWireError::FeatureDisabled)
+    }
+
+    /// zenoh-pico `zp_batch_stop` parity — close the batching window and
+    /// send the currently batched messages. Deactivates BEFORE draining
+    /// (the `api.c` order: `_z_transport_stop_batching` then
+    /// `_z_send_n_batch`) so a send racing the stop goes out directly
+    /// rather than landing in a window that is closing.
+    pub fn batch_stop(&self) -> Result<(), SendWireError> {
+        #[cfg(feature = "transport-batching")]
+        {
+            R::with_mutex_mut(&self.batch_tx, |batch| batch.active = false);
+            self.flush_open_batch();
+            Ok(())
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        Err(SendWireError::FeatureDisabled)
+    }
+
+    /// R311jp — express short-circuit, zenoh-pico parity: an
+    /// express-flagged message is encoded into the open batch like any
+    /// other, then the whole frame is flushed immediately (`tx.c`
+    /// `_z_transport_tx_get_express_status` arm calls
+    /// `_z_transport_tx_flush_buffer` right after the encode). The
+    /// `send_push_*_with_meta_*` senders call this after their dispatch;
+    /// the express bit is only derivable where QoS metadata exists, which
+    /// today is the Push metadata path.
+    #[cfg(feature = "codec-push")]
+    fn flush_batch_if_express(&self, meta: &PushMetadata) {
+        #[cfg(feature = "transport-batching")]
+        if meta
+            .qos
+            .as_ref()
+            .is_some_and(crate::sample::QosLevel::is_express)
+        {
+            self.flush_open_batch();
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = meta;
     }
 
     /// R239 — outbound `Request.request_id` generator. Returns the
@@ -1162,6 +1406,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.flush_batch_if_express(meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1186,6 +1431,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.flush_batch_if_express(meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1212,6 +1458,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.flush_batch_if_express(meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1236,6 +1483,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             self.dispatch_frame_or_fragment(wire, sn, reliable);
+            self.flush_batch_if_express(meta);
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -2057,6 +2305,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_close_with_reason(&self, reason: CloseReason) {
         #[cfg(feature = "codec-close")]
         {
+            // R311jp — transport-message order parity (zenoh-pico tx.c
+            // `_z_transport_tx_send_t_msg_inner` flushes an active batch
+            // before encoding any t_msg): drain the open batch frame so
+            // CLOSE never overtakes already-batched data frames on the
+            // wire. Any future unicast t_msg sender (e.g. a KeepAlive
+            // worker emit) must take the same pre-drain.
+            #[cfg(feature = "transport-batching")]
+            self.flush_open_batch();
             R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
             let bytes = encode_close(reason as u8);
             self.link_driver()

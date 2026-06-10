@@ -1240,6 +1240,29 @@ mod tests {
         );
     }
 
+    /// R311jp — with `transport-batching` OFF, the signature-stable batch
+    /// window controls must fail-fast with the typed
+    /// `SendWireError::FeatureDisabled` reject (no silent falsely-Ok window
+    /// that would buffer nothing). Rides the C1j subset lanes — the
+    /// coherent-subset base omits `transport-batching`.
+    #[cfg(not(feature = "transport-batching"))]
+    #[test]
+    fn batch_controls_reject_with_feature_disabled_when_transport_batching_off() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        assert_eq!(
+            actions.batch_start(),
+            Err(SendWireError::FeatureDisabled),
+            "transport-batching OFF: batch_start must return the typed reject"
+        );
+        assert_eq!(actions.batch_flush(), Err(SendWireError::FeatureDisabled));
+        assert_eq!(actions.batch_stop(), Err(SendWireError::FeatureDisabled));
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "transport-batching OFF: the typed rejects must leave no wire bytes"
+        );
+    }
+
     // QosLevel / SourceInfo remain named by the send_push_with_meta action
     // test; TimestampHint / EncodingHint left with the push-builder meta
     // coverage tests (now wz-session-core::push_build).
@@ -1924,5 +1947,259 @@ mod fragment_tx_tests {
             reassembled, expected_body,
             "reassembled fragments must reproduce the non-fragmented Push body byte-for-byte",
         );
+    }
+}
+
+/// R311jp — TX batching end-to-end: a `batch_start` window coalesces N
+/// network messages into ONE outbound `T_MID_FRAME` (header + `VLE(sn)` + N
+/// message bodies), bounded by the `batch_size` byte budget, drained by
+/// `batch_flush` / `batch_stop` / overflow / express / pre-CLOSE. The TX
+/// counterpart of the RX multi-message loop `parse_frame_payload` already
+/// runs on every inbound frame — each test round-trips the emitted frame
+/// through that same RX SSOT. zenoh-pico `Z_FEATURE_BATCHING` parity
+/// (`zp_batch_start/flush/stop` + `src/transport/common/tx.c`).
+#[cfg(all(
+    test,
+    feature = "transport-batching",
+    feature = "codec-push",
+    feature = "codec-frame"
+))]
+mod batch_tx_tests {
+    use super::{parse_inbound, InboundFrame, SessionInitParams};
+    use wz_codecs::wire_const;
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    /// Decode an emitted FRAME into its network-message list through the
+    /// real RX path (`parse_inbound` + `parse_frame_payload`), returning
+    /// `(sn, messages)`.
+    fn decode_frame(frame: &[u8]) -> (u64, Vec<NetworkMessage>) {
+        let InboundFrame::Frame { sn, payload, .. } =
+            parse_inbound(frame).expect("parse emitted frame")
+        else {
+            panic!("emitted bytes are not a T_MID_FRAME");
+        };
+        let messages = parse_frame_payload(&payload).expect("parse frame payload");
+        (sn, messages)
+    }
+
+    /// Three batched PUTs coalesce into one frame whose body is the
+    /// byte-exact concatenation of the three per-message frame bodies the
+    /// unbatched path emits — and the RX loop yields all three messages.
+    #[test]
+    fn batched_pushes_coalesce_into_one_frame_with_concatenated_bodies() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.batch_start().expect("batch_start");
+        for i in 0..3u8 {
+            actions
+                .send_push_literal("home/batch", &[i, i, i], /*reliable=*/ true)
+                .expect("batched push");
+        }
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "an open batch window must defer every wire emit"
+        );
+        actions.batch_flush().expect("batch_flush");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "flush drains the window as exactly one frame"
+        );
+
+        let frame = driver.frame_bytes(0);
+        let (sn, messages) = decode_frame(&frame);
+        assert_eq!(sn, 0, "the frame keeps the OPENING message's SN");
+        assert_eq!(messages.len(), 3, "RX loop must yield all batched messages");
+        assert!(messages
+            .iter()
+            .all(|m| matches!(m, NetworkMessage::Push(_))));
+
+        // Byte-exactness: the batched frame == the first unbatched frame +
+        // the 2nd/3rd unbatched frames' bodies (header + VLE(sn) stripped;
+        // fixture SNs 0..=2 are all 1-byte VLE).
+        let (ref_actions, ref_driver) = crate::test_fixtures::recording_actions();
+        for i in 0..3u8 {
+            ref_actions
+                .send_push_literal("home/batch", &[i, i, i], true)
+                .expect("reference push");
+        }
+        assert_eq!(ref_driver.frame_count(), 3);
+        let mut expected = ref_driver.frame_bytes(0);
+        expected.extend_from_slice(&ref_driver.frame_bytes(1)[2..]);
+        expected.extend_from_slice(&ref_driver.frame_bytes(2)[2..]);
+        assert_eq!(
+            frame, expected,
+            "batched frame must be the unbatched frame + appended message bodies, byte-for-byte"
+        );
+    }
+
+    /// Overflow parity (`_z_transport_tx_batch_overflow`): when the next
+    /// message would push the open frame past `batch_size`, the open frame
+    /// flushes and the message re-opens a fresh frame — each emitted frame
+    /// is byte-identical to its unbatched twin.
+    #[test]
+    fn batch_overflow_flushes_open_frame_and_reopens() {
+        // Measure the single-PUT frame length first; budget exactly one.
+        let (probe_actions, probe_driver) = crate::test_fixtures::recording_actions();
+        probe_actions
+            .send_push_literal("home/batch", &[0xAA; 8], true)
+            .expect("probe push");
+        let single_len = probe_driver.frame_bytes(0).len() as u16;
+
+        let params = SessionInitParams {
+            batch_size: single_len,
+            ..fixture_session_init_params()
+        };
+        let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
+        actions.batch_start().expect("batch_start");
+        actions
+            .send_push_literal("home/batch", &[0xAA; 8], true)
+            .expect("first push opens the frame");
+        assert_eq!(driver.frame_count(), 0, "first message fits the budget");
+        actions
+            .send_push_literal("home/batch", &[0xAA; 8], true)
+            .expect("second push overflows");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "overflow must flush the open frame before re-opening"
+        );
+        actions.batch_stop().expect("batch_stop");
+        assert_eq!(driver.frame_count(), 2, "stop drains the re-opened frame");
+
+        for i in 0..2 {
+            let (sn, messages) = decode_frame(&driver.frame_bytes(i));
+            assert_eq!(messages.len(), 1, "each frame carries one message");
+            assert_eq!(
+                sn, i as u64,
+                "frame SNs stay monotonic across the overflow re-open"
+            );
+        }
+    }
+
+    /// `batch_stop` drains AND deactivates: a send after stop flushes per
+    /// message again (the pre-A3 behavior).
+    #[test]
+    fn batch_stop_drains_and_deactivates() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.batch_start().expect("batch_start");
+        actions
+            .send_push_literal("home/batch", b"a", true)
+            .expect("batched push");
+        actions.batch_stop().expect("batch_stop");
+        assert_eq!(driver.frame_count(), 1, "stop drains the open frame");
+        actions
+            .send_push_literal("home/batch", b"b", true)
+            .expect("direct push");
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "after stop, sends flush per message again"
+        );
+        // The post-stop direct frame's SN reflects the batched gap contract:
+        // SNs stay strictly monotonic (gaps are harmless per zenoh-pico
+        // unicast/rx.c "only monotonic SNs are ensured").
+        let (sn0, _) = decode_frame(&driver.frame_bytes(0));
+        let (sn1, _) = decode_frame(&driver.frame_bytes(1));
+        assert!(sn1 > sn0, "outbound SNs must stay strictly monotonic");
+    }
+
+    /// Express parity (`_z_transport_tx_get_express_status` arm): an
+    /// express-flagged publish is absorbed into the open frame and the
+    /// whole frame flushes immediately.
+    #[test]
+    fn express_publish_flushes_the_open_batch_immediately() {
+        use wz_session_core::metadata::PushMetadata;
+        use wz_session_core::sample::QosLevel;
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.batch_start().expect("batch_start");
+        actions
+            .send_push_literal("home/batch", b"plain", true)
+            .expect("batched push");
+        assert_eq!(driver.frame_count(), 0);
+
+        let express_meta = PushMetadata {
+            // `_Z_N_QOS_IS_EXPRESS_FLAG = 1 << 4` (zenoh-pico network.h:82).
+            qos: Some(QosLevel::from_raw(1 << 4)),
+            ..PushMetadata::default()
+        };
+        actions
+            .send_push_with_meta_literal("home/batch", b"urgent", true, &express_meta)
+            .expect("express push");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "an express message drains the open frame immediately"
+        );
+        let (_, messages) = decode_frame(&driver.frame_bytes(0));
+        assert_eq!(
+            messages.len(),
+            2,
+            "the express message rides the same frame as the batched one"
+        );
+    }
+
+    /// CLOSE pre-drain parity (`_z_transport_tx_send_t_msg_inner` flushes
+    /// an active batch before any transport message): the batched data
+    /// frame leaves BEFORE the CLOSE bytes.
+    #[cfg(feature = "codec-close")]
+    #[test]
+    fn close_drains_the_open_batch_before_the_close_bytes() {
+        use wz_session_core::close_reason::CloseReason;
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions.batch_start().expect("batch_start");
+        actions
+            .send_push_literal("home/batch", b"pending", true)
+            .expect("batched push");
+        actions.send_close_with_reason(CloseReason::Generic);
+        assert_eq!(driver.frame_count(), 2, "open frame + CLOSE");
+        assert_eq!(
+            driver.frame_bytes(0)[0] & 0x1F,
+            wire_const::T_MID_FRAME,
+            "the batched data frame must leave first"
+        );
+        assert_eq!(
+            driver.frame_bytes(1)[0] & 0x1F,
+            wire_const::T_MID_CLOSE,
+            "the CLOSE follows the drained batch"
+        );
+    }
+
+    /// Oversize-while-batching parity (`tx.c` oversize fallback): the open
+    /// frame drains first, then the oversize message takes the fragment
+    /// path — wire order preserved.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn oversize_publish_drains_open_frame_then_fragments() {
+        let params = SessionInitParams {
+            batch_size: 64,
+            ..fixture_session_init_params()
+        };
+        let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
+        actions.batch_start().expect("batch_start");
+        actions
+            .send_push_literal("home/batch", b"small", true)
+            .expect("batched push");
+        let oversize: Vec<u8> = (0..200u32).map(|i| i as u8).collect();
+        actions
+            .send_push_literal("home/batch", &oversize, true)
+            .expect("oversize push");
+        let n = driver.frame_count();
+        assert!(n > 2, "open frame + a multi-chunk fragment chain, got {n}");
+        assert_eq!(
+            driver.frame_bytes(0)[0] & 0x1F,
+            wire_const::T_MID_FRAME,
+            "the drained batch frame must leave before the fragment chain"
+        );
+        for i in 1..n {
+            assert_eq!(
+                driver.frame_bytes(i)[0] & 0x1F,
+                wire_const::T_MID_FRAGMENT,
+                "every subsequent emit is a fragment chunk"
+            );
+        }
     }
 }
