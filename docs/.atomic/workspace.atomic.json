@@ -3140,7 +3140,10 @@
         "R311kg: lwIP critical_section spans TX emits (batching arms R311jq + immediate path R311kf).",
         "Span bound: at most two frame emits per hold, each within the negotiated MTU; IRQs disabled.",
         "Accepted cost of R311w uniform Send+Sync Mutex; pico no-ops its tx mutex (IRQs stay enabled).",
-        "Reopen: preemptive MCU profile, hardware ISR-latency evidence, or wz-runtime-embassy lands."
+        "Reopen: preemptive MCU profile, hardware ISR-latency evidence, or wz-runtime-embassy lands.",
+        "R311kj corrects R311kg: an oversize send emits its WHOLE fragment chain under the one hold.",
+        "Span bound = ceil(payload/MTU) sends per oversize message; two-emit bound holds only non-oversize.",
+        "Chain atomicity is required: an interleaved frame advances the peer RX gate past the chain."
       ],
       "alternatives_rejected": [
         {
@@ -33156,6 +33159,58 @@
         "debt-clearing track COMPLETE: all seven R311kb-era carries paid (R311kc..R311ki)"
       ]
     },
+    "Round 311kj": {
+      "decision_summary": "R311kj session-review fixes: R311kg span-bound correction (whole fragment chain per hold); InitAck gate scoped to SentInitSyn; effective_batch_size SSOT keeps the 0 sentinel off the wire; one wire decoder; matching callback re-entrancy hazard documented.",
+      "changes_bullets": [
+        "F-1 (audit correction): R311kg's \"at most two frame emits per hold\" bound is FALSE for oversize sends - emit_frame_or_fragments loops the whole fragment chain (ceil(payload/MTU) sends) under the batch_tx hold, and must (chain wire-atomicity: an interleaved higher-SN frame advances the peer RX gate past the remaining fragments). 5.P caveats x3 + dispatch comment corrected; R311kg frozen body stands, this entry is the correction",
+        "F-2: from_init_body now routes through decode_wire_caps (one wire decoder, the doc-claimed layering made real); wire-0 normalizes to 65535 in the projection (defensive: pre-R311kj wz or non-conforming peer)",
+        "F-3: InitAck params gate scoped to SentInitSyn (was role-blind !is_established - an acceptor receiving a bogus enlarging InitAck tore down where pico ignores it); pico validates exactly at that open-sequence point",
+        "F-4: SessionInitParams::effective_batch_size SSOT - the wire NEVER carries the internal 0 sentinel (pico adopts a literal 0 and sizes a 0-byte wbuf, transport.c:47-49/135-136); encode_init + init_ack_params min + validator own side + negotiated_batch_mtu all read it",
+        "F-6: re-entrancy hazard documented on MatchingSink + both declare_matching_listener docs (callback fires under the observer mutex; observer-locking APIs self-deadlock; pico fires under its own filter-ctx mutex)",
+        "F-7: LocalSwappableLink::swap uses idiomatic RefCell::replace"
+      ],
+      "verification_bullets": [
+        "init_advertisement_tests: unset batch_size encodes 65535 on the InitSyn wire, configured value passes verbatim",
+        "r311kj_acceptor_ignores_enlarging_init_ack: acceptor-side bogus InitAck no longer tears down (state unchanged, no InitAckCapsRejected)",
+        "r311kc batch-reject test re-premised on a configured own advertisement (512 vs peer 1024) - an unset own side can no longer be enlarged by any u16, which is the F-4 fix working",
+        "peer_init_caps truth table + negotiated_mtu + driver-loop suites green; full host run-ci EXIT 0 + Layer G EXIT 0"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "F-5 open decision: R311cb ties peer-batch honoring to transport-batching, but pico's frame-budget negotiation is core transport (independent of Z_FEATURE_BATCHING) - batching-off builds ignore the peer RX budget even for fragment sizing; reopening R311cb needs user steer",
+        "F-8 open decision: batch_tx field name understates its TX-order-lock role (documented dual role); rename candidate tx_window",
+        "F-6 structural follow-up: deferred-fire (callbacks outside the observer lock) would remove the re-entrancy constraint for ALL decl/matching sinks - a cross-cutting redesign round if wanted"
+      ],
+      "publishable_decision_summary": "R311kj session-review fixes: R311kg span-bound correction (whole fragment chain per hold); InitAck gate scoped to SentInitSyn; effective_batch_size SSOT keeps the 0 sentinel off the wire; one wire decoder; matching callback re-entrancy hazard documented.",
+      "publishable_changes_bullets": [
+        "F-1 (audit correction): R311kg's \"at most two frame emits per hold\" bound is FALSE for oversize sends - emit_frame_or_fragments loops the whole fragment chain (ceil(payload/MTU) sends) under the batch_tx hold, and must (chain wire-atomicity: an interleaved higher-SN frame advances the peer RX gate past the remaining fragments). 5.P caveats x3 + dispatch comment corrected; R311kg frozen body stands, this entry is the correction",
+        "F-2: from_init_body now routes through decode_wire_caps (one wire decoder, the doc-claimed layering made real); wire-0 normalizes to 65535 in the projection (defensive: pre-R311kj wz or non-conforming peer)",
+        "F-3: InitAck params gate scoped to SentInitSyn (was role-blind !is_established - an acceptor receiving a bogus enlarging InitAck tore down where pico ignores it); pico validates exactly at that open-sequence point",
+        "F-4: SessionInitParams::effective_batch_size SSOT - the wire NEVER carries the internal 0 sentinel (pico adopts a literal 0 and sizes a 0-byte wbuf, transport.c:47-49/135-136); encode_init + init_ack_params min + validator own side + negotiated_batch_mtu all read it",
+        "F-6: re-entrancy hazard documented on MatchingSink + both declare_matching_listener docs (callback fires under the observer mutex; observer-locking APIs self-deadlock; pico fires under its own filter-ctx mutex)",
+        "F-7: LocalSwappableLink::swap uses idiomatic RefCell::replace"
+      ],
+      "publishable_verification_bullets": [
+        "init_advertisement_tests: unset batch_size encodes 65535 on the InitSyn wire, configured value passes verbatim",
+        "r311kj_acceptor_ignores_enlarging_init_ack: acceptor-side bogus InitAck no longer tears down (state unchanged, no InitAckCapsRejected)",
+        "r311kc batch-reject test re-premised on a configured own advertisement (512 vs peer 1024) - an unset own side can no longer be enlarged by any u16, which is the F-4 fix working",
+        "peer_init_caps truth table + negotiated_mtu + driver-loop suites green; full host run-ci EXIT 0 + Layer G EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-5 open decision: R311cb ties peer-batch honoring to transport-batching, but pico's frame-budget negotiation is core transport (independent of Z_FEATURE_BATCHING) - batching-off builds ignore the peer RX budget even for fragment sizing; reopening R311cb needs user steer",
+        "F-8 open decision: batch_tx field name understates its TX-order-lock role (documented dual role); rename candidate tx_window",
+        "F-6 structural follow-up: deferred-fire (callbacks outside the observer lock) would remove the re-entrancy constraint for ALL decl/matching sinks - a cross-cutting redesign round if wanted"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
@@ -39481,6 +39536,7 @@
   "confirmation_events": {},
   "frames": {},
   "branches": {},
+  "entities": {},
   "narrative_facts": {},
-  "schema_version": 14
+  "schema_version": 17
 }
