@@ -70,12 +70,10 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
         join.sn_res = Some(pack_res_cbyte(params.seq_num_res, params.req_id_res));
         join.batch_size = Some(params.batch_size);
     }
-    let lease_in_seconds = params.lease_ms % 1000 == 0;
-    join.lease = if lease_in_seconds {
-        params.lease_ms / 1000
-    } else {
-        params.lease_ms
-    };
+    // R311ku — the unit projection SSOT (`crate::lease`) is shared with
+    // the unicast OPEN encoder; both carry the same `_Z_FLAG_T_*_T` rule.
+    let (lease_in_seconds, wire_lease) = crate::lease::lease_to_wire(params.lease_ms);
+    join.lease = wire_lease;
     join.next_sn_reliable = tx_sn.next_reliable;
     join.next_sn_best_effort = tx_sn.next_best_effort;
     let body = join.encode_to_vec(u8::from(advertises));
@@ -121,11 +119,9 @@ pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
     // milliseconds every wz consumer speaks (pico decode parity,
     // codec/transport.c:161-164: `_lease = _lease * 1000`). The default
     // pico beacon (lease 10000ms) arrives as T=1 + VLE 10, so skipping
-    // this read it as 10ms. Saturating: pico multiplies unchecked, but a
-    // hostile VLE near u64::MAX must not panic the RX loop.
-    if header & wire_const::FLAG_T_JOIN_T != 0 {
-        join.lease = join.lease.saturating_mul(1000);
-    }
+    // this read it as 10ms. R311ku — the projection SSOT is
+    // `crate::lease` (shared with the unicast OPEN decode boundary).
+    join.lease = crate::lease::lease_from_wire(header & wire_const::FLAG_T_JOIN_T != 0, join.lease);
     Some(join)
 }
 

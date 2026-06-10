@@ -217,8 +217,7 @@ fn session_init_params() -> SessionInitParams {
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,
-        lease: 10_000,
-        lease_in_seconds: false,
+        lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])

@@ -233,20 +233,16 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
 ///
 /// `now_ms` is parameterised for test determinism; production callers pass
 /// `clock.now_monotonic_ms()` (the same epoch [`SessionLinkActions::clock`]
-/// carries). `params.lease_in_seconds` selects the unit per the `_Z_FLAG_T_OPEN_T`
-/// wire semantics; seconds are scaled to ms before the `>=` so the arithmetic
-/// stays on the `u64` ms scale of the stamps (R294).
+/// carries). `params.lease_ms` is milliseconds by contract (R311ku —
+/// the wire unit is an encode/decode boundary concern, `crate::lease`),
+/// matching the `u64` ms scale of the stamps (R294).
 pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     now_ms: u64,
 ) -> LeaseCheckOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let lease_ms = if actions.params.lease_in_seconds {
-        actions.params.lease.saturating_mul(1000)
-    } else {
-        actions.params.lease
-    };
+    let lease_ms = actions.params.lease_ms;
     let keepalive = R::with_mutex_mut(&actions.last_inbound_keepalive_at, |g| *g);
     let established = R::with_mutex_mut(&actions.established_at, |g| *g);
     let baseline = match (established, keepalive) {

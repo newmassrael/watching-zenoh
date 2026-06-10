@@ -113,8 +113,7 @@ pub(crate) fn demo_session_init_params(role: &Role) -> SessionInitParams {
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,
-        lease: 10_000,
-        lease_in_seconds: false,
+        lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
         // Demo signing key — 32 bytes of 0xAB. Production deployment

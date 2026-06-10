@@ -48,8 +48,7 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         seq_num_res: 0,
         req_id_res: 0,
         batch_size: 0,
-        lease: 10_000,
-        lease_in_seconds: false,
+        lease_ms: 10_000,
         initial_sn: 0,
         cookie: Vec::new(),
         // Deterministic 32-byte test key. Production callers MUST

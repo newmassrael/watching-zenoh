@@ -64,8 +64,7 @@ fn fixture_params() -> SessionInitParams {
         seq_num_res: 0x03,
         req_id_res: 0x02,
         batch_size: 0xCAFE,
-        lease: 30,
-        lease_in_seconds: true,
+        lease_ms: 30_000,
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte test key valid"),
@@ -176,7 +175,8 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     );
     assert_eq!(snap.sends[0].1, Reliability::Reliable);
 
-    // OpenSyn — flags=T (lease_in_seconds), echoes cookie.
+    // OpenSyn — flags=T (whole-second lease_ms auto-derives T, R311ku),
+    // echoes cookie.
     // Wire = [header] || OpenBody.encode(flags=T)
     let open_syn_flags = 0x40u8; // FLAG_T_OPEN_T
     let open_syn = &snap.sends[1].0;

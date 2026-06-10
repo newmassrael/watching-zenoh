@@ -45,13 +45,14 @@ pub struct SessionInitParams {
     /// wire; every advertisement / comparison reads
     /// [`Self::effective_batch_size`] (R311kj).
     pub batch_size: u16,
-    /// Lease duration. The `lease_in_seconds` flag below picks the
-    /// unit; the value itself is VLE-encoded inside the open body.
-    pub lease: u64,
-    /// `_Z_FLAG_T_OPEN_T` semantics: when true the wire encodes the
-    /// `lease` field as seconds (set the flag); when false it
-    /// encodes milliseconds (clear the flag).
-    pub lease_in_seconds: bool,
+    /// Lease duration in milliseconds — ALWAYS milliseconds on both
+    /// sides (R311ku; the pre-ku shape was a raw wire value plus a
+    /// `lease_in_seconds` unit flag every consumer had to project).
+    /// The OPEN encoder derives the `_Z_FLAG_T_OPEN_T` wire form itself
+    /// ([`crate::lease::lease_to_wire`]): a whole-second value rides the
+    /// wire compacted to seconds under T=1, exactly like zenoh-pico's
+    /// `_z_t_msg_make_open_syn/_ack` (definitions/transport.c:196-214).
+    pub lease_ms: u64,
     /// Initial sequence number for the reliable channel (VLE-encoded
     /// inside the open body).
     pub initial_sn: u64,

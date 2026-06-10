@@ -730,11 +730,7 @@ where
     F: FnMut(IterationEvent<'_>),
     T: TimeSource,
 {
-    let lease_ms = if actions.params.lease_in_seconds {
-        actions.params.lease.saturating_mul(1000)
-    } else {
-        actions.params.lease
-    };
+    let lease_ms = actions.params.lease_ms;
     // R311il — host-owned handshake deadline tracker (the arming-key
     // staleness logic lives once in wz-session-core; see
     // [`HandshakeDeadlineTracker`]). The engine-free FSM arms no

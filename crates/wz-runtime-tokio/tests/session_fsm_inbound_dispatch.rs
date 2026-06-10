@@ -172,7 +172,6 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
 
     let open_syn = InboundFrame::Open {
         is_ack: false,
-        lease_in_seconds: false,
         has_ext: false,
         body: OpenBody::default().try_into_owned().unwrap(),
         extensions: Vec::new(),
@@ -184,7 +183,6 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
 
     let open_ack = InboundFrame::Open {
         is_ack: true,
-        lease_in_seconds: false,
         has_ext: false,
         body: OpenBody::default().try_into_owned().unwrap(),
         extensions: Vec::new(),

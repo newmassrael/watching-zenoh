@@ -127,8 +127,14 @@ pub fn encode_open(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<Vec<u8>, CodecError> {
+    // R311ku — the T flag is DERIVED, not configured: a whole-second
+    // lease compacts to the seconds form, pico `_z_t_msg_make_open_syn`
+    // / `_ack` parity (definitions/transport.c:196-214; the pre-ku
+    // manual `lease_in_seconds` knob let wz send `T=0 + VLE 10000`
+    // where pico always compacts to `T=1 + VLE 10`).
+    let (lease_in_seconds, wire_lease) = crate::lease::lease_to_wire(params.lease_ms);
     let mut parent_flags = 0u8;
-    if params.lease_in_seconds {
+    if lease_in_seconds {
         parent_flags |= wire_const::FLAG_T_OPEN_T;
     }
     if is_ack {
@@ -144,7 +150,7 @@ pub fn encode_open(
         &[]
     };
     let body = OpenBodyOwned {
-        lease: params.lease,
+        lease: wire_lease,
         initial_sn: params.initial_sn,
         cookie_len: if !is_ack {
             Some(cookie_bytes.len() as u64)
@@ -246,6 +252,65 @@ fn pack_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
 #[cfg(all(test, feature = "codec-init-body"))]
 mod tests {
     use super::{init_cbyte, pack_sn_res};
+
+    /// A minimal params bundle for the OPEN lease-unit fixtures.
+    #[cfg(feature = "codec-open-body")]
+    fn open_params(lease_ms: u64) -> crate::session_init_params::SessionInitParams {
+        use alloc::vec;
+        use alloc::vec::Vec;
+        crate::session_init_params::SessionInitParams {
+            version: 0x05,
+            whatami: 0x02,
+            zid: vec![0x01; 4],
+            seq_num_res: 0,
+            req_id_res: 0,
+            batch_size: 0,
+            lease_ms,
+            initial_sn: 0,
+            cookie: Vec::new(),
+            cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
+                .expect("32-byte test key"),
+        }
+    }
+
+    /// R311ku — encode_open derives the `_Z_FLAG_T_OPEN_T` flag from the
+    /// lease value itself (pico `_z_t_msg_make_open_syn/_ack` parity,
+    /// definitions/transport.c:196-214): a whole-second lease compacts
+    /// to the seconds form (10000ms -> T=1 + VLE 10), a fractional one
+    /// stays raw ms with T clear. The pre-ku manual `lease_in_seconds`
+    /// knob let wz emit the non-compact form pico never sends.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn encode_open_derives_t_flag_from_lease() {
+        // OpenAck (no cookie field): [header][lease vle][initial_sn vle].
+        let ack = super::encode_open(&open_params(10_000), true, None, &[]).expect("encodes");
+        assert_ne!(ack[0] & wire_const::FLAG_T_OPEN_T, 0, "T derived");
+        assert_eq!(ack[1], 10, "wire VLE carries seconds");
+        let ack = super::encode_open(&open_params(1_500), true, None, &[]).expect("encodes");
+        assert_eq!(ack[0] & wire_const::FLAG_T_OPEN_T, 0, "T clear");
+    }
+
+    /// R311ku — the RX boundary inverts the projection: an OpenAck
+    /// carrying the compact seconds form parses back to `body.lease`
+    /// in MILLISECONDS (`parse_inbound` applies `lease_from_wire`, the
+    /// same boundary rule as `multicast_join::decode_join`) — no
+    /// consumer ever sees the wire unit.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn parse_inbound_projects_open_lease_to_ms() {
+        let ack = super::encode_open(&open_params(10_000), true, None, &[]).expect("encodes");
+        match crate::inbound::parse_inbound(&ack) {
+            Ok(crate::inbound::InboundFrame::Open { body, .. }) => {
+                assert_eq!(body.lease, 10_000, "seconds form projected back to ms");
+            }
+            // InboundFrame intentionally derives no Debug (sce-codegen
+            // bodies only derive Default) — a variant name suffices here.
+            Ok(_) => panic!("expected Open, got another variant"),
+            Err(e) => panic!("expected Open, got parse error {e:?}"),
+        }
+    }
+    #[cfg(feature = "codec-open-body")]
+    use wz_codecs::wire_const;
 
     /// init_cbyte must match zenoh-pico's transport.c:189-192
     /// packing exactly — Layer 3 byte-equiv depends on this.

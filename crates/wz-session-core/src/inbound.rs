@@ -107,12 +107,15 @@ pub enum InboundFrame {
         body: InitBodyOwned,
         extensions: Vec<ExtEntryOwned>,
     },
-    /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`;
-    /// `lease_in_seconds` mirrors `_Z_FLAG_T_OPEN_T`.
+    /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`.
+    /// `body.lease` is ALWAYS milliseconds — the `_Z_FLAG_T_OPEN_T`
+    /// seconds form is projected back during parse (R311ku,
+    /// [`crate::lease::lease_from_wire`]); the pre-ku shape exposed the
+    /// raw wire value plus a `lease_in_seconds` flag that no consumer
+    /// ever read.
     #[cfg(feature = "codec-open-body")]
     Open {
         is_ack: bool,
-        lease_in_seconds: bool,
         has_ext: bool,
         body: OpenBodyOwned,
         extensions: Vec<ExtEntryOwned>,
@@ -243,7 +246,14 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
         }
         #[cfg(feature = "codec-open-body")]
         wire_const::T_MID_OPEN => {
-            let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?.try_into_owned()?;
+            let mut body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?.try_into_owned()?;
+            // R311ku — the `_Z_FLAG_T_OPEN_T` seconds form is projected
+            // back to milliseconds AT the wire boundary
+            // ([`crate::lease::lease_from_wire`], pico decode parity
+            // codec/transport.c:314), so no consumer ever sees the wire
+            // unit — the same boundary rule as `multicast_join::decode_join`.
+            body.lease =
+                crate::lease::lease_from_wire((flags & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -251,7 +261,6 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             };
             Ok(InboundFrame::Open {
                 is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
-                lease_in_seconds: (flags & wire_const::FLAG_T_OPEN_T) != 0,
                 has_ext,
                 body,
                 extensions,

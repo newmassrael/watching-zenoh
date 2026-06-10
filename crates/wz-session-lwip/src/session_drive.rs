@@ -108,11 +108,7 @@ where
     engine.initialize();
     engine.process_event(role.start_event());
 
-    let lease_ms = if actions.params.lease_in_seconds {
-        actions.params.lease.saturating_mul(1000)
-    } else {
-        actions.params.lease
-    };
+    let lease_ms = actions.params.lease_ms;
     let mut deadline_tracker = HandshakeDeadlineTracker::new(*timeouts);
     #[cfg(feature = "reassembly")]
     let mut reasm = mcu_reassembly();
@@ -228,8 +224,7 @@ mod tests {
             seq_num_res: 2,
             req_id_res: 2,
             batch_size: 1024,
-            lease: 10,
-            lease_in_seconds: true,
+            lease_ms: 10_000,
             initial_sn: 0,
             cookie: vec![0u8; 16],
             cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),

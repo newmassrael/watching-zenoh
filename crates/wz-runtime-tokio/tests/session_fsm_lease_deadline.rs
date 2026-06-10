@@ -192,7 +192,7 @@ fn r84_keepalive_wins_over_stale_established_via_max() {
 fn r77_within_lease_when_stamp_recent() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
-    // Fixture lease = 10_000 (ms, lease_in_seconds=false) ⇒ 10s window.
+    // Fixture lease_ms = 10_000 ⇒ 10s window (R311ku: always ms).
     let stamp = actions.clock.now_monotonic_ms();
     *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
     let pre_state = engine.get_current_state();
