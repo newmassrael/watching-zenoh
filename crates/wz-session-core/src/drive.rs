@@ -120,19 +120,31 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                         payload,
                         has_ext,
                         extensions,
-                    } => match parse_frame_payload(&payload) {
-                        Ok(messages) => DriverLoopOutcome::FramePayload {
-                            reliable,
-                            sn,
-                            messages,
-                            has_ext,
-                            extensions,
-                        },
-                        Err(codec_err) => {
-                            engine.process_event(E::FramingError);
-                            DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                    } => {
+                        // R311ke — per-channel RX SN gate (pico
+                        // `_z_sn_precedes`, unicast/rx.c:108-131): a stale
+                        // / duplicate / reordered frame drops before its
+                        // payload reaches the application layer. The typed
+                        // outcome lets `report_outcome_reassembling` clear
+                        // the channel's in-progress chain (dbuf-clear
+                        // parity) and observers count the drop.
+                        if !actions.admit_rx_frame_sn(reliable, sn) {
+                            return DriverLoopOutcome::RxSnRejected { reliable, sn };
                         }
-                    },
+                        match parse_frame_payload(&payload) {
+                            Ok(messages) => DriverLoopOutcome::FramePayload {
+                                reliable,
+                                sn,
+                                messages,
+                                has_ext,
+                                extensions,
+                            },
+                            Err(codec_err) => {
+                                engine.process_event(E::FramingError);
+                                DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                            }
+                        }
+                    }
                     #[cfg(feature = "codec-keep-alive")]
                     InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
                     // R311im — surface the decoded fragment to the drive
@@ -147,14 +159,27 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                         payload,
                         has_ext,
                         extensions,
-                    } => DriverLoopOutcome::Fragment {
-                        reliable,
-                        sn,
-                        more,
-                        payload,
-                        has_ext,
-                        extensions,
-                    },
+                    } => {
+                        // R311ke — fragments ride the same per-channel SN
+                        // counter as frames (pico gates them through the
+                        // same `_z_sn_precedes`, rx.c:160-176), so the gate
+                        // must see them too or a frame following a fragment
+                        // chain would compare against a stale baseline. The
+                        // chain-level ring-consecutive check stays in the
+                        // ReassemblyDispatcher (a forward GAP passes here
+                        // and aborts there, exactly pico's two-stage check).
+                        if !actions.admit_rx_frame_sn(reliable, sn) {
+                            return DriverLoopOutcome::RxSnRejected { reliable, sn };
+                        }
+                        DriverLoopOutcome::Fragment {
+                            reliable,
+                            sn,
+                            more,
+                            payload,
+                            has_ext,
+                            extensions,
+                        }
+                    }
                     #[cfg(feature = "codec-init-body")]
                     InboundFrame::Init { .. } => {
                         unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
@@ -283,6 +308,17 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
     F: FnMut(IterationEvent<'_>),
 {
     on_event(IterationEvent::Poll(outcome));
+    // R311ke — a channel-gate rejection clears that channel's in-progress
+    // reassembly chain (pico clears the dbuf + state on an out-of-order
+    // FRAME or FRAGMENT, rx.c:112-113/166-168): a continuation superseded
+    // by the rejection must never complete a chain from mixed generations.
+    if let DriverLoopOutcome::RxSnRejected { reliable, .. } = outcome {
+        R::with_mutex_mut(&actions.inbound_peer_zid, |zid_slot| {
+            let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
+            reasm.abort_channel(zid, *reliable);
+        });
+        return;
+    }
     let DriverLoopOutcome::Fragment {
         reliable,
         sn,

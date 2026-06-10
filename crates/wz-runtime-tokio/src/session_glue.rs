@@ -2055,6 +2055,99 @@ mod negotiated_mtu_tests {
     }
 }
 
+/// R311ke — unicast RX SN gate: handshake seeding + the reassembly
+/// chain-clear a channel-gate rejection triggers. The half-window admit
+/// logic itself is unit-tested in `wz_session_core::sn` (RxSn) and the
+/// dispatcher wiring in `tests/session_fsm_driver_loop.rs`; these pin
+/// the two stateful seams — OpenAck `initial_sn` seeds the gate through
+/// the production `handle_inbound` path (peer.c:212-214 parity), and a
+/// `RxSnRejected` outcome clears the channel's in-progress chain through
+/// `report_outcome_reassembling` (rx.c dbuf-clear parity).
+#[cfg(all(test, feature = "codec-open-body", feature = "codec-frame"))]
+mod rx_sn_gate_tests {
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_wire_fixtures::craft_openack_wire;
+
+    #[test]
+    fn openack_initial_sn_seeds_rx_gate() {
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        actions
+            .handle_inbound(&craft_openack_wire(5))
+            .expect("parse OpenAck");
+        assert!(
+            !actions.admit_rx_frame_sn(true, 4),
+            "a frame BEFORE the announced initial_sn is stale"
+        );
+        assert!(
+            actions.admit_rx_frame_sn(true, 5),
+            "the first frame at exactly initial_sn passes (decrement seed)"
+        );
+        assert!(
+            !actions.admit_rx_frame_sn(true, 5),
+            "and the duplicate of it is stale"
+        );
+        assert!(
+            actions.admit_rx_frame_sn(false, 5),
+            "the best-effort channel was seeded too and gates independently"
+        );
+    }
+
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn rx_sn_rejection_clears_in_progress_chain() {
+        use wz_session_core::drive::report_outcome_reassembling;
+        use wz_session_core::driver_loop::DriverLoopOutcome;
+        use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        let zid = vec![0x0A; 4];
+        *actions.inbound_peer_zid.lock().unwrap() = Some(zid);
+
+        let mut reasm: ReassemblyDispatcher<4, 4096> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+        let mut sink = |_e: wz_session_core::driver_loop::IterationEvent<'_>| {};
+
+        // Begin a reliable chain (more=1) through the production helper.
+        let begin = DriverLoopOutcome::Fragment {
+            reliable: true,
+            sn: 10,
+            more: true,
+            payload: vec![0x01],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        report_outcome_reassembling(&begin, &mut reasm, &actions, 0, &mut sink);
+        assert_eq!(reasm.active_chains(), 1, "chain armed");
+
+        // A reliable-channel SN rejection clears it (pico dbuf-clear).
+        let rejected = DriverLoopOutcome::RxSnRejected {
+            reliable: true,
+            sn: 9,
+        };
+        report_outcome_reassembling(&rejected, &mut reasm, &actions, 0, &mut sink);
+        assert_eq!(
+            reasm.active_chains(),
+            0,
+            "channel-gate rejection must clear the in-progress chain"
+        );
+
+        // A best-effort rejection leaves a reliable chain untouched.
+        report_outcome_reassembling(&begin, &mut reasm, &actions, 0, &mut sink);
+        let rejected_be = DriverLoopOutcome::RxSnRejected {
+            reliable: false,
+            sn: 9,
+        };
+        report_outcome_reassembling(&rejected_be, &mut reasm, &actions, 0, &mut sink);
+        assert_eq!(
+            reasm.active_chains(),
+            1,
+            "the clear is per-channel: best-effort rejection keeps the reliable chain"
+        );
+    }
+}
+
 /// R311jp — TX batching end-to-end: a `batch_start` window coalesces N
 /// network messages into ONE outbound `T_MID_FRAME` (header + `VLE(sn)` + N
 /// message bodies), bounded by the `batch_size` byte budget, drained by

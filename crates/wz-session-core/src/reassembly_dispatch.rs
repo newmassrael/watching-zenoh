@@ -470,6 +470,28 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         self.slots[idx].release();
         IngestOutcome::Aborted(reason)
     }
+
+    /// R311ke — abort the in-progress chain on (`zid`, `reliable`), the
+    /// zenoh-pico dbuf-clear a channel-level SN-gate rejection triggers
+    /// (unicast/rx.c:112-113: an out-of-order FRAME on a channel clears
+    /// that channel's defragmentation buffer — the dropped frame may have
+    /// superseded the chain's continuation, so completing it would mix
+    /// generations). Drives the slot FSM through its `fragment.ooo`
+    /// abort arm before release, exactly as an in-chain abort does.
+    /// Returns whether a chain was cleared (`false` = nothing in
+    /// progress on that channel — the common case).
+    pub fn abort_channel(&mut self, zid: &[u8], reliable: bool) -> bool {
+        match self.find_active(zid, reliable) {
+            Some(idx) => {
+                self.slots[idx]
+                    .engine
+                    .process_event(ReassemblySlotEvent::FragmentOoo);
+                self.abort(idx, AbortReason::OutOfOrder);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Build the typed `fragment.chunk` event. The slot FSM's only guard

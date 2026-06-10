@@ -126,6 +126,56 @@ impl TxSn {
     }
 }
 
+/// R311ke — per-channel unicast RX SN gate state, the zenoh-pico
+/// `_z_transport_peer_unicast_t._sn_rx_reliable` / `_sn_rx_best_effort`
+/// pair (transport/peer.c:212-214 seeds both, unicast/rx.c:100-185 gates
+/// every inbound FRAME / FRAGMENT against them per channel). The unicast
+/// counterpart of the multicast `PeerSlot.rx_sn_*` fields — one peer per
+/// unicast session, so the session actions hold a single instance.
+///
+/// `None` = unseeded: the handshake's OpenSyn/OpenAck `initial_sn` seeds
+/// both channels via [`RxSn::seed`] before any legal data frame, so an
+/// unseeded channel only sees a frame on a non-conforming peer — wz
+/// admits-and-tracks it (permissive first-frame baseline) rather than
+/// dropping, mirroring the multicast slot's JOIN-seeded tolerance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RxSn {
+    pub reliable: Option<u64>,
+    pub best_effort: Option<u64>,
+}
+
+impl RxSn {
+    /// Seed both channels one before the peer's announced `initial_sn`
+    /// (zenoh-pico peer.c:212-214 `_z_sn_decrement(sn_res, initial_sn_rx)`
+    /// into BOTH `_sn_rx_*`), so the first frame at exactly `initial_sn`
+    /// passes [`Self::admit`].
+    pub fn seed(&mut self, mask: u64, initial_sn: u64) {
+        let baseline = decrement(mask, initial_sn);
+        self.reliable = Some(baseline);
+        self.best_effort = Some(baseline);
+    }
+
+    /// Admit one inbound frame SN on its channel: the half-window
+    /// [`precedes`] gate against the last accepted SN; a pass stores
+    /// `sn` as the new baseline (rx.c stores the accepted `msg->_sn`).
+    /// `false` = stale / duplicate / reordered — the caller drops the
+    /// frame without advancing the FSM (pico's silent drop).
+    pub fn admit(&mut self, mask: u64, reliable: bool, sn: u64) -> bool {
+        let slot = if reliable {
+            &mut self.reliable
+        } else {
+            &mut self.best_effort
+        };
+        match *slot {
+            Some(last) if !precedes(mask, last, sn) => false,
+            _ => {
+                *slot = Some(sn);
+                true
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +255,40 @@ mod tests {
         let mask = mask_from_res(0x01);
         assert_eq!(increment(mask, 0), 1);
         assert_eq!(increment(mask, mask), 0);
+    }
+
+    /// R311ke — [`RxSn`] seeds both channels from `initial_sn` and gates
+    /// per channel: the first frame at `initial_sn` passes, a duplicate or
+    /// backward SN is rejected, and the channels track independently.
+    #[test]
+    fn rx_sn_seeds_and_gates_per_channel() {
+        let mask = mask_from_res(0x00);
+        let mut rx = RxSn::default();
+        rx.seed(mask, 42);
+        assert!(rx.admit(mask, true, 42), "first frame at initial_sn passes");
+        assert!(!rx.admit(mask, true, 42), "duplicate SN is stale");
+        assert!(!rx.admit(mask, true, 41), "backward SN is stale");
+        assert!(rx.admit(mask, true, 43), "next forward SN passes");
+        // The best-effort channel still sits at the seed baseline.
+        assert!(
+            rx.admit(mask, false, 42),
+            "channels gate independently (best-effort untouched by reliable)"
+        );
+    }
+
+    /// An unseeded [`RxSn`] channel admits the first frame and tracks from
+    /// it (permissive baseline for a non-conforming peer that skipped the
+    /// handshake seeding) — subsequent stale SNs still drop.
+    #[test]
+    fn rx_sn_unseeded_admits_first_then_gates() {
+        let mask = mask_from_res(0x00);
+        let mut rx = RxSn::default();
+        assert!(
+            rx.admit(mask, true, 7),
+            "unseeded channel admits-and-tracks"
+        );
+        assert!(!rx.admit(mask, true, 7), "then gates duplicates");
+        assert!(!rx.admit(mask, true, 7 + 65), "past half-window is stale");
     }
 
     /// `TxSn::mint` returns the advertised `next_*` and advances per

@@ -436,3 +436,69 @@ async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
     );
     assert_eq!(engine.get_current_state(), S::Closing);
 }
+
+// ── R311ke Scenario: per-channel RX SN gate — a duplicate/stale Frame
+//                    SN drops typed (pico `_z_sn_precedes`, rx.c:108-131)
+//                    while the other channel gates independently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311ke_rx_duplicate_frame_sn_rejected_per_channel() {
+    use wz_session_wire_fixtures::craft_frame_wire;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let mut driver = QueueDriver::with(vec![
+        LinkEvent::Rx(RxFrame::new(craft_frame_wire(2, true))),
+        LinkEvent::Rx(RxFrame::new(craft_frame_wire(2, true))), // duplicate
+        LinkEvent::Rx(RxFrame::new(craft_frame_wire(1, true))), // backward
+        LinkEvent::Rx(RxFrame::new(craft_frame_wire(2, false))), // other channel
+    ]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::FramePayload { sn: 2, .. }),
+        "first frame at sn=2 admits (unseeded channel tracks from it); got {outcome:?}"
+    );
+    let pre_state = engine.get_current_state();
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(
+            outcome,
+            DriverLoopOutcome::RxSnRejected {
+                reliable: true,
+                sn: 2
+            }
+        ),
+        "duplicate sn=2 must drop typed; got {outcome:?}"
+    );
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(
+            outcome,
+            DriverLoopOutcome::RxSnRejected {
+                reliable: true,
+                sn: 1
+            }
+        ),
+        "backward sn=1 must drop typed; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        pre_state,
+        "SN-gate drops must not advance the FSM (pico silent drop)"
+    );
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(
+            outcome,
+            DriverLoopOutcome::FramePayload {
+                reliable: false,
+                sn: 2,
+                ..
+            }
+        ),
+        "best-effort channel gates independently of reliable; got {outcome:?}"
+    );
+}

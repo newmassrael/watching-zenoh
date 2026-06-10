@@ -145,6 +145,25 @@ pub fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
     wire
 }
 
+/// `_Z_FLAG_T_OPEN_A` — OpenAck (the `A` discriminator on the OPEN MID).
+pub const FLAG_T_OPEN_A: u8 = 0x20;
+
+/// R311ke — `OpenAck` (parent flag `FLAG_T_OPEN_A`; no cookie — the
+/// cookie rides the Syn only) announcing `initial_sn`: lease VLE=0,
+/// initial_sn VLE. Seeds the initiator-side RX SN gate in tests exactly
+/// as a real acceptor's OpenAck does.
+pub fn craft_openack_wire(initial_sn: u64) -> Vec<u8> {
+    assert!(
+        initial_sn < 0x80,
+        "fixture: single-byte VLE initial_sn only"
+    );
+    vec![
+        FLAG_T_OPEN_A | T_MID_OPEN,
+        0x00,             // lease VLE = 0
+        initial_sn as u8, // initial_sn VLE
+    ]
+}
+
 /// Application `Frame` with the `R` (reliable) flag set per `reliable`, a
 /// single-byte-VLE `sn`, and an empty payload (decodes to a `FramePayload`
 /// with an empty NetworkMessage batch).

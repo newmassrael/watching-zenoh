@@ -76,6 +76,18 @@ pub enum DriverLoopOutcome {
     /// `LinkLost` into the engine so the `link.lost` transition
     /// fires; the cause is returned for logging.
     LinkLost(LostCause),
+    /// R311ke — an inbound Frame/Fragment SN fell outside its channel's
+    /// half-window ([`crate::sn::RxSn`] gate — zenoh-pico
+    /// `_z_sn_precedes`, unicast/rx.c:100-185): a stale, duplicated, or
+    /// reordered datagram. Dropped without FSM advance (pico's silent
+    /// drop — an INFO-level event, not a session error); the payload
+    /// never reaches the application layer. On a rejection the drive
+    /// helper also clears the channel's in-progress reassembly chain
+    /// (pico's dbuf-clear, rx.c:112-113) so a chain whose continuation
+    /// was superseded never completes from mixed generations. TCP's
+    /// in-order delivery cannot produce this; UDP unicast can.
+    #[cfg(feature = "codec-frame")]
+    RxSnRejected { reliable: bool, sn: u64 },
     /// R311kc — the InitAck's size parameters exceeded our InitSyn
     /// advertisement (the zenoh-pico
     /// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` rejection,

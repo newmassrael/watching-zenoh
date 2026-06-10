@@ -307,6 +307,17 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// realized the R121e explicit-modulo carry via zenoh-pico
     /// `_z_sn_increment` parity (the F-5 consolidation).
     pub outbound_frame_sn: AtomicU64,
+    /// R311ke — per-channel inbound Frame/Fragment SN gate state
+    /// ([`crate::sn::RxSn`]), the zenoh-pico
+    /// `_z_transport_peer_unicast_t._sn_rx_reliable` /
+    /// `_sn_rx_best_effort` pair. Seeded by [`Self::handle_inbound`]
+    /// from the peer's OpenSyn/OpenAck `initial_sn` (one before, so the
+    /// first frame at exactly `initial_sn` passes — peer.c:212-214);
+    /// consulted by the drive dispatcher's
+    /// [`Self::admit_rx_frame_sn`] before a Frame payload or Fragment
+    /// reaches the application layer. Handshake-scoped: reset by
+    /// `reset_for_reopen` and re-seeded by the reopen handshake.
+    pub rx_sn: R::Mutex<crate::sn::RxSn>,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
@@ -605,6 +616,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             open_ack_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
+            rx_sn: R::new_mutex(crate::sn::RxSn::default()),
             #[cfg(feature = "transport-batching")]
             batch_tx: R::new_mutex(BatchTx::default()),
             outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
@@ -871,6 +883,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         *slot = Some(cookie.as_slice().to_vec());
                     });
                 }
+                // R311ke — the peer's announced initial_sn seeds the RX
+                // SN gate baselines (peer.c:212-214: both channels one
+                // before, so the first frame at initial_sn passes).
+                // Sequential mutex scopes (negotiated_sn_mask takes
+                // inbound_peer_init_caps), never nested.
+                let mask = self.negotiated_sn_mask();
+                R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, body.initial_sn));
+            }
+            #[cfg(feature = "codec-open-body")]
+            InboundFrame::Open {
+                is_ack: true, body, ..
+            } => {
+                // R311ke — Initiator-side OpenAck arrival: the acceptor's
+                // initial_sn seeds the RX gate exactly as the OpenSyn
+                // seeds it on the accepting side (pico captures
+                // `_initial_sn_rx` from either body, transport.c:196/270).
+                let mask = self.negotiated_sn_mask();
+                R::with_mutex_mut(&self.rx_sn, |s| s.seed(mask, body.initial_sn));
             }
             #[cfg(feature = "codec-keep-alive")]
             InboundFrame::KeepAlive { .. } => {
@@ -918,6 +948,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             sn_res_byte,
             batch_size,
         )
+    }
+
+    /// R311ke — per-channel inbound Frame/Fragment SN admission, the
+    /// zenoh-pico `_z_sn_precedes` gate of unicast/rx.c:100-185: every
+    /// inbound FRAME / FRAGMENT SN must half-window-follow the channel's
+    /// last accepted SN; a pass stores it as the new baseline. `false`
+    /// means stale / duplicate / reordered — the dispatcher drops the
+    /// frame without advancing the FSM (pico's silent drop; TCP cannot
+    /// produce it, UDP unicast can). The reliable-channel reassembly
+    /// chain is cleared by the drive helper on rejection, mirroring
+    /// pico's dbuf-clear (rx.c:112-113).
+    pub fn admit_rx_frame_sn(&self, reliable: bool, sn: u64) -> bool {
+        // Sequential mutex scopes: the mask accessor takes
+        // `inbound_peer_init_caps`, then `rx_sn` — disjoint, never nested
+        // (the non-reentrant MCU critical_section forbids nesting).
+        let mask = self.negotiated_sn_mask();
+        R::with_mutex_mut(&self.rx_sn, |s| s.admit(mask, reliable, sn))
     }
 
     /// R121e / R311kb — outbound Frame sequence-number mint. Returns
@@ -2702,7 +2749,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `inbound_opensyn_cookie`, `last_inbound_keepalive_at`,
     /// `established_at` (so [`Self::is_established`] reads `false` until
     /// the re-handshake completes), `inbound_peer_zid`,
-    /// `inbound_peer_init_caps`, the open batching window
+    /// `inbound_peer_init_caps`, the RX SN gate (`rx_sn`, re-seeded by
+    /// the reopen handshake's OpenSyn/OpenAck), the open batching window
     /// (`transport-batching`), and `outbound_frame_sn` (re-seeded to
     /// `params.initial_sn`, the value the re-handshake's OpenSyn
     /// announces — pico mints a fresh random initial SN per `_z_open`;
@@ -2731,6 +2779,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.established_at, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
+            // R311ke — the RX SN gate is handshake-scoped: the reopen
+            // handshake's OpenSyn/OpenAck re-seeds both channels.
+            R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxSn::default());
             #[cfg(feature = "transport-batching")]
             R::with_mutex_mut(&self.batch_tx, |batch| *batch = BatchTx::default());
             // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
