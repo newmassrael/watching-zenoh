@@ -1223,7 +1223,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "transport-fragmentation")]
         {
             if frame.len() > mtu {
-                let body = &frame[1 + crate::frame_encode::vle_width(sn)..];
+                let body = crate::frame_encode::frame_wire_body(frame, sn);
                 let count = crate::frame_encode::fragment_count(body.len(), mtu) as u64;
                 let base = self.outbound_frame_sn.fetch_add(count, Ordering::SeqCst);
                 for frag in crate::frame_encode::fragment_body(body, reliable, mtu, base, sn_mask) {

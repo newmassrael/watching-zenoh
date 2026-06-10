@@ -59,6 +59,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         lease_ms: 5_000,
         join_interval_ms: 50,
         seq_num_res: 0x02,
+        req_id_res: 0x02,
         batch_size: 2_048,
     }
 }

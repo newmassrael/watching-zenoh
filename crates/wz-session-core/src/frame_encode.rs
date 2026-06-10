@@ -401,13 +401,24 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 /// codec union (R311jq) no longer bounds where the symbol is live —
 /// any fragmentation build slices.
 #[cfg(feature = "transport-fragmentation")]
-pub(crate) fn vle_width(sn: u64) -> usize {
+fn vle_width(sn: u64) -> usize {
     let (mut width, mut v) = (1usize, sn);
     while v >= 0x80 {
         v >>= 7;
         width += 1;
     }
     width
+}
+
+/// R311kq — the network-message body of an already-encoded outbound
+/// `T_MID_FRAME`: the tail behind the 1-byte header + `VLE(sn)` prefix
+/// [`encode_frame_envelope`] wrote. The single home of the FRAME-prefix
+/// offset contract — both fragmentation re-framers (the unicast
+/// `emit_frame_or_fragments` and [`multicast_frame_or_fragments`]) slice
+/// through this instead of each re-deriving `1 + vle_width(sn)`.
+#[cfg(feature = "transport-fragmentation")]
+pub(crate) fn frame_wire_body(frame: &[u8], sn: u64) -> &[u8] {
+    &frame[1 + vle_width(sn)..]
 }
 
 /// Conservative per-fragment header budget: 1 flags byte + the maximum u64
@@ -534,7 +545,7 @@ pub fn multicast_frame_or_fragments(
 ) -> Vec<Vec<u8>> {
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
-        let body = &frame[1 + vle_width(sn)..];
+        let body = frame_wire_body(&frame, sn);
         let count = fragment_count(body.len(), mtu);
         for _ in 1..count {
             tx_sn.mint(reliable);

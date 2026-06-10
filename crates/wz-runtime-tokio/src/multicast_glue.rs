@@ -96,7 +96,10 @@ use wz_session_core::multicast_dispatch::{
     abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
 };
 use wz_session_core::multicast_dispatch::{FrameIngest, JoinSnBaseline, MulticastDispatcher};
-use wz_session_core::multicast_params::MulticastParams;
+use wz_session_core::multicast_params::{
+    pack_res_cbyte, unpack_res_cbyte, MulticastParams, PROTOCOL_DEFAULT_BATCH_SIZE,
+    PROTOCOL_DEFAULT_RESOLUTION,
+};
 use wz_session_core::network_message::parse_frame_payload;
 #[cfg(feature = "codec-push")]
 use wz_session_core::push_build;
@@ -108,15 +111,18 @@ use wz_runtime_core::TimeSource;
 
 use crate::LinkDriver;
 
-/// Frame a minimal multicast JOIN datagram for `params`:
-/// `[T_MID_JOIN][version][cbyte][zid][lease vle][next_sn_r vle][next_sn_be vle]`.
+/// Frame a multicast JOIN datagram for `params`:
+/// `[T_MID_JOIN][version][cbyte][zid][S: res-cbyte + batch][lease vle]`
+/// `[next_sn_r vle][next_sn_be vle]`.
 ///
-/// "Minimal" = no `sn_res` / `batch_size` resolution negotiation (the
-/// `join` codec's `S`-flag optionals are absent, encoded with `s = 0`), so
-/// the header carries no high flags. Richer JOIN options (resolution
-/// negotiation) are a zenoh-interop follow-up; this is the self-advertising
-/// beacon body. The body codec omits the MID byte, so it is prepended here
-/// (mirror of [`crate::scouting_glue`]'s `scout_emit`).
+/// R311kq — the S-flag optionals (`sn_res` resolution cbyte +
+/// `batch_size`) are present exactly when the config departs from the
+/// protocol defaults ([`MulticastParams::join_advertises_caps`], zenoh-pico
+/// `_z_t_msg_make_join` parity): an omitted optional is the wire statement
+/// "I run the protocol defaults", so a non-default config MUST advertise
+/// or every protocol-default peer would mis-read its caps. The body codec
+/// omits the MID byte, so header + S flag are prepended here (mirror of
+/// [`crate::scouting_glue`]'s `scout_emit`).
 ///
 /// A1c — the JOIN advertises the LIVE per-channel `next_sn` from `tx_sn`
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
@@ -130,13 +136,23 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
         join.set_zid_len_m1((zid.len() - 1) as u8);
         join.zid = zid.as_slice();
     }
+    let advertises = params.join_advertises_caps();
+    if advertises {
+        join.sn_res = Some(pack_res_cbyte(params.seq_num_res, params.req_id_res));
+        join.batch_size = Some(params.batch_size);
+    }
     join.lease = params.lease_ms;
     join.next_sn_reliable = tx_sn.next_reliable;
     join.next_sn_best_effort = tx_sn.next_best_effort;
-    let body = join.encode_to_vec(0);
+    let body = join.encode_to_vec(u8::from(advertises));
 
     let mut dgram = Vec::with_capacity(1 + body.len());
-    dgram.push(wire_const::T_MID_JOIN);
+    let s_flag = if advertises {
+        wire_const::FLAG_T_JOIN_S
+    } else {
+        0
+    };
+    dgram.push(s_flag | wire_const::T_MID_JOIN);
     dgram.extend_from_slice(&body);
     dgram
 }
@@ -144,12 +160,16 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
 /// One queued outbound data emission for the multicast drive loop's TX
 /// half (A1c). The application side holds the paired
 /// `tokio::sync::mpsc::UnboundedSender` and enqueues items; the loop
-/// mints the channel SN, wraps the network message in a `T_MID_FRAME`,
-/// and multicasts it to the group — the multicast mirror of the unicast
-/// writer-channel seam (zenoh-pico `_z_send_n_msg` over the multicast
-/// transport). The enum is unconditional (signature stability); the
-/// variants are gated by the codec that encodes them, so a build without
-/// any data codec carries an uninhabited type and a dead arm-free match.
+/// mints the channel SN, wraps the network message in a `T_MID_FRAME` —
+/// re-framed as a `T_MID_FRAGMENT` chain when it exceeds the group batch
+/// budget (R311ko,
+/// [`multicast_frame_or_fragments`](wz_session_core::frame_encode::multicast_frame_or_fragments))
+/// — and multicasts it to the group: the multicast mirror of the unicast
+/// writer-channel seam
+/// (zenoh-pico `_z_send_n_msg` over the multicast transport). The enum is
+/// unconditional (signature stability); the variants are gated by the
+/// codec that encodes them, so a build without any data codec carries an
+/// uninhabited type and a dead arm-free match.
 #[derive(Debug)]
 pub enum MulticastTxItem {
     /// A pub/sub Push (`z_put` / `z_del` over multicast). Framed via the
@@ -220,28 +240,39 @@ pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
 /// [`MulticastDispatcher::ingest_join`] (the dispatcher's documented
 /// contract: "the caller has already validated the Join"). Mirrors
 /// zenoh-pico's checks — version (`_z_multicast_handle_join_inner`
-/// proto-version guard) and SN-resolution compatibility (the
-/// incompatible-config refuse; multicast has no negotiation, so peers
-/// must already agree) plus the batch-size compatibility from the same
-/// pico guard (R311ko — a peer framing against a larger budget would
-/// emit datagrams this node's budget never expects). A JOIN that omits
-/// an optional (`sn_res` / `batch_size`) advertises the local default
-/// and is treated as compatible.
+/// proto-version guard) and the seq-num / req-id resolution + batch-size
+/// compatibility from the same pico incompatible-config guard (multicast
+/// has no negotiation, so peers must already agree; R311ko batch, R311kq
+/// req-id).
+///
+/// R311kq — omitted-optional semantics are pico's decode semantics: an
+/// absent `sn_res` / `batch_size` means the PROTOCOL defaults
+/// ([`PROTOCOL_DEFAULT_RESOLUTION`] / [`PROTOCOL_DEFAULT_BATCH_SIZE`],
+/// codec/transport.c:155-157), NOT this node's local config — a
+/// non-default announcer advertises (S=1). The advertised resolution
+/// cbyte packs `seq_num_res` (bits 0-1) + `req_id_res` (bits 2-3); the
+/// codec carries it opaque, so it is decomposed here
+/// ([`unpack_res_cbyte`]) — comparing the whole byte against the 2-bit
+/// `seq_num_res` would refuse every compatible S=1 announcer.
 /// Returns the admitted SN baseline, or `None` when the announcement
 /// must be ignored (a diagnostic event, not a peer-FSM transition).
 pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinSnBaseline> {
     if join.version != params.version {
         return None;
     }
-    let sn_res = join.sn_res.unwrap_or(params.seq_num_res);
-    if sn_res != params.seq_num_res {
+    let res_cbyte = join.sn_res.unwrap_or(pack_res_cbyte(
+        PROTOCOL_DEFAULT_RESOLUTION,
+        PROTOCOL_DEFAULT_RESOLUTION,
+    ));
+    let (seq_num_res, req_id_res) = unpack_res_cbyte(res_cbyte);
+    if seq_num_res != params.seq_num_res || req_id_res != params.req_id_res {
         return None;
     }
-    if join.batch_size.unwrap_or(params.batch_size) != params.batch_size {
+    if join.batch_size.unwrap_or(PROTOCOL_DEFAULT_BATCH_SIZE) != params.batch_size {
         return None;
     }
     Some(JoinSnBaseline {
-        sn_res,
+        sn_res: seq_num_res,
         next_sn_reliable: join.next_sn_reliable,
         next_sn_best_effort: join.next_sn_best_effort,
     })
@@ -278,9 +309,13 @@ pub enum MulticastOutcome {
 ///
 /// `outbound` is the A1c TX seam: queued [`MulticastTxItem`]s are framed
 /// with a freshly minted per-channel SN (the loop-owned [`TxSn`] the JOIN
-/// beacon also advertises) and multicast to the group. A publish-free
-/// caller passes the receiver of an idle channel; when every sender is
-/// dropped the arm disarms (the loop keeps serving RX + JOIN).
+/// beacon also advertises) and multicast to the group; a frame past the
+/// group batch budget leaves as a `T_MID_FRAGMENT` chain instead (R311ko,
+/// [`multicast_frame_or_fragments`](wz_session_core::frame_encode::multicast_frame_or_fragments)
+/// — the chain rides the minted SN and the follow-on mints). A
+/// publish-free caller passes the receiver of an
+/// idle channel; when every sender is dropped the arm disarms (the loop
+/// keeps serving RX + JOIN).
 pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
@@ -566,6 +601,7 @@ mod tests {
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,
+            req_id_res: 0x02,
             batch_size: 2_048,
         }
     }
@@ -582,15 +618,96 @@ mod tests {
         tokio::sync::mpsc::unbounded_channel().1
     }
 
-    /// `encode_join` frames a minimal JOIN whose MID is `T_MID_JOIN` and
-    /// whose body round-trips back to the announcer zid through
-    /// `decode_join_zid`.
+    /// A params bundle at the PROTOCOL defaults (8192 / 0x02 / 0x02) —
+    /// the only config whose JOIN is minimal (S=0) under the R311kq
+    /// pico `make_join` parity.
+    fn protocol_default_params(zid: &[u8]) -> MulticastParams {
+        MulticastParams {
+            batch_size: PROTOCOL_DEFAULT_BATCH_SIZE,
+            ..params(zid)
+        }
+    }
+
+    /// `encode_join` frames a JOIN whose MID is `T_MID_JOIN` and whose
+    /// body round-trips back to the announcer zid through
+    /// `decode_join_zid` (the fixture batch 2048 is non-default, so the
+    /// header also carries S — masked out of the MID compare).
     #[test]
     fn encode_join_round_trips_zid() {
         let zid = [0xAA, 0xBB, 0xCC, 0xDD];
         let dgram = join0(&params(&zid));
-        assert_eq!(dgram[0], wire_const::T_MID_JOIN);
+        assert_eq!(dgram[0] & 0x1f, wire_const::T_MID_JOIN);
         assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));
+    }
+
+    /// R311kq — a protocol-default config emits the minimal JOIN (S=0,
+    /// no optionals): omitted IS the honest advertisement of the
+    /// protocol defaults (pico `make_join` sets S only off-default).
+    #[test]
+    fn encode_join_is_minimal_at_protocol_defaults() {
+        let p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
+        let dgram = join0(&p);
+        assert_eq!(dgram[0], wire_const::T_MID_JOIN, "no S flag");
+        let join = decode_join(&dgram).expect("JOIN decodes");
+        assert_eq!(join.sn_res, None);
+        assert_eq!(join.batch_size, None);
+        assert!(
+            validate_join(&join, &p).is_some(),
+            "protocol-default group admits the minimal JOIN"
+        );
+    }
+
+    /// R311kq — a non-default config (batch 2048) advertises S=1 with
+    /// the packed resolution cbyte (seq 0x02 | req 0x02 << 2 = 0x0A) +
+    /// batch, and a same-config group admits it through the cbyte
+    /// decomposition (the pre-R311kq whole-byte compare refused every
+    /// compatible S=1 announcer).
+    #[test]
+    fn encode_join_advertises_non_default_caps() {
+        let zid = [0x01, 0x02, 0x03, 0x04];
+        let p = params(&zid);
+        let dgram = join0(&p);
+        assert_ne!(dgram[0] & wire_const::FLAG_T_JOIN_S, 0, "S flag set");
+        let join = decode_join(&dgram).expect("JOIN decodes");
+        assert_eq!(join.sn_res, Some(0x0A), "seq 2 | req 2 << 2");
+        assert_eq!(join.batch_size, Some(2_048));
+        assert!(
+            validate_join(&join, &p).is_some(),
+            "same-config group admits the advertised caps"
+        );
+    }
+
+    /// R311kq — pico omitted-optional semantics: a minimal JOIN means
+    /// the PROTOCOL defaults, so a non-default group (batch 2048) must
+    /// refuse it (`_z_multicast_handle_join_inner` compares the decoded
+    /// default 8192 against the local config).
+    #[test]
+    fn validate_join_rejects_minimal_join_in_non_default_group() {
+        let zid = [0x01, 0x02, 0x03, 0x04];
+        let minimal = join0(&protocol_default_params(&zid));
+        let join = decode_join(&minimal).expect("JOIN decodes");
+        assert!(
+            validate_join(&join, &params(&zid)).is_none(),
+            "omitted batch means 8192, not the local 2048"
+        );
+    }
+
+    /// R311kq — the req-id bits of the resolution cbyte are checked too:
+    /// seq matches (0x02) but req differs (0x01) -> refused (pico checks
+    /// `_req_id_res != Z_REQ_RESOLUTION` in the same guard).
+    #[test]
+    fn validate_join_rejects_mismatched_req_id_res() {
+        use wz_codecs::join::Join;
+        let p = params(&[0x01, 0x02, 0x03, 0x04]);
+        let mut join = Join::new();
+        join.version = p.version;
+        join.set_whatami(p.whatami);
+        join.set_zid_len_m1(3);
+        join.zid = &[0x05, 0x06, 0x07, 0x08];
+        join.sn_res = Some(pack_res_cbyte(0x02, 0x01)); // seq ok, req off
+        join.batch_size = Some(p.batch_size);
+        join.lease = p.lease_ms;
+        assert!(validate_join(&join, &p).is_none(), "req-id mismatch");
     }
 
     /// `decode_join_zid` rejects a datagram whose MID is not `T_MID_JOIN`.
@@ -710,9 +827,10 @@ mod tests {
             dispatcher.peer_state_by_src(src(2)),
             Some(MulticastPeerState::Active)
         );
-        // At least one self JOIN beacon was multicast, MID-framed correctly.
+        // At least one self JOIN beacon was multicast, MID-framed correctly
+        // (the non-default fixture batch advertises S=1, masked out here).
         assert!(!driver.sent.is_empty(), "expected >= 1 JOIN beacon");
-        assert_eq!(driver.sent[0][0], wire_const::T_MID_JOIN);
+        assert_eq!(driver.sent[0][0] & 0x1f, wire_const::T_MID_JOIN);
     }
 
     /// An inbound Close (attributed by source address) evicts the peer.

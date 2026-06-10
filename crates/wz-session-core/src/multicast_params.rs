@@ -20,6 +20,39 @@
 
 use alloc::vec::Vec;
 
+/// R311kq — the PROTOCOL default an omitted JOIN `sn_res` / `batch_size`
+/// optional means (zenoh-pico `_Z_DEFAULT_RESOLUTION_SIZE`, protocol/
+/// definitions/core.h:22; decode fills it when the S flag is absent,
+/// codec/transport.c:155-157). Distinct from any per-deploy CONFIG
+/// default: pico's `make_join` advertises (S=1) exactly when its config
+/// departs from these protocol constants, so "omitted" is a wire
+/// statement of "I run the protocol defaults", not "match me locally".
+pub const PROTOCOL_DEFAULT_RESOLUTION: u8 = 0x02;
+
+/// R311kq — the protocol-default multicast batch size an omitted JOIN
+/// `batch_size` optional means (zenoh-pico
+/// `_Z_DEFAULT_MULTICAST_BATCH_SIZE`, protocol/definitions/core.h:21).
+/// NOTE: pico's shipped CONFIG default (`Z_BATCH_MULTICAST_SIZE`,
+/// CMakeLists 2048) differs from this protocol constant — a default-built
+/// pico therefore always advertises S=1 in its JOIN.
+pub const PROTOCOL_DEFAULT_BATCH_SIZE: u16 = 8192;
+
+/// Pack the JOIN resolution cbyte: `seq_num_res` in bits 0-1,
+/// `req_id_res` in bits 2-3 (zenoh-pico `_z_join_encode`,
+/// codec/transport.c:54-56). The `join` codec carries the byte opaque
+/// ("host decomposes", join.scxml); these two helpers are that host
+/// decomposition's single home.
+pub fn pack_res_cbyte(seq_num_res: u8, req_id_res: u8) -> u8 {
+    (seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)
+}
+
+/// Unpack a JOIN resolution cbyte into `(seq_num_res, req_id_res)` —
+/// the decode twin of [`pack_res_cbyte`] (zenoh-pico `_z_join_decode`,
+/// codec/transport.c:150-152).
+pub fn unpack_res_cbyte(cbyte: u8) -> (u8, u8) {
+    (cbyte & 0x03, (cbyte >> 2) & 0x03)
+}
+
 /// Inputs for each outbound multicast JOIN frame plus the periodic-emit
 /// cadence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,9 +88,18 @@ pub struct MulticastParams {
     /// resolution (there is no negotiation — §3.2 rejection rules drop a
     /// JOIN advertising a different one, zenoh-pico
     /// `_z_multicast_handle_join_inner` incompatible-config refuse); a JOIN
-    /// that omits the optional advertises the default and is treated as
-    /// this value.
+    /// that omits the optional advertises [`PROTOCOL_DEFAULT_RESOLUTION`]
+    /// (R311kq — the PROTOCOL default, not this local value; pico decode
+    /// semantics).
     pub seq_num_res: u8,
+    /// R311kq — this node's 2-bit `req_id_res` wire code (request-id
+    /// resolution; JOIN resolution-cbyte bits 2-3, [`pack_res_cbyte`]).
+    /// The multicast mirror of
+    /// [`crate::session_init_params::SessionInitParams::req_id_res`];
+    /// group-agreed like `seq_num_res` (zenoh-pico
+    /// `_z_multicast_handle_join_inner` refuses a JOIN advertising a
+    /// different one — same incompatible-config guard).
+    pub req_id_res: u8,
     /// R311ko — the group-wide outbound frame budget in bytes (zenoh-pico
     /// `Z_BATCH_MULTICAST_SIZE`, CMake default 2048): a data emission whose
     /// encoded `T_MID_FRAME` exceeds this re-frames as a `T_MID_FRAGMENT`
@@ -65,7 +107,8 @@ pub struct MulticastParams {
     /// Group-agreed like `seq_num_res` — multicast has no negotiation, so
     /// a JOIN advertising a DIFFERENT batch size is dropped (zenoh-pico
     /// `_z_multicast_handle_join_inner` incompatible-config refuse), and a
-    /// JOIN that omits the optional advertises this value. The unicast
+    /// JOIN that omits the optional advertises
+    /// [`PROTOCOL_DEFAULT_BATCH_SIZE`] (R311kq). The unicast
     /// counterpart is the negotiated-min
     /// `SessionLinkActions::negotiated_batch_mtu`; here the budget is a
     /// per-deploy constant. (pico additionally floors at the link MTU —
@@ -73,4 +116,17 @@ pub struct MulticastParams {
     /// exposes no MTU, so the budget alone governs and stays well under
     /// the 65507-byte UDP datagram ceiling at the default.)
     pub batch_size: u16,
+}
+
+impl MulticastParams {
+    /// R311kq — whether this node's JOIN must carry the S-flag optionals
+    /// (`sn_res` cbyte + `batch_size`): exactly when any of them departs
+    /// from the protocol defaults, so an omitted optional stays an honest
+    /// "I run the protocol defaults" statement (zenoh-pico
+    /// `_z_t_msg_make_join`, protocol/definitions/transport.c:117-120).
+    pub fn join_advertises_caps(&self) -> bool {
+        self.seq_num_res != PROTOCOL_DEFAULT_RESOLUTION
+            || self.req_id_res != PROTOCOL_DEFAULT_RESOLUTION
+            || self.batch_size != PROTOCOL_DEFAULT_BATCH_SIZE
+    }
 }
