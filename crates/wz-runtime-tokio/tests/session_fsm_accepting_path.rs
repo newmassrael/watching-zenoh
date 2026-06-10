@@ -369,7 +369,7 @@ async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded()
 // ───────────── R121d peer-caps negotiation unit tests ──────────────
 
 #[test]
-fn r121d_peer_init_caps_from_init_syn_uses_defaults_when_s_bit_clear() {
+fn r121d_peer_init_caps_from_init_body_uses_defaults_when_s_bit_clear() {
     // When the peer's InitSyn carries `_Z_FLAG_T_INIT_S=0`, the
     // `sn_res` byte and `batch_size` are absent on the wire; the
     // decoder must substitute the Zenoh defaults
@@ -377,7 +377,7 @@ fn r121d_peer_init_caps_from_init_syn_uses_defaults_when_s_bit_clear() {
     // =65535`) so the downstream `min(own, peer)` cap in
     // `init_ack_params` keeps the own params verbatim (peer's stated
     // ceiling is the maximum).
-    let caps = PeerInitCaps::from_init_syn(None, None);
+    let caps = PeerInitCaps::from_init_body(None, None);
     assert_eq!(caps.seq_num_res, 2);
     assert_eq!(caps.req_id_res, 2);
     assert_eq!(caps.batch_size, 65535);
@@ -394,7 +394,7 @@ fn r121d_peer_init_caps_decodes_packed_sn_res_byte() {
     // transport.c:196-197. Encoder shape: seq=1, req=2 →
     // 0x01 | (0x02 << 2) = 0x09. Decoder must invert that
     // composition exactly.
-    let caps = PeerInitCaps::from_init_syn(Some(0x09), Some(1024));
+    let caps = PeerInitCaps::from_init_body(Some(0x09), Some(1024));
     assert_eq!(caps.seq_num_res, 1, "low 2 bits are seq_num_res");
     assert_eq!(caps.req_id_res, 2, "next 2 bits are req_id_res");
     assert_eq!(caps.batch_size, 1024);

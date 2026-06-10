@@ -260,7 +260,7 @@ pub type SessionLinkActions<R = TokioRuntime, T = TokioTime> =
 pub type SessionActionsBinding<R = TokioRuntime, T = TokioTime> =
     wz_session_core::session_actions::SessionActionsBinding<R, T>;
 
-// R311eg — PeerInitCaps + its from_init_syn decoder moved to
+// R311eg — PeerInitCaps + its from_init_body decoder moved to
 // wz-session-core::peer_init_caps (pure no_std/no_alloc; the
 // transport-batching gate moved with the decoder). Re-exported so the
 // `crate::session_glue::PeerInitCaps` callsites (the
@@ -1916,6 +1916,7 @@ mod fragment_tx_tests {
                     more: u8::from(more),
                     payload: &payload,
                 },
+                wz_session_core::sn::mask_from_res(0x02),
                 0,
                 |msg| reassembled = Some(msg.to_vec()),
             );

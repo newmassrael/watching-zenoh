@@ -53,6 +53,17 @@ pub const fn precedes(mask: u64, left: u64, right: u64) -> bool {
     distance != 0 && distance <= half(mask)
 }
 
+/// Ring-consecutive check (`_z_sn_consecutive`): is `right` exactly one
+/// step after `left` on the ring of `mask`? The modular distance form
+/// accepts a non-canonical `right` from the wire (any representative of
+/// the same residue), exactly as zenoh-pico's masked subtraction does.
+/// First consumer: the reassembly dispatcher's strict in-order
+/// continuation check (§2.5) — a plain `==` on `wrapping_add(1)` diverges
+/// from this at the ring seam (R311ka F-5).
+pub const fn consecutive(mask: u64, left: u64, right: u64) -> bool {
+    right.wrapping_sub(left) & mask == 1
+}
+
 /// Modular decrement (`_z_sn_decrement`). Used to seed a peer's last-seen
 /// SN from its JOIN-advertised `next_sn` (the next SN it WILL send): the
 /// baseline is one before, so the first data frame at exactly `next_sn`
@@ -166,6 +177,23 @@ mod tests {
         let baseline = decrement(mask, 0);
         assert_eq!(baseline, mask);
         assert!(precedes(mask, baseline, 0));
+    }
+
+    /// Consecutive is the distance-1 ring check: it holds across the seam
+    /// (`mask -> 0`) and rejects duplicates, gaps, and backward steps —
+    /// the `_z_sn_consecutive` contract the reassembly continuation gate
+    /// mirrors.
+    #[test]
+    fn consecutive_holds_across_ring_seam() {
+        let mask = mask_from_res(0x02);
+        assert!(consecutive(mask, 5, 6));
+        assert!(consecutive(mask, mask, 0), "seam step mask -> 0");
+        assert!(!consecutive(mask, 5, 5), "duplicate is not consecutive");
+        assert!(!consecutive(mask, 5, 7), "gap is not consecutive");
+        assert!(!consecutive(mask, 6, 5), "backward step is not consecutive");
+        // A non-canonical wire value of the same residue still passes
+        // (the masked-subtraction form, not a canonical-form compare).
+        assert!(consecutive(mask, mask, 2 * (mask + 1)));
     }
 
     /// Increment walks the ring and wraps at the mask (TX mint step).

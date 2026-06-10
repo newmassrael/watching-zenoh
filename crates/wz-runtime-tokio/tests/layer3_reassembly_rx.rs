@@ -98,6 +98,7 @@ fn two_fragment_chain_reassembles_through_parse_inbound() {
                 more: u8::from(more),
                 payload: &payload,
             },
+            wz_session_core::sn::mask_from_res(0x02),
             0,
             |msg| reassembled = Some(msg.to_vec()),
         );

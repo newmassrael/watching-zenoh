@@ -5,14 +5,14 @@
 //! `wz-runtime-tokio::session_glue`.
 //!
 //! Pure no_std + no_alloc value type (three integer fields, `Copy`) plus
-//! its `from_init_syn` decoder, so it sits on the runtime-agnostic side
+//! its `from_init_body` decoder, so it sits on the runtime-agnostic side
 //! alongside [`crate::qos`] / [`crate::close_reason`] /
 //! [`crate::action_trace`]. The Accepting side reads an InitSyn's `sn_res`
 //! byte + optional `batch_size` into this struct to drive the InitAck
 //! response capabilities; an MCU profile decodes the same wire fields
 //! with the same typed API as the tokio AP profile.
 //!
-//! The `transport-batching` gate inside `from_init_syn` (whether to honor
+//! The `transport-batching` gate inside `from_init_body` (whether to honor
 //! the peer-advertised `batch_size` or clamp to the full MTU) moves here
 //! with the decoder, so `wz-session-core` now owns a `transport-batching`
 //! gate-only feature; `wz-runtime-tokio`'s same-named feature forwards to
@@ -23,11 +23,15 @@
 //! callsites resolve unchanged. A DP3 leaf out of `session_glue.rs`.
 
 /// Peer-advertised resolution + batch-size capabilities decoded from an
-/// InitSyn. The S-bit (`_Z_FLAG_T_INIT_S`) governs whether the
-/// resolution + batch-size fields are present; absent fields fall back
-/// to the zenoh-pico defaults (`_z_t_msg_decode` with the S flag
-/// clear on InitSyn (zenoh-pico/src/protocol/codec/transport.c:267-269
-/// — falls back to `_Z_DEFAULT_RESOLUTION_SIZE = 2` and
+/// INIT body — the InitSyn and InitAck share the wire layout
+/// (`wz_codecs::init_body`), so the Accepting side decodes the peer's
+/// InitSyn advertisement and the Initiating side the acceptor's InitAck
+/// final values through one constructor (R311kb). The S-bit
+/// (`_Z_FLAG_T_INIT_S`) governs whether the resolution + batch-size
+/// fields are present; absent fields fall back to the zenoh-pico
+/// defaults (`_z_t_msg_decode` with the S flag clear,
+/// zenoh-pico/src/protocol/codec/transport.c:267-269 — falls back to
+/// `_Z_DEFAULT_RESOLUTION_SIZE = 2` and
 /// `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerInitCaps {
@@ -37,12 +41,13 @@ pub struct PeerInitCaps {
 }
 
 impl PeerInitCaps {
-    /// Decode the InitSyn `sn_res` byte + optional `batch_size`
+    /// Decode the INIT-body `sn_res` byte + optional `batch_size`
     /// field per the init_body codec (parent.S=1 carries both,
-    /// parent.S=0 falls back to defaults). The `sn_res` byte is
-    /// packed `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`
+    /// parent.S=0 falls back to defaults; the layout is shared by
+    /// InitSyn and InitAck). The `sn_res` byte is packed
+    /// `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`
     /// per zenoh-pico transport.c:196-197.
-    pub fn from_init_syn(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
+    pub fn from_init_body(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
         // R311cb — transport-batching gates the peer-advertised
         // batch_size honoring. cfg-off forces 65535 (full MTU) and
         // ignores the peer's advertised value; honest semantic is
@@ -81,7 +86,7 @@ impl PeerInitCaps {
 
 // ── transport-batching receive-side field-drop NEG ──
 //
-// `from_init_syn` honors the peer-advertised InitSyn `batch_size` only
+// `from_init_body` honors the peer-advertised InitSyn `batch_size` only
 // when `transport-batching` is ON; with it OFF the peer value is
 // discarded and the field is forced to 65535 (full MTU). The ON arm is
 // behaviourally covered by wz-runtime-tokio's
@@ -105,7 +110,7 @@ mod tests {
     #[test]
     fn peer_batch_size_discarded_when_transport_batching_off() {
         // sn_res 0x09 = seq 1 | (req 2 << 2); peer advertises batch 1024.
-        let caps = PeerInitCaps::from_init_syn(Some(0x09), Some(1024));
+        let caps = PeerInitCaps::from_init_body(Some(0x09), Some(1024));
         assert_eq!(caps.seq_num_res, 1, "packed sn_res still decodes");
         assert_eq!(caps.req_id_res, 2, "packed sn_res still decodes");
         assert_eq!(

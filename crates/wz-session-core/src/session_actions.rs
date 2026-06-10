@@ -666,6 +666,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         params
     }
 
+    /// R311kb — the session's negotiated SN ring mask
+    /// ([`crate::sn::mask_from_res`] over `min(own, peer)` `seq_num_res`),
+    /// the zenoh-pico `_z_transport_common_t._sn_res` equivalent. `min` is
+    /// role-symmetric: the acceptor caps against the InitSyn caps
+    /// ([`Self::init_ack_params`] emits the same min), and the initiator's
+    /// InitAck caps are already `<=` its own advertisement, so `min`
+    /// reproduces the adopted value. Before any peer caps arrive the own
+    /// advertisement applies — handshake frames carry no SN, so every data
+    /// mint and reassembly compare runs after the slot is populated; the
+    /// fallback only keeps the accessor total.
+    pub fn negotiated_sn_mask(&self) -> u64 {
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        let res = match peer {
+            Some(p) => self.params.seq_num_res.min(p.seq_num_res),
+            None => self.params.seq_num_res,
+        };
+        crate::sn::mask_from_res(res)
+    }
+
     /// Replace the ext chain for the given role. Production callers
     /// stage their negotiation result here; the next outbound frame
     /// of `role` reads the new chain via the encoder.
@@ -766,6 +785,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         *slot = Some(cookie.as_slice().to_vec());
                     });
                 }
+                // R311kb — capture the InitAck's sizing caps too: the
+                // initiator adopts the acceptor's (already-capped) final
+                // values, mirroring zenoh-pico's client arm
+                // (unicast/transport.c `_z_unicast_transport_create` reads
+                // `param._seq_num_res` from the InitAck). Feeds
+                // [`Self::negotiated_sn_mask`] so both roles resolve the
+                // same SN ring; the packed `sn_res` byte is wire-identical
+                // on InitSyn and InitAck, so the decoder is shared.
+                R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
+                    *slot = Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
+                });
             }
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
@@ -785,7 +815,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // outbound InitAck (zenoh-pico
                 // unicast/transport.c:123-140 rejection condition).
                 R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
-                    *slot = Some(PeerInitCaps::from_init_syn(body.sn_res, body.batch_size));
+                    *slot = Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
                 });
             }
             #[cfg(feature = "codec-open-body")]

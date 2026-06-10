@@ -257,8 +257,13 @@ struct Slot<const CAP: usize> {
     /// `Some` while the slot holds an in-progress chain (FSM == Receiving);
     /// `None` when free (FSM == Empty).
     key: Option<ChainKey>,
-    /// The SN the next in-order continuation must carry.
-    next_sn: u64,
+    /// The last in-order SN staged into this chain. A continuation is
+    /// admitted iff it is ring-consecutive to this ([`crate::sn::consecutive`]
+    /// at the caller-passed mask) — the zenoh-pico `_sn_rx_*` tracker shape
+    /// (rx.c stores the accepted `msg->_sn` and compares
+    /// `_z_sn_consecutive` against it), replacing the R311ka F-5 unmasked
+    /// `next_sn` `==` that diverged at the ring seam.
+    last_sn: u64,
     /// Absolute monotonic-ms instant this chain times out (valid iff
     /// `key.is_some()`).
     deadline_ms: u64,
@@ -275,7 +280,7 @@ impl<const CAP: usize> Slot<CAP> {
         Self {
             engine,
             key: None,
-            next_sn: 0,
+            last_sn: 0,
             deadline_ms: 0,
             buf: BoundedVec::new(),
         }
@@ -292,7 +297,7 @@ impl<const CAP: usize> Slot<CAP> {
         // `slot.release` transition; the caller only releases from there.
         self.engine.process_event(ReassemblySlotEvent::SlotRelease);
         self.key = None;
-        self.next_sn = 0;
+        self.last_sn = 0;
         self.deadline_ms = 0;
         self.buf.clear();
     }
@@ -323,18 +328,26 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
 
     /// Ingest one decoded transport [`Fragment`].
     ///
-    /// `now_ms` is the runtime monotonic clock (used to arm a new chain's
-    /// deadline). On reassembly completion `deliver` is called once with
-    /// the fully reassembled message bytes (zero-copy from the slot
-    /// buffer) before the slot is reclaimed.
+    /// `sn_mask` is the announcing channel's SN ring mask
+    /// ([`crate::sn::mask_from_res`] over the negotiated / per-peer
+    /// `seq_num_res`) — the continuation gate compares ring-consecutive
+    /// at it, as zenoh-pico passes `entry->_sn_res` / `_common._sn_res`
+    /// into `_z_sn_consecutive` per call. It is a channel property the
+    /// caller resolves, not per-fragment wire data, so it rides beside
+    /// the clock rather than inside [`Fragment`]. `now_ms` is the runtime
+    /// monotonic clock (used to arm a new chain's deadline). On
+    /// reassembly completion `deliver` is called once with the fully
+    /// reassembled message bytes (zero-copy from the slot buffer) before
+    /// the slot is reclaimed.
     pub fn ingest<F: FnOnce(&[u8])>(
         &mut self,
         frag: Fragment<'_>,
+        sn_mask: u64,
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
         match self.find_active(frag.zid, frag.reliable) {
-            Some(idx) => self.ingest_continuation(idx, frag, deliver),
+            Some(idx) => self.ingest_continuation(idx, frag, sn_mask, deliver),
             None => self.ingest_chain_start(frag, now_ms),
         }
     }
@@ -389,7 +402,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         // Arm the chain before driving the FSM so a staging overflow on the
         // very first fragment releases cleanly.
         self.slots[idx].key = Some(ChainKey::new(frag.zid, frag.reliable));
-        self.slots[idx].next_sn = frag.sn.wrapping_add(1);
+        self.slots[idx].last_sn = frag.sn;
         self.slots[idx].deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
         self.slots[idx].buf.clear();
 
@@ -412,11 +425,15 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         &mut self,
         idx: usize,
         frag: Fragment<'_>,
+        sn_mask: u64,
         deliver: F,
     ) -> IngestOutcome {
-        // Strict in-order (§2.5): a non-consecutive continuation (including
-        // a duplicate, sn < next_sn) aborts the chain via `fragment.ooo`.
-        if frag.sn != self.slots[idx].next_sn {
+        // Strict in-order (§2.5): a non-consecutive continuation (a
+        // duplicate, a gap, or a backward step — all ring distances != 1)
+        // aborts the chain via `fragment.ooo`. Ring compare, not `==` on
+        // `+1`: a sender minting on the ring wraps `mask -> 0`, where the
+        // unmasked form falsely aborted (R311ka F-5).
+        if !crate::sn::consecutive(sn_mask, self.slots[idx].last_sn, frag.sn) {
             self.slots[idx]
                 .engine
                 .process_event(ReassemblySlotEvent::FragmentOoo);
@@ -430,7 +447,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
             return self.abort(idx, AbortReason::CapacityOverflow);
         }
 
-        self.slots[idx].next_sn = frag.sn.wrapping_add(1);
+        self.slots[idx].last_sn = frag.sn;
         self.slots[idx]
             .engine
             .raise_fragment_chunk(chunk_event(frag.more));
@@ -493,6 +510,9 @@ mod tests {
     const ZID_A: &[u8] = &[0xAA; 16];
     const ZID_B: &[u8] = &[0xBB; 16];
 
+    /// The default-resolution (0x02, 28-bit) ring every test compares at.
+    const MASK: u64 = crate::sn::mask_from_res(0x02);
+
     fn dispatcher<const S: usize, const C: usize>() -> ReassemblyDispatcher<S, C> {
         ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000))
     }
@@ -520,13 +540,13 @@ mod tests {
         let mut d = dispatcher::<4, 64>();
         let mut out: Option<Vec<u8>> = None;
 
-        let r0 = d.ingest(frag(ZID_A, true, 10, 1, b"hello "), 0, |_| {
+        let r0 = d.ingest(frag(ZID_A, true, 10, 1, b"hello "), MASK, 0, |_| {
             panic!("not final")
         });
         assert_eq!(r0, IngestOutcome::Begun);
         assert_eq!(d.active_chains(), 1);
 
-        let r1 = d.ingest(frag(ZID_A, true, 11, 0, b"world"), 0, |msg| {
+        let r1 = d.ingest(frag(ZID_A, true, 11, 0, b"world"), MASK, 0, |msg| {
             out = Some(msg.to_vec())
         });
         assert_eq!(r1, IngestOutcome::Reassembled);
@@ -541,15 +561,15 @@ mod tests {
         let mut d = dispatcher::<4, 64>();
         let mut out: Option<Vec<u8>> = None;
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), 0, |_| {}),
+            d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 2, 1, b"bbb"), 0, |_| {}),
+            d.ingest(frag(ZID_A, true, 2, 1, b"bbb"), MASK, 0, |_| {}),
             IngestOutcome::Continued
         );
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 3, 0, b"ccc"), 0, |m| out =
+            d.ingest(frag(ZID_A, true, 3, 0, b"ccc"), MASK, 0, |m| out =
                 Some(m.to_vec())),
             IngestOutcome::Reassembled
         );
@@ -561,23 +581,42 @@ mod tests {
     fn out_of_order_continuation_aborts() {
         let mut d = dispatcher::<4, 64>();
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), 0, |_| {}),
+            d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         // SN jumps 2 -> 4: aborts.
-        let r = d.ingest(frag(ZID_A, true, 4, 0, b"zzz"), 0, |_| {
+        let r = d.ingest(frag(ZID_A, true, 4, 0, b"zzz"), MASK, 0, |_| {
             panic!("aborted, no deliver")
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::OutOfOrder));
         assert_eq!(d.active_chains(), 0);
     }
 
-    /// A duplicate SN (sn < next_sn) is non-consecutive -> abort.
+    /// A chain crossing the SN ring seam (`mask -> 0`) continues — the
+    /// ring-consecutive gate (R311ka F-5; zenoh-pico `_z_sn_consecutive`)
+    /// where the prior unmasked `next_sn` compare falsely aborted.
+    #[test]
+    fn chain_continues_across_ring_seam() {
+        let mut d = dispatcher::<4, 64>();
+        let mut out: Option<Vec<u8>> = None;
+        assert_eq!(
+            d.ingest(frag(ZID_A, true, MASK, 1, b"top "), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.ingest(frag(ZID_A, true, 0, 0, b"wrap"), MASK, 0, |m| out =
+                Some(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(out.as_deref(), Some(&b"top wrap"[..]));
+    }
+
+    /// A duplicate SN (ring distance 0) is non-consecutive -> abort.
     #[test]
     fn duplicate_sn_aborts() {
         let mut d = dispatcher::<4, 64>();
-        d.ingest(frag(ZID_A, true, 5, 1, b"aaa"), 0, |_| {});
-        let r = d.ingest(frag(ZID_A, true, 5, 1, b"aaa"), 0, |_| {});
+        d.ingest(frag(ZID_A, true, 5, 1, b"aaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(ZID_A, true, 5, 1, b"aaa"), MASK, 0, |_| {});
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::OutOfOrder));
     }
 
@@ -587,11 +626,11 @@ mod tests {
     fn reliable_and_best_effort_are_distinct_chains() {
         let mut d = dispatcher::<4, 64>();
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"R"), 0, |_| {}),
+            d.ingest(frag(ZID_A, true, 1, 1, b"R"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(
-            d.ingest(frag(ZID_A, false, 1, 1, b"B"), 0, |_| {}),
+            d.ingest(frag(ZID_A, false, 1, 1, b"B"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(d.active_chains(), 2);
@@ -605,10 +644,10 @@ mod tests {
     #[test]
     fn per_peer_quota_is_per_peer() {
         let mut d = dispatcher::<4, 64>();
-        d.ingest(frag(ZID_A, true, 1, 1, b"a"), 0, |_| {});
-        d.ingest(frag(ZID_A, false, 1, 1, b"b"), 0, |_| {});
+        d.ingest(frag(ZID_A, true, 1, 1, b"a"), MASK, 0, |_| {});
+        d.ingest(frag(ZID_A, false, 1, 1, b"b"), MASK, 0, |_| {});
         assert_eq!(
-            d.ingest(frag(ZID_B, true, 1, 1, b"c"), 0, |_| {}),
+            d.ingest(frag(ZID_B, true, 1, 1, b"c"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(d.active_chains(), 3);
@@ -624,13 +663,13 @@ mod tests {
         let mut d: ReassemblyDispatcher<4, 64> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(1, 5_000));
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"a"), 0, |_| {}),
+            d.ingest(frag(ZID_A, true, 1, 1, b"a"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         // Second chain for ZID_A (best-effort key) refused on quota even
         // though 3 slots are free.
         assert_eq!(
-            d.ingest(frag(ZID_A, false, 1, 1, b"b"), 0, |_| {}),
+            d.ingest(frag(ZID_A, false, 1, 1, b"b"), MASK, 0, |_| {}),
             IngestOutcome::Refused(RefuseReason::PeerQuota)
         );
     }
@@ -644,16 +683,16 @@ mod tests {
         let mut d: ReassemblyDispatcher<2, 64> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(8, 5_000));
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"a"), 0, |_| {}),
+            d.ingest(frag(ZID_A, true, 1, 1, b"a"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(
-            d.ingest(frag(ZID_B, true, 1, 1, b"b"), 0, |_| {}),
+            d.ingest(frag(ZID_B, true, 1, 1, b"b"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         let third: &[u8] = &[0xCC; 16];
         assert_eq!(
-            d.ingest(frag(third, true, 1, 1, b"c"), 0, |_| {}),
+            d.ingest(frag(third, true, 1, 1, b"c"), MASK, 0, |_| {}),
             IngestOutcome::Refused(RefuseReason::PoolExhausted)
         );
     }
@@ -667,10 +706,10 @@ mod tests {
         // CAP = 8: first fragment 6 bytes ok; continuation 5 bytes overflows.
         let mut d = dispatcher::<4, 8>();
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"aaaaaa"), 0, |_| {}),
+            d.ingest(frag(ZID_A, true, 1, 1, b"aaaaaa"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
-        let r = d.ingest(frag(ZID_A, true, 2, 0, b"bbbbb"), 0, |_| {
+        let r = d.ingest(frag(ZID_A, true, 2, 0, b"bbbbb"), MASK, 0, |_| {
             panic!("overflow, no deliver")
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
@@ -683,9 +722,9 @@ mod tests {
     fn sweep_times_out_expired_chains_only() {
         let mut d = dispatcher::<4, 64>();
         // Chain armed at t=0 with the 5_000ms window -> deadline 5_000.
-        d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), 0, |_| {});
+        d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), MASK, 0, |_| {});
         // Chain armed at t=4_000 -> deadline 9_000.
-        d.ingest(frag(ZID_B, true, 1, 1, b"bbb"), 4_000, |_| {});
+        d.ingest(frag(ZID_B, true, 1, 1, b"bbb"), MASK, 4_000, |_| {});
         // Sweep at t=6_000: only ZID_A's chain (deadline 5_000) expires.
         assert_eq!(d.sweep(6_000), 1);
         assert_eq!(d.active_chains(), 1);
@@ -700,10 +739,10 @@ mod tests {
     fn slot_reuse_after_completion() {
         let mut d = dispatcher::<1, 64>();
         // One slot: complete a chain, then a second chain reuses it.
-        d.ingest(frag(ZID_A, true, 1, 1, b"aa"), 0, |_| {});
+        d.ingest(frag(ZID_A, true, 1, 1, b"aa"), MASK, 0, |_| {});
         let mut out: Option<Vec<u8>> = None;
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 2, 0, b"bb"), 0, |m| out =
+            d.ingest(frag(ZID_A, true, 2, 0, b"bb"), MASK, 0, |m| out =
                 Some(m.to_vec())),
             IngestOutcome::Reassembled
         );
@@ -711,7 +750,7 @@ mod tests {
         // Slot freed -> a new chain begins (would be PoolExhausted if not
         // reclaimed).
         assert_eq!(
-            d.ingest(frag(ZID_B, true, 7, 1, b"cc"), 100, |_| {}),
+            d.ingest(frag(ZID_B, true, 7, 1, b"cc"), MASK, 100, |_| {}),
             IngestOutcome::Begun
         );
     }
@@ -723,7 +762,7 @@ mod tests {
     #[test]
     fn first_fragment_more_zero_does_not_complete() {
         let mut d = dispatcher::<4, 64>();
-        let r = d.ingest(frag(ZID_A, true, 1, 0, b"solo"), 0, |_| {
+        let r = d.ingest(frag(ZID_A, true, 1, 0, b"solo"), MASK, 0, |_| {
             panic!("first frag never completes")
         });
         assert_eq!(r, IngestOutcome::Begun);

@@ -267,6 +267,12 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
     else {
         return;
     };
+    // The negotiated SN ring mask resolves BEFORE the peer-ZID guard:
+    // `negotiated_sn_mask` takes the `inbound_peer_init_caps` mutex, and the
+    // guard below documents that nothing inside it re-enters a session mutex
+    // slot — hoisting keeps the two scopes disjoint instead of weakening
+    // that invariant to "only disjoint slots nest".
+    let sn_mask = actions.negotiated_sn_mask();
     // The peer ZID guard must wrap the whole `ingest` call: the completion
     // closure borrows `zid` for the chain-key lookup. `with_mutex_mut` scopes
     // that borrow to the closure (the AP std mutex and the MCU critical_section
@@ -283,6 +289,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
                 more: u8::from(*more),
                 payload: payload.as_slice(),
             },
+            sn_mask,
             now_ms,
             |msg| {
                 completed = Some(match parse_frame_payload(msg) {

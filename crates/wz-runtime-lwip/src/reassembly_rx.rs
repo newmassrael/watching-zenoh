@@ -22,8 +22,9 @@
 //!
 //! ```ignore
 //! let mut reasm = wz_runtime_lwip::reassembly_rx::mcu_reassembly();
-//! // on each decoded inbound fragment (zid from the established session):
-//! reasm.ingest(frag, now_ms, |msg| { /* re-parse + per-MID dispatch */ });
+//! // on each decoded inbound fragment (zid from the established session;
+//! // sn_mask = the session's negotiated SN ring, `negotiated_sn_mask()`):
+//! reasm.ingest(frag, sn_mask, now_ms, |msg| { /* re-parse + dispatch */ });
 //! // once per tick, with the hardware monotonic clock:
 //! reasm.sweep(now_ms);
 //! ```
@@ -95,6 +96,9 @@ mod tests {
 
     const ZID: &[u8] = &[0x11; 16];
 
+    /// The default-resolution (0x02, 28-bit) ring the tests compare at.
+    const MASK: u64 = wz_session_core::sn::mask_from_res(0x02);
+
     fn frag<'a>(sn: u64, more: u8, payload: &'a [u8]) -> Fragment<'a> {
         Fragment {
             zid: ZID,
@@ -123,12 +127,12 @@ mod tests {
     fn mcu_seam_reassembles_a_two_fragment_chain() {
         let mut reasm = mcu_reassembly();
 
-        let r0 = reasm.ingest(frag(7, 1, b"lwip "), 0, |_| panic!("not final"));
+        let r0 = reasm.ingest(frag(7, 1, b"lwip "), MASK, 0, |_| panic!("not final"));
         assert_eq!(r0, IngestOutcome::Begun);
         assert_eq!(reasm.active_chains(), 1);
 
         let mut delivered = false;
-        let r1 = reasm.ingest(frag(8, 0, b"reassembly"), 0, |msg| {
+        let r1 = reasm.ingest(frag(8, 0, b"reassembly"), MASK, 0, |msg| {
             assert_eq!(msg, &b"lwip reassembly"[..]);
             delivered = true;
         });
@@ -142,7 +146,7 @@ mod tests {
     #[test]
     fn mcu_seam_sweep_times_out_a_stale_chain() {
         let mut reasm = mcu_reassembly();
-        reasm.ingest(frag(1, 1, b"partial"), 0, |_| {});
+        reasm.ingest(frag(1, 1, b"partial"), MASK, 0, |_| {});
         assert_eq!(reasm.active_chains(), 1);
         // Before the deadline: nothing reclaimed.
         assert_eq!(reasm.sweep(499), 0);

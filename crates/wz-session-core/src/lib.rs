@@ -261,7 +261,7 @@ pub mod scout_static;
 pub mod locator;
 
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
-/// three integer fields + a `from_init_syn` decoder). Pure no_std +
+/// three integer fields + a `from_init_body` decoder). Pure no_std +
 /// no_alloc; unconditional. DP3 leaf lifted from
 /// `wz-runtime-tokio::session_glue`; the decoder's `transport-batching`
 /// gate moves here (the live `R::Mutex<Option<PeerInitCaps>>` slot stays

@@ -109,6 +109,38 @@ fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     );
 }
 
+/// R311kb — the initiator adopts the InitAck's sizing caps: handle_inbound
+/// on an InitAck populates `inbound_peer_init_caps` (previously only the
+/// Accepting side's InitSyn arm captured), so `negotiated_sn_mask` tightens
+/// from the own advertisement to the acceptor's final value — the ring the
+/// TX mint and the reassembly continuation gate both resolve.
+#[test]
+fn r311kb_initack_capture_tightens_negotiated_sn_mask() {
+    let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
+    let mut params = fixture_session_init_params();
+    params.seq_num_res = 2; // own advertisement: 28-bit ring
+    let actions = new_session_actions(driver, params, TokioTime::new());
+
+    assert_eq!(
+        actions.negotiated_sn_mask(),
+        wz_session_core::sn::mask_from_res(2),
+        "before any peer caps arrive the own advertisement applies"
+    );
+
+    // The fixture InitAck carries sn_res byte 0x00 (seq_num_res = 0,
+    // 7-bit ring) — the acceptor's stricter final value.
+    let wire = craft_initack_wire(&[0xCA, 0xFE]);
+    actions
+        .handle_inbound(&wire)
+        .expect("handle_inbound on synthetic InitAck");
+
+    assert_eq!(
+        actions.negotiated_sn_mask(),
+        wz_session_core::sn::mask_from_res(0),
+        "the InitAck caps capture must tighten the negotiated SN ring"
+    );
+}
+
 #[test]
 fn inbound_to_fsm_event_covers_every_inbound_variant() {
     use wz_codecs::close::Close;
