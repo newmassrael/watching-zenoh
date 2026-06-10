@@ -32979,6 +32979,46 @@
         "debt track remaining: mint-vs-enqueue race; MCU critical_section span; matching-listener; MCU reconnect seam"
       ]
     },
+    "Round 311kf": {
+      "decision_summary": "R311kf TX serialization parity: one batch_tx lock hold covers mint through emit for batching AND immediate paths (pico tx-mutex parity); closes the mint-vs-enqueue carry and the batch_start boundary race.",
+      "changes_bullets": [
+        "BatchTx struct + batch_tx mutex UNGATED: the mutex doubles as the session TX-order serialization lock; with transport-batching off only the lock role remains (empty buf = three words)",
+        "dispatch_network_message: ONE batch_tx hold covers absorb/overflow/oversize arms AND the immediate frame-per-message path, mint through emit (pico common/tx.c:273-305 - _z_transport_tx_get_sn runs inside the inner send under the tx mutex)",
+        "closes both the immediate-vs-immediate mint/emit interleave and the batch_start boundary race (a sender that saw the window closed cannot emit between a concurrent absorb's mint and its flush)"
+      ],
+      "verification_bullets": [
+        "tx_order_tests::concurrent_sends_keep_mint_order_on_the_wire: 4 threads x 25 sends -> recorded wire SN sequence exactly 0..100 (deterministic under the single hold; any re-opened mint-to-emit window surfaces as out-of-order SN)",
+        "batch_tx_tests 5/5 regression-free (absorb/overflow/express/CLOSE-drain order preserved)",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "MCU consequence: the critical_section now also spans the immediate-path lwIP send (bounded by the negotiated MTU) - ratified with reopen triggers in R311kg",
+        "debt track remaining: matching-listener callback; MCU reconnect seam"
+      ],
+      "publishable_decision_summary": "R311kf TX serialization parity: one batch_tx lock hold covers mint through emit for batching AND immediate paths (pico tx-mutex parity); closes the mint-vs-enqueue carry and the batch_start boundary race.",
+      "publishable_changes_bullets": [
+        "BatchTx struct + batch_tx mutex UNGATED: the mutex doubles as the session TX-order serialization lock; with transport-batching off only the lock role remains (empty buf = three words)",
+        "dispatch_network_message: ONE batch_tx hold covers absorb/overflow/oversize arms AND the immediate frame-per-message path, mint through emit (pico common/tx.c:273-305 - _z_transport_tx_get_sn runs inside the inner send under the tx mutex)",
+        "closes both the immediate-vs-immediate mint/emit interleave and the batch_start boundary race (a sender that saw the window closed cannot emit between a concurrent absorb's mint and its flush)"
+      ],
+      "publishable_verification_bullets": [
+        "tx_order_tests::concurrent_sends_keep_mint_order_on_the_wire: 4 threads x 25 sends -> recorded wire SN sequence exactly 0..100 (deterministic under the single hold; any re-opened mint-to-emit window surfaces as out-of-order SN)",
+        "batch_tx_tests 5/5 regression-free (absorb/overflow/express/CLOSE-drain order preserved)",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU consequence: the critical_section now also spans the immediate-path lwIP send (bounded by the negotiated MTU) - ratified with reopen triggers in R311kg",
+        "debt track remaining: matching-listener callback; MCU reconnect seam"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
