@@ -32803,6 +32803,54 @@
         "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
       ]
     },
+    "Round 311kb": {
+      "decision_summary": "R311kb F-5 SN ring consolidation: reassembly continuation gate ring-consecutive via sn::consecutive, unicast TX mint + fragment walk masked at the negotiated ring, initiator InitAck caps capture.",
+      "changes_bullets": [
+        "wz-session-core/src/sn.rs: consecutive() added (_z_sn_consecutive mirror)",
+        "reassembly_dispatch.rs: Slot next_sn -> last_sn; ingest(sn_mask) ring-consecutive gate",
+        "session_actions.rs: InitAck PeerInitCaps capture + negotiated_sn_mask(); from_init_body rename",
+        "session_actions.rs: next_outbound_frame_sn(sn_mask) ring projection; mask resolved pre-batch-lock",
+        "frame_encode.rs: fragment_body(sn_mask) walks sn::increment (raw base masked at the walk)",
+        "drive.rs: report_outcome_reassembling resolves negotiated mask before the zid guard"
+      ],
+      "verification_bullets": [
+        "run-ci all host lanes EXIT 0 per commit (b8499b0, b339a2f); Layer G 7-MCU EXIT 0 per commit",
+        "new seam tests: sn::consecutive; reassembly chain mask->0; mint wrap; fragment walk 126,127,0,1",
+        "r311kb_initack_capture_tightens_negotiated_sn_mask pins the initiator-side caps adoption"
+      ],
+      "impact_refs": [
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "F-b: InitAck params validation absent (pico _Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION session reject); min() keeps own side consistent only",
+        "unicast RX Frame SN gate absent (pico unicast rx.c _z_sn_precedes); precedes consumed only by multicast_dispatch today",
+        "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span"
+      ],
+      "publishable_decision_summary": "R311kb F-5 SN ring consolidation: reassembly continuation gate ring-consecutive via sn::consecutive, unicast TX mint + fragment walk masked at the negotiated ring, initiator InitAck caps capture.",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/sn.rs: consecutive() added (_z_sn_consecutive mirror)",
+        "reassembly_dispatch.rs: Slot next_sn -> last_sn; ingest(sn_mask) ring-consecutive gate",
+        "session_actions.rs: InitAck PeerInitCaps capture + negotiated_sn_mask(); from_init_body rename",
+        "session_actions.rs: next_outbound_frame_sn(sn_mask) ring projection; mask resolved pre-batch-lock",
+        "frame_encode.rs: fragment_body(sn_mask) walks sn::increment (raw base masked at the walk)",
+        "drive.rs: report_outcome_reassembling resolves negotiated mask before the zid guard"
+      ],
+      "publishable_verification_bullets": [
+        "run-ci all host lanes EXIT 0 per commit (b8499b0, b339a2f); Layer G 7-MCU EXIT 0 per commit",
+        "new seam tests: sn::consecutive; reassembly chain mask->0; mint wrap; fragment walk 126,127,0,1",
+        "r311kb_initack_capture_tightens_negotiated_sn_mask pins the initiator-side caps adoption"
+      ],
+      "publishable_impact_refs": [
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-b: InitAck params validation absent (pico _Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION session reject); min() keeps own side consistent only",
+        "unicast RX Frame SN gate absent (pico unicast rx.c _z_sn_precedes); precedes consumed only by multicast_dispatch today",
+        "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
