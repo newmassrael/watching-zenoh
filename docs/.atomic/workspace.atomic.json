@@ -565,7 +565,7 @@
         "transport-link-udp gates UdpDriver + LinkDriver impl + tokio::net::UdpSocket import at lib.rs.",
         "transport-unicast gates `pub mod session_fsm_unicast` (SCE-generated FSM module declaration).",
         "transport-keepalive gates start_keepalive_worker / stop_keepalive_worker SCXML action bindings.",
-        "transport-batching gates INIT handshake batch_size honoring + min(local, peer) reduction.",
+        "transport-batching gates the BatchTx TX coalescing window; INIT negotiation core since R311kl.",
         "Reserved link kinds (6): -link-tls, -link-quic, -link-ws, -link-unixsock, -link-vsock, -link-serial.",
         "Reserved envelope/topology (5): -multicast, -fragmentation, -compression, -shm, -lowlatency.",
         "Reserved features stay declaration-only in wz facade Cargo.toml until behavior lands."
@@ -585,7 +585,8 @@
         "R311jv: multicast Frame RX delivers payloads to registries (SN gate); TX half pending A1c.",
         "R311jv: transport-multicast forward grew codec-frame (kconfig select for the data plane).",
         "R311jw: multicast TX half landed (TxSn + outbound seam + Layer M e2e) - data plane full-duplex.",
-        "R311ka: Frame fan routes Declare too - multicast-declarations RX half implicitly live, TX pending."
+        "R311ka: Frame fan routes Declare too - multicast-declarations RX half implicitly live, TX pending.",
+        "R311kl supersedes cfg-off-forces-65535: negotiation core (ungated); cfg-off = no coalescing only."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -33253,6 +33254,54 @@
         "prior-round claims R311kc..kg/ki cited the same pipe shape, but the unmasked HEAD run localizes ALL failures to kh+kj artifacts - their lanes are green at HEAD, so those claims are retroactively sound in outcome, unsound in method"
       ]
     },
+    "Round 311kl": {
+      "decision_summary": "R311kl F-5: INIT batch_size negotiation ungated to core transport (pico parity, R311cb reopen) - batching-off builds now honor the peer RX budget; the R311fg e2e transport-batching pins are dropped.",
+      "changes_bullets": [
+        "peer_init_caps.rs: from_init_body honors the peer batch_size unconditionally - the R311cb transport-batching projection (cfg-off forces 65535) is removed; the R311kj wire-0 normalization survives as the only projection",
+        "session_actions.rs: init_ack_params min(local, peer) batch_size reduction ungated - pico runs the negotiation outside every Z_FEATURE_BATCHING gate (unicast/transport.c:47 + 102 + 135-140); the feature gates only the coalescing machinery (transport.c:35-38)",
+        "R311fg root cause dissolved: a batching-off InitAck no longer ENLARGES a smaller InitSyn advertisement, so foreign pico initiators accept the session; all 7 wz-e2e-* crates drop the transport-batching pin (build-coherent == interop-coherent; the harness intersection shrinks by one)",
+        "transport-batching scope narrowed to exact Z_FEATURE_BATCHING parity (BatchTx accumulation arm + batch_start/flush/stop window); Cargo feature docs (wz, wz-runtime-tokio, wz-session-core), run-ci design prose (subset #7, R311fp delta blocks), and source docs updated",
+        "tests: the OFF-arm NEG peer_batch_size_discarded_when_transport_batching_off is retired (it pinned exactly the removed projection) and replaced by the ungated peer_batch_size_honored_in_every_build + wire_zero_batch_size_normalizes_to_ceiling pair; negotiated_mtu_tests and 2 accepting-path caps tests lose their transport-batching gate",
+        "catalog 5-1-transport: outputs[5] rewritten to the coalescing-only scope + a superseding caveat appended (cfg-off-forces-65535 is no longer true; prior caveat left frozen-in-place)"
+      ],
+      "verification_bullets": [
+        "full host run-ci EXIT=0 captured without a pipeline (RUNCI_EXIT=0, /tmp/runci_r311kl.log) - \"run-ci: all required layers pass\" incl. Layer E e2e",
+        "Layer E binaries now complete the foreign zenoh-pico handshake WITHOUT transport-batching - on-wire behavioural proof of the ungate",
+        "wz-session-core isolated lane: 126 lib tests pass incl. the two new peer_init_caps POS tests (honoring + wire-0 ceiling)",
+        "pico ground truth verified by direct read: negotiation + TX wbuf sizing outside Z_FEATURE_BATCHING (unicast/transport.c:35-49, 102, 135-140)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "F-8 (R311kj carry): batch_tx field rename to tx_mutex (pico _mutex_tx parity) lands next round (R311km) - user ratified 2026-06-10",
+        "F-6 (R311kj carry) stays open: deferred-fire (callbacks outside the observer lock) cross-cutting redesign awaits a dedicated round"
+      ],
+      "publishable_decision_summary": "R311kl F-5: INIT batch_size negotiation ungated to core transport (pico parity, R311cb reopen) - batching-off builds now honor the peer RX budget; the R311fg e2e transport-batching pins are dropped.",
+      "publishable_changes_bullets": [
+        "peer_init_caps.rs: from_init_body honors the peer batch_size unconditionally - the R311cb transport-batching projection (cfg-off forces 65535) is removed; the R311kj wire-0 normalization survives as the only projection",
+        "session_actions.rs: init_ack_params min(local, peer) batch_size reduction ungated - pico runs the negotiation outside every Z_FEATURE_BATCHING gate (unicast/transport.c:47 + 102 + 135-140); the feature gates only the coalescing machinery (transport.c:35-38)",
+        "R311fg root cause dissolved: a batching-off InitAck no longer ENLARGES a smaller InitSyn advertisement, so foreign pico initiators accept the session; all 7 wz-e2e-* crates drop the transport-batching pin (build-coherent == interop-coherent; the harness intersection shrinks by one)",
+        "transport-batching scope narrowed to exact Z_FEATURE_BATCHING parity (BatchTx accumulation arm + batch_start/flush/stop window); Cargo feature docs (wz, wz-runtime-tokio, wz-session-core), run-ci design prose (subset #7, R311fp delta blocks), and source docs updated",
+        "tests: the OFF-arm NEG peer_batch_size_discarded_when_transport_batching_off is retired (it pinned exactly the removed projection) and replaced by the ungated peer_batch_size_honored_in_every_build + wire_zero_batch_size_normalizes_to_ceiling pair; negotiated_mtu_tests and 2 accepting-path caps tests lose their transport-batching gate",
+        "catalog 5-1-transport: outputs[5] rewritten to the coalescing-only scope + a superseding caveat appended (cfg-off-forces-65535 is no longer true; prior caveat left frozen-in-place)"
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci EXIT=0 captured without a pipeline (RUNCI_EXIT=0, /tmp/runci_r311kl.log) - \"run-ci: all required layers pass\" incl. Layer E e2e",
+        "Layer E binaries now complete the foreign zenoh-pico handshake WITHOUT transport-batching - on-wire behavioural proof of the ungate",
+        "wz-session-core isolated lane: 126 lib tests pass incl. the two new peer_init_caps POS tests (honoring + wire-0 ceiling)",
+        "pico ground truth verified by direct read: negotiation + TX wbuf sizing outside Z_FEATURE_BATCHING (unicast/transport.c:35-49, 102, 135-140)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-8 (R311kj carry): batch_tx field rename to tx_mutex (pico _mutex_tx parity) lands next round (R311km) - user ratified 2026-06-10",
+        "F-6 (R311kj carry) stays open: deferred-fire (callbacks outside the observer lock) cross-cutting redesign awaits a dedicated round"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
@@ -39580,5 +39629,5 @@
   "branches": {},
   "entities": {},
   "narrative_facts": {},
-  "schema_version": 17
+  "schema_version": 18
 }
