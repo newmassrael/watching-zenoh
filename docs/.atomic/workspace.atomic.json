@@ -33700,6 +33700,52 @@
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
       ]
     },
+    "Round 311kv": {
+      "decision_summary": "R311kv unicast peer-lease adoption: the session deadline governs by min(local, peer OPEN-advertised lease) — pico transport.c:193/269 parity, the deadline twin of the R311ks multicast cap; captured at both OpenSyn and OpenAck arrival.",
+      "changes_bullets": [
+        "SessionLinkActions.peer_open_lease_ms (new slot) — the peer's OPEN-advertised lease in ms, captured by handle_inbound at BOTH arrival points: OpenSyn on the accepting side and OpenAck on the initiating side (zenoh-pico adopts min(advertised, Z_TRANSPORT_LEASE) at the same two points, unicast/transport.c:269/193)",
+        "check_lease_deadline governs by min(local params.lease_ms, peer-advertised): pico expires the session by the adopted value (unicast/lease.c:147); store-raw / cap-at-check split mirrors the R311ks multicast per-peer sweep; pre-OPEN (slot None) the local window governs alone — shared SSOT, so the lwIP MCU loop adopts it with zero MCU-side change",
+        "capture rides the R311ku boundary projection: body.lease is already ms when stored (the wire carries the compact T=1 seconds form)",
+        "tests: r311kv_shorter_peer_lease_governs_deadline + r311kv_local_cap_bounds_longer_peer_lease (deadline min) + inbound_openack_captures_peer_advertised_lease_ms (full chain: encode compacts to T=1+VLE 7 -> parse projects to ms -> capture)",
+        "NOT in scope: keepalive TX cadence tightening by the adopted lease (pico keep_alive task / EXPIRE_FACTOR) — wz has no keepalive TX emitter yet (start_keepalive_worker is a trace marker; pre-existing tracked surface, not a kv regression)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_lease_deadline: 9 passed (2 new min() tests); --test session_fsm_inbound_dispatch: 23 passed (1 new capture test)",
+        "cargo test -p wz-session-core (defaults) + wz-runtime-tokio --lib: 0 failures",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (unpiped; ledger appended after green)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "keepalive TX emitter absent (start_keepalive_worker = trace marker): pico sends KeepAlive every adopted-lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR when idle (unicast/lease.c keep_alive task) — without it a wz node publishing nothing gets expired by ITS OWN advertised lease at the peer; surfaced by kv (the adopted-min deadline makes the asymmetry concrete)",
+        "no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ],
+      "publishable_decision_summary": "R311kv unicast peer-lease adoption: the session deadline governs by min(local, peer OPEN-advertised lease) — pico transport.c:193/269 parity, the deadline twin of the R311ks multicast cap; captured at both OpenSyn and OpenAck arrival.",
+      "publishable_changes_bullets": [
+        "SessionLinkActions.peer_open_lease_ms (new slot) — the peer's OPEN-advertised lease in ms, captured by handle_inbound at BOTH arrival points: OpenSyn on the accepting side and OpenAck on the initiating side (zenoh-pico adopts min(advertised, Z_TRANSPORT_LEASE) at the same two points, unicast/transport.c:269/193)",
+        "check_lease_deadline governs by min(local params.lease_ms, peer-advertised): pico expires the session by the adopted value (unicast/lease.c:147); store-raw / cap-at-check split mirrors the R311ks multicast per-peer sweep; pre-OPEN (slot None) the local window governs alone — shared SSOT, so the lwIP MCU loop adopts it with zero MCU-side change",
+        "capture rides the R311ku boundary projection: body.lease is already ms when stored (the wire carries the compact T=1 seconds form)",
+        "tests: r311kv_shorter_peer_lease_governs_deadline + r311kv_local_cap_bounds_longer_peer_lease (deadline min) + inbound_openack_captures_peer_advertised_lease_ms (full chain: encode compacts to T=1+VLE 7 -> parse projects to ms -> capture)",
+        "NOT in scope: keepalive TX cadence tightening by the adopted lease (pico keep_alive task / EXPIRE_FACTOR) — wz has no keepalive TX emitter yet (start_keepalive_worker is a trace marker; pre-existing tracked surface, not a kv regression)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_lease_deadline: 9 passed (2 new min() tests); --test session_fsm_inbound_dispatch: 23 passed (1 new capture test)",
+        "cargo test -p wz-session-core (defaults) + wz-runtime-tokio --lib: 0 failures",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (unpiped; ledger appended after green)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "keepalive TX emitter absent (start_keepalive_worker = trace marker): pico sends KeepAlive every adopted-lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR when idle (unicast/lease.c keep_alive task) — without it a wz node publishing nothing gets expired by ITS OWN advertised lease at the peer; surfaced by kv (the adopted-min deadline makes the asymmetry concrete)",
+        "no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
