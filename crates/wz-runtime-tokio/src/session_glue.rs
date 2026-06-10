@@ -2855,3 +2855,43 @@ mod reconnect_tx_tests {
         assert_eq!(second.frame_bytes(0), b"frame-b".to_vec());
     }
 }
+
+/// R311kj — the wire never carries the internal `batch_size = 0`
+/// "unset" sentinel: `encode_init` advertises
+/// `SessionInitParams::effective_batch_size()` (65535 when unset). A
+/// zenoh-pico peer ADOPTS a literal 0 (unicast/transport.c:135-136) and
+/// sizes a 0-byte TX wbuf from it (transport.c:47-49), so emitting 0
+/// bricks interop — the R311kd zero-sentinel only patched the wz<->wz
+/// MTU consult; this pins the wire emission itself.
+#[cfg(all(test, feature = "codec-init-body"))]
+mod init_advertisement_tests {
+    use super::parse_inbound;
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_core::handshake_encode::encode_init;
+    use wz_session_core::inbound::InboundFrame;
+
+    #[test]
+    fn unset_batch_size_advertises_wire_ceiling_not_zero() {
+        let params = fixture_session_init_params(); // batch_size: 0 (unset)
+        let wire = encode_init(&params, /*is_ack=*/ false, &[], None).expect("encode InitSyn");
+        let InboundFrame::Init { body, .. } = parse_inbound(&wire).expect("parse own InitSyn")
+        else {
+            panic!("encoded InitSyn must parse as Init");
+        };
+        assert_eq!(
+            body.batch_size,
+            Some(65535),
+            "the internal 0 sentinel must never reach the wire"
+        );
+
+        // A configured value passes through verbatim.
+        let mut params = fixture_session_init_params();
+        params.batch_size = 1024;
+        let wire = encode_init(&params, false, &[], None).expect("encode InitSyn");
+        let InboundFrame::Init { body, .. } = parse_inbound(&wire).expect("parse own InitSyn")
+        else {
+            panic!("encoded InitSyn must parse as Init");
+        };
+        assert_eq!(body.batch_size, Some(1024));
+    }
+}

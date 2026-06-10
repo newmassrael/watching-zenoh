@@ -417,15 +417,23 @@ async fn r311kc_rx_init_ack_enlarged_caps_rejects_session() {
 
 // ── R311kc NEG: an InitAck whose batch_size enlarges the advertisement
 //               rejects even though seq/req conform — pico validates the
-//               three parameters independently.
+//               three parameters independently. R311kj — the own side is
+//               a CONFIGURED 512 (the fixture's unset 0 advertises the
+//               65535 ceiling on the wire since R311kj, so an unset own
+//               side can no longer be "enlarged" by any u16 peer value).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r311kc_rx_init_ack_enlarged_batch_size_rejects_session() {
     use wz_session_wire_fixtures::craft_initack_wire_with_caps;
 
-    let (actions, mut engine) = fresh_setup();
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let mut params = fixture_session_init_params();
+    params.batch_size = 512;
+    let actions = new_session_actions(outbound, params, TokioTime::new());
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
     drive_to_sent_init_syn(&mut engine);
 
-    // seq/req = 0/0 conform; batch_size 1024 > advertised 0.
+    // seq/req = 0/0 conform; batch_size 1024 > advertised 512.
     let wire = craft_initack_wire_with_caps(&[0xC0, 0x01], 0x00, 1024);
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
 
@@ -500,5 +508,40 @@ async fn r311ke_rx_duplicate_frame_sn_rejected_per_channel() {
             }
         ),
         "best-effort channel gates independently of reliable; got {outcome:?}"
+    );
+}
+
+// ── R311kj review fix: the InitAck params gate is SCOPED to
+//    SentInitSyn — an ACCEPTOR mid-handshake receiving a bogus
+//    enlarging InitAck must NOT tear down (the FSM ignores the
+//    no-transition event, pico drops it). The R311kc !is_established()
+//    scope was role-blind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311kj_acceptor_ignores_enlarging_init_ack() {
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    let (actions, mut engine) = fresh_setup();
+    // Accepting role: InboundStart -> AwaitingInitSyn.
+    engine.process_event(E::InboundStart);
+    let pre_state = engine.get_current_state();
+
+    // Enlarging InitAck (seq_num_res 1 > advertised 0) aimed at the
+    // acceptor — outside SentInitSyn the gate must not fire.
+    let wire = craft_initack_wire_with_caps(&[0xC0, 0x01], 0x01, 0);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        !matches!(outcome, DriverLoopOutcome::InitAckCapsRejected),
+        "acceptor-side InitAck must not trigger the params gate; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        pre_state,
+        "the FSM ignores the no-transition event (no teardown)"
+    );
+    assert!(
+        !engine.is_in_final_state(),
+        "acceptor session survives a bogus InitAck"
     );
 }

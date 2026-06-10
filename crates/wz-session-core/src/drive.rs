@@ -64,25 +64,34 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             Ok(frame) => match inbound_to_fsm_event(&frame) {
                 Some(event) => {
                     // R311kc — initiator InitAck params validation (zenoh-pico
-                    // unicast/transport.c:123-140): a pre-Established InitAck
-                    // whose size parameters exceed our InitSyn advertisement
-                    // REJECTS the session — `framing.error` drives Closing
-                    // with `CloseReason::Invalid` (wire Close(INVALID)) and
-                    // the typed outcome surfaces the reason to the open loop.
+                    // unicast/transport.c:123-140): an InitAck whose size
+                    // parameters exceed our InitSyn advertisement REJECTS the
+                    // session — `framing.error` drives Closing with
+                    // `CloseReason::Invalid` (wire Close(INVALID)) and the
+                    // typed outcome surfaces the reason to the open loop.
                     // Unlike the silent-drop admissions below, the reject must
                     // advance the FSM: hanging until the handshake timeout
                     // would mislabel a non-conforming peer as a silent one.
                     // `handle_inbound` already captured the (rejected) caps
                     // into `inbound_peer_init_caps`; inert — the session is
-                    // torn down before any mint reads them. Scoped to
-                    // `!is_established()` so an unsolicited steady-state
-                    // InitAck stays an ignored no-event (pico drops it).
+                    // torn down before any mint reads them.
+                    //
+                    // R311kj review fix — scoped to `SentInitSyn`, the ONE
+                    // Initiator state that awaits the InitAck (pico validates
+                    // exactly there in its open sequence). The R311kc
+                    // `!is_established()` scope was role-blind: a bogus
+                    // enlarging InitAck aimed at an ACCEPTOR mid-handshake
+                    // tore the session down where pico (and pre-R311kc wz)
+                    // lets the FSM ignore the no-transition event. Outside
+                    // SentInitSyn the frame now falls through to the FSM,
+                    // which ignores it (pico drops it).
                     #[cfg(feature = "codec-init-body")]
                     if let InboundFrame::Init {
                         is_ack: true, body, ..
                     } = &frame
                     {
-                        if !actions.is_established()
+                        use crate::session_fsm_unicast::SessionFsmUnicastState as S;
+                        if engine.get_current_state() == S::SentInitSyn
                             && !actions.init_ack_caps_acceptable(body.sn_res, body.batch_size)
                         {
                             engine.process_event(E::FramingError);

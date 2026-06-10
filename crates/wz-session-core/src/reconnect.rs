@@ -256,7 +256,7 @@ impl<R: SessionRuntime> LocalSwappableLink<R> {
     /// sink so the supervisor can drop the dead transport outside any
     /// borrow.
     pub fn swap(&self, next: R::LinkSink) -> R::LinkSink {
-        core::mem::replace(&mut self.inner.borrow_mut(), next)
+        self.inner.replace(next)
     }
 }
 

@@ -41,6 +41,9 @@ pub struct SessionInitParams {
     /// Request-id resolution (0..=3).
     pub req_id_res: u8,
     /// Per-link batch size (bytes). Transport.h documents 1..=65535.
+    /// `0` is wz's INTERNAL "unset" sentinel — it must never reach the
+    /// wire; every advertisement / comparison reads
+    /// [`Self::effective_batch_size`] (R311kj).
     pub batch_size: u16,
     /// Lease duration. The `lease_in_seconds` flag below picks the
     /// unit; the value itself is VLE-encoded inside the open body.
@@ -72,6 +75,27 @@ pub struct SessionInitParams {
     /// consume this field; the cookie value flows inbound from the
     /// peer's InitAck instead.
     pub cookie_signing_key: SigningKey,
+}
+
+impl SessionInitParams {
+    /// R311kj — the EFFECTIVE advertised batch budget: `0` is wz's
+    /// internal "unset" sentinel and must never reach the wire — a
+    /// zenoh-pico peer adopts a literal 0 verbatim
+    /// (unicast/transport.c:135-136) and sizes a 0-byte TX wbuf from it
+    /// (transport.c:47-49), bricking the session. The single accessor
+    /// every advertisement and own-side comparison reads:
+    /// `encode_init`'s wire write, `init_ack_params`' capping min, the
+    /// R311kc InitAck validator's own side, and
+    /// `negotiated_batch_mtu`'s own arm — so the wire value and every
+    /// comparison against it stay one value (the R311kd zero-sentinel
+    /// patched only the wz<->wz MTU consult; this closes the wire
+    /// emission itself).
+    pub fn effective_batch_size(&self) -> u16 {
+        match self.batch_size {
+            0 => 65535,
+            n => n,
+        }
+    }
 }
 
 // `SessionInitParams` carries no test-only methods. The deterministic

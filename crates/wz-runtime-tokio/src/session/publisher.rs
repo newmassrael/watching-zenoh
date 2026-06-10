@@ -356,6 +356,13 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// transition-only; poll [`Self::get_matching_status`] for the
     /// current value, which also seeds the watch baseline).
     ///
+    /// R311kj — CALLBACK CONSTRAINT: the callback fires while the
+    /// session's observer mutex is held (the registries dispatch under
+    /// it). It must NOT call observer-locking session APIs —
+    /// `get_matching_status`, declares, registry consults — or it
+    /// self-deadlocks. Record the status and act after the dispatch
+    /// returns (e.g. via a channel).
+    ///
     /// R310.5c / R311g1 — the signature is always visible; the body
     /// rejects typed (`Err(FeatureDisabled)`) when `session-matching`
     /// or the backing `declare-subscriber` registry is off.

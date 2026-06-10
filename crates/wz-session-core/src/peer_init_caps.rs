@@ -94,38 +94,36 @@ impl PeerInitCaps {
     /// `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`
     /// per zenoh-pico transport.c:196-197.
     pub fn from_init_body(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
-        // R311cb — transport-batching gates the peer-advertised
-        // batch_size honoring. cfg-off forces 65535 (full MTU) and
-        // ignores the peer's advertised value; honest semantic is
-        // "we always batch up to the wire limit and never reduce."
-        // The S-bit clear arm always returns 65535 regardless of the
-        // feature state — that path is the peer-declined-S baseline,
-        // not a negotiation outcome.
+        // R311kj — ONE wire decoder: the raw triple comes from
+        // [`decode_wire_caps`] (S-clear defaults applied), and this
+        // constructor layers the two PROJECTIONS on top:
+        //
+        // - R311cb — transport-batching gates the peer-advertised
+        //   batch_size honoring. cfg-off forces 65535 (full MTU): the
+        //   honest semantic is "we always batch up to the wire limit
+        //   and never reduce."
+        // - R311kj — a wire 0 normalizes to the 65535 ceiling
+        //   defensively: wz itself never emits 0 any more
+        //   (`SessionInitParams::effective_batch_size` is the
+        //   advertisement SSOT), so a 0 here is a pre-R311kj wz or a
+        //   non-conforming peer, and "unset" beats a zero TX budget.
+        let (seq_num_res, req_id_res, wire_batch) = decode_wire_caps(sn_res_byte, batch_size);
         #[cfg(feature = "transport-batching")]
-        let honored_batch_size = batch_size.unwrap_or(65535);
+        let batch_size = match wire_batch {
+            0 => 65535,
+            n => n,
+        };
         #[cfg(not(feature = "transport-batching"))]
-        let honored_batch_size = {
-            // transport-batching off: the peer-advertised value is
-            // discarded (we clamp to full MTU). Bind it to `_` so the
-            // signature stays stable under the gate per the
-            // signature-stability principle (R311g1).
-            let _ = batch_size;
+        let batch_size = {
+            // Bind the raw value to `_` so the signature stays stable
+            // under the gate (signature-stability, R311g1).
+            let _ = wire_batch;
             65535u16
         };
-        match sn_res_byte {
-            Some(b) => Self {
-                seq_num_res: b & 0x03,
-                req_id_res: (b >> 2) & 0x03,
-                batch_size: honored_batch_size,
-            },
-            None => Self {
-                // S bit clear → both peer defaults to
-                // `_Z_DEFAULT_RESOLUTION_SIZE = 2` and
-                // `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`.
-                seq_num_res: 2,
-                req_id_res: 2,
-                batch_size: 65535,
-            },
+        Self {
+            seq_num_res,
+            req_id_res,
+            batch_size,
         }
     }
 }

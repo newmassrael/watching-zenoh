@@ -39,6 +39,18 @@ pub trait MatchingSink {
     /// Observe one matching-status transition. `matching` is the NEW
     /// verdict (`true` = at least one remote declaration now intersects
     /// the watched keyexpr).
+    ///
+    /// R311kj — RE-ENTRANCY HAZARD: the production dispatch fires this
+    /// while the owning registry (and on the AP profile the WHOLE
+    /// `ApplicationLayerObserver` mutex) is held. The sink must NOT
+    /// call back into any observer-locking session API — e.g.
+    /// `get_matching_status`, a declare, a registry consult — or it
+    /// self-deadlocks (std Mutex) / RefCell-panics (MCU). Record the
+    /// verdict (channel, flag, buffer) and act AFTER the dispatch
+    /// returns. (zenoh-pico fires under its own write-filter ctx mutex,
+    /// not the session lock, so its callbacks do not carry this
+    /// constraint — a wz-specific consequence of the one-observer-mutex
+    /// shape, shared with the `DeclSink` / `UndeclSink` callbacks.)
     fn on_matching_changed(&mut self, matching: bool);
 }
 

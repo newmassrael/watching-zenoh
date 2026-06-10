@@ -606,6 +606,11 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     /// itself never fires (pico transition-only semantics; poll
     /// [`Self::get_matching_status`] for the current value).
     ///
+    /// R311kj — CALLBACK CONSTRAINT: the callback fires while the
+    /// session's observer mutex is held; it must NOT call
+    /// observer-locking session APIs (see
+    /// `Publisher::declare_matching_listener`).
+    ///
     /// R310.5c / R311g1 — signature always visible; typed
     /// `Err(FeatureDisabled)` when `session-matching` or the backing
     /// `declare-queryable` registry is off.

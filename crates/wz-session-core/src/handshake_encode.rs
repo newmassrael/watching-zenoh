@@ -83,7 +83,10 @@ pub fn encode_init(
         // invariant leaf (`.expect`), mirroring request_build.rs.
         zid: crate::codec_bound::bounded_bytes(&params.zid).expect("zid length asserted in 1..=16"),
         sn_res: Some(pack_sn_res(params.seq_num_res, params.req_id_res)),
-        batch_size: Some(params.batch_size),
+        // R311kj — the wire NEVER carries the internal 0 = "unset"
+        // sentinel (a pico peer would adopt it and size a 0-byte TX
+        // wbuf); the effective accessor is the advertisement SSOT.
+        batch_size: Some(params.effective_batch_size()),
         cookie_len: cookie_bytes.as_ref().map(|c| c.len() as u64),
         cookie: cookie_bytes
             .as_deref()

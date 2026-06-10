@@ -677,9 +677,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311cb — transport-batching gates the min(local, peer)
             // reduction on batch_size. cfg-off keeps the local
             // advertised batch_size as-is (no downward negotiation).
+            // R311kj — min over the EFFECTIVE own advertisement (0 =
+            // unset would otherwise pin the InitAck to a literal 0 on
+            // the wire); the peer side is already 0-normalized by the
+            // from_init_body projection.
             #[cfg(feature = "transport-batching")]
             {
-                params.batch_size = params.batch_size.min(p.batch_size);
+                params.batch_size = params.effective_batch_size().min(p.batch_size);
             }
         }
         params
@@ -713,29 +717,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// advertisement only and a frame could exceed what the peer's RX
     /// buffer accepts.
     ///
-    /// `0` is the wz "unset" sentinel on BOTH sides of the min (a wz
-    /// peer advertises `params.batch_size` verbatim, so an unconfigured
-    /// wz peer puts `0` on the wire): an unset side contributes the
-    /// 65535 wire ceiling instead of a zero budget. zenoh-pico never
-    /// advertises 0 (its default is `_Z_DEFAULT_UNICAST_BATCH_SIZE =
-    /// 65535`), so the sentinel only fires wz<->wz.
+    /// R311kj — `0` ("unset") is an INTERNAL sentinel only: the own
+    /// side reads [`SessionInitParams::effective_batch_size`] (the same
+    /// value `encode_init` put on the wire — 0 never reaches a peer),
+    /// and the peer side reads the captured [`PeerInitCaps`], whose
+    /// `from_init_body` projection 0-normalizes a legacy/non-conforming
+    /// wire 0 defensively. zenoh-pico never advertises 0 (default
+    /// `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`) and ADOPTS a literal 0
+    /// (transport.c:135-136), which is exactly why wz must not emit it.
     ///
-    /// The peer side reads the captured [`PeerInitCaps`], i.e. the
-    /// `transport-batching`-honored projection: with the feature off the
-    /// projection clamps to 65535 ("never reduce", R311cb) and the min
-    /// degrades to the local advertisement — the pre-R311kd behavior.
+    /// `transport-batching` off: the peer projection clamps to 65535
+    /// ("never reduce", R311cb) and the min degrades to the local
+    /// advertisement — the pre-R311kd behavior.
     pub fn negotiated_batch_mtu(&self) -> usize {
-        const UNSET_BATCH_MTU: usize = 65_535;
-        let own = match self.params.batch_size {
-            0 => UNSET_BATCH_MTU,
-            n => n as usize,
-        };
+        // R311kj — both sides are 0-normalized at their SSOT
+        // (own: effective_batch_size, the same value the InitSyn wire
+        // carried; peer: the from_init_body projection), so the min is
+        // a plain min — no sentinel arms here.
+        let own = self.params.effective_batch_size() as usize;
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
         match peer {
-            Some(p) => match p.batch_size {
-                0 => own,
-                n => own.min(n as usize),
-            },
+            Some(p) => own.min(p.batch_size as usize),
             None => own,
         }
     }
@@ -951,7 +953,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         !crate::peer_init_caps::init_ack_exceeds_advertisement(
             self.params.seq_num_res,
             self.params.req_id_res,
-            self.params.batch_size,
+            // R311kj — compare against the EFFECTIVE advertisement,
+            // i.e. exactly the value encode_init put on the InitSyn
+            // wire (0 = unset never reaches the wire).
+            self.params.effective_batch_size(),
             sn_res_byte,
             batch_size,
         )
@@ -1091,9 +1096,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // batch_start boundary race — a sender that saw the window closed
         // cannot emit between a concurrent absorb's mint and its flush.
         // AP profile: std Mutex around a writer-channel enqueue — cheap.
-        // MCU profile: critical_section — single-task drive model, and the
-        // lwIP send under the section is bounded by the negotiated MTU;
-        // revisit if a preemptive MCU profile lands (documented caveat).
+        // MCU profile: critical_section — single-task drive model. R311kj
+        // span precision: an oversize message emits its WHOLE fragment
+        // chain under the hold (ceil(payload/MTU) sends — the chain MUST
+        // stay wire-atomic: an interleaved higher-SN frame would advance
+        // the peer's RX gate past the remaining fragments, R311ke); a
+        // non-oversize call is at most two emits (overflow flush + one
+        // frame), each within the negotiated MTU. Revisit if a
+        // preemptive MCU profile lands (5.P caveat, R311kg/R311kj).
         R::with_mutex_mut(&self.batch_tx, |batch| {
             #[cfg(feature = "transport-batching")]
             if batch.active {
