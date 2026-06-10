@@ -1970,6 +1970,91 @@ mod fragment_tx_tests {
     }
 }
 
+/// R311kd — negotiated-min MTU: the outbound frame budget is
+/// `min(own batch_size, peer-advertised batch_size)` with `0` as the
+/// unset/65535 sentinel on either side (zenoh-pico sizes its TX wbuf to
+/// `min(link MTU, negotiated batch_size)`, unicast/transport.c:47-49 —
+/// the R311jm "honor the peer's advertised batch_size" carry).
+/// `transport-batching` gates the PEER projection (`from_init_body`
+/// clamps to 65535 with it off, R311cb), so the honoring arms below
+/// require the feature; `codec-init-body` is needed to capture the caps
+/// off a crafted InitAck through the production `handle_inbound` path.
+#[cfg(all(test, feature = "transport-batching", feature = "codec-init-body"))]
+mod negotiated_mtu_tests {
+    use super::SessionInitParams;
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+    #[test]
+    fn negotiated_batch_mtu_takes_min_of_own_and_peer() {
+        let params = SessionInitParams {
+            batch_size: 1024,
+            ..fixture_session_init_params()
+        };
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        assert_eq!(
+            actions.negotiated_batch_mtu(),
+            1024,
+            "no peer caps yet -> own advertisement"
+        );
+        // Peer InitAck advertises 512 — a conforming reduction (< own 1024).
+        let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, 512);
+        actions.handle_inbound(&wire).expect("parse InitAck");
+        assert_eq!(
+            actions.negotiated_batch_mtu(),
+            512,
+            "peer reduction must bound the TX budget (negotiated min)"
+        );
+    }
+
+    #[test]
+    fn negotiated_batch_mtu_zero_is_unset_sentinel() {
+        // Own unset (0) -> 65535 wire ceiling, not a zero budget.
+        let (actions, _driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        assert_eq!(actions.negotiated_batch_mtu(), 65_535);
+        // Peer 0 (an unconfigured wz peer advertises its params verbatim)
+        // is the same sentinel: contributes the ceiling, not 0.
+        let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, 0);
+        actions.handle_inbound(&wire).expect("parse InitAck");
+        assert_eq!(
+            actions.negotiated_batch_mtu(),
+            65_535,
+            "peer batch_size 0 = unset sentinel, not a zero budget"
+        );
+    }
+
+    /// Behavioral: the peer's reduction — not the local advertisement —
+    /// decides when a PUT fragments. Own side is unset (65535 ceiling);
+    /// the peer's 64-byte budget must split the ~200-byte PUT into a
+    /// fragment chain whose every frame fits the peer budget.
+    #[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
+    #[test]
+    fn peer_batch_reduction_fragments_oversize_put() {
+        let (actions, driver) =
+            crate::test_fixtures::recording_actions_with_params(fixture_session_init_params());
+        let wire = craft_initack_wire_with_caps(&[0xC0], 0x00, 64);
+        actions.handle_inbound(&wire).expect("parse InitAck");
+
+        let value: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
+        actions
+            .send_push_literal("home/sensor/bulk", &value, /*reliable=*/ true)
+            .expect("send oversize push");
+
+        let n = driver.frame_count();
+        assert!(
+            n > 1,
+            "the peer's 64-byte budget must fragment the ~200-byte PUT, got {n} frame(s)"
+        );
+        for i in 0..n {
+            assert!(
+                driver.frame_bytes(i).len() <= 64,
+                "fragment {i} exceeds the peer-advertised 64-byte budget"
+            );
+        }
+    }
+}
+
 /// R311jp — TX batching end-to-end: a `batch_start` window coalesces N
 /// network messages into ONE outbound `T_MID_FRAME` (header + `VLE(sn)` + N
 /// message bodies), bounded by the `batch_size` byte budget, drained by

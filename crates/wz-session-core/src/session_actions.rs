@@ -685,6 +685,42 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         crate::sn::mask_from_res(res)
     }
 
+    /// R311kd — the session's effective outbound frame budget: the
+    /// negotiated-min batch size, zenoh-pico parity for
+    /// `mtu = min(link MTU, negotiated batch_size)` where the
+    /// negotiated value is `min(own, peer)` (unicast/transport.c:47-49
+    /// sizes the TX wbuf to exactly that). Closes the R311jm carry —
+    /// before this, `dispatch_network_message` sized against the LOCAL
+    /// advertisement only and a frame could exceed what the peer's RX
+    /// buffer accepts.
+    ///
+    /// `0` is the wz "unset" sentinel on BOTH sides of the min (a wz
+    /// peer advertises `params.batch_size` verbatim, so an unconfigured
+    /// wz peer puts `0` on the wire): an unset side contributes the
+    /// 65535 wire ceiling instead of a zero budget. zenoh-pico never
+    /// advertises 0 (its default is `_Z_DEFAULT_UNICAST_BATCH_SIZE =
+    /// 65535`), so the sentinel only fires wz<->wz.
+    ///
+    /// The peer side reads the captured [`PeerInitCaps`], i.e. the
+    /// `transport-batching`-honored projection: with the feature off the
+    /// projection clamps to 65535 ("never reduce", R311cb) and the min
+    /// degrades to the local advertisement — the pre-R311kd behavior.
+    pub fn negotiated_batch_mtu(&self) -> usize {
+        const UNSET_BATCH_MTU: usize = 65_535;
+        let own = match self.params.batch_size {
+            0 => UNSET_BATCH_MTU,
+            n => n as usize,
+        };
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
+        match peer {
+            Some(p) => match p.batch_size {
+                0 => own,
+                n => own.min(n as usize),
+            },
+            None => own,
+        }
+    }
+
     /// Replace the ext chain for the given role. Production callers
     /// stage their negotiation result here; the next outbound frame
     /// of `role` reads the new chain via the encoder.
@@ -969,25 +1005,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !R::with_mutex_mut(&self.transport_available, |g| *g) {
             return Err(SendWireError::TransportUnavailable);
         }
-        // Outbound MTU = the negotiated session `batch_size`, or a
-        // 65535-byte ceiling when unset (`0`). v1 sizes against the *local*
-        // advertised batch size; honoring the peer's advertised batch_size
-        // (the negotiated minimum) is a follow-up — the local value is a
-        // safe ceiling since the receiver reassembles up to its own slot
-        // capacity regardless of fragment size. (UDP's 65507-byte datagram
+        // Outbound MTU = the negotiated-min batch budget
+        // ([`Self::negotiated_batch_mtu`]: min(own, peer) with `0` as the
+        // unset/65535 sentinel — R311kd closes the R311jm "honor the
+        // peer's advertised batch_size" carry). (UDP's 65507-byte datagram
         // cap is below the 65535 default, so a UDP deployment expecting
-        // >64 KB payloads must configure `batch_size <= 65507`.)
-        // zenoh's default batch / the u16 ceiling, used when batch_size is
-        // unset (0) so an unconfigured session never fragments. R311jp —
+        // >64 KB payloads must configure `batch_size <= 65507`.) R311jp —
         // the same budget bounds the batching accumulator (pico shares one
-        // `_wbuf` capacity between both concerns).
-        let mtu = {
-            const UNSET_BATCH_MTU: usize = 65_535;
-            match self.params.batch_size {
-                0 => UNSET_BATCH_MTU,
-                n => n as usize,
-            }
-        };
+        // `_wbuf` capacity between both concerns). Resolved before the
+        // batch lock for the same disjoint-mutex discipline as `sn_mask`
+        // below (the accessor takes `inbound_peer_init_caps`).
+        let mtu = self.negotiated_batch_mtu();
 
         // R311kb — the negotiated SN ring every mint below walks
         // ([`Self::negotiated_sn_mask`]). Resolved here, before the batch
