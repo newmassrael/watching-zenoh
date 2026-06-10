@@ -517,6 +517,13 @@ session-multicast = []
 # swap seam is a follow-up (same staging as MCU TX fragmentation); no
 # `wz-runtime-lwip?/` forward until it lands.
 session-reconnect = ["wz-runtime-tokio?/session-reconnect"]
+# R311kh — session-matching: matching-listener watch machinery
+# (wz-session-core declare::matching, via the runtime forward) + the
+# Publisher/Querier declare_matching_listener surface. zenoh-pico
+# Z_FEATURE_MATCHING parity; pico defaults it ON, so the AP presets
+# carry it. AP-only (alloc-gated watch keyexprs); an MCU no-heap watch
+# backing is a follow-up, same staging as the session-reconnect MCU seam.
+session-matching = ["wz-runtime-tokio?/session-matching"]
 session-resumable = []
 session-stateless-accept = []
 # R311cd — session-unicast-* features forward to wz-runtime-tokio
@@ -724,6 +731,7 @@ domain-session = [
     "session-extcompression",
     "session-extqos",
     "session-extshm",
+    "session-matching",
     "session-multicast",
     "session-reconnect",
     "session-resumable",
@@ -952,6 +960,7 @@ preset-ap-client = [
     "session-unicast-open",
     "session-unicast-accept",
     "session-reconnect",
+    "session-matching",
     "link-batching",
     "link-frame",
     "link-fragment",
@@ -1025,6 +1034,7 @@ preset-ap-router = [
     "session-unicast-open",
     "session-unicast-accept",
     "session-reconnect",
+    "session-matching",
     "session-multicast",
     "link-batching",
     "link-frame",
@@ -1121,6 +1131,7 @@ preset-ap-full = [
     "session-unicast-open",
     "session-unicast-accept",
     "session-reconnect",
+    "session-matching",
     "session-multicast",
     "session-resumable",
     "session-stateless-accept",
@@ -1258,6 +1269,7 @@ preset-zenoh-cpp = [
     "session-unicast-open",
     "session-unicast-accept",
     "session-reconnect",
+    "session-matching",
     "session-multicast",
     "session-extauth",
     "session-extqos",

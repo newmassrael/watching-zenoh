@@ -598,6 +598,43 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
         let matching = false;
         MatchingStatus { matching }
     }
+
+    /// R311kh — callback counterpart of [`Self::get_matching_status`]
+    /// (zenoh-pico querier matching listener, `Z_FEATURE_MATCHING`):
+    /// `callback` fires on every matching-status TRANSITION of this
+    /// querier's keyexpr against the remote QUERYABLE set. Registration
+    /// itself never fires (pico transition-only semantics; poll
+    /// [`Self::get_matching_status`] for the current value).
+    ///
+    /// R310.5c / R311g1 — signature always visible; typed
+    /// `Err(FeatureDisabled)` when `session-matching` or the backing
+    /// `declare-queryable` registry is off.
+    pub fn declare_matching_listener(
+        &self,
+        callback: impl FnMut(MatchingStatus) + Send + 'static,
+    ) -> Result<MatchingListener<R, T>, MatchingListenerError> {
+        #[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
+        {
+            let mut callback = callback;
+            let sink = wz_session_core::declare::matching::BoxedMatchingSink::new(move |m| {
+                callback(MatchingStatus { matching: m })
+            });
+            let id = R::with_mutex_mut(&self.session.observer, |obs| {
+                obs.remote_queryables
+                    .declare_matching_listener(&self.keyexpr, sink)
+            });
+            Ok(MatchingListener {
+                session: self.session.clone(),
+                id,
+                scope: MatchingScope::RemoteQueryables,
+            })
+        }
+        #[cfg(not(all(feature = "session-matching", feature = "declare-queryable")))]
+        {
+            let _ = callback;
+            Err(MatchingListenerError::FeatureDisabled)
+        }
+    }
 }
 
 /// R288 — return type of [`Querier::get_matching_status`]. Mirror

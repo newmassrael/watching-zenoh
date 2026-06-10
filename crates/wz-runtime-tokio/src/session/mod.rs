@@ -207,11 +207,13 @@ use crate::session_glue::{ConsolidationMode, QueryTarget};
 // types and their impls); `pub use <mod>::*` preserves the public
 // `wz_runtime_tokio::session::<Type>` paths unchanged.
 mod liveliness;
+mod matching_listener;
 mod publisher;
 mod querier;
 mod queryable;
 mod subscriber;
 pub use liveliness::*;
+pub use matching_listener::*;
 pub use publisher::*;
 pub use querier::*;
 pub use queryable::*;

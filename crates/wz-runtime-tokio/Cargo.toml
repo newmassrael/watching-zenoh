@@ -132,6 +132,7 @@ default = [
     "session-unicast-open",
     "session-unicast-accept",
     "session-reconnect",
+    "session-matching",
     "keyexpr-canon",
     "keyexpr-wildcard-single",
     "keyexpr-wildcard-double",
@@ -389,6 +390,12 @@ transport-batching = ["wz-session-core/transport-batching"]
 # set carries it like transport-batching/-keepalive. The re-dial +
 # re-handshake supervisor loop is this crate's side (A4b).
 session-reconnect = ["wz-session-core/session-reconnect"]
+
+# R311kh — matching-listener surface (zenoh-pico Z_FEATURE_MATCHING,
+# default-on in pico's CMake cache): forwards the wz-session-core watch
+# machinery; the Publisher/Querier declare_matching_listener methods are
+# signature-stable and reject typed with this off (R311g1).
+session-matching = ["wz-session-core/session-matching"]
 # R311cc — pubsub domain wire-up. 9 atomic features (Cargo.toml
 # authoring intent: "11 atomic, 9 active / 2 reserved"). After the
 # R311du SubscriberRegistry move + R311fv attachment SSOT, only TWO

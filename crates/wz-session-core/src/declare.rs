@@ -94,6 +94,35 @@ pub mod local_token;
 #[cfg(feature = "liveliness-get")]
 pub mod liveliness_get;
 
+/// R311kh — the shared membership consult behind the subscriber /
+/// queryable `has_matching` AND the matching-watch re-evaluation: does
+/// any currently-declared peer keyexpr intersect `keyexpr` under
+/// [`crate::keyexpr_match::keyexpr_intersect_patterns`]? A free fn (not
+/// a registry method) so the watch-list sweep can consult the
+/// membership table while the watch list itself is mutably borrowed —
+/// disjoint-field borrows inside one registry.
+#[cfg(feature = "alloc")]
+pub(crate) fn declared_intersects(
+    declared: &hashbrown::HashMap<u64, alloc::string::String>,
+    keyexpr: &str,
+) -> bool {
+    use alloc::vec::Vec;
+    let chunks: Vec<&str> = keyexpr.split('/').collect();
+    declared.values().any(|peer_keyexpr| {
+        let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
+        crate::keyexpr_match::keyexpr_intersect_patterns(&peer_chunks, &chunks)
+    })
+}
+
+// R311kh — matching-listener watch machinery (pico Z_FEATURE_MATCHING
+// parity): the MatchingSink seam + the flip-fire MatchingWatchList the
+// subscriber / queryable registries compose under `session-matching`.
+// `alloc`-gated as a whole — a watch owns its keyexpr String, and the
+// membership table it re-evaluates against is the registries'
+// `alloc`-gated half.
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+pub mod matching;
+
 // R311ds — cross-registry composability tests (R311dr-wider-tests
 // carry closure). Gated on `codec-declare` as well as `test` because
 // it references all three registries, which compile only under

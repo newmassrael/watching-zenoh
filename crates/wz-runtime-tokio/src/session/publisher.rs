@@ -345,6 +345,46 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
         let matching = false;
         MatchingStatus { matching }
     }
+
+    /// R311kh — callback counterpart of [`Self::get_matching_status`]
+    /// (zenoh-pico `z_publisher_declare_matching_listener`,
+    /// `Z_FEATURE_MATCHING`): `callback` fires on every matching-status
+    /// TRANSITION of this publisher's keyexpr against the remote
+    /// subscriber set — a remote `DeclSubscriber` whose keyexpr starts
+    /// intersecting flips it `true`, the matching `UndeclSubscriber`
+    /// flips it back. Registration itself never fires (pico
+    /// transition-only; poll [`Self::get_matching_status`] for the
+    /// current value, which also seeds the watch baseline).
+    ///
+    /// R310.5c / R311g1 — the signature is always visible; the body
+    /// rejects typed (`Err(FeatureDisabled)`) when `session-matching`
+    /// or the backing `declare-subscriber` registry is off.
+    pub fn declare_matching_listener(
+        &self,
+        callback: impl FnMut(MatchingStatus) + Send + 'static,
+    ) -> Result<MatchingListener<R, T>, MatchingListenerError> {
+        #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+        {
+            let mut callback = callback;
+            let sink = wz_session_core::declare::matching::BoxedMatchingSink::new(move |m| {
+                callback(MatchingStatus { matching: m })
+            });
+            let id = R::with_mutex_mut(&self.session.observer, |obs| {
+                obs.remote_subscribers
+                    .declare_matching_listener(&self.keyexpr, sink)
+            });
+            Ok(MatchingListener {
+                session: self.session.clone(),
+                id,
+                scope: MatchingScope::RemoteSubscribers,
+            })
+        }
+        #[cfg(not(all(feature = "session-matching", feature = "declare-subscriber")))]
+        {
+            let _ = callback;
+            Err(MatchingListenerError::FeatureDisabled)
+        }
+    }
 }
 
 /// R244 — aliased-keyexpr counterpart of [`Publisher`]. Holds

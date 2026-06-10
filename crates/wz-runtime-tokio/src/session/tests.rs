@@ -4851,3 +4851,116 @@ fn liveliness_token_id_counter_independent_of_request_id() {
     );
     std::mem::forget(t);
 }
+
+// ── R311kh Publisher/Querier::declare_matching_listener ──
+
+/// The publisher listener fires on transitions only: silent at
+/// registration, `true` when a matching remote subscriber declares,
+/// `false` when it undeclares, silent on a non-matching declare, and
+/// silent after `undeclare()` — driven through the production
+/// `dispatch_declare` path the drive loop runs.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[test]
+fn publisher_matching_listener_fires_on_transitions_only() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = pubr
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+    assert!(log.lock().unwrap().is_empty(), "registration never fires");
+
+    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(body, &HashMap::new());
+    };
+
+    dispatch(&make_decl_subscriber(1, "garage/door"));
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "non-matching remote subscriber is silent"
+    );
+
+    dispatch(&make_decl_subscriber(2, "home/temp"));
+    assert_eq!(*log.lock().unwrap(), vec![true], "flip false -> true");
+    assert_eq!(
+        pubr.get_matching_status(),
+        MatchingStatus { matching: true },
+        "poll agrees with the callback verdict"
+    );
+
+    dispatch(&make_undecl_subscriber(2));
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true, false],
+        "flip true -> false"
+    );
+
+    assert!(listener.undeclare(), "undeclare removes the watch");
+    dispatch(&make_decl_subscriber(3, "home/temp"));
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![true, false],
+        "no fire after undeclare"
+    );
+}
+
+/// Q-side mirror: the querier listener watches the remote QUERYABLE set.
+#[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
+#[test]
+fn querier_matching_listener_fires_on_remote_queryable_transitions() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = querier
+        .declare_matching_listener(move |s| log_cb.lock().unwrap().push(s.matching))
+        .expect("session-matching is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_queryables
+        .dispatch_declare(&make_decl_queryable(7, "home/temp"), &HashMap::new());
+    assert_eq!(*log.lock().unwrap(), vec![true]);
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_queryables
+        .dispatch_declare(&make_undecl_queryable(7), &HashMap::new());
+    assert_eq!(*log.lock().unwrap(), vec![true, false]);
+
+    assert!(listener.undeclare());
+}
+
+/// R311g1 NEG — with `session-matching` off the method keeps its
+/// signature and rejects typed (build-time choice observed as a runtime
+/// reject, never a missing symbol). Runs in the C1j subset lanes whose
+/// base omits session-matching.
+#[cfg(all(not(feature = "session-matching"), feature = "declare-subscriber"))]
+#[test]
+fn publisher_matching_listener_rejects_typed_when_feature_off() {
+    let (session, _driver) = build_session();
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+    assert!(
+        matches!(
+            pubr.declare_matching_listener(|_| {}),
+            Err(MatchingListenerError::FeatureDisabled)
+        ),
+        "session-matching off must reject typed"
+    );
+}

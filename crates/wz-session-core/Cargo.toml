@@ -416,6 +416,16 @@ transport-keepalive = []
 # (wz-runtime-tokio), which forwards its same-named feature here.
 session-reconnect = ["alloc"]
 
+# R311kh — session-matching gates the matching-listener watch machinery
+# (zenoh-pico `Z_FEATURE_MATCHING` parity, default-on in pico's CMake
+# cache): the `declare::matching` MatchingSink/MatchingWatchList seam +
+# the watch-list field and declare/undeclare-listener methods on the
+# remote subscriber / queryable registries, re-evaluated on every
+# membership mutation (the listener form of the polling
+# `get_matching_status`). Pulls `alloc` for the watch keyexpr Strings —
+# the membership table it consults is the registries' alloc-gated half.
+session-matching = ["alloc"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

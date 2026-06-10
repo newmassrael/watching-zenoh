@@ -21,8 +21,6 @@
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
-use alloc::vec::Vec;
-#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
@@ -38,10 +36,12 @@ use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
+#[cfg(feature = "alloc")]
+use crate::declare::declared_intersects;
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+use crate::declare::matching::{BoxedMatchingSink, MatchingWatchList};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-#[cfg(feature = "alloc")]
-use crate::keyexpr_match::keyexpr_intersect_patterns;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
@@ -87,6 +87,12 @@ pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink> {
     /// on it.
     #[cfg(feature = "alloc")]
     declared: HashMap<u64, String>,
+    /// R311kh — matching-listener watches (pico `Z_FEATURE_MATCHING`):
+    /// re-evaluated against the `declared` table on every membership
+    /// mutation, firing each watch's sink on a verdict flip. The
+    /// listener form of the polling `has_matching` consult.
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    matching_watches: MatchingWatchList<BoxedMatchingSink>,
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for RemoteSubscriberRegistry<D, U> {
@@ -110,6 +116,8 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
             observers: DeclObserverPair::new(),
             #[cfg(feature = "alloc")]
             declared: HashMap::new(),
+            #[cfg(all(feature = "session-matching", feature = "alloc"))]
+            matching_watches: MatchingWatchList::new(),
         }
     }
 
@@ -173,11 +181,36 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// itself is symmetric.
     #[cfg(feature = "alloc")]
     pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
-        let publish_chunks: Vec<&str> = publish_keyexpr.split('/').collect();
-        self.declared.values().any(|peer_keyexpr| {
-            let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
-            keyexpr_intersect_patterns(&peer_chunks, &publish_chunks)
-        })
+        declared_intersects(&self.declared, publish_keyexpr)
+    }
+
+    /// R311kh — register a matching-listener watch over `keyexpr` (pico
+    /// `Z_FEATURE_MATCHING`): the sink fires on every VERDICT FLIP of
+    /// [`Self::has_matching`]`(keyexpr)` caused by an inbound
+    /// `DeclSubscriber` / `UndeclSubscriber`, seeded with the CURRENT
+    /// verdict so registration itself never fires (pico transition-only
+    /// semantics; `get_matching_status` remains the poll for the current
+    /// value). Returns the watch id for
+    /// [`Self::undeclare_matching_listener`].
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
+        let initial = self.has_matching(keyexpr);
+        self.matching_watches
+            .register(String::from(keyexpr), initial, sink)
+    }
+
+    /// R311kh — remove a matching-listener watch. Returns whether one
+    /// was removed (pico `_z_matching_listener_undeclare`).
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn undeclare_matching_listener(&mut self, id: u64) -> bool {
+        self.matching_watches.unregister(id)
+    }
+
+    /// Number of registered matching-listener watches (observability /
+    /// test helper).
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn matching_listener_len(&self) -> usize {
+        self.matching_watches.len()
     }
 
     /// R311gb (Track 2) — no-heap declaration fire: hand each installed
@@ -239,6 +272,13 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                     keyexpr: &resolved,
                 };
                 self.dispatch_declared_borrowed(&view);
+                // R311kh — membership changed: re-evaluate the matching
+                // watches (flip-fire only). Disjoint field borrows: the
+                // watch list is &mut, the membership table is read
+                // through the free-fn consult.
+                #[cfg(feature = "session-matching")]
+                self.matching_watches
+                    .reevaluate(|k| declared_intersects(&self.declared, k));
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
                 // R290 — drop the membership entry first so a
@@ -247,6 +287,10 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // undeclare state.
                 self.declared.remove(&undecl.id);
                 self.dispatch_undeclared(undecl.id);
+                // R311kh — see the DeclSubscriber arm.
+                #[cfg(feature = "session-matching")]
+                self.matching_watches
+                    .reevaluate(|k| declared_intersects(&self.declared, k));
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -464,6 +508,58 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         assert_eq!(*captured, vec![42]);
+    }
+
+    /// R311kh — matching listener flip-fires through the production
+    /// dispatch: a matching DeclSubscriber flips false->true, the
+    /// matching UndeclSubscriber flips back true->false, a NON-matching
+    /// declare never fires, and registration itself is silent (pico
+    /// transition-only semantics).
+    #[cfg(feature = "session-matching")]
+    #[test]
+    fn matching_listener_flips_on_membership_mutation() {
+        use crate::declare::matching::BoxedMatchingSink;
+
+        let mut reg = RemoteSubscriberRegistry::new();
+        let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_cb = log.clone();
+        let id = reg.declare_matching_listener(
+            "home/temp",
+            BoxedMatchingSink::new(move |m| log_cb.lock().unwrap().push(m)),
+        );
+        assert_eq!(reg.matching_listener_len(), 1);
+        assert!(log.lock().unwrap().is_empty(), "registration never fires");
+
+        // Non-matching peer subscriber: membership changes, verdict does not.
+        let body = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(
+            1,
+            0,
+            Some("garage/door"),
+        ));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "non-matching declare is silent"
+        );
+
+        // Matching peer subscriber (literal-literal byte-equal — no
+        // wildcard feature dependency): false -> true fires once.
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(2, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert_eq!(*log.lock().unwrap(), vec![true]);
+
+        // Its undeclare: true -> false fires once more.
+        let body = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(2));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert_eq!(*log.lock().unwrap(), vec![true, false]);
+
+        // After undeclare-listener, further mutations are silent.
+        assert!(reg.undeclare_matching_listener(id));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(3, 0, Some("home/x")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert_eq!(*log.lock().unwrap(), vec![true, false]);
     }
 
     #[test]

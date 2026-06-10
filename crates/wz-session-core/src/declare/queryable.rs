@@ -19,8 +19,6 @@
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
-use alloc::vec::Vec;
-#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
@@ -31,10 +29,12 @@ use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
+#[cfg(feature = "alloc")]
+use crate::declare::declared_intersects;
+#[cfg(all(feature = "session-matching", feature = "alloc"))]
+use crate::declare::matching::{BoxedMatchingSink, MatchingWatchList};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-#[cfg(feature = "alloc")]
-use crate::keyexpr_match::keyexpr_intersect_patterns;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
 use crate::registry_error::RegisterError;
@@ -82,6 +82,13 @@ pub struct RemoteQueryableRegistry<D: DeclSink, U: UndeclSink> {
     /// `has_matching`); `alloc`-gated per the borrow boundary.
     #[cfg(feature = "alloc")]
     declared: HashMap<u64, String>,
+    /// R311kh — matching-listener watches (pico `Z_FEATURE_MATCHING`),
+    /// the Q-side mirror of the subscriber registry's list: re-evaluated
+    /// against the `declared` table on every membership mutation, firing
+    /// each watch's sink on a verdict flip (the listener form of the
+    /// polling `Querier::get_matching_status`).
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    matching_watches: MatchingWatchList<BoxedMatchingSink>,
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for RemoteQueryableRegistry<D, U> {
@@ -104,6 +111,8 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
             observers: DeclObserverPair::new(),
             #[cfg(feature = "alloc")]
             declared: HashMap::new(),
+            #[cfg(all(feature = "session-matching", feature = "alloc"))]
+            matching_watches: MatchingWatchList::new(),
         }
     }
 
@@ -187,11 +196,33 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// answer for the peer-declared domain.
     #[cfg(feature = "alloc")]
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
-        let query_chunks: Vec<&str> = query_keyexpr.split('/').collect();
-        self.declared.values().any(|peer_keyexpr| {
-            let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
-            keyexpr_intersect_patterns(&peer_chunks, &query_chunks)
-        })
+        declared_intersects(&self.declared, query_keyexpr)
+    }
+
+    /// R311kh — register a matching-listener watch over `keyexpr`, the
+    /// Q-side mirror of the subscriber registry's
+    /// `declare_matching_listener`: fires on every verdict flip of
+    /// [`Self::has_matching`]`(keyexpr)` caused by an inbound
+    /// `DeclQueryable` / `UndeclQueryable`, seeded with the current
+    /// verdict (registration never fires).
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn declare_matching_listener(&mut self, keyexpr: &str, sink: BoxedMatchingSink) -> u64 {
+        let initial = self.has_matching(keyexpr);
+        self.matching_watches
+            .register(String::from(keyexpr), initial, sink)
+    }
+
+    /// R311kh — remove a matching-listener watch. Returns whether one
+    /// was removed.
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn undeclare_matching_listener(&mut self, id: u64) -> bool {
+        self.matching_watches.unregister(id)
+    }
+
+    /// Number of registered matching-listener watches.
+    #[cfg(all(feature = "session-matching", feature = "alloc"))]
+    pub fn matching_listener_len(&self) -> usize {
+        self.matching_watches.len()
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -242,6 +273,11 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
                     keyexpr: &resolved,
                 };
                 self.dispatch_declared_borrowed(&view);
+                // R311kh — membership changed: flip-fire the matching
+                // watches (disjoint field borrows via the free-fn consult).
+                #[cfg(feature = "session-matching")]
+                self.matching_watches
+                    .reevaluate(|k| declared_intersects(&self.declared, k));
             }
             DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
                 // R288 — drop the membership entry first so a
@@ -250,6 +286,10 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
                 // undeclare state. Missing-id remove is silent.
                 self.declared.remove(&undecl.id);
                 self.dispatch_undeclared(undecl.id);
+                // R311kh — see the DeclQueryable arm.
+                #[cfg(feature = "session-matching")]
+                self.matching_watches
+                    .reevaluate(|k| declared_intersects(&self.declared, k));
             }
             // Other sub-variants do not reach this registry.
             _ => {}
