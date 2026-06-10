@@ -1972,7 +1972,7 @@ mod fragment_tx_tests {
 
 /// R311kf — TX serialization parity: SN mint order == wire order under
 /// concurrent senders. pico holds its TX mutex across mint + write
-/// (common/tx.c:273-305); wz's `batch_tx` lock now covers the immediate
+/// (common/tx.c:273-305); wz's `tx_mutex` (R311km name) covers the immediate
 /// path's mint + emit too, so the recorded wire SN sequence of N
 /// concurrent frame-per-message sends is exactly the mint sequence. Any
 /// regression that re-opens the mint→emit window surfaces here as an

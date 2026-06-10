@@ -165,7 +165,7 @@ use crate::response_final_build::*;
 /// observability and tests; the flush trigger is the byte budget
 /// (`params.batch_size`), never the count.
 ///
-/// R311kf — the struct (and the `batch_tx` mutex around it) is UNGATED:
+/// R311kf — the struct (and the `tx_mutex` lock around it) is UNGATED:
 /// the mutex doubles as the session's TX-ORDER serialization lock (pico
 /// holds its TX mutex across SN mint + wire write for every sender,
 /// common/tx.c:273-305), which every build needs — with
@@ -335,7 +335,10 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// R311kf — ungated: this mutex is ALSO the TX-order serialization
     /// lock (mint + emit under one hold, pico TX-mutex parity); see the
     /// [`BatchTx`] doc.
-    pub batch_tx: R::Mutex<BatchTx>,
+    /// R311km — renamed from `batch_tx`: the name leads with the
+    /// ungated lock role (pico `_z_transport_common_t._mutex_tx`
+    /// parity); [`BatchTx`] keeps naming the guarded coalescing state.
+    pub tx_mutex: R::Mutex<BatchTx>,
     /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
     /// `_z_session_t._local_resources` slot: every time
     /// [`Self::send_declare_keyexpr`] emits a `Declare(DeclKexpr)`
@@ -625,7 +628,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             rx_sn: R::new_mutex(crate::sn::RxSn::default()),
-            batch_tx: R::new_mutex(BatchTx::default()),
+            tx_mutex: R::new_mutex(BatchTx::default()),
             outbound_mappings: R::new_mutex(HashMap::<u64, String>::new()),
             #[cfg(feature = "session-reconnect")]
             declaration_cache: R::new_mutex(Vec::<CachedDeclaration>::new()),
@@ -1085,7 +1088,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session mutex scopes stay disjoint by discipline.
         let sn_mask = self.negotiated_sn_mask();
 
-        // R311jq / R311kf — ONE `batch_tx` lock hold covers the WHOLE TX
+        // R311jq / R311kf — ONE `tx_mutex` hold covers the WHOLE TX
         // decision: the batching absorb / overflow-reopen / oversize arms
         // AND the immediate frame-per-message path, mint through emit.
         // pico holds its TX mutex across SN mint + wire write for EVERY
@@ -1107,7 +1110,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // non-oversize call is at most two emits (overflow flush + one
         // frame), each within the negotiated MTU. Revisit if a
         // preemptive MCU profile lands (5.P caveat, R311kg/R311kj).
-        R::with_mutex_mut(&self.batch_tx, |batch| {
+        R::with_mutex_mut(&self.tx_mutex, |batch| {
             #[cfg(feature = "transport-batching")]
             if batch.active {
                 use crate::frame_encode::{begin_frame, frame_flags, frame_wire_reliability};
@@ -1243,7 +1246,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the peer's half-window SN check drops reordered frames).
     #[cfg(feature = "transport-batching")]
     fn flush_open_batch(&self) {
-        R::with_mutex_mut(&self.batch_tx, |batch| {
+        R::with_mutex_mut(&self.tx_mutex, |batch| {
             if batch.buf.is_empty() {
                 return;
             }
@@ -1272,7 +1275,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn batch_start(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
-            R::with_mutex_mut(&self.batch_tx, |batch| batch.active = true);
+            R::with_mutex_mut(&self.tx_mutex, |batch| batch.active = true);
             Ok(())
         }
         #[cfg(not(feature = "transport-batching"))]
@@ -1299,7 +1302,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn batch_stop(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
-            R::with_mutex_mut(&self.batch_tx, |batch| batch.active = false);
+            R::with_mutex_mut(&self.tx_mutex, |batch| batch.active = false);
             self.flush_open_batch();
             Ok(())
         }
@@ -2811,7 +2814,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
             R::with_mutex_mut(&self.rx_sn, |s| *s = crate::sn::RxSn::default());
-            R::with_mutex_mut(&self.batch_tx, |batch| *batch = BatchTx::default());
+            R::with_mutex_mut(&self.tx_mutex, |batch| *batch = BatchTx::default());
             // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
             // reset must not reorder against a straggling in-flight mint.
             self.outbound_frame_sn
