@@ -45,7 +45,13 @@ const FIXTURE_WHATAMI_API: u8 = 0x02; // Peer
 const FIXTURE_ZID: [u8; 4] = [0x01, 0x01, 0x01, 0x01];
 const FIXTURE_SEQ_NUM_RES: u8 = 0;
 const FIXTURE_REQ_ID_RES: u8 = 0;
-const FIXTURE_BATCH_SIZE: u16 = 0;
+// R311kk — a REAL advertised value: wz's internal `0` means "unset"
+// and never reaches the wire any more (`effective_batch_size`
+// normalizes it to 65535 at encode, R311kj), so a 0 input would make
+// the two encoders disagree by design. The byte-parity property is
+// "same logical advertisement -> same bytes"; the 0-normalization
+// itself is pinned by wz-runtime-tokio's init_advertisement_tests.
+const FIXTURE_BATCH_SIZE: u16 = 1024;
 const FIXTURE_COOKIE: &[u8] = &[];
 
 // Oracle ext-chain values — same as layer3_ext_envelope.rs.
@@ -184,7 +190,10 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     expected.extend_from_slice(&pico_oracle_ext_chain());
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    // R311kk — feed wz the SAME advertisement the pico oracle encodes.
+    let mut params = fixture_session_init_params();
+    params.batch_size = FIXTURE_BATCH_SIZE;
+    let actions = new_session_actions(driver, params, TokioTime::new());
     actions.set_ext_chain(ExtChainRole::InitAck, wz_oracle_chain());
 
     let actual = actions
@@ -208,7 +217,10 @@ fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     expected.extend_from_slice(&pico_init_body(parent_flags));
 
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver);
-    let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
+    // R311kk — feed wz the SAME advertisement the pico oracle encodes.
+    let mut params = fixture_session_init_params();
+    params.batch_size = FIXTURE_BATCH_SIZE;
+    let actions = new_session_actions(driver, params, TokioTime::new());
     // R121f1 — `SessionLinkActions::new` now seeds the Init ext chains
     // with the wire-spec-mandatory patch entry; this test re-asserts
     // the encoder's "empty chain → no Z flag + no trailing bytes"

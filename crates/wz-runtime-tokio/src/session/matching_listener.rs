@@ -22,9 +22,19 @@ use super::*;
 /// Publisher listeners watch remote SUBSCRIBERS; querier listeners watch
 /// remote QUERYABLES — the same split as the two `get_matching_status`
 /// consults.
+///
+/// R311kk — each variant is gated on the features that can CONSTRUCT it
+/// (the `declare_matching_listener` arm that returns the handle): under
+/// a subset where a registry is off, its variant is uninhabitable
+/// rather than dead code (the C1j/C4c deny-warnings lanes reject a
+/// never-constructed variant). With both off the enum is empty and
+/// [`MatchingListener::undeclare`]'s match is the zero-arm match on an
+/// uninhabited type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MatchingScope {
+    #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
     RemoteSubscribers,
+    #[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
     RemoteQueryables,
 }
 
@@ -48,27 +58,23 @@ impl<R: SessionRuntime, T: TimeSource> MatchingListener<R, T> {
     /// whether a watch was removed (`false` = already removed, e.g. a
     /// clone of the underlying session undeclared it first).
     pub fn undeclare(self) -> bool {
+        // R311g1 / R311kk — bind the handle state unconditionally: under
+        // a feature subset where both registry variants are cfg-off (e.g.
+        // the C1j handshake-only lane) the zero-arm match below reads
+        // neither field and the deny-warnings build would reject them.
+        let _ = (&self.session, self.id);
+        // Each arm rides its variant's gate (see [`MatchingScope`]); a
+        // variant that cannot be constructed has no arm, and with both
+        // off this is the zero-arm match on an uninhabited enum.
         match self.scope {
-            MatchingScope::RemoteSubscribers => {
-                #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
-                {
-                    R::with_mutex_mut(self.session.observer(), |obs| {
-                        obs.remote_subscribers.undeclare_matching_listener(self.id)
-                    })
-                }
-                #[cfg(not(all(feature = "session-matching", feature = "declare-subscriber")))]
-                false
-            }
-            MatchingScope::RemoteQueryables => {
-                #[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
-                {
-                    R::with_mutex_mut(self.session.observer(), |obs| {
-                        obs.remote_queryables.undeclare_matching_listener(self.id)
-                    })
-                }
-                #[cfg(not(all(feature = "session-matching", feature = "declare-queryable")))]
-                false
-            }
+            #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+            MatchingScope::RemoteSubscribers => R::with_mutex_mut(self.session.observer(), |obs| {
+                obs.remote_subscribers.undeclare_matching_listener(self.id)
+            }),
+            #[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
+            MatchingScope::RemoteQueryables => R::with_mutex_mut(self.session.observer(), |obs| {
+                obs.remote_queryables.undeclare_matching_listener(self.id)
+            }),
         }
     }
 }
