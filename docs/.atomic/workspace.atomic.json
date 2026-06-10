@@ -32895,6 +32895,44 @@
         "debt-clearing track remaining: unicast RX Frame SN gate; negotiated-min MTU (peer batch_size); mint-vs-enqueue race; matching-listener callback; MCU reconnect seam; MCU critical_section span"
       ]
     },
+    "Round 311kd": {
+      "decision_summary": "R311kd negotiated-min MTU: outbound frame budget = min(own, peer-advertised batch_size) with 0-as-unset sentinel; closes the R311jm honor-peer-batch-size carry (pico wbuf-sizing parity).",
+      "changes_bullets": [
+        "SessionLinkActions::negotiated_batch_mtu: min(own, peer-captured batch_size) with 0 as the unset/65535 sentinel on either side (negotiated_sn_mask twin; resolves before the batch lock, disjoint-mutex discipline)",
+        "dispatch_network_message sizes against the negotiated min instead of the local advertisement only (pico unicast/transport.c:47-49 wbuf = min(link MTU, negotiated batch_size))",
+        "transport-batching-off degrade documented: peer projection clamps to 65535 (R311cb), min falls back to the local advertisement (pre-R311kd behavior)"
+      ],
+      "verification_bullets": [
+        "negotiated_mtu_tests x3 (wz-runtime-tokio session_glue): min-of-own-and-peer via production handle_inbound InitAck capture; 0-sentinel on both sides; behavioral peer-64B-budget fragments a ~200B PUT with every frame within the peer budget",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "wz advertises params.batch_size verbatim incl. the 0 sentinel; a literal-0 advertisement is only interpreted as unset by wz peers (pico never advertises 0) - revisit if a third-party peer treats 0 literally",
+        "debt track remaining: unicast RX Frame SN gate; mint-vs-enqueue race; matching-listener; MCU reconnect seam; MCU critical_section span"
+      ],
+      "publishable_decision_summary": "R311kd negotiated-min MTU: outbound frame budget = min(own, peer-advertised batch_size) with 0-as-unset sentinel; closes the R311jm honor-peer-batch-size carry (pico wbuf-sizing parity).",
+      "publishable_changes_bullets": [
+        "SessionLinkActions::negotiated_batch_mtu: min(own, peer-captured batch_size) with 0 as the unset/65535 sentinel on either side (negotiated_sn_mask twin; resolves before the batch lock, disjoint-mutex discipline)",
+        "dispatch_network_message sizes against the negotiated min instead of the local advertisement only (pico unicast/transport.c:47-49 wbuf = min(link MTU, negotiated batch_size))",
+        "transport-batching-off degrade documented: peer projection clamps to 65535 (R311cb), min falls back to the local advertisement (pre-R311kd behavior)"
+      ],
+      "publishable_verification_bullets": [
+        "negotiated_mtu_tests x3 (wz-runtime-tokio session_glue): min-of-own-and-peer via production handle_inbound InitAck capture; 0-sentinel on both sides; behavioral peer-64B-budget fragments a ~200B PUT with every frame within the peer budget",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz advertises params.batch_size verbatim incl. the 0 sentinel; a literal-0 advertisement is only interpreted as unset by wz peers (pico never advertises 0) - revisit if a third-party peer treats 0 literally",
+        "debt track remaining: unicast RX Frame SN gate; mint-vs-enqueue race; matching-listener; MCU reconnect seam; MCU critical_section span"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
