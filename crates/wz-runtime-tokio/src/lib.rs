@@ -377,6 +377,21 @@ pub mod udp_pipeline;
 #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
 pub mod session_open;
 
+/// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
+/// [`session_open`]: `open_session_with_reconnect` wires the actions
+/// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs
+/// the open loop + declaration replay whenever the steady-state loop
+/// terminates without the caller's stop signal. zenoh-pico
+/// `Z_FEATURE_AUTO_RECONNECT` (`_z_client_reopen_task_fn`) parity. Gated
+/// like [`session_open`] (it re-runs that module's open loop) plus the
+/// `session-reconnect` state tier it drives.
+#[cfg(all(
+    feature = "session-reconnect",
+    feature = "transport-link-tcp",
+    feature = "transport-unicast"
+))]
+pub mod reconnect;
+
 /// The 4-method `LinkDriver` trait. Matches
 /// docs/runtime-crate-tokio.md §2.1. Trust-class flavored variants
 /// (untrusted / session_arming / established_session) deferred to

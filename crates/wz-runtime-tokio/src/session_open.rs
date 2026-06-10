@@ -276,7 +276,10 @@ fn wire_session_engine(
 /// per §2.7 anti-amplification). So a timed-out accept is reported as
 /// `Terminal`, intentionally indistinguishable from a peer close: the silent
 /// drop spends no Close frame on a possibly-spoofed peer.
-async fn drive_open_loop(
+/// pub(crate) for the A4b reconnect supervisor (`crate::reconnect`), which
+/// re-runs this same open loop over a re-dialed link with the surviving
+/// actions bundle.
+pub(crate) async fn drive_open_loop(
     mut inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
     mut engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
@@ -294,8 +297,15 @@ async fn drive_open_loop(
     let mut deadline_tracker = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
     let mut iter: usize = 0;
     loop {
-        let trace = actions.trace_snapshot();
-        if trace.record_established_at >= 1 {
+        // A4 (R311js) — Established is detected via the `established_at`
+        // STATE slot (`is_established`), not the cumulative
+        // `record_established_at` trace counter: the counter survives a
+        // `reset_for_reopen`, so a reconnect re-run of this loop over the
+        // surviving actions bundle would false-positive on the FIRST
+        // connection's count and skip the re-handshake. Equivalent on a
+        // fresh bundle (the same `Established.onentry` action populates
+        // both).
+        if actions.is_established() {
             return Ok(OpenedSession {
                 engine,
                 actions,
@@ -311,6 +321,7 @@ async fn drive_open_loop(
             // inactivity timeout reaches Closed without a close-reason action
             // (count == 0), so the Initiator timeout is distinguishable while
             // the accept timeout folds into Terminal (silent-drop by design).
+            let trace = actions.trace_snapshot();
             return Err(
                 if trace.set_close_reason_count >= 1 && trace.close_reason == CloseReason::Generic {
                     OpenError::HandshakeTimeout

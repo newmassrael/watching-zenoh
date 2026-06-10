@@ -114,7 +114,10 @@ pub(crate) fn recording_driver() -> Arc<RecordingLinkDriver> {
 /// A4 — [`recording_actions`] variant that accepts the caller's driver
 /// (e.g. a `SwappableLink` wrapping a [`RecordingLinkDriver`]) so a test
 /// can interpose on the link seam while keeping the deterministic
-/// [`fixture_session_init_params`].
+/// [`fixture_session_init_params`]. Gated like its sole consumer
+/// (`session_glue::reconnect_tx_tests`) so the C1j deny-warnings subset
+/// lane (no `session-reconnect`) does not see it as dead code.
+#[cfg(feature = "session-reconnect")]
 pub(crate) fn recording_actions_with_driver(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
 ) -> Arc<SessionLinkActions> {

@@ -930,7 +930,8 @@
         "Active session-domain count now 3 (open/accept/multicast); multicast FSM is handshake-free.",
         "session-reconnect (R311jr) = state tier only; re-dial supervisor is the A4b carry, not yet e2e.",
         "SwappableLink needs LinkSink: Send — lwIP Rc sink is !Send; MCU reconnect = follow-up seam.",
-        "reset re-seeds params.initial_sn where pico mints a fresh random SN; OpenSyn renegotiates either."
+        "reset re-seeds params.initial_sn where pico mints a fresh random SN; OpenSyn renegotiates either.",
+        "A4b (R311js) lands the re-dial supervisor: session-reconnect is e2e on AP/tokio; MCU still carried."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32315,6 +32316,56 @@
         "MCU follow-up: Rc<dyn> sink is !Send so SwappableLink is AP-only; bounded no-alloc cache + single-task swap seam (same staging as MCU TX fragmentation R311jm)",
         "accepted parity gap (caveat on 5-4-session): pico mints fresh random initial_sn per reopen; wz re-seeds params.initial_sn - equivalent because OpenSyn renegotiates the start value",
         "prior carries unchanged: negotiated-min MTU (R311jm); non-batched mint-vs-enqueue order race; MCU critical_section span during batch emits (R311jq)"
+      ]
+    },
+    "Round 311js": {
+      "decision_summary": "R311js A4b reconnect supervisor: open_session_with_reconnect + ReconnectingSession::drive (re-dial/re-handshake/replay, pico _z_client_reopen_task_fn parity); real-TCP e2e 10/10; A4 reconnect now end-to-end.",
+      "changes_bullets": [
+        "wz-runtime-tokio reconnect.rs (new): open_session_with_reconnect wires actions over SwappableLink; ReconnectingSession::drive supervises steady loop + reopen loop (reset -> re-dial -> swap -> fresh engine on same actions -> drive_open_loop -> replay_declarations)",
+        "ReconnectPolicy defaults = pico literals (1s retry, unbounded attempts); transient set = Dial/LinkLost/HandshakeTimeout/Terminal (pico OPEN/SCOUT/TX/RX_FAILED mirror); BadLocator/IterationLimit give up",
+        "stop discipline = caller flag checked at loop boundaries (pico: reopen task exits on z_close-emptied config); GaveUp wraps Open vs Replay (replay reject = invariant breach, not retried)",
+        "drive_open_loop Established check trace-counter -> is_established() state slot (cumulative counter false-positives on reconnect re-run; equivalent on fresh bundle); fn pub(crate) for the supervisor",
+        "session_reconnect_e2e: real-TCP loopback, conn1 declare -> abrupt sever -> re-dial + re-handshake -> conn2 observes replayed Declare verbatim (Debug-render compare); single-iteration drive chunks so the fixture returns on observation"
+      ],
+      "verification_bullets": [
+        "session_reconnect_e2e 10/10 consecutive PASS direct-binary runs (no-flaky-ever gate); declares_conn2 == declares_conn1 verbatim + ReconnectDriveOutcome::Stopped",
+        "existing open-path tests unregressed (accept_and_open_session 2 PASS + 1 ignored); clippy --all-targets 0 warnings",
+        "full host run-ci EXIT 0",
+        "C1j deny-warnings subset caught a reconnect-gated fixture leaking dead-code into no-reconnect builds; fixed by gating recording_actions_with_driver like its consumer; C1j re-run + full run-ci EXIT 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "A4c: facade wz forward + presets (ap-client/-full/zenoh-cpp follow pico default-ON) + FeatureDisabled NEG ride for a no-session-reconnect subset lane + session-fsm.md prose note",
+        "Session-tier ergonomics: ReconnectingSession exposes raw actions; a Session<R,T>-level wrapper (auto re-wire + reconnect callback) is a follow-up design point",
+        "trace-based HandshakeTimeout classification is cumulative across reconnect attempts (set_close_reason_count survives reset) - both outcomes are transient to the supervisor so no functional impact; tidy if close-reason trace ever feeds non-retry logic",
+        "MCU follow-up unchanged (R311jr carry): Rc sink !Send, bounded no-alloc cache, single-task swap seam",
+        "prior carries unchanged: negotiated-min MTU (R311jm); non-batched mint-vs-enqueue order race; MCU critical_section span (R311jq)"
+      ],
+      "publishable_decision_summary": "R311js A4b reconnect supervisor: open_session_with_reconnect + ReconnectingSession::drive (re-dial/re-handshake/replay, pico _z_client_reopen_task_fn parity); real-TCP e2e 10/10; A4 reconnect now end-to-end.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio reconnect.rs (new): open_session_with_reconnect wires actions over SwappableLink; ReconnectingSession::drive supervises steady loop + reopen loop (reset -> re-dial -> swap -> fresh engine on same actions -> drive_open_loop -> replay_declarations)",
+        "ReconnectPolicy defaults = pico literals (1s retry, unbounded attempts); transient set = Dial/LinkLost/HandshakeTimeout/Terminal (pico OPEN/SCOUT/TX/RX_FAILED mirror); BadLocator/IterationLimit give up",
+        "stop discipline = caller flag checked at loop boundaries (pico: reopen task exits on z_close-emptied config); GaveUp wraps Open vs Replay (replay reject = invariant breach, not retried)",
+        "drive_open_loop Established check trace-counter -> is_established() state slot (cumulative counter false-positives on reconnect re-run; equivalent on fresh bundle); fn pub(crate) for the supervisor",
+        "session_reconnect_e2e: real-TCP loopback, conn1 declare -> abrupt sever -> re-dial + re-handshake -> conn2 observes replayed Declare verbatim (Debug-render compare); single-iteration drive chunks so the fixture returns on observation"
+      ],
+      "publishable_verification_bullets": [
+        "session_reconnect_e2e 10/10 consecutive PASS direct-binary runs (no-flaky-ever gate); declares_conn2 == declares_conn1 verbatim + ReconnectDriveOutcome::Stopped",
+        "existing open-path tests unregressed (accept_and_open_session 2 PASS + 1 ignored); clippy --all-targets 0 warnings",
+        "full host run-ci EXIT 0",
+        "C1j deny-warnings subset caught a reconnect-gated fixture leaking dead-code into no-reconnect builds; fixed by gating recording_actions_with_driver like its consumer; C1j re-run + full run-ci EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A4c: facade wz forward + presets (ap-client/-full/zenoh-cpp follow pico default-ON) + FeatureDisabled NEG ride for a no-session-reconnect subset lane + session-fsm.md prose note",
+        "Session-tier ergonomics: ReconnectingSession exposes raw actions; a Session<R,T>-level wrapper (auto re-wire + reconnect callback) is a follow-up design point",
+        "trace-based HandshakeTimeout classification is cumulative across reconnect attempts (set_close_reason_count survives reset) - both outcomes are transient to the supervisor so no functional impact; tidy if close-reason trace ever feeds non-retry logic",
+        "MCU follow-up unchanged (R311jr carry): Rc sink !Send, bounded no-alloc cache, single-task swap seam",
+        "prior carries unchanged: negotiated-min MTU (R311jm); non-batched mint-vs-enqueue order race; MCU critical_section span (R311jq)"
       ]
     },
     "Round 311k": {
