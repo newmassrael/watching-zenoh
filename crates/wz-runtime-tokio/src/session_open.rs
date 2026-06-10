@@ -438,12 +438,45 @@ pub async fn initiate_and_open_session(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
-    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    let actions = new_session_actions(outbound, params, clock);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
 
+/// R311ju — the single home of the Initiator bring-up sequence: build a
+/// fresh engine over `actions`, dispatch the role-start activation
+/// (`OutboundStart` -> LinkOpening, where `link_driver_open` is a no-op on
+/// an already-connected transport; `LinkOpened` -> SentInitSyn, which fires
+/// `send_init_syn` — the first wire byte), and drive [`drive_open_loop`] to
+/// Established.
+///
+/// Extracted from the A4b session review (F1): the activation order is
+/// protocol-critical and was repeated verbatim across
+/// [`initiate_and_open_session`], `reconnect::open_session_with_reconnect`,
+/// and every `reconnect` reopen attempt — three drift-prone copies. All
+/// three now route here; the engine is built INSIDE so a reopen attempt
+/// over a surviving actions bundle and a first open over a fresh one share
+/// the exact same body.
+pub(crate) async fn initiator_open(
+    inbound: InboundLink,
+    actions: Arc<SessionLinkActions>,
+    writer_handle: TokioJoinHandle<()>,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
     // Initiator activation -> SentInitSyn (send_init_syn enqueues InitSyn).
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
-
     drive_open_loop(
         inbound,
         actions,

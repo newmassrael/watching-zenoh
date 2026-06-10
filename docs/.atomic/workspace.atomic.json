@@ -931,7 +931,8 @@
         "session-reconnect (R311jr) = state tier only; re-dial supervisor is the A4b carry, not yet e2e.",
         "SwappableLink needs LinkSink: Send — lwIP Rc sink is !Send; MCU reconnect = follow-up seam.",
         "reset re-seeds params.initial_sn where pico mints a fresh random SN; OpenSyn renegotiates either.",
-        "A4b (R311js) lands the re-dial supervisor: session-reconnect is e2e on AP/tokio; MCU still carried."
+        "A4b (R311js) lands the re-dial supervisor: session-reconnect is e2e on AP/tokio; MCU still carried.",
+        "reconnect reset drops an open batch window (msgs + flag) — pico parity, batch dies with transport."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32406,6 +32407,48 @@
         "A4 track CLOSED (state tier R311jr + supervisor R311js + composition R311jt); NEXT = A1 multicast DATA plane (deliver multicast Frame payloads to subscriber/queryable registries - transport peer-attribution done at R311jk)",
         "open A4 follow-ups: MCU reconnect (Rc !Send swap seam + bounded no-alloc cache); Session<R,T>-tier reconnect wrapper ergonomics; FeatureDisabled NEG ride on a no-session-reconnect subset lane",
         "prior carries unchanged: negotiated-min MTU (R311jm); non-batched mint-vs-enqueue order race; MCU critical_section span (R311jq)"
+      ]
+    },
+    "Round 311ju": {
+      "decision_summary": "R311ju A4 session-review fixes: F1 initiator_open single-home (3 verbatim copies of the activation sequence collapsed), F4 ap-demo Established polls -> is_established state SSOT, F5 batch-window caveat. F2/F3/F6 carried.",
+      "changes_bullets": [
+        "F1: pub(crate) initiator_open extracted (session_open.rs) = single home of engine build + OutboundStart/LinkOpened activation + drive_open_loop; initiate_and_open_session + open_session_with_reconnect + reopen open_attempt all route through it (was 3 verbatim copies of a protocol-critical sequence)",
+        "F4: wz-ap-demo 4 Established polls migrate trace_snapshot().record_established_at -> actions.is_established() (state slot is the Established SSOT since R311js; counter stays diagnostics-only)",
+        "F5: 5-4-session caveat - reconnect reset drops an open batch window (pico parity, batch state dies with the transport)"
+      ],
+      "verification_bullets": [
+        "session_reconnect_e2e 3/3 PASS post-refactor + 4 reconnect_tx unit tests; clippy 0 warnings",
+        "full host run-ci EXIT 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "F2 carry: sends during the RECONNECTING window are silently dropped (pico surfaces TX errors via transport mutex/NULL) - extend the is_established gate to the send seam, intersects the Session<R,T>-tier reconnect wrapper design",
+        "F3 carry: LivelinessGetInterest cache entries are never pruned (pico-parity leak, liveliness.c:355) - prune on the inbound DeclFinal once the liveliness-get RX arm (small-item carry) lands",
+        "F6 carry: drive(self) consumes the session (reconnects count unobservable after; GaveUp leaves handles emitting into a dead link) - Session-tier wrapper ergonomics round",
+        "NEXT = A1 multicast DATA plane (deliver multicast Frame payloads to subscriber/queryable registries; transport peer-attribution done at R311jk)",
+        "prior carries unchanged: MCU reconnect seam; negotiated-min MTU (R311jm); non-batched mint-vs-enqueue race; MCU critical_section span (R311jq)"
+      ],
+      "publishable_decision_summary": "R311ju A4 session-review fixes: F1 initiator_open single-home (3 verbatim copies of the activation sequence collapsed), F4 ap-demo Established polls -> is_established state SSOT, F5 batch-window caveat. F2/F3/F6 carried.",
+      "publishable_changes_bullets": [
+        "F1: pub(crate) initiator_open extracted (session_open.rs) = single home of engine build + OutboundStart/LinkOpened activation + drive_open_loop; initiate_and_open_session + open_session_with_reconnect + reopen open_attempt all route through it (was 3 verbatim copies of a protocol-critical sequence)",
+        "F4: wz-ap-demo 4 Established polls migrate trace_snapshot().record_established_at -> actions.is_established() (state slot is the Established SSOT since R311js; counter stays diagnostics-only)",
+        "F5: 5-4-session caveat - reconnect reset drops an open batch window (pico parity, batch state dies with the transport)"
+      ],
+      "publishable_verification_bullets": [
+        "session_reconnect_e2e 3/3 PASS post-refactor + 4 reconnect_tx unit tests; clippy 0 warnings",
+        "full host run-ci EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F2 carry: sends during the RECONNECTING window are silently dropped (pico surfaces TX errors via transport mutex/NULL) - extend the is_established gate to the send seam, intersects the Session<R,T>-tier reconnect wrapper design",
+        "F3 carry: LivelinessGetInterest cache entries are never pruned (pico-parity leak, liveliness.c:355) - prune on the inbound DeclFinal once the liveliness-get RX arm (small-item carry) lands",
+        "F6 carry: drive(self) consumes the session (reconnects count unobservable after; GaveUp leaves handles emitting into a dead link) - Session-tier wrapper ergonomics round",
+        "NEXT = A1 multicast DATA plane (deliver multicast Frame payloads to subscriber/queryable registries; transport peer-attribution done at R311jk)",
+        "prior carries unchanged: MCU reconnect seam; negotiated-min MTU (R311jm); non-batched mint-vs-enqueue race; MCU critical_section span (R311jq)"
       ]
     },
     "Round 311k": {

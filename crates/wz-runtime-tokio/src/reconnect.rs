@@ -21,8 +21,8 @@
 //!   under the transport mutex);
 //! - the reopen task = [`ReconnectingSession::drive`]'s reconnect loop:
 //!   `reset_for_reopen` (pico's fresh `_z_transport_t`) → re-dial the
-//!   retained [`ParsedLocator`] → swap → fresh engine over the same actions
-//!   → the same [`drive_open_loop`] handshake the first open used →
+//!   retained [`ParsedLocator`] → swap → the same [`initiator_open`]
+//!   bring-up the first open used (fresh engine over the same actions) →
 //!   [`SessionLinkActions::replay_declarations`] (pico's declaration-cache
 //!   walk) → resume the steady-state loop;
 //! - the suspended-sibling-tasks resume = re-entering
@@ -46,13 +46,12 @@ use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::runtime_impl::{TokioRuntime, TokioTime};
-use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
 use crate::session_glue::{
-    drive_session_until_terminal, new_session_actions, new_session_engine, BoxedLinkDriver,
-    DriverOutcome, SessionLinkActions,
+    drive_session_until_terminal, new_session_actions, BoxedLinkDriver, DriverOutcome,
+    SessionLinkActions,
 };
 use crate::session_open::{
-    dial_locator, drive_open_loop, wire_dialed_link, OpenError, OpenedSession,
+    dial_locator, initiator_open, wire_dialed_link, OpenError, OpenedSession,
 };
 
 /// Reconnect retry policy. The defaults are the pico literals:
@@ -145,15 +144,13 @@ impl ReconnectingSession {
         let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
         let old = self.swappable.swap(outbound);
         drop(old);
-        let mut engine = new_session_engine(&self.actions);
-        engine.initialize();
-        // Initiator activation — same sequence as the first open.
-        engine.process_event(E::OutboundStart);
-        engine.process_event(E::LinkOpened);
-        drive_open_loop(
+        // R311ju — engine build + Initiator activation + open loop live once
+        // in `initiator_open` (shared with the first open), so the
+        // protocol-critical activation order cannot drift between the dial
+        // path and the reopen path.
+        initiator_open(
             inbound,
             self.actions.clone(),
-            engine,
             writer_handle,
             clock,
             self.open_max_iters,
@@ -297,14 +294,11 @@ pub async fn open_session_with_reconnect(
     let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
     let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();
     let actions = new_session_actions(sink, params, clock);
-    let mut engine = new_session_engine(&actions);
-    engine.initialize();
-    engine.process_event(E::OutboundStart);
-    engine.process_event(E::LinkOpened);
-    let opened = drive_open_loop(
+    // R311ju — first open routes through the same shared `initiator_open`
+    // body every reopen attempt uses (engine build + activation + open loop).
+    let opened = initiator_open(
         inbound,
-        actions.clone(),
-        engine,
+        actions,
         writer_handle,
         clock,
         max_iters,

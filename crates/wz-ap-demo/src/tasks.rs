@@ -181,7 +181,7 @@ pub(crate) async fn declare_task<T>(
     let actions = session.actions();
     let deadline_ms = clock.now_monotonic_ms() + DECLARE_HANDSHAKE_TIMEOUT_MS;
     loop {
-        if actions.trace_snapshot().record_established_at > 0 {
+        if actions.is_established() {
             break;
         }
         if clock.now_monotonic_ms() >= deadline_ms {
@@ -273,7 +273,7 @@ where
 {
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
     loop {
-        if actions.trace_snapshot().record_established_at > 0 {
+        if actions.is_established() {
             break;
         }
         if clock.now_monotonic_ms() >= deadline_ms {
@@ -317,7 +317,7 @@ where
     let actions = session.actions();
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
     loop {
-        if actions.trace_snapshot().record_established_at > 0 {
+        if actions.is_established() {
             break;
         }
         if clock.now_monotonic_ms() >= deadline_ms {
@@ -400,7 +400,7 @@ pub(crate) async fn publisher_task<T>(
     //           expiry, framing error, etc.).
     let deadline_ms = clock.now_monotonic_ms() + PUBLISHER_HANDSHAKE_TIMEOUT_MS;
     loop {
-        if actions.trace_snapshot().record_established_at > 0 {
+        if actions.is_established() {
             break;
         }
         if clock.now_monotonic_ms() >= deadline_ms {
