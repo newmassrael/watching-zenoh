@@ -166,6 +166,12 @@ codec-init-body = ["wz-codecs/codec-init-body"]
 codec-open-body = ["wz-codecs/codec-open-body"]
 codec-keep-alive = ["wz-codecs/codec-keep-alive"]
 codec-close = ["wz-codecs/codec-close"]
+# R311kt — codec-join forwards the wz-codecs JOIN body codec. Gates the
+# `multicast_join` module (encode / decode / validate — the JOIN wire
+# SSOT hoisted from wz-runtime-tokio::multicast_glue) together with
+# `session-multicast` (JoinBaseline) + `alloc` (owned Vec encode,
+# MulticastParams Vec zid).
+codec-join = ["wz-codecs/codec-join"]
 
 # attachment domain primitive: gates the `attachment` SSOT module (the
 # one attachment-ext encode/decode pair). Selected by the

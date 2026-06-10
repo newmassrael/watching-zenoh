@@ -221,7 +221,10 @@ codec-close = ["wz-codecs/codec-close", "wz-session-core/codec-close"]
 # codec features for a future scouting-active runtime to reuse.
 codec-scout = ["wz-codecs/codec-scout"]
 codec-hello = ["wz-codecs/codec-hello"]
-codec-join = ["wz-codecs/codec-join"]
+# R311kt — codec-join now ALSO forwards wz-session-core (the hoisted
+# `multicast_join` JOIN wire SSOT this crate's drive loop consumes),
+# catalog-uniform with the other body codecs' 3-stage chain.
+codec-join = ["wz-codecs/codec-join", "wz-session-core/codec-join"]
 # R311e — codec-response-final forwards wz-codecs + gates the
 # session_glue.rs send/build/encode_frame_with/NetworkMessage variant/
 # parse arm cluster. Feature-off: queryable can't emit the terminator;

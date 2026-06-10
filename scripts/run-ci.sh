@@ -986,13 +986,17 @@ layer_c1l_reassembly() {
 # fragment SN gate + the shared ingest_multicast_fragment pipeline compose
 # session-multicast WITH reassembly (codec-push backs the FramePayload
 # fixture); the first arm keeps the without-reassembly composition honest
-# (fragment MIDs drop, nothing else regresses).
+# (fragment MIDs drop, nothing else regresses). R311kt widens the union
+# arm with codec-join: the hoisted multicast_join module (the JOIN wire
+# SSOT moved here from wz-runtime-tokio::multicast_glue) gates on
+# session-multicast + codec-join + alloc; the first arm keeps the
+# codec-join-less Router composition honest.
 layer_c1p_multicast() {
     (cd crates \
         && cargo test -p wz-session-core --features session-multicast --quiet) \
         && (cd crates \
             && cargo test -p wz-session-core \
-                --features session-multicast,reassembly,codec-push --quiet)
+                --features session-multicast,reassembly,codec-push,codec-join --quiet)
 }
 
 # ─── Layer C1q — multicast transport drive loop (Round C) ────────────

@@ -238,7 +238,9 @@ pub enum JoinOutcome {
     /// Free -> Discovered (`init_rx_seq`) -> Active.
     Admitted,
     /// The Join was from a peer already in the table; its `last_seen` was
-    /// refreshed (the peer stays Active).
+    /// refreshed and the advertised baselines (RX SN pair + lease window)
+    /// re-stored from the fresh announcement (the peer stays Active;
+    /// zenoh-pico re-copies both on every JOIN, multicast/rx.c:453-456).
     Refreshed,
     /// The Join was refused before slot allocation.
     Refused(JoinRefuse),

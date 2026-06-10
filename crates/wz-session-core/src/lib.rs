@@ -777,3 +777,16 @@ pub mod multicast_peer {
 /// generated FSM engines).
 #[cfg(feature = "session-multicast")]
 pub mod multicast_dispatch;
+
+/// R311kt — the multicast JOIN datagram surface (encode the periodic TX
+/// beacon, decode the RX classify view, validate the §3.2 rejection
+/// rules), hoisted from `wz-runtime-tokio::multicast_glue` so both
+/// runtime profiles share one JOIN wire SSOT (the multicast sibling of
+/// [`handshake_encode`]). Pure functions: codecs + [`multicast_params`] +
+/// [`sn`] only — the host drive loops own the socket + the clock.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-join",
+    feature = "alloc"
+))]
+pub mod multicast_join;
