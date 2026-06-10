@@ -936,7 +936,10 @@
         "SwappableLink needs LinkSink: Send — lwIP Rc sink is !Send; MCU reconnect = follow-up seam.",
         "reset re-seeds params.initial_sn where pico mints a fresh random SN; OpenSyn renegotiates either.",
         "A4b (R311js) lands the re-dial supervisor: session-reconnect is e2e on AP/tokio; MCU still carried.",
-        "reconnect reset drops an open batch window (msgs + flag) — pico parity, batch dies with transport."
+        "reconnect reset drops an open batch window (msgs + flag) — pico parity, batch dies with transport.",
+        "Remaining MCU reconnect: supervisor + bounded no-alloc cache, both bind at the MCU session runtime.",
+        "Today's MCU profile builds session-core WITH alloc (G.13); a no-heap cache has no binding site yet.",
+        "R311ki: LocalSwappableLink (RefCell, no-Send) closes the lwIP Rc-sink swap-seam half."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -33107,6 +33110,50 @@
         "AP-only: the watch keyexprs are alloc Strings; a no-heap MCU watch backing binds when a no-heap MCU session runtime exists (same staging as the session-reconnect MCU seam)",
         "no Drop-undeclare on the handle (explicit undeclare only, consistent with the other wz handles); revisit if the zenoh-cpp parity surface requires background listeners (pico declare_background_matching_listener)",
         "debt track remaining: MCU reconnect seam (single-task swap; bounded no-alloc cache deferred to the no-heap session runtime)"
+      ]
+    },
+    "Round 311ki": {
+      "decision_summary": "R311ki MCU reconnect swap seam: LocalSwappableLink (RefCell, no Send bound) for the lwIP Rc sink + Layer G.13 cross-compile lane; bounded no-alloc cache deferred with binding condition. Debt track complete.",
+      "changes_bullets": [
+        "wz-session-core reconnect::LocalSwappableLink - the single-task transport-replacement seam (RefCell interior, NO Send bound): the lwIP Rc<dyn BoxedLinkDriver> sink is !Send and Runtime::Mutex requires T: Send, so the mutex-backed SwappableLink cannot exist on the MCU profile; the RefCell twin encodes the single-task invariant honestly (!Sync by construction, non-reentrant documented)",
+        "SwappableLink doc updated: the \"until it grows a single-task swap seam\" staging note now points at the twin",
+        "run-ci Layer G.13: wz-session-core cross-compiles session-reconnect,session-unicast,declare-keyexpr,declare-undeclare (coherent subset - the cache hooks live in the declare send paths) on all Phase W targets",
+        "bounded no-alloc declaration cache DEFERRED with binding condition: today's MCU profile builds session-core WITH alloc; a no-heap cache twin has no binding site until a no-heap MCU session runtime exists (s5.4 caveats record the staging)"
+      ],
+      "verification_bullets": [
+        "host test local_swappable_link_redirects_sends_after_swap: delegation lands on the installed sink, swap redirects, replaced sink stays silent (driven directly through BoxedLinkDriver - the type cannot be the tokio actions driver, which is the point)",
+        "Layer G.13 cross-compile on all 7 Phase W MCU targets EXIT 0 (incl thumbv6m/M0+)",
+        "full host run-ci EXIT 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "MCU reconnect supervisor (re-dial + re-handshake loop) binds at the MCU session-open runtime - the seam is consumer-ready (scout_static R311ih bottom-up staging precedent)",
+        "bounded no-alloc declaration cache: reopen when a no-heap MCU session runtime lands (avoid a duplicate CachedDeclaration enum until then; consider genericizing the string storage at that point)",
+        "debt-clearing track COMPLETE: all seven R311kb-era carries paid (R311kc..R311ki)"
+      ],
+      "publishable_decision_summary": "R311ki MCU reconnect swap seam: LocalSwappableLink (RefCell, no Send bound) for the lwIP Rc sink + Layer G.13 cross-compile lane; bounded no-alloc cache deferred with binding condition. Debt track complete.",
+      "publishable_changes_bullets": [
+        "wz-session-core reconnect::LocalSwappableLink - the single-task transport-replacement seam (RefCell interior, NO Send bound): the lwIP Rc<dyn BoxedLinkDriver> sink is !Send and Runtime::Mutex requires T: Send, so the mutex-backed SwappableLink cannot exist on the MCU profile; the RefCell twin encodes the single-task invariant honestly (!Sync by construction, non-reentrant documented)",
+        "SwappableLink doc updated: the \"until it grows a single-task swap seam\" staging note now points at the twin",
+        "run-ci Layer G.13: wz-session-core cross-compiles session-reconnect,session-unicast,declare-keyexpr,declare-undeclare (coherent subset - the cache hooks live in the declare send paths) on all Phase W targets",
+        "bounded no-alloc declaration cache DEFERRED with binding condition: today's MCU profile builds session-core WITH alloc; a no-heap cache twin has no binding site until a no-heap MCU session runtime exists (s5.4 caveats record the staging)"
+      ],
+      "publishable_verification_bullets": [
+        "host test local_swappable_link_redirects_sends_after_swap: delegation lands on the installed sink, swap redirects, replaced sink stays silent (driven directly through BoxedLinkDriver - the type cannot be the tokio actions driver, which is the point)",
+        "Layer G.13 cross-compile on all 7 Phase W MCU targets EXIT 0 (incl thumbv6m/M0+)",
+        "full host run-ci EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU reconnect supervisor (re-dial + re-handshake loop) binds at the MCU session-open runtime - the seam is consumer-ready (scout_static R311ih bottom-up staging precedent)",
+        "bounded no-alloc declaration cache: reopen when a no-heap MCU session runtime lands (avoid a duplicate CachedDeclaration enum until then; consider genericizing the string storage at that point)",
+        "debt-clearing track COMPLETE: all seven R311kb-era carries paid (R311kc..R311ki)"
       ]
     },
     "Round 311n": {
