@@ -3133,7 +3133,11 @@
         "Phase W ladder remaining: facade runtime-lwip feature R311ax; first MCU preset R311ay; abort R311az+",
         "R311av self-wake busy-poll SleepFuture/TimeoutFuture; real deadline-keyed timer queue is R311az+",
         "R311ja resolves R311av M0 gap: handle Arc -> ActionsHandle GAT (lwIP Rc); session-unicast on ARMv6-M",
-        "R311jb: M0 e2e run needs session-rx 24.6KB >nrf51 16KB; Q.4 thumbv6m is build-only cross-compile"
+        "R311jb: M0 e2e run needs session-rx 24.6KB >nrf51 16KB; Q.4 thumbv6m is build-only cross-compile",
+        "R311kg: lwIP critical_section spans TX emits (batching arms R311jq + immediate path R311kf).",
+        "Span bound: at most two frame emits per hold, each within the negotiated MTU; IRQs disabled.",
+        "Accepted cost of R311w uniform Send+Sync Mutex; pico no-ops its tx mutex (IRQs stay enabled).",
+        "Reopen: preemptive MCU profile, hardware ISR-latency evidence, or wz-runtime-embassy lands."
       ],
       "alternatives_rejected": [
         {
@@ -33016,6 +33020,46 @@
       ],
       "publishable_carry_forward_bullets": [
         "MCU consequence: the critical_section now also spans the immediate-path lwIP send (bounded by the negotiated MTU) - ratified with reopen triggers in R311kg",
+        "debt track remaining: matching-listener callback; MCU reconnect seam"
+      ]
+    },
+    "Round 311kg": {
+      "decision_summary": "R311kg decision-only ratify: MCU critical_section span over TX emits accepted as the bounded cost of the R311w uniform Mutex bound; pico divergence (no-op mutex, IRQs enabled) stated; reopen triggers recorded in the 5.P caveat.",
+      "changes_bullets": [
+        "decision-only ratify: the MCU-profile critical_section span over TX emits (batching arms since R311jq, immediate path since R311kf) is ACCEPTED as the bounded cost of the R311w option-(a) uniform Runtime::Mutex trait bound (Send+Sync forces an IRQ-disabling primitive on the single-core profile)",
+        "divergence vs pico stated honestly: pico single-thread builds compile the tx mutex to a no-op (IRQs stay enabled during the send); wz disables IRQs for the hold - the trait-uniformity constraint pico does not have",
+        "span bound: at most two frame emits per hold (overflow arm), each bounded by the negotiated MTU; single-core cooperative drive model means no task starvation, only ISR latency",
+        "§5.P caveat records the reopen triggers: a preemptive MCU profile lands, hardware ISR-latency evidence, or a wz-runtime-embassy profile (async mutex changes the cost model)"
+      ],
+      "verification_bullets": [
+        "decision-only round: no code change; validate-workspace clean after the caveat append (orphan new=0)",
+        "span-bound claim verified by direct read of dispatch_network_message (two send_blocking sites max per hold: overflow flush + oversize/immediate emit)"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "reopen triggers (any one): preemptive MCU profile; measured ISR-latency problem on hardware; wz-runtime-embassy lands - then revisit per-profile lock cost (R311w decision reopen, user steer required)",
+        "debt track remaining: matching-listener callback; MCU reconnect seam"
+      ],
+      "publishable_decision_summary": "R311kg decision-only ratify: MCU critical_section span over TX emits accepted as the bounded cost of the R311w uniform Mutex bound; pico divergence (no-op mutex, IRQs enabled) stated; reopen triggers recorded in the 5.P caveat.",
+      "publishable_changes_bullets": [
+        "decision-only ratify: the MCU-profile critical_section span over TX emits (batching arms since R311jq, immediate path since R311kf) is ACCEPTED as the bounded cost of the R311w option-(a) uniform Runtime::Mutex trait bound (Send+Sync forces an IRQ-disabling primitive on the single-core profile)",
+        "divergence vs pico stated honestly: pico single-thread builds compile the tx mutex to a no-op (IRQs stay enabled during the send); wz disables IRQs for the hold - the trait-uniformity constraint pico does not have",
+        "span bound: at most two frame emits per hold (overflow arm), each bounded by the negotiated MTU; single-core cooperative drive model means no task starvation, only ISR latency",
+        "§5.P caveat records the reopen triggers: a preemptive MCU profile lands, hardware ISR-latency evidence, or a wz-runtime-embassy profile (async mutex changes the cost model)"
+      ],
+      "publishable_verification_bullets": [
+        "decision-only round: no code change; validate-workspace clean after the caveat append (orphan new=0)",
+        "span-bound claim verified by direct read of dispatch_network_message (two send_blocking sites max per hold: overflow flush + oversize/immediate emit)"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "reopen triggers (any one): preemptive MCU profile; measured ISR-latency problem on hardware; wz-runtime-embassy lands - then revisit per-profile lock cost (R311w decision reopen, user steer required)",
         "debt track remaining: matching-listener callback; MCU reconnect seam"
       ]
     },
