@@ -669,6 +669,7 @@ pub(crate) async fn run_demo(
     // without competing select arms.
     let sweep_clock = session_clock;
     let observer_for_sweep = observer.clone();
+    let actions_for_sweep = actions.clone();
     let sweep_cadence_ms = u64::from(reply_log_spec.sweep_cadence_ms);
     let sweep_task = TokioRuntime.spawn(async move {
         loop {
@@ -687,9 +688,15 @@ pub(crate) async fn run_demo(
             // deadline contract as the reply registry (registered with
             // an absolute timeout, swept here so an unanswered get
             // cannot leak its slot); previously documented but unwired.
-            // The swept ids stage a reconnect-cache prune drained by the
-            // next observer flush.
+            // R311ka — drain the staged reconnect-cache prunes in the
+            // SAME lock window (the registry's airtight-capacity
+            // contract: every staging site drains where it stages; a
+            // deferred drain could overflow the staging across
+            // un-flushed ticks and permanently re-leak a cache entry).
             let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
+            for interest_id in obs.liveliness_gets.take_finalized() {
+                actions_for_sweep.prune_liveliness_get_interest(interest_id);
+            }
         }
     });
 

@@ -539,28 +539,14 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
                 .expect("DeclFinal reply carries no bounded fields"),
         );
     }
-    // F3 — terminated-get prune: drop exactly the `LivelinessGetInterest`
-    // cache entry for `interest_id` (variant-precise — fresh-allocated
-    // ids cannot collide across kinds, but the filter encodes the
-    // intent: a live subscriber Interest must never be collateral). The
-    // requester emits no interest-FINAL for a one-shot get, so this
-    // drain — fed by the registry's staged DeclFinal / timeout
-    // terminations through the observer's `flush_pending` — is the
-    // entry's only prune (zenoh-pico keeps the stale entry and replays
-    // it on reconnect; wz closes the leak). No-op without
-    // `session-reconnect` (no cache exists).
+    // F3/R311ka — drain target for the registry's staged get
+    // terminations; delegates to the inherent twin (the same shape as
+    // `send_response` / `send_response_final` above), so sweep callers
+    // that hold the actions handle directly (the wz-ap-demo ticker)
+    // need no trait import.
     #[cfg(feature = "liveliness-get")]
     fn prune_liveliness_get_interest(&self, interest_id: u64) {
-        #[cfg(feature = "session-reconnect")]
-        self.prune_declaration(|entry| {
-            matches!(
-                entry,
-                CachedDeclaration::LivelinessGetInterest { interest_id: id, .. }
-                    if *id == interest_id
-            )
-        });
-        #[cfg(not(feature = "session-reconnect"))]
-        let _ = interest_id;
+        SessionLinkActions::prune_liveliness_get_interest(self, interest_id);
     }
 }
 
@@ -2557,6 +2543,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 cache.remove(pos);
             }
         });
+    }
+
+    /// F3 — terminated-get prune: drop exactly the
+    /// `LivelinessGetInterest` cache entry for `interest_id`
+    /// (variant-precise — fresh-allocated ids cannot collide across
+    /// kinds, but the filter encodes the intent: a live subscriber
+    /// Interest must never be collateral). The requester emits no
+    /// interest-FINAL for a one-shot get, so this drain — fed by the
+    /// registry's staged DeclFinal / timeout terminations through the
+    /// observer's `flush_pending` and the sweep tickers — is the
+    /// entry's ONLY prune (zenoh-pico keeps the stale entry and replays
+    /// it on reconnect; wz closes the leak). The `ResponseSink` trait
+    /// method delegates here (inherent-twin shape). No-op without
+    /// `session-reconnect` (no cache exists) per R311g1
+    /// signature-stability.
+    #[cfg(feature = "liveliness-get")]
+    pub fn prune_liveliness_get_interest(&self, interest_id: u64) {
+        #[cfg(feature = "session-reconnect")]
+        self.prune_declaration(|entry| {
+            matches!(
+                entry,
+                CachedDeclaration::LivelinessGetInterest { interest_id: id, .. }
+                    if *id == interest_id
+            )
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = interest_id;
     }
 
     /// A4 — snapshot of the declaration cache, in recorded (replay)

@@ -131,9 +131,13 @@ pub struct LivelinessGetRegistry<C: ReplySink> {
     /// the cache entry would replay a finished snapshot on every
     /// reconnect (zenoh-pico shares the leak — its `_z_liveliness_query`
     /// routes through the caching `_z_send_declare`, `liveliness.c:355`,
-    /// with no prune; wz closes it). Same capacity as the pending table:
-    /// drained at least once per drive-loop iteration, the staging can
-    /// never out-accumulate the table that feeds it.
+    /// with no prune; wz closes it). Capacity contract (R311ka): every
+    /// staging site drains within its own lock window — the dispatch
+    /// path via `flush_pending` in the same `observer.dispatch` call,
+    /// the sweep path at its caller right after `sweep_timed_out` — so
+    /// one staged batch is bounded by the pending table and the shared
+    /// capacity cannot overflow (a dropped marker would be a PERMANENT
+    /// replay-leak: this drain is the entry's only prune).
     finalized: BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }>,
 }
 
@@ -285,9 +289,17 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         let swept = fired.len();
         for mut entry in fired {
             let id = entry.interest_id;
-            // F3 — a timed-out get is as terminated as a DeclFinal'd one:
-            // stage it for the reconnect-cache prune drain too.
-            let _ = self.finalized.push(id);
+            // F3/R311ka — a timed-out get is as terminated as a
+            // DeclFinal'd one: stage it for the reconnect-cache prune
+            // drain. The sweep CALLER must drain (`take_finalized` ->
+            // `prune_liveliness_get_interest`) in the same lock window —
+            // see `fire_final_for` for the airtight-capacity contract.
+            let staged = self.finalized.push(id);
+            debug_assert!(
+                staged.is_ok(),
+                "finalized staging overflow: sweep caller is not draining \
+                 within its lock window (permanent replay-leak hazard)"
+            );
             entry.sink.on_final(id);
         }
         swept
@@ -308,11 +320,23 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         let any = !fired.is_empty();
         for mut entry in fired {
             let id = entry.interest_id;
-            // F3 — stage the terminated id for the reconnect-cache prune
-            // drain (capacity mirrors the pending table; a same-iteration
-            // drain cannot overflow, and a dropped marker only delays the
-            // prune to the entry's next legitimate undeclare/replay).
-            let _ = self.finalized.push(id);
+            // F3/R311ka — stage the terminated id for the reconnect-cache
+            // prune drain. This drain is the cache entry's ONLY prune (a
+            // get never emits an interest-FINAL), so a dropped marker
+            // would be a permanent replay-leak — the capacity argument
+            // must therefore be airtight, not best-effort: every staging
+            // site drains within its own lock window (the dispatch path
+            // through `flush_pending` in the same `observer.dispatch`
+            // call; the sweep path at its caller, right after
+            // `sweep_timed_out`), so one staged batch is bounded by the
+            // pending table the ids came from, and `finalized` shares
+            // that table's capacity. The debug_assert pins the invariant.
+            let staged = self.finalized.push(id);
+            debug_assert!(
+                staged.is_ok(),
+                "finalized staging overflow: a staging site is not draining \
+                 within its lock window (permanent replay-leak hazard)"
+            );
             entry.sink.on_final(id);
         }
         any

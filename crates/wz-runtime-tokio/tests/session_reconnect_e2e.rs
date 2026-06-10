@@ -173,3 +173,92 @@ async fn declares_replay_after_link_loss_and_reconnect() {
         "exactly one survived link loss across the run"
     );
 }
+
+/// F6/R311ka — pin the documented GaveUp-resume contract: after `drive`
+/// returns `GaveUp` (peer endpoint gone, attempt cap exhausted), the
+/// borrowed supervisor can be driven AGAIN once the endpoint returns —
+/// the dead connection's engine is already terminal, so the second
+/// `drive` drops straight into the reopen loop, re-handshakes, and
+/// replays the declaration cache (caller-paced retry beyond the policy
+/// cap). Also pins the F2 contract inside the abandoned window: a send
+/// over the surviving bundle rejects typed instead of silently vanishing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gave_up_supervisor_resumes_on_re_drive() {
+    use wz_session_core::send_declare_error::SendDeclareError;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x01; 4];
+
+    // Connection #1: open + declare, acceptor observes it.
+    let policy = ReconnectPolicy {
+        retry_delay_ms: 10, // test cadence
+        max_attempts: Some(2),
+    };
+    let (mut client, (server_conn1, declares_conn1)) = tokio::join!(
+        async {
+            let session = open_session_with_reconnect(
+                locator,
+                params,
+                TokioTime::new(),
+                policy,
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("client reaches Established");
+            session
+                .actions()
+                .send_declare_subscriber(10, 0, Some("home/resume"))
+                .expect("declare subscriber");
+            session
+        },
+        accept_and_collect_declares(&listener),
+    );
+
+    // Kill the endpoint entirely: drop the live connection AND the
+    // listener, so every reopen attempt dials a dead address.
+    drop(server_conn1);
+    drop(listener);
+
+    let stop = AtomicBool::new(false);
+    let timeouts = SessionTimeouts::spec_defaults();
+    let outcome = client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}).await;
+    assert!(
+        matches!(outcome, ReconnectDriveOutcome::GaveUp { attempts: 2, .. }),
+        "dial-refused attempts exhaust the cap, got {outcome:?}"
+    );
+    assert_eq!(client.reconnects(), 0, "no reconnect survived yet");
+    // F2 — the abandoned window: handles over the surviving bundle are
+    // inert-typed, not silently lossy.
+    assert_eq!(
+        client.actions().send_declare_keyexpr(8, "home/while-dead"),
+        Err(SendDeclareError::TransportUnavailable),
+        "post-GaveUp send must reject typed"
+    );
+
+    // The endpoint returns on the SAME address; re-driving the surviving
+    // supervisor resumes the reopen loop and replays the cache.
+    let listener = TcpListener::bind(addr).await.expect("rebind same addr");
+    let stop_for_server = stop;
+    let (drive_outcome, declares_conn2) = tokio::join!(
+        client.drive(&timeouts, &stop_for_server, Some(ITER_CAP), |_| {}),
+        async {
+            let (server_conn2, declares) = accept_and_collect_declares(&listener).await;
+            stop_for_server.store(true, Ordering::Release);
+            drop(server_conn2);
+            declares
+        },
+    );
+    assert!(
+        matches!(drive_outcome, ReconnectDriveOutcome::Stopped),
+        "resumed supervisor must run to the stop flag, got {drive_outcome:?}"
+    );
+    assert_eq!(
+        declares_conn2, declares_conn1,
+        "the resumed reconnect must replay the cached Declare verbatim"
+    );
+    assert_eq!(client.reconnects(), 1, "the resumed re-drive survived once");
+}

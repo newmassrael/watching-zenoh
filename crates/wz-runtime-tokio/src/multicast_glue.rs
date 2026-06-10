@@ -155,9 +155,14 @@ pub enum MulticastTxItem {
 }
 
 /// Convenience builder: a literal-keyexpr Put as a queued
-/// [`MulticastTxItem`] (best-effort channel — the zenoh multicast
-/// default). Composes [`push_build::build_push_literal`]; richer pushes
-/// (Del / aliased keyexpr / metadata) construct the item directly.
+/// [`MulticastTxItem`] on the RELIABLE channel — zenoh's put default
+/// (zenoh-pico `Z_RELIABILITY_DEFAULT = Z_RELIABILITY_RELIABLE`,
+/// api/constants.h:203, multicast included; the reliable channel has no
+/// retransmit on either implementation — pico rx.c "only monotonic SNs
+/// are ensured" — so the flag selects the SN ring + frame R flag, not a
+/// delivery guarantee). Composes [`push_build::build_push_literal`];
+/// richer pushes (Del / best-effort / aliased keyexpr / metadata)
+/// construct the item directly.
 #[cfg(feature = "codec-push")]
 pub fn multicast_put_literal(
     keyexpr_suffix: &str,
@@ -165,7 +170,7 @@ pub fn multicast_put_literal(
 ) -> Result<MulticastTxItem, sce_forge_runtime::codec::CodecError> {
     Ok(MulticastTxItem::Push {
         push: push_build::build_push_literal(keyexpr_suffix, payload)?,
-        reliable: false,
+        reliable: true,
     })
 }
 
@@ -835,7 +840,9 @@ mod tests {
     /// A queued `MulticastTxItem::Push` leaves the loop as a `T_MID_FRAME`
     /// whose minted SN matches the JOIN-advertised baseline (0), whose
     /// payload round-trips back to the Push, and whose emission advances
-    /// the advertised `next_sn` in subsequent JOIN beacons.
+    /// the advertised `next_sn` in subsequent JOIN beacons — on the
+    /// RELIABLE channel (`multicast_put_literal` mirrors pico's
+    /// `Z_RELIABILITY_DEFAULT = RELIABLE` put default).
     #[cfg(feature = "codec-push")]
     #[tokio::test]
     async fn drive_loop_frames_queued_push_and_advances_join_next_sn() {
@@ -863,18 +870,19 @@ mod tests {
         .await;
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
 
-        // Exactly one data frame went out, on the best-effort channel
-        // (R flag clear), carrying SN 0 and the Push payload.
+        // Exactly one data frame went out, on the reliable channel
+        // (R flag set — the pico put default), carrying SN 0 and the
+        // Push payload.
         let frames: Vec<&Vec<u8>> = driver
             .sent
             .iter()
             .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
             .collect();
         assert_eq!(frames.len(), 1, "one queued publish = one data frame");
-        assert_eq!(
+        assert_ne!(
             frames[0][0] & wire_const::FLAG_T_FRAME_R,
             0,
-            "multicast_put_literal publishes best-effort"
+            "multicast_put_literal publishes reliable (pico Z_RELIABILITY_DEFAULT)"
         );
         let parsed = parse_inbound(frames[0]).expect("frame parses");
         let InboundFrame::Frame { sn, payload, .. } = parsed else {
@@ -889,7 +897,7 @@ mod tests {
         );
 
         // The JOIN beacons emitted AFTER the publish advertise the
-        // advanced best-effort next_sn (init_rx_seq stays truthful).
+        // advanced reliable next_sn (init_rx_seq stays truthful).
         let last_join = driver
             .sent
             .iter()
@@ -897,8 +905,8 @@ mod tests {
             .find(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
             .expect("at least one JOIN beacon");
         let join = decode_join(last_join).expect("JOIN decodes");
-        assert_eq!(join.next_sn_best_effort, 1, "publish advanced the ring");
-        assert_eq!(join.next_sn_reliable, 0, "reliable channel untouched");
+        assert_eq!(join.next_sn_reliable, 1, "publish advanced the ring");
+        assert_eq!(join.next_sn_best_effort, 0, "best-effort channel untouched");
     }
 
     /// Our own JOIN echoed back by multicast loopback does NOT admit us as a

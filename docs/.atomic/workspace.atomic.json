@@ -584,7 +584,8 @@
         "batching appends inherit the open frame's channel (opening msg's R flag) - pico tx.c parity (R311jp)",
         "R311jv: multicast Frame RX delivers payloads to registries (SN gate); TX half pending A1c.",
         "R311jv: transport-multicast forward grew codec-frame (kconfig select for the data plane).",
-        "R311jw: multicast TX half landed (TxSn + outbound seam + Layer M e2e) - data plane full-duplex."
+        "R311jw: multicast TX half landed (TxSn + outbound seam + Layer M e2e) - data plane full-duplex.",
+        "R311ka: Frame fan routes Declare too - multicast-declarations RX half implicitly live, TX pending."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32752,6 +32753,54 @@
         "Tier 3 measurement automation carry forward — extend scripts/measure-codec-footprint.sh + CI Layer F to:\\n  (a) auto-detect Cargo feature implications so the `minus-codec-X` lane disables every consumer feature that implies codec-X\\n  (b) introduce a `handshake-only` measurement lane (every body codec OFF + every consumer feature OFF) to surface the codec-frame elision\\n  (c) threshold-based regression gate on per-codec elision so future cascades cannot silently fall below the catalog truthfulness baseline.",
         "Architectural carries unchanged: R267 Session<R,T> reparam (MCU prerequisite + type-ungating carrier for declare-*/query-* / response signatures), R284 uniform Established gate, R283 peer-side Interest inbound bilateral, R301 §8 SCE cross-repo, Q_B / Q_E codec slots, Phase W full lwIP (north star MCU half), R299 carry #2 / #3, R300 narrow, R301 §7 cargo wz-config tool, R304 stderr non-UTF-8 source, keyexpr_canon proptest filter.",
         "Codec catalog body-cascade closure status — R311h codec-push + R311i codec-declare + R311j codec-request + R311k codec-response: 4/4 body codecs gated with codec-frame imply. All 14 codec catalog features have mechanical implementation. The composable framework north star's wire-layer codec elision is mechanically true at the wz-runtime-tokio level; consumer-module elision (R311m) and type-ungating (R267) remain as the next architectural layers."
+      ]
+    },
+    "Round 311ka": {
+      "decision_summary": "R311ka session-review fixes: F-1 multicast_put_literal reliable=true (pico Z_RELIABILITY_DEFAULT falsified the best-effort claim), F-2 finalized-staging loss window closed (same-lock-window drain contract + debug_assert; false comment rewritten), F-3 GaveUp-resume e2e pin, F-4 multicast-declarations RX-half caveat.",
+      "changes_bullets": [
+        "F-1 (parity falsified): `multicast_put_literal` defaulted best-effort with a doc claiming \"the zenoh multicast default\" — pico's put default is RELIABLE (`Z_RELIABILITY_DEFAULT = Z_RELIABILITY_RELIABLE`, api/constants.h:203, multicast included). Now `reliable: true` + honest doc (the flag selects the SN ring + R flag, not a delivery guarantee — neither impl retransmits); unit test asserts the R flag + reliable-ring JOIN advance.",
+        "F-2 (false comment + loss window): the F3 `finalized` staging overflow comments claimed a dropped marker \"only delays the prune\" — FALSE: this drain is a get entry's ONLY prune, a dropped marker is a permanent replay-leak. Closed the window structurally: every staging site now drains within its own lock window (dispatch -> flush_pending same call; sweep -> caller drain — the wz-ap-demo ticker drains `take_finalized` -> prune right after `sweep_timed_out` under the same observer lock), making one staged batch provably <= the pending table; `debug_assert` pins the invariant; comments rewritten to the airtight contract.",
+        "F-2 enabler: `prune_liveliness_get_interest` moved to an INHERENT method on `SessionLinkActions` (the `send_response` inherent-twin shape); the `ResponseSink` trait method delegates — sweep callers holding the actions handle need no trait import.",
+        "F-3 (doc claim unpinned): NEW e2e `gave_up_supervisor_resumes_on_re_drive` pins the F6 GaveUp-resume contract (endpoint dies -> drive #1 GaveUp{attempts:2} -> post-GaveUp send rejects SendDeclareError::TransportUnavailable (F2) -> endpoint rebinds same addr -> drive #2 re-handshakes + replays verbatim + reconnects()==1).",
+        "F-6 (doc drift): `response_sink` module intro now describes the full drain-effect set (reply emits + declarer interest-responses + the F3 cache prune), not just \"wire emit\"."
+      ],
+      "verification_bullets": [
+        "C1q 12 PASS (reliable-channel assertions: R flag set, JOIN next_sn_reliable advances, best-effort untouched).",
+        "session_reconnect_e2e 2 tests x 10 consecutive runs PASS (no-flaky rule) incl. the NEW resume pin; liveliness_get 13 PASS.",
+        "wz-ap-demo build + clippy -D warnings clean (ticker same-window drain).",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0 + Layer M (scouting twins + multicast pub/sub 2-node) EXIT 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "F-5 (pre-existing, surfaced by the sn.rs SSOT): unicast TX mint (`outbound_frame_sn.fetch_add`) does not wrap at the ring mask (pico `_z_sn_increment` masks) and reassembly's consecutive check (`next_sn = sn.wrapping_add(1)`, unmasked `!=`) diverges from pico `_z_sn_consecutive` at the ring seam — both manifest only past 2^28 frames; consolidate onto `sn::increment`/ring compare in a follow-up round.",
+        "F-6 residuals: drive_multicast_session at 8 params (config-struct threshold); multicast glue's hand MID classification beside parse_inbound (scouting_glue precedent; InboundFrame has no Join variant); ()-returning drain surfaces (R311jy carry).",
+        "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ],
+      "publishable_decision_summary": "R311ka session-review fixes: F-1 multicast_put_literal reliable=true (pico Z_RELIABILITY_DEFAULT falsified the best-effort claim), F-2 finalized-staging loss window closed (same-lock-window drain contract + debug_assert; false comment rewritten), F-3 GaveUp-resume e2e pin, F-4 multicast-declarations RX-half caveat.",
+      "publishable_changes_bullets": [
+        "F-1 (parity falsified): `multicast_put_literal` defaulted best-effort with a doc claiming \"the zenoh multicast default\" — pico's put default is RELIABLE (`Z_RELIABILITY_DEFAULT = Z_RELIABILITY_RELIABLE`, api/constants.h:203, multicast included). Now `reliable: true` + honest doc (the flag selects the SN ring + R flag, not a delivery guarantee — neither impl retransmits); unit test asserts the R flag + reliable-ring JOIN advance.",
+        "F-2 (false comment + loss window): the F3 `finalized` staging overflow comments claimed a dropped marker \"only delays the prune\" — FALSE: this drain is a get entry's ONLY prune, a dropped marker is a permanent replay-leak. Closed the window structurally: every staging site now drains within its own lock window (dispatch -> flush_pending same call; sweep -> caller drain — the wz-ap-demo ticker drains `take_finalized` -> prune right after `sweep_timed_out` under the same observer lock), making one staged batch provably <= the pending table; `debug_assert` pins the invariant; comments rewritten to the airtight contract.",
+        "F-2 enabler: `prune_liveliness_get_interest` moved to an INHERENT method on `SessionLinkActions` (the `send_response` inherent-twin shape); the `ResponseSink` trait method delegates — sweep callers holding the actions handle need no trait import.",
+        "F-3 (doc claim unpinned): NEW e2e `gave_up_supervisor_resumes_on_re_drive` pins the F6 GaveUp-resume contract (endpoint dies -> drive #1 GaveUp{attempts:2} -> post-GaveUp send rejects SendDeclareError::TransportUnavailable (F2) -> endpoint rebinds same addr -> drive #2 re-handshakes + replays verbatim + reconnects()==1).",
+        "F-6 (doc drift): `response_sink` module intro now describes the full drain-effect set (reply emits + declarer interest-responses + the F3 cache prune), not just \"wire emit\"."
+      ],
+      "publishable_verification_bullets": [
+        "C1q 12 PASS (reliable-channel assertions: R flag set, JOIN next_sn_reliable advances, best-effort untouched).",
+        "session_reconnect_e2e 2 tests x 10 consecutive runs PASS (no-flaky rule) incl. the NEW resume pin; liveliness_get 13 PASS.",
+        "wz-ap-demo build + clippy -D warnings clean (ticker same-window drain).",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0 + Layer M (scouting twins + multicast pub/sub 2-node) EXIT 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-5 (pre-existing, surfaced by the sn.rs SSOT): unicast TX mint (`outbound_frame_sn.fetch_add`) does not wrap at the ring mask (pico `_z_sn_increment` masks) and reassembly's consecutive check (`next_sn = sn.wrapping_add(1)`, unmasked `!=`) diverges from pico `_z_sn_consecutive` at the ring seam — both manifest only past 2^28 frames; consolidate onto `sn::increment`/ring compare in a follow-up round.",
+        "F-6 residuals: drive_multicast_session at 8 params (config-struct threshold); multicast glue's hand MID classification beside parse_inbound (scouting_glue precedent; InboundFrame has no Join variant); ()-returning drain surfaces (R311jy carry).",
+        "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
       ]
     },
     "Round 311n": {

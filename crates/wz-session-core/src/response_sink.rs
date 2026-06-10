@@ -13,14 +13,17 @@
 //! impls the same trait, so the observer drains identically on either
 //! profile.
 //!
-//! The method set is feature-gated to exactly the wire emit the observer
-//! performs while draining its staged `QueryReply` buffer:
-//! `send_response` (`codec-response`) for each queryable reply, and
-//! `send_response_final` (`codec-response-final`) to terminate each
-//! reply chain. The trait itself is always-nameable so the observer's
+//! The method set is feature-gated to exactly the drain effects the
+//! observer performs onto the actions bundle while flushing its staged
+//! buffers: the queryable-reply wire emits (`send_response` /
+//! `send_response_final`), the declarer-side liveliness interest-response
+//! emits (`send_declare_token_reply` / `send_declare_final_reply`,
+//! R283/R311hn), and the terminated-get reconnect-cache prune
+//! (`prune_liveliness_get_interest`, F3 — a bundle-state effect, not a
+//! wire emit). The trait itself is always-nameable so the observer's
 //! `flush_pending<S: ResponseSink>` signature stays stable across feature
-//! subsets (the trait is simply empty in a build with neither response
-//! codec).
+//! subsets (the trait is simply empty in a build with none of the gating
+//! features).
 
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::ResponseOwned;
