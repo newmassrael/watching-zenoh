@@ -317,6 +317,21 @@ action plus an optional short timer before tearing the link down
 (so the TCP FIN isn't emitted before the `Close` frame is flushed).
 Default `Closing` timeout: 100 ms; deploy-configurable.
 
+**Reconnect sits ABOVE the FSM (A4, R311jr/js).** Every close path
+above still targets terminal `Closed` — the per-connection FSM stays
+one-shot, mirroring zenoh-pico where `Z_FEATURE_AUTO_RECONNECT`
+recreates `_z_transport_t` while `_z_session_t` survives
+(`_z_client_reopen_task_fn`). The wz supervisor
+(`wz-runtime-tokio::reconnect`) owns the cross-connection lifecycle:
+on a terminal without the caller's stop signal it resets the
+handshake-scoped half of the actions bundle (`reset_for_reopen`),
+re-dials the retained locator, swaps the new link into the
+`SwappableLink` write seam, runs a FRESH engine through the same open
+loop, then replays the declaration cache (`replay_declarations`, the
+pico `_declaration_cache` walk) so the peer's declaration tables are
+rebuilt. No `Reconnecting` state is added to this FSM; the supervisor
+loop plus the §2.1 states compose the full lifecycle.
+
 ### §2.5 Timeouts and budgets
 
 All timeouts are named here so they have a single home in
