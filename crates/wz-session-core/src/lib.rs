@@ -169,6 +169,13 @@ pub mod locality;
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;
 
+/// A1a — modular sequence-number arithmetic (zenoh-pico
+/// `transport/utils.c` mirror): the `seq_num_res` ring masks + the
+/// half-window `precedes` ordering every RX SN gate shares. First
+/// consumer is the multicast data plane's per-peer Frame admission.
+/// Pure no_std + no_alloc; unconditional.
+pub mod sn;
+
 /// R311gb-2 — `SampleKind` discriminant (Put/Del), hoisted out of the
 /// `alloc`-gated `sample` module so the no-alloc `sink::SampleView`
 /// accessor contract can name it on every profile. Pure `Copy` enum;

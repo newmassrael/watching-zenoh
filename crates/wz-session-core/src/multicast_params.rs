@@ -48,4 +48,14 @@ pub struct MulticastParams {
     /// the handshake-free transport; a peer stays alive while its JOINs keep
     /// arriving).
     pub join_interval_ms: u64,
+    /// A1b — this node's 2-bit `seq_num_res` wire code (the SN ring width,
+    /// [`crate::sn::mask_from_res`]; wz default `0x02` = 28-bit, matching
+    /// the unicast `SessionInitParams::seq_num_res` fixture default and
+    /// zenoh-pico's `Z_SN_RESOLUTION`). Multicast peers must agree on the
+    /// resolution (there is no negotiation — §3.2 rejection rules drop a
+    /// JOIN advertising a different one, zenoh-pico
+    /// `_z_multicast_handle_join_inner` incompatible-config refuse); a JOIN
+    /// that omits the optional advertises the default and is treated as
+    /// this value.
+    pub seq_num_res: u8,
 }

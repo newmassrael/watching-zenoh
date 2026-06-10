@@ -581,7 +581,9 @@
         "R311jm: transport-fragmentation reserved->active; gates the TX-side FRAME fragment split.",
         "transport-fragmentation -> reassembly (full-duplex); AP/tokio TX only, MCU TX deferred.",
         "Fragments to local batch_size MTU; negotiated-min + MsgPut 256B cap raise are follow-ups.",
-        "batching appends inherit the open frame's channel (opening msg's R flag) - pico tx.c parity (R311jp)"
+        "batching appends inherit the open frame's channel (opening msg's R flag) - pico tx.c parity (R311jp)",
+        "R311jv: multicast Frame RX delivers payloads to registries (SN gate); TX half pending A1c.",
+        "R311jv: transport-multicast forward grew codec-frame (kconfig select for the data plane)."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32449,6 +32451,56 @@
         "F6 carry: drive(self) consumes the session (reconnects count unobservable after; GaveUp leaves handles emitting into a dead link) - Session-tier wrapper ergonomics round",
         "NEXT = A1 multicast DATA plane (deliver multicast Frame payloads to subscriber/queryable registries; transport peer-attribution done at R311jk)",
         "prior carries unchanged: MCU reconnect seam; negotiated-min MTU (R311jm); non-batched mint-vs-enqueue race; MCU critical_section span (R311jq)"
+      ]
+    },
+    "Round 311jv": {
+      "decision_summary": "A1a/b multicast DATA plane RX: sn.rs half-window SSOT + per-peer SN gate (init_rx_seq from JOIN next_sn) + glue Frame arm fans FramePayload to the observer registries via new on_event param; JOIN gains §3.2 validation; transport-multicast selects codec-frame.",
+      "changes_bullets": [
+        "wz-session-core `sn.rs` NEW: zenoh-pico `transport/utils.c` mirror (`mask_from_res` / `half` / `precedes` / `decrement` / `increment`), pure no_std unconditional; half-window SN ordering SSOT (first consumer = multicast data plane).",
+        "`multicast_dispatch.rs`: `PeerSlot` gains `sn_mask` + per-channel `rx_sn_reliable`/`rx_sn_best_effort`; `ingest_join` signature gains `JoinSnBaseline` (sn_res + next_sn pair) and seeds baselines via decrement (the §3.2 `init_rx_seq` effect point, realised; re-seeds on refresh JOIN per pico `_sn_rx_sns` copy); NEW `ingest_frame_by_src(src, reliable, sn, now)` -> `FrameIngest` (Admitted / OutOfOrder / UnknownPeer / SessionNotRunning) applying the half-window gate per channel; OutOfOrder still refreshes lease (pico sets `_received = true` BEFORE its SN gate - liveness independent of data validity).",
+        "`multicast_glue.rs` (wz-runtime-tokio): `decode_join` full-body decode (decode_join_zid now a thin projection); NEW `validate_join` (§3.2 rejection rules: version + sn_res compat, absent sn_res = own default); JOIN RX arm validates before `ingest_join`; `T_MID_FRAME` arm now decodes via `parse_inbound`, admits via `ingest_frame_by_src`, parses payload via `parse_frame_payload`, and fans `IterationEvent::Poll(DriverLoopOutcome::FramePayload)` through the NEW `on_event: FnMut(IterationEvent)` parameter of `drive_multicast_session` (the unicast `drive_session_until_terminal` observer-fan mirror - one `ApplicationLayerObserver` serves both transports); malformed/unknown-peer/stale frames dropped without touching the session FSM.",
+        "`MulticastParams` gains `seq_num_res` (own 2-bit resolution; multicast has no negotiation, mismatched JOINs are ignored).",
+        "wz-runtime-tokio Cargo: `transport-multicast` forward gains `codec-frame` (kconfig select - the data plane is the point of a transport; consumer arms stay per-feature like unicast)."
+      ],
+      "verification_bullets": [
+        "wz-session-core 141 tests PASS (`--features session-multicast`): 23 multicast_dispatch (7 new frame-admission: unknown-peer / not-running / first-frame-at-next_sn / channel independence / lease-on-out-of-order / lease-on-admit / half-window + re-JOIN re-seed) + 5 sn (pico mask vectors, wrap-around, decrement seed).",
+        "C1q lane (`cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue`) 11 PASS incl. the in-loop data-plane e2e: JOIN -> Frame(Push) -> registered subscriber fires EXACTLY once (replay SN-dropped), unknown-peer frame drops, version-mismatch + sn_res-mismatch JOINs ignored.",
+        "full host run-ci EXIT 0 (all required layers) + Layer G opt-in EXIT 0 (G.1-G.12 all 7 MCU targets; G.12 multicast cross-compiles the new sn.rs + dispatcher SN state no_std).",
+        "clippy -D warnings clean on both touched feature sets; cargo fmt applied."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "A1c TX half: per-channel TX SN mint (`sn::increment` ring), JOIN advertises LIVE next_sn (today hardcoded 0 in encode_join), app-facing publish seam (channel into the drive loop) + multicast sender driver (ephemeral bind -> group target; same-host dual group-bind needs SO_REUSEADDR, cross-host fine), Layer M two-node pub/sub e2e.",
+        "multicast Fragment RX not wired: T_MID_FRAGMENT falls to the ignore arm (no per-peer reassembly, no lease refresh; pico refreshes + per-peer dbuf) - follow-up alongside the reassembly_dispatch zid-keyed pool.",
+        "queryable-over-multicast replies need the A1c TX seam (today the observer can stage replies but the loop has no response sink).",
+        "JOIN batch_size compat check skipped (minimal JOIN omits it; pico refuses mismatch) - revisit with richer JOIN opts."
+      ],
+      "publishable_decision_summary": "A1a/b multicast DATA plane RX: sn.rs half-window SSOT + per-peer SN gate (init_rx_seq from JOIN next_sn) + glue Frame arm fans FramePayload to the observer registries via new on_event param; JOIN gains §3.2 validation; transport-multicast selects codec-frame.",
+      "publishable_changes_bullets": [
+        "wz-session-core `sn.rs` NEW: zenoh-pico `transport/utils.c` mirror (`mask_from_res` / `half` / `precedes` / `decrement` / `increment`), pure no_std unconditional; half-window SN ordering SSOT (first consumer = multicast data plane).",
+        "`multicast_dispatch.rs`: `PeerSlot` gains `sn_mask` + per-channel `rx_sn_reliable`/`rx_sn_best_effort`; `ingest_join` signature gains `JoinSnBaseline` (sn_res + next_sn pair) and seeds baselines via decrement (the §3.2 `init_rx_seq` effect point, realised; re-seeds on refresh JOIN per pico `_sn_rx_sns` copy); NEW `ingest_frame_by_src(src, reliable, sn, now)` -> `FrameIngest` (Admitted / OutOfOrder / UnknownPeer / SessionNotRunning) applying the half-window gate per channel; OutOfOrder still refreshes lease (pico sets `_received = true` BEFORE its SN gate - liveness independent of data validity).",
+        "`multicast_glue.rs` (wz-runtime-tokio): `decode_join` full-body decode (decode_join_zid now a thin projection); NEW `validate_join` (§3.2 rejection rules: version + sn_res compat, absent sn_res = own default); JOIN RX arm validates before `ingest_join`; `T_MID_FRAME` arm now decodes via `parse_inbound`, admits via `ingest_frame_by_src`, parses payload via `parse_frame_payload`, and fans `IterationEvent::Poll(DriverLoopOutcome::FramePayload)` through the NEW `on_event: FnMut(IterationEvent)` parameter of `drive_multicast_session` (the unicast `drive_session_until_terminal` observer-fan mirror - one `ApplicationLayerObserver` serves both transports); malformed/unknown-peer/stale frames dropped without touching the session FSM.",
+        "`MulticastParams` gains `seq_num_res` (own 2-bit resolution; multicast has no negotiation, mismatched JOINs are ignored).",
+        "wz-runtime-tokio Cargo: `transport-multicast` forward gains `codec-frame` (kconfig select - the data plane is the point of a transport; consumer arms stay per-feature like unicast)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core 141 tests PASS (`--features session-multicast`): 23 multicast_dispatch (7 new frame-admission: unknown-peer / not-running / first-frame-at-next_sn / channel independence / lease-on-out-of-order / lease-on-admit / half-window + re-JOIN re-seed) + 5 sn (pico mask vectors, wrap-around, decrement seed).",
+        "C1q lane (`cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue`) 11 PASS incl. the in-loop data-plane e2e: JOIN -> Frame(Push) -> registered subscriber fires EXACTLY once (replay SN-dropped), unknown-peer frame drops, version-mismatch + sn_res-mismatch JOINs ignored.",
+        "full host run-ci EXIT 0 (all required layers) + Layer G opt-in EXIT 0 (G.1-G.12 all 7 MCU targets; G.12 multicast cross-compiles the new sn.rs + dispatcher SN state no_std).",
+        "clippy -D warnings clean on both touched feature sets; cargo fmt applied."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A1c TX half: per-channel TX SN mint (`sn::increment` ring), JOIN advertises LIVE next_sn (today hardcoded 0 in encode_join), app-facing publish seam (channel into the drive loop) + multicast sender driver (ephemeral bind -> group target; same-host dual group-bind needs SO_REUSEADDR, cross-host fine), Layer M two-node pub/sub e2e.",
+        "multicast Fragment RX not wired: T_MID_FRAGMENT falls to the ignore arm (no per-peer reassembly, no lease refresh; pico refreshes + per-peer dbuf) - follow-up alongside the reassembly_dispatch zid-keyed pool.",
+        "queryable-over-multicast replies need the A1c TX seam (today the observer can stage replies but the loop has no response sink).",
+        "JOIN batch_size compat check skipped (minimal JOIN omits it; pico refuses mismatch) - revisit with richer JOIN opts."
       ]
     },
     "Round 311k": {

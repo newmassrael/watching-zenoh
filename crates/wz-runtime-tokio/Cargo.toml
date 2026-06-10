@@ -366,7 +366,14 @@ transport-unicast = ["wz-session-core/session-unicast"]
 # drive loop. Pulls `codec-join` (the JOIN beacon body codec the loop
 # encodes/decodes). The handshake-free multicast sibling of
 # `transport-unicast`; the wz facade `transport-multicast` forwards here.
-transport-multicast = ["wz-session-core/session-multicast", "codec-join"]
+# A1b — `codec-frame` rides along for the data plane: the drive loop
+# decodes inbound `T_MID_FRAME` envelopes (`parse_inbound`) and fans their
+# NetworkMessage payloads into the application registries
+# (`parse_frame_payload`). A multicast transport that cannot deliver data
+# would be an inert beacon, so the dep is a kconfig select, not an
+# optional compose (which consumer arms then act on the fanned messages
+# stays per-consumer-feature, exactly as on the unicast path).
+transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec-frame"]
 # chunk-5 — forward to the wz-session-core same-named gate so the migrated
 # start/stop_keepalive_worker action bodies compile under the keepalive axis.
 transport-keepalive = ["wz-session-core/transport-keepalive"]

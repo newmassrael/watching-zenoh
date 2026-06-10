@@ -74,6 +74,7 @@ use crate::session_fsm_multicast::{
     SessionFsmMulticastActions, SessionFsmMulticastEvent, SessionFsmMulticastPolicy,
     SessionFsmMulticastState,
 };
+use crate::sn;
 use core::net::SocketAddr;
 use sce_rust_runtime::Engine;
 
@@ -115,6 +116,53 @@ pub enum JoinRefuse {
     /// Every pool slot already holds a live peer (the §3.2
     /// `multicast_peer_table` bounded cap; the `max_sessions` reject).
     PeerTableFull,
+}
+
+/// The SN baseline a validated JOIN advertises (§3.2 "initialize RX
+/// seq-num table" — the `init_rx_seq` effect point, realised by the
+/// Router). `next_sn_*` is the next SN the announcer WILL send per
+/// channel; the Router seeds the peer's last-seen SN one BEFORE it
+/// (zenoh-pico `_z_conduit_sn_list_copy` + `_z_conduit_sn_list_decrement`,
+/// multicast/rx.c) so the first data frame at exactly `next_sn` passes
+/// the half-window gate. `sn_res` is the announcer's 2-bit `seq_num_res`
+/// wire code — the RX classifier has already checked it is compatible
+/// (§3.2 rejection rules); the Router derives the peer's ring mask from
+/// it ([`sn::mask_from_res`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinSnBaseline {
+    /// The announcer's `seq_num_res` wire code (a JOIN that omits the
+    /// optional advertises the protocol default — the caller projects
+    /// that default before constructing this).
+    pub sn_res: u8,
+    /// Next SN the announcer will send on the reliable channel.
+    pub next_sn_reliable: u64,
+    /// Next SN the announcer will send on the best-effort channel.
+    pub next_sn_best_effort: u64,
+}
+
+/// Outcome of one [`MulticastDispatcher::ingest_frame_by_src`] admission
+/// (§3.1 `Frame -> per-peer RxDispatch`, the §2.3 SN gate applied
+/// per-peer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameIngest {
+    /// The frame SN strictly follows the peer's last-seen SN on its
+    /// channel; the baseline advanced and the peer's lease refreshed.
+    /// The caller delivers the frame payload to the application layer.
+    Admitted,
+    /// The frame SN is stale / duplicated / outside the half-window
+    /// (zenoh-pico "message dropped because it is out of order"). The
+    /// payload must be dropped. The peer's lease WAS refreshed — pico
+    /// marks `_received = true` before its SN gate, so even an
+    /// out-of-order frame proves the peer is alive (liveness is
+    /// independent of data validity).
+    OutOfOrder,
+    /// No live peer is keyed at the source address (zenoh-pico "Dropping
+    /// _Z_FRAME from unknown peer" — a peer must JOIN before its data is
+    /// admitted).
+    UnknownPeer,
+    /// The session FSM is not in `Running` (mirror of
+    /// [`JoinOutcome::SessionNotRunning`]).
+    SessionNotRunning,
 }
 
 /// Outcome of one [`MulticastDispatcher::ingest_join`] call.
@@ -159,7 +207,9 @@ impl SessionFsmMulticastActions for SessionBinding {
 /// are Router-realised — a per-peer RX-seq table and the upward peer-lost
 /// event are Router/host state the buried binding cannot reach (engine-free
 /// split). No-op bodies: the SCXML marks WHERE the effect goes (SSOT with
-/// §3.2), the Router realises it (today deferred — see the module deferral
+/// §3.2), the Router realises it — `init_rx_seq` as
+/// [`PeerSlot::seed_rx_sn`] on JOIN admission (A1a), `emit_peer_lost` as
+/// the upward peer-lost surface (still deferred — see the module deferral
 /// notes). Zero-field, no dead counters.
 struct PeerBinding;
 
@@ -186,6 +236,16 @@ struct PeerSlot {
     /// Absolute monotonic-ms instant of the peer's most recent inbound
     /// message (valid iff `src.is_some()`); the lease is measured from here.
     last_seen_ms: u64,
+    /// The peer's SN ring mask, derived from its JOIN-advertised
+    /// `seq_num_res` ([`sn::mask_from_res`]; zenoh-pico
+    /// `entry->_sn_res = _z_sn_max(msg->_seq_num_res)`). Valid iff
+    /// `src.is_some()`.
+    sn_mask: u64,
+    /// Last-seen SN per channel (reliable / best-effort), seeded one
+    /// before the JOIN-advertised `next_sn` (§3.2 `init_rx_seq`) and
+    /// advanced by each admitted frame. Valid iff `src.is_some()`.
+    rx_sn_reliable: u64,
+    rx_sn_best_effort: u64,
 }
 
 impl PeerSlot {
@@ -198,7 +258,19 @@ impl PeerSlot {
             src: None,
             zid: None,
             last_seen_ms: 0,
+            sn_mask: 0,
+            rx_sn_reliable: 0,
+            rx_sn_best_effort: 0,
         }
+    }
+
+    /// Seed the per-channel RX SN baselines from a JOIN's advertised
+    /// `next_sn` (§3.2 `init_rx_seq`: baseline = one before, so the first
+    /// frame at exactly `next_sn` passes the half-window gate).
+    fn seed_rx_sn(&mut self, baseline: JoinSnBaseline) {
+        self.sn_mask = sn::mask_from_res(baseline.sn_res);
+        self.rx_sn_reliable = sn::decrement(self.sn_mask, baseline.next_sn_reliable);
+        self.rx_sn_best_effort = sn::decrement(self.sn_mask, baseline.next_sn_best_effort);
     }
 
     fn is_free(&self) -> bool {
@@ -231,6 +303,9 @@ impl PeerSlot {
         self.src = None;
         self.zid = None;
         self.last_seen_ms = 0;
+        self.sn_mask = 0;
+        self.rx_sn_reliable = 0;
+        self.rx_sn_best_effort = 0;
     }
 }
 
@@ -348,19 +423,30 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// (version / resolution / batch / qos, §3.2); a mismatch is dropped
     /// before this call (no transition). The peer is keyed by `src` (the
     /// zenoh-pico multicast model — `_z_find_peer_entry(addr)`): a Join from
-    /// a NEW address admits a peer (Free -> Discovered -> Active) and records
-    /// its `zid`; a Join from a KNOWN address refreshes its lease (and
-    /// re-records the zid in case the address's occupant changed). `now_ms`
-    /// is the runtime monotonic clock.
-    pub fn ingest_join(&mut self, zid: &[u8], src: SocketAddr, now_ms: u64) -> JoinOutcome {
+    /// a NEW address admits a peer (Free -> Discovered -> Active), records
+    /// its `zid`, and seeds its RX SN baselines from `sn_baseline` (the
+    /// §3.2 `init_rx_seq` effect point, realised here by the Router); a
+    /// Join from a KNOWN address refreshes its lease, re-records the zid,
+    /// and RE-seeds the SN baselines (zenoh-pico re-copies `_sn_rx_sns`
+    /// from every JOIN — the announcer's `next_sn` is authoritative).
+    /// `now_ms` is the runtime monotonic clock.
+    pub fn ingest_join(
+        &mut self,
+        zid: &[u8],
+        src: SocketAddr,
+        sn_baseline: JoinSnBaseline,
+        now_ms: u64,
+    ) -> JoinOutcome {
         if self.session_state() != SessionFsmMulticastState::Running {
             return JoinOutcome::SessionNotRunning;
         }
         if let Some(idx) = self.find_by_src(src) {
             // Known address: a Join is just another inbound message (§3.2
-            // "Active: any msg refresh last_seen"). The FSM stays Active.
+            // "Active: any msg refresh last_seen"). The FSM stays Active;
+            // the SN baselines re-seed from the fresh advertisement.
             self.peers[idx].last_seen_ms = now_ms;
             self.peers[idx].zid = Some(copy_zid(zid));
+            self.peers[idx].seed_rx_sn(sn_baseline);
             return JoinOutcome::Refreshed;
         }
         let idx = match self.peers.iter().position(PeerSlot::is_free) {
@@ -375,6 +461,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         self.peers[idx].src = Some(src);
         self.peers[idx].zid = Some(copy_zid(zid));
         self.peers[idx].last_seen_ms = now_ms;
+        self.peers[idx].seed_rx_sn(sn_baseline);
         self.peers[idx]
             .engine
             .process_event(MulticastPeerEvent::PeerDiscovered);
@@ -382,6 +469,50 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             .engine
             .process_event(MulticastPeerEvent::PeerActivated);
         JoinOutcome::Admitted
+    }
+
+    /// Admit one inbound data Frame from the peer at source address `src`
+    /// against its per-channel SN gate (§3.1 `Frame -> per-peer RxDispatch`;
+    /// the §2.3 half-window rule, zenoh-pico `_z_multicast_handle_frame`).
+    ///
+    /// On [`FrameIngest::Admitted`] the channel baseline advances to `sn`
+    /// and the caller delivers the frame payload to the application layer.
+    /// [`FrameIngest::OutOfOrder`] drops the payload but still refreshes
+    /// the lease — pico sets `_received = true` BEFORE its SN gate
+    /// (`_z_multicast_handle_frame`), so any frame from a known address is
+    /// liveness even when its data is stale. An unknown peer (no JOIN yet)
+    /// is not attributed at all.
+    pub fn ingest_frame_by_src(
+        &mut self,
+        src: SocketAddr,
+        reliable: bool,
+        frame_sn: u64,
+        now_ms: u64,
+    ) -> FrameIngest {
+        if self.session_state() != SessionFsmMulticastState::Running {
+            return FrameIngest::SessionNotRunning;
+        }
+        let Some(idx) = self.find_by_src(src) else {
+            return FrameIngest::UnknownPeer;
+        };
+        let slot = &mut self.peers[idx];
+        // Liveness before validity (pico `_received = true` precedes the
+        // SN gate): any frame from a known address refreshes the lease.
+        slot.last_seen_ms = now_ms;
+        let last = if reliable {
+            slot.rx_sn_reliable
+        } else {
+            slot.rx_sn_best_effort
+        };
+        if !sn::precedes(slot.sn_mask, last, frame_sn) {
+            return FrameIngest::OutOfOrder;
+        }
+        if reliable {
+            slot.rx_sn_reliable = frame_sn;
+        } else {
+            slot.rx_sn_best_effort = frame_sn;
+        }
+        FrameIngest::Admitted
     }
 
     /// Refresh a live peer's lease on any non-Join inbound message attributed
@@ -469,6 +600,17 @@ mod tests {
         d
     }
 
+    /// A fresh announcer's JOIN baseline (`next_sn` 0 on both channels at
+    /// the wz unicast-default 28-bit resolution) — the membership tests
+    /// only need SOME valid baseline.
+    fn sn0() -> JoinSnBaseline {
+        JoinSnBaseline {
+            sn_res: 0x02,
+            next_sn_reliable: 0,
+            next_sn_best_effort: 0,
+        }
+    }
+
     /// The session lifecycle walks Idle -> LinkOpening -> Running ->
     /// Stopped (§3.1; no Closing state, §3.3).
     #[test]
@@ -500,8 +642,8 @@ mod tests {
     #[test]
     fn stop_clears_peer_table() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, SRC_A, 0);
-        d.ingest_join(ZID_B, SRC_B, 0);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0);
+        d.ingest_join(ZID_B, SRC_B, sn0(), 0);
         assert_eq!(d.active_peers(), 2);
         assert_eq!(d.stop(), SessionFsmMulticastState::Stopped);
         assert_eq!(d.active_peers(), 0);
@@ -512,7 +654,7 @@ mod tests {
     #[test]
     fn link_lost_clears_peer_table() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, SRC_A, 0);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0);
         assert_eq!(d.active_peers(), 1);
         assert_eq!(d.notify_link_lost(), SessionFsmMulticastState::Stopped);
         assert_eq!(d.active_peers(), 0);
@@ -523,7 +665,7 @@ mod tests {
     #[test]
     fn join_admits_peer_to_active() {
         let mut d = running_dispatcher::<4>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(d.active_peers(), 1);
         assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
         assert_eq!(d.peer_state_by_src(SRC_A), Some(MulticastPeerState::Active));
@@ -537,13 +679,13 @@ mod tests {
         let mut d = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         // Idle: not running.
         assert_eq!(
-            d.ingest_join(ZID_A, SRC_A, 0),
+            d.ingest_join(ZID_A, SRC_A, sn0(), 0),
             JoinOutcome::SessionNotRunning
         );
         // LinkOpening: still not running.
         d.create();
         assert_eq!(
-            d.ingest_join(ZID_A, SRC_A, 0),
+            d.ingest_join(ZID_A, SRC_A, sn0(), 0),
             JoinOutcome::SessionNotRunning
         );
         assert_eq!(d.active_peers(), 0);
@@ -553,8 +695,11 @@ mod tests {
     #[test]
     fn duplicate_join_refreshes() {
         let mut d = running_dispatcher::<4>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
-        assert_eq!(d.ingest_join(ZID_A, SRC_A, 100), JoinOutcome::Refreshed);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0(), 100),
+            JoinOutcome::Refreshed
+        );
         assert_eq!(d.active_peers(), 1);
         assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
     }
@@ -565,8 +710,8 @@ mod tests {
     #[test]
     fn same_zid_distinct_src_are_two_peers() {
         let mut d = running_dispatcher::<4>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
-        assert_eq!(d.ingest_join(ZID_A, SRC_B, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_B, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(d.active_peers(), 2);
     }
 
@@ -575,10 +720,10 @@ mod tests {
     #[test]
     fn join_refused_when_peer_table_full() {
         let mut d = running_dispatcher::<2>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
-        assert_eq!(d.ingest_join(ZID_B, SRC_B, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(
-            d.ingest_join(ZID_C, SRC_C, 0),
+            d.ingest_join(ZID_C, SRC_C, sn0(), 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
         assert_eq!(d.active_peers(), 2);
@@ -589,7 +734,7 @@ mod tests {
     #[test]
     fn close_by_src_evicts_peer() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, SRC_A, 0);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0);
         assert!(d.close_by_src(SRC_A));
         assert_eq!(d.active_peers(), 0);
         assert_eq!(d.peer_state(ZID_A), None);
@@ -599,7 +744,7 @@ mod tests {
     #[test]
     fn close_unknown_src_returns_false() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, SRC_A, 0);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0);
         assert!(!d.close_by_src(SRC_B));
         assert_eq!(d.active_peers(), 1);
     }
@@ -610,9 +755,9 @@ mod tests {
     fn sweep_expires_peers_past_lease_only() {
         let mut d = running_dispatcher::<4>(5_000);
         // Peer A last seen at t=0 -> lease deadline 5_000.
-        d.ingest_join(ZID_A, SRC_A, 0);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0);
         // Peer B last seen at t=4_000 -> lease deadline 9_000.
-        d.ingest_join(ZID_B, SRC_B, 4_000);
+        d.ingest_join(ZID_B, SRC_B, sn0(), 4_000);
         // Sweep at t=6_000: only A (deadline 5_000) expires.
         assert_eq!(d.sweep(6_000), 1);
         assert_eq!(d.active_peers(), 1);
@@ -627,7 +772,7 @@ mod tests {
     #[test]
     fn refresh_by_src_extends_lease() {
         let mut d = running_dispatcher::<4>(5_000);
-        d.ingest_join(ZID_A, SRC_A, 0); // deadline 5_000
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0); // deadline 5_000
         assert!(d.refresh_by_src(SRC_A, 4_000)); // deadline now 9_000
                                                  // Sweep at t=6_000: A survives because of the refresh.
         assert_eq!(d.sweep(6_000), 0);
@@ -647,16 +792,184 @@ mod tests {
     fn slot_reuse_after_expiry() {
         // One slot: admit A, close it, then B reuses the slot.
         let mut d = running_dispatcher::<1>(5_000);
-        assert_eq!(d.ingest_join(ZID_A, SRC_A, 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         // Full while A is live.
         assert_eq!(
-            d.ingest_join(ZID_B, SRC_B, 0),
+            d.ingest_join(ZID_B, SRC_B, sn0(), 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
         assert!(d.close_by_src(SRC_A));
         // Slot freed -> B is admitted into the reclaimed slot.
-        assert_eq!(d.ingest_join(ZID_B, SRC_B, 100), JoinOutcome::Admitted);
+        assert_eq!(
+            d.ingest_join(ZID_B, SRC_B, sn0(), 100),
+            JoinOutcome::Admitted
+        );
         assert_eq!(d.peer_state(ZID_B), Some(MulticastPeerState::Active));
         assert_eq!(d.peer_state(ZID_A), None);
+    }
+
+    // ── A1a — per-peer Frame SN admission (§3.1 Frame -> per-peer
+    //    RxDispatch; zenoh-pico _z_multicast_handle_frame parity) ──
+
+    /// A frame from an address that never JOINed is dropped (zenoh-pico
+    /// "Dropping _Z_FRAME from unknown peer").
+    #[test]
+    fn frame_from_unknown_peer_is_dropped() {
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 0, 0),
+            FrameIngest::UnknownPeer
+        );
+    }
+
+    /// A frame while the session is not Running is not admitted (mirror
+    /// of the JOIN guard).
+    #[test]
+    fn frame_refused_when_session_not_running() {
+        let mut d = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 0, 0),
+            FrameIngest::SessionNotRunning
+        );
+    }
+
+    /// The first frame at exactly the JOIN-advertised `next_sn` is
+    /// admitted (the §3.2 `init_rx_seq` decrement-seed contract), and the
+    /// SN gate then walks forward: a duplicate of the same SN is stale.
+    #[test]
+    fn first_frame_at_advertised_next_sn_is_admitted() {
+        let mut d = running_dispatcher::<4>(5_000);
+        let baseline = JoinSnBaseline {
+            sn_res: 0x02,
+            next_sn_reliable: 42,
+            next_sn_best_effort: 7,
+        };
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, baseline, 0),
+            JoinOutcome::Admitted
+        );
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 42, 10),
+            FrameIngest::Admitted
+        );
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 42, 20),
+            FrameIngest::OutOfOrder,
+            "duplicate SN must be stale"
+        );
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 43, 30),
+            FrameIngest::Admitted
+        );
+    }
+
+    /// The reliable and best-effort channels gate independently (two
+    /// last-seen baselines per peer, zenoh-pico `_sn_rx_sns` plain pair).
+    #[test]
+    fn frame_sn_channels_are_independent() {
+        let mut d = running_dispatcher::<4>(5_000);
+        let baseline = JoinSnBaseline {
+            sn_res: 0x02,
+            next_sn_reliable: 10,
+            next_sn_best_effort: 100,
+        };
+        d.ingest_join(ZID_A, SRC_A, baseline, 0);
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 10, 1),
+            FrameIngest::Admitted
+        );
+        // The best-effort channel still expects 100 — the reliable advance
+        // did not touch it.
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, false, 10, 2),
+            FrameIngest::OutOfOrder
+        );
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, false, 100, 3),
+            FrameIngest::Admitted
+        );
+    }
+
+    /// A stale (backward / replayed) frame is dropped but STILL refreshes
+    /// the peer's lease — pico marks `_received = true` before its SN
+    /// gate, so liveness is independent of data validity.
+    #[test]
+    fn out_of_order_frame_still_refreshes_lease() {
+        let mut d = running_dispatcher::<4>(5_000);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0); // lease deadline 5_000
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 0, 100),
+            FrameIngest::Admitted
+        );
+        // Replay of SN 0 at t=4_900: payload dropped, lease refreshed
+        // (deadline now 9_900).
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 0, 4_900),
+            FrameIngest::OutOfOrder
+        );
+        assert_eq!(d.sweep(5_200), 0, "stale frame is still liveness");
+        assert_eq!(d.sweep(10_000), 1, "lease from the replay then lapses");
+    }
+
+    /// An admitted frame refreshes the peer's lease (any inbound message
+    /// is liveness, §3.2 Active).
+    #[test]
+    fn admitted_frame_refreshes_lease() {
+        let mut d = running_dispatcher::<4>(5_000);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0); // deadline 5_000
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 0, 4_000),
+            FrameIngest::Admitted
+        ); // deadline now 9_000
+        assert_eq!(d.sweep(6_000), 0);
+        assert_eq!(d.peer_state(ZID_A), Some(MulticastPeerState::Active));
+    }
+
+    /// A frame past the half-window is ambiguous-stale and dropped; one
+    /// inside the window (a sender that skipped SNs) is admitted.
+    #[test]
+    fn frame_sn_half_window_rule() {
+        let mut d = running_dispatcher::<4>(5_000);
+        // 7-bit ring (mask 0x7F, half = 63) keeps the vectors readable.
+        let baseline = JoinSnBaseline {
+            sn_res: 0x00,
+            next_sn_reliable: 0,
+            next_sn_best_effort: 0,
+        };
+        d.ingest_join(ZID_A, SRC_A, baseline, 0);
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 0, 1),
+            FrameIngest::Admitted
+        );
+        // Distance 64 > half(63): dropped.
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 64, 2),
+            FrameIngest::OutOfOrder
+        );
+        // Distance 63 = half: admitted (gap-tolerant within the window).
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 63, 3),
+            FrameIngest::Admitted
+        );
+        // Wrap across the ring seam: 63 -> 1 is distance 66 (stale), but a
+        // re-JOIN re-seeds the baseline and recovers the stream.
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 1, 4),
+            FrameIngest::OutOfOrder
+        );
+        let rejoin = JoinSnBaseline {
+            sn_res: 0x00,
+            next_sn_reliable: 1,
+            next_sn_best_effort: 0,
+        };
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, rejoin, 5),
+            JoinOutcome::Refreshed
+        );
+        assert_eq!(
+            d.ingest_frame_by_src(SRC_A, true, 1, 6),
+            FrameIngest::Admitted,
+            "a refresh JOIN re-seeds the SN baseline (pico re-copies _sn_rx_sns)"
+        );
     }
 }

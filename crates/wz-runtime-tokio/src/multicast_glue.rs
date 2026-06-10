@@ -24,12 +24,35 @@
 //! - **RxDispatch** — classifies each inbound datagram by its transport MID
 //!   and attributes it by the datagram SOURCE ADDRESS (carried on the
 //!   [`RxFrame`](wz_session_core::link::RxFrame), populated by the multicast
-//!   `UdpDriver`): JOIN -> [`ingest_join`](MulticastDispatcher::ingest_join)
-//!   (admit / refresh by addr, record zid); Frame / KeepAlive ->
+//!   `UdpDriver`): JOIN -> validate (§3.2 rejection rules) +
+//!   [`ingest_join`](MulticastDispatcher::ingest_join) (admit / refresh by
+//!   addr, record zid, seed the RX SN baselines); Frame -> the A1b DATA
+//!   plane (below); KeepAlive ->
 //!   [`refresh_by_src`](MulticastDispatcher::refresh_by_src); Close ->
 //!   [`close_by_src`](MulticastDispatcher::close_by_src).
 //! - **PeerSweep** — evicts peers past their lease via
 //!   [`MulticastDispatcher::sweep`].
+//!
+//! ## A1b — the multicast DATA plane (§3.1 `Frame -> per-peer RxDispatch`)
+//!
+//! An inbound `T_MID_FRAME` from a live peer is decoded
+//! ([`parse_inbound`]), admitted against that peer's per-channel SN gate
+//! ([`ingest_frame_by_src`](MulticastDispatcher::ingest_frame_by_src) — the
+//! §2.3 half-window rule, zenoh-pico `_z_multicast_handle_frame`), and its
+//! NetworkMessage batch ([`parse_frame_payload`]) is fanned to the caller's
+//! `on_event` observer callback as an
+//! [`IterationEvent::Poll`]`(`[`DriverLoopOutcome::FramePayload`]`)` — the
+//! SAME event shape the unicast
+//! [`drive_session_until_terminal`](crate::session_glue::drive_session_until_terminal)
+//! loop fans, so one
+//! [`ApplicationLayerObserver`](wz_session_core::observer::ApplicationLayerObserver)
+//! routes both transports' data into the subscriber / queryable / reply
+//! registries (zenoh-pico parity: multicast frames reach the same
+//! `_z_handle_network_message` the unicast transport calls). A frame from
+//! an address that never JOINed is dropped (pico "Dropping _Z_FRAME from
+//! unknown peer"); a malformed frame is dropped without touching the
+//! session FSM (one bad peer must not tear down the group — unlike the
+//! unicast loop's `FramingError`).
 //!
 //! ## RX attribution: by source address (zenoh-pico parity)
 //!
@@ -38,9 +61,7 @@
 //! attributed to a peer by its datagram source address. JOIN additionally
 //! carries the announcer's zid, recorded as the peer's protocol identity.
 //! The `RxFrame.src` field carries the address; a non-multicast link leaves
-//! it `None` and such messages are ignored here. (Delivering a Frame's
-//! PAYLOAD to the application — multicast pub/sub — is a separate layer
-//! above this transport attribution.)
+//! it `None` and such messages are ignored here.
 //!
 //! ## Stop
 //!
@@ -54,9 +75,12 @@ use sce_forge_runtime::codec::SceCursor;
 
 use wz_codecs::join::Join;
 use wz_codecs::wire_const;
+use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
-use wz_session_core::multicast_dispatch::MulticastDispatcher;
+use wz_session_core::multicast_dispatch::{FrameIngest, JoinSnBaseline, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
+use wz_session_core::network_message::parse_frame_payload;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 
@@ -95,11 +119,12 @@ pub fn encode_join(params: &MulticastParams) -> Vec<u8> {
     dgram
 }
 
-/// If `bytes` is a multicast JOIN datagram, decode it and return the
-/// announcer's zid (a sub-slice borrow of `bytes`). Returns `None` for a
-/// non-JOIN MID or a malformed body. The returned zid is fed straight to
+/// If `bytes` is a multicast JOIN datagram, decode its full body (a
+/// borrowed view into `bytes`). Returns `None` for a non-JOIN MID or a
+/// malformed body. The caller validates the announcement (§3.2 rejection
+/// rules — [`validate_join`]) before feeding it to
 /// [`MulticastDispatcher::ingest_join`].
-pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
+pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
     let header = *bytes.first()?;
     if header & 0x1f != wire_const::T_MID_JOIN {
         return None;
@@ -113,10 +138,39 @@ pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
     // would read the wrong bit.
     let s = u8::from(header & wire_const::FLAG_T_JOIN_S != 0);
     let mut cursor = SceCursor::new(&bytes[1..]);
-    match Join::decode(&mut cursor, s) {
-        Ok(join) => Some(join.zid),
-        Err(_) => None,
+    Join::decode(&mut cursor, s).ok()
+}
+
+/// If `bytes` is a multicast JOIN datagram, decode it and return the
+/// announcer's zid (a sub-slice borrow of `bytes`). Returns `None` for a
+/// non-JOIN MID or a malformed body. Thin projection of [`decode_join`].
+pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
+    decode_join(bytes).map(|join| join.zid)
+}
+
+/// §3.2 rejection rules for an inbound JOIN announcement, ahead of
+/// [`MulticastDispatcher::ingest_join`] (the dispatcher's documented
+/// contract: "the caller has already validated the Join"). Mirrors
+/// zenoh-pico's checks — version (`_z_multicast_handle_join_inner`
+/// proto-version guard) and SN-resolution compatibility (the
+/// incompatible-config refuse; multicast has no negotiation, so peers
+/// must already agree). A JOIN that omits the optional `sn_res`
+/// advertises the protocol default and is treated as compatible.
+/// Returns the admitted SN baseline, or `None` when the announcement
+/// must be ignored (a diagnostic event, not a peer-FSM transition).
+pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinSnBaseline> {
+    if join.version != params.version {
+        return None;
     }
+    let sn_res = join.sn_res.unwrap_or(params.seq_num_res);
+    if sn_res != params.seq_num_res {
+        return None;
+    }
+    Some(JoinSnBaseline {
+        sn_res,
+        next_sn_reliable: join.next_sn_reliable,
+        next_sn_best_effort: join.next_sn_best_effort,
+    })
 }
 
 /// Outcome of one [`drive_multicast_session`] run.
@@ -131,25 +185,35 @@ pub enum MulticastOutcome {
 }
 
 /// Drive a multicast session: bring the link up, then own the §3.1 Running
-/// concerns (periodic JOIN emit, RX classify -> dispatch, lease sweep)
-/// until the link is lost or `max_iters` is reached.
+/// concerns (periodic JOIN emit, RX classify -> dispatch + the A1b data
+/// plane, lease sweep) until the link is lost or `max_iters` is reached.
 ///
 /// `max_iters` bounds the select loop for tests; production passes `None`.
 /// `tick_ms` is the scheduler cadence (the JOIN interval + lease are
 /// spec-sourced from `params` / the dispatcher config, not duplicated
 /// here). The loop owns the monotonic clock (the engine-free FSMs bind
 /// `NoOpHal` and arm no timer — same split as [`crate::scouting_glue`]).
-pub async fn drive_multicast_session<D, T, const MAX_PEERS: usize>(
+///
+/// `on_event` is the per-iteration observer callback (the multicast mirror
+/// of `drive_session_until_terminal`'s): each SN-admitted data Frame fans
+/// one [`IterationEvent::Poll`]`(`[`DriverLoopOutcome::FramePayload`]`)`
+/// carrying the decoded NetworkMessage batch. Wire it to
+/// `ApplicationLayerObserver::dispatch` (exactly as the unicast loop does)
+/// to route multicast pub/sub data into the registered subscriber /
+/// queryable registries.
+pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
     driver: &mut D,
     clock: &T,
     max_iters: Option<usize>,
     tick_ms: u64,
+    mut on_event: F,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
     T: TimeSource,
+    F: FnMut(IterationEvent<'_>),
 {
     // Idle -> LinkOpening -> Running.
     dispatcher.create();
@@ -194,22 +258,62 @@ where
                         let now = clock.now_monotonic_ms();
                         match rx.bytes.first().map(|h| h & 0x1f) {
                             Some(wire_const::T_MID_JOIN) => {
-                                // A JOIN announces its zid; admit / refresh the
-                                // peer at this address. Filter our own zid: with
-                                // multicast loopback on our beacon echoes back,
-                                // and a node is not its own peer.
-                                if let Some(zid) = decode_join_zid(&rx.bytes) {
-                                    if zid != params.zid.as_slice() {
-                                        dispatcher.ingest_join(zid, src, now);
+                                // A JOIN announces its zid; validate (§3.2
+                                // rejection rules), then admit / refresh the
+                                // peer at this address and seed its RX SN
+                                // baselines. Filter our own zid: with
+                                // multicast loopback on our beacon echoes
+                                // back, and a node is not its own peer.
+                                if let Some(join) = decode_join(&rx.bytes) {
+                                    if join.zid != params.zid.as_slice() {
+                                        if let Some(baseline) =
+                                            validate_join(&join, params)
+                                        {
+                                            dispatcher.ingest_join(
+                                                join.zid, src, baseline, now,
+                                            );
+                                        }
                                     }
                                 }
                             }
-                            Some(wire_const::T_MID_FRAME)
-                            | Some(wire_const::T_MID_KEEP_ALIVE) => {
-                                // Any data / liveness message refreshes the
-                                // sender's lease (robustness if its JOINs are
-                                // lost). Delivering the Frame PAYLOAD to the
-                                // app (multicast pub/sub) is a separate layer.
+                            Some(wire_const::T_MID_FRAME) => {
+                                // A1b data plane: decode the Frame envelope,
+                                // admit it against the sender's per-channel SN
+                                // gate (which also refreshes its lease), and
+                                // fan the NetworkMessage batch to the observer
+                                // callback. A frame from an unknown peer, an
+                                // out-of-order SN, or a malformed envelope /
+                                // payload is dropped — pico logs and moves on;
+                                // one bad datagram must not stop the group.
+                                if let Ok(InboundFrame::Frame {
+                                    reliable,
+                                    sn,
+                                    payload,
+                                    has_ext,
+                                    extensions,
+                                }) = parse_inbound(&rx.bytes)
+                                {
+                                    if dispatcher
+                                        .ingest_frame_by_src(src, reliable, sn, now)
+                                        == FrameIngest::Admitted
+                                    {
+                                        if let Ok(messages) = parse_frame_payload(&payload)
+                                        {
+                                            let outcome = DriverLoopOutcome::FramePayload {
+                                                reliable,
+                                                sn,
+                                                messages,
+                                                has_ext,
+                                                extensions,
+                                            };
+                                            on_event(IterationEvent::Poll(&outcome));
+                                        }
+                                    }
+                                }
+                            }
+                            Some(wire_const::T_MID_KEEP_ALIVE) => {
+                                // A liveness ping refreshes the sender's lease
+                                // (robustness if its JOINs are lost).
                                 dispatcher.refresh_by_src(src, now);
                             }
                             Some(wire_const::T_MID_CLOSE) => {
@@ -261,6 +365,7 @@ mod tests {
             zid: zid.to_vec(),
             lease_ms: 5_000,
             join_interval_ms: 1,
+            seq_num_res: 0x02,
         }
     }
 
@@ -376,6 +481,7 @@ mod tests {
             &clock,
             Some(5),
             5,
+            |_| {},
         )
         .await;
 
@@ -416,6 +522,7 @@ mod tests {
             &clock,
             Some(8),
             5,
+            |_| {},
         )
         .await;
 
@@ -441,6 +548,7 @@ mod tests {
             &clock,
             Some(5),
             5,
+            |_| {},
         )
         .await;
 
@@ -450,6 +558,170 @@ mod tests {
             SessionFsmMulticastState::Stopped
         );
         assert_eq!(dispatcher.active_peers(), 0);
+    }
+
+    // ── A1b — data plane: Frame payload -> observer registries ──
+
+    /// A JOIN whose version differs from ours is ignored (§3.2 rejection
+    /// rules / zenoh-pico proto-version guard): no peer is admitted.
+    #[tokio::test]
+    async fn drive_loop_ignores_join_with_version_mismatch() {
+        let mut peer = params(&[0x01, 0x02, 0x03, 0x04]);
+        peer.version = 0x08; // wire-incompatible announcer
+        let mut driver = FakeDriver::with([(encode_join(&peer), src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(5),
+            5,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(dispatcher.active_peers(), 0, "version mismatch must drop");
+    }
+
+    /// A JOIN advertising a different SN resolution is ignored (§3.2
+    /// incompatible-config refuse — multicast has no negotiation).
+    #[tokio::test]
+    async fn drive_loop_ignores_join_with_mismatched_sn_res() {
+        use wz_codecs::join::Join;
+        let zid = [0x01, 0x02, 0x03, 0x04];
+        let mut join = Join::new();
+        join.version = 0x09;
+        join.set_whatami(0x01);
+        join.set_zid_len_m1((zid.len() - 1) as u8);
+        join.zid = &zid;
+        join.sn_res = Some(0x01); // 14-bit ring, ours is 0x02 (28-bit)
+        join.batch_size = Some(0xFFFF);
+        join.lease = 5_000;
+        let body = join.encode_to_vec(1);
+        let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
+        dgram.extend_from_slice(&body);
+
+        let mut driver = FakeDriver::with([(dgram, src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(5),
+            5,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(dispatcher.active_peers(), 0, "sn_res mismatch must drop");
+    }
+
+    /// The data plane end-to-end inside the loop: a peer JOINs, then its
+    /// Frame (at the JOIN-advertised next SN) carrying a Push reaches a
+    /// registered subscriber through the SAME `ApplicationLayerObserver`
+    /// fan the unicast loop uses. A replay of the same frame is dropped by
+    /// the SN gate (the callback fires exactly once), mirroring zenoh-pico
+    /// `_z_multicast_handle_frame` -> `_z_handle_network_message`.
+    #[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
+    #[tokio::test]
+    async fn drive_loop_delivers_frame_push_to_subscriber_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wz_session_core::frame_encode::encode_frame_with_push;
+        use wz_session_core::observer::ApplicationLayerObserver;
+        use wz_session_core::push_build::build_push_literal;
+
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let join = encode_join(&params(&peer_b)); // next_sn_reliable = 0
+        let push = build_push_literal("demo/mc", b"over-multicast").expect("push fixture");
+        let frame = encode_frame_with_push(/*sn=*/ 0, push, /*reliable=*/ true);
+
+        // JOIN admits the peer, the first frame is delivered, the replayed
+        // frame is SN-stale and dropped.
+        let mut driver =
+            FakeDriver::with([(join, src(2)), (frame.clone(), src(2)), (frame, src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let mut observer = ApplicationLayerObserver::new();
+        {
+            let fired = fired.clone();
+            observer.subscribers.register("demo/mc", move |sample| {
+                assert_eq!(sample.keyexpr(), "demo/mc");
+                assert_eq!(sample.payload(), b"over-multicast");
+                fired.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(8),
+            5,
+            |event| observer.dispatch_event(event),
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 1);
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "the Push must reach the subscriber exactly once (replay SN-dropped)"
+        );
+    }
+
+    /// A Frame from an address that never JOINed is dropped before payload
+    /// decode (zenoh-pico "Dropping _Z_FRAME from unknown peer").
+    #[cfg(all(feature = "codec-push", feature = "pubsub-put"))]
+    #[tokio::test]
+    async fn drive_loop_drops_frame_from_unknown_peer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wz_session_core::frame_encode::encode_frame_with_push;
+        use wz_session_core::observer::ApplicationLayerObserver;
+        use wz_session_core::push_build::build_push_literal;
+
+        let push = build_push_literal("demo/mc", b"orphan").expect("push fixture");
+        let frame = encode_frame_with_push(0, push, true);
+        let mut driver = FakeDriver::with([(frame, src(7))]); // no prior JOIN
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let mut observer = ApplicationLayerObserver::new();
+        {
+            let fired = fired.clone();
+            observer.subscribers.register("demo/mc", move |_| {
+                fired.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(5),
+            5,
+            |event| observer.dispatch_event(event),
+        )
+        .await;
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "unattributed frame must drop"
+        );
     }
 
     /// Our own JOIN echoed back by multicast loopback does NOT admit us as a
@@ -469,6 +741,7 @@ mod tests {
             &clock,
             Some(5),
             5,
+            |_| {},
         )
         .await;
 
