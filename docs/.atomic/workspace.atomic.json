@@ -33842,6 +33842,50 @@
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop; no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it"
       ]
     },
+    "Round 311ky": {
+      "decision_summary": "R311ky deferred-fire infrastructure (F-6 building blocks): staging queue + take-call-restore listener cell so decl/matching callbacks can run OUTSIDE the session observer mutex — registries unchanged, a deferred listener is just another Model B sink.",
+      "changes_bullets": [
+        "`wz-session-core::deferred_fire` NEW: `DeferredFireQueue<R>` (Arc<R::Mutex<Vec<FireJob>>> swap-drain, drain-until-empty loop) + `DeferredListenerCell<R, F>` (take-call-restore slot with dead marker)",
+        "lock-order contract documented: `observer > queue`, never reversed — a sink stages under the observer hold via the queue's own lock; the drain swaps the batch out and runs jobs under NO framework lock",
+        "self-undeclare safe by construction: the callback runs with its cell unlocked; `kill` marks dead so the restore drops instead of resurrecting, and a staged-but-undrained fire for a killed cell is suppressed (no post-undeclare event)",
+        "module gated on the consumer-feature union (currently `session-matching`): `alloc::sync::Arc` needs `target_has_atomic = \"ptr\"`, so the gate keeps the thumbv6m session-unicast lane (G.10) Arc-free",
+        "`wz-runtime-tokio/tests/deferred_fire_infra.rs` NEW: 4 wirings (stage order, drain-until-empty, kill suppression, self-kill safety)"
+      ],
+      "verification_bullets": [
+        "cargo test --test deferred_fire_infra 4/4 PASS",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped); run 1 caught clippy type_complexity in the test fixture (C2/C3 deny-warnings) -> type aliases; run 2 clean",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311kz wires the matching plane: Session owns the queue, Publisher/Querier::declare_matching_listener register staging sinks over listener cells, MatchingListener::undeclare kills the cell, dispatch sites drain after the observer lock drops, R311kj hazard caveats rewritten",
+        "decl-sink planes (DeclSink/UndeclSink on remote_subscribers / remote_queryables / liveliness) migrate onto the same infra in a later round — the module gate union grows with them",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ],
+      "publishable_decision_summary": "R311ky deferred-fire infrastructure (F-6 building blocks): staging queue + take-call-restore listener cell so decl/matching callbacks can run OUTSIDE the session observer mutex — registries unchanged, a deferred listener is just another Model B sink.",
+      "publishable_changes_bullets": [
+        "`wz-session-core::deferred_fire` NEW: `DeferredFireQueue<R>` (Arc<R::Mutex<Vec<FireJob>>> swap-drain, drain-until-empty loop) + `DeferredListenerCell<R, F>` (take-call-restore slot with dead marker)",
+        "lock-order contract documented: `observer > queue`, never reversed — a sink stages under the observer hold via the queue's own lock; the drain swaps the batch out and runs jobs under NO framework lock",
+        "self-undeclare safe by construction: the callback runs with its cell unlocked; `kill` marks dead so the restore drops instead of resurrecting, and a staged-but-undrained fire for a killed cell is suppressed (no post-undeclare event)",
+        "module gated on the consumer-feature union (currently `session-matching`): `alloc::sync::Arc` needs `target_has_atomic = \"ptr\"`, so the gate keeps the thumbv6m session-unicast lane (G.10) Arc-free",
+        "`wz-runtime-tokio/tests/deferred_fire_infra.rs` NEW: 4 wirings (stage order, drain-until-empty, kill suppression, self-kill safety)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --test deferred_fire_infra 4/4 PASS",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped); run 1 caught clippy type_complexity in the test fixture (C2/C3 deny-warnings) -> type aliases; run 2 clean",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311kz wires the matching plane: Session owns the queue, Publisher/Querier::declare_matching_listener register staging sinks over listener cells, MatchingListener::undeclare kills the cell, dispatch sites drain after the observer lock drops, R311kj hazard caveats rewritten",
+        "decl-sink planes (DeclSink/UndeclSink on remote_subscribers / remote_queryables / liveliness) migrate onto the same infra in a later round — the module gate union grows with them",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
