@@ -70,10 +70,13 @@ use crate::reassembly_slot::{
 };
 use sce_rust_runtime::Engine;
 
-/// Maximum ZID byte length (zenoh ZID is up to 16 bytes; the wire form is
-/// length-prefixed). The chain key copies the peer ZID into a fixed
-/// buffer so the Router holds no allocation per chain.
-const ZID_MAX: usize = 16;
+/// Maximum peer-key byte length: sized to the widest key a transport
+/// feeds the chain key — the unicast peer ZID (a zenoh ZID is up to 16
+/// bytes; the wire form is length-prefixed); the multicast pool-slot key
+/// ([`crate::multicast_dispatch::multicast_chain_key`]) is 4 bytes. The
+/// chain key copies the peer key into a fixed buffer so the Router holds
+/// no allocation per chain.
+const PEER_KEY_MAX: usize = 16;
 
 /// Deploy-sourced reassembly runtime knobs (§4 `buffer_pools.reassembly_pool`).
 ///
@@ -87,7 +90,7 @@ const ZID_MAX: usize = 16;
 /// pass spec values today.
 #[derive(Debug, Clone, Copy)]
 pub struct ReassemblyConfig {
-    /// Maximum concurrently-open chains per peer ZID. The §5.M
+    /// Maximum concurrently-open chains per peer key. The §5.M
     /// malicious-peer pool-exhaustion defence: a peer opening a chain it
     /// never finishes cannot occupy more than this many slots. Quota
     /// rejection takes precedence over slot availability (§5.M
@@ -157,9 +160,13 @@ pub enum IngestOutcome {
 /// long positional argument list.
 #[derive(Debug, Clone, Copy)]
 pub struct Fragment<'a> {
-    /// Peer identity from the link/session context (NOT the fragment
-    /// body) — half of the §2.3 chain key.
-    pub zid: &'a [u8],
+    /// Peer identity key from the link/session context (NOT the fragment
+    /// body) — half of the §2.3 chain key. Unicast feeds the peer ZID;
+    /// multicast feeds the pool-slot index key
+    /// ([`crate::multicast_dispatch::multicast_chain_key`]) — there the
+    /// wire zid is attacker-chosen and the source address owns identity,
+    /// hence the transport-neutral name (R311kp rename from `zid`).
+    pub peer_key: &'a [u8],
     /// Transport-header R bit (`FLAG_T_FRAGMENT_R`); the other half of the
     /// chain key (a peer's reliable and best-effort fragment streams are
     /// independent chains).
@@ -221,32 +228,32 @@ impl ReassemblySlotActions for SlotBinding {
     }
 }
 
-/// The chain key: a fragment chain is identified by (peer ZID, reliable
+/// The chain key: a fragment chain is identified by (peer key, reliable
 /// channel) per §2.3. Two distinct reliability channels from the same peer
 /// are independent chains (the R bit is part of the §5.M chain key
-/// alongside the ZID).
+/// alongside the peer key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChainKey {
-    zid: [u8; ZID_MAX],
-    zid_len: u8,
+    peer_key: [u8; PEER_KEY_MAX],
+    peer_key_len: u8,
     reliable: bool,
 }
 
 impl ChainKey {
-    fn new(zid: &[u8], reliable: bool) -> Self {
-        let mut buf = [0u8; ZID_MAX];
-        let n = core::cmp::min(zid.len(), ZID_MAX);
-        buf[..n].copy_from_slice(&zid[..n]);
+    fn new(peer_key: &[u8], reliable: bool) -> Self {
+        let mut buf = [0u8; PEER_KEY_MAX];
+        let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
+        buf[..n].copy_from_slice(&peer_key[..n]);
         Self {
-            zid: buf,
-            zid_len: n as u8,
+            peer_key: buf,
+            peer_key_len: n as u8,
             reliable,
         }
     }
 
-    fn same_peer(&self, zid: &[u8]) -> bool {
-        let n = core::cmp::min(zid.len(), ZID_MAX);
-        self.zid_len as usize == n && self.zid[..n] == zid[..n]
+    fn same_peer(&self, peer_key: &[u8]) -> bool {
+        let n = core::cmp::min(peer_key.len(), PEER_KEY_MAX);
+        self.peer_key_len as usize == n && self.peer_key[..n] == peer_key[..n]
     }
 }
 
@@ -346,7 +353,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        match self.find_active(frag.zid, frag.reliable) {
+        match self.find_active(frag.peer_key, frag.reliable) {
             Some(idx) => self.ingest_continuation(idx, frag, sn_mask, deliver),
             None => self.ingest_chain_start(frag, now_ms),
         }
@@ -370,18 +377,18 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         timed_out
     }
 
-    fn find_active(&self, zid: &[u8], reliable: bool) -> Option<usize> {
+    fn find_active(&self, peer_key: &[u8], reliable: bool) -> Option<usize> {
         self.slots.iter().position(|s| match &s.key {
-            Some(k) => k.reliable == reliable && k.same_peer(zid),
+            Some(k) => k.reliable == reliable && k.same_peer(peer_key),
             None => false,
         })
     }
 
-    fn peer_chain_count(&self, zid: &[u8]) -> u16 {
+    fn peer_chain_count(&self, peer_key: &[u8]) -> u16 {
         self.slots
             .iter()
             .filter(|s| match &s.key {
-                Some(k) => k.same_peer(zid),
+                Some(k) => k.same_peer(peer_key),
                 None => false,
             })
             .count() as u16
@@ -391,7 +398,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         // §5.M quota-first: the per-peer cap is checked before slot
         // availability, so a flood from one peer is refused on quota even
         // while free slots remain for honest peers.
-        if self.peer_chain_count(frag.zid) >= self.config.per_peer_quota {
+        if self.peer_chain_count(frag.peer_key) >= self.config.per_peer_quota {
             return IngestOutcome::Refused(RefuseReason::PeerQuota);
         }
         let idx = match self.slots.iter().position(Slot::is_free) {
@@ -401,7 +408,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
 
         // Arm the chain before driving the FSM so a staging overflow on the
         // very first fragment releases cleanly.
-        self.slots[idx].key = Some(ChainKey::new(frag.zid, frag.reliable));
+        self.slots[idx].key = Some(ChainKey::new(frag.peer_key, frag.reliable));
         self.slots[idx].last_sn = frag.sn;
         self.slots[idx].deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
         self.slots[idx].buf.clear();
@@ -471,8 +478,8 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
         IngestOutcome::Aborted(reason)
     }
 
-    /// R311ke — abort the in-progress chain on (`zid`, `reliable`), the
-    /// zenoh-pico dbuf-clear a channel-level SN-gate rejection triggers
+    /// R311ke — abort the in-progress chain on (`peer_key`, `reliable`),
+    /// the zenoh-pico dbuf-clear a channel-level SN-gate rejection triggers
     /// (unicast/rx.c:112-113: an out-of-order FRAME on a channel clears
     /// that channel's defragmentation buffer — the dropped frame may have
     /// superseded the chain's continuation, so completing it would mix
@@ -480,8 +487,8 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
     /// abort arm before release, exactly as an in-chain abort does.
     /// Returns whether a chain was cleared (`false` = nothing in
     /// progress on that channel — the common case).
-    pub fn abort_channel(&mut self, zid: &[u8], reliable: bool) -> bool {
-        match self.find_active(zid, reliable) {
+    pub fn abort_channel(&mut self, peer_key: &[u8], reliable: bool) -> bool {
+        match self.find_active(peer_key, reliable) {
             Some(idx) => {
                 self.slots[idx]
                     .engine
@@ -529,8 +536,8 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
-    const ZID_A: &[u8] = &[0xAA; 16];
-    const ZID_B: &[u8] = &[0xBB; 16];
+    const PEER_A: &[u8] = &[0xAA; 16];
+    const PEER_B: &[u8] = &[0xBB; 16];
 
     /// The default-resolution (0x02, 28-bit) ring every test compares at.
     const MASK: u64 = crate::sn::mask_from_res(0x02);
@@ -541,14 +548,14 @@ mod tests {
 
     /// Terse [`Fragment`] constructor for the test calls.
     fn frag<'a>(
-        zid: &'a [u8],
+        peer_key: &'a [u8],
         reliable: bool,
         sn: u64,
         more: u8,
         payload: &'a [u8],
     ) -> Fragment<'a> {
         Fragment {
-            zid,
+            peer_key,
             reliable,
             sn,
             more,
@@ -562,13 +569,13 @@ mod tests {
         let mut d = dispatcher::<4, 64>();
         let mut out: Option<Vec<u8>> = None;
 
-        let r0 = d.ingest(frag(ZID_A, true, 10, 1, b"hello "), MASK, 0, |_| {
+        let r0 = d.ingest(frag(PEER_A, true, 10, 1, b"hello "), MASK, 0, |_| {
             panic!("not final")
         });
         assert_eq!(r0, IngestOutcome::Begun);
         assert_eq!(d.active_chains(), 1);
 
-        let r1 = d.ingest(frag(ZID_A, true, 11, 0, b"world"), MASK, 0, |msg| {
+        let r1 = d.ingest(frag(PEER_A, true, 11, 0, b"world"), MASK, 0, |msg| {
             out = Some(msg.to_vec())
         });
         assert_eq!(r1, IngestOutcome::Reassembled);
@@ -583,15 +590,15 @@ mod tests {
         let mut d = dispatcher::<4, 64>();
         let mut out: Option<Vec<u8>> = None;
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, 1, 1, b"aaa"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 2, 1, b"bbb"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, 2, 1, b"bbb"), MASK, 0, |_| {}),
             IngestOutcome::Continued
         );
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 3, 0, b"ccc"), MASK, 0, |m| out =
+            d.ingest(frag(PEER_A, true, 3, 0, b"ccc"), MASK, 0, |m| out =
                 Some(m.to_vec())),
             IngestOutcome::Reassembled
         );
@@ -603,11 +610,11 @@ mod tests {
     fn out_of_order_continuation_aborts() {
         let mut d = dispatcher::<4, 64>();
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, 1, 1, b"aaa"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         // SN jumps 2 -> 4: aborts.
-        let r = d.ingest(frag(ZID_A, true, 4, 0, b"zzz"), MASK, 0, |_| {
+        let r = d.ingest(frag(PEER_A, true, 4, 0, b"zzz"), MASK, 0, |_| {
             panic!("aborted, no deliver")
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::OutOfOrder));
@@ -622,11 +629,11 @@ mod tests {
         let mut d = dispatcher::<4, 64>();
         let mut out: Option<Vec<u8>> = None;
         assert_eq!(
-            d.ingest(frag(ZID_A, true, MASK, 1, b"top "), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, MASK, 1, b"top "), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 0, 0, b"wrap"), MASK, 0, |m| out =
+            d.ingest(frag(PEER_A, true, 0, 0, b"wrap"), MASK, 0, |m| out =
                 Some(m.to_vec())),
             IngestOutcome::Reassembled
         );
@@ -637,8 +644,8 @@ mod tests {
     #[test]
     fn duplicate_sn_aborts() {
         let mut d = dispatcher::<4, 64>();
-        d.ingest(frag(ZID_A, true, 5, 1, b"aaa"), MASK, 0, |_| {});
-        let r = d.ingest(frag(ZID_A, true, 5, 1, b"aaa"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_A, true, 5, 1, b"aaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 5, 1, b"aaa"), MASK, 0, |_| {});
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::OutOfOrder));
     }
 
@@ -648,11 +655,11 @@ mod tests {
     fn reliable_and_best_effort_are_distinct_chains() {
         let mut d = dispatcher::<4, 64>();
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"R"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, 1, 1, b"R"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(
-            d.ingest(frag(ZID_A, false, 1, 1, b"B"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, false, 1, 1, b"B"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(d.active_chains(), 2);
@@ -660,21 +667,21 @@ mod tests {
 
     /// Per-peer quota refuses a chain start once the peer holds
     /// `per_peer_quota` open chains, even with free slots remaining
-    /// (§5.M quota-first). The (zid,reliable) key gives ZID_A two distinct
+    /// (§5.M quota-first). The (peer_key,reliable) key gives PEER_A two distinct
     /// keys (the quota=2 cap); a third peer still composes under its own
     /// quota, proving the cap is per-peer.
     #[test]
     fn per_peer_quota_is_per_peer() {
         let mut d = dispatcher::<4, 64>();
-        d.ingest(frag(ZID_A, true, 1, 1, b"a"), MASK, 0, |_| {});
-        d.ingest(frag(ZID_A, false, 1, 1, b"b"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_A, true, 1, 1, b"a"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_A, false, 1, 1, b"b"), MASK, 0, |_| {});
         assert_eq!(
-            d.ingest(frag(ZID_B, true, 1, 1, b"c"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_B, true, 1, 1, b"c"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(d.active_chains(), 3);
-        assert_eq!(d.peer_chain_count(ZID_A), 2);
-        assert_eq!(d.peer_chain_count(ZID_B), 1);
+        assert_eq!(d.peer_chain_count(PEER_A), 2);
+        assert_eq!(d.peer_chain_count(PEER_B), 1);
     }
 
     /// Quota rejection takes precedence over slot availability (§5.M
@@ -685,13 +692,13 @@ mod tests {
         let mut d: ReassemblyDispatcher<4, 64> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(1, 5_000));
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"a"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, 1, 1, b"a"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
-        // Second chain for ZID_A (best-effort key) refused on quota even
+        // Second chain for PEER_A (best-effort key) refused on quota even
         // though 3 slots are free.
         assert_eq!(
-            d.ingest(frag(ZID_A, false, 1, 1, b"b"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, false, 1, 1, b"b"), MASK, 0, |_| {}),
             IngestOutcome::Refused(RefuseReason::PeerQuota)
         );
     }
@@ -705,11 +712,11 @@ mod tests {
         let mut d: ReassemblyDispatcher<2, 64> =
             ReassemblyDispatcher::new(ReassemblyConfig::new(8, 5_000));
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"a"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, 1, 1, b"a"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         assert_eq!(
-            d.ingest(frag(ZID_B, true, 1, 1, b"b"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_B, true, 1, 1, b"b"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
         let third: &[u8] = &[0xCC; 16];
@@ -728,10 +735,10 @@ mod tests {
         // CAP = 8: first fragment 6 bytes ok; continuation 5 bytes overflows.
         let mut d = dispatcher::<4, 8>();
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 1, 1, b"aaaaaa"), MASK, 0, |_| {}),
+            d.ingest(frag(PEER_A, true, 1, 1, b"aaaaaa"), MASK, 0, |_| {}),
             IngestOutcome::Begun
         );
-        let r = d.ingest(frag(ZID_A, true, 2, 0, b"bbbbb"), MASK, 0, |_| {
+        let r = d.ingest(frag(PEER_A, true, 2, 0, b"bbbbb"), MASK, 0, |_| {
             panic!("overflow, no deliver")
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
@@ -744,14 +751,14 @@ mod tests {
     fn sweep_times_out_expired_chains_only() {
         let mut d = dispatcher::<4, 64>();
         // Chain armed at t=0 with the 5_000ms window -> deadline 5_000.
-        d.ingest(frag(ZID_A, true, 1, 1, b"aaa"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_A, true, 1, 1, b"aaa"), MASK, 0, |_| {});
         // Chain armed at t=4_000 -> deadline 9_000.
-        d.ingest(frag(ZID_B, true, 1, 1, b"bbb"), MASK, 4_000, |_| {});
-        // Sweep at t=6_000: only ZID_A's chain (deadline 5_000) expires.
+        d.ingest(frag(PEER_B, true, 1, 1, b"bbb"), MASK, 4_000, |_| {});
+        // Sweep at t=6_000: only PEER_A's chain (deadline 5_000) expires.
         assert_eq!(d.sweep(6_000), 1);
         assert_eq!(d.active_chains(), 1);
-        assert_eq!(d.peer_chain_count(ZID_B), 1);
-        // Sweep at t=10_000: ZID_B's chain expires too.
+        assert_eq!(d.peer_chain_count(PEER_B), 1);
+        // Sweep at t=10_000: PEER_B's chain expires too.
         assert_eq!(d.sweep(10_000), 1);
         assert_eq!(d.active_chains(), 0);
     }
@@ -761,10 +768,10 @@ mod tests {
     fn slot_reuse_after_completion() {
         let mut d = dispatcher::<1, 64>();
         // One slot: complete a chain, then a second chain reuses it.
-        d.ingest(frag(ZID_A, true, 1, 1, b"aa"), MASK, 0, |_| {});
+        d.ingest(frag(PEER_A, true, 1, 1, b"aa"), MASK, 0, |_| {});
         let mut out: Option<Vec<u8>> = None;
         assert_eq!(
-            d.ingest(frag(ZID_A, true, 2, 0, b"bb"), MASK, 0, |m| out =
+            d.ingest(frag(PEER_A, true, 2, 0, b"bb"), MASK, 0, |m| out =
                 Some(m.to_vec())),
             IngestOutcome::Reassembled
         );
@@ -772,7 +779,7 @@ mod tests {
         // Slot freed -> a new chain begins (would be PoolExhausted if not
         // reclaimed).
         assert_eq!(
-            d.ingest(frag(ZID_B, true, 7, 1, b"cc"), MASK, 100, |_| {}),
+            d.ingest(frag(PEER_B, true, 7, 1, b"cc"), MASK, 100, |_| {}),
             IngestOutcome::Begun
         );
     }
@@ -784,7 +791,7 @@ mod tests {
     #[test]
     fn first_fragment_more_zero_does_not_complete() {
         let mut d = dispatcher::<4, 64>();
-        let r = d.ingest(frag(ZID_A, true, 1, 0, b"solo"), MASK, 0, |_| {
+        let r = d.ingest(frag(PEER_A, true, 1, 0, b"solo"), MASK, 0, |_| {
             panic!("first frag never completes")
         });
         assert_eq!(r, IngestOutcome::Begun);

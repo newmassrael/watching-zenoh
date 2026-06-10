@@ -92,7 +92,7 @@ fn two_fragment_chain_reassembles_through_parse_inbound() {
         };
         d.ingest(
             Fragment {
-                zid,
+                peer_key: zid,
                 reliable,
                 sn,
                 more: u8::from(more),

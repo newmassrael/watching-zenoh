@@ -752,7 +752,7 @@ pub fn ingest_multicast_fragment<const MAX_PEERS: usize, const SLOTS: usize, con
     let mut completed: Option<DriverLoopOutcome> = None;
     let ingest_outcome = reasm.ingest(
         ReassemblyFragment {
-            zid: &key,
+            peer_key: &key,
             reliable,
             sn,
             more: u8::from(more),

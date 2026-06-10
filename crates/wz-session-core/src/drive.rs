@@ -350,7 +350,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
         let zid: &[u8] = zid_slot.as_deref().unwrap_or(&[]);
         reasm.ingest(
             ReassemblyFragment {
-                zid,
+                peer_key: zid,
                 reliable: *reliable,
                 sn: *sn,
                 more: u8::from(*more),
