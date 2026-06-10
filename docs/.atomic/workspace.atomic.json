@@ -33606,6 +33606,52 @@
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
       ]
     },
+    "Round 311kt": {
+      "decision_summary": "R311kt session-review Finding C: the multicast JOIN wire trio (encode/decode/validate) hoisted from the tokio glue to wz-session-core::multicast_join — pure protocol logic shared with the MCU profile, handshake_encode precedent.",
+      "changes_bullets": [
+        "wz-session-core multicast_join (NEW module): encode_join / decode_join / decode_join_zid / validate_join hoisted byte-identical from wz-runtime-tokio::multicast_glue — the three are pure (codecs + MulticastParams + TxSn, no socket/clock/tokio) and the MCU no_std multicast loop cannot depend on the tokio crate; the exact multicast sibling of the handshake_encode hoist (R311kt session-review Finding C)",
+        "gating: cfg(session-multicast + codec-join + alloc); session-core grows codec-join = [wz-codecs/codec-join]; tokio codec-join now also forwards wz-session-core/codec-join (catalog-uniform 3-stage chain); wz facade chain unchanged (forwards through tokio)",
+        "multicast_glue keeps the IO only (beacon tick TX, RX classify, sweep clock); imports the trio; 10 pure wire-shape tests moved with the functions; module doc records the split",
+        "run-ci C1p union arm widens with codec-join so the hoisted module's tests run in CI; first arm keeps the codec-join-less Router composition honest",
+        "session-review Finding D rode along: JoinOutcome::Refreshed doc now records the baseline re-store (SN pair + lease window, pico rx.c:453-456)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join: 201 passed 0 failed (multicast_join 10/10 in-crate)",
+        "C1q arms green post-hoist: multicast_glue 9 loop tests / +fragmentation 15; glue retains zero JOIN wire logic",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (both unpiped capture, ledger appended AFTER green per R311ks lesson)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ku next: session-review Findings A+B — lease wire-unit SSOT pair (lease::to_wire/from_wire) + SessionInitParams lease_ms unification + encode_open T auto-derive (pico make_open transport.c:196-214 parity; wz OpenSyn currently sends lease 10000 as T=0+VLE 10000 where pico compacts to T=1+VLE 10) + parse_inbound boundary projection (InboundFrame::Open lease_in_seconds field is produced but consumed nowhere)",
+        "no-alloc MCU JOIN TX variant (sink-based encode, heapless params) deferred until the MCU multicast loop shapes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ],
+      "publishable_decision_summary": "R311kt session-review Finding C: the multicast JOIN wire trio (encode/decode/validate) hoisted from the tokio glue to wz-session-core::multicast_join — pure protocol logic shared with the MCU profile, handshake_encode precedent.",
+      "publishable_changes_bullets": [
+        "wz-session-core multicast_join (NEW module): encode_join / decode_join / decode_join_zid / validate_join hoisted byte-identical from wz-runtime-tokio::multicast_glue — the three are pure (codecs + MulticastParams + TxSn, no socket/clock/tokio) and the MCU no_std multicast loop cannot depend on the tokio crate; the exact multicast sibling of the handshake_encode hoist (R311kt session-review Finding C)",
+        "gating: cfg(session-multicast + codec-join + alloc); session-core grows codec-join = [wz-codecs/codec-join]; tokio codec-join now also forwards wz-session-core/codec-join (catalog-uniform 3-stage chain); wz facade chain unchanged (forwards through tokio)",
+        "multicast_glue keeps the IO only (beacon tick TX, RX classify, sweep clock); imports the trio; 10 pure wire-shape tests moved with the functions; module doc records the split",
+        "run-ci C1p union arm widens with codec-join so the hoisted module's tests run in CI; first arm keeps the codec-join-less Router composition honest",
+        "session-review Finding D rode along: JoinOutcome::Refreshed doc now records the baseline re-store (SN pair + lease window, pico rx.c:453-456)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join: 201 passed 0 failed (multicast_join 10/10 in-crate)",
+        "C1q arms green post-hoist: multicast_glue 9 loop tests / +fragmentation 15; glue retains zero JOIN wire logic",
+        "full host run-ci WZ_RUN_LAYER_G=1 RUNCI_EXIT=0 + Layer M opt-in EXIT=0 (both unpiped capture, ledger appended AFTER green per R311ks lesson)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ku next: session-review Findings A+B — lease wire-unit SSOT pair (lease::to_wire/from_wire) + SessionInitParams lease_ms unification + encode_open T auto-derive (pico make_open transport.c:196-214 parity; wz OpenSyn currently sends lease 10000 as T=0+VLE 10000 where pico compacts to T=1+VLE 10) + parse_inbound boundary projection (InboundFrame::Open lease_in_seconds field is produced but consumed nowhere)",
+        "no-alloc MCU JOIN TX variant (sink-based encode, heapless params) deferred until the MCU multicast loop shapes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
