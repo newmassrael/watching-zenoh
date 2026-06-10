@@ -355,6 +355,21 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// feature-elided prunes nothing.
     #[cfg(feature = "session-reconnect")]
     pub declaration_cache: R::Mutex<Vec<CachedDeclaration>>,
+    /// F2 — is the transport currently accepting data sends? `true` at
+    /// construction (the bundle is built over a live link sink; the
+    /// pre-handshake window keeps today's emit semantics), `false` when
+    /// the FSM releases the link (`release_link`, Closing/Closed entry)
+    /// or the reconnect supervisor tears the transport down for re-dial
+    /// ([`Self::reset_for_reopen`]), `true` again when Established
+    /// (re-)enters (`record_established_at`). The
+    /// [`Self::dispatch_network_message`] chokepoint gates on it so a
+    /// data send inside the RECONNECTING window rejects typed
+    /// ([`SendWireError::TransportUnavailable`]) instead of silently
+    /// vanishing into a dead writer channel — zenoh-pico's tx path fails
+    /// on the dead transport's mutex/NULL
+    /// (`_Z_ERR_TRANSPORT_NOT_AVAILABLE`); the handshake / CLOSE
+    /// transport messages bypass the chokepoint and stay ungated.
+    pub transport_available: R::Mutex<bool>,
     /// R239 — monotonic outbound `Request.request_id` allocator.
     /// Mirrors zenoh-pico's `_z_session_t._query_id` slot
     /// (`vendor/zenoh-pico/src/session/query.c:99` —
@@ -588,6 +603,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             inbound_cookie: R::new_mutex(None::<Vec<u8>>),
             last_inbound_keepalive_at: R::new_mutex(None::<u64>),
             established_at: R::new_mutex(None::<u64>),
+            transport_available: R::new_mutex(true),
             clock,
             inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
             inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
@@ -887,12 +903,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    fn dispatch_network_message<P>(&self, reliable: bool, worst_case_payload: usize, encode_body: P)
+    fn dispatch_network_message<P>(
+        &self,
+        reliable: bool,
+        worst_case_payload: usize,
+        encode_body: P,
+    ) -> Result<(), SendWireError>
     where
         P: Fn(
             &mut sce_forge_runtime::codec::VecSink<'_>,
         ) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
+        // F2 — transport-availability gate (pico
+        // `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity): inside the
+        // RECONNECTING window (link released / reset for re-dial, not yet
+        // re-Established) a data send must reject typed rather than
+        // vanish into a dead writer channel. Single gate — every
+        // network-message send routes through this chokepoint.
+        if !R::with_mutex_mut(&self.transport_available, |g| *g) {
+            return Err(SendWireError::TransportUnavailable);
+        }
         // Outbound MTU = the negotiated session `batch_size`, or a
         // 65535-byte ceiling when unset (`0`). v1 sizes against the *local*
         // advertised batch size; honoring the peer's advertised batch_size
@@ -971,7 +1001,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 }
             });
             if absorbed {
-                return;
+                return Ok(());
             }
         }
 
@@ -984,6 +1014,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             &encode_body,
         );
         self.emit_frame_or_fragments(&wire, sn, reliable, mtu);
+        Ok(())
     }
 
     /// R311jq — terminal emit for one already-encoded outbound frame:
@@ -1118,12 +1149,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// owns the frame SN. cfg = the union of the routed `send_*` callers
     /// (a build where no caller exists must not carry the dead symbol).
     #[cfg(feature = "codec-push")]
-    fn dispatch_push(&self, push: wz_codecs::push::PushOwned, reliable: bool) {
+    fn dispatch_push(
+        &self,
+        push: wz_codecs::push::PushOwned,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
             reliable,
             wz_codecs::push::Push::MAX_ENCODED_BYTES,
             crate::frame_encode::push_body(&push),
-        );
+        )
     }
 
     /// See [`Self::dispatch_push`].
@@ -1135,32 +1170,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-final",
         feature = "liveliness-token",
     ))]
-    fn dispatch_declare(&self, declare: wz_codecs::declare::DeclareOwned, reliable: bool) {
+    fn dispatch_declare(
+        &self,
+        declare: wz_codecs::declare::DeclareOwned,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
             reliable,
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             crate::frame_encode::declare_body(&declare),
-        );
+        )
     }
 
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-request")]
-    fn dispatch_request(&self, request: wz_codecs::request::RequestOwned, reliable: bool) {
+    fn dispatch_request(
+        &self,
+        request: wz_codecs::request::RequestOwned,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
             reliable,
             wz_codecs::request::Request::MAX_ENCODED_BYTES,
             crate::frame_encode::request_body(&request),
-        );
+        )
     }
 
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-response")]
-    fn dispatch_response(&self, response: wz_codecs::response::ResponseOwned, reliable: bool) {
+    fn dispatch_response(
+        &self,
+        response: wz_codecs::response::ResponseOwned,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
             reliable,
             wz_codecs::response::Response::MAX_ENCODED_BYTES,
             crate::frame_encode::response_body(&response),
-        );
+        )
     }
 
     /// See [`Self::dispatch_push`].
@@ -1169,22 +1216,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         response_final: wz_codecs::response_final::ResponseFinalOwned,
         reliable: bool,
-    ) {
+    ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
             reliable,
             wz_codecs::response_final::ResponseFinal::MAX_ENCODED_BYTES,
             crate::frame_encode::response_final_body(&response_final),
-        );
+        )
     }
 
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "declare-interest")]
-    fn dispatch_interest(&self, interest: wz_codecs::interest::InterestOwned, reliable: bool) {
+    fn dispatch_interest(
+        &self,
+        interest: wz_codecs::interest::InterestOwned,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         self.dispatch_network_message(
             reliable,
             wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
             crate::frame_encode::interest_body(&interest),
-        );
+        )
     }
 
     /// R311jp — express short-circuit, zenoh-pico parity: an
@@ -1324,7 +1375,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_literal(keyexpr_suffix, value)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1380,7 +1431,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             check_outbound_keyexpr_pico_safe(suffix)?;
             let declare = build_declare_kexpr(mapping_id, suffix)?;
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true)
+                .map_err(SendDeclareError::from)?;
             // R234 — record the (mapping_id, suffix) pair in the
             // outbound table so later `publish_aliased_auto` calls
             // can resolve the literal without caller assertion.
@@ -1430,7 +1482,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_aliased(mapping_id, suffix, value)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1456,7 +1508,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_literal(keyexpr_suffix)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1482,7 +1534,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_aliased(mapping_id, suffix)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
@@ -1509,7 +1561,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_literal_with_meta(keyexpr_suffix, value, meta)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1532,7 +1584,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1557,7 +1609,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_literal_with_meta(keyexpr_suffix, meta)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1580,7 +1632,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-push")]
         {
             let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta)?;
-            self.dispatch_push(push, reliable);
+            self.dispatch_push(push, reliable)?;
             self.flush_batch_if_express(meta);
             Ok(())
         }
@@ -1632,7 +1684,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare =
                 build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true)
+                .map_err(SendDeclareError::from)?;
             // A4 — record for post-reconnect replay (pico
             // `_z_cache_declaration` on `_Z_RES_OK`).
             #[cfg(feature = "session-reconnect")]
@@ -1686,7 +1739,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare =
                 build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true)
+                .map_err(SendDeclareError::from)?;
             // A4 — record for post-reconnect replay (pico
             // `_z_cache_declaration` on `_Z_RES_OK`).
             #[cfg(feature = "session-reconnect")]
@@ -1735,7 +1789,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            self.dispatch_declare(declare, /*reliable=*/ true)
+                .map_err(SendDeclareError::from)?;
             // A4 — record for post-reconnect replay (pico
             // `_z_cache_declaration` on `_Z_RES_OK`).
             #[cfg(feature = "session-reconnect")]
@@ -1770,7 +1825,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `encode_frame_with_declare` is in scope.
     #[cfg(feature = "liveliness-token")]
     pub fn send_declare(&self, declare: DeclareOwned) {
-        self.dispatch_declare(declare, /*reliable=*/ true);
+        // F2 — this surface has no error channel; a transport-down
+        // reject drops the emit exactly as the dead link would.
+        let _ = self.dispatch_declare(declare, /*reliable=*/ true);
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
@@ -1796,7 +1853,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_kexpr(mapping_id);
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            // F2 — this surface has no error channel; a transport-down
+            // reject drops the emit exactly as the dead link would.
+            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
             // R234 — drop the (mapping_id, suffix) pair so subsequent
             // `publish_aliased_auto` calls return `None` on this id and
             // the caller knows the alias is stale. Idempotent: removing
@@ -1947,7 +2006,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_subscriber(subscriber_id);
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            // F2 — this surface has no error channel; a transport-down
+            // reject drops the emit exactly as the dead link would.
+            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
             // A4 — drop the matching replay entry (pico
             // `_z_prune_declaration` undeclare-filter on `_id`).
             #[cfg(feature = "session-reconnect")]
@@ -1972,7 +2033,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_queryable(queryable_id);
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            // F2 — this surface has no error channel; a transport-down
+            // reject drops the emit exactly as the dead link would.
+            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
             // A4 — drop the matching replay entry (pico
             // `_z_prune_declaration` undeclare-filter on `_id`).
             #[cfg(feature = "session-reconnect")]
@@ -1998,7 +2061,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
         {
             let declare = build_undeclare_token(token_id);
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            // F2 — this surface has no error channel; a transport-down
+            // reject drops the emit exactly as the dead link would.
+            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
             // A4 — drop the matching replay entry (pico
             // `_z_prune_declaration` undeclare-filter on `_id`).
             #[cfg(feature = "session-reconnect")]
@@ -2027,7 +2092,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "declare-final")]
         {
             let declare = build_declare_final();
-            self.dispatch_declare(declare, /*reliable=*/ true);
+            // F2 — this surface has no error channel; a transport-down
+            // reject drops the emit exactly as the dead link would.
+            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
         }
     }
 
@@ -2099,7 +2166,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 keyexpr_mapping_id,
                 keyexpr_suffix,
             )?;
-            self.dispatch_interest(interest, /*reliable=*/ true);
+            self.dispatch_interest(interest, /*reliable=*/ true)?;
             // A4 — record for post-reconnect replay (pico caches the
             // liveliness Interest via `_z_send_declare`,
             // `net/liveliness.c:209`).
@@ -2148,7 +2215,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let interest =
                 build_interest_liveliness_get(interest_id, keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_interest(interest, /*reliable=*/ true);
+            self.dispatch_interest(interest, /*reliable=*/ true)?;
             // A4 — record for post-reconnect replay (pico caches the
             // one-shot CURRENT Interest via `_z_send_declare`,
             // `net/liveliness.c:355`; never pruned there either — the
@@ -2195,7 +2262,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "declare-interest")]
         {
             let interest = build_interest_final(interest_id);
-            self.dispatch_interest(interest, /*reliable=*/ true);
+            // F2 — this surface has no error channel; a transport-down
+            // reject drops the emit exactly as the dead link would.
+            let _ = self.dispatch_interest(interest, /*reliable=*/ true);
             // A4 — drop the matching replay entry. pico's interest prune
             // filter matches any cached `_Z_N_INTEREST` by `_id`
             // (`_z_cache_declaration_undeclare_filter_interest`), so both
@@ -2241,7 +2310,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-request")]
         {
             let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_request(request, /*reliable=*/ true);
+            self.dispatch_request(request, /*reliable=*/ true)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -2322,7 +2391,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 builder = builder.request_timeout_ms(meta.timeout_ms as u64);
             }
             let request = builder.build()?;
-            self.dispatch_request(request, /*reliable=*/ true);
+            self.dispatch_request(request, /*reliable=*/ true)?;
             Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
@@ -2359,7 +2428,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "codec-response-final")]
         {
             let response_final = build_response_final(request_id);
-            self.dispatch_response_final(response_final, /*reliable=*/ true);
+            // F2 — this surface has no error channel; a transport-down
+            // reject drops the emit exactly as the dead link would.
+            let _ = self.dispatch_response_final(response_final, /*reliable=*/ true);
         }
         #[cfg(not(feature = "codec-response-final"))]
         let _ = request_id;
@@ -2398,7 +2469,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R267 Session<R,T> reparam-adjacent architectural cascade).
     #[cfg(feature = "codec-response")]
     pub fn send_response(&self, response: ResponseOwned) {
-        self.dispatch_response(response, /*reliable=*/ true);
+        // F2 — this surface has no error channel; a transport-down
+        // reject drops the emit exactly as the dead link would.
+        let _ = self.dispatch_response(response, /*reliable=*/ true);
     }
 
     /// R284 — encode + dispatch a session-layer `Close` frame
@@ -2532,6 +2605,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn reset_for_reopen(&self) {
         #[cfg(feature = "session-reconnect")]
         {
+            // F2 — close the data-send gate for the whole re-dial +
+            // re-handshake window (release_link already closed it when the
+            // FSM saw the loss; this also covers a reset without a prior
+            // terminal). record_established_at re-opens it.
+            R::with_mutex_mut(&self.transport_available, |g| *g = false);
             R::with_mutex_mut(&self.inbound_cookie, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
             R::with_mutex_mut(&self.last_inbound_keepalive_at, |slot| *slot = None);
@@ -2601,7 +2679,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 {
                     let declare = build_declare_kexpr(mapping_id, &suffix)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
-                    self.dispatch_declare(declare, /*reliable=*/ true);
+                    self.dispatch_declare(declare, /*reliable=*/ true)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
                 #[cfg(not(feature = "declare-keyexpr"))]
                 let _ = (mapping_id, suffix);
@@ -2616,7 +2695,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let declare =
                         build_declare_subscriber(subscriber_id, mapping_id, suffix.as_deref())
                             .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
-                    self.dispatch_declare(declare, /*reliable=*/ true);
+                    self.dispatch_declare(declare, /*reliable=*/ true)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
                 #[cfg(not(feature = "declare-subscriber"))]
                 let _ = (subscriber_id, mapping_id, suffix);
@@ -2631,7 +2711,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let declare =
                         build_declare_queryable(queryable_id, mapping_id, suffix.as_deref())
                             .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
-                    self.dispatch_declare(declare, /*reliable=*/ true);
+                    self.dispatch_declare(declare, /*reliable=*/ true)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
                 #[cfg(not(feature = "declare-queryable"))]
                 let _ = (queryable_id, mapping_id, suffix);
@@ -2645,7 +2726,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 {
                     let declare = build_declare_token(token_id, mapping_id, suffix.as_deref())
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
-                    self.dispatch_declare(declare, /*reliable=*/ true);
+                    self.dispatch_declare(declare, /*reliable=*/ true)
+                        .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
                 #[cfg(not(feature = "declare-token"))]
                 let _ = (token_id, mapping_id, suffix);
@@ -2665,7 +2747,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         suffix.as_deref(),
                     )
                     .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
-                    self.dispatch_interest(interest, /*reliable=*/ true);
+                    self.dispatch_interest(interest, /*reliable=*/ true)
+                        .map_err(ReplayDeclarationsError::Interest)?;
                 }
                 #[cfg(not(feature = "declare-interest"))]
                 let _ = (interest_id, history, mapping_id, suffix);
@@ -2680,7 +2763,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let interest =
                         build_interest_liveliness_get(interest_id, mapping_id, suffix.as_deref())
                             .map_err(|e| ReplayDeclarationsError::Interest(e.into()))?;
-                    self.dispatch_interest(interest, /*reliable=*/ true);
+                    self.dispatch_interest(interest, /*reliable=*/ true)
+                        .map_err(ReplayDeclarationsError::Interest)?;
                 }
                 #[cfg(not(feature = "declare-interest"))]
                 let _ = (interest_id, mapping_id, suffix);
@@ -2875,6 +2959,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     fn release_link(&mut self) {
         let a = &self.inner;
         R::with_mutex_mut(&a.trace, |t| t.release_link += 1);
+        // F2 — the link is going away: close the data-send gate so a
+        // straggling send rejects typed instead of racing the teardown.
+        R::with_mutex_mut(&a.transport_available, |g| *g = false);
         a.link_driver().close_blocking();
     }
 
@@ -2891,6 +2978,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // subtract stays on one scale. Read outside the slot closure.
         let now = a.clock.now_monotonic_ms();
         R::with_mutex_mut(&a.established_at, |slot| *slot = Some(now));
+        // F2 — Established (re-)entry re-opens the data-send gate (the
+        // supervisor replays cached declarations right after this fires).
+        R::with_mutex_mut(&a.transport_available, |g| *g = true);
     }
 
     fn start_lease_monitor(&mut self) {

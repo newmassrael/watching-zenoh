@@ -47,6 +47,15 @@ pub enum SendWireError {
     /// downstream crates surface a non-exhaustive-match warning rather
     /// than silently rebind a prior variant.
     FeatureDisabled,
+    /// F2 — the session's transport is not currently accepting data
+    /// sends: the supervisor tore it down for re-dial
+    /// (`reset_for_reopen`) or the session FSM released the link
+    /// (`release_link`), and Established has not (re-)entered. Mirrors
+    /// zenoh-pico's `_Z_ERR_TRANSPORT_NOT_AVAILABLE` — pico's tx path
+    /// fails on the dead transport's mutex/NULL where wz's writer-channel
+    /// enqueue would otherwise swallow the bytes silently. A no-emit
+    /// reject; the caller retries after the session re-establishes.
+    TransportUnavailable,
 }
 
 impl fmt::Display for SendWireError {
@@ -61,6 +70,11 @@ impl fmt::Display for SendWireError {
                 "send_wire: matching codec-* Cargo feature is OFF in this \
                  build; wire emit elided (signature-stability contract — \
                  caller observes build-time choice as runtime reject)",
+            ),
+            Self::TransportUnavailable => f.write_str(
+                "send_wire: transport not available (link released or \
+                 reconnecting; Established not re-entered) — no bytes \
+                 emitted; retry after the session re-establishes",
             ),
         }
     }

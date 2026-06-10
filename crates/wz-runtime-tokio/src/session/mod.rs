@@ -1646,6 +1646,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     // reachable caller-data condition projecting to the
                     // typed public reject.
                     SendDeclareError::Codec(_) => LivelinessAliasError::ExceedsCapacity,
+                    // F2 — reconnect-window reject, typed through.
+                    SendDeclareError::TransportUnavailable => {
+                        LivelinessAliasError::TransportUnavailable
+                    }
                     SendDeclareError::UnknownMappingId(id) => {
                         // Race against a concurrent send_undeclare_kexpr
                         // between the pre-check resolve_outbound_mapping

@@ -356,6 +356,9 @@ impl From<SendWireError> for LivelinessGetError {
         match e {
             SendWireError::Codec(_) => LivelinessGetError::ExceedsCapacity,
             SendWireError::FeatureDisabled => LivelinessGetError::FeatureDisabled,
+            // F2 — the reconnect window IS a not-yet-(re)Established
+            // session; the existing variant names the same contract.
+            SendWireError::TransportUnavailable => LivelinessGetError::NotEstablished,
         }
     }
 }
@@ -404,6 +407,11 @@ pub enum QueryAliasError {
     /// off the public surface); the generic name avoids over-claiming
     /// which field overflowed, matching [`PublishError::ExceedsCapacity`].
     ExceedsCapacity,
+    /// F2 — the transport is not currently accepting data sends (link
+    /// released or reconnecting; Established not re-entered). The
+    /// Request(Query) was not emitted; retry after the session
+    /// re-establishes (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
+    TransportUnavailable,
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -424,6 +432,12 @@ impl std::fmt::Display for QueryAliasError {
                 "QueryAliasError: a query field (keyexpr / parameters / attachment) \
                  exceeded the declared codec capacity; the Request(Query) was not emitted"
             ),
+            QueryAliasError::TransportUnavailable => write!(
+                f,
+                "QueryAliasError: transport not available (link released or \
+                 reconnecting); the Request(Query) was not emitted — retry after \
+                 the session re-establishes"
+            ),
         }
     }
 }
@@ -435,6 +449,7 @@ impl From<SendWireError> for QueryAliasError {
         match e {
             SendWireError::Codec(_) => QueryAliasError::ExceedsCapacity,
             SendWireError::FeatureDisabled => QueryAliasError::FeatureDisabled,
+            SendWireError::TransportUnavailable => QueryAliasError::TransportUnavailable,
         }
     }
 }

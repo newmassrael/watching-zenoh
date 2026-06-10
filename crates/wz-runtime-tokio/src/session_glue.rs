@@ -2419,6 +2419,27 @@ mod reconnect_tx_tests {
         let original: Vec<Vec<u8>> = (0..3).map(|i| driver.frame_bytes(i)).collect();
 
         actions.reset_for_reopen();
+        // F2 — a send inside the post-reset window rejects typed: the
+        // transport-availability gate stays closed until Established
+        // re-entry (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
+        assert_eq!(
+            actions.send_declare_keyexpr(8, "home/blocked"),
+            Err(wz_session_core::send_declare_error::SendDeclareError::TransportUnavailable),
+            "reconnect-window declare must reject, not silently vanish"
+        );
+        assert_eq!(
+            actions.declaration_cache_snapshot().len(),
+            3,
+            "a rejected declare caches nothing"
+        );
+        // Simulate the re-handshake reaching Established (the supervisor
+        // replays only after `drive_open_loop`; `record_established_at`
+        // re-opens the gate) — direct-stamp idiom shared with
+        // `reset_for_reopen_clears_handshake_scoped_state_only`.
+        {
+            use wz_runtime_core::Runtime;
+            TokioRuntime::with_mutex_mut(&actions.transport_available, |g| *g = true);
+        }
         let replayed = actions
             .replay_declarations()
             .expect("replay over validated cache entries cannot reject");
@@ -2488,7 +2509,11 @@ mod reconnect_tx_tests {
             1,
             "the declaration cache IS the replay source — must survive"
         );
-        // SN re-seed: the next emitted frame repeats the initial SN.
+        // SN re-seed: the next emitted frame repeats the initial SN. The
+        // probe send happens post-re-handshake in production, so re-open
+        // the F2 transport gate first (Established re-entry does this via
+        // `record_established_at`).
+        TokioRuntime::with_mutex_mut(&actions.transport_available, |g| *g = true);
         let pre_reset_first_frame = driver.frame_bytes(0);
         actions
             .send_push_literal("home/x", b"p", true)

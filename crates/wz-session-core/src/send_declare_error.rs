@@ -62,6 +62,14 @@ pub enum SendDeclareError {
     /// warning (when applicable) rather than silently rebind a
     /// prior variant.
     FeatureDisabled,
+    /// F2 — the session's transport is not currently accepting data
+    /// sends (link released or reconnecting; Established not
+    /// re-entered). Declare-plane projection of
+    /// `SendWireError::TransportUnavailable` (zenoh-pico
+    /// `_Z_ERR_TRANSPORT_NOT_AVAILABLE`). A no-emit reject: nothing is
+    /// cached and nothing reaches the wire; the caller re-declares
+    /// after the session re-establishes.
+    TransportUnavailable,
 }
 
 impl fmt::Display for SendDeclareError {
@@ -93,6 +101,11 @@ impl fmt::Display for SendDeclareError {
                  contract — caller observes build-time choice as \
                  runtime reject)",
             ),
+            Self::TransportUnavailable => f.write_str(
+                "send_declare: transport not available (link released or \
+                 reconnecting; Established not re-entered) — no bytes \
+                 emitted; re-declare after the session re-establishes",
+            ),
         }
     }
 }
@@ -115,5 +128,20 @@ impl From<OutboundKeyexprError> for SendDeclareError {
 impl From<CodecError> for SendDeclareError {
     fn from(e: CodecError) -> Self {
         Self::Codec(e)
+    }
+}
+
+// F2 — chokepoint-error projection: the declare-plane senders route
+// through the same `dispatch_network_message` gate as the wire senders,
+// so its `SendWireError` rejects must arrive typed on the declare
+// surface (variant-for-variant; both enums append-order their tails).
+impl From<crate::send_wire_error::SendWireError> for SendDeclareError {
+    fn from(e: crate::send_wire_error::SendWireError) -> Self {
+        use crate::send_wire_error::SendWireError as W;
+        match e {
+            W::Codec(c) => Self::Codec(c),
+            W::FeatureDisabled => Self::FeatureDisabled,
+            W::TransportUnavailable => Self::TransportUnavailable,
+        }
     }
 }

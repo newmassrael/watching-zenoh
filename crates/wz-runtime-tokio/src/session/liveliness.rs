@@ -232,6 +232,11 @@ pub enum LivelinessAliasError {
     /// `CodecError` (the public surface stays free of the SCE codec
     /// type, mirroring how the other variants expose wz-level causes).
     ExceedsCapacity,
+    /// F2 — the transport is not currently accepting data sends (link
+    /// released or reconnecting; Established not re-entered). The
+    /// DECLARE was not emitted; re-declare after the session
+    /// re-establishes (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
+    TransportUnavailable,
 }
 
 impl std::fmt::Display for LivelinessAliasError {
@@ -257,6 +262,12 @@ impl std::fmt::Display for LivelinessAliasError {
                 "LivelinessAliasError: keyexpr exceeded the declared codec \
                  capacity (MAX_KEYEXPR_BYTES); the DECLARE was not emitted"
             ),
+            LivelinessAliasError::TransportUnavailable => write!(
+                f,
+                "LivelinessAliasError: transport not available (link released \
+                 or reconnecting); the DECLARE was not emitted — re-declare \
+                 after the session re-establishes"
+            ),
         }
     }
 }
@@ -267,7 +278,8 @@ impl std::error::Error for LivelinessAliasError {
             LivelinessAliasError::InvalidKeyexpr(inner) => Some(inner),
             LivelinessAliasError::UnknownMapping(_)
             | LivelinessAliasError::FeatureDisabled
-            | LivelinessAliasError::ExceedsCapacity => None,
+            | LivelinessAliasError::ExceedsCapacity
+            | LivelinessAliasError::TransportUnavailable => None,
         }
     }
 }
@@ -602,6 +614,9 @@ impl From<SendWireError> for LivelinessSubscriberAliasError {
         match e {
             SendWireError::Codec(_) => LivelinessSubscriberAliasError::ExceedsCapacity,
             SendWireError::FeatureDisabled => LivelinessSubscriberAliasError::FeatureDisabled,
+            // F2 — the reconnect window IS a not-yet-(re)Established
+            // session; the existing variant names the same contract.
+            SendWireError::TransportUnavailable => LivelinessSubscriberAliasError::NotEstablished,
         }
     }
 }

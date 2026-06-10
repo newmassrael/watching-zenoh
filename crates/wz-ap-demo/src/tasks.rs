@@ -541,6 +541,16 @@ pub(crate) async fn publisher_task<T>(
                      skipping this iteration"
                 );
             }
+            // F2 — a publish inside a reconnect window rejects typed
+            // (transport gate closed until Established re-entry); log and
+            // skip so the burst still terminates — the next iterations
+            // succeed once the supervisor re-establishes.
+            Err(e @ PublishAliasError::TransportUnavailable) => {
+                log::warn!(
+                    "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
+                     skipping this iteration"
+                );
+            }
         }
         // Cadence pause between emissions (not after the last
         // one — the run_demo cleanup gives the writer a brief

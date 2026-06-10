@@ -489,6 +489,10 @@ pub enum PublishAliasError {
     /// into the no-alloc owned Push mirror, so no wire bytes were
     /// emitted (projected from the underlying [`PublishError`]).
     ExceedsCapacity,
+    /// F2 — the transport is not currently accepting data sends (link
+    /// released or reconnecting; Established not re-entered); projected
+    /// from the underlying [`PublishError::TransportUnavailable`].
+    TransportUnavailable,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -504,6 +508,12 @@ impl std::fmt::Display for PublishAliasError {
                 "PublishAliasError: payload or keyexpr exceeded the declared codec \
                  capacity; the Push was not emitted"
             ),
+            PublishAliasError::TransportUnavailable => write!(
+                f,
+                "PublishAliasError: transport not available (link released or \
+                 reconnecting); the Push was not emitted — retry after the \
+                 session re-establishes"
+            ),
         }
     }
 }
@@ -514,6 +524,7 @@ impl From<PublishError> for PublishAliasError {
     fn from(e: PublishError) -> Self {
         match e {
             PublishError::ExceedsCapacity => PublishAliasError::ExceedsCapacity,
+            PublishError::TransportUnavailable => PublishAliasError::TransportUnavailable,
         }
     }
 }
@@ -536,6 +547,11 @@ pub enum PublishError {
     /// mirror — the same bound the decode path enforces. No wire bytes
     /// were emitted.
     ExceedsCapacity,
+    /// F2 — the transport is not currently accepting data sends (link
+    /// released or reconnecting; Established not re-entered). No wire
+    /// bytes were emitted; retry after the session re-establishes
+    /// (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity).
+    TransportUnavailable,
 }
 
 impl std::fmt::Display for PublishError {
@@ -545,6 +561,12 @@ impl std::fmt::Display for PublishError {
                 f,
                 "PublishError: payload or keyexpr exceeded the declared codec \
                  capacity; the Push was not emitted"
+            ),
+            PublishError::TransportUnavailable => write!(
+                f,
+                "PublishError: transport not available (link released or \
+                 reconnecting); the Push was not emitted — retry after the \
+                 session re-establishes"
             ),
         }
     }
@@ -565,6 +587,7 @@ impl From<SendWireError> for PublishError {
             SendWireError::FeatureDisabled => {
                 unreachable!("publish remote leg is codec-push-gated")
             }
+            SendWireError::TransportUnavailable => PublishError::TransportUnavailable,
         }
     }
 }

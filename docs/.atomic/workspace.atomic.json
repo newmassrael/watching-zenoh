@@ -32604,6 +32604,50 @@
         "prior carries unchanged: A1 follow-ups (queryable-over-multicast replies, Fragment RX, multicast-declarations, MCU multicast loop); MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
       ]
     },
+    "Round 311jy": {
+      "decision_summary": "F2 reconnect-window send gate: SessionLinkActions.transport_available gates the dispatch chokepoint - data sends inside the RECONNECTING window reject SendWireError::TransportUnavailable (pico _Z_ERR_TRANSPORT_NOT_AVAILABLE parity) instead of vanishing into the dead writer channel.",
+      "changes_bullets": [
+        "`SessionLinkActions` gains `transport_available: R::Mutex<bool>` (initial true): `false` at `release_link` (FSM Closing/Closed entry) + `reset_for_reopen` (supervisor re-dial window), `true` at `record_established_at` (Established (re-)entry, right before the supervisor replay).",
+        "`dispatch_network_message` (the R311jq chokepoint every network-message send routes through) returns `Result<(), SendWireError>` and gates on the flag: a data send inside the RECONNECTING window rejects `SendWireError::TransportUnavailable` (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity — pico's tx fails on the dead transport's mutex/NULL where wz's writer-channel enqueue silently swallowed bytes). Handshake INIT/OPEN/CLOSE + KeepAlive transport messages bypass the chokepoint and stay ungated.",
+        "6 typed `dispatch_*` wrappers -> Result; ~31 call sites threaded: Result-returning senders propagate (`?` / `SendDeclareError::from`), `()`-returning drain surfaces (`send_response`/`_final`, undeclares, interest-final, declare replies) drop-with-comment (no error channel; the reject lands where the dead link loss landed before, now deterministic); `replay_one` maps into `ReplayDeclarationsError`.",
+        "New variants: `SendWireError::TransportUnavailable`, `SendDeclareError::TransportUnavailable` (+ `From<SendWireError>`), session-tier `PublishError`/`PublishAliasError`/`QueryAliasError`/`LivelinessAliasError::TransportUnavailable`; `LivelinessGetError`/`LivelinessSubscriberAliasError` map to their existing `NotEstablished` (same contract). wz-ap-demo publisher logs-and-skips the new reject."
+      ],
+      "verification_bullets": [
+        "reconnect_tx_tests 5 PASS: `replay_after_reset_re_emits_identical_wire_bytes` now ALSO asserts the post-reset declare rejects `SendDeclareError::TransportUnavailable` + caches nothing, then re-opens the gate (production order: replay runs post-Established) and replays byte-identical; `reset_for_reopen_clears_handshake_scoped_state_only` re-opens the gate before its SN re-seed probe.",
+        "session_reconnect_e2e (real TCP sever -> re-dial -> replay) PASS with the gate live — the supervisor cycle re-opens the gate via record_established_at exactly before replay.",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0 (the new field is R-generic; critical_section mutex on MCU)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "F6 (next): drive(self) consuming supervisor ergonomics — reconnects observability after termination, GaveUp zombie handles; Session-tier wrapper round.",
+        "()-returning drain surfaces (send_response/_final, undeclare family) still have no caller-visible reject — acceptable while their only production callers are observer drains; revisit if an application surface grows over them.",
+        "batch window contents buffered before a link loss are dropped with the window (pre-existing; pico drops its _wbuf the same way on transport teardown).",
+        "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ],
+      "publishable_decision_summary": "F2 reconnect-window send gate: SessionLinkActions.transport_available gates the dispatch chokepoint - data sends inside the RECONNECTING window reject SendWireError::TransportUnavailable (pico _Z_ERR_TRANSPORT_NOT_AVAILABLE parity) instead of vanishing into the dead writer channel.",
+      "publishable_changes_bullets": [
+        "`SessionLinkActions` gains `transport_available: R::Mutex<bool>` (initial true): `false` at `release_link` (FSM Closing/Closed entry) + `reset_for_reopen` (supervisor re-dial window), `true` at `record_established_at` (Established (re-)entry, right before the supervisor replay).",
+        "`dispatch_network_message` (the R311jq chokepoint every network-message send routes through) returns `Result<(), SendWireError>` and gates on the flag: a data send inside the RECONNECTING window rejects `SendWireError::TransportUnavailable` (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity — pico's tx fails on the dead transport's mutex/NULL where wz's writer-channel enqueue silently swallowed bytes). Handshake INIT/OPEN/CLOSE + KeepAlive transport messages bypass the chokepoint and stay ungated.",
+        "6 typed `dispatch_*` wrappers -> Result; ~31 call sites threaded: Result-returning senders propagate (`?` / `SendDeclareError::from`), `()`-returning drain surfaces (`send_response`/`_final`, undeclares, interest-final, declare replies) drop-with-comment (no error channel; the reject lands where the dead link loss landed before, now deterministic); `replay_one` maps into `ReplayDeclarationsError`.",
+        "New variants: `SendWireError::TransportUnavailable`, `SendDeclareError::TransportUnavailable` (+ `From<SendWireError>`), session-tier `PublishError`/`PublishAliasError`/`QueryAliasError`/`LivelinessAliasError::TransportUnavailable`; `LivelinessGetError`/`LivelinessSubscriberAliasError` map to their existing `NotEstablished` (same contract). wz-ap-demo publisher logs-and-skips the new reject."
+      ],
+      "publishable_verification_bullets": [
+        "reconnect_tx_tests 5 PASS: `replay_after_reset_re_emits_identical_wire_bytes` now ALSO asserts the post-reset declare rejects `SendDeclareError::TransportUnavailable` + caches nothing, then re-opens the gate (production order: replay runs post-Established) and replays byte-identical; `reset_for_reopen_clears_handshake_scoped_state_only` re-opens the gate before its SN re-seed probe.",
+        "session_reconnect_e2e (real TCP sever -> re-dial -> replay) PASS with the gate live — the supervisor cycle re-opens the gate via record_established_at exactly before replay.",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0 (the new field is R-generic; critical_section mutex on MCU)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F6 (next): drive(self) consuming supervisor ergonomics — reconnects observability after termination, GaveUp zombie handles; Session-tier wrapper round.",
+        "()-returning drain surfaces (send_response/_final, undeclare family) still have no caller-visible reject — acceptable while their only production callers are observer drains; revisit if an application surface grows over them.",
+        "batch window contents buffered before a link loss are dropped with the window (pre-existing; pico drops its _wbuf the same way on transport teardown).",
+        "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
@@ -38991,5 +39035,7 @@
     }
   },
   "confirmation_events": {},
-  "schema_version": 11
+  "frames": {},
+  "narrative_facts": {},
+  "schema_version": 12
 }
