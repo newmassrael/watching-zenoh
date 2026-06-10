@@ -27,9 +27,16 @@
 //!   `UdpDriver`): JOIN -> validate (§3.2 rejection rules) +
 //!   [`ingest_join`](MulticastDispatcher::ingest_join) (admit / refresh by
 //!   addr, record zid, seed the RX SN baselines); Frame -> the A1b DATA
-//!   plane (below); KeepAlive ->
+//!   plane (below); Fragment -> the R311kn reassembly arm
+//!   (`reassembly`-gated:
+//!   [`ingest_multicast_fragment`](wz_session_core::multicast_dispatch::ingest_multicast_fragment)
+//!   SN-gates per peer, reassembles per (slot, channel) chain, and fans
+//!   the completed message through the same observer event the Frame arm
+//!   uses; without the feature the MID is dropped — pico "Fragment
+//!   dropped because fragmentation feature is deactivated"); KeepAlive ->
 //!   [`refresh_by_src`](MulticastDispatcher::refresh_by_src); Close ->
-//!   [`close_by_src`](MulticastDispatcher::close_by_src).
+//!   [`close_by_src`](MulticastDispatcher::close_by_src) (chains aborted
+//!   first — pico's per-entry dbufs die with the peer entry).
 //! - **PeerSweep** — evicts peers past their lease via
 //!   [`MulticastDispatcher::sweep`].
 //!
@@ -77,11 +84,17 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use wz_codecs::join::Join;
 use wz_codecs::wire_const;
+#[cfg(feature = "reassembly")]
+use wz_session_core::drive::sweep_reporting;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "codec-push")]
 use wz_session_core::frame_encode::encode_frame_with_push;
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
+#[cfg(feature = "reassembly")]
+use wz_session_core::multicast_dispatch::{
+    abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
+};
 use wz_session_core::multicast_dispatch::{FrameIngest, JoinSnBaseline, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::network_message::parse_frame_payload;
@@ -287,6 +300,14 @@ where
     // The TX mint state (per-channel next SN). The JOIN beacon advertises
     // the live values; every outbound data frame mints from here.
     let mut tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
+    // R311kn — the loop owns the multicast reassembly Router: per-peer
+    // fragment chains keyed by the peer's pool-slot index (zenoh-pico's
+    // per-entry dbuf pair, generalised to the bounded §5.M slot pool).
+    // Same SCE-sourced AP pool dims/knobs as the unicast loop — one
+    // buffer-pool policy SSOT, two transports.
+    #[cfg(feature = "reassembly")]
+    let mut reasm =
+        crate::session_glue::TokioReassembly::new(crate::session_glue::reassembly_config());
     // Once every sender is dropped `recv()` would resolve `None` forever;
     // disarm the select arm instead of busy-looping on it.
     let mut outbound_open = true;
@@ -385,22 +406,72 @@ where
                                     extensions,
                                 }) = parse_inbound(&rx.bytes)
                                 {
-                                    if dispatcher
-                                        .ingest_frame_by_src(src, reliable, sn, now)
-                                        == FrameIngest::Admitted
-                                    {
-                                        if let Ok(messages) = parse_frame_payload(&payload)
-                                        {
-                                            let outcome = DriverLoopOutcome::FramePayload {
-                                                reliable,
-                                                sn,
-                                                messages,
-                                                has_ext,
-                                                extensions,
-                                            };
-                                            on_event(IterationEvent::Poll(&outcome));
+                                    match dispatcher.ingest_frame_by_src(src, reliable, sn, now) {
+                                        FrameIngest::Admitted => {
+                                            if let Ok(messages) = parse_frame_payload(&payload)
+                                            {
+                                                let outcome = DriverLoopOutcome::FramePayload {
+                                                    reliable,
+                                                    sn,
+                                                    messages,
+                                                    has_ext,
+                                                    extensions,
+                                                };
+                                                on_event(IterationEvent::Poll(&outcome));
+                                            }
                                         }
+                                        // R311kn — an out-of-order FRAME clears
+                                        // the channel's in-progress reassembly
+                                        // chain (pico clears the dbuf + state,
+                                        // multicast/rx.c
+                                        // `_z_multicast_handle_frame`): the
+                                        // dropped frame may have superseded the
+                                        // chain's continuation, so completing it
+                                        // would mix generations.
+                                        #[cfg(feature = "reassembly")]
+                                        FrameIngest::OutOfOrder => {
+                                            if let Some(idx) =
+                                                dispatcher.peer_index_by_src(src)
+                                            {
+                                                reasm.abort_channel(
+                                                    &multicast_chain_key(idx),
+                                                    reliable,
+                                                );
+                                            }
+                                        }
+                                        _ => {}
                                     }
+                                }
+                            }
+                            // R311kn — the multicast fragment RX arm: SN-gate
+                            // per peer, reassemble per (slot, channel) chain,
+                            // and fan the completed message through the SAME
+                            // observer event the Frame arm uses (zenoh-pico
+                            // `_z_multicast_handle_fragment_inner`). Without
+                            // `reassembly` the MID falls to the `_` arm and
+                            // the fragment is dropped — pico "Fragment dropped
+                            // because fragmentation feature is deactivated".
+                            #[cfg(feature = "reassembly")]
+                            Some(wire_const::T_MID_FRAGMENT) => {
+                                if let Ok(InboundFrame::Fragment {
+                                    reliable,
+                                    sn,
+                                    more,
+                                    payload,
+                                    ..
+                                }) = parse_inbound(&rx.bytes)
+                                {
+                                    ingest_multicast_fragment(
+                                        dispatcher,
+                                        &mut reasm,
+                                        src,
+                                        reliable,
+                                        sn,
+                                        more,
+                                        &payload,
+                                        now,
+                                        &mut on_event,
+                                    );
                                 }
                             }
                             Some(wire_const::T_MID_KEEP_ALIVE) => {
@@ -411,6 +482,13 @@ where
                             Some(wire_const::T_MID_CLOSE) => {
                                 // Graceful departure (the Close carries no zid,
                                 // so it is attributed by source address).
+                                // R311kn — the departing peer's in-progress
+                                // chains die with it (pico's per-entry dbufs),
+                                // BEFORE the slot index can be re-issued.
+                                #[cfg(feature = "reassembly")]
+                                if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                                    abort_peer_chains(&mut reasm, idx);
+                                }
                                 dispatcher.close_by_src(src);
                             }
                             _ => {}
@@ -426,8 +504,18 @@ where
             _ = clock.sleep(tick_ms) => {
                 // PeerSweep: evict peers past their lease. Swept every tick
                 // (>= the §3.1 lease/3 cadence; sweeping more often only
-                // sharpens eviction, and sweep is idempotent).
-                dispatcher.sweep(clock.now_monotonic_ms());
+                // sharpens eviction, and sweep is idempotent). R311kn — an
+                // evicted peer's chains are aborted before its slot index
+                // recycles, and the reassembly deadline sweep runs on the
+                // same tick (the unicast loop's per-iteration twin).
+                let now = clock.now_monotonic_ms();
+                #[cfg(feature = "reassembly")]
+                {
+                    sweep_reporting(&mut reasm, now, &mut on_event);
+                    dispatcher.sweep_with(now, |idx| abort_peer_chains(&mut reasm, idx));
+                }
+                #[cfg(not(feature = "reassembly"))]
+                dispatcher.sweep(now);
             }
         }
     }
@@ -907,6 +995,235 @@ mod tests {
         let join = decode_join(last_join).expect("JOIN decodes");
         assert_eq!(join.next_sn_reliable, 1, "publish advanced the ring");
         assert_eq!(join.next_sn_best_effort, 0, "best-effort channel untouched");
+    }
+
+    // ── R311kn — multicast fragment RX: per-peer chains through the
+    //    loop's reassembly Router ──
+
+    #[cfg(all(feature = "reassembly", feature = "codec-push", feature = "pubsub-put"))]
+    mod fragment_rx {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wz_session_core::frame_encode::encode_frame_with_push;
+        use wz_session_core::observer::ApplicationLayerObserver;
+        use wz_session_core::push_build::build_push_literal;
+
+        /// The serialized NetworkMessage batch a data frame would carry —
+        /// built through the production encoders (push -> frame -> parse
+        /// back the payload) so the fixture cannot drift from the wire.
+        fn push_batch_bytes(keyexpr: &str, payload: &[u8]) -> Vec<u8> {
+            let push = build_push_literal(keyexpr, payload).expect("push fixture");
+            let frame = encode_frame_with_push(0, push, true);
+            let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&frame) else {
+                panic!("frame fixture must parse");
+            };
+            payload
+        }
+
+        /// One reliable `T_MID_FRAGMENT` datagram: `[flags|MID]` header +
+        /// the fragment body (`VLE(sn) + chunk`). `sn < 0x80` keeps the
+        /// VLE single-byte (the fixtures stay in that range).
+        fn fragment_dgram(sn: u8, more: bool, chunk: &[u8]) -> Vec<u8> {
+            assert!(sn < 0x80, "single-byte VLE fixture range");
+            let mut flags = wire_const::FLAG_T_FRAGMENT_R;
+            if more {
+                flags |= wire_const::FLAG_T_FRAGMENT_M;
+            }
+            let mut dgram = std::vec![flags | wire_const::T_MID_FRAGMENT, sn];
+            dgram.extend_from_slice(chunk);
+            dgram
+        }
+
+        /// A subscriber observer + fire counter for "demo/mc".
+        fn counting_observer(
+            expect_payload: &'static [u8],
+        ) -> (ApplicationLayerObserver, Arc<AtomicUsize>) {
+            let fired = Arc::new(AtomicUsize::new(0));
+            let mut observer = ApplicationLayerObserver::new();
+            {
+                let fired = fired.clone();
+                observer.subscribers.register("demo/mc", move |sample| {
+                    assert_eq!(sample.payload(), expect_payload);
+                    fired.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+            (observer, fired)
+        }
+
+        /// A two-fragment chain from a JOINed peer reassembles inside the
+        /// drive loop and reaches the subscriber exactly once, through the
+        /// SAME observer fan the whole-frame path uses (zenoh-pico
+        /// `_z_multicast_handle_fragment_inner` -> defrag ->
+        /// `_z_handle_network_message`).
+        #[tokio::test]
+        async fn drive_loop_reassembles_fragment_chain_to_subscriber() {
+            let peer_b = [0x01, 0x02, 0x03, 0x04];
+            let join = join0(&params(&peer_b)); // next_sn_reliable = 0
+            let batch = push_batch_bytes("demo/mc", b"frag-over-multicast");
+            let (head, tail) = batch.split_at(batch.len() / 2);
+
+            let mut driver = FakeDriver::with([
+                (join, src(2)),
+                (fragment_dgram(0, true, head), src(2)),
+                (fragment_dgram(1, false, tail), src(2)),
+            ]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            let (mut observer, fired) = counting_observer(b"frag-over-multicast");
+
+            let outcome = drive_multicast_session(
+                &mut dispatcher,
+                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                &mut driver,
+                &clock,
+                Some(8),
+                5,
+                |event| observer.dispatch_event(event),
+                &mut idle_outbound(),
+            )
+            .await;
+
+            assert_eq!(outcome, MulticastOutcome::IterationLimit);
+            assert_eq!(
+                fired.load(Ordering::SeqCst),
+                1,
+                "the reassembled Push must reach the subscriber exactly once"
+            );
+        }
+
+        /// A fragment chain from an address that never JOINed is dropped
+        /// before any chain opens (pico "Dropping Z_FRAGMENT from unknown
+        /// peer").
+        #[tokio::test]
+        async fn drive_loop_drops_fragments_from_unknown_peer() {
+            let batch = push_batch_bytes("demo/mc", b"orphan");
+            let (head, tail) = batch.split_at(batch.len() / 2);
+            let mut driver = FakeDriver::with([
+                (fragment_dgram(0, true, head), src(7)), // no prior JOIN
+                (fragment_dgram(1, false, tail), src(7)),
+            ]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            let (mut observer, fired) = counting_observer(b"orphan");
+
+            drive_multicast_session(
+                &mut dispatcher,
+                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                &mut driver,
+                &clock,
+                Some(6),
+                5,
+                |event| observer.dispatch_event(event),
+                &mut idle_outbound(),
+            )
+            .await;
+
+            assert_eq!(
+                fired.load(Ordering::SeqCst),
+                0,
+                "unattributed chain must drop"
+            );
+        }
+
+        /// An out-of-order FRAME between two fragments clears the open
+        /// chain (pico clears the channel dbuf on a frame SN-gate reject),
+        /// so the chain's tail can no longer complete it.
+        #[tokio::test]
+        async fn drive_loop_frame_ooo_aborts_open_chain() {
+            let peer_b = [0x01, 0x02, 0x03, 0x04];
+            let join = join0(&params(&peer_b)); // next_sn_reliable = 0
+            let batch = push_batch_bytes("demo/mc", b"never-delivered");
+            let (head, tail) = batch.split_at(batch.len() / 2);
+            // A stale whole frame (replaying SN 0, which the first fragment
+            // already consumed) — rejected by the frame gate, clearing the
+            // chain head staged at SN 0.
+            let stale_frame = encode_frame_with_push(
+                0,
+                build_push_literal("demo/mc", b"stale").expect("push fixture"),
+                true,
+            );
+
+            let mut driver = FakeDriver::with([
+                (join, src(2)),
+                (fragment_dgram(0, true, head), src(2)),
+                (stale_frame, src(2)),
+                (fragment_dgram(1, false, tail), src(2)),
+            ]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            let (mut observer, fired) = counting_observer(b"never-delivered");
+
+            drive_multicast_session(
+                &mut dispatcher,
+                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                &mut driver,
+                &clock,
+                Some(10),
+                5,
+                |event| observer.dispatch_event(event),
+                &mut idle_outbound(),
+            )
+            .await;
+
+            assert_eq!(
+                fired.load(Ordering::SeqCst),
+                0,
+                "a frame SN-gate reject must clear the channel's open chain"
+            );
+        }
+
+        /// A peer's Close aborts its open chain BEFORE the slot recycles:
+        /// a new peer admitted into the SAME slot starts its chains clean
+        /// (no generation mixing across the recycled chain key).
+        #[tokio::test]
+        async fn drive_loop_close_aborts_chain_before_slot_reuse() {
+            let peer_b = [0x01, 0x02, 0x03, 0x04];
+            let peer_c = [0x05, 0x06, 0x07, 0x08];
+            let batch = push_batch_bytes("demo/mc", b"second-peer-clean");
+            let (head, tail) = batch.split_at(batch.len() / 2);
+
+            // Peer B (slot 0) opens a chain at SN 5..., then Closes. Peer C
+            // (from another address, admitted into the recycled slot 0)
+            // sends a clean 2-fragment chain at SN 0/1. Without the
+            // eviction abort, B's poisoned head (SN 5) would make C's SN 0
+            // continuation non-consecutive and abort C's chain instead.
+            let join_b = params(&peer_b);
+            let mut b_tx = TxSn::new(sn::mask_from_res(join_b.seq_num_res));
+            b_tx.next_reliable = 5; // B advertises next_sn_reliable = 5
+            let join_b_dgram = encode_join(&join_b, &b_tx);
+
+            let mut driver = FakeDriver::with([
+                (join_b_dgram, src(2)),
+                (fragment_dgram(5, true, b"poison-head"), src(2)),
+                (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
+                (join0(&params(&peer_c)), src(3)), // recycles slot 0
+                (fragment_dgram(0, true, head), src(3)),
+                (fragment_dgram(1, false, tail), src(3)),
+            ]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            let (mut observer, fired) = counting_observer(b"second-peer-clean");
+
+            drive_multicast_session(
+                &mut dispatcher,
+                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                &mut driver,
+                &clock,
+                Some(12),
+                5,
+                |event| observer.dispatch_event(event),
+                &mut idle_outbound(),
+            )
+            .await;
+
+            assert_eq!(dispatcher.active_peers(), 1, "B closed, C live");
+            assert_eq!(
+                fired.load(Ordering::SeqCst),
+                1,
+                "the recycled slot's new chain must complete cleanly"
+            );
+        }
     }
 
     /// Our own JOIN echoed back by multicast loopback does NOT admit us as a

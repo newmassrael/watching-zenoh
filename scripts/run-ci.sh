@@ -982,10 +982,17 @@ layer_c1l_reassembly() {
 # (std sce-rust-runtime — the AP profile). Multicast is handshake-free
 # (§3.3), a different shape from the unicast session FSM, so it is its own
 # lane. The MCU no_std build of the same is Layer G.12. Mirrors the Layer
-# C1l reassembly lane.
+# C1l reassembly lane. R311kn adds the reassembly-union arm: the multicast
+# fragment SN gate + the shared ingest_multicast_fragment pipeline compose
+# session-multicast WITH reassembly (codec-push backs the FramePayload
+# fixture); the first arm keeps the without-reassembly composition honest
+# (fragment MIDs drop, nothing else regresses).
 layer_c1p_multicast() {
     (cd crates \
-        && cargo test -p wz-session-core --features session-multicast --quiet)
+        && cargo test -p wz-session-core --features session-multicast --quiet) \
+        && (cd crates \
+            && cargo test -p wz-session-core \
+                --features session-multicast,reassembly,codec-push --quiet)
 }
 
 # ─── Layer C1q — multicast transport drive loop (Round C) ────────────
@@ -996,10 +1003,17 @@ layer_c1p_multicast() {
 # encode/decode round-trip + the fake-driver drive-loop admit/beacon/
 # link-lost paths) under `--features transport-multicast`. The real-socket
 # multicast e2e is Layer M (Round D). Mirrors the Layer C1i scouting-glue
-# lane.
+# lane. R311kn adds the reassembly-union arm: the fragment RX arm in
+# drive_multicast_session (per-peer chains, frame-OOO chain abort,
+# eviction abort before slot reuse); the first arm keeps the
+# without-reassembly drive loop composing (fragment MIDs fall to the
+# drop arm).
 layer_c1q_multicast_glue() {
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet)
+        && cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet) \
+        && (cd crates \
+            && cargo test -p wz-runtime-tokio \
+                --features transport-multicast,reassembly --lib multicast_glue --quiet)
 }
 
 # ─── Layer C1m — wz-session-lwip isolated host test + clippy ─────────

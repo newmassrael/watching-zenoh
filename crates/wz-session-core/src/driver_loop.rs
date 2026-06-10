@@ -197,6 +197,31 @@ pub enum IterationEvent<'a> {
     ReassemblyDropped(ReassemblyDropReason),
 }
 
+/// Build the [`DriverLoopOutcome`] a completed reassembly chain re-enters
+/// the loop with: the reassembled bytes go back through
+/// [`parse_frame_payload`](crate::network_message::parse_frame_payload), so
+/// the application's per-MID dispatch sees the reassembled message exactly
+/// as it sees a `T_MID_FRAME` payload. The reassembled bytes are the inner
+/// NetworkMessage batch; transport ext chains were per-fragment, so the
+/// reassembled outcome carries none. Shared by the unicast
+/// [`crate::drive::report_outcome_reassembling`] and the multicast
+/// [`crate::multicast_dispatch::ingest_multicast_fragment`] completion
+/// closures (one re-entry SSOT). `reassembly` implies `codec-frame`, so
+/// the payload parser is in scope.
+#[cfg(feature = "reassembly")]
+pub fn reassembled_frame_outcome(reliable: bool, sn: u64, msg: &[u8]) -> DriverLoopOutcome {
+    match crate::network_message::parse_frame_payload(msg) {
+        Ok(messages) => DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            has_ext: false,
+            extensions: Vec::new(),
+        },
+        Err(codec_err) => DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err)),
+    }
+}
+
 /// Why a reassembly chain was dropped at ingest, surfaced on
 /// [`IterationEvent::ReassemblyDropped`]. A stable, feature-independent
 /// mirror of the reassembly-internal `AbortReason` / `RefuseReason` (which
@@ -214,6 +239,37 @@ pub enum ReassemblyDropReason {
     PeerQuota,
     /// Every slot was occupied by another peer's in-progress chain.
     PoolExhausted,
+}
+
+#[cfg(feature = "reassembly")]
+impl ReassemblyDropReason {
+    /// Map a terminal non-completion ingest to this feature-independent
+    /// observer mirror; `None` for the progressing outcomes (Begun /
+    /// Continued / Reassembled), which the caller reports through their
+    /// own events. Shared by the unicast and multicast ingest reporters
+    /// (one mapping SSOT). Lives here, not on `IngestOutcome`: the
+    /// reassembly dispatcher also compiles on the no-alloc MCU profile,
+    /// where this alloc-gated observer module does not exist.
+    pub fn from_ingest(
+        outcome: crate::reassembly_dispatch::IngestOutcome,
+    ) -> Option<ReassemblyDropReason> {
+        use crate::reassembly_dispatch::{AbortReason, IngestOutcome, RefuseReason};
+        match outcome {
+            IngestOutcome::Aborted(AbortReason::OutOfOrder) => {
+                Some(ReassemblyDropReason::OutOfOrder)
+            }
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow) => {
+                Some(ReassemblyDropReason::CapacityOverflow)
+            }
+            IngestOutcome::Refused(RefuseReason::PeerQuota) => {
+                Some(ReassemblyDropReason::PeerQuota)
+            }
+            IngestOutcome::Refused(RefuseReason::PoolExhausted) => {
+                Some(ReassemblyDropReason::PoolExhausted)
+            }
+            IngestOutcome::Begun | IngestOutcome::Continued | IngestOutcome::Reassembled => None,
+        }
+    }
 }
 
 /// R76b — terminal result of a production session drive loop. Runtime-

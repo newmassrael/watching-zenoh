@@ -284,13 +284,9 @@ pub fn new_session_engine<R: SessionRuntime, T: TimeSource>(
 // ── reassembly-pool drive (reassembly-gated; `reassembly` implies `codec-frame`,
 //    so `parse_frame_payload` above is in scope here too) ──
 #[cfg(feature = "reassembly")]
-use crate::driver_loop::{IterationEvent, ReassemblyDropReason};
+use crate::driver_loop::{reassembled_frame_outcome, IterationEvent, ReassemblyDropReason};
 #[cfg(feature = "reassembly")]
-use crate::reassembly_dispatch::{
-    AbortReason, Fragment as ReassemblyFragment, IngestOutcome, ReassemblyDispatcher, RefuseReason,
-};
-#[cfg(feature = "reassembly")]
-use alloc::vec::Vec;
+use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispatcher};
 
 /// Report one driver-loop outcome, additionally driving the reassembly pool
 /// when the outcome is a `Fragment`. On chain completion the reassembled bytes
@@ -363,21 +359,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
             sn_mask,
             now_ms,
             |msg| {
-                completed = Some(match parse_frame_payload(msg) {
-                    Ok(messages) => DriverLoopOutcome::FramePayload {
-                        reliable: *reliable,
-                        sn: *sn,
-                        messages,
-                        // The reassembled bytes are the inner NetworkMessage
-                        // batch; transport ext chains were per-fragment, so the
-                        // reassembled message carries none.
-                        has_ext: false,
-                        extensions: Vec::new(),
-                    },
-                    Err(codec_err) => {
-                        DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
-                    }
-                });
+                completed = Some(reassembled_frame_outcome(*reliable, *sn, msg));
             },
         )
     });
@@ -389,18 +371,7 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
     // silent. Surface it (mapped to the feature-independent observer reason)
     // so the application can observe a malformed or abusive fragment stream
     // (the drop counterpart of the FramePayload completion).
-    let drop_reason = match ingest_outcome {
-        IngestOutcome::Aborted(AbortReason::OutOfOrder) => Some(ReassemblyDropReason::OutOfOrder),
-        IngestOutcome::Aborted(AbortReason::CapacityOverflow) => {
-            Some(ReassemblyDropReason::CapacityOverflow)
-        }
-        IngestOutcome::Refused(RefuseReason::PeerQuota) => Some(ReassemblyDropReason::PeerQuota),
-        IngestOutcome::Refused(RefuseReason::PoolExhausted) => {
-            Some(ReassemblyDropReason::PoolExhausted)
-        }
-        IngestOutcome::Begun | IngestOutcome::Continued | IngestOutcome::Reassembled => None,
-    };
-    if let Some(reason) = drop_reason {
+    if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
         on_event(IterationEvent::ReassemblyDropped(reason));
     }
 }

@@ -630,8 +630,11 @@ pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_SLO
 /// from the same SCE-codegen'd AP buffer-pool constants. The emit types
 /// them as `u32`; [`ReassemblyConfig`] takes `u16` / `u64`, so the two
 /// widening casts are the only adaptation.
+/// `pub(crate)`: the multicast drive loop (`crate::multicast_glue`) runs
+/// its own pool instance over the SAME SCE-sourced AP dims/knobs (one
+/// buffer-pool policy SSOT, two transports).
 #[cfg(feature = "reassembly")]
-fn reassembly_config() -> ReassemblyConfig {
+pub(crate) fn reassembly_config() -> ReassemblyConfig {
     ReassemblyConfig::new(
         crate::reassembly_pool_ap::PER_PEER_QUOTA as u16,
         crate::reassembly_pool_ap::REASSEMBLY_TIMEOUT_MS as u64,
