@@ -28,6 +28,7 @@ use zenoh_pico_sys::{
 };
 
 const FLAG_JOIN_S: u8 = 0x40;
+const FLAG_JOIN_T: u8 = 0x20;
 const WHATAMI_PEER: z_whatami_t = 0x02;
 
 fn whatami_wire_form(api: z_whatami_t) -> u8 {
@@ -151,6 +152,44 @@ fn layer3_join_s1_with_size_negotiation() {
         sn_res: Some(sn_res),
         batch_size: Some(input.batch_size),
         lease: input.lease,
+        next_sn_reliable: input.next_sn_reliable,
+        next_sn_best_effort: input.next_sn_best_effort,
+    }
+    .encode_to_vec(((input.parent_flags) >> 6) & 1);
+    let pico = zenoh_pico_encode_join(&input);
+    assert_eq!(wz, pico);
+}
+
+/// R311kr — parent.T lease-unit parity: with the T flag in the header,
+/// pico's codec divides the lease by 1000 INSIDE `_z_join_encode`
+/// (codec/transport.c:59-62), while wz keeps the codec raw and lets the
+/// multicast glue divide before encoding. Same wire either way — this
+/// pins the two division homes byte-equal for the pico-default beacon
+/// (lease 10000ms = T=1 + VLE 10).
+#[test]
+fn layer3_join_t_flag_lease_in_seconds() {
+    let input = JoinInput {
+        version: 0x05,
+        whatami: WHATAMI_PEER,
+        zid: &[0x01, 0x02, 0x03],
+        seq_num_res: 0,
+        req_id_res: 0,
+        batch_size: 0,
+        lease: 10_000,
+        next_sn_reliable: 42,
+        next_sn_best_effort: 99,
+        parent_flags: FLAG_JOIN_T,
+    };
+    let cbyte = compute_join_cbyte(input.whatami, input.zid.len() as u8);
+    let wz = Join {
+        version: input.version,
+        cbyte,
+        zid: input.zid,
+        sn_res: None,
+        batch_size: None,
+        // The glue's encode-side projection (multicast_glue::encode_join):
+        // whole-second lease -> seconds on the wire.
+        lease: input.lease / 1000,
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }

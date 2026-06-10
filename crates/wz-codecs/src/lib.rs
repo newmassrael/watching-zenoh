@@ -352,6 +352,15 @@ pub mod wire_const {
     /// clears it.
     #[cfg(feature = "codec-join")]
     pub const FLAG_T_JOIN_S: u8 = 0x40;
+    /// Lease-unit selector for `T_MID_JOIN` per transport.h:60
+    /// (`_Z_FLAG_T_JOIN_T`, 1<<5): 1 = the lease VLE is in SECONDS
+    /// (zenoh-pico `_z_t_msg_make_join` sets it for every whole-second
+    /// lease, so the default 10000ms rides the wire as 10), 0 =
+    /// milliseconds. The `join` body codec carries the raw VLE; the
+    /// multicast glue owns the unit projection (encode divides, decode
+    /// multiplies — codec/transport.c:59-62 / 161-164).
+    #[cfg(feature = "codec-join")]
+    pub const FLAG_T_JOIN_T: u8 = 0x20;
 
     /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
     #[cfg(feature = "codec-init-body")]

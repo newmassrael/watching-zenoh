@@ -124,6 +124,14 @@ use crate::LinkDriver;
 /// omits the MID byte, so header + S flag are prepended here (mirror of
 /// [`crate::scouting_glue`]'s `scout_emit`).
 ///
+/// R311kr — a whole-second lease rides the wire in SECONDS under the
+/// `T` header flag ([`wire_const::FLAG_T_JOIN_T`]), pico `make_join`
+/// parity (`lease % 1000 == 0` sets T, definitions/transport.c:113-115;
+/// the codec then divides, codec/transport.c:59-62). The pico default
+/// lease 10000ms therefore arrives as T=1 + VLE 10 — an encoder that
+/// never set T was fine on its own wire (T=0 = milliseconds) but the
+/// decode side MUST honor T or it mis-reads every pico beacon 1000x.
+///
 /// A1c — the JOIN advertises the LIVE per-channel `next_sn` from `tx_sn`
 /// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
 /// before these, so the next data frame this node mints is admitted).
@@ -141,18 +149,26 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
         join.sn_res = Some(pack_res_cbyte(params.seq_num_res, params.req_id_res));
         join.batch_size = Some(params.batch_size);
     }
-    join.lease = params.lease_ms;
+    let lease_in_seconds = params.lease_ms % 1000 == 0;
+    join.lease = if lease_in_seconds {
+        params.lease_ms / 1000
+    } else {
+        params.lease_ms
+    };
     join.next_sn_reliable = tx_sn.next_reliable;
     join.next_sn_best_effort = tx_sn.next_best_effort;
     let body = join.encode_to_vec(u8::from(advertises));
 
     let mut dgram = Vec::with_capacity(1 + body.len());
-    let s_flag = if advertises {
+    let mut flags = if advertises {
         wire_const::FLAG_T_JOIN_S
     } else {
         0
     };
-    dgram.push(s_flag | wire_const::T_MID_JOIN);
+    if lease_in_seconds {
+        flags |= wire_const::FLAG_T_JOIN_T;
+    }
+    dgram.push(flags | wire_const::T_MID_JOIN);
     dgram.extend_from_slice(&body);
     dgram
 }
@@ -209,9 +225,11 @@ pub fn multicast_put_literal(
 
 /// If `bytes` is a multicast JOIN datagram, decode its full body (a
 /// borrowed view into `bytes`). Returns `None` for a non-JOIN MID or a
-/// malformed body. The caller validates the announcement (§3.2 rejection
-/// rules — [`validate_join`]) before feeding it to
-/// [`MulticastDispatcher::ingest_join`].
+/// malformed body. The returned `lease` is ALWAYS milliseconds — the
+/// `T` header flag's seconds form is projected back here (R311kr), so
+/// consumers never see the wire unit. The caller validates the
+/// announcement (§3.2 rejection rules — [`validate_join`]) before
+/// feeding it to [`MulticastDispatcher::ingest_join`].
 pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
     let header = *bytes.first()?;
     if header & 0x1f != wire_const::T_MID_JOIN {
@@ -222,11 +240,21 @@ pub fn decode_join(bytes: &[u8]) -> Option<Join<'_>> {
     // zenoh-pico transport.h:61) to that bit. A minimal JOIN clears S so
     // `s` is 0, but project from the named flag (not a raw shift) so a
     // future richer JOIN decodes correctly — header bit 5 is the distinct
-    // `_Z_FLAG_T_JOIN_T` timestamp flag, NOT S, so a `header >> 5` shift
-    // would read the wrong bit.
+    // `_Z_FLAG_T_JOIN_T` lease-unit flag (handled below), NOT S, so a
+    // `header >> 5` shift would read the wrong bit.
     let s = u8::from(header & wire_const::FLAG_T_JOIN_S != 0);
     let mut cursor = SceCursor::new(&bytes[1..]);
-    Join::decode(&mut cursor, s).ok()
+    let mut join = Join::decode(&mut cursor, s).ok()?;
+    // R311kr — T flag = the lease VLE is in SECONDS; project back to the
+    // milliseconds every wz consumer speaks (pico decode parity,
+    // codec/transport.c:161-164: `_lease = _lease * 1000`). The default
+    // pico beacon (lease 10000ms) arrives as T=1 + VLE 10, so skipping
+    // this read it as 10ms. Saturating: pico multiplies unchecked, but a
+    // hostile VLE near u64::MAX must not panic the RX loop.
+    if header & wire_const::FLAG_T_JOIN_T != 0 {
+        join.lease = join.lease.saturating_mul(1000);
+    }
+    Some(join)
 }
 
 /// If `bytes` is a multicast JOIN datagram, decode it and return the
@@ -643,11 +671,17 @@ mod tests {
     /// R311kq — a protocol-default config emits the minimal JOIN (S=0,
     /// no optionals): omitted IS the honest advertisement of the
     /// protocol defaults (pico `make_join` sets S only off-default).
+    /// The fixture's whole-second lease (5000ms) still rides the T flag
+    /// (R311kr) — T is the lease UNIT, orthogonal to the S caps.
     #[test]
     fn encode_join_is_minimal_at_protocol_defaults() {
         let p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
         let dgram = join0(&p);
-        assert_eq!(dgram[0], wire_const::T_MID_JOIN, "no S flag");
+        assert_eq!(dgram[0] & wire_const::FLAG_T_JOIN_S, 0, "no S flag");
+        assert_eq!(
+            dgram[0] & !(wire_const::FLAG_T_JOIN_S | wire_const::FLAG_T_JOIN_T),
+            wire_const::T_MID_JOIN
+        );
         let join = decode_join(&dgram).expect("JOIN decodes");
         assert_eq!(join.sn_res, None);
         assert_eq!(join.batch_size, None);
@@ -675,6 +709,37 @@ mod tests {
             validate_join(&join, &p).is_some(),
             "same-config group admits the advertised caps"
         );
+    }
+
+    /// R311kr — pico `make_join` lease-unit parity: a whole-second lease
+    /// sets the T header flag and rides the wire in SECONDS (the pico
+    /// default 10000ms beacon is T=1 + a one-byte VLE 10); `decode_join`
+    /// projects it back so consumers always see milliseconds. The
+    /// pre-R311kr decoder ignored T and read that beacon as 10ms.
+    #[test]
+    fn encode_join_whole_second_lease_rides_t_flag() {
+        let mut p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
+        p.lease_ms = 10_000;
+        let dgram = join0(&p);
+        assert_ne!(dgram[0] & wire_const::FLAG_T_JOIN_T, 0, "T flag set");
+        // header(1) + version(1) + cbyte(1) + zid(4) -> lease VLE at 7;
+        // 10 fits one VLE byte, so the raw wire value is visible here.
+        assert_eq!(dgram[7], 10, "wire VLE carries seconds");
+        let join = decode_join(&dgram).expect("JOIN decodes");
+        assert_eq!(join.lease, 10_000, "lease projected back to ms");
+    }
+
+    /// R311kr — a sub-second-granularity lease cannot ride the seconds
+    /// form: T stays clear and the lease VLE carries raw milliseconds
+    /// (pico `make_join` sets T only when `lease % 1000 == 0`).
+    #[test]
+    fn encode_join_fractional_lease_stays_in_ms() {
+        let mut p = protocol_default_params(&[0x01, 0x02, 0x03, 0x04]);
+        p.lease_ms = 1_500;
+        let dgram = join0(&p);
+        assert_eq!(dgram[0] & wire_const::FLAG_T_JOIN_T, 0, "T flag clear");
+        let join = decode_join(&dgram).expect("JOIN decodes");
+        assert_eq!(join.lease, 1_500);
     }
 
     /// R311kq — pico omitted-optional semantics: a minimal JOIN means

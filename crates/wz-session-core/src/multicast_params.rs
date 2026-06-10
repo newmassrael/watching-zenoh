@@ -74,6 +74,9 @@ pub struct MulticastParams {
     /// Group members hold the peer alive for at least this long after each
     /// JOIN; the local sweep lease ([`crate::multicast_dispatch::MulticastConfig::lease_ms`])
     /// is the symmetric inbound side (how long THIS node holds OTHER peers).
+    /// R311kr — a whole-second value rides the wire in SECONDS under the
+    /// JOIN `T` header flag (zenoh-pico `make_join` parity); the glue owns
+    /// that projection, so this field stays milliseconds on both sides.
     pub lease_ms: u64,
     /// Period between this peer's outbound JOINs (milliseconds; zenoh
     /// default 2500). The drive loop owns this cadence — the periodic JOIN
