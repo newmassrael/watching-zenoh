@@ -33211,6 +33211,48 @@
         "F-6 structural follow-up: deferred-fire (callbacks outside the observer lock) would remove the re-entrancy constraint for ALL decl/matching sinks - a cross-cutting redesign round if wanted"
       ]
     },
+    "Round 311kk": {
+      "decision_summary": "R311kk verification correction: R311kh/kj 'run-ci EXIT 0' claims were unsound (pipe-masked exit codes); unmasked run surfaced kh subset dead-code + kj parity-input regressions, both fixed; verdicts now from direct exit capture.",
+      "changes_bullets": [
+        "VERIFICATION CORRECTION: R311kh and R311kj entries claim \"full host run-ci EXIT 0\" - both claims were UNSOUND: the session's CI invocations piped through `| tail -N`, so the recorded exit code was tail's, masking run-ci failures (frozen bodies stand; this entry is the correction)",
+        "actual failures the unmasked run surfaced: (a) R311kh MatchingListener fields/variants dead under the C1j/C4b/c/d handshake-only subsets; (b) R311kj F-4 broke layer3_ext_chain_outbound x2 (the pico byte-parity oracle fed batch_size=0, which wz now normalizes to 65535 at encode)",
+        "fix (a): MatchingScope variants cfg-gated on their constructing features (uninhabited-when-off, zero-arm match; R311js precedent) + unconditional handle-state binding in undeclare (R311g1 idiom)",
+        "fix (b): FIXTURE_BATCH_SIZE 0 -> 1024 and the wz side fed the SAME advertisement (byte-parity property = same logical input -> same bytes; the 0-normalization is pinned separately by init_advertisement_tests)",
+        "pre-push hook caught both before remote (the R64 gate working as designed); push completed only after the unmasked re-verification"
+      ],
+      "verification_bullets": [
+        "layer3_ext_chain_outbound 4/4; handshake-only subset build + clippy -D warnings clean; default-features matching tests 25/25",
+        "full host run-ci EXIT 0 and Layer G EXIT 0 verified via DIRECT exit-code capture (no pipe in the verdict path), logs preserved at capture time"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "process rule (memory feedback entry written): a run-ci verdict MUST come from the script exit code captured without a pipeline; `cmd | tail` reports tail's exit status and silently masks gate failures",
+        "prior-round claims R311kc..kg/ki cited the same pipe shape, but the unmasked HEAD run localizes ALL failures to kh+kj artifacts - their lanes are green at HEAD, so those claims are retroactively sound in outcome, unsound in method"
+      ],
+      "publishable_decision_summary": "R311kk verification correction: R311kh/kj 'run-ci EXIT 0' claims were unsound (pipe-masked exit codes); unmasked run surfaced kh subset dead-code + kj parity-input regressions, both fixed; verdicts now from direct exit capture.",
+      "publishable_changes_bullets": [
+        "VERIFICATION CORRECTION: R311kh and R311kj entries claim \"full host run-ci EXIT 0\" - both claims were UNSOUND: the session's CI invocations piped through `| tail -N`, so the recorded exit code was tail's, masking run-ci failures (frozen bodies stand; this entry is the correction)",
+        "actual failures the unmasked run surfaced: (a) R311kh MatchingListener fields/variants dead under the C1j/C4b/c/d handshake-only subsets; (b) R311kj F-4 broke layer3_ext_chain_outbound x2 (the pico byte-parity oracle fed batch_size=0, which wz now normalizes to 65535 at encode)",
+        "fix (a): MatchingScope variants cfg-gated on their constructing features (uninhabited-when-off, zero-arm match; R311js precedent) + unconditional handle-state binding in undeclare (R311g1 idiom)",
+        "fix (b): FIXTURE_BATCH_SIZE 0 -> 1024 and the wz side fed the SAME advertisement (byte-parity property = same logical input -> same bytes; the 0-normalization is pinned separately by init_advertisement_tests)",
+        "pre-push hook caught both before remote (the R64 gate working as designed); push completed only after the unmasked re-verification"
+      ],
+      "publishable_verification_bullets": [
+        "layer3_ext_chain_outbound 4/4; handshake-only subset build + clippy -D warnings clean; default-features matching tests 25/25",
+        "full host run-ci EXIT 0 and Layer G EXIT 0 verified via DIRECT exit-code capture (no pipe in the verdict path), logs preserved at capture time"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "process rule (memory feedback entry written): a run-ci verdict MUST come from the script exit code captured without a pipeline; `cmd | tail` reports tail's exit status and silently masks gate failures",
+        "prior-round claims R311kc..kg/ki cited the same pipe shape, but the unmasked HEAD run localizes ALL failures to kh+kj artifacts - their lanes are green at HEAD, so those claims are retroactively sound in outcome, unsound in method"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
