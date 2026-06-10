@@ -33746,6 +33746,50 @@
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop"
       ]
     },
+    "Round 311kw": {
+      "decision_summary": "R311kw outbound TX stamp: all wire emits funnel through the send_wire seam stamping last_outbound_at — deadline-model twin of pico _transmitted (common/tx.c:98/153), the keepalive TX emitter's idle-window input.",
+      "changes_bullets": [
+        "`SessionLinkActions.last_outbound_at: R::Mutex<Option<u64>>` slot + private `send_wire` seam (stamp + forward to `link_driver().send_blocking`); all 10 production TX callsites converged (handshake t_msg senders, CLOSE x2 paths, Frame / Fragment / batch-flush emits)",
+        "`reset_for_reopen` clears the stamp — per-transport state, pico fresh-transport `_transmitted = 0` parity (unicast/transport.c:65)",
+        "`Reliability` import union + `send_wire` cfg union extended with `transport-batching` (the batch flush now routes the seam; the former full-path-return exclusion comment updated)",
+        "`wz-runtime-tokio/tests/session_keepalive_tx.rs` NEW: 3 stamp wirings (empty at construction / CLOSE primitive path / FSM SentInitSyn action path)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_keepalive_tx: 3/3 PASS",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped exit-code capture); run 1 caught G.10 riscv E0425 (ungated seam naming the cfg-gated `Reliability` import on the minimal MCU lane) -> seam gated on the emit-body union; run 2 caught fmt drift -> cargo fmt; run 3 clean",
+        "pre-commit validate-workspace clean (T1 new=+0, entries 652 / sections 258 unchanged)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311kx keepalive TX emitter rides this stamp: LEASE_EXPIRE_FACTOR=3 cadence (pico CMakeLists.txt:311), encode_keep_alive (bare 0x04 header), check_keepalive_deadline + wake-deadline helpers, tokio select-arm + lwIP busy-poll integration, wz-session-lwip transport-keepalive feature forward",
+        "lease wake-arming gap surfaced: BOTH drive loops arm the lease wake from last_inbound_keepalive_at alone with the LOCAL window, so an Established peer that never sends a KeepAlive leaves the loop blocked on the link poll forever (the R84 established_at comparator fallback is unreachable) and a shorter peer-advertised lease wakes late; R311kx lease_wake_deadline (baseline max(established_at, keepalive-RX) + adopted min window) closes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop; no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it"
+      ],
+      "publishable_decision_summary": "R311kw outbound TX stamp: all wire emits funnel through the send_wire seam stamping last_outbound_at — deadline-model twin of pico _transmitted (common/tx.c:98/153), the keepalive TX emitter's idle-window input.",
+      "publishable_changes_bullets": [
+        "`SessionLinkActions.last_outbound_at: R::Mutex<Option<u64>>` slot + private `send_wire` seam (stamp + forward to `link_driver().send_blocking`); all 10 production TX callsites converged (handshake t_msg senders, CLOSE x2 paths, Frame / Fragment / batch-flush emits)",
+        "`reset_for_reopen` clears the stamp — per-transport state, pico fresh-transport `_transmitted = 0` parity (unicast/transport.c:65)",
+        "`Reliability` import union + `send_wire` cfg union extended with `transport-batching` (the batch flush now routes the seam; the former full-path-return exclusion comment updated)",
+        "`wz-runtime-tokio/tests/session_keepalive_tx.rs` NEW: 3 stamp wirings (empty at construction / CLOSE primitive path / FSM SentInitSyn action path)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_keepalive_tx: 3/3 PASS",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped exit-code capture); run 1 caught G.10 riscv E0425 (ungated seam naming the cfg-gated `Reliability` import on the minimal MCU lane) -> seam gated on the emit-body union; run 2 caught fmt drift -> cargo fmt; run 3 clean",
+        "pre-commit validate-workspace clean (T1 new=+0, entries 652 / sections 258 unchanged)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311kx keepalive TX emitter rides this stamp: LEASE_EXPIRE_FACTOR=3 cadence (pico CMakeLists.txt:311), encode_keep_alive (bare 0x04 header), check_keepalive_deadline + wake-deadline helpers, tokio select-arm + lwIP busy-poll integration, wz-session-lwip transport-keepalive feature forward",
+        "lease wake-arming gap surfaced: BOTH drive loops arm the lease wake from last_inbound_keepalive_at alone with the LOCAL window, so an Established peer that never sends a KeepAlive leaves the loop blocked on the link poll forever (the R84 established_at comparator fallback is unreachable) and a shorter peer-advertised lease wakes late; R311kx lease_wake_deadline (baseline max(established_at, keepalive-RX) + adopted min window) closes it",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop; no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
