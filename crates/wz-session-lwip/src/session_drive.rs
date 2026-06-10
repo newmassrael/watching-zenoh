@@ -21,9 +21,13 @@
 //!   `link_driver().send_blocking` -> [`LwipUdpDriver`]'s `socket.send_to`.
 
 use wz_link_lwip::LwipLink;
-use wz_runtime_core::{Runtime, TimeSource};
+use wz_runtime_core::TimeSource;
 use wz_runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
-use wz_session_core::drive::{check_lease_deadline, dispatch_link_event, new_session_engine};
+#[cfg(feature = "transport-keepalive")]
+use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
+use wz_session_core::drive::{
+    check_lease_deadline, dispatch_link_event, lease_wake_deadline, new_session_engine,
+};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::{LinkEvent, RxFrame};
 use wz_session_core::session_actions::SessionLinkActions;
@@ -108,7 +112,6 @@ where
     engine.initialize();
     engine.process_event(role.start_event());
 
-    let lease_ms = actions.params.lease_ms;
     let mut deadline_tracker = HandshakeDeadlineTracker::new(*timeouts);
     #[cfg(feature = "reassembly")]
     let mut reasm = mcu_reassembly();
@@ -157,19 +160,18 @@ where
 
         // No inbound: the handshake / lease deadline. The tracker yields the
         // active handshake deadline; in Established it disarms and the
-        // keepalive-resetting lease deadline applies (R84 baseline read via
-        // the shared mutex seam). Fire when `now_ms >= deadline_ms` — the
+        // lease-expiry deadline applies — armed via the shared
+        // `lease_wake_deadline` helper (R311kx: baseline
+        // max(established_at, keepalive-RX) + the adopted min(local, peer)
+        // window, the same arithmetic the comparator re-derives; the prior
+        // arming read last_inbound_keepalive_at alone with the local
+        // window, so a peer that never sent a KeepAlive was never
+        // lease-checked). Fire when `now_ms >= deadline_ms` — the
         // busy-poll equivalent of the AP select! sleep branch.
         let deadline: Option<(u64, Option<SessionFsmUnicastEvent>)> =
             match deadline_tracker.poll(engine.get_current_state(), now_ms) {
                 Some((dl_ms, ev)) => Some((dl_ms, Some(ev))),
-                None => {
-                    let stamp = <LwipRuntime<C> as Runtime>::with_mutex_mut(
-                        &actions.last_inbound_keepalive_at,
-                        |g| *g,
-                    );
-                    stamp.map(|s| (s.saturating_add(lease_ms), None))
-                }
+                None => lease_wake_deadline(actions).map(|dl| (dl, None)),
             };
         if let Some((deadline_ms, kind)) = deadline {
             if now_ms >= deadline_ms {
@@ -182,6 +184,19 @@ where
                         engine.process_event(event);
                     }
                 }
+            }
+        }
+
+        // R311kx — keepalive TX deadline, the busy-poll twin of the AP
+        // loop's min-deadline select arm: compare against the TX wake
+        // deadline each tick and run the (self-guarded) check only when it
+        // crossed, so the steady state stays event-free — the observer
+        // sees `Emitted` verdicts, not a per-tick `WithinInterval` flood.
+        #[cfg(feature = "transport-keepalive")]
+        if let Some(ka_deadline_ms) = keepalive_wake_deadline(actions) {
+            if now_ms >= ka_deadline_ms {
+                let ka_outcome = check_keepalive_deadline(actions, now_ms);
+                on_event(IterationEvent::KeepAlive(ka_outcome));
             }
         }
     }

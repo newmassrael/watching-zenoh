@@ -42,6 +42,13 @@ pub struct ActionTrace {
     pub stop_lease_monitor: u32,
     pub start_keepalive_worker: u32,
     pub stop_keepalive_worker: u32,
+    /// R311kx — incremented on every KeepAlive wire emit
+    /// (`SessionLinkActions::send_keep_alive`, the cadence-driven
+    /// liveness ping). Counts EMITS, not worker starts — pairs with
+    /// `start_keepalive_worker` (the Established.onentry trace marker)
+    /// the way `send_close_frame_with_reason` pairs with the Closing
+    /// entry actions.
+    pub send_keep_alive: u32,
     pub free_pool_slots: u32,
     pub set_close_reason_count: u32,
     pub close_reason: CloseReason,
@@ -80,6 +87,7 @@ impl ActionTrace {
             stop_lease_monitor: self.stop_lease_monitor,
             start_keepalive_worker: self.start_keepalive_worker,
             stop_keepalive_worker: self.stop_keepalive_worker,
+            send_keep_alive: self.send_keep_alive,
             free_pool_slots: self.free_pool_slots,
             set_close_reason_count: self.set_close_reason_count,
             close_reason: self.close_reason,

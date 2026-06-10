@@ -20,8 +20,21 @@
 //! (gated at the `lib.rs` module declaration). Semantically distinct
 //! from `frame_encode` (which is the `T_MID_FRAME` data-plane envelope).
 
+// Vec / VecSink back the codec-body encoders only; `encode_keep_alive`
+// (transport-keepalive) is a const header byte, so a keepalive-only
+// subset must not carry the unused imports (CI denies warnings).
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close"
+))]
 use alloc::vec::Vec;
 
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close"
+))]
 use sce_forge_runtime::codec::VecSink;
 use wz_codecs::wire_const;
 
@@ -228,6 +241,17 @@ pub fn encode_close(reason: u8) -> Vec<u8> {
         .encode(&mut sink)
         .expect("VecSink is infallible");
     wire
+}
+
+/// R311kx — wire bytes for a KeepAlive transport message: the bare
+/// 1-byte header (MID 0x04, no flags) over a zero-byte body — zenoh-pico
+/// `_z_keep_alive_encode` writes nothing and the header alone marks the
+/// message on the wire (`_z_t_msg_make_keep_alive`; the empty-body codec
+/// parity is pinned by `tests/layer3_keep_alive.rs`). Const array (no
+/// alloc): the message has no variable part.
+#[cfg(feature = "transport-keepalive")]
+pub const fn encode_keep_alive() -> [u8; 1] {
+    [wire_const::T_MID_KEEP_ALIVE]
 }
 
 /// Pack the `cbyte` field per zenoh-pico's `_z_whatami_to_uint8`

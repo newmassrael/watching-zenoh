@@ -351,9 +351,9 @@ mod tests {
     /// `decode_join_zid` rejects a datagram whose MID is not `T_MID_JOIN`.
     #[test]
     fn decode_rejects_non_join_mid() {
-        // A T_MID_KEEP_ALIVE (0x04) datagram, not a JOIN — literal so the
-        // negative-path fixture doesn't pull the codec-keep-alive gate.
-        let dgram = [0x04u8, 0x00];
+        // A T_MID_KEEP_ALIVE (0x04) datagram, not a JOIN (the const is
+        // ungated since R311kx, so the fixture can name it directly).
+        let dgram = [wz_codecs::wire_const::T_MID_KEEP_ALIVE, 0x00];
         assert_eq!(decode_join_zid(&dgram), None);
         assert_eq!(decode_join_zid(&[]), None);
     }

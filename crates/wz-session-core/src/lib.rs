@@ -375,19 +375,24 @@ pub mod inbound;
 #[cfg(feature = "alloc")]
 pub mod frame_encode;
 
-/// Outbound transport-handshake / close frame encoders
-/// (`encode_init` / `encode_open` / `encode_close`) hoisted from
+/// Outbound transport-handshake / close / keepalive frame encoders
+/// (`encode_init` / `encode_open` / `encode_close` /
+/// `encode_keep_alive`) hoisted from
 /// `wz-runtime-tokio::session_glue` so the session action layer shares
-/// one handshake encode SSOT across the tokio (AP) and lwIP (MCU)
-/// profiles. Owned `Vec` output, so alloc-gated like `frame_encode`;
-/// additionally gated on at least one handshake codec feature so the
-/// module is absent (rather than empty) under a data-plane-only subset.
+/// one transport-message encode SSOT across the tokio (AP) and lwIP
+/// (MCU) profiles. Owned `Vec` output, so alloc-gated like
+/// `frame_encode`; additionally gated on at least one t_msg emitter
+/// feature so the module is absent (rather than empty) under a
+/// data-plane-only subset (R311kx adds `transport-keepalive` to the
+/// union — its `encode_keep_alive` is a const 1-byte header, no codec
+/// body).
 #[cfg(all(
     feature = "alloc",
     any(
         feature = "codec-init-body",
         feature = "codec-open-body",
-        feature = "codec-close"
+        feature = "codec-close",
+        feature = "transport-keepalive"
     )
 ))]
 pub mod handshake_encode;

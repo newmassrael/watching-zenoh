@@ -66,6 +66,14 @@ reassembly = [
 # link-tier feature + session_rx_pool_mcu_minimal.scxml for the derivation.
 buffer-pool-session-rx-slim = ["wz-link-lwip/buffer-pool-session-rx-slim"]
 
+# R311kx — keepalive TX emitter on the MCU session loop. Forwards to the
+# wz-session-core transport-keepalive capability (the shared
+# check_keepalive_deadline / keepalive_wake_deadline pair + the
+# send_keep_alive wire primitive); with it on, `run_session` emits a
+# KeepAlive whenever the line has been idle for
+# adopted_lease / LEASE_EXPIRE_FACTOR, exactly as the AP loop does.
+transport-keepalive = ["wz-session-core/transport-keepalive"]
+
 [dependencies]
 # §5.P runtime tier: LwipRuntime<C> + LwipTime<C> + the Runtime /
 # TimeSource trait surface (with_mutex_mut, now_monotonic_ms). alloc +

@@ -569,7 +569,13 @@ time-timestamp-source = []
 transport-batching = ["wz-runtime-tokio?/transport-batching", "wz-runtime-lwip?/transport-batching"]
 transport-compression = []
 transport-fragmentation = ["wz-runtime-tokio?/transport-fragmentation"]
-transport-keepalive = ["wz-runtime-tokio?/transport-keepalive", "wz-runtime-lwip?/transport-keepalive"]
+# R311kx — transport-keepalive additionally weak-forwards to
+# wz-session-lwip: the MCU keepalive TX emitter (run_session's
+# check_keepalive_deadline busy-poll arm) is gated on wz-session-lwip's
+# OWN same-named feature, so without this forward a session-lwip +
+# transport-keepalive build lit the core capability but silently never
+# emitted from the MCU loop (the reassembly atom's forwarding shape).
+transport-keepalive = ["wz-runtime-tokio?/transport-keepalive", "wz-runtime-lwip?/transport-keepalive", "wz-session-lwip?/transport-keepalive"]
 transport-link-quic = []
 transport-link-serial = []
 transport-link-tcp = ["wz-runtime-tokio?/transport-link-tcp"]

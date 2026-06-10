@@ -11,6 +11,14 @@
 //! the helper hoist — migrated here at R311di-7 so MCU profiles could
 //! type-equality-compare lease verdicts without dragging in tokio).
 
+/// R311kx — keepalive TX cadence divisor, zenoh-pico
+/// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` (CMakeLists.txt:311, default 3):
+/// the keepalive tasks wake every `lease / factor` and emit a KeepAlive
+/// when nothing was transmitted in the window (unicast/lease.c:191/210,
+/// multicast/lease.c:181), so a peer observes at least factor-1 liveness
+/// signals inside any lease window even on an otherwise idle link.
+pub const LEASE_EXPIRE_FACTOR: u64 = 3;
+
 /// R311ku — encode-side lease wire-unit projection, the one home for the
 /// `_Z_FLAG_T_*_T` rule both transports' encoders consume (OPEN and the
 /// multicast JOIN carry the same flag semantics). zenoh-pico parity: every
@@ -71,6 +79,32 @@ pub enum LeaseCheckOutcome {
     /// so the session-fsm `lease.expired -> Closing(Expired)`
     /// transition fires.
     Expired,
+}
+
+/// R311kx — outcome of a single keepalive TX deadline check
+/// ([`crate::drive::check_keepalive_deadline`]) against the
+/// `last_outbound_at` / `established_at` baseline stamps. The TX twin of
+/// [`LeaseCheckOutcome`]: that enum reports whether the PEER's silence
+/// expired the session; this one reports whether OUR silence warranted a
+/// KeepAlive emit. Ungated (like [`LeaseCheckOutcome`]) so the
+/// `IterationEvent::KeepAlive` observer variant stays feature-independent;
+/// the checker that produces it is `transport-keepalive`-gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAliveCheckOutcome {
+    /// The session is not Established (no `established_at` stamp) or the
+    /// transport is mid-teardown (`transport_available == false`). The
+    /// emitter is dormant — zenoh-pico's keep-alive task runs only on an
+    /// open transport (spawned after `_z_open`, suspended on
+    /// RECONNECTING, retired on CLOSED).
+    Inactive,
+    /// The line spoke within the last `adopted_lease / LEASE_EXPIRE_FACTOR`
+    /// milliseconds (the `last_outbound_at` stamp is fresh) — no emit, the
+    /// pico `_transmitted == true` suppression arm.
+    WithinInterval,
+    /// The idle window elapsed: a KeepAlive was emitted through
+    /// [`crate::session_actions::SessionLinkActions::send_keep_alive`]
+    /// (which re-stamps `last_outbound_at`, opening the next window).
+    Emitted,
 }
 
 #[cfg(test)]

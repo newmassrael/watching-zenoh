@@ -61,11 +61,12 @@ use crate::peer_init_caps::PeerInitCaps;
 use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
 // Reliability is the signature type of the R311kw `send_wire` seam, so it
 // is used iff at least one wire-emit body is active: the handshake / close
-// encoders, any consumer-plane frame emit (the frame_encode union), OR the
+// encoders, any consumer-plane frame emit (the frame_encode union), the
 // batch flush (`transport-batching` — its emits route through the seam
 // since R311kw, so the former "full-path return type only" exclusion no
-// longer holds). `send_wire` itself carries the same cfg union; the two
-// move together.
+// longer holds), OR the keepalive emitter (`transport-keepalive`,
+// R311kx). `send_wire` itself carries the same cfg union; the two move
+// together.
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -82,6 +83,7 @@ use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
     feature = "declare-final",
     feature = "liveliness-token",
     feature = "transport-batching",
+    feature = "transport-keepalive",
 ))]
 use crate::reliability::Reliability;
 use crate::response_sink::ResponseSink;
@@ -698,9 +700,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// cfg = the union of the routed emit bodies (the `Reliability`
     /// import union above): the handshake / close encoders, the
-    /// frame_encode consumer-plane union, and the batch flush. A build
-    /// with no active wire-emit body must not carry the dead seam
-    /// (CI denies warnings on the minimal MCU lanes).
+    /// frame_encode consumer-plane union, the batch flush, and the
+    /// keepalive emitter. A build with no active wire-emit body must
+    /// not carry the dead seam (CI denies warnings on the minimal MCU
+    /// lanes).
     #[cfg(any(
         feature = "codec-init-body",
         feature = "codec-open-body",
@@ -717,6 +720,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-final",
         feature = "liveliness-token",
         feature = "transport-batching",
+        feature = "transport-keepalive",
     ))]
     fn send_wire(&self, bytes: &[u8], reliability: Reliability) {
         let now = self.clock.now_monotonic_ms();
@@ -2173,6 +2177,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.established_at, |slot| slot.is_some())
     }
 
+    /// R311kx — the governing lease window in milliseconds:
+    /// `min(params.lease_ms, peer OPEN-advertised)`, falling back to the
+    /// local window pre-OPEN (`peer_open_lease_ms` empty). The R311kv
+    /// comparator's min hoisted to an accessor so the lease-expiry check
+    /// ([`crate::drive::check_lease_deadline`]), the loop wake-deadline
+    /// computation ([`crate::drive::lease_wake_deadline`]), and the
+    /// keepalive TX cadence ([`crate::drive::keepalive_wake_deadline`])
+    /// share one definition — zenoh-pico adopts the min once at OPEN
+    /// arrival (unicast/transport.c:193/269) and every task reads the
+    /// same `_common._lease`.
+    pub fn adopted_lease_ms(&self) -> u64 {
+        let peer = R::with_mutex_mut(&self.peer_open_lease_ms, |g| *g);
+        match peer {
+            Some(advertised) => advertised.min(self.params.lease_ms),
+            None => self.params.lease_ms,
+        }
+    }
+
     /// R300 — reconstruct the full literal keyexpr that the peer
     /// will canonize on the receive side from the wire's
     /// `(mapping_id, suffix)` carrier shape. The reconstruction
@@ -2782,6 +2804,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
+    }
+
+    /// R311kx — emit one KeepAlive transport message (the bare MID 0x04
+    /// header, zenoh-pico `_zp_unicast_send_keep_alive` /
+    /// `_z_t_msg_make_keep_alive`). The wire primitive behind the
+    /// keepalive TX cadence ([`crate::drive::check_keepalive_deadline`]);
+    /// routing through [`Self::send_wire`] re-stamps `last_outbound_at`,
+    /// so each emit opens the next idle window by construction.
+    ///
+    /// R311jp — transport-message order parity (zenoh-pico tx.c
+    /// `_z_transport_tx_send_t_msg_inner` flushes an active batch before
+    /// encoding any t_msg): drain the open batch frame first so the
+    /// KeepAlive never overtakes already-batched data frames on the wire
+    /// — the exact future sender the [`Self::send_close_with_reason`]
+    /// pre-drain comment named.
+    ///
+    /// Like the CLOSE primitive, this is wire-side and FSM-state-blind;
+    /// the Established/teardown gating lives in the checker
+    /// (`check_keepalive_deadline` consults `is_established` +
+    /// `transport_available`). R311g signature-stability — the method
+    /// exists across feature states; minus `transport-keepalive` the
+    /// body silently no-ops (the FSM cannot enter the keepalive cadence
+    /// there, per the `start_keepalive_worker` gate).
+    pub fn send_keep_alive(&self) {
+        #[cfg(feature = "transport-keepalive")]
+        {
+            #[cfg(feature = "transport-batching")]
+            self.flush_open_batch();
+            R::with_mutex_mut(&self.trace, |t| t.send_keep_alive += 1);
+            let bytes = crate::handshake_encode::encode_keep_alive();
+            self.send_wire(&bytes, Reliability::Reliable);
+        }
     }
 
     /// A4 — append one replay entry to the declaration cache. The

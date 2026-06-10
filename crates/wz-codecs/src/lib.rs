@@ -307,8 +307,12 @@ pub mod wire_const {
     #[cfg(feature = "codec-close")]
     pub const T_MID_CLOSE: u8 = 0x03;
     /// Per-session liveness ping (transport.h:24 MID 0x04). Lease-timer
-    /// reset on receive.
-    #[cfg(feature = "codec-keep-alive")]
+    /// reset on receive. Ungated since R311kx (was `codec-keep-alive`):
+    /// two independent axes consume it — the codec-keep-alive RX parse
+    /// arm AND the transport-keepalive TX emitter
+    /// (wz-session-core::handshake_encode::encode_keep_alive) — and the
+    /// bare MID is wire-spec ground truth like the ungated `T_MID_FRAME`
+    /// / `T_MID_FRAGMENT` below; an unused pub const is warning-free.
     pub const T_MID_KEEP_ALIVE: u8 = 0x04;
     /// Established-session payload carrier (transport.h:79 MID 0x05).
     /// Body = VLE sn + tail payload; optional ext chain between sn and

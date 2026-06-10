@@ -581,6 +581,16 @@ pub use wz_session_core::lease::LeaseCheckOutcome;
 // report_outcome_reassembling).
 pub use wz_session_core::drive::check_lease_deadline;
 
+// R311kx — loop wake-deadline SSOT + keepalive TX emitter check. The
+// wake helpers live beside the comparators in wz-session-core::drive so
+// "the wake fired" and "the window elapsed" share one arithmetic; the
+// keepalive pair is transport-keepalive-gated at the producer while the
+// IterationEvent::KeepAlive observer variant stays ungated.
+pub use wz_session_core::drive::lease_wake_deadline;
+#[cfg(feature = "transport-keepalive")]
+pub use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
+pub use wz_session_core::lease::KeepAliveCheckOutcome;
+
 // R83 / R311di-12 — IterationEvent extracted to
 // wz-session-core::driver_loop. Re-exported here for callsites in
 // declare/* IterationEvent adapters + drive_session test closures.
@@ -730,7 +740,6 @@ where
     F: FnMut(IterationEvent<'_>),
     T: TimeSource,
 {
-    let lease_ms = actions.params.lease_ms;
     // R311il — host-owned handshake deadline tracker (the arming-key
     // staleness logic lives once in wz-session-core; see
     // [`HandshakeDeadlineTracker`]). The engine-free FSM arms no
@@ -764,18 +773,34 @@ where
         sweep_reporting(&mut reasm, clock.now_monotonic_ms(), &mut on_event);
         // This iteration's deadline. During the handshake phases the
         // tracker yields the host-owned handshake deadline; in Established
-        // it disarms and the keepalive-resetting lease deadline applies;
-        // in Init / between there is none (block on the link poll).
-        // `Some((abs_ms, Some(event)))` = handshake timeout to raise;
-        // `Some((abs_ms, None))` = lease deadline (-> check_lease).
+        // it disarms and the earlier of the lease-expiry deadline and the
+        // keepalive TX deadline applies (R311kx — both via the
+        // wz-session-core::drive wake helpers, so the arming shares the
+        // comparators' arithmetic: baseline max(established_at, activity
+        // stamp) + the adopted min(local, peer) window; the prior arming
+        // read last_inbound_keepalive_at alone with the local window, so a
+        // peer that never sent a KeepAlive left the loop blocked on the
+        // link poll forever); in Init / between there is none (block on
+        // the link poll). `Some((abs_ms, Some(event)))` = handshake
+        // timeout to raise; `Some((abs_ms, None))` = lease / keepalive
+        // deadline (-> run both checks, each self-guarded).
         let deadline: Option<(
             u64,
             Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
         )> = match deadline_tracker.poll(engine.get_current_state(), clock.now_monotonic_ms()) {
             Some((deadline_ms, event)) => Some((deadline_ms, Some(event))),
             None => {
-                let stamp_ms = *actions.last_inbound_keepalive_at.lock().unwrap();
-                stamp_ms.map(|s| (s.saturating_add(lease_ms), None))
+                let lease_dl = lease_wake_deadline(actions);
+                #[cfg(feature = "transport-keepalive")]
+                let ka_dl = keepalive_wake_deadline(actions);
+                #[cfg(not(feature = "transport-keepalive"))]
+                let ka_dl: Option<u64> = None;
+                match (lease_dl, ka_dl) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, None) => a,
+                    (None, b) => b,
+                }
+                .map(|d| (d, None))
             }
         };
         match deadline {
@@ -796,8 +821,23 @@ where
                         on_event(IterationEvent::Poll(&outcome));
                     }
                     _ = clock.sleep(remaining_ms) => match kind {
-                        // Established lease deadline (existing R77 path).
+                        // Established lease / keepalive deadline. Both
+                        // checks are deadline-self-guarded, so whichever
+                        // armed the earlier wake fires and the other
+                        // reports its within-window verdict truthfully
+                        // (R311kx — the keepalive emit runs first: it is
+                        // wire-side only and must not be starved by an
+                        // Expired transition tearing the session down in
+                        // the same wake).
                         None => {
+                            #[cfg(feature = "transport-keepalive")]
+                            {
+                                let ka_outcome = check_keepalive_deadline(
+                                    actions,
+                                    clock.now_monotonic_ms(),
+                                );
+                                on_event(IterationEvent::KeepAlive(ka_outcome));
+                            }
                             let lease_outcome =
                                 check_lease_deadline(actions, engine, clock.now_monotonic_ms());
                             on_event(IterationEvent::Lease(lease_outcome));

@@ -249,26 +249,105 @@ pub fn check_lease_deadline<R: SessionRuntime, T: TimeSource>(
     now_ms: u64,
 ) -> LeaseCheckOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let peer_lease = R::with_mutex_mut(&actions.peer_open_lease_ms, |g| *g);
-    let lease_ms = match peer_lease {
-        Some(advertised) => advertised.min(actions.params.lease_ms),
-        None => actions.params.lease_ms,
-    };
-    let keepalive = R::with_mutex_mut(&actions.last_inbound_keepalive_at, |g| *g);
-    let established = R::with_mutex_mut(&actions.established_at, |g| *g);
-    let baseline = match (established, keepalive) {
-        (None, None) => None,
-        (Some(e), None) => Some(e),
-        (None, Some(k)) => Some(k),
-        (Some(e), Some(k)) => Some(e.max(k)),
-    };
-    match baseline {
+    // R311kx — deadline arithmetic shared with the loop wake computation
+    // (`lease_wake_deadline`): `deadline = baseline + adopted window`, so
+    // "the wake fired" and "the window elapsed" cannot drift apart.
+    match lease_wake_deadline(actions) {
         None => LeaseCheckOutcome::NoBaseline,
-        Some(stamp_ms) if now_ms.saturating_sub(stamp_ms) >= lease_ms => {
+        Some(deadline_ms) if now_ms >= deadline_ms => {
             engine.process_event(E::LeaseExpired);
             LeaseCheckOutcome::Expired
         }
         Some(_) => LeaseCheckOutcome::WithinLease,
+    }
+}
+
+/// Merge two optional baseline stamps to the most recent one — the R84
+/// `max(established_at, <activity stamp>)` rule both wake computations
+/// apply.
+fn max_stamp(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (Some(x), Some(y)) => Some(x.max(y)),
+    }
+}
+
+/// R311kx — absolute lease-expiry deadline (ms, the shared monotonic
+/// epoch): `max(established_at, last_inbound_keepalive_at) +
+/// adopted_lease_ms`, or `None` pre-Established (no baseline). The wake
+/// twin of [`check_lease_deadline`] — both drive loops arm their sleep /
+/// busy-poll compare on this value and the comparator re-derives the same
+/// deadline at fire time, so the two cannot disagree.
+///
+/// Closes the R311kw-carried wake-arming gap: the prior loop arming read
+/// `last_inbound_keepalive_at` alone with the LOCAL `params.lease_ms`
+/// window, so an Established peer that never sent a KeepAlive left the
+/// loop blocked on the link poll forever (the R84 `established_at`
+/// comparator fallback was unreachable — no wake ever fired to invoke
+/// it), and a shorter peer-advertised lease (R311kv min) woke late by
+/// the difference.
+pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> Option<u64> {
+    let keepalive = R::with_mutex_mut(&actions.last_inbound_keepalive_at, |g| *g);
+    let established = R::with_mutex_mut(&actions.established_at, |g| *g);
+    max_stamp(established, keepalive).map(|b| b.saturating_add(actions.adopted_lease_ms()))
+}
+
+/// R311kx — absolute next keepalive TX deadline (ms):
+/// `max(established_at, last_outbound_at) + adopted_lease_ms /
+/// LEASE_EXPIRE_FACTOR`, or `None` pre-Established. The TX-side wake twin
+/// of [`lease_wake_deadline`]: the lease deadline watches the PEER's
+/// silence, this one watches OURS — zenoh-pico's keep-alive task wakes
+/// every `_lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR` and emits when
+/// nothing was transmitted in the window (unicast/lease.c:191).
+///
+/// `.max(1)` keeps a degenerate 0 ms lease from hot-spinning the emitter;
+/// the lease comparator expires such a session on its first check
+/// regardless.
+#[cfg(feature = "transport-keepalive")]
+pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> Option<u64> {
+    let outbound = R::with_mutex_mut(&actions.last_outbound_at, |g| *g);
+    let established = R::with_mutex_mut(&actions.established_at, |g| *g);
+    let interval = (actions.adopted_lease_ms() / crate::lease::LEASE_EXPIRE_FACTOR).max(1);
+    max_stamp(established, outbound).map(|b| b.saturating_add(interval))
+}
+
+/// R311kx — run one keepalive TX deadline check: when the session is
+/// Established, the transport is live, and the line has been idle for
+/// `adopted_lease_ms / LEASE_EXPIRE_FACTOR` (no wire emit since the
+/// [`keepalive_wake_deadline`] baseline), emit one KeepAlive through
+/// [`SessionLinkActions::send_keep_alive`] — which re-stamps
+/// `last_outbound_at`, opening the next idle window. The TX-emitter
+/// closure of the R311kv asymmetry: without it a wz node publishing
+/// nothing fell silent for its whole advertised lease and the peer
+/// expired it (zenoh-pico's keep-alive task is the reference,
+/// unicast/lease.c:172-214).
+///
+/// Shared by both drive loops (the AP `tokio::select!` sleep arm and the
+/// lwIP busy-poll compare), exactly as [`check_lease_deadline`] is. No
+/// FSM access — a KeepAlive emit is not a session-state trigger.
+#[cfg(feature = "transport-keepalive")]
+pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+    now_ms: u64,
+) -> crate::lease::KeepAliveCheckOutcome {
+    use crate::lease::KeepAliveCheckOutcome as K;
+    if !actions.is_established() || !R::with_mutex_mut(&actions.transport_available, |g| *g) {
+        return K::Inactive;
+    }
+    match keepalive_wake_deadline(actions) {
+        // Unreachable while Established (`established_at` is a baseline),
+        // kept total for the enum's sake.
+        None => K::Inactive,
+        Some(deadline_ms) if now_ms >= deadline_ms => {
+            actions.send_keep_alive();
+            K::Emitted
+        }
+        Some(_) => K::WithinInterval,
     }
 }
 

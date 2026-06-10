@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use wz_codecs::ext_entry::ExtEntryOwned;
 
-use crate::lease::LeaseCheckOutcome;
+use crate::lease::{KeepAliveCheckOutcome, LeaseCheckOutcome};
 use crate::link::LostCause;
 use crate::network_message::NetworkMessage;
 use crate::parse_error::InboundParseError;
@@ -175,6 +175,17 @@ pub enum IterationEvent<'a> {
     /// verdict is carried here. `Copy` because the enum has only
     /// unit variants.
     Lease(LeaseCheckOutcome),
+    /// R311kx — the keepalive TX deadline check ran (the AP loop runs it
+    /// on every deadline-arm wake alongside the lease check; the MCU loop
+    /// when the busy-poll compare crosses the TX deadline) and its
+    /// verdict is carried here. On `Emitted` a KeepAlive wire frame went
+    /// out through `send_keep_alive` — the TX liveness counterpart of
+    /// `Lease` (which watches the PEER's silence). Carries the ungated
+    /// [`KeepAliveCheckOutcome`] so this variant — and every consumer's
+    /// match — stays feature-independent; only the producer
+    /// (`check_keepalive_deadline`) is `transport-keepalive`-gated.
+    /// `Copy` (a unit-only enum).
+    KeepAlive(KeepAliveCheckOutcome),
     /// The per-iteration reassembly deadline sweep evicted one or more
     /// chains whose continuation never arrived (the carried `usize` is the
     /// count). Emitted by [`crate::drive::sweep_reporting`] from both the AP
