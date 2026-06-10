@@ -33790,6 +33790,58 @@
         "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop; no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it"
       ]
     },
+    "Round 311kx": {
+      "decision_summary": "R311kx keepalive TX emitter: both drive loops emit a bare-0x04 KeepAlive after adopted_lease/3 idle (pico keep_alive task parity, unicast/lease.c:172-214) — closes the R311kv asymmetry; lease wake-arming gap fixed alongside.",
+      "changes_bullets": [
+        "`lease::LEASE_EXPIRE_FACTOR=3` (pico CMakeLists.txt:311) + ungated `KeepAliveCheckOutcome` (Inactive / WithinInterval / Emitted); `handshake_encode::encode_keep_alive` = const bare MID 0x04 header (module gate union + imports widened for a keepalive-only subset)",
+        "`SessionLinkActions::send_keep_alive` (signature-stable; transport-keepalive body): batch pre-drain (the send_close R311jp t_msg-order comment's named future sender) + trace counter + send_wire re-stamp; `adopted_lease_ms` accessor hoists the R311kv min(local, peer)",
+        "`drive::check_keepalive_deadline` + `keepalive_wake_deadline` + `lease_wake_deadline` — wake arming and comparators share one arithmetic; `check_lease_deadline` refactored onto the shared deadline (behavior-identical)",
+        "lease wake-arming gap closed in BOTH loops (tokio select arm mins lease+keepalive deadlines; lwIP busy-poll compares both): prior arming read last_inbound_keepalive_at alone with the LOCAL window — an Established peer that never sent a KeepAlive left the loop blocked on the link poll forever and a shorter peer-advertised lease woke late",
+        "`IterationEvent::KeepAlive` observer variant (ungated, producer-gated); `wire_const::T_MID_KEEP_ALIVE` ungated (wire-spec ground truth, T_MID_FRAME precedent; two axes consume it); wz-session-lwip `transport-keepalive` feature NEW + wz facade atom weak-forwards `wz-session-lwip?/` (reassembly shape — without it the MCU loop silently never emitted)",
+        "tests/session_keepalive_tx.rs: +5 (checker verdicts, adopted-min cadence, inbound self-parity round trip, drive-loop e2e: silent link emits >=2 cadence KeepAlives AND the silent peer still expires)"
+      ],
+      "verification_bullets": [
+        "cargo test --test session_keepalive_tx 8/8 PASS + 10x consecutive flake sweep 0 FAIL (wall-clock-short-lease loop e2e per the R76b convention)",
+        "full wz-runtime-tokio suite green (234 lib + integration files); full run-ci WZ_RUN_LAYER_G=1 EXIT=0 twice (pre- and post-facade-forward tree, unpiped capture)",
+        "facade combo smoke: cargo build -p wz --no-default-features --features runtime-lwip,session-lwip,transport-keepalive,codec-init-body,codec-open-body,codec-close,session-unicast-open CARGO-EXIT=0 (unpiped)",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "keepalive TX emitter carry (R311kv) CLOSED: a wz node publishing nothing now emits at adopted_lease/3 and survives its advertised lease at the peer",
+        "MCU preset wiring of the transport-keepalive atom (preset cargo mirrors / atomic outputs) is a preset-tier follow-up; the atom + forwards are in place, presets stay opt-in like reassembly",
+        "multicast keepalive task intentionally NOT mirrored: wz's periodic JOIN beacon (join_interval_ms) is the multicast liveness TX, matching pico where the JOIN task sets _transmitted=true and effectively suppresses the multicast keepalive at default Z_JOIN_INTERVAL=2500 < lease/3",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop; no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it"
+      ],
+      "publishable_decision_summary": "R311kx keepalive TX emitter: both drive loops emit a bare-0x04 KeepAlive after adopted_lease/3 idle (pico keep_alive task parity, unicast/lease.c:172-214) — closes the R311kv asymmetry; lease wake-arming gap fixed alongside.",
+      "publishable_changes_bullets": [
+        "`lease::LEASE_EXPIRE_FACTOR=3` (pico CMakeLists.txt:311) + ungated `KeepAliveCheckOutcome` (Inactive / WithinInterval / Emitted); `handshake_encode::encode_keep_alive` = const bare MID 0x04 header (module gate union + imports widened for a keepalive-only subset)",
+        "`SessionLinkActions::send_keep_alive` (signature-stable; transport-keepalive body): batch pre-drain (the send_close R311jp t_msg-order comment's named future sender) + trace counter + send_wire re-stamp; `adopted_lease_ms` accessor hoists the R311kv min(local, peer)",
+        "`drive::check_keepalive_deadline` + `keepalive_wake_deadline` + `lease_wake_deadline` — wake arming and comparators share one arithmetic; `check_lease_deadline` refactored onto the shared deadline (behavior-identical)",
+        "lease wake-arming gap closed in BOTH loops (tokio select arm mins lease+keepalive deadlines; lwIP busy-poll compares both): prior arming read last_inbound_keepalive_at alone with the LOCAL window — an Established peer that never sent a KeepAlive left the loop blocked on the link poll forever and a shorter peer-advertised lease woke late",
+        "`IterationEvent::KeepAlive` observer variant (ungated, producer-gated); `wire_const::T_MID_KEEP_ALIVE` ungated (wire-spec ground truth, T_MID_FRAME precedent; two axes consume it); wz-session-lwip `transport-keepalive` feature NEW + wz facade atom weak-forwards `wz-session-lwip?/` (reassembly shape — without it the MCU loop silently never emitted)",
+        "tests/session_keepalive_tx.rs: +5 (checker verdicts, adopted-min cadence, inbound self-parity round trip, drive-loop e2e: silent link emits >=2 cadence KeepAlives AND the silent peer still expires)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --test session_keepalive_tx 8/8 PASS + 10x consecutive flake sweep 0 FAIL (wall-clock-short-lease loop e2e per the R76b convention)",
+        "full wz-runtime-tokio suite green (234 lib + integration files); full run-ci WZ_RUN_LAYER_G=1 EXIT=0 twice (pre- and post-facade-forward tree, unpiped capture)",
+        "facade combo smoke: cargo build -p wz --no-default-features --features runtime-lwip,session-lwip,transport-keepalive,codec-init-body,codec-open-body,codec-close,session-unicast-open CARGO-EXIT=0 (unpiped)",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "keepalive TX emitter carry (R311kv) CLOSED: a wz node publishing nothing now emits at adopted_lease/3 and survives its advertised lease at the peer",
+        "MCU preset wiring of the transport-keepalive atom (preset cargo mirrors / atomic outputs) is a preset-tier follow-up; the atom + forwards are in place, presets stay opt-in like reassembly",
+        "multicast keepalive task intentionally NOT mirrored: wz's periodic JOIN beacon (join_interval_ms) is the multicast liveness TX, matching pico where the JOIN task sets _transmitted=true and effectively suppresses the multicast keepalive at default Z_JOIN_INTERVAL=2500 < lease/3",
+        "F-6 deferred-fire (R311kj carry) stays open",
+        "A1 pool: queryable-over-multicast reply sink, multicast-declarations atom flip, MCU multicast loop; no-alloc MCU JOIN TX variant deferred until the MCU multicast loop shapes it"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
