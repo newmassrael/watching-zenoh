@@ -73,16 +73,23 @@
 
 use sce_forge_runtime::codec::SceCursor;
 
+use tokio::sync::mpsc::UnboundedReceiver;
+
 use wz_codecs::join::Join;
 use wz_codecs::wire_const;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(feature = "codec-push")]
+use wz_session_core::frame_encode::encode_frame_with_push;
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 use wz_session_core::multicast_dispatch::{FrameIngest, JoinSnBaseline, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::network_message::parse_frame_payload;
+#[cfg(feature = "codec-push")]
+use wz_session_core::push_build;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
+use wz_session_core::sn::{self, TxSn};
 
 use wz_runtime_core::TimeSource;
 
@@ -97,7 +104,11 @@ use crate::LinkDriver;
 /// negotiation) are a zenoh-interop follow-up; this is the self-advertising
 /// beacon body. The body codec omits the MID byte, so it is prepended here
 /// (mirror of [`crate::scouting_glue`]'s `scout_emit`).
-pub fn encode_join(params: &MulticastParams) -> Vec<u8> {
+///
+/// A1c — the JOIN advertises the LIVE per-channel `next_sn` from `tx_sn`
+/// (the §3.2 `init_rx_seq` contract: receivers seed their RX baseline one
+/// before these, so the next data frame this node mints is admitted).
+pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
     let zid = &params.zid;
     let mut join = Join::new();
     join.version = params.version;
@@ -107,16 +118,55 @@ pub fn encode_join(params: &MulticastParams) -> Vec<u8> {
         join.zid = zid.as_slice();
     }
     join.lease = params.lease_ms;
-    // A fresh announcer starts both channel sequence numbers at 0; tracking
-    // the live TX sequence is a data-plane follow-up (no data frames yet).
-    join.next_sn_reliable = 0;
-    join.next_sn_best_effort = 0;
+    join.next_sn_reliable = tx_sn.next_reliable;
+    join.next_sn_best_effort = tx_sn.next_best_effort;
     let body = join.encode_to_vec(0);
 
     let mut dgram = Vec::with_capacity(1 + body.len());
     dgram.push(wire_const::T_MID_JOIN);
     dgram.extend_from_slice(&body);
     dgram
+}
+
+/// One queued outbound data emission for the multicast drive loop's TX
+/// half (A1c). The application side holds the paired
+/// `tokio::sync::mpsc::UnboundedSender` and enqueues items; the loop
+/// mints the channel SN, wraps the network message in a `T_MID_FRAME`,
+/// and multicasts it to the group — the multicast mirror of the unicast
+/// writer-channel seam (zenoh-pico `_z_send_n_msg` over the multicast
+/// transport). The enum is unconditional (signature stability); the
+/// variants are gated by the codec that encodes them, so a build without
+/// any data codec carries an uninhabited type and a dead arm-free match.
+#[derive(Debug)]
+pub enum MulticastTxItem {
+    /// A pub/sub Push (`z_put` / `z_del` over multicast). Framed via the
+    /// [`encode_frame_with_push`] SSOT with a freshly minted channel SN.
+    #[cfg(feature = "codec-push")]
+    Push {
+        /// The built Push network message
+        /// ([`push_build::build_push_literal`] and friends).
+        push: wz_codecs::push::PushOwned,
+        /// Channel selection: reliable mints on the reliable ring,
+        /// best-effort on the other (multicast UDP delivery is
+        /// best-effort either way; the flag governs the SN channel +
+        /// the frame's R flag).
+        reliable: bool,
+    },
+}
+
+/// Convenience builder: a literal-keyexpr Put as a queued
+/// [`MulticastTxItem`] (best-effort channel — the zenoh multicast
+/// default). Composes [`push_build::build_push_literal`]; richer pushes
+/// (Del / aliased keyexpr / metadata) construct the item directly.
+#[cfg(feature = "codec-push")]
+pub fn multicast_put_literal(
+    keyexpr_suffix: &str,
+    payload: &[u8],
+) -> Result<MulticastTxItem, sce_forge_runtime::codec::CodecError> {
+    Ok(MulticastTxItem::Push {
+        push: push_build::build_push_literal(keyexpr_suffix, payload)?,
+        reliable: false,
+    })
 }
 
 /// If `bytes` is a multicast JOIN datagram, decode its full body (a
@@ -201,6 +251,12 @@ pub enum MulticastOutcome {
 /// `ApplicationLayerObserver::dispatch` (exactly as the unicast loop does)
 /// to route multicast pub/sub data into the registered subscriber /
 /// queryable registries.
+///
+/// `outbound` is the A1c TX seam: queued [`MulticastTxItem`]s are framed
+/// with a freshly minted per-channel SN (the loop-owned [`TxSn`] the JOIN
+/// beacon also advertises) and multicast to the group. A publish-free
+/// caller passes the receiver of an idle channel; when every sender is
+/// dropped the arm disarms (the loop keeps serving RX + JOIN).
 pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     params: &MulticastParams,
@@ -209,6 +265,7 @@ pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     max_iters: Option<usize>,
     tick_ms: u64,
     mut on_event: F,
+    outbound: &mut UnboundedReceiver<MulticastTxItem>,
 ) -> MulticastOutcome
 where
     D: LinkDriver,
@@ -221,6 +278,13 @@ where
 
     // Emit the first JOIN beacon immediately, then every join_interval_ms.
     let mut next_join_ms = clock.now_monotonic_ms();
+
+    // The TX mint state (per-channel next SN). The JOIN beacon advertises
+    // the live values; every outbound data frame mints from here.
+    let mut tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
+    // Once every sender is dropped `recv()` would resolve `None` forever;
+    // disarm the select arm instead of busy-looping on it.
+    let mut outbound_open = true;
 
     let mut iter: usize = 0;
     loop {
@@ -237,7 +301,7 @@ where
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
         let now = clock.now_monotonic_ms();
         if now >= next_join_ms {
-            let dgram = encode_join(params);
+            let dgram = encode_join(params, &tx_sn);
             let frame = TxFrame { bytes: &dgram };
             // Best-effort: a failed multicast send is non-fatal (the next
             // cadence retries), so unlike the scout path there is no
@@ -247,6 +311,29 @@ where
         }
 
         tokio::select! {
+            item = outbound.recv(), if outbound_open => match item {
+                Some(item) => match item {
+                    #[cfg(feature = "codec-push")]
+                    MulticastTxItem::Push { push, reliable } => {
+                        // TxData: mint the channel SN, wrap in a
+                        // T_MID_FRAME (frame_encode SSOT), multicast to
+                        // the group. Send failure is non-fatal like the
+                        // JOIN beacon (UDP multicast is best-effort; the
+                        // SN gap a dropped datagram leaves stays inside
+                        // receivers' half-window).
+                        let frame_sn = tx_sn.mint(reliable);
+                        let dgram = encode_frame_with_push(frame_sn, push, reliable);
+                        let frame = TxFrame { bytes: &dgram };
+                        let reliability = if reliable {
+                            Reliability::Reliable
+                        } else {
+                            Reliability::BestEffort
+                        };
+                        let _ = driver.send(&frame, reliability).await;
+                    }
+                },
+                None => outbound_open = false,
+            },
             event = driver.poll_event() => match event {
                 LinkEvent::Rx(rx) => {
                     // RxDispatch: every multicast message is attributed by its
@@ -369,13 +456,25 @@ mod tests {
         }
     }
 
+    /// A fresh announcer's JOIN datagram (both advertised next SNs = 0) —
+    /// the membership fixtures only need SOME valid beacon.
+    fn join0(p: &MulticastParams) -> Vec<u8> {
+        encode_join(p, &TxSn::new(sn::mask_from_res(p.seq_num_res)))
+    }
+
+    /// A publish-free outbound seam: the sender is dropped immediately, so
+    /// the loop disarms the TX arm on first poll.
+    fn idle_outbound() -> tokio::sync::mpsc::UnboundedReceiver<MulticastTxItem> {
+        tokio::sync::mpsc::unbounded_channel().1
+    }
+
     /// `encode_join` frames a minimal JOIN whose MID is `T_MID_JOIN` and
     /// whose body round-trips back to the announcer zid through
     /// `decode_join_zid`.
     #[test]
     fn encode_join_round_trips_zid() {
         let zid = [0xAA, 0xBB, 0xCC, 0xDD];
-        let dgram = encode_join(&params(&zid));
+        let dgram = join0(&params(&zid));
         assert_eq!(dgram[0], wire_const::T_MID_JOIN);
         assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));
     }
@@ -470,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn drive_loop_admits_join_peer_and_emits_beacon() {
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let mut driver = FakeDriver::with([(encode_join(&params(&peer_b)), src(2))]);
+        let mut driver = FakeDriver::with([(join0(&params(&peer_b)), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -482,6 +581,7 @@ mod tests {
             Some(5),
             5,
             |_| {},
+            &mut idle_outbound(),
         )
         .await;
 
@@ -509,7 +609,7 @@ mod tests {
         // SAME address evicts it — the Close carries no zid, so it is keyed
         // by source address.
         let mut driver = FakeDriver::with([
-            (encode_join(&params(&peer_b)), src(2)),
+            (join0(&params(&peer_b)), src(2)),
             (std::vec![wire_const::T_MID_CLOSE, 0x00], src(2)),
         ]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
@@ -523,6 +623,7 @@ mod tests {
             Some(8),
             5,
             |_| {},
+            &mut idle_outbound(),
         )
         .await;
 
@@ -549,6 +650,7 @@ mod tests {
             Some(5),
             5,
             |_| {},
+            &mut idle_outbound(),
         )
         .await;
 
@@ -568,7 +670,7 @@ mod tests {
     async fn drive_loop_ignores_join_with_version_mismatch() {
         let mut peer = params(&[0x01, 0x02, 0x03, 0x04]);
         peer.version = 0x08; // wire-incompatible announcer
-        let mut driver = FakeDriver::with([(encode_join(&peer), src(2))]);
+        let mut driver = FakeDriver::with([(join0(&peer), src(2))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -580,6 +682,7 @@ mod tests {
             Some(5),
             5,
             |_| {},
+            &mut idle_outbound(),
         )
         .await;
 
@@ -616,6 +719,7 @@ mod tests {
             Some(5),
             5,
             |_| {},
+            &mut idle_outbound(),
         )
         .await;
 
@@ -638,7 +742,7 @@ mod tests {
         use wz_session_core::push_build::build_push_literal;
 
         let peer_b = [0x01, 0x02, 0x03, 0x04];
-        let join = encode_join(&params(&peer_b)); // next_sn_reliable = 0
+        let join = join0(&params(&peer_b)); // next_sn_reliable = 0
         let push = build_push_literal("demo/mc", b"over-multicast").expect("push fixture");
         let frame = encode_frame_with_push(/*sn=*/ 0, push, /*reliable=*/ true);
 
@@ -668,6 +772,7 @@ mod tests {
             Some(8),
             5,
             |event| observer.dispatch_event(event),
+            &mut idle_outbound(),
         )
         .await;
 
@@ -714,6 +819,7 @@ mod tests {
             Some(5),
             5,
             |event| observer.dispatch_event(event),
+            &mut idle_outbound(),
         )
         .await;
 
@@ -724,13 +830,84 @@ mod tests {
         );
     }
 
+    // ── A1c — TX half: queued publish -> minted SN -> framed multicast ──
+
+    /// A queued `MulticastTxItem::Push` leaves the loop as a `T_MID_FRAME`
+    /// whose minted SN matches the JOIN-advertised baseline (0), whose
+    /// payload round-trips back to the Push, and whose emission advances
+    /// the advertised `next_sn` in subsequent JOIN beacons.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test]
+    async fn drive_loop_frames_queued_push_and_advances_join_next_sn() {
+        use wz_session_core::network_message::NetworkMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(multicast_put_literal("demo/mc", b"tx-half").expect("put item"))
+            .expect("queue publish");
+        drop(tx); // after the publish drains, the TX arm disarms
+
+        let mut driver = FakeDriver::with([]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(8),
+            5,
+            |_| {},
+            &mut rx,
+        )
+        .await;
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+
+        // Exactly one data frame went out, on the best-effort channel
+        // (R flag clear), carrying SN 0 and the Push payload.
+        let frames: Vec<&Vec<u8>> = driver
+            .sent
+            .iter()
+            .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAME)
+            .collect();
+        assert_eq!(frames.len(), 1, "one queued publish = one data frame");
+        assert_eq!(
+            frames[0][0] & wire_const::FLAG_T_FRAME_R,
+            0,
+            "multicast_put_literal publishes best-effort"
+        );
+        let parsed = parse_inbound(frames[0]).expect("frame parses");
+        let InboundFrame::Frame { sn, payload, .. } = parsed else {
+            panic!("expected Frame");
+        };
+        assert_eq!(sn, 0, "first mint on a fresh ring is 0");
+        let messages = parse_frame_payload(&payload).expect("payload parses");
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0], NetworkMessage::Push(_)),
+            "payload is the queued Push"
+        );
+
+        // The JOIN beacons emitted AFTER the publish advertise the
+        // advanced best-effort next_sn (init_rx_seq stays truthful).
+        let last_join = driver
+            .sent
+            .iter()
+            .rev()
+            .find(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
+            .expect("at least one JOIN beacon");
+        let join = decode_join(last_join).expect("JOIN decodes");
+        assert_eq!(join.next_sn_best_effort, 1, "publish advanced the ring");
+        assert_eq!(join.next_sn_reliable, 0, "reliable channel untouched");
+    }
+
     /// Our own JOIN echoed back by multicast loopback does NOT admit us as a
     /// peer — a node is not its own peer (own-zid filter).
     #[tokio::test]
     async fn drive_loop_filters_own_join_echo() {
         let self_zid = [0xAA, 0xBB, 0xCC, 0xDD];
         // The inbound JOIN carries OUR zid (the loopback echo of our beacon).
-        let mut driver = FakeDriver::with([(encode_join(&params(&self_zid)), src(9))]);
+        let mut driver = FakeDriver::with([(join0(&params(&self_zid)), src(9))]);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let clock = TokioTime::new();
 
@@ -742,6 +919,7 @@ mod tests {
             Some(5),
             5,
             |_| {},
+            &mut idle_outbound(),
         )
         .await;
 

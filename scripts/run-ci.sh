@@ -2264,13 +2264,19 @@ layer_q_qemu_mcu_e2e() {
 # deterministic FSM + encode/decode logic is covered without a socket
 # by Layer C1i's `scouting_glue` unit tests, so disabling Layer M loses
 # no logic coverage, only the real-socket transport leg.
+# A1c adds the `multicast_pubsub_loopback` two-node pub/sub e2e (a
+# publisher node's JOIN + framed Push reach a group-joined subscriber
+# node's registry over a real socket); its deterministic logic twin is
+# the C1q `multicast_glue` unit suite.
 layer_m_scouting_multicast() {
     if [[ "$ONLY_LAYER" != "M" && "${WZ_RUN_LAYER_M:-0}" -ne 1 ]]; then
         echo "Layer M SKIP (opt-in: --layer M or WZ_RUN_LAYER_M=1)"
         return 0
     fi
     (cd crates && cargo test -p wz-runtime-tokio --features scouting-active \
-        --test scouting_multicast_loopback -- --ignored --quiet)
+        --test scouting_multicast_loopback -- --ignored --quiet) \
+        && (cd crates && cargo test -p wz-runtime-tokio --features transport-multicast \
+            --test multicast_pubsub_loopback -- --ignored --quiet)
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────

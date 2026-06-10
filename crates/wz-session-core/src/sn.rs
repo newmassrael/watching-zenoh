@@ -68,6 +68,50 @@ pub const fn increment(mask: u64, sn: u64) -> u64 {
     sn.wrapping_add(1) & mask
 }
 
+/// A1c — per-channel TX sequence-number mint state (zenoh-pico
+/// `_z_transport_common_t._sn_tx_reliable` / `_sn_tx_best_effort` pair on
+/// one ring). The multicast drive loop owns one instance: each outbound
+/// data frame [`mint`](TxSn::mint)s its channel's next SN, and the
+/// periodic JOIN beacon advertises the LIVE `next_*` values so receivers
+/// seed their RX baselines one before the next real frame (§3.2
+/// `init_rx_seq`). Fields are public — the JOIN encoder reads them
+/// directly, and tests construct arbitrary ring positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxSn {
+    /// The ring mask ([`mask_from_res`]); both channels share it.
+    pub mask: u64,
+    /// Next SN the reliable channel will send.
+    pub next_reliable: u64,
+    /// Next SN the best-effort channel will send.
+    pub next_best_effort: u64,
+}
+
+impl TxSn {
+    /// A fresh announcer: both channels start at 0 on the ring of
+    /// `mask` (zenoh-pico seeds from `Z_SN_RESOLUTION`-bounded random;
+    /// wz starts at 0 — the JOIN advertisement makes any start valid).
+    pub const fn new(mask: u64) -> Self {
+        Self {
+            mask,
+            next_reliable: 0,
+            next_best_effort: 0,
+        }
+    }
+
+    /// Mint the next SN for a channel: returns the current `next_*` and
+    /// advances it one step on the ring.
+    pub fn mint(&mut self, reliable: bool) -> u64 {
+        let slot = if reliable {
+            &mut self.next_reliable
+        } else {
+            &mut self.next_best_effort
+        };
+        let sn = *slot;
+        *slot = increment(self.mask, sn);
+        sn
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +174,23 @@ mod tests {
         let mask = mask_from_res(0x01);
         assert_eq!(increment(mask, 0), 1);
         assert_eq!(increment(mask, mask), 0);
+    }
+
+    /// `TxSn::mint` returns the advertised `next_*` and advances per
+    /// channel independently; a receiver seeding from the pre-mint
+    /// advertisement admits the minted SN.
+    #[test]
+    fn tx_sn_mints_per_channel() {
+        let mask = mask_from_res(0x02);
+        let mut tx = TxSn::new(mask);
+        let advertised = tx.next_reliable;
+        assert_eq!(tx.mint(true), 0);
+        assert_eq!(tx.mint(true), 1);
+        assert_eq!(tx.mint(false), 0, "channels mint independently");
+        assert_eq!(tx.next_reliable, 2);
+        assert_eq!(tx.next_best_effort, 1);
+        // RX seeding contract: baseline = decrement(advertised next) admits
+        // the first minted SN.
+        assert!(precedes(mask, decrement(mask, advertised), 0));
     }
 }

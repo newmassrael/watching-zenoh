@@ -134,7 +134,6 @@ async fn scout_discovers_peer_locator_over_multicast() {
 #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
 mod round2 {
     use std::net::Ipv4Addr;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use tokio::net::{TcpListener, UdpSocket};
@@ -147,7 +146,7 @@ mod round2 {
     use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
     use wz_runtime_tokio::session_glue::{
         new_session_actions, new_session_engine, poll_and_dispatch_one, DriverLoopOutcome,
-        SessionInitParams, SessionLinkActions,
+        SessionInitParams,
     };
     use wz_runtime_tokio::session_open::{open_session_at, DEFAULT_OPEN_TICK_MS};
     use wz_runtime_tokio::UdpDriver;

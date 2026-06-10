@@ -583,7 +583,8 @@
         "Fragments to local batch_size MTU; negotiated-min + MsgPut 256B cap raise are follow-ups.",
         "batching appends inherit the open frame's channel (opening msg's R flag) - pico tx.c parity (R311jp)",
         "R311jv: multicast Frame RX delivers payloads to registries (SN gate); TX half pending A1c.",
-        "R311jv: transport-multicast forward grew codec-frame (kconfig select for the data plane)."
+        "R311jv: transport-multicast forward grew codec-frame (kconfig select for the data plane).",
+        "R311jw: multicast TX half landed (TxSn + outbound seam + Layer M e2e) - data plane full-duplex."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -32501,6 +32502,60 @@
         "multicast Fragment RX not wired: T_MID_FRAGMENT falls to the ignore arm (no per-peer reassembly, no lease refresh; pico refreshes + per-peer dbuf) - follow-up alongside the reassembly_dispatch zid-keyed pool.",
         "queryable-over-multicast replies need the A1c TX seam (today the observer can stage replies but the loop has no response sink).",
         "JOIN batch_size compat check skipped (minimal JOIN omits it; pico refuses mismatch) - revisit with richer JOIN opts."
+      ]
+    },
+    "Round 311jw": {
+      "decision_summary": "A1c multicast TX half + e2e: loop-owned TxSn mint (JOIN advertises live next_sn), MulticastTxItem outbound seam (unicast writer-channel mirror) + multicast_put_literal, Layer M two-node pub/sub e2e 10/10; multicast DATA plane closes full-duplex.",
+      "changes_bullets": [
+        "wz-session-core `sn.rs` gains `TxSn` (zenoh-pico `_sn_tx_reliable`/`_sn_tx_best_effort` pair on one ring): loop-owned per-channel mint state; `mint(reliable)` returns-then-advances.",
+        "`multicast_glue::encode_join` signature gains `&TxSn` — the JOIN beacon now advertises the LIVE per-channel `next_sn` (the §3.2 `init_rx_seq` contract stays truthful once data frames mint; the prior hardcoded 0 was honest only pre-data-plane).",
+        "NEW `MulticastTxItem` outbound seam (unconditional enum, codec-gated variants = signature stability; `Push { push, reliable }` under codec-push) + `multicast_put_literal` convenience builder; `drive_multicast_session` gains `outbound: &mut UnboundedReceiver<MulticastTxItem>` — the multicast mirror of the unicast writer-channel: the loop mints the channel SN, wraps via the `encode_frame_with_push` SSOT, and multicasts to the group; a closed channel disarms the select arm.",
+        "NEW `tests/multicast_pubsub_loopback.rs` Layer M two-node e2e: publisher node (ephemeral socket -> group via `UdpDriver::from_socket`) JOIN-admits into a group-joined subscriber node; queued Push travels A -> group -> SN gate -> `ApplicationLayerObserver` subscriber callback exactly once.",
+        "run-ci Layer M lane grows the `multicast_pubsub_loopback` invocation (`--features transport-multicast`).",
+        "`tests/scouting_multicast_loopback.rs` rot fix: 2 pre-existing unused imports (Arc, SessionLinkActions) failed the opt-in Layer M lane under -D warnings — removed (drift from an earlier session.rs refactor; opt-in lanes do not gate pushes, so it sat invisible)."
+      ],
+      "verification_bullets": [
+        "C1q lane 12 PASS incl. NEW `drive_loop_frames_queued_push_and_advances_join_next_sn` (one queued publish = one best-effort T_MID_FRAME at minted SN 0; payload round-trips to the Push; subsequent JOIN advertises next_sn_best_effort=1, reliable untouched).",
+        "wz-session-core 142 tests PASS incl. NEW `tx_sn_mints_per_channel` (per-channel independence + RX-seed admits the minted SN).",
+        "Layer M opt-in EXIT 0: scouting twins + NEW `publisher_push_reaches_group_subscriber` two-node real-socket e2e, 10/10 consecutive runs PASS (no-flaky rule).",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "queryable-over-multicast replies: the observer can stage replies but the multicast loop wires no ResponseSink — compose flush_pending onto the outbound seam when query-over-multicast lands.",
+        "multicast Fragment RX still unwired (T_MID_FRAGMENT ignored; pico per-peer dbuf) — pairs with a reassembly_dispatch pool keyed by peer.",
+        "multicast-declarations atom still reserved (Declare over multicast untested; the FramePayload fan already routes Declare records, so the gap is TX + e2e + catalog flip).",
+        "MCU multicast drive loop (wz-runtime-lwip mirror of multicast_glue) — link-tier RX socket exists (R311ir), loop + TX seam do not.",
+        "same-host symmetric peers need SO_REUSEADDR on the shared group port (e2e sidesteps via ephemeral publisher socket; cross-host unaffected).",
+        "prior carries unchanged: F2 send-gate / F3 liveliness-get cache prune / F6 wrapper ergonomics; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ],
+      "publishable_decision_summary": "A1c multicast TX half + e2e: loop-owned TxSn mint (JOIN advertises live next_sn), MulticastTxItem outbound seam (unicast writer-channel mirror) + multicast_put_literal, Layer M two-node pub/sub e2e 10/10; multicast DATA plane closes full-duplex.",
+      "publishable_changes_bullets": [
+        "wz-session-core `sn.rs` gains `TxSn` (zenoh-pico `_sn_tx_reliable`/`_sn_tx_best_effort` pair on one ring): loop-owned per-channel mint state; `mint(reliable)` returns-then-advances.",
+        "`multicast_glue::encode_join` signature gains `&TxSn` — the JOIN beacon now advertises the LIVE per-channel `next_sn` (the §3.2 `init_rx_seq` contract stays truthful once data frames mint; the prior hardcoded 0 was honest only pre-data-plane).",
+        "NEW `MulticastTxItem` outbound seam (unconditional enum, codec-gated variants = signature stability; `Push { push, reliable }` under codec-push) + `multicast_put_literal` convenience builder; `drive_multicast_session` gains `outbound: &mut UnboundedReceiver<MulticastTxItem>` — the multicast mirror of the unicast writer-channel: the loop mints the channel SN, wraps via the `encode_frame_with_push` SSOT, and multicasts to the group; a closed channel disarms the select arm.",
+        "NEW `tests/multicast_pubsub_loopback.rs` Layer M two-node e2e: publisher node (ephemeral socket -> group via `UdpDriver::from_socket`) JOIN-admits into a group-joined subscriber node; queued Push travels A -> group -> SN gate -> `ApplicationLayerObserver` subscriber callback exactly once.",
+        "run-ci Layer M lane grows the `multicast_pubsub_loopback` invocation (`--features transport-multicast`).",
+        "`tests/scouting_multicast_loopback.rs` rot fix: 2 pre-existing unused imports (Arc, SessionLinkActions) failed the opt-in Layer M lane under -D warnings — removed (drift from an earlier session.rs refactor; opt-in lanes do not gate pushes, so it sat invisible)."
+      ],
+      "publishable_verification_bullets": [
+        "C1q lane 12 PASS incl. NEW `drive_loop_frames_queued_push_and_advances_join_next_sn` (one queued publish = one best-effort T_MID_FRAME at minted SN 0; payload round-trips to the Push; subsequent JOIN advertises next_sn_best_effort=1, reliable untouched).",
+        "wz-session-core 142 tests PASS incl. NEW `tx_sn_mints_per_channel` (per-channel independence + RX-seed admits the minted SN).",
+        "Layer M opt-in EXIT 0: scouting twins + NEW `publisher_push_reaches_group_subscriber` two-node real-socket e2e, 10/10 consecutive runs PASS (no-flaky rule).",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "queryable-over-multicast replies: the observer can stage replies but the multicast loop wires no ResponseSink — compose flush_pending onto the outbound seam when query-over-multicast lands.",
+        "multicast Fragment RX still unwired (T_MID_FRAGMENT ignored; pico per-peer dbuf) — pairs with a reassembly_dispatch pool keyed by peer.",
+        "multicast-declarations atom still reserved (Declare over multicast untested; the FramePayload fan already routes Declare records, so the gap is TX + e2e + catalog flip).",
+        "MCU multicast drive loop (wz-runtime-lwip mirror of multicast_glue) — link-tier RX socket exists (R311ir), loop + TX seam do not.",
+        "same-host symmetric peers need SO_REUSEADDR on the shared group port (e2e sidesteps via ephemeral publisher socket; cross-host unaffected).",
+        "prior carries unchanged: F2 send-gate / F3 liveliness-get cache prune / F6 wrapper ergonomics; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
       ]
     },
     "Round 311k": {
