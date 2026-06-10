@@ -71,6 +71,20 @@ pub trait ResponseSink {
     /// composes on the MCU no-alloc profile.
     #[cfg(feature = "liveliness-token")]
     fn send_declare_final_reply(&self, interest_id: u64);
+
+    /// F3 — drop the session-reconnect declaration-cache entry for a
+    /// liveliness get whose snapshot terminated (inbound `DeclFinal` or
+    /// local timeout). A get is one-shot: the requester never emits an
+    /// interest-FINAL for it (the peer's `DeclFinal` ends the protocol),
+    /// so this is the only prune path its `LivelinessGetInterest` cache
+    /// entry has — without it every finished get replays a stale CURRENT
+    /// Interest on each reconnect (zenoh-pico shares the leak; wz closes
+    /// it). The observer's `flush_pending` drains the registry's
+    /// staged terminations through here. No-op when `session-reconnect`
+    /// is off (no cache exists) — implementors keep the body
+    /// feature-stable per R311g1.
+    #[cfg(feature = "liveliness-get")]
+    fn prune_liveliness_get_interest(&self, interest_id: u64);
 }
 
 // Smart-pointer / reference transparency: an `Arc`-shared or borrowed
@@ -97,6 +111,10 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
     #[cfg(feature = "liveliness-token")]
     fn send_declare_final_reply(&self, interest_id: u64) {
         (**self).send_declare_final_reply(interest_id)
+    }
+    #[cfg(feature = "liveliness-get")]
+    fn prune_liveliness_get_interest(&self, interest_id: u64) {
+        (**self).prune_liveliness_get_interest(interest_id)
     }
 }
 
@@ -126,5 +144,9 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
     #[cfg(feature = "liveliness-token")]
     fn send_declare_final_reply(&self, interest_id: u64) {
         (**self).send_declare_final_reply(interest_id)
+    }
+    #[cfg(feature = "liveliness-get")]
+    fn prune_liveliness_get_interest(&self, interest_id: u64) {
+        (**self).prune_liveliness_get_interest(interest_id)
     }
 }

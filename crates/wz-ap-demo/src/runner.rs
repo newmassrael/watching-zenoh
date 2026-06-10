@@ -681,7 +681,15 @@ pub(crate) async fn run_demo(
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let _ = obs.replies.sweep_timed_out(sweep_clock.now_monotonic_ms());
+            let now_ms = sweep_clock.now_monotonic_ms();
+            let _ = obs.replies.sweep_timed_out(now_ms);
+            // F3 — the liveliness-get pending table has the same
+            // deadline contract as the reply registry (registered with
+            // an absolute timeout, swept here so an unanswered get
+            // cannot leak its slot); previously documented but unwired.
+            // The swept ids stage a reconnect-cache prune drained by the
+            // next observer flush.
+            let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
         }
     });
 

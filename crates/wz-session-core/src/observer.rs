@@ -546,12 +546,25 @@ impl ApplicationLayerObserver {
                 }
             }
         }
-        // R307 — without `query-queryable` (and, R283, without
-        // `liveliness-token`) the staging buffers do not exist; `actions`
-        // is then unused in this branch but the method signature stays
-        // stable so callers (`Self::dispatch`) can wire it
-        // unconditionally.
-        #[cfg(not(any(feature = "query-queryable", feature = "liveliness-token")))]
+        // F3 — drain the terminated-get staging (inbound DeclFinal +
+        // timeout sweeps) through the reconnect-cache prune seam: a
+        // finished one-shot get must not replay its CURRENT Interest on
+        // the next reconnect. The sink no-ops when `session-reconnect`
+        // is off, so the drain is unconditional within the gate.
+        #[cfg(feature = "liveliness-get")]
+        for interest_id in self.liveliness_gets.take_finalized() {
+            actions.prune_liveliness_get_interest(interest_id);
+        }
+        // R307 — without `query-queryable` (and, R283/F3, without
+        // `liveliness-token` / `liveliness-get`) the staging buffers do
+        // not exist; `actions` is then unused in this branch but the
+        // method signature stays stable so callers (`Self::dispatch`)
+        // can wire it unconditionally.
+        #[cfg(not(any(
+            feature = "query-queryable",
+            feature = "liveliness-token",
+            feature = "liveliness-get"
+        )))]
         let _ = actions;
     }
 

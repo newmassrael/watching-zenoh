@@ -1979,7 +1979,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     ///
     /// `options.timeout_ms == 0` registers the pending get with no
     /// deadline (it stays pending until the peer's `DeclFinal` arrives);
-    /// a non-zero value arms a timeout swept by the driver loop, firing
+    /// a non-zero value arms a timeout the host sweeps via
+    /// `LivelinessGetRegistry::sweep_timed_out` (the wz-ap-demo sweep
+    /// ticker drives it alongside the reply registry; F3), firing
     /// `on_final` if the peer never terminates the snapshot so the
     /// pending slot cannot leak. Because a get is one-shot (unlike a
     /// re-fireable subscription) this surface enforces the

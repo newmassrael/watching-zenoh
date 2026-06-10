@@ -120,6 +120,21 @@ struct PendingGet<C: ReplySink> {
 /// sibling of [`crate::reply::ReplyRegistry`] rather than a reuse of it.
 pub struct LivelinessGetRegistry<C: ReplySink> {
     pending: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }>,
+    /// F3 — interest ids whose get terminated since the last
+    /// [`take_finalized`](Self::take_finalized) drain (inbound
+    /// `DeclFinal` or local timeout sweep). The observer's
+    /// `flush_pending` drains these through
+    /// `ResponseSink::prune_liveliness_get_interest` so the
+    /// session-reconnect declaration cache drops the one-shot CURRENT
+    /// Interest — the requester never emits an interest-FINAL for a get
+    /// (the peer's `DeclFinal` terminates the protocol), so without this
+    /// the cache entry would replay a finished snapshot on every
+    /// reconnect (zenoh-pico shares the leak — its `_z_liveliness_query`
+    /// routes through the caching `_z_send_declare`, `liveliness.c:355`,
+    /// with no prune; wz closes it). Same capacity as the pending table:
+    /// drained at least once per drive-loop iteration, the staging can
+    /// never out-accumulate the table that feeds it.
+    finalized: BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }>,
 }
 
 impl<C: ReplySink> Default for LivelinessGetRegistry<C> {
@@ -137,7 +152,19 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     pub fn with_sink_backing() -> Self {
         Self {
             pending: BoundedVec::new(),
+            finalized: BoundedVec::new(),
         }
+    }
+
+    /// F3 — drain the interest ids whose gets terminated since the last
+    /// call (inbound `DeclFinal` or timeout sweep). The caller routes
+    /// each through
+    /// `ResponseSink::prune_liveliness_get_interest` so the
+    /// session-reconnect declaration cache drops the finished one-shot
+    /// Interest (see the `finalized` field docs). Returns the staged ids
+    /// by value, leaving the staging empty.
+    pub fn take_finalized(&mut self) -> BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }> {
+        core::mem::take(&mut self.finalized)
     }
 
     /// Register a pending get keyed by `interest_id`. Fresh ids come
@@ -258,6 +285,9 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         let swept = fired.len();
         for mut entry in fired {
             let id = entry.interest_id;
+            // F3 — a timed-out get is as terminated as a DeclFinal'd one:
+            // stage it for the reconnect-cache prune drain too.
+            let _ = self.finalized.push(id);
             entry.sink.on_final(id);
         }
         swept
@@ -278,6 +308,11 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
         let any = !fired.is_empty();
         for mut entry in fired {
             let id = entry.interest_id;
+            // F3 — stage the terminated id for the reconnect-cache prune
+            // drain (capacity mirrors the pending table; a same-iteration
+            // drain cannot overflow, and a dropped marker only delays the
+            // prune to the entry's next legitimate undeclare/replay).
+            let _ = self.finalized.push(id);
             entry.sink.on_final(id);
         }
         any
@@ -635,5 +670,39 @@ mod tests {
         assert_eq!(got[1].1, "live/b");
         assert_eq!(*f.lock().unwrap(), vec![7]);
         assert_eq!(reg.len(), 0);
+    }
+
+    /// F3 — every termination path (DeclFinal + timeout sweep) stages the
+    /// interest id for the reconnect-cache prune drain; `take_finalized`
+    /// returns the staged ids and empties the staging. Replies and
+    /// unknown-id finals stage nothing.
+    #[test]
+    fn terminations_stage_finalized_ids_for_prune_drain() {
+        let mut reg = LivelinessGetRegistry::new();
+        let r: Captured = Arc::new(Mutex::new(Vec::new()));
+        let f: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(7, None, make_get(r.clone(), f.clone()))
+            .unwrap();
+        reg.register(8, Some(1000), make_get(r.clone(), f.clone()))
+            .unwrap();
+
+        // A reply is not a termination: nothing staged.
+        assert_eq!(reg.dispatch_reply_borrowed(7, "live/a"), 1);
+        assert!(reg.take_finalized().is_empty());
+
+        // DeclFinal terminates get 7; an unknown id stages nothing.
+        assert!(reg.dispatch_final(7));
+        assert!(!reg.dispatch_final(99));
+        let staged: Vec<u64> = reg.take_finalized().into_iter().collect();
+        assert_eq!(staged, vec![7]);
+        assert!(
+            reg.take_finalized().is_empty(),
+            "take_finalized drains the staging"
+        );
+
+        // A timeout sweep is as terminal as a DeclFinal.
+        assert_eq!(reg.sweep_timed_out(1000), 1);
+        let staged: Vec<u64> = reg.take_finalized().into_iter().collect();
+        assert_eq!(staged, vec![8]);
     }
 }

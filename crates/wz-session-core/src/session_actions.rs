@@ -524,6 +524,29 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
                 .expect("DeclFinal reply carries no bounded fields"),
         );
     }
+    // F3 — terminated-get prune: drop exactly the `LivelinessGetInterest`
+    // cache entry for `interest_id` (variant-precise — fresh-allocated
+    // ids cannot collide across kinds, but the filter encodes the
+    // intent: a live subscriber Interest must never be collateral). The
+    // requester emits no interest-FINAL for a one-shot get, so this
+    // drain — fed by the registry's staged DeclFinal / timeout
+    // terminations through the observer's `flush_pending` — is the
+    // entry's only prune (zenoh-pico keeps the stale entry and replays
+    // it on reconnect; wz closes the leak). No-op without
+    // `session-reconnect` (no cache exists).
+    #[cfg(feature = "liveliness-get")]
+    fn prune_liveliness_get_interest(&self, interest_id: u64) {
+        #[cfg(feature = "session-reconnect")]
+        self.prune_declaration(|entry| {
+            matches!(
+                entry,
+                CachedDeclaration::LivelinessGetInterest { interest_id: id, .. }
+                    if *id == interest_id
+            )
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = interest_id;
+    }
 }
 
 /// Generic-`R` constructor (Stage 2c) — the runtime-agnostic body behind the

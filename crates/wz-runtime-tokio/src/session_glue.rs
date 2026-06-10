@@ -2253,6 +2253,89 @@ mod reconnect_tx_tests {
 
     use crate::runtime_impl::TokioRuntime;
 
+    /// F3 — the peer's `DeclFinal` terminating a liveliness get prunes
+    /// exactly that get's cached Interest through the observer's
+    /// `flush_pending` drain: a finished one-shot snapshot must not
+    /// replay on reconnect (the requester never emits an interest-FINAL
+    /// for a get, so this drain is the entry's only prune; zenoh-pico
+    /// keeps the stale entry). A live subscriber Interest sharing the
+    /// cache survives untouched.
+    #[cfg(feature = "liveliness-get")]
+    #[test]
+    fn inbound_decl_final_prunes_cached_liveliness_get_interest() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::observer::ApplicationLayerObserver;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_interest_liveliness_subscriber(13, /*history=*/ false, 0, Some("home/liv"))
+            .expect("liveliness subscriber interest");
+        actions
+            .send_interest_liveliness_get(14, 0, Some("home/get"))
+            .expect("liveliness get interest");
+        assert_eq!(
+            actions.declaration_cache_snapshot().len(),
+            2,
+            "both Interest forms cached"
+        );
+
+        let finals = Arc::new(AtomicUsize::new(0));
+        let mut observer = ApplicationLayerObserver::new();
+        {
+            let finals = finals.clone();
+            observer
+                .liveliness_gets
+                .register_get(
+                    14,
+                    None,
+                    |_reply| {},
+                    move |_id| {
+                        finals.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .expect("register pending get");
+        }
+
+        // The peer's terminator arrives as a solicited Declare(DeclFinal)
+        // tagged with the get's interest_id, inside a Frame payload.
+        let declare = wz_codecs::declare::DeclareOwned {
+            header: 0,
+            interest_id: Some(14),
+            extensions: None,
+            body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(
+                wz_codecs::decl_final::DeclFinal::default(),
+            ),
+        };
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        observer.dispatch(IterationEvent::Poll(&outcome), &actions);
+
+        assert_eq!(finals.load(Ordering::SeqCst), 1, "the get terminated");
+        let cache = actions.declaration_cache_snapshot();
+        assert_eq!(
+            cache.len(),
+            1,
+            "the finished get's Interest is pruned from the replay cache"
+        );
+        assert!(
+            matches!(
+                cache[0],
+                CachedDeclaration::LivelinessSubscriberInterest {
+                    interest_id: 13,
+                    ..
+                }
+            ),
+            "the live subscriber Interest survives"
+        );
+    }
+
     /// Every cached-kind declare appends one entry in emit order; each
     /// matching undeclare prunes exactly its own entry (first-match,
     /// pico `_z_prune_declaration` filter semantics).

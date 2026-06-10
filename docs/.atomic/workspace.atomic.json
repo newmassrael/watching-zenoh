@@ -32558,6 +32558,52 @@
         "prior carries unchanged: F2 send-gate / F3 liveliness-get cache prune / F6 wrapper ergonomics; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
       ]
     },
+    "Round 311jx": {
+      "decision_summary": "F3 liveliness-get cache prune: registry stages terminated interest ids (DeclFinal + timeout sweep), observer flush drains via new ResponseSink::prune_liveliness_get_interest -> reconnect cache drops finished one-shot gets; demo ticker gains the previously-unwired get sweep.",
+      "changes_bullets": [
+        "`LivelinessGetRegistry` gains a `finalized` staging (`BoundedVec`, pending-table capacity): every termination path — inbound `DeclFinal` (`fire_final_for`) AND timeout sweep (`sweep_timed_out`) — stages the interest id; new `take_finalized()` drains it.",
+        "`ResponseSink` gains `prune_liveliness_get_interest(interest_id)` (liveliness-get gated) + forwards in both blanket impls; `SessionLinkActions` impl prunes exactly the `CachedDeclaration::LivelinessGetInterest` entry (variant-precise filter; no-op without session-reconnect, R311g1 body-cfg).",
+        "`ApplicationLayerObserver::flush_pending` drains the staged terminations through the new sink method (the same drain phase the queryable replies use); the actions-unused tail cfg union grows liveliness-get.",
+        "wz-ap-demo sweep ticker now ALSO fires `liveliness_gets.sweep_timed_out` next to the reply sweep — the `Session::liveliness_get` timeout was documented as \"swept by the driver loop\" but had NO production sweeper (doc-claim falsified by grep: zero callers); the doc now names the real surface."
+      ],
+      "verification_bullets": [
+        "wz-session-core 13 liveliness_get tests PASS incl. NEW `terminations_stage_finalized_ids_for_prune_drain` (DeclFinal stages / unknown-id stages nothing / take_finalized drains+empties / timeout sweep stages).",
+        "wz-runtime-tokio reconnect_tx_tests 5 PASS incl. NEW `inbound_decl_final_prunes_cached_liveliness_get_interest` (full path: cached get Interest -> observer.dispatch(FramePayload[Declare(DeclFinal id=14)]) -> on_final fired + cache entry pruned + sibling subscriber Interest survives).",
+        "clippy -D warnings: session-core (alloc+liveliness-get+codec-declare, no session-reconnect = no-op arm) / runtime-tokio (+liveliness-get) / wz-ap-demo all clean.",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "F2 carry (next): RECONNECTING-window sends silently dropped — design settled this session: actions-tier `link_up` gate at the dispatch chokepoint (initial true; false at release_link + reset_for_reopen; true at record_established_at), new typed SendWireError variant; replay runs post-Established so it passes the gate.",
+        "F6 carry: drive(self) consuming supervisor ergonomics (reconnects observability, GaveUp zombie handles) - Session-tier wrapper round.",
+        "liveliness-get has NO dedicated run-ci lane (rides the C1 workspace union via wz-ap-demo preset-ap-client + explicit-feature clippy here); a C1-series lane with liveliness-get explicit is a nicety.",
+        "prior carries unchanged: A1 follow-ups (queryable-over-multicast replies, Fragment RX, multicast-declarations, MCU multicast loop); MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ],
+      "publishable_decision_summary": "F3 liveliness-get cache prune: registry stages terminated interest ids (DeclFinal + timeout sweep), observer flush drains via new ResponseSink::prune_liveliness_get_interest -> reconnect cache drops finished one-shot gets; demo ticker gains the previously-unwired get sweep.",
+      "publishable_changes_bullets": [
+        "`LivelinessGetRegistry` gains a `finalized` staging (`BoundedVec`, pending-table capacity): every termination path — inbound `DeclFinal` (`fire_final_for`) AND timeout sweep (`sweep_timed_out`) — stages the interest id; new `take_finalized()` drains it.",
+        "`ResponseSink` gains `prune_liveliness_get_interest(interest_id)` (liveliness-get gated) + forwards in both blanket impls; `SessionLinkActions` impl prunes exactly the `CachedDeclaration::LivelinessGetInterest` entry (variant-precise filter; no-op without session-reconnect, R311g1 body-cfg).",
+        "`ApplicationLayerObserver::flush_pending` drains the staged terminations through the new sink method (the same drain phase the queryable replies use); the actions-unused tail cfg union grows liveliness-get.",
+        "wz-ap-demo sweep ticker now ALSO fires `liveliness_gets.sweep_timed_out` next to the reply sweep — the `Session::liveliness_get` timeout was documented as \"swept by the driver loop\" but had NO production sweeper (doc-claim falsified by grep: zero callers); the doc now names the real surface."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core 13 liveliness_get tests PASS incl. NEW `terminations_stage_finalized_ids_for_prune_drain` (DeclFinal stages / unknown-id stages nothing / take_finalized drains+empties / timeout sweep stages).",
+        "wz-runtime-tokio reconnect_tx_tests 5 PASS incl. NEW `inbound_decl_final_prunes_cached_liveliness_get_interest` (full path: cached get Interest -> observer.dispatch(FramePayload[Declare(DeclFinal id=14)]) -> on_final fired + cache entry pruned + sibling subscriber Interest survives).",
+        "clippy -D warnings: session-core (alloc+liveliness-get+codec-declare, no session-reconnect = no-op arm) / runtime-tokio (+liveliness-get) / wz-ap-demo all clean.",
+        "full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F2 carry (next): RECONNECTING-window sends silently dropped — design settled this session: actions-tier `link_up` gate at the dispatch chokepoint (initial true; false at release_link + reset_for_reopen; true at record_established_at), new typed SendWireError variant; replay runs post-Established so it passes the gate.",
+        "F6 carry: drive(self) consuming supervisor ergonomics (reconnects observability, GaveUp zombie handles) - Session-tier wrapper round.",
+        "liveliness-get has NO dedicated run-ci lane (rides the C1 workspace union via wz-ap-demo preset-ap-client + explicit-feature clippy here); a C1-series lane with liveliness-get explicit is a nicety.",
+        "prior carries unchanged: A1 follow-ups (queryable-over-multicast replies, Fragment RX, multicast-declarations, MCU multicast loop); MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [
