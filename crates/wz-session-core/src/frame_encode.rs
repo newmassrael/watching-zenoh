@@ -395,28 +395,12 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 /// Mirrors the encoder's emit loop exactly; it IS the wire format, not
 /// consumer-tunable logic.
 ///
-/// cfg = fragmentation AND the wire-emit union: the only consumer is the
-/// fragment body-slice in `emit_frame_or_fragments`, which exists when at
-/// least one network-message sender is compiled — a no-sender subset must
-/// not carry the dead symbol (`-D warnings` lanes). (R311jq: the batching
-/// append no longer slices — it sink-encodes into the open frame
-/// directly, so batching dropped out of this cfg.)
-#[cfg(all(
-    feature = "transport-fragmentation",
-    any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-final",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    )
-))]
+/// cfg = fragmentation only (R311ko): the codec-agnostic
+/// [`multicast_frame_or_fragments`] body-slice joined the unicast
+/// `emit_frame_or_fragments` as a consumer, so the former wire-emit
+/// codec union (R311jq) no longer bounds where the symbol is live —
+/// any fragmentation build slices.
+#[cfg(feature = "transport-fragmentation")]
 pub(crate) fn vle_width(sn: u64) -> usize {
     let (mut width, mut v) = (1usize, sn);
     while v >= 0x80 {
@@ -514,6 +498,52 @@ fn build_fragment_wire(sn: u64, payload: &[u8], reliable: bool, more: bool) -> V
             .expect("VecSink is infallible");
     }
     wire
+}
+
+/// R311ko — terminal framing for one multicast outbound emission: the
+/// already-encoded `T_MID_FRAME` passes through when it fits `mtu`
+/// (the group batch budget, `MulticastParams::batch_size`), else its
+/// network-message body — the tail after the 1-byte header + `VLE(sn)` —
+/// re-frames as a `T_MID_FRAGMENT` chain (zenoh-pico
+/// `_z_transport_tx_send_n_msg_inner` -> `_z_transport_tx_send_fragment`,
+/// common/tx.c — multicast rides the same common TX path). The multicast
+/// twin of `SessionLinkActions::emit_frame_or_fragments`, hosted here
+/// (pure, driver-free) so the AP drive loop and a future MCU multicast
+/// loop share one egress SSOT — the TX mirror of
+/// [`crate::multicast_dispatch::ingest_multicast_fragment`].
+///
+/// SN policy (pico parity, `_z_transport_tx_send_fragment_inner`): the
+/// oversize frame's already-minted `sn` IS the first fragment SN, and
+/// each further fragment mints the channel's next — the drive loop owns
+/// `tx_sn` exclusively, so the chain stays ring-consecutive by
+/// construction and no SN is ever skipped (contrast the unicast
+/// shared-counter path, which discards the oversize frame's SN and
+/// reserves a fresh contiguous block). The follow-on mints advance
+/// `tx_sn`, so the next JOIN beacon advertises the post-chain `next_*`.
+///
+/// Without `transport-fragmentation` the frame passes through whatever
+/// its size (zenoh-pico "Sending the message required fragmentation
+/// feature that is deactivated") — the signature stays stable so the
+/// drive loop carries no cfg at the call site.
+pub fn multicast_frame_or_fragments(
+    frame: Vec<u8>,
+    sn: u64,
+    reliable: bool,
+    mtu: usize,
+    tx_sn: &mut crate::sn::TxSn,
+) -> Vec<Vec<u8>> {
+    #[cfg(feature = "transport-fragmentation")]
+    if frame.len() > mtu {
+        let body = &frame[1 + vle_width(sn)..];
+        let count = fragment_count(body.len(), mtu);
+        for _ in 1..count {
+            tx_sn.mint(reliable);
+        }
+        return fragment_body(body, reliable, mtu, sn, tx_sn.mask);
+    }
+    #[cfg(not(feature = "transport-fragmentation"))]
+    let _ = (sn, reliable, mtu, tx_sn);
+    alloc::vec![frame]
 }
 
 // Each frame test builds a payload via a sibling codec builder, so the
@@ -915,5 +945,73 @@ mod fragment_tests {
                 "best-effort fragment must clear the R bit",
             );
         }
+    }
+
+    /// R311ko — a frame that fits the budget passes through untouched and
+    /// mints nothing beyond the frame SN the caller already drew.
+    #[test]
+    fn multicast_frame_passes_through_when_it_fits() {
+        let mut tx_sn = crate::sn::TxSn::new(crate::sn::mask_from_res(0x02));
+        let sn = tx_sn.mint(true);
+        let mut frame = Vec::new();
+        super::begin_frame(&mut frame, sn, super::frame_flags(true));
+        frame.extend_from_slice(&[0xCD; 16]);
+        let after_mint = tx_sn;
+        let out = super::multicast_frame_or_fragments(frame.clone(), sn, true, 64, &mut tx_sn);
+        assert_eq!(out, alloc::vec![frame], "a fitting frame passes through");
+        assert_eq!(tx_sn, after_mint, "no follow-on mint for a fitting frame");
+    }
+
+    /// R311ko — an oversize frame re-frames as a fragment chain whose
+    /// first SN IS the frame's already-minted SN (zenoh-pico
+    /// `_z_transport_tx_send_fragment` passes the frame `sn` through as
+    /// `first_sn`), whose payloads concatenate back to the frame's
+    /// network-message body (sliced past the 2-byte-VLE SN prefix), and
+    /// whose follow-on mints advance the channel to one past the chain.
+    #[test]
+    fn multicast_oversize_chains_from_the_minted_frame_sn() {
+        let mtu = 64usize;
+        let mut tx_sn = crate::sn::TxSn::new(crate::sn::mask_from_res(0x02));
+        tx_sn.next_reliable = 200; // 2-byte VLE: pins the body-offset slice
+        let sn = tx_sn.mint(true);
+        let body: Vec<u8> = (0..200u32).map(|i| (i * 3) as u8).collect();
+        let mut frame = Vec::new();
+        super::begin_frame(&mut frame, sn, super::frame_flags(true));
+        frame.extend_from_slice(&body);
+
+        let frames = super::multicast_frame_or_fragments(frame, sn, true, mtu, &mut tx_sn);
+        assert_eq!(frames.len(), fragment_count(body.len(), mtu));
+        assert!(frames.len() > 1, "200 bytes at mtu 64 must fragment");
+        assert_eq!(
+            tx_sn.next_reliable,
+            (sn + frames.len() as u64) & tx_sn.mask,
+            "the chain consumes count SNs total (frame mint + count-1 follow-ons)",
+        );
+        assert_eq!(
+            tx_sn.next_best_effort, 0,
+            "a reliable chain leaves the other channel untouched",
+        );
+
+        let mut reassembled = Vec::new();
+        let mut expect_sn = sn;
+        for (i, frag) in frames.iter().enumerate() {
+            assert!(frag.len() <= mtu, "fragment {i} exceeds mtu");
+            let InboundFrame::Fragment {
+                reliable,
+                sn: frag_sn,
+                more,
+                payload,
+                ..
+            } = parse_inbound(frag).expect("parse fragment")
+            else {
+                panic!("frame {i} did not decode as a Fragment");
+            };
+            assert!(reliable, "R flag rides the channel");
+            assert_eq!(frag_sn, expect_sn, "fragment {i} SN must walk the ring");
+            assert_eq!(more, i + 1 < frames.len(), "M on every fragment but last");
+            reassembled.extend_from_slice(&payload);
+            expect_sn = crate::sn::increment(tx_sn.mask, expect_sn);
+        }
+        assert_eq!(reassembled, body, "payloads concatenate back to the body");
     }
 }

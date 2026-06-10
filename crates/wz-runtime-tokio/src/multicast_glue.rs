@@ -88,7 +88,7 @@ use wz_codecs::wire_const;
 use wz_session_core::drive::sweep_reporting;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "codec-push")]
-use wz_session_core::frame_encode::encode_frame_with_push;
+use wz_session_core::frame_encode::{encode_frame_with_push, multicast_frame_or_fragments};
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 #[cfg(feature = "reassembly")]
@@ -222,8 +222,11 @@ pub fn decode_join_zid(bytes: &[u8]) -> Option<&[u8]> {
 /// zenoh-pico's checks — version (`_z_multicast_handle_join_inner`
 /// proto-version guard) and SN-resolution compatibility (the
 /// incompatible-config refuse; multicast has no negotiation, so peers
-/// must already agree). A JOIN that omits the optional `sn_res`
-/// advertises the protocol default and is treated as compatible.
+/// must already agree) plus the batch-size compatibility from the same
+/// pico guard (R311ko — a peer framing against a larger budget would
+/// emit datagrams this node's budget never expects). A JOIN that omits
+/// an optional (`sn_res` / `batch_size`) advertises the local default
+/// and is treated as compatible.
 /// Returns the admitted SN baseline, or `None` when the announcement
 /// must be ignored (a diagnostic event, not a peer-FSM transition).
 pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinSnBaseline> {
@@ -232,6 +235,9 @@ pub fn validate_join(join: &Join<'_>, params: &MulticastParams) -> Option<JoinSn
     }
     let sn_res = join.sn_res.unwrap_or(params.seq_num_res);
     if sn_res != params.seq_num_res {
+        return None;
+    }
+    if join.batch_size.unwrap_or(params.batch_size) != params.batch_size {
         return None;
     }
     Some(JoinSnBaseline {
@@ -343,19 +349,33 @@ where
                     MulticastTxItem::Push { push, reliable } => {
                         // TxData: mint the channel SN, wrap in a
                         // T_MID_FRAME (frame_encode SSOT), multicast to
-                        // the group. Send failure is non-fatal like the
-                        // JOIN beacon (UDP multicast is best-effort; the
-                        // SN gap a dropped datagram leaves stays inside
-                        // receivers' half-window).
+                        // the group. R311ko — a frame past the group
+                        // batch budget re-frames as a T_MID_FRAGMENT
+                        // chain riding the same minted SN
+                        // (multicast_frame_or_fragments, zenoh-pico
+                        // common-TX parity). Send failure is non-fatal
+                        // like the JOIN beacon (UDP multicast is
+                        // best-effort; the SN gap a dropped datagram
+                        // leaves stays inside receivers' half-window —
+                        // though a hole in a fragment chain aborts that
+                        // chain at every receiver, as on pico).
                         let frame_sn = tx_sn.mint(reliable);
                         let dgram = encode_frame_with_push(frame_sn, push, reliable);
-                        let frame = TxFrame { bytes: &dgram };
                         let reliability = if reliable {
                             Reliability::Reliable
                         } else {
                             Reliability::BestEffort
                         };
-                        let _ = driver.send(&frame, reliability).await;
+                        for dgram in multicast_frame_or_fragments(
+                            dgram,
+                            frame_sn,
+                            reliable,
+                            params.batch_size as usize,
+                            &mut tx_sn,
+                        ) {
+                            let frame = TxFrame { bytes: &dgram };
+                            let _ = driver.send(&frame, reliability).await;
+                        }
                     }
                 },
                 None => outbound_open = false,
@@ -546,6 +566,7 @@ mod tests {
             lease_ms: 5_000,
             join_interval_ms: 1,
             seq_num_res: 0x02,
+            batch_size: 2_048,
         }
     }
 
@@ -1222,6 +1243,182 @@ mod tests {
                 fired.load(Ordering::SeqCst),
                 1,
                 "the recycled slot's new chain must complete cleanly"
+            );
+        }
+    }
+
+    // ── R311ko — multicast fragment TX: an oversize publish re-frames as
+    //    a T_MID_FRAGMENT chain at the loop's outbound seam ──
+
+    #[cfg(all(
+        feature = "transport-fragmentation",
+        feature = "reassembly",
+        feature = "codec-push",
+        feature = "pubsub-put"
+    ))]
+    mod fragment_tx {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wz_session_core::observer::ApplicationLayerObserver;
+
+        /// A group configured with a small frame budget — the owned push
+        /// codec caps payloads at the bounded profile (msg_put
+        /// `max-size="256"`), so "oversize" is a frame past a SMALL batch
+        /// budget, exactly how the unicast fragmentation fixtures shrink
+        /// the negotiated mtu rather than growing the message.
+        fn small_batch_params(zid: &[u8]) -> MulticastParams {
+            MulticastParams {
+                batch_size: 64,
+                ..params(zid)
+            }
+        }
+
+        /// A payload comfortably past the 64-byte group batch budget,
+        /// inside the owned-codec bound.
+        fn oversize_payload() -> Vec<u8> {
+            (0..200u32).map(|i| (i * 13) as u8).collect()
+        }
+
+        /// A queued oversize Push leaves the loop as a reliable
+        /// `T_MID_FRAGMENT` chain — no oversize `T_MID_FRAME` reaches the
+        /// wire, every datagram fits the batch budget, the chain SNs are
+        /// ring-consecutive from the frame's minted SN (0 on a fresh
+        /// ring), and the follow-on mints advance the JOIN-advertised
+        /// `next_sn_reliable` to one past the chain (zenoh-pico
+        /// `_z_transport_tx_send_fragment` parity).
+        #[tokio::test]
+        async fn drive_loop_publishes_oversize_put_as_fragment_chain() {
+            let p = small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.send(multicast_put_literal("demo/mc", &oversize_payload()).expect("put item"))
+                .expect("queue publish");
+            drop(tx);
+
+            let mut driver = FakeDriver::with([]);
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            drive_multicast_session(
+                &mut dispatcher,
+                &p,
+                &mut driver,
+                &clock,
+                Some(8),
+                5,
+                |_| {},
+                &mut rx,
+            )
+            .await;
+
+            assert!(
+                !driver
+                    .sent
+                    .iter()
+                    .any(|d| d[0] & 0x1f == wire_const::T_MID_FRAME),
+                "an oversize publish must never leave as a whole frame"
+            );
+            let frags: Vec<&Vec<u8>> = driver
+                .sent
+                .iter()
+                .filter(|d| d[0] & 0x1f == wire_const::T_MID_FRAGMENT)
+                .collect();
+            assert!(frags.len() > 1, "200-byte put at batch 64 must fragment");
+            for (i, frag) in frags.iter().enumerate() {
+                assert!(
+                    frag.len() <= p.batch_size as usize,
+                    "fragment {i} is {} bytes, exceeds the batch budget",
+                    frag.len()
+                );
+                let Ok(InboundFrame::Fragment {
+                    reliable, sn, more, ..
+                }) = parse_inbound(frag)
+                else {
+                    panic!("fragment {i} must parse");
+                };
+                assert!(reliable, "put default rides the reliable channel");
+                assert_eq!(sn, i as u64, "chain SNs walk from the minted 0");
+                assert_eq!(more, i + 1 < frags.len(), "M on all but the last");
+            }
+
+            // The JOIN beacons emitted AFTER the chain advertise the
+            // post-chain next_sn (the chain consumed count SNs total).
+            let last_join = driver
+                .sent
+                .iter()
+                .rev()
+                .find(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
+                .expect("at least one JOIN beacon");
+            let join = decode_join(last_join).expect("JOIN decodes");
+            assert_eq!(
+                join.next_sn_reliable,
+                frags.len() as u64,
+                "the chain consumed count SNs"
+            );
+        }
+
+        /// TX -> RX round-trip through the production bytes: node A's
+        /// drive loop publishes an oversize put, and node B's drive loop —
+        /// fed A's emitted datagrams verbatim (JOIN beacons + fragment
+        /// chain) — admits A, reassembles the chain, and fans the put to
+        /// a registered subscriber exactly once.
+        #[tokio::test]
+        async fn drive_loop_oversize_put_round_trips_through_peer_loop() {
+            let payload = oversize_payload();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.send(multicast_put_literal("demo/mc", &payload).expect("put item"))
+                .expect("queue publish");
+            drop(tx);
+
+            let mut driver_a = FakeDriver::with([]);
+            let mut dispatcher_a = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            let clock = TokioTime::new();
+            drive_multicast_session(
+                &mut dispatcher_a,
+                &small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                &mut driver_a,
+                &clock,
+                Some(8),
+                5,
+                |_| {},
+                &mut rx,
+            )
+            .await;
+
+            // Node B ingests A's wire output in emit order.
+            let inbound: Vec<(Vec<u8>, SocketAddr)> =
+                driver_a.sent.iter().map(|d| (d.clone(), src(7))).collect();
+            let budget = inbound.len() + 6;
+            let mut driver_b = FakeDriver::with(inbound);
+            let mut dispatcher_b = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+
+            let fired = Arc::new(AtomicUsize::new(0));
+            let mut observer = ApplicationLayerObserver::new();
+            {
+                let fired = fired.clone();
+                let expect = payload.clone();
+                observer.subscribers.register("demo/mc", move |sample| {
+                    assert_eq!(sample.payload(), &expect[..]);
+                    fired.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+
+            drive_multicast_session(
+                &mut dispatcher_b,
+                &small_batch_params(&[0x55, 0x66, 0x77, 0x88]),
+                &mut driver_b,
+                &clock,
+                Some(budget),
+                5,
+                |event| observer.dispatch_event(event),
+                &mut idle_outbound(),
+            )
+            .await;
+
+            assert_eq!(dispatcher_b.active_peers(), 1, "B admitted A's JOIN");
+            assert_eq!(
+                fired.load(Ordering::SeqCst),
+                1,
+                "the reassembled oversize put reaches the subscriber once"
             );
         }
     }

@@ -58,4 +58,19 @@ pub struct MulticastParams {
     /// that omits the optional advertises the default and is treated as
     /// this value.
     pub seq_num_res: u8,
+    /// R311ko — the group-wide outbound frame budget in bytes (zenoh-pico
+    /// `Z_BATCH_MULTICAST_SIZE`, CMake default 2048): a data emission whose
+    /// encoded `T_MID_FRAME` exceeds this re-frames as a `T_MID_FRAGMENT`
+    /// chain ([`crate::frame_encode::multicast_frame_or_fragments`]).
+    /// Group-agreed like `seq_num_res` — multicast has no negotiation, so
+    /// a JOIN advertising a DIFFERENT batch size is dropped (zenoh-pico
+    /// `_z_multicast_handle_join_inner` incompatible-config refuse), and a
+    /// JOIN that omits the optional advertises this value. The unicast
+    /// counterpart is the negotiated-min
+    /// `SessionLinkActions::negotiated_batch_mtu`; here the budget is a
+    /// per-deploy constant. (pico additionally floors at the link MTU —
+    /// `min(link MTU, batch)`, multicast/transport.c:73; the wz UDP driver
+    /// exposes no MTU, so the budget alone governs and stays well under
+    /// the 65507-byte UDP datagram ceiling at the default.)
+    pub batch_size: u16,
 }

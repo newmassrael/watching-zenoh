@@ -59,6 +59,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         lease_ms: 5_000,
         join_interval_ms: 50,
         seq_num_res: 0x02,
+        batch_size: 2_048,
     }
 }
 
@@ -146,4 +147,98 @@ async fn publisher_push_reaches_group_subscriber() {
         1,
         "B admitted A from its JOIN beacon"
     );
+}
+
+/// R311ko — the fragmentation leg of the same two-node topology: the
+/// group runs a 64-byte batch budget (the owned push codec caps payloads
+/// at the bounded profile, so "oversize" is a frame past a SMALL budget —
+/// the unicast fixtures shrink the mtu the same way), the publisher's
+/// 200-byte put leaves its loop as a `T_MID_FRAGMENT` chain, and the
+/// subscriber node's loop reassembles it back into one delivered sample.
+/// Distinct group port from `publisher_push_reaches_group_subscriber` so
+/// the two tests never contend on the same multicast bind.
+#[cfg(feature = "transport-fragmentation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn oversize_put_fragments_and_reassembles_across_nodes() {
+    const FRAG_PORT: u16 = 7450;
+    const FRAG_KEYEXPR: &str = "demo/mc/frag";
+    let payload: Vec<u8> = (0..200u32).map(|i| (i * 13) as u8).collect();
+    let frag_params = |zid_byte: u8| MulticastParams {
+        batch_size: 64,
+        ..mc_params(zid_byte)
+    };
+
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, FRAG_PORT)
+        .await
+        .expect("bind multicast subscriber link");
+    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_b = frag_params(0xBB);
+
+    let fired = Arc::new(AtomicUsize::new(0));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let fired = fired.clone();
+        let expect = payload.clone();
+        observer.subscribers.register(FRAG_KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), FRAG_KEYEXPR);
+            assert_eq!(sample.payload(), &expect[..]);
+            fired.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral publisher socket");
+    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, FRAG_PORT)));
+    let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_a = frag_params(0xAA);
+
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+
+    let clock = TokioTime::new();
+    let drive_b = drive_multicast_session(
+        &mut dispatcher_b,
+        &params_b,
+        &mut driver_b,
+        &clock,
+        None,
+        10,
+        |event| observer.dispatch_event(event),
+        &mut rx_b,
+    );
+    let drive_a = drive_multicast_session(
+        &mut dispatcher_a,
+        &params_a,
+        &mut driver_a,
+        &clock,
+        None,
+        10,
+        |_| {},
+        &mut rx_a,
+    );
+
+    let fired_probe = fired.clone();
+    let put_payload = payload.clone();
+    let scenario = async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx_a.send(multicast_put_literal(FRAG_KEYEXPR, &put_payload).expect("put item"))
+            .expect("queue publish");
+        for _ in 0..100 {
+            if fired_probe.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("subscriber did not fire within the 3s budget");
+    };
+
+    tokio::select! {
+        _ = drive_b => panic!("subscriber drive loop ended unexpectedly"),
+        _ = drive_a => panic!("publisher drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "exactly one delivery");
 }

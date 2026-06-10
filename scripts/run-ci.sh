@@ -1007,13 +1007,18 @@ layer_c1p_multicast() {
 # drive_multicast_session (per-peer chains, frame-OOO chain abort,
 # eviction abort before slot reuse); the first arm keeps the
 # without-reassembly drive loop composing (fragment MIDs fall to the
-# drop arm).
+# drop arm). R311ko adds the fragmentation-union arm: the TX seam
+# (oversize publish re-frames as a fragment chain +
+# the TX->RX round-trip through a peer loop's reassembly).
 layer_c1q_multicast_glue() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue --quiet) \
         && (cd crates \
             && cargo test -p wz-runtime-tokio \
-                --features transport-multicast,reassembly --lib multicast_glue --quiet)
+                --features transport-multicast,reassembly --lib multicast_glue --quiet) \
+        && (cd crates \
+            && cargo test -p wz-runtime-tokio \
+                --features transport-multicast,transport-fragmentation --lib multicast_glue --quiet)
 }
 
 # ─── Layer C1m — wz-session-lwip isolated host test + clippy ─────────
@@ -2302,7 +2307,9 @@ layer_q_qemu_mcu_e2e() {
 # A1c adds the `multicast_pubsub_loopback` two-node pub/sub e2e (a
 # publisher node's JOIN + framed Push reach a group-joined subscriber
 # node's registry over a real socket); its deterministic logic twin is
-# the C1q `multicast_glue` unit suite.
+# the C1q `multicast_glue` unit suite. R311ko widens that invocation
+# with transport-fragmentation for the oversize-put e2e (publisher
+# fragments at the group batch budget, subscriber reassembles).
 layer_m_scouting_multicast() {
     if [[ "$ONLY_LAYER" != "M" && "${WZ_RUN_LAYER_M:-0}" -ne 1 ]]; then
         echo "Layer M SKIP (opt-in: --layer M or WZ_RUN_LAYER_M=1)"
@@ -2310,7 +2317,8 @@ layer_m_scouting_multicast() {
     fi
     (cd crates && cargo test -p wz-runtime-tokio --features scouting-active \
         --test scouting_multicast_loopback -- --ignored --quiet) \
-        && (cd crates && cargo test -p wz-runtime-tokio --features transport-multicast \
+        && (cd crates && cargo test -p wz-runtime-tokio \
+            --features transport-multicast,transport-fragmentation \
             --test multicast_pubsub_loopback -- --ignored --quiet)
 }
 
