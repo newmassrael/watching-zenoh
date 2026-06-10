@@ -32851,6 +32851,50 @@
         "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span"
       ]
     },
+    "Round 311kc": {
+      "decision_summary": "R311kc F-b InitAck params validation: initiator rejects an InitAck whose seq_num_res/req_id_res/batch_size exceed the InitSyn advertisement (pico _Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION parity).",
+      "changes_bullets": [
+        "wz-session-core peer_init_caps: decode_wire_caps raw-wire decode split + init_ack_exceeds_advertisement predicate (compares the unprojected wire values; the transport-batching-off projection would mask the enlargement)",
+        "SessionLinkActions::init_ack_caps_acceptable admission twin of cookie_valid; drive.rs dispatch pre-classify rejects a pre-Established enlarging InitAck via the existing framing.error arm (Closing + CloseReason::Invalid, wire Close(INVALID))",
+        "DriverLoopOutcome::InitAckCapsRejected (codec-init-body gated) mapped to typed OpenError::InitAckCapsRejected in drive_open_loop",
+        "wz-session-wire-fixtures: craft_initack_wire_with_caps (caller-supplied sn_res byte + LE batch_size)"
+      ],
+      "verification_bullets": [
+        "peer_init_caps unit truth table x3: equal/smaller caps pass; each of seq/req/batch enlarging rejects independently; S-clear defaults (2/2/65535) compared per pico _z_t_msg_decode fallback",
+        "driver-loop behavioral x2: enlarged seq -> InitAckCapsRejected + Closing + CloseReason::Invalid; enlarged batch_size rejects independently",
+        "e2e enlarging_init_ack_surfaces_caps_rejected: real-TCP fake acceptor answers InitSyn with seq_num_res=1 (advertised 0) -> typed OpenError::InitAckCapsRejected",
+        "full host run-ci EXIT 0"
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "divergence (documented in DriverLoopOutcome doc): pico aborts without a Close frame; wz spends one Close(INVALID) via the framing.error arm — initiator-side reply is not an amplification vector",
+        "debt-clearing track remaining: unicast RX Frame SN gate; negotiated-min MTU (peer batch_size); mint-vs-enqueue race; matching-listener callback; MCU reconnect seam; MCU critical_section span"
+      ],
+      "publishable_decision_summary": "R311kc F-b InitAck params validation: initiator rejects an InitAck whose seq_num_res/req_id_res/batch_size exceed the InitSyn advertisement (pico _Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION parity).",
+      "publishable_changes_bullets": [
+        "wz-session-core peer_init_caps: decode_wire_caps raw-wire decode split + init_ack_exceeds_advertisement predicate (compares the unprojected wire values; the transport-batching-off projection would mask the enlargement)",
+        "SessionLinkActions::init_ack_caps_acceptable admission twin of cookie_valid; drive.rs dispatch pre-classify rejects a pre-Established enlarging InitAck via the existing framing.error arm (Closing + CloseReason::Invalid, wire Close(INVALID))",
+        "DriverLoopOutcome::InitAckCapsRejected (codec-init-body gated) mapped to typed OpenError::InitAckCapsRejected in drive_open_loop",
+        "wz-session-wire-fixtures: craft_initack_wire_with_caps (caller-supplied sn_res byte + LE batch_size)"
+      ],
+      "publishable_verification_bullets": [
+        "peer_init_caps unit truth table x3: equal/smaller caps pass; each of seq/req/batch enlarging rejects independently; S-clear defaults (2/2/65535) compared per pico _z_t_msg_decode fallback",
+        "driver-loop behavioral x2: enlarged seq -> InitAckCapsRejected + Closing + CloseReason::Invalid; enlarged batch_size rejects independently",
+        "e2e enlarging_init_ack_surfaces_caps_rejected: real-TCP fake acceptor answers InitSyn with seq_num_res=1 (advertised 0) -> typed OpenError::InitAckCapsRejected",
+        "full host run-ci EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "divergence (documented in DriverLoopOutcome doc): pico aborts without a Close frame; wz spends one Close(INVALID) via the framing.error arm — initiator-side reply is not an amplification vector",
+        "debt-clearing track remaining: unicast RX Frame SN gate; negotiated-min MTU (peer batch_size); mint-vs-enqueue race; matching-listener callback; MCU reconnect seam; MCU critical_section span"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
@@ -39172,5 +39216,5 @@
   "confirmation_events": {},
   "frames": {},
   "narrative_facts": {},
-  "schema_version": 12
+  "schema_version": 13
 }
