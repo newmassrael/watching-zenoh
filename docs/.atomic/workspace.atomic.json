@@ -32648,6 +32648,44 @@
         "prior carries unchanged: A1 follow-ups; MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
       ]
     },
+    "Round 311jz": {
+      "decision_summary": "F6 supervisor ergonomics: ReconnectingSession::drive borrows (&mut self) - reconnects()/actions() observable post-termination, GaveUp resumable by re-driving; with the F2 gate, abandoned-session handles are inert-typed. A4 review carries F2/F3/F6 all closed.",
+      "changes_bullets": [
+        "`ReconnectingSession::drive` borrows (`&mut self`) instead of consuming: the supervisor outlives termination, so `reconnects()` + `actions()` stay observable post-mortem, and a `GaveUp` outcome is RESUMABLE — calling `drive` again drops straight into the reopen loop (the dead connection's engine is already terminal), giving caller-paced retry beyond the policy cap.",
+        "`GaveUp` docs record the post-abandon contract: handles over the surviving bundle are inert-typed, not silently lossy (the F2 `TransportUnavailable` gate stays closed after the final failed reopen).",
+        "e2e gains the post-drive observability assertion (`client.reconnects() == 1` after the drive returns Stopped)."
+      ],
+      "verification_bullets": [
+        "session_reconnect_e2e PASS (real TCP sever -> re-dial -> replay -> stop) including the NEW post-drive `reconnects() == 1` assertion (impossible under the prior consuming signature).",
+        "clippy -D warnings (session-reconnect set) clean; full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Session<R,T>-tier reconnect wrapper (a Session constructor that owns the supervisor + spawns drive internally) remains open — the A4 carry's larger ergonomics shape; this round closed the observability + zombie-handle pain points the carry named, the wrapper is now pure convenience (YAGNI until a consumer asks).",
+        "A4 review carries F2/F3/F6 are now ALL closed (R311jy/jx/jz).",
+        "prior carries unchanged: A1 follow-ups (queryable-over-multicast replies, multicast Fragment RX, multicast-declarations, MCU multicast loop); MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ],
+      "publishable_decision_summary": "F6 supervisor ergonomics: ReconnectingSession::drive borrows (&mut self) - reconnects()/actions() observable post-termination, GaveUp resumable by re-driving; with the F2 gate, abandoned-session handles are inert-typed. A4 review carries F2/F3/F6 all closed.",
+      "publishable_changes_bullets": [
+        "`ReconnectingSession::drive` borrows (`&mut self`) instead of consuming: the supervisor outlives termination, so `reconnects()` + `actions()` stay observable post-mortem, and a `GaveUp` outcome is RESUMABLE — calling `drive` again drops straight into the reopen loop (the dead connection's engine is already terminal), giving caller-paced retry beyond the policy cap.",
+        "`GaveUp` docs record the post-abandon contract: handles over the surviving bundle are inert-typed, not silently lossy (the F2 `TransportUnavailable` gate stays closed after the final failed reopen).",
+        "e2e gains the post-drive observability assertion (`client.reconnects() == 1` after the drive returns Stopped)."
+      ],
+      "publishable_verification_bullets": [
+        "session_reconnect_e2e PASS (real TCP sever -> re-dial -> replay -> stop) including the NEW post-drive `reconnects() == 1` assertion (impossible under the prior consuming signature).",
+        "clippy -D warnings (session-reconnect set) clean; full host run-ci EXIT 0 + Layer G all 7 MCU targets EXIT 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Session<R,T>-tier reconnect wrapper (a Session constructor that owns the supervisor + spawns drive internally) remains open — the A4 carry's larger ergonomics shape; this round closed the observability + zombie-handle pain points the carry named, the wrapper is now pure convenience (YAGNI until a consumer asks).",
+        "A4 review carries F2/F3/F6 are now ALL closed (R311jy/jx/jz).",
+        "prior carries unchanged: A1 follow-ups (queryable-over-multicast replies, multicast Fragment RX, multicast-declarations, MCU multicast loop); MCU reconnect seam; negotiated-min MTU; mint-vs-enqueue race; MCU critical_section span."
+      ]
+    },
     "Round 311k": {
       "decision_summary": "R311k codec-response wire-layer cascade — Response/Reply/Err gated + final body-codec-implies-envelope edge closes handshake-only-deploy contract.",
       "changes_bullets": [

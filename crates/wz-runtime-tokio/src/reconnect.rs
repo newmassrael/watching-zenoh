@@ -96,7 +96,11 @@ pub enum ReconnectDriveOutcome {
     Stopped,
     /// Reconnection was abandoned: a permanent open error, an exhausted
     /// attempt cap, or a replay invariant breach. `attempts` counts the
-    /// reopen tries for the final link loss.
+    /// reopen tries for the final link loss. F6 — the supervisor
+    /// survives (`drive` borrows): data sends over the surviving bundle
+    /// reject typed (`TransportUnavailable`, the F2 gate) rather than
+    /// silently vanish, and calling [`ReconnectingSession::drive`]
+    /// again resumes the reopen loop at the caller's pace.
     GaveUp { attempts: u32, last: ReconnectError },
     /// The per-connection `max_iters` test guard elapsed inside the
     /// steady-state loop (production passes `None`).
@@ -176,8 +180,21 @@ impl ReconnectingSession {
     /// so the steady loop returns. Mirrors pico, where `z_close` empties
     /// the session config and the reopen task observes that at its next
     /// wake-up.
+    ///
+    /// F6 — borrows rather than consumes: after `drive` returns the
+    /// caller still holds the supervisor, so the
+    /// [`reconnects`](Self::reconnects) count and the
+    /// [`actions`](Self::actions) bundle stay observable past
+    /// termination, and a [`GaveUp`](ReconnectDriveOutcome::GaveUp)
+    /// outcome can be RESUMED by calling `drive` again (the dead
+    /// connection's engine is already terminal, so the next call drops
+    /// straight into the reopen loop — caller-paced retry beyond the
+    /// policy cap). While abandoned, every data send over the bundle
+    /// rejects typed (`SendWireError::TransportUnavailable`, the F2
+    /// gate) — handles built over the session are inert, not silently
+    /// lossy.
     pub async fn drive<F>(
-        mut self,
+        &mut self,
         timeouts: &SessionTimeouts,
         stop: &AtomicBool,
         max_iters_per_connection: Option<usize>,

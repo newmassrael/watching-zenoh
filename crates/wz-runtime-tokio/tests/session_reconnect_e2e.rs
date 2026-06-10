@@ -104,7 +104,7 @@ async fn declares_replay_after_link_loss_and_reconnect() {
         retry_delay_ms: 50, // test cadence; production default is pico's 1s
         max_attempts: Some(100),
     };
-    let (client, (server_conn1, declares_conn1)) = tokio::join!(
+    let (mut client, (server_conn1, declares_conn1)) = tokio::join!(
         async {
             let session = open_session_with_reconnect(
                 locator,
@@ -164,5 +164,12 @@ async fn declares_replay_after_link_loss_and_reconnect() {
         declares_conn2, declares_conn1,
         "the reconnected link must replay the cached Declare verbatim \
          (kind, id, keyexpr all preserved)"
+    );
+    // F6 — `drive` borrows, so the supervisor outlives termination: the
+    // reconnect count survives for post-mortem observability.
+    assert_eq!(
+        client.reconnects(),
+        1,
+        "exactly one survived link loss across the run"
     );
 }
