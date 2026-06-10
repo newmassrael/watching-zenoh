@@ -32933,6 +32933,52 @@
         "debt track remaining: unicast RX Frame SN gate; mint-vs-enqueue race; matching-listener; MCU reconnect seam; MCU critical_section span"
       ]
     },
+    "Round 311ke": {
+      "decision_summary": "R311ke unicast RX Frame SN gate: per-channel half-window admission (sn::RxSn) seeded from OpenSyn/OpenAck initial_sn; stale/duplicate frames drop typed and clear the channel reassembly chain (pico rx.c parity).",
+      "changes_bullets": [
+        "sn::RxSn per-channel RX gate state (seed = decrement(initial_sn) into both channels, peer.c:212-214; admit = precedes gate storing the accepted SN, rx.c:100-185)",
+        "SessionLinkActions.rx_sn slot + admit_rx_frame_sn + OpenSyn/OpenAck initial_sn seeding in handle_inbound (new is_ack:true arm); reset_for_reopen clears it (handshake-scoped)",
+        "drive.rs dispatch gates Frame AND Fragment (fragments ride the same channel counter, rx.c:160-176); typed DriverLoopOutcome::RxSnRejected, no FSM advance (pico silent drop)",
+        "report_outcome_reassembling clears the rejected channel's in-progress chain via new ReassemblyDispatcher::abort_channel (pico dbuf-clear, rx.c:112-113); per-channel"
+      ],
+      "verification_bullets": [
+        "sn::RxSn unit x2: seed-then-gate truth table (first-at-initial_sn passes, duplicate/backward stale, channels independent) + unseeded admit-and-track",
+        "driver-loop behavioral: duplicate + backward SN -> RxSnRejected, FSM state unchanged, best-effort channel independent",
+        "session_glue x2: OpenAck initial_sn seeds the gate via production handle_inbound; RxSnRejected clears the in-progress chain per-channel through report_outcome_reassembling",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0"
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy"
+      ],
+      "carry_forward_bullets": [
+        "the gate applies to the unicast session loop only; multicast keeps its per-peer PeerSlot.rx_sn_* gate (R311jw) - the two trackers are intentionally separate state",
+        "unseeded-channel admit-and-track is a wz permissive divergence (pico always seeds at peer create); a frame before Open completes only occurs on a non-conforming peer",
+        "debt track remaining: mint-vs-enqueue race; MCU critical_section span; matching-listener; MCU reconnect seam"
+      ],
+      "publishable_decision_summary": "R311ke unicast RX Frame SN gate: per-channel half-window admission (sn::RxSn) seeded from OpenSyn/OpenAck initial_sn; stale/duplicate frames drop typed and clear the channel reassembly chain (pico rx.c parity).",
+      "publishable_changes_bullets": [
+        "sn::RxSn per-channel RX gate state (seed = decrement(initial_sn) into both channels, peer.c:212-214; admit = precedes gate storing the accepted SN, rx.c:100-185)",
+        "SessionLinkActions.rx_sn slot + admit_rx_frame_sn + OpenSyn/OpenAck initial_sn seeding in handle_inbound (new is_ack:true arm); reset_for_reopen clears it (handshake-scoped)",
+        "drive.rs dispatch gates Frame AND Fragment (fragments ride the same channel counter, rx.c:160-176); typed DriverLoopOutcome::RxSnRejected, no FSM advance (pico silent drop)",
+        "report_outcome_reassembling clears the rejected channel's in-progress chain via new ReassemblyDispatcher::abort_channel (pico dbuf-clear, rx.c:112-113); per-channel"
+      ],
+      "publishable_verification_bullets": [
+        "sn::RxSn unit x2: seed-then-gate truth table (first-at-initial_sn passes, duplicate/backward stale, channels independent) + unseeded admit-and-track",
+        "driver-loop behavioral: duplicate + backward SN -> RxSnRejected, FSM state unchanged, best-effort channel independent",
+        "session_glue x2: OpenAck initial_sn seeds the gate via production handle_inbound; RxSnRejected clears the in-progress chain per-channel through report_outcome_reassembling",
+        "full host run-ci EXIT 0 + Layer G (7 MCU targets) EXIT 0"
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy"
+      ],
+      "publishable_carry_forward_bullets": [
+        "the gate applies to the unicast session loop only; multicast keeps its per-peer PeerSlot.rx_sn_* gate (R311jw) - the two trackers are intentionally separate state",
+        "unseeded-channel admit-and-track is a wz permissive divergence (pico always seeds at peer create); a frame before Open completes only occurs on a non-conforming peer",
+        "debt track remaining: mint-vs-enqueue race; MCU critical_section span; matching-listener; MCU reconnect seam"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
