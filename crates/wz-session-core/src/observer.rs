@@ -567,6 +567,25 @@ impl ApplicationLayerObserver {
         self.drain_query_finals(sink);
     }
 
+    /// R311lr — drain the staged declarer-side liveliness interest-responses
+    /// (`pending_declares`) through a [`DeclareReplySink`]. The
+    /// `DeclareReplySink` sibling of [`Self::flush_query_replies`]: a consumer
+    /// that replies to inbound liveliness Interests but drives neither the
+    /// query-reply nor the liveliness-get-prune planes (the multicast reply
+    /// loop, which answers a peer's liveliness Interest over the group) drains
+    /// exactly this and need only implement [`DeclareReplySink`] — not the
+    /// `LivelinessGetPrune` concern, which is genuinely absent on the
+    /// connectionless multicast transport (no reconnect cache to prune).
+    /// Stage order (each interest-response batch's `Token`s precede its
+    /// terminating `Final`) is owned by the underlying
+    /// [`Self::drain_declare_replies`]. Exposed demand-driven: the per-concern
+    /// drains stay private until a single-concern consumer needs one (the
+    /// get-prune concern has no such consumer yet, so it stays bundled in
+    /// [`Self::flush_pending`]).
+    pub fn flush_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
+        self.drain_declare_replies(sink);
+    }
+
     /// R311lq — drain the staged queryable data replies (`pending_replies`)
     /// through `send_response`. Does NOT touch the terminal rids (see
     /// [`Self::drain_query_finals`]); the Session-tier path drains data

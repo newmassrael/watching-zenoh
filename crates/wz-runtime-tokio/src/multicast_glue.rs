@@ -90,13 +90,17 @@ use wz_codecs::wire_const;
 #[cfg(feature = "reassembly")]
 use wz_session_core::drive::sweep_reporting;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-// R311lq — `multicast_frame_or_fragments` is the codec-agnostic egress
-// splitter shared by every data emit (Push or queryable Response), so it is
-// gated on the union of the data codecs that can ride the loop, not Push
-// alone.
+// R311lq/R311lr — `multicast_frame_or_fragments` is the codec-agnostic
+// egress splitter shared by every data emit (Push, queryable Response, or
+// the R311lr liveliness Declare reply), so it is gated on the union of the
+// emit paths that can ride the loop, not Push alone.
 #[cfg(feature = "codec-push")]
 use wz_session_core::frame_encode::encode_frame_with_push;
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "liveliness-token"
+))]
 use wz_session_core::frame_encode::multicast_frame_or_fragments;
 // R311lq — queryable reply egress over multicast: the same Frame encoders
 // the unicast `SessionLinkActions::send_response{,_final}` use, sent on the
@@ -105,6 +109,17 @@ use wz_session_core::frame_encode::multicast_frame_or_fragments;
 use wz_session_core::frame_encode::encode_frame_with_response;
 #[cfg(feature = "codec-response-final")]
 use wz_session_core::frame_encode::encode_frame_with_response_final;
+// R311lr — declarer-side liveliness interest-response egress over multicast:
+// the borrowed reply builders + Frame encoder the unicast
+// `SessionLinkActions: DeclareReplySink` uses, multicast to the group instead
+// of a per-peer writer. Gated on `liveliness-token` (the sole producer; it
+// implies `declare-token` -> `codec-declare`, so the encoder is in scope).
+#[cfg(feature = "liveliness-token")]
+use wz_codecs::declare::DeclareOwned;
+#[cfg(feature = "liveliness-token")]
+use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
+#[cfg(feature = "liveliness-token")]
+use wz_session_core::frame_encode::encode_frame_with_declare;
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 #[cfg(feature = "reassembly")]
@@ -158,7 +173,7 @@ pub enum MulticastTxItem {
     /// R311lq — a queryable `Response(Reply|Err)` over multicast: the
     /// reply a queryable's handler produced for a Query that arrived on
     /// the group. Staged by the observer during `dispatch_event` and
-    /// drained through [`MulticastResponseSink`] onto this channel; the
+    /// drained through [`MulticastReplySink`] onto this channel; the
     /// loop frames it via the [`encode_frame_with_response`] SSOT and
     /// multicasts it (reliable — zenoh-pico replies on the multicast
     /// transport through the same `_z_send_n_msg` path with
@@ -181,37 +196,71 @@ pub enum MulticastTxItem {
         /// from the observer's `pending_final_rids`).
         request_id: u64,
     },
+    /// R311lr — a declarer-side liveliness interest-response
+    /// `Declare(DeclToken|DeclFinal)` over multicast: the reply a held
+    /// liveliness token produced for an `Interest` (CURRENT) that arrived on
+    /// the group. Staged by the observer during `dispatch_event` and drained
+    /// through [`MulticastReplySink`]'s
+    /// [`DeclareReplySink`](wz_session_core::response_sink::DeclareReplySink)
+    /// impl onto this channel; the loop frames it via the
+    /// [`encode_frame_with_declare`] SSOT and multicasts it (reliable —
+    /// zenoh-pico's `_z_send_declare` rides `_z_send_n_msg` with
+    /// `Z_RELIABILITY_RELIABLE`, src/net/primitives.c:52, which dispatches to
+    /// the multicast transport when the session is multicast). The querier on
+    /// the group matches it to its pending liveliness Interest by
+    /// `interest_id`. Carries the owned `DeclareOwned` because the
+    /// borrowed-arg sink seam resolves the keyexpr at drain (mirror of the
+    /// unicast `SessionLinkActions: DeclareReplySink`, which routes the same
+    /// owned form through its inherent `send_declare`).
+    #[cfg(feature = "liveliness-token")]
+    DeclareReply {
+        /// The built `Declare` reply (a `DeclToken` for a held token, or the
+        /// terminating `DeclFinal`), already owned via `Declare::try_into_owned`.
+        declare: DeclareOwned,
+    },
 }
 
-/// R311lq — a [`ResponseSink`](wz_session_core::response_sink::ResponseSink)
-/// backed by the multicast drive loop's A1c outbound channel. The
-/// application's `on_event` closure drains its observer's staged queryable
-/// replies through this sink
-/// (`observer.flush_query_replies(&sink)`); each emit enqueues a
+/// R311lq/R311lr — the multicast drive loop's observer-drain sink, backed by
+/// its A1c outbound channel. The application's `on_event` closure drains its
+/// observer's staged outbound effects through this sink; each emit enqueues a
 /// [`MulticastTxItem`] that [`drive_multicast_session`] frames into a
 /// `T_MID_FRAME` and multicasts to the group — the multicast mirror of the
-/// unicast `SessionLinkActions: ResponseSink`, which enqueues onto the
-/// per-peer writer channel instead.
+/// unicast `SessionLinkActions`, which enqueues onto the per-peer writer
+/// channel instead.
 ///
-/// It implements ONLY `ResponseSink`: the multicast reply loop drains only
-/// the queryable-reply concern, so per the R311lq interface segregation it
-/// is not forced to satisfy the liveliness declare / get-prune sinks (those
-/// arrive with the multicast-declarations track, each adding its own sink
-/// impl + drain call). `Clone` so the closure can hold a sender clone while
-/// the loop owns the paired receiver.
+/// Per the R311lq interface segregation it implements EXACTLY the two
+/// observer-drain concerns the multicast loop actually uses, as separate
+/// impl blocks:
+/// - [`ResponseSink`](wz_session_core::response_sink::ResponseSink) — the
+///   queryable reply chain (`observer.flush_query_replies(&sink)`).
+/// - [`DeclareReplySink`](wz_session_core::response_sink::DeclareReplySink)
+///   — R311lr, the declarer-side liveliness interest-response
+///   (`observer.flush_declare_replies(&sink)`): a held token's
+///   `Declare(DeclToken)` + terminating `DeclFinal` reply to a peer's
+///   liveliness Interest that arrived on the group.
+///
+/// It deliberately does NOT implement
+/// [`LivelinessGetPrune`](wz_session_core::response_sink::LivelinessGetPrune).
+/// That concern is the session-reconnect declaration-cache prune (F3), and
+/// the connectionless multicast transport (JOIN + lease, never a re-dial) has
+/// no reconnect cache — so there is genuinely nothing to prune. Honoring the
+/// segregation, the loop implements only the concerns it drains rather than
+/// stubbing an empty `LivelinessGetPrune` to reach the fat `flush_pending`.
+/// `Clone` so the closure can hold a sender clone while the loop owns the
+/// paired receiver.
 #[derive(Clone)]
-pub struct MulticastResponseSink {
+pub struct MulticastReplySink {
     tx: UnboundedSender<MulticastTxItem>,
 }
 
-impl MulticastResponseSink {
+impl MulticastReplySink {
     /// Wrap a clone of the loop's outbound-channel sender as a reply sink.
     pub fn new(tx: UnboundedSender<MulticastTxItem>) -> Self {
         Self { tx }
     }
 }
 
-impl wz_session_core::response_sink::ResponseSink for MulticastResponseSink {
+impl wz_session_core::response_sink::ResponseSink for MulticastReplySink {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: wz_codecs::response::ResponseOwned) {
         // Fire-and-forget, mirroring `SessionLinkActions::send_response`'s
@@ -222,6 +271,32 @@ impl wz_session_core::response_sink::ResponseSink for MulticastResponseSink {
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64) {
         let _ = self.tx.send(MulticastTxItem::ResponseFinal { request_id });
+    }
+}
+
+// R311lr — the declarer-side liveliness interest-response drain. The observer
+// stages a held token's reply (token id + interest id) and resolves the
+// keyexpr from its registry at drain, then hands this sink the borrowed
+// (token_id, keyexpr, interest_id); the sink owns the encode by building the
+// owned `Declare` form via the shared `build_*_reply` SSOT (the same wire
+// shape the unicast `SessionLinkActions: DeclareReplySink` derives) and
+// enqueues it. A separate impl block from `ResponseSink` per the R311lq
+// segregation — a declare reply is a distinct message family from a query
+// `Response`.
+impl wz_session_core::response_sink::DeclareReplySink for MulticastReplySink {
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        let declare = build_token_reply(token_id, keyexpr, interest_id)
+            .try_into_owned()
+            .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES");
+        let _ = self.tx.send(MulticastTxItem::DeclareReply { declare });
+    }
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare_final_reply(&self, interest_id: u64) {
+        let declare = build_final_reply(interest_id)
+            .try_into_owned()
+            .expect("DeclFinal reply carries no bounded fields");
+        let _ = self.tx.send(MulticastTxItem::DeclareReply { declare });
     }
 }
 
@@ -382,7 +457,7 @@ where
                     // R311lq — queryable reply egress: a Query that arrived on
                     // the group was dispatched to a queryable whose handler
                     // staged a reply; the observer drained it through
-                    // `MulticastResponseSink` onto this channel. Reliable like
+                    // `MulticastReplySink` onto this channel. Reliable like
                     // a reliable-ring put (zenoh-pico replies via the same
                     // `_z_send_n_msg` multicast TX with `Z_RELIABILITY_RELIABLE`,
                     // src/net/primitives.c `_z_send_reply`); a large reply
@@ -421,6 +496,36 @@ where
                         );
                         let frame = TxFrame { bytes: &dgram };
                         let _ = driver.send(&frame, Reliability::Reliable).await;
+                    }
+                    // R311lr — declarer-side liveliness interest-response
+                    // egress: an `Interest` (CURRENT) that arrived on the group
+                    // matched a held liveliness token whose `Declare(DeclToken)`
+                    // + terminating `DeclFinal` reply the observer staged; the
+                    // closure drained it through `MulticastReplySink`'s
+                    // `DeclareReplySink` impl onto this channel. Reliable —
+                    // zenoh-pico's `_z_send_declare` rides `_z_send_n_msg` with
+                    // `Z_RELIABILITY_RELIABLE` (src/net/primitives.c:52), which
+                    // dispatches to the multicast transport for a multicast
+                    // session; a large held-token keyexpr re-frames as a
+                    // `T_MID_FRAGMENT` chain exactly like an oversize Push /
+                    // Response. Send failure is non-fatal (a dropped reply leaves
+                    // that one querier's liveliness Interest unanswered until its
+                    // timeout, as a lost unicast Declare would).
+                    #[cfg(feature = "liveliness-token")]
+                    MulticastTxItem::DeclareReply { declare } => {
+                        let frame_sn = tx_sn.mint(/* reliable = */ true);
+                        let dgram =
+                            encode_frame_with_declare(frame_sn, declare, /* reliable = */ true);
+                        for dgram in multicast_frame_or_fragments(
+                            dgram,
+                            frame_sn,
+                            true,
+                            params.batch_size as usize,
+                            &mut tx_sn,
+                        ) {
+                            let frame = TxFrame { bytes: &dgram };
+                            let _ = driver.send(&frame, Reliability::Reliable).await;
+                        }
                     }
                 },
                 None => outbound_open = false,
@@ -907,7 +1012,7 @@ mod tests {
     /// JOINs, then sends a Query Frame (at the JOIN-advertised next SN)
     /// matching a registered queryable. The observer dispatches the Query to
     /// the handler (which stages a reply), the `on_event` closure drains the
-    /// staged reply through `MulticastResponseSink` onto the loop's outbound
+    /// staged reply through `MulticastReplySink` onto the loop's outbound
     /// channel, and the loop frames the `Response` + its terminal
     /// `ResponseFinal` and multicasts them to the group — the multicast mirror
     /// of the unicast queryable reply path (zenoh-pico `_z_send_reply` ->
@@ -946,7 +1051,7 @@ mod tests {
         // enqueues drained replies, the loop drains the channel and frames
         // them onto the group (the A1c TX seam).
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = MulticastResponseSink::new(tx);
+        let sink = MulticastReplySink::new(tx);
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
@@ -993,6 +1098,120 @@ mod tests {
         assert_eq!(
             finals, 1,
             "exactly one ResponseFinal terminated the reply chain"
+        );
+    }
+
+    /// R311lr — the declarer-side liveliness DECLARE-reply plane end-to-end
+    /// inside the loop: a peer JOINs, then sends a CURRENT liveliness
+    /// `Interest` Frame (at the JOIN-advertised next SN) matching a held local
+    /// liveliness token. The observer dispatches the Interest to the
+    /// `LocalTokenRegistry` (which stages a `Declare(DeclToken)` reply + a
+    /// terminating `Declare(DeclFinal)`), the `on_event` closure drains the
+    /// staged interest-response through `MulticastReplySink`'s
+    /// `DeclareReplySink` impl onto the loop's outbound channel, and the loop
+    /// frames the `Declare`s and multicasts them to the group — the multicast
+    /// mirror of the unicast declarer interest-response path (zenoh-pico
+    /// `_z_send_declare` -> `_z_send_n_msg` over the multicast transport,
+    /// src/net/primitives.c:52). The loop drains ONLY the declare-reply
+    /// concern (`flush_declare_replies`): no queryable is registered, and the
+    /// connectionless multicast transport has no liveliness-get reconnect
+    /// cache, so per the R311lq segregation the sink need not satisfy the
+    /// `ResponseSink` data-reply nor the `LivelinessGetPrune` concerns here.
+    #[cfg(feature = "liveliness-token")]
+    #[tokio::test]
+    async fn drive_loop_emits_liveliness_token_reply_over_multicast() {
+        use wz_codecs::declare::DeclareOwnedVariant;
+        use wz_session_core::frame_encode::encode_frame_with_interest;
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::observer::ApplicationLayerObserver;
+
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let join = join0(&params(&peer_b)); // next_sn_reliable = 0
+                                            // A CURRENT liveliness get for "demo/live", interest id 9, on the
+                                            // reliable channel at the JOIN-advertised next SN (so the per-peer SN
+                                            // gate admits it). mapping_id 0 + literal suffix = a literal keyexpr.
+        let interest = encode_frame_with_interest(
+            /*sn=*/ 0,
+            build_interest_liveliness_get(9, 0, Some("demo/live")).expect("interest fixture"),
+            /*reliable=*/ true,
+        );
+
+        let mut driver = FakeDriver::with([(join, src(2)), (interest, src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        // A held local liveliness token at the queried keyexpr — the declarer
+        // replies with it (and only it: the sole registered token matches).
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .local_tokens
+            .register(/*token_id=*/ 3, "demo/live")
+            .expect("register held token");
+
+        // The reply sink shares the loop's outbound channel: the closure
+        // drains the staged declare interest-response onto it, the loop frames
+        // each `Declare` onto the group (the A1c TX seam).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = MulticastReplySink::new(tx);
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(12),
+            5,
+            |event| {
+                observer.dispatch_event(event);
+                observer.flush_declare_replies(&sink);
+            },
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 1, "JOIN admitted the querier");
+
+        // Classify the multicast TX: skip the JOIN beacons (not T_MID_FRAME),
+        // decode each Frame payload, and tally the declare-reply chain. Both
+        // the DeclToken and the terminating DeclFinal carry the get's
+        // interest_id (9) — the correlation the querier matches on.
+        let mut tokens = 0usize;
+        let mut finals = 0usize;
+        for dg in &driver.sent {
+            if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
+                if let Ok(messages) = parse_frame_payload(&payload) {
+                    for m in &messages {
+                        if let NetworkMessage::Declare(d) = m {
+                            match &d.body {
+                                DeclareOwnedVariant::CodecZenohDeclToken(_) => {
+                                    assert_eq!(
+                                        d.interest_id,
+                                        Some(9),
+                                        "DeclToken is tagged with the get's interest id"
+                                    );
+                                    tokens += 1;
+                                }
+                                DeclareOwnedVariant::CodecZenohDeclFinal(_) => {
+                                    assert_eq!(
+                                        d.interest_id,
+                                        Some(9),
+                                        "DeclFinal terminates the get's interest id"
+                                    );
+                                    finals += 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(tokens, 1, "exactly one DeclToken reply reached the group");
+        assert_eq!(
+            finals, 1,
+            "exactly one DeclFinal terminated the interest-response chain"
         );
     }
 
