@@ -33886,6 +33886,52 @@
         "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
       ]
     },
+    "Round 311kz": {
+      "decision_summary": "R311kz F-6 closure (matching plane): matching-listener callbacks fire OUTSIDE the session observer mutex via the staging-sink + listener-cell infra — full re-entrancy (in-callback session APIs, re-registration, self-undeclare) replaces the R311kj constraint.",
+      "changes_bullets": [
+        "`Session<R, T>` owns a per-session `DeferredFireQueue<R>` (`fires` field, session-matching gated) + signature-stable `drain_deferred_fires()` (0 when off, R311g1)",
+        "`Publisher::declare_matching_listener` / `Querier::declare_matching_listener` rebuilt on the R311ky infra: the user callback lives in a `DeferredListenerCell` (type-erased `BoxedMatchingCallback`); the registry-installed `BoxedMatchingSink` only STAGES the transition onto the queue",
+        "`MatchingListener` carries the cell; `undeclare` kills it FIRST (staged-but-undrained fires suppressed; self-undeclare from inside the callback is deadlock-free) then unregisters under the observer lock",
+        "dispatch sites pair every observer dispatch with a post-lock drain: wz-ap-demo runner closure (explicit lock scope + drain) and wz-e2e-harness drive closure",
+        "R311kj hazard caveats rewritten: publisher/querier listener docs now state the deferred contract (callback may re-enter any observer-locking session API); `MatchingSink::on_matching_changed` keeps the inline constraint exactly for hand-installed sinks on the raw registries",
+        "session/tests.rs: 2 R311kh tests migrated to the dispatch+drain shape + NEW `matching_listener_callback_may_reenter_session_apis` (in-callback get_matching_status poll + re-entrant listener registration + self-undeclare — the R311kj self-deadlock reproducer, now green)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib matching: 26/26 PASS incl. the re-entrancy e2e (pre-R311kz each re-entry deadlocked the std observer mutex)",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped); wz-ap-demo + wz-e2e-harness build clean",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) CLOSED for the matching plane — the only decl/matching plane with a Session-tier callback registration surface today",
+        "decl-sink planes (DeclSink/UndeclSink via direct observer registry access: remote_subscribers / remote_queryables / liveliness) keep the documented inline-fire constraint; they migrate onto the same infra when a Session-tier registration surface for them lands (the deferred_fire module gate union grows with them)",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ],
+      "publishable_decision_summary": "R311kz F-6 closure (matching plane): matching-listener callbacks fire OUTSIDE the session observer mutex via the staging-sink + listener-cell infra — full re-entrancy (in-callback session APIs, re-registration, self-undeclare) replaces the R311kj constraint.",
+      "publishable_changes_bullets": [
+        "`Session<R, T>` owns a per-session `DeferredFireQueue<R>` (`fires` field, session-matching gated) + signature-stable `drain_deferred_fires()` (0 when off, R311g1)",
+        "`Publisher::declare_matching_listener` / `Querier::declare_matching_listener` rebuilt on the R311ky infra: the user callback lives in a `DeferredListenerCell` (type-erased `BoxedMatchingCallback`); the registry-installed `BoxedMatchingSink` only STAGES the transition onto the queue",
+        "`MatchingListener` carries the cell; `undeclare` kills it FIRST (staged-but-undrained fires suppressed; self-undeclare from inside the callback is deadlock-free) then unregisters under the observer lock",
+        "dispatch sites pair every observer dispatch with a post-lock drain: wz-ap-demo runner closure (explicit lock scope + drain) and wz-e2e-harness drive closure",
+        "R311kj hazard caveats rewritten: publisher/querier listener docs now state the deferred contract (callback may re-enter any observer-locking session API); `MatchingSink::on_matching_changed` keeps the inline constraint exactly for hand-installed sinks on the raw registries",
+        "session/tests.rs: 2 R311kh tests migrated to the dispatch+drain shape + NEW `matching_listener_callback_may_reenter_session_apis` (in-callback get_matching_status poll + re-entrant listener registration + self-undeclare — the R311kj self-deadlock reproducer, now green)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib matching: 26/26 PASS incl. the re-entrancy e2e (pre-R311kz each re-entry deadlocked the std observer mutex)",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped); wz-ap-demo + wz-e2e-harness build clean",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "F-6 deferred-fire (R311kj carry) CLOSED for the matching plane — the only decl/matching plane with a Session-tier callback registration surface today",
+        "decl-sink planes (DeclSink/UndeclSink via direct observer registry access: remote_subscribers / remote_queryables / liveliness) keep the documented inline-fire constraint; they migrate onto the same infra when a Session-tier registration surface for them lands (the deferred_fire module gate union grows with them)",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
