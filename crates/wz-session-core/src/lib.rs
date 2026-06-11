@@ -308,11 +308,23 @@ pub mod lease;
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let
 /// decl/matching callbacks run OUTSIDE the session observer mutex.
-/// Rides the consumer-feature union (currently `session-matching`)
-/// because `alloc::sync::Arc` needs `target_has_atomic = "ptr"`
-/// (absent on ARMv6-M) — the gate keeps the thumbv6m session-unicast
-/// lane Arc-free; the union grows as the decl-sink planes migrate.
-#[cfg(feature = "session-matching")]
+/// Rides the consumer-feature union because `alloc::sync::Arc` needs
+/// `target_has_atomic = "ptr"` (absent on ARMv6-M) — the gate keeps
+/// the thumbv6m session-unicast lane Arc-free. R311lb — the union
+/// grew from `session-matching` alone to the decl-sink planes
+/// (`declare-subscriber` / `declare-queryable` / `liveliness-token`,
+/// each under `alloc` since the staging sinks heap-box; the matching
+/// arm already implies `alloc` via its Cargo feature) for the
+/// Session-tier deferred decl listeners (R311lc).
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "session-matching",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token",
+    )
+))]
 pub mod deferred_fire;
 
 /// Query-side enums (ConsolidationMode + QueryTarget) shared by the

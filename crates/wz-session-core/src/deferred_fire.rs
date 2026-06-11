@@ -60,13 +60,15 @@
 //! ## Gating
 //!
 //! `alloc::sync::Arc` needs `target_has_atomic = "ptr"` (absent on
-//! ARMv6-M), so the module rides the consumer-feature union —
-//! currently `session-matching` (the matching-listener plane; the
-//! decl-sink planes join the union when they migrate) — exactly the
-//! envelope of the session tier that needs it, keeping the thumbv6m
-//! session-unicast lane (G.10) Arc-free. The single-task MCU profile
-//! that drives registries directly (no outer observer mutex) does not
-//! need deferral and keeps the inline-fire path.
+//! ARMv6-M), so the module rides the consumer-feature union — exactly
+//! the envelope of the session tier that needs it, keeping the
+//! thumbv6m session-unicast lane (G.10) Arc-free. R311lb grew the
+//! union from `session-matching` alone to the decl-sink planes
+//! (`declare-subscriber` / `declare-queryable` / `liveliness-token`,
+//! each under `alloc`) for the Session-tier deferred decl listeners
+//! (R311lc). The single-task MCU profile that drives registries
+//! directly (no outer observer mutex) does not need deferral and
+//! keeps the inline-fire path.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;

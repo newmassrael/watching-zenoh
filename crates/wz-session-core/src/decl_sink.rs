@@ -110,6 +110,15 @@ pub trait UndeclSink {
     fn on_undeclared(&mut self, id: u64);
 }
 
+/// One keyed observer slot in a [`DeclObserverPair`] list: the
+/// pair-local monotonic id (the removal currency `install_*` returns —
+/// the same list-local-id pattern as the matching plane's
+/// `MatchingWatchList`, not a wire id) + the sink it keys.
+struct KeyedSink<S> {
+    id: u64,
+    sink: S,
+}
+
 /// R311gb (Track 2) — the shared declaration-observer mechanism for the
 /// three `DeclSink` / `UndeclSink` registries
 /// ([`crate::declare::subscriber::RemoteSubscriberRegistry`],
@@ -130,12 +139,23 @@ pub trait UndeclSink {
 /// separation into distinct registry *types* (the deliberate
 /// scope-boundary decision) is preserved.
 ///
+/// R311lb — observers are id-keyed: `install_*` returns the pair-local
+/// id and `uninstall_*` removes by it, so a Session-tier listener handle
+/// (the deferred-fire decl listeners, R311lc) can undeclare its staging
+/// sinks instead of leaking dead entries against
+/// [`caps::MAX_DECL_OBSERVERS`]. Removal preserves registration order
+/// for the surviving observers ([`BoundedVec::retain`]).
+///
 /// No-alloc: both lists are [`BoundedVec`] capped at
 /// [`caps::MAX_DECL_OBSERVERS`]; `fire_*` split nothing and allocate
 /// nothing, so the whole component is the MCU no-heap control plane.
 pub struct DeclObserverPair<D: DeclSink, U: UndeclSink> {
-    on_decl: BoundedVec<D, { caps::MAX_DECL_OBSERVERS }>,
-    on_undecl: BoundedVec<U, { caps::MAX_DECL_OBSERVERS }>,
+    on_decl: BoundedVec<KeyedSink<D>, { caps::MAX_DECL_OBSERVERS }>,
+    on_undecl: BoundedVec<KeyedSink<U>, { caps::MAX_DECL_OBSERVERS }>,
+    /// Monotonic id source shared by both lists (ids are unique within
+    /// the pair, so a caller cannot cross-cancel a decl observer with
+    /// an undecl id that happens to collide).
+    next_id: u64,
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for DeclObserverPair<D, U> {
@@ -151,25 +171,54 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U> {
         Self {
             on_decl: BoundedVec::new(),
             on_undecl: BoundedVec::new(),
+            next_id: 0,
         }
     }
 
     /// Install a declaration observer. Fallible on the no-alloc backing
     /// ([`RegisterError::TableFull`] past [`caps::MAX_DECL_OBSERVERS`]);
     /// infallible on `alloc`. Duplicate sinks are allowed; fired in
-    /// registration order.
-    pub fn install_decl(&mut self, sink: D) -> Result<(), RegisterError> {
+    /// registration order. R311lb — returns the pair-local observer id
+    /// for [`uninstall_decl`](Self::uninstall_decl); the id is consumed
+    /// only on a successful install.
+    pub fn install_decl(&mut self, sink: D) -> Result<u64, RegisterError> {
+        let id = self.next_id;
         self.on_decl
-            .push(sink)
-            .map_err(|_| RegisterError::TableFull)
+            .push(KeyedSink { id, sink })
+            .map_err(|_| RegisterError::TableFull)?;
+        self.next_id += 1;
+        Ok(id)
     }
 
     /// Install an undeclaration observer. Same contract as
-    /// [`install_decl`](Self::install_decl).
-    pub fn install_undecl(&mut self, sink: U) -> Result<(), RegisterError> {
+    /// [`install_decl`](Self::install_decl); the returned id feeds
+    /// [`uninstall_undecl`](Self::uninstall_undecl).
+    pub fn install_undecl(&mut self, sink: U) -> Result<u64, RegisterError> {
+        let id = self.next_id;
         self.on_undecl
-            .push(sink)
-            .map_err(|_| RegisterError::TableFull)
+            .push(KeyedSink { id, sink })
+            .map_err(|_| RegisterError::TableFull)?;
+        self.next_id += 1;
+        Ok(id)
+    }
+
+    /// R311lb — remove the declaration observer keyed by `id`,
+    /// preserving registration order for the survivors. Returns whether
+    /// one was removed (`false` = unknown or already-removed id; double
+    /// removal is a no-op, mirroring the matching plane's
+    /// `MatchingWatchList::unregister`).
+    pub fn uninstall_decl(&mut self, id: u64) -> bool {
+        let before = self.on_decl.len();
+        self.on_decl.retain(|k| k.id != id);
+        self.on_decl.len() != before
+    }
+
+    /// R311lb — remove the undeclaration observer keyed by `id`. Same
+    /// contract as [`uninstall_decl`](Self::uninstall_decl).
+    pub fn uninstall_undecl(&mut self, id: u64) -> bool {
+        let before = self.on_undecl.len();
+        self.on_undecl.retain(|k| k.id != id);
+        self.on_undecl.len() != before
     }
 
     /// Number of installed declaration observers.
@@ -186,8 +235,8 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U> {
     /// borrowed [`DeclView`]. Returns the count fired.
     pub fn fire_declared(&mut self, view: &dyn DeclView) -> usize {
         let mut fired: usize = 0;
-        for sink in self.on_decl.iter_mut() {
-            sink.on_declared(view);
+        for keyed in self.on_decl.iter_mut() {
+            keyed.sink.on_declared(view);
             fired = fired.saturating_add(1);
         }
         fired
@@ -197,8 +246,8 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U> {
     /// bare `id`. Returns the count fired.
     pub fn fire_undeclared(&mut self, id: u64) -> usize {
         let mut fired: usize = 0;
-        for sink in self.on_undecl.iter_mut() {
-            sink.on_undeclared(id);
+        for keyed in self.on_undecl.iter_mut() {
+            keyed.sink.on_undeclared(id);
             fired = fired.saturating_add(1);
         }
         fired
@@ -366,6 +415,60 @@ mod tests {
         let ufired = pair.fire_undeclared(9);
         assert_eq!(ufired, 1);
         assert_eq!(ucount.load(Ordering::SeqCst), 1);
+    }
+
+    /// R311lb — id-keyed removal: `install_*` hands back a pair-local
+    /// id, `uninstall_*` removes exactly that observer (survivors keep
+    /// firing in registration order), double removal reports `false`,
+    /// and the decl / undecl id spaces share one counter so ids never
+    /// collide across the two lists.
+    #[test]
+    fn observer_pair_uninstalls_by_id() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountDecl(Arc<AtomicUsize>);
+        impl DeclSink for CountDecl {
+            fn on_declared(&mut self, _d: &dyn DeclView) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct CountUndecl(Arc<AtomicUsize>);
+        impl UndeclSink for CountUndecl {
+            fn on_undeclared(&mut self, _id: u64) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let ucount = Arc::new(AtomicUsize::new(0));
+        let mut pair: DeclObserverPair<CountDecl, CountUndecl> = DeclObserverPair::new();
+        let d0 = pair.install_decl(CountDecl(first.clone())).unwrap();
+        let d1 = pair.install_decl(CountDecl(second.clone())).unwrap();
+        let u0 = pair.install_undecl(CountUndecl(ucount.clone())).unwrap();
+        assert_ne!(d0, d1, "decl ids are distinct");
+        assert_ne!(d1, u0, "decl/undecl ids share one counter");
+
+        assert!(pair.uninstall_decl(d0), "known id removes");
+        assert!(!pair.uninstall_decl(d0), "double removal reports false");
+        assert_eq!(pair.decl_len(), 1);
+
+        let view = BorrowedDecl {
+            id: 3,
+            keyexpr: "k",
+        };
+        assert_eq!(pair.fire_declared(&view), 1, "survivor still fires");
+        assert_eq!(first.load(Ordering::SeqCst), 0, "removed observer silent");
+        assert_eq!(second.load(Ordering::SeqCst), 1);
+
+        // An undecl id is not removable through the decl list (and vice
+        // versa) — the lists are keyed independently.
+        assert!(!pair.uninstall_decl(u0));
+        assert!(pair.uninstall_undecl(u0));
+        assert_eq!(pair.undecl_len(), 0);
+        assert_eq!(pair.fire_undeclared(3), 0);
+        assert_eq!(ucount.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(feature = "alloc")]

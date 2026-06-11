@@ -78,17 +78,37 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
     /// seam-native entry point). The `alloc`-only
     /// [`on_token_declared`](LivelinessRegistry::on_token_declared)
-    /// convenience wrapper funnels through here.
-    pub fn on_token_declared_sink(&mut self, sink: D) -> Result<(), RegisterError> {
+    /// convenience wrapper funnels through here. R311lb — returns the
+    /// registry-local observer id for
+    /// [`remove_token_declared_sink`](Self::remove_token_declared_sink).
+    pub fn on_token_declared_sink(&mut self, sink: D) -> Result<u64, RegisterError> {
         self.observers.install_decl(sink)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
     /// [`on_token_undeclared`](LivelinessRegistry::on_token_undeclared)
-    /// convenience wrapper funnels through here.
-    pub fn on_token_undeclared_sink(&mut self, sink: U) -> Result<(), RegisterError> {
+    /// convenience wrapper funnels through here. R311lb — returns the
+    /// registry-local observer id for
+    /// [`remove_token_undeclared_sink`](Self::remove_token_undeclared_sink).
+    pub fn on_token_undeclared_sink(&mut self, sink: U) -> Result<u64, RegisterError> {
         self.observers.install_undecl(sink)
+    }
+
+    /// R311lb — remove the declaration observer keyed by `id` (the
+    /// return of [`on_token_declared_sink`](Self::on_token_declared_sink)).
+    /// Returns whether one was removed; double removal is a `false`
+    /// no-op. The removal half of the Session-tier decl-listener
+    /// surface (R311lc).
+    pub fn remove_token_declared_sink(&mut self, id: u64) -> bool {
+        self.observers.uninstall_decl(id)
+    }
+
+    /// R311lb — remove the undeclaration observer keyed by `id`. Same
+    /// contract as
+    /// [`remove_token_declared_sink`](Self::remove_token_declared_sink).
+    pub fn remove_token_undeclared_sink(&mut self, id: u64) -> bool {
+        self.observers.uninstall_undecl(id)
     }
 
     /// Number of installed `on_token_declared` callbacks.
@@ -194,21 +214,23 @@ impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// declared `id` + resolved keyexpr) — the R311gb-3d seam contract
     /// replaces the prior `(&DeclTokenOwned, &str)`
     /// ([`feedback_signature_stability`] wire-data exemption). Heap-boxed
-    /// via [`BoxedDeclSink`].
+    /// via [`BoxedDeclSink`]. R311lb — returns the registry-local
+    /// observer id (see [`Self::remove_token_declared_sink`]).
     pub fn on_token_declared(
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
-    ) {
+    ) -> u64 {
         self.on_token_declared_sink(BoxedDeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity");
+            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 
     /// Install a closure fired on every inbound `Declare(UndeclToken)`.
     /// The closure receives the bare `id` (`u64`). Heap-boxed via
-    /// [`BoxedUndeclSink`].
-    pub fn on_token_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
+    /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
+    /// id (see [`Self::remove_token_undeclared_sink`]).
+    pub fn on_token_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) -> u64 {
         self.on_token_undeclared_sink(BoxedUndeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity");
+            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 }
 

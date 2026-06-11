@@ -126,17 +126,38 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// [`on_subscriber_declared`](RemoteSubscriberRegistry::on_subscriber_declared)
     /// convenience wrapper funnels through here after wrapping a closure
     /// in a [`BoxedDeclSink`]. Duplicate sinks are explicitly allowed;
-    /// dispatch fires them in registration order.
-    pub fn on_subscriber_declared_sink(&mut self, sink: D) -> Result<(), RegisterError> {
+    /// dispatch fires them in registration order. R311lb — returns the
+    /// registry-local observer id for
+    /// [`remove_subscriber_declared_sink`](Self::remove_subscriber_declared_sink).
+    pub fn on_subscriber_declared_sink(&mut self, sink: D) -> Result<u64, RegisterError> {
         self.observers.install_decl(sink)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
     /// [`on_subscriber_undeclared`](RemoteSubscriberRegistry::on_subscriber_undeclared)
-    /// convenience wrapper funnels through here.
-    pub fn on_subscriber_undeclared_sink(&mut self, sink: U) -> Result<(), RegisterError> {
+    /// convenience wrapper funnels through here. R311lb — returns the
+    /// registry-local observer id for
+    /// [`remove_subscriber_undeclared_sink`](Self::remove_subscriber_undeclared_sink).
+    pub fn on_subscriber_undeclared_sink(&mut self, sink: U) -> Result<u64, RegisterError> {
         self.observers.install_undecl(sink)
+    }
+
+    /// R311lb — remove the declaration observer keyed by `id` (the
+    /// return of
+    /// [`on_subscriber_declared_sink`](Self::on_subscriber_declared_sink)).
+    /// Returns whether one was removed; double removal is a `false`
+    /// no-op. The removal half of the Session-tier decl-listener
+    /// surface (R311lc).
+    pub fn remove_subscriber_declared_sink(&mut self, id: u64) -> bool {
+        self.observers.uninstall_decl(id)
+    }
+
+    /// R311lb — remove the undeclaration observer keyed by `id`. Same
+    /// contract as
+    /// [`remove_subscriber_declared_sink`](Self::remove_subscriber_declared_sink).
+    pub fn remove_subscriber_undeclared_sink(&mut self, id: u64) -> bool {
+        self.observers.uninstall_undecl(id)
     }
 
     /// Number of installed `on_subscriber_declared` callbacks.
@@ -365,14 +386,17 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// [`feedback_signature_stability`] wire-data principled exemption.
     /// Duplicate callbacks are allowed; dispatch fires them in
     /// registration order. The closure is heap-boxed via [`BoxedDeclSink`].
+    /// R311lb — returns the registry-local observer id (see
+    /// [`Self::remove_subscriber_declared_sink`]); existing callers that
+    /// never remove may ignore it.
     pub fn on_subscriber_declared(
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
-    ) {
+    ) -> u64 {
         // AP backing: the observer `BoundedVec` grows past the advisory
         // `N`, so installing never fails here.
         self.on_subscriber_declared_sink(BoxedDeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity");
+            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 
     /// Install a closure fired on every inbound
@@ -380,10 +404,11 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// (`u64`) — the undeclaration carries no keyexpr. Same registration-
     /// order + duplicates-allowed contract as
     /// [`Self::on_subscriber_declared`]. The closure is heap-boxed via
-    /// [`BoxedUndeclSink`].
-    pub fn on_subscriber_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
+    /// [`BoxedUndeclSink`]. R311lb — returns the registry-local observer
+    /// id (see [`Self::remove_subscriber_undeclared_sink`]).
+    pub fn on_subscriber_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) -> u64 {
         self.on_subscriber_undeclared_sink(BoxedUndeclSink::new(callback))
-            .expect("observer install on the alloc backing never exceeds declared capacity");
+            .expect("observer install on the alloc backing never exceeds declared capacity")
     }
 }
 
