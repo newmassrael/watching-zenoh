@@ -34562,6 +34562,54 @@
         "z_get rollback closes the R311lk~lm carry #1 (Finding B query sibling); the consumer-plane register-then-send orphan family is now empty."
       ]
     },
+    "Round 311lo": {
+      "decision_summary": "R311lo handle RAII no-leak: mem::forget(self) in 4 handles' undeclare -> armed disarm-flag + shared teardown SSOT; Drop frees owned fields (Session Arc/keyexpr/cell), exactly-once liveliness wire emit.",
+      "changes_bullets": [
+        "Subscriber/Queryable/LivelinessToken/LivelinessSubscriber: undeclare's mem::forget(self) replaced by an `armed: bool` disarm flag.",
+        "Shared `teardown(&mut self)` SSOT called by both undeclare and Drop (kill-cell -> unregister -> liveliness wire-final); idempotent via armed.",
+        "Drop now runs (disarmed after undeclare) so owned fields free: Session Arc clone + keyexpr String + deferred cell Arc no longer leak.",
+        "liveliness handles emit UndeclToken / Interest(Final) exactly once (armed guard); no duplicate wire frame on the consumed-handle path.",
+        "6 constructor sites set armed: true; 3 Arc-strong-count no-leak tests (subscriber/queryable/token) + stale mem::forget test comment fixed."
+      ],
+      "verification_bullets": [
+        "cargo fmt --check + cargo check + clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean.",
+        "handle test suite: 85 prior + 3 new Arc-strong-count no-leak tests pass; double-emit + skips_drop + drop_auto_unregisters green.",
+        "full run-ci WZ_RUN_LAYER_G=1: EXIT=0, all required layers pass, 0 FAIL/panic.",
+        "C4d cfg-OFF subsets (pubsub/queryable/liveliness-sub/token/get-only) clippy OK: armed field + teardown compile in feature-OFF builds."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "minor D/E + keepalive MCU preset wiring + A1 pool remain open; next priority is the keepalive MCU preset wiring or minor D/E.",
+        "R311ln closed the consumer-plane register-then-send orphan family; R311lo closes the handle-RAII mem::forget leak family (all 4 handles)."
+      ],
+      "publishable_decision_summary": "R311lo handle RAII no-leak: mem::forget(self) in 4 handles' undeclare -> armed disarm-flag + shared teardown SSOT; Drop frees owned fields (Session Arc/keyexpr/cell), exactly-once liveliness wire emit.",
+      "publishable_changes_bullets": [
+        "Subscriber/Queryable/LivelinessToken/LivelinessSubscriber: undeclare's mem::forget(self) replaced by an `armed: bool` disarm flag.",
+        "Shared `teardown(&mut self)` SSOT called by both undeclare and Drop (kill-cell -> unregister -> liveliness wire-final); idempotent via armed.",
+        "Drop now runs (disarmed after undeclare) so owned fields free: Session Arc clone + keyexpr String + deferred cell Arc no longer leak.",
+        "liveliness handles emit UndeclToken / Interest(Final) exactly once (armed guard); no duplicate wire frame on the consumed-handle path.",
+        "6 constructor sites set armed: true; 3 Arc-strong-count no-leak tests (subscriber/queryable/token) + stale mem::forget test comment fixed."
+      ],
+      "publishable_verification_bullets": [
+        "cargo fmt --check + cargo check + clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean.",
+        "handle test suite: 85 prior + 3 new Arc-strong-count no-leak tests pass; double-emit + skips_drop + drop_auto_unregisters green.",
+        "full run-ci WZ_RUN_LAYER_G=1: EXIT=0, all required layers pass, 0 FAIL/panic.",
+        "C4d cfg-OFF subsets (pubsub/queryable/liveliness-sub/token/get-only) clippy OK: armed field + teardown compile in feature-OFF builds."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "minor D/E + keepalive MCU preset wiring + A1 pool remain open; next priority is the keepalive MCU preset wiring or minor D/E.",
+        "R311ln closed the consumer-plane register-then-send orphan family; R311lo closes the handle-RAII mem::forget leak family (all 4 handles)."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
