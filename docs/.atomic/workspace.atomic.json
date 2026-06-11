@@ -34020,6 +34020,50 @@
         "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
       ]
     },
+    "Round 311lc": {
+      "decision_summary": "R311lc Session-tier deferred decl listeners: declare_remote_{subscriber,queryable,token}_listener stage owned DeclEvents through the F-6 queue so callbacks run outside the observer mutex with full re-entrancy — closes the R311kz decl-sink-plane carry (the planes' Session-tier registration surface now exists and is deferred-only).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/decl_listener.rs (new) — DeclEvent owned event enum (Declared{id,keyexpr}/Undeclared{id}); DeclListener handle (kill cell first, then remove both R311lb-keyed observers under the lock; explicit-undeclare-only, no Drop hook); DeclListenerError::FeatureDisabled; Session::declare_remote_{subscriber,queryable,token}_listener install one decl + one undecl staging sink over a shared DeferredListenerCell via the deferred_decl_sinks helper",
+        "crates/wz-runtime-tokio/src/session/mod.rs — Session.fires / Clone / constructor / drain_deferred_fires cfg union grows from session-matching alone to any(session-matching, declare-subscriber, declare-queryable, liveliness-token); module decl_listener registered + re-exported",
+        "crates/wz-session-core/src/decl_sink.rs — DeclSink/UndeclSink trait docs now carry the R311kj inline re-entrancy constraint explicitly + the R311lc deferred Session-tier alternative note (inline contract remains for hand-installed raw-registry sinks)",
+        "tests (session/tests.rs) — per-plane delivery tests (subscriber incl. observer-list back-to-baseline after undeclare; queryable single-drain stage order; token over local make_decl_token/make_undecl_token fixtures) + decl_listener_callback_may_reenter_session_apis (in-callback registry consult, re-entrant registration, self-undeclare) + R311g1 typed-reject NEG"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib 239 PASS (235 + 4 new; re-entrancy test deadlocks pre-R311lc by construction of the inline R311kj constraint)",
+        "deny-warnings subset builds EXIT=0: handshake-only / liveliness-token-only / declare-observer (C1j plane-map shapes; fires union + uninhabited-scope arms verified) + handshake-only --lib test compile (NEG path)",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings EXIT=0; cargo fmt --check clean",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ld (session-review minor F) lands Session::dispatch_iteration_event(_with) — observer lock + dispatch + deferred-fire drain in one SSOT fn — and migrates the wz-e2e-harness + wz-ap-demo dispatch closures onto it, mechanizing the documentation-enforced drain discipline",
+        "F-6 deferred-fire now covers every Session-tier callback registration surface (matching R311kz + decl planes R311lc); the raw registry sinks keep the documented inline R311kj constraint by design",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ],
+      "publishable_decision_summary": "R311lc Session-tier deferred decl listeners: declare_remote_{subscriber,queryable,token}_listener stage owned DeclEvents through the F-6 queue so callbacks run outside the observer mutex with full re-entrancy — closes the R311kz decl-sink-plane carry (the planes' Session-tier registration surface now exists and is deferred-only).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/decl_listener.rs (new) — DeclEvent owned event enum (Declared{id,keyexpr}/Undeclared{id}); DeclListener handle (kill cell first, then remove both R311lb-keyed observers under the lock; explicit-undeclare-only, no Drop hook); DeclListenerError::FeatureDisabled; Session::declare_remote_{subscriber,queryable,token}_listener install one decl + one undecl staging sink over a shared DeferredListenerCell via the deferred_decl_sinks helper",
+        "crates/wz-runtime-tokio/src/session/mod.rs — Session.fires / Clone / constructor / drain_deferred_fires cfg union grows from session-matching alone to any(session-matching, declare-subscriber, declare-queryable, liveliness-token); module decl_listener registered + re-exported",
+        "crates/wz-session-core/src/decl_sink.rs — DeclSink/UndeclSink trait docs now carry the R311kj inline re-entrancy constraint explicitly + the R311lc deferred Session-tier alternative note (inline contract remains for hand-installed raw-registry sinks)",
+        "tests (session/tests.rs) — per-plane delivery tests (subscriber incl. observer-list back-to-baseline after undeclare; queryable single-drain stage order; token over local make_decl_token/make_undecl_token fixtures) + decl_listener_callback_may_reenter_session_apis (in-callback registry consult, re-entrant registration, self-undeclare) + R311g1 typed-reject NEG"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib 239 PASS (235 + 4 new; re-entrancy test deadlocks pre-R311lc by construction of the inline R311kj constraint)",
+        "deny-warnings subset builds EXIT=0: handshake-only / liveliness-token-only / declare-observer (C1j plane-map shapes; fires union + uninhabited-scope arms verified) + handshake-only --lib test compile (NEG path)",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings EXIT=0; cargo fmt --check clean",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ld (session-review minor F) lands Session::dispatch_iteration_event(_with) — observer lock + dispatch + deferred-fire drain in one SSOT fn — and migrates the wz-e2e-harness + wz-ap-demo dispatch closures onto it, mechanizing the documentation-enforced drain discipline",
+        "F-6 deferred-fire now covers every Session-tier callback registration surface (matching R311kz + decl planes R311lc); the raw registry sinks keep the documented inline R311kj constraint by design",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
