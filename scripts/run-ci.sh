@@ -1150,12 +1150,26 @@ layer_c2_cargo_clippy() {
 # both wz-runtime-lwip lanes (default sync-only + `--features alloc`)
 # so Phase W MCU profile feature combinations are caught the same way
 # the AP-tokio lane catches them.
+#
+# R311ls expansion: adds the three `transport-multicast` clippy combos
+# (base + reassembly + transport-fragmentation, mirroring the C1q test
+# matrix). transport-multicast is off by default, so the default-feature
+# wz-runtime-tokio lane above never lints multicast_glue's drive loop and
+# its cfg-gated RX/TX arms — before R311ls that left the whole module
+# clippy-uncovered in run-ci (the gap that hid drive_multicast_session's
+# too_many_arguments until it was collapsed into MulticastDriveConfig).
 layer_c3_per_pkg_isolated_lint() {
     (cd crates \
         && cargo clippy -p wz-ap-demo --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz --no-default-features --features preset-ap-client \
             --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --features transport-multicast \
+            --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --features transport-multicast,reassembly \
+            --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --features transport-multicast,transport-fragmentation \
+            --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-lwip --features alloc \
             --all-targets --quiet -- -D warnings)

@@ -37,7 +37,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use wz_runtime_tokio::multicast_glue::{drive_multicast_session, multicast_put_literal};
+use wz_runtime_tokio::multicast_glue::{
+    drive_multicast_session, multicast_put_literal, MulticastDriveConfig,
+};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::UdpDriver;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
@@ -101,21 +103,26 @@ async fn publisher_push_reaches_group_subscriber() {
     let clock = TokioTime::new();
     let drive_b = drive_multicast_session(
         &mut dispatcher_b,
-        &params_b,
+        MulticastDriveConfig {
+            params: &params_b,
+            tick_ms: 10,
+            // production path: no iteration budget, select! bounds the run
+            max_iters: None,
+        },
         &mut driver_b,
         &clock,
-        None, // production path: no iteration budget, select! bounds the run
-        10,
         |event| observer.dispatch_event(event),
         &mut rx_b,
     );
     let drive_a = drive_multicast_session(
         &mut dispatcher_a,
-        &params_a,
+        MulticastDriveConfig {
+            params: &params_a,
+            tick_ms: 10,
+            max_iters: None,
+        },
         &mut driver_a,
         &clock,
-        None,
-        10,
         |_| {},
         &mut rx_a,
     );
@@ -201,21 +208,25 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
     let clock = TokioTime::new();
     let drive_b = drive_multicast_session(
         &mut dispatcher_b,
-        &params_b,
+        MulticastDriveConfig {
+            params: &params_b,
+            tick_ms: 10,
+            max_iters: None,
+        },
         &mut driver_b,
         &clock,
-        None,
-        10,
         |event| observer.dispatch_event(event),
         &mut rx_b,
     );
     let drive_a = drive_multicast_session(
         &mut dispatcher_a,
-        &params_a,
+        MulticastDriveConfig {
+            params: &params_a,
+            tick_ms: 10,
+            max_iters: None,
+        },
         &mut driver_a,
         &clock,
-        None,
-        10,
         |_| {},
         &mut rx_a,
     );

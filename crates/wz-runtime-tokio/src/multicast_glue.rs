@@ -331,10 +331,37 @@ pub enum MulticastOutcome {
     IterationLimit,
 }
 
+/// R311ls — the static parameterization of one [`drive_multicast_session`]
+/// run, split out from the loop's live collaborators (the dispatcher /
+/// driver / clock handles, the observer callback, the outbound channel) via
+/// the Introduce-Parameter-Object refactoring. The "what configures this
+/// drive" inputs read as one unit, and the entry point stays within
+/// clippy's argument-count bound — the multicast loop is the only
+/// `wz-runtime-tokio` surface large enough to trip it, and (unlike the
+/// default-feature C2/C3 clippy lanes) the `transport-multicast` arm is now
+/// linted in run-ci, so the bound is enforced rather than incidentally
+/// hidden behind a non-default feature.
+pub struct MulticastDriveConfig<'a> {
+    /// The multicast protocol config (zid, lease, batch_size, JOIN interval,
+    /// SN / req-id resolutions) the loop advertises in its JOIN beacon and
+    /// enforces on inbound peers.
+    pub params: &'a MulticastParams,
+    /// Scheduler cadence: the loop falls to a PeerSweep tick every `tick_ms`
+    /// (>= the §3.1 lease/3 cadence; sweeping more often only sharpens
+    /// eviction, and sweep is idempotent).
+    pub tick_ms: u64,
+    /// Bounded select-loop budget for tests (`Some(n)`); production passes
+    /// `None` to run until the link is lost.
+    pub max_iters: Option<usize>,
+}
+
 /// Drive a multicast session: bring the link up, then own the §3.1 Running
 /// concerns (periodic JOIN emit, RX classify -> dispatch + the A1b data
-/// plane, lease sweep) until the link is lost or `max_iters` is reached.
+/// plane, lease sweep) until the link is lost or `cfg.max_iters` is reached.
 ///
+/// `cfg` ([`MulticastDriveConfig`]) bundles the loop's static configuration
+/// — the protocol `params`, the scheduler `tick_ms` cadence, and the
+/// test-only `max_iters` budget — separated from the runtime handles below.
 /// `max_iters` bounds the select loop for tests; production passes `None`.
 /// `tick_ms` is the scheduler cadence (the JOIN interval + lease are
 /// spec-sourced from `params` / the dispatcher config, not duplicated
@@ -360,11 +387,9 @@ pub enum MulticastOutcome {
 /// keeps serving RX + JOIN).
 pub async fn drive_multicast_session<D, T, F, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
-    params: &MulticastParams,
+    cfg: MulticastDriveConfig<'_>,
     driver: &mut D,
     clock: &T,
-    max_iters: Option<usize>,
-    tick_ms: u64,
     mut on_event: F,
     outbound: &mut UnboundedReceiver<MulticastTxItem>,
 ) -> MulticastOutcome
@@ -373,6 +398,13 @@ where
     T: TimeSource,
     F: FnMut(IterationEvent<'_>),
 {
+    // Destructure into the same local names the loop body uses, so the body
+    // is unchanged by the Introduce-Parameter-Object refactor.
+    let MulticastDriveConfig {
+        params,
+        tick_ms,
+        max_iters,
+    } = cfg;
     // Idle -> LinkOpening -> Running.
     dispatcher.create();
     dispatcher.notify_link_ready();
@@ -797,11 +829,14 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]), // self
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
+            // self
             &mut driver,
             &clock,
-            Some(5),
-            5,
             |_| {},
             &mut idle_outbound(),
         )
@@ -840,11 +875,13 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
             &mut driver,
             &clock,
-            Some(8),
-            5,
             |_| {},
             &mut idle_outbound(),
         )
@@ -867,11 +904,13 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
             &mut driver,
             &clock,
-            Some(5),
-            5,
             |_| {},
             &mut idle_outbound(),
         )
@@ -899,11 +938,13 @@ mod tests {
 
         drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
             &mut driver,
             &clock,
-            Some(5),
-            5,
             |_| {},
             &mut idle_outbound(),
         )
@@ -936,11 +977,13 @@ mod tests {
 
         drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
             &mut driver,
             &clock,
-            Some(5),
-            5,
             |_| {},
             &mut idle_outbound(),
         )
@@ -989,11 +1032,13 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
             &mut driver,
             &clock,
-            Some(8),
-            5,
             |event| observer.dispatch_event(event),
             &mut idle_outbound(),
         )
@@ -1055,11 +1100,13 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
             &mut driver,
             &clock,
-            Some(12),
-            5,
             |event| {
                 observer.dispatch_event(event);
                 // Drain only the queryable-reply concern — the multicast loop
@@ -1157,11 +1204,13 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
             &mut driver,
             &clock,
-            Some(12),
-            5,
             |event| {
                 observer.dispatch_event(event);
                 observer.flush_declare_replies(&sink);
@@ -1243,11 +1292,13 @@ mod tests {
 
         drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
             &mut driver,
             &clock,
-            Some(5),
-            5,
             |event| observer.dispatch_event(event),
             &mut idle_outbound(),
         )
@@ -1284,11 +1335,13 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            MulticastDriveConfig {
+                params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                tick_ms: 5,
+                max_iters: Some(8),
+            },
             &mut driver,
             &clock,
-            Some(8),
-            5,
             |_| {},
             &mut rx,
         )
@@ -1411,11 +1464,13 @@ mod tests {
 
             let outcome = drive_multicast_session(
                 &mut dispatcher,
-                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                MulticastDriveConfig {
+                    params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
                 &mut driver,
                 &clock,
-                Some(8),
-                5,
                 |event| observer.dispatch_event(event),
                 &mut idle_outbound(),
             )
@@ -1446,11 +1501,13 @@ mod tests {
 
             drive_multicast_session(
                 &mut dispatcher,
-                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                MulticastDriveConfig {
+                    params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                    tick_ms: 5,
+                    max_iters: Some(6),
+                },
                 &mut driver,
                 &clock,
-                Some(6),
-                5,
                 |event| observer.dispatch_event(event),
                 &mut idle_outbound(),
             )
@@ -1493,11 +1550,13 @@ mod tests {
 
             drive_multicast_session(
                 &mut dispatcher,
-                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                MulticastDriveConfig {
+                    params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                    tick_ms: 5,
+                    max_iters: Some(10),
+                },
                 &mut driver,
                 &clock,
-                Some(10),
-                5,
                 |event| observer.dispatch_event(event),
                 &mut idle_outbound(),
             )
@@ -1544,11 +1603,13 @@ mod tests {
 
             drive_multicast_session(
                 &mut dispatcher,
-                &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                MulticastDriveConfig {
+                    params: &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                    tick_ms: 5,
+                    max_iters: Some(12),
+                },
                 &mut driver,
                 &clock,
-                Some(12),
-                5,
                 |event| observer.dispatch_event(event),
                 &mut idle_outbound(),
             )
@@ -1616,11 +1677,13 @@ mod tests {
             let clock = TokioTime::new();
             drive_multicast_session(
                 &mut dispatcher,
-                &p,
+                MulticastDriveConfig {
+                    params: &p,
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
                 &mut driver,
                 &clock,
-                Some(8),
-                5,
                 |_| {},
                 &mut rx,
             )
@@ -1690,11 +1753,13 @@ mod tests {
             let clock = TokioTime::new();
             drive_multicast_session(
                 &mut dispatcher_a,
-                &small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                MulticastDriveConfig {
+                    params: &small_batch_params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+                    tick_ms: 5,
+                    max_iters: Some(8),
+                },
                 &mut driver_a,
                 &clock,
-                Some(8),
-                5,
                 |_| {},
                 &mut rx,
             )
@@ -1720,11 +1785,13 @@ mod tests {
 
             drive_multicast_session(
                 &mut dispatcher_b,
-                &small_batch_params(&[0x55, 0x66, 0x77, 0x88]),
+                MulticastDriveConfig {
+                    params: &small_batch_params(&[0x55, 0x66, 0x77, 0x88]),
+                    tick_ms: 5,
+                    max_iters: Some(budget),
+                },
                 &mut driver_b,
                 &clock,
-                Some(budget),
-                5,
                 |event| observer.dispatch_event(event),
                 &mut idle_outbound(),
             )
@@ -1751,11 +1818,13 @@ mod tests {
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
-            &params(&self_zid),
+            MulticastDriveConfig {
+                params: &params(&self_zid),
+                tick_ms: 5,
+                max_iters: Some(5),
+            },
             &mut driver,
             &clock,
-            Some(5),
-            5,
             |_| {},
             &mut idle_outbound(),
         )
