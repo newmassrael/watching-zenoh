@@ -34108,6 +34108,48 @@
         "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
       ]
     },
+    "Round 311le": {
+      "decision_summary": "R311le session-review ratify (decision-only): R311lb..ld verdict textbook — no hack/smell, SSOT axes hold; inline cfg union ratified as the honest encoding (Cargo-implied gate would break the no-alloc decl lane); data-plane callback deferral promoted to a NEXT-RATIFY open question.",
+      "changes_bullets": [
+        "decision-only entry (no code change): post-track session review of R311lb..ld — verdict textbook; no hack / doc-around-hack / workaround found; SSOT axes verified (DeclObserverPair fan-out single home, deferred_fire single mechanism, lock/fan/drain pairing converged on Session::dispatch_iteration_event, flush sink converged on Session.actions)",
+        "review residual (a) ratified as forced-inline: the deferred-fire gate union all(alloc, any(session-matching, declare-subscriber, declare-queryable, liveliness-token)) is NOT expressible as a Cargo implied feature — a deferred-fire=[alloc] gate implied by the planes would drag alloc into the no-alloc decl lane (run-ci wz-session-core --no-default-features codec-declare,declare-* build) — so the inline union at its 6 cfg sites (core lib.rs 1 + runtime-tokio session/mod.rs 4 + decl_listener.rs unions) is the honest encoding; cross-referencing docs are the mitigation",
+        "review residual (c) accepted: DeclListener::undeclare returns d && u (single-bool, matching-listener convention) — a raw-registry racing removal of one side yields false with partial removal; documented, handle-path cannot produce it",
+        "review residual (d) accepted: dispatch_iteration_event_with's under_lock hook carries the R311kj inline constraint doc-enforced only (the switchboard fan requires the same-lock-scope peer_keyexpr_table snapshot, so a hook seam is structurally required)"
+      ],
+      "verification_bullets": [
+        "review performed over the landed R311lb..ld diffs (6 commits 1f49fac..78789e8); mechanical evidence unchanged from those entries: wz-runtime-tokio --lib 241 PASS, core 334 PASS, C1j-shaped subset deny-warnings builds EXIT=0, full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped)",
+        "no code mutation in this round; pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "NEXT-RATIFY candidate (review residual (b)): data-plane callbacks (subscribers samples / queryables query handlers / replies reply+final / liveliness_subscribers LivelinessSample) still fire INSIDE the observer mutex — outside the ratified F-6 scope (decl/matching planes, now fully closed). Extending deferral there is an OPEN architectural question, not a defect: data callbacks carry same-iteration semantics + backpressure, and the owned-copy staging cost differs per plane; decide by ratify before any code",
+        "session-review minor D/E open: AP loop reports both KeepAlive+Lease verdicts per deadline wake vs MCU crossed-deadline-only — cross-profile observer event-stream asymmetry",
+        "deferred-fire union maintenance note: a 5th plane joining the union must update all 6 inline cfg sites (forced-inline per this round's ratify)",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ],
+      "publishable_decision_summary": "R311le session-review ratify (decision-only): R311lb..ld verdict textbook — no hack/smell, SSOT axes hold; inline cfg union ratified as the honest encoding (Cargo-implied gate would break the no-alloc decl lane); data-plane callback deferral promoted to a NEXT-RATIFY open question.",
+      "publishable_changes_bullets": [
+        "decision-only entry (no code change): post-track session review of R311lb..ld — verdict textbook; no hack / doc-around-hack / workaround found; SSOT axes verified (DeclObserverPair fan-out single home, deferred_fire single mechanism, lock/fan/drain pairing converged on Session::dispatch_iteration_event, flush sink converged on Session.actions)",
+        "review residual (a) ratified as forced-inline: the deferred-fire gate union all(alloc, any(session-matching, declare-subscriber, declare-queryable, liveliness-token)) is NOT expressible as a Cargo implied feature — a deferred-fire=[alloc] gate implied by the planes would drag alloc into the no-alloc decl lane (run-ci wz-session-core --no-default-features codec-declare,declare-* build) — so the inline union at its 6 cfg sites (core lib.rs 1 + runtime-tokio session/mod.rs 4 + decl_listener.rs unions) is the honest encoding; cross-referencing docs are the mitigation",
+        "review residual (c) accepted: DeclListener::undeclare returns d && u (single-bool, matching-listener convention) — a raw-registry racing removal of one side yields false with partial removal; documented, handle-path cannot produce it",
+        "review residual (d) accepted: dispatch_iteration_event_with's under_lock hook carries the R311kj inline constraint doc-enforced only (the switchboard fan requires the same-lock-scope peer_keyexpr_table snapshot, so a hook seam is structurally required)"
+      ],
+      "publishable_verification_bullets": [
+        "review performed over the landed R311lb..ld diffs (6 commits 1f49fac..78789e8); mechanical evidence unchanged from those entries: wz-runtime-tokio --lib 241 PASS, core 334 PASS, C1j-shaped subset deny-warnings builds EXIT=0, full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped)",
+        "no code mutation in this round; pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NEXT-RATIFY candidate (review residual (b)): data-plane callbacks (subscribers samples / queryables query handlers / replies reply+final / liveliness_subscribers LivelinessSample) still fire INSIDE the observer mutex — outside the ratified F-6 scope (decl/matching planes, now fully closed). Extending deferral there is an OPEN architectural question, not a defect: data callbacks carry same-iteration semantics + backpressure, and the owned-copy staging cost differs per plane; decide by ratify before any code",
+        "session-review minor D/E open: AP loop reports both KeepAlive+Lease verdicts per deadline wake vs MCU crossed-deadline-only — cross-profile observer event-stream asymmetry",
+        "deferred-fire union maintenance note: a 5th plane joining the union must update all 6 inline cfg sites (forced-inline per this round's ratify)",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
