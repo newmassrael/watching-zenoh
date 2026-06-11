@@ -2131,12 +2131,29 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     .register(interest_id, &keyexpr_string, options.history, sink)
                     .expect("register on the alloc backing never exceeds declared capacity");
             });
-            self.actions.send_interest_liveliness_subscriber(
+            // R311ll (Finding B) — roll the slot back if the wire emit
+            // fails. Register-first guards the race against an inbound
+            // DeclToken (the slot matches by keyexpr, so a proactive peer
+            // declaration can fire it before our Interest lands), but a
+            // FAILED send means no Interest reached the peer: the slot
+            // would be a permanent orphan firing a callback the caller
+            // got no handle to retract. Kill the cell first (suppress any
+            // sample staged in the register->send window, the same
+            // suppression order as `undeclare`), drop the orphaned slot,
+            // and surface the error. No Interest(Final) wire retract —
+            // nothing was ever declared to the peer.
+            if let Err(e) = self.actions.send_interest_liveliness_subscriber(
                 interest_id,
                 options.history,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
-            )?;
+            ) {
+                cell.kill();
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.liveliness_subscribers.unregister(interest_id);
+                });
+                return Err(e.into());
+            }
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -2272,12 +2289,24 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // mapping_id + optional inline_suffix cost rather than the
             // full literal each time — bandwidth parity with
             // `declare_token_aliased`'s aliased wire emit.
-            self.actions.send_interest_liveliness_subscriber(
+            // R311ll (Finding B) — same wire-emit rollback as the literal
+            // `declare_liveliness_subscriber`: a failed alias-form Interest
+            // leaves no peer subscription, so the keyexpr-matched slot must
+            // not survive as an orphan. Kill the cell (suppress a sample
+            // staged in the register->send window), drop the slot, surface
+            // the error; no Interest(Final) retract (nothing was declared).
+            if let Err(e) = self.actions.send_interest_liveliness_subscriber(
                 interest_id,
                 options.history,
                 mapping_id,
                 inline_suffix,
-            )?;
+            ) {
+                cell.kill();
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.liveliness_subscribers.unregister(interest_id);
+                });
+                return Err(e.into());
+            }
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -2374,11 +2403,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     .register(interest_id, deadline_ms, sink)
                     .expect("register on the alloc backing never exceeds declared capacity");
             });
-            self.actions.send_interest_liveliness_get(
+            // R311ll (Finding B) — roll the pending get back if the wire
+            // emit fails. Unlike the keyexpr-matched subscriber slot, a
+            // get correlates by FRESH interest_id, so no solicited reply
+            // can exist before this Interest is sent: nothing could have
+            // staged in the register->send window, and `unregister` alone
+            // is a complete rollback (it drops the entry, and with it the
+            // deferred sink's cell). Without this the orphaned entry leaks
+            // — or, with a deadline, fires a spurious sweep on_final for a
+            // get the caller got no success from.
+            if let Err(e) = self.actions.send_interest_liveliness_get(
                 interest_id,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
-            )?;
+            ) {
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.liveliness_gets.unregister(interest_id);
+                });
+                return Err(e.into());
+            }
             Ok(())
         }
         #[cfg(not(feature = "liveliness-get"))]

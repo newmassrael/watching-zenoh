@@ -4612,6 +4612,66 @@ fn declare_liveliness_subscriber_aliased_unknown_mapping_returns_err_without_wir
     );
 }
 
+/// R311ll (Finding B) — a wire-emit FAILURE on the literal
+/// `declare_liveliness_subscriber` must roll the slot back, not leave a
+/// keyexpr-matched orphan firing the callback for a subscription the
+/// caller got no handle to retract. The slot is registered BEFORE the
+/// emit (the inbound-DeclToken race guard), so a failed emit takes the
+/// rollback path: kill the deferred cell + unregister. Sibling of the
+/// unknown-mapping test above but on the register-THEN-fail path, not
+/// the never-register early return. The RECONNECTING
+/// transport-availability gate is the deterministic failure trigger (no
+/// oversized-keyexpr fragility).
+#[cfg(feature = "liveliness-subscriber")]
+#[test]
+fn declare_liveliness_subscriber_rolls_back_slot_on_wire_emit_failure() {
+    let (session, driver) = build_session();
+    // Flip the pub transport-availability flag off so the next wire emit
+    // returns Err(TransportUnavailable) at the F2 gate, before any encode
+    // or driver write.
+    *session.actions().transport_available.lock().unwrap() = false;
+    let result = session.declare_liveliness_subscriber(
+        "live/**",
+        LivelinessSubscriberOptions::default(),
+        |_| {},
+    );
+    assert!(result.is_err(), "wire-emit failure must surface as Err");
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .liveliness_subscribers
+            .slot_count(),
+        0,
+        "a failed declare must leave NO orphan slot (Finding B rollback)",
+    );
+    assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
+}
+
+/// R311ll (Finding B) — the `liveliness_get` rollback is unregister-only
+/// (a get correlates by FRESH interest_id, so no reply can stage in the
+/// register->send window). A failed wire emit must still drop the pending
+/// entry, else it leaks — or a deadline'd entry fires a spurious sweep
+/// `on_final` for a get the caller never received a success from.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn liveliness_get_rolls_back_pending_on_wire_emit_failure() {
+    let (session, driver) = build_session();
+    // liveliness_get enforces the Established gate; satisfy it, THEN fail
+    // the emit at the transport-availability gate.
+    mark_session_established(&session);
+    *session.actions().transport_available.lock().unwrap() = false;
+    let result = session.liveliness_get("live/**", LivelinessGetOptions::default(), |_| {}, |_| {});
+    assert!(result.is_err(), "wire-emit failure must surface as Err");
+    assert_eq!(
+        session.observer().lock().unwrap().liveliness_gets.len(),
+        0,
+        "a failed get must leave NO orphan pending entry (Finding B)",
+    );
+    assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
+}
+
 #[cfg(all(
     feature = "codec-declare",
     feature = "declare-keyexpr",
