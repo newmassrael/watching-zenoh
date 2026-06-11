@@ -54,13 +54,27 @@
 //!   the queue after releasing the observer lock (the session-tier
 //!   dispatch SSOT does this); an undrained queue delays fires until
 //!   the next drain, it never drops them.
+//! - **Batch atomicity (R311lj).** A production drain takes its batch
+//!   under the OBSERVER lock (`Session::drain_deferred_fires` wraps
+//!   `take_batch` in the observer lock). Since every `stage` runs
+//!   inside the staging site's observer-lock window, the take cannot
+//!   interleave a half-staged window: it observes a whole number of
+//!   complete windows. This is what guarantees a queryable handler job
+//!   and its trailing ResponseFinal job (both staged in one dispatch
+//!   window) land in one batch on one drainer, so Reply precedes Final
+//!   on the wire even when an auxiliary drainer (a query-tail / publish
+//!   / sweep drain) races the drive loop. Without the observer-lock
+//!   take, an auxiliary drainer could `mem::take` the queue mid-window
+//!   (queue lock only) and split that pair — the Finding-A hazard the
+//!   R311li session review surfaced.
 //! - **Ordering.** Jobs run in stage order — wire order across planes
-//!   (a matching flip staged before a decl fire runs before it) when
-//!   a single drainer drains. Production has one drive loop per
-//!   session as the primary drainer; auxiliary drainers (a query-tail
-//!   drain, the reply sweep task) interleave batches (each batch
-//!   internally ordered) and per-cell delivery stays FIFO + lossless
-//!   via the cell backlog.
+//!   (a matching flip staged before a decl fire runs before it). With
+//!   the observer-lock take, every batch is a whole number of complete
+//!   staging windows in stage order; a single drainer runs each batch
+//!   FIFO. Auxiliary drainers take disjoint batches (the take is
+//!   serialized by the observer lock), and per-cell delivery stays
+//!   FIFO + lossless via the cell backlog when two batches touch one
+//!   cell.
 //! - **Late fires.** A fire staged before an undeclare but drained
 //!   after it is suppressed by the dead-marked cell — the callback
 //!   never observes a post-undeclare event.
@@ -132,16 +146,43 @@ impl<R: Runtime> DeferredFireQueue<R> {
         R::with_mutex_mut(&self.jobs, |jobs| jobs.push(job));
     }
 
+    /// Swap the staged jobs out as one batch and return them, leaving
+    /// the queue empty. Takes ONLY the queue lock. The caller runs the
+    /// returned jobs after releasing every framework lock.
+    ///
+    /// R311lj — batch-atomicity seam: a caller that takes this under
+    /// the OBSERVER lock (the [`crate::deferred_fire`] serialization
+    /// contract) is guaranteed a whole number of complete staging
+    /// windows, because every `stage` call holds the observer lock for
+    /// the duration of its window. The take then cannot interleave a
+    /// window that stages a queryable handler job and its trailing
+    /// ResponseFinal job — they land in one batch, run on one drainer,
+    /// in order (Reply-before-Final). A take that does NOT hold the
+    /// observer lock (the self-contained [`Self::drain_and_fire`], used
+    /// only where no concurrent stager exists — the infra unit tests)
+    /// may split a window; that path is for single-thread fixtures.
+    pub fn take_batch(&self) -> Vec<FireJob> {
+        R::with_mutex_mut(&self.jobs, core::mem::take)
+    }
+
     /// Drain and run every staged job OUTSIDE every framework lock.
     /// Call with the observer lock RELEASED. Loops until the queue is
     /// empty so fires staged by the running callbacks themselves (a
     /// callback's own declare can flip another watch synchronously via
     /// a loopback dispatch) run in the same drain. Returns the number
     /// of jobs run.
+    ///
+    /// R311lj — self-contained take (queue lock only); it does NOT
+    /// serialize against staging via the observer lock, so a CONCURRENT
+    /// stager can split a batch across two of these. Production drains
+    /// route through the observer-serialized
+    /// `Session::drain_deferred_fires` instead; this self-contained
+    /// form is for single-thread fixtures (the infra unit tests) where
+    /// no concurrent stager exists.
     pub fn drain_and_fire(&self) -> usize {
         let mut fired = 0;
         loop {
-            let batch = R::with_mutex_mut(&self.jobs, core::mem::take);
+            let batch = self.take_batch();
             if batch.is_empty() {
                 return fired;
             }

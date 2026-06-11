@@ -474,8 +474,39 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// always-compiled subscriber plane defers, so a deferred sink can
     /// exist in every feature subset of this host-only crate and the
     /// queue field is always present.
+    ///
+    /// R311lj — each batch is taken under the OBSERVER lock (not the
+    /// queue lock alone). Staging always holds the observer lock, so a
+    /// take serialized against it observes a whole number of complete
+    /// staging windows — a queryable handler job and the ResponseFinal
+    /// job staged after it in the same dispatch window land in ONE
+    /// batch on ONE drainer, in order. This closes the Finding-A
+    /// Reply-before-Final hazard the R311li review surfaced: an
+    /// auxiliary drainer (a query-tail / publish / sweep drain) racing
+    /// the drive loop can no longer `mem::take` a half-staged window
+    /// and emit a Final ahead of its last Reply. The jobs still RUN
+    /// outside the lock (the lock-free callback invariant): the lock is
+    /// held only across the cheap `take_batch` swap, then dropped
+    /// before the batch fires, so a callback may re-enter any
+    /// observer-locking session API. The loop re-takes (under the lock
+    /// again) until the queue is empty, so fires a running callback
+    /// stages are drained in the same call.
+    ///
+    /// MUST be called with the observer lock RELEASED (the standing
+    /// drain-after-dispatch contract); calling it while holding the
+    /// observer lock self-deadlocks on the re-take.
     pub fn drain_deferred_fires(&self) -> usize {
-        self.fires.drain_and_fire()
+        let mut fired = 0;
+        loop {
+            let batch = R::with_mutex_mut(&self.observer, |_obs| self.fires.take_batch());
+            if batch.is_empty() {
+                return fired;
+            }
+            for job in batch {
+                job();
+                fired += 1;
+            }
+        }
     }
 
     /// R311ld — the dispatch SSOT (session-review minor F closure):
@@ -752,19 +783,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         {
             let delivered = if opts.allowed_destination.allows_local() {
                 let sample = build_loopback_sample(keyexpr, payload, &opts);
-                R::with_mutex_mut(&self.observer, |observer| {
+                let delivered = R::with_mutex_mut(&self.observer, |observer| {
                     observer.subscribers.local_publish(&sample)
-                })
+                });
+                // R311lh / R311lj — drain the fires THIS publish staged
+                // (the loopback `local_publish`) so local subscriber
+                // callbacks run synchronously on the caller thread,
+                // outside the observer lock, before `publish` returns
+                // (pico fires subscription callbacks outside the session
+                // mutex on the delivering thread). Drain is gated on the
+                // local-delivery path: a Remote-only publish stages
+                // nothing, so draining there would be gratuitous (it
+                // would run drive-loop-staged callbacks on the publish
+                // thread). The observer-serialized take keeps a
+                // concurrent drive-loop batch atomic (R311lj).
+                self.drain_deferred_fires();
+                delivered
             } else {
                 0
             };
-            // R311lh — drain the fires the loopback staged so local
-            // subscriber callbacks run synchronously on the caller
-            // thread, outside the observer lock, before `publish`
-            // returns (pico fires subscription callbacks outside the
-            // session mutex on the delivering thread). An overlapping
-            // drive-loop drain is lossless (cell backlog).
-            self.drain_deferred_fires();
             Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
@@ -865,15 +902,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         {
             let delivered = if opts.allowed_destination.allows_local() {
                 let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
-                R::with_mutex_mut(&self.observer, |observer| {
+                let delivered = R::with_mutex_mut(&self.observer, |observer| {
                     observer.subscribers.local_publish(&sample)
-                })
+                });
+                // R311lh / R311lj — drain the loopback-staged fires;
+                // gated on the local-delivery path, see `Session::publish`.
+                self.drain_deferred_fires();
+                delivered
             } else {
                 0
             };
-            // R311lh — drain the loopback-staged fires; see
-            // `Session::publish`.
-            self.drain_deferred_fires();
             Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
