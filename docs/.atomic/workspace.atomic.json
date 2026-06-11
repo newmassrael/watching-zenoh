@@ -34194,6 +34194,58 @@
         "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
       ]
     },
+    "Round 311lg": {
+      "decision_summary": "R311lg data-plane deferral (a): liveliness samples + z_get reply/final move to deferred fire — Session API semantics upgraded in place; cell backlog makes multi-drainer overlap lossless.",
+      "changes_bullets": [
+        "R311lf delivery round (a) — the first two data planes move to deferred fire (liveliness samples + z_get reply/final), Session-tier API semantics upgraded in place (no dual inline/deferred variants, per the ratify)",
+        "deferred_fire cell backlog (R311lg-pre commit): DeferredListenerCell::invoke grows a FIFO backlog — an invoke that finds the callback mid-fire on another drainer hands the call to the active drainer instead of dropping it (the prior documented skip), making multi-drainer overlap lossless; required because this round introduces auxiliary drainers (query-tail drain + wz-ap-demo sweep-task drain) beside the drive loop; invoke signature gains Send + 'static (4 existing call sites move-capture)",
+        "liveliness-sample plane: declare_liveliness_subscriber{,_aliased} install a staging sink (owned copy: kind + keyexpr String + token_id; the job reconstructs the borrowed LivelinessSample over the owned fields) through deferred_liveliness_sample_sink; the LivelinessSubscriber handle gains the cell, kill-first ordering in undeclare + Drop; callback signature unchanged",
+        "reply/final plane: query / query_aliased route (on_reply, on_final) into a deferred cell holding the BoxedReplySink pair; the registry-stored staging sink copies each inbound reply to the owned InboundReply (the existing AP retention form — no third reply struct) and stages per-fire jobs; the staged on_final job kills the cell after firing (Final is terminal, user closures drop outside every lock); query tail calls drain_deferred_fires so SessionLocal loopback replies still deliver synchronously before query returns (pico _z_session_deliver_query_locally caller-thread parity)",
+        "deferred-fire union grows at the 6 ratified inline cfg sites (core lib.rs module gate + runtime-tokio mod.rs field/Clone/new/drain): + liveliness-subscriber (both tiers) + query-reply (core) / query-get (Session tier); no Layer G MCU lane enables either arm so the thumbv6m Arc-free envelope is unchanged",
+        "wz-ap-demo sweep task pairs its lock window with session.drain_deferred_fires() after release (the sweep's timed-out on_final fires are now staged), second production drainer beside the drive loop — covered by the cell backlog",
+        "InboundReply import gate widened from all(query-get, query-queryable) to query-get (the staging sink names it on every getter build)"
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio --lib 245 PASS (241 prior + 4 new: deferred liveliness sample with observer-locking re-entry incl. handle Drop inside callback, staged-before-undeclare suppression, re-entrant same-cell backlog lossless FIFO, SessionLocal query with re-entrant query-from-on_reply delivering synchronously); wz-session-core default-feature tests PASS",
+        "one existing test updated to the documented drain-pairing obligation (query_locality_any_fires_both_branches_and_waits_for_wire_final: raw registry dispatch_response_final now pairs with drain_deferred_fires)",
+        "cargo fmt --check + clippy deny-warnings clean on wz-session-core / wz-runtime-tokio / wz-ap-demo",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311lf delivery remaining: (b) subscriber-sample plane (owned Sample staging on the AP path; re-examine the union shape — the subscribers registry is always-compiled) then (c) queryable plane (reply-path restructure: deferred handler emits replies through actions directly, ResponseFinal after handler return; the pending_replies staging flush order currently owns the Reply-before-Final invariant)",
+        "liveliness-get surface discovered outside the ratified 4-plane enumeration: LivelinessGetRegistry on_reply/on_final callbacks (reply-shaped, declaration-plane wire) still fire inside the observer mutex — the R311lf invariant covers it in spirit; fold into (b)/(c) or a follow-up round",
+        "pre-existing observation (not introduced this round): LivelinessSubscriber::undeclare / LivelinessToken::undeclare use std::mem::forget(self) to suppress the Drop double-emit, leaking the handle field Arcs (session clone, keyexpr String, now the killed cell) per undeclare cycle — candidate ManuallyDrop/destructure refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ],
+      "publishable_decision_summary": "R311lg data-plane deferral (a): liveliness samples + z_get reply/final move to deferred fire — Session API semantics upgraded in place; cell backlog makes multi-drainer overlap lossless.",
+      "publishable_changes_bullets": [
+        "R311lf delivery round (a) — the first two data planes move to deferred fire (liveliness samples + z_get reply/final), Session-tier API semantics upgraded in place (no dual inline/deferred variants, per the ratify)",
+        "deferred_fire cell backlog (R311lg-pre commit): DeferredListenerCell::invoke grows a FIFO backlog — an invoke that finds the callback mid-fire on another drainer hands the call to the active drainer instead of dropping it (the prior documented skip), making multi-drainer overlap lossless; required because this round introduces auxiliary drainers (query-tail drain + wz-ap-demo sweep-task drain) beside the drive loop; invoke signature gains Send + 'static (4 existing call sites move-capture)",
+        "liveliness-sample plane: declare_liveliness_subscriber{,_aliased} install a staging sink (owned copy: kind + keyexpr String + token_id; the job reconstructs the borrowed LivelinessSample over the owned fields) through deferred_liveliness_sample_sink; the LivelinessSubscriber handle gains the cell, kill-first ordering in undeclare + Drop; callback signature unchanged",
+        "reply/final plane: query / query_aliased route (on_reply, on_final) into a deferred cell holding the BoxedReplySink pair; the registry-stored staging sink copies each inbound reply to the owned InboundReply (the existing AP retention form — no third reply struct) and stages per-fire jobs; the staged on_final job kills the cell after firing (Final is terminal, user closures drop outside every lock); query tail calls drain_deferred_fires so SessionLocal loopback replies still deliver synchronously before query returns (pico _z_session_deliver_query_locally caller-thread parity)",
+        "deferred-fire union grows at the 6 ratified inline cfg sites (core lib.rs module gate + runtime-tokio mod.rs field/Clone/new/drain): + liveliness-subscriber (both tiers) + query-reply (core) / query-get (Session tier); no Layer G MCU lane enables either arm so the thumbv6m Arc-free envelope is unchanged",
+        "wz-ap-demo sweep task pairs its lock window with session.drain_deferred_fires() after release (the sweep's timed-out on_final fires are now staged), second production drainer beside the drive loop — covered by the cell backlog",
+        "InboundReply import gate widened from all(query-get, query-queryable) to query-get (the staging sink names it on every getter build)"
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio --lib 245 PASS (241 prior + 4 new: deferred liveliness sample with observer-locking re-entry incl. handle Drop inside callback, staged-before-undeclare suppression, re-entrant same-cell backlog lossless FIFO, SessionLocal query with re-entrant query-from-on_reply delivering synchronously); wz-session-core default-feature tests PASS",
+        "one existing test updated to the documented drain-pairing obligation (query_locality_any_fires_both_branches_and_waits_for_wire_final: raw registry dispatch_response_final now pairs with drain_deferred_fires)",
+        "cargo fmt --check + clippy deny-warnings clean on wz-session-core / wz-runtime-tokio / wz-ap-demo",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311lf delivery remaining: (b) subscriber-sample plane (owned Sample staging on the AP path; re-examine the union shape — the subscribers registry is always-compiled) then (c) queryable plane (reply-path restructure: deferred handler emits replies through actions directly, ResponseFinal after handler return; the pending_replies staging flush order currently owns the Reply-before-Final invariant)",
+        "liveliness-get surface discovered outside the ratified 4-plane enumeration: LivelinessGetRegistry on_reply/on_final callbacks (reply-shaped, declaration-plane wire) still fire inside the observer mutex — the R311lf invariant covers it in spirit; fold into (b)/(c) or a follow-up round",
+        "pre-existing observation (not introduced this round): LivelinessSubscriber::undeclare / LivelinessToken::undeclare use std::mem::forget(self) to suppress the Drop double-emit, leaking the handle field Arcs (session clone, keyexpr String, now the killed cell) per undeclare cycle — candidate ManuallyDrop/destructure refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
