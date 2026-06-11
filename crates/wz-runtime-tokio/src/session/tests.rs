@@ -5776,3 +5776,215 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
         "staged-but-undrained sample is suppressed by the killed cell"
     );
 }
+
+// ── R311li deferred queryable plane ──
+
+/// R290-style local Request(Query) constructor for the R311li
+/// queryable-plane tests (mirror of `make_decl_token` — the
+/// wz-session-core test builders are not a dev-dep here per R311ds).
+#[cfg(feature = "query-queryable")]
+fn make_request_query(rid: u64, keyexpr_literal: &str) -> wz_codecs::request::RequestOwned {
+    use wz_codecs::request::{Request, RequestVariant};
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+    let keyexpr = Wireexpr {
+        body: WireexprVariant::WireexprLocal(WireexprLocal {
+            id: 0,
+            suffix_len: Some(keyexpr_literal.len() as u64),
+            suffix: Some(keyexpr_literal),
+        }),
+    };
+    Request {
+        header: 0x1c,
+        rid,
+        keyexpr,
+        extensions: None,
+        body: RequestVariant::CodecZenohQuery(wz_codecs::query::Query::default()),
+    }
+    .try_into_owned()
+    .unwrap()
+}
+
+#[cfg(feature = "query-queryable")]
+fn query_frame_outcome(
+    request: wz_codecs::request::RequestOwned,
+) -> wz_session_core::driver_loop::DriverLoopOutcome {
+    wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Request(
+            Box::new(request),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    }
+}
+
+/// R311li — the queryable plane rides the deferred-fire queue: the
+/// handler runs OUTSIDE the observer mutex (it re-enters the session
+/// here by declaring a subscriber and dropping its handle — both lock
+/// the observer; pre-R311li this self-deadlocked), its replies are
+/// emitted at the drain, and the ResponseFinal job staged by the
+/// dispatch SSOT runs after them — Reply-before-Final on the wire.
+#[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+#[test]
+fn queryable_handler_runs_deferred_replies_then_final_on_wire() {
+    use std::sync::Arc;
+
+    let (session, driver) = build_session();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let session_cb = session.clone();
+    let _q = session
+        .declare_queryable(
+            "home/**",
+            QueryableOptions::default(),
+            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(query.keyexpr(), "home/temp");
+                assert!(!query.is_local(), "wire-shaped dispatch");
+                // Re-enter an observer-locking session API from inside
+                // the handler (deadlocked pre-R311li).
+                let _re = session_cb.declare_subscriber(
+                    "reentry/ok",
+                    SubscribeOptions::default(),
+                    |_| {},
+                );
+                out.reply(b"22.5");
+            },
+        )
+        .expect("query-queryable on in this lane");
+
+    let outcome = query_frame_outcome(make_request_query(11, "home/temp"));
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "handler ran at the drain");
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "one Response + one ResponseFinal left the session"
+    );
+    let reply_frame = driver.frame_bytes(0);
+    assert!(
+        reply_frame.windows(4).any(|w| w == b"22.5"),
+        "first frame is the Reply (carries the payload bytes) — Reply precedes Final"
+    );
+}
+
+/// R311li — a matched-but-silent handler still terminates the reply
+/// stream: the Final trigger keys on the MATCH count, not the staged
+/// reply delta (the prior delta detection starved the querier until
+/// timeout — zenoh-pico emits the reply Final on query drop
+/// regardless of reply count).
+#[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+#[test]
+fn queryable_matched_but_silent_handler_still_sends_final() {
+    let (session, driver) = build_session();
+    let _q = session
+        .declare_queryable(
+            "home/**",
+            QueryableOptions::default(),
+            |_query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                // deliberately no reply
+            },
+        )
+        .expect("query-queryable on in this lane");
+
+    let outcome = query_frame_outcome(make_request_query(12, "home/temp"));
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "bare ResponseFinal terminates the silent handler's reply stream"
+    );
+}
+
+/// R311li — a SessionLocal query against a Session-tier (deferred)
+/// queryable delivers every local reply, then the loopback Final, all
+/// synchronously before `query` returns (the query-tail drain runs the
+/// deferred handler; the loopback Final is delivered after that drain).
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn local_query_against_deferred_queryable_delivers_before_return() {
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let _q = session
+        .declare_queryable(
+            "home/**",
+            QueryableOptions::default(),
+            |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                assert!(query.is_local(), "loopback-shaped dispatch");
+                out.reply(b"21.0");
+            },
+        )
+        .expect("query-queryable on in this lane");
+
+    let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_r = log.clone();
+    let log_f = log.clone();
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                assert_eq!(reply.payload(), b"21.0");
+                log_r.lock().unwrap().push("reply");
+            },
+            move |_rid| {
+                log_f.lock().unwrap().push("final");
+            },
+        )
+        .expect("query-get on in this lane");
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["reply", "final"],
+        "deferred local handler's reply precedes the loopback Final, both before query returned"
+    );
+}
+
+/// R311li — a query staged before `undeclare` but drained after it is
+/// suppressed (kill-first), while the registry-staged ResponseFinal is
+/// still owed — the requester is never starved by a racing undeclare.
+#[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+#[test]
+fn queryable_staged_before_undeclare_suppressed_but_final_still_sent() {
+    use std::sync::Arc;
+
+    let (session, driver) = build_session();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let q = session
+        .declare_queryable(
+            "home/**",
+            QueryableOptions::default(),
+            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-queryable on in this lane");
+
+    // Stage through the raw observer (no drain yet), mirroring the
+    // drive loop's fan with a window before the drain.
+    let outcome = query_frame_outcome(make_request_query(13, "home/temp"));
+    {
+        let mut obs = session.observer().lock().unwrap();
+        obs.dispatch_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    assert!(q.undeclare(), "undeclare removes the registration");
+    session.drain_deferred_fires();
+    // The raw-dispatch site still owes the staged Final through the
+    // combined flush (the SSOT path stages it as a job instead).
+    {
+        let mut obs = session.observer().lock().unwrap();
+        obs.flush_pending(&*session.actions().clone());
+    }
+    assert_eq!(fired.load(Ordering::SeqCst), 0, "handler suppressed");
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "the ResponseFinal is still emitted — the requester is not starved"
+    );
+}

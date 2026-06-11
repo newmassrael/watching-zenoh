@@ -75,6 +75,135 @@ impl QueryableOptions {
 /// — unconditionally available after R311r observer field ungate.
 // R311cu — R267 helper cascade. Same pattern as Subscriber: `!Clone`
 // by construction; Drop is generic via R::with_mutex_mut.
+/// R311li — the type-erased user handler a deferred queryable's cell
+/// holds: erased at registration so the [`Queryable`] handle has a
+/// nameable cell type (the [`Subscriber`] / [`DeclListener`]
+/// convention).
+#[cfg(feature = "query-queryable")]
+pub(super) type BoxedQueryHandler =
+    Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static>;
+
+/// R311li — the per-queryable deferred-fire cell (take-call-restore
+/// with the lossless backlog; see [`wz_session_core::deferred_fire`]).
+/// The registry-installed staging sink fires against it;
+/// [`Queryable::undeclare`] / `Drop` kill it so a staged-but-undrained
+/// query never reaches a removed queryable's handler.
+#[cfg(feature = "query-queryable")]
+pub(super) type QueryHandlerCell<R> =
+    wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedQueryHandler>;
+
+/// R311li — owned copy of one matched inbound query, staged for the
+/// deferred handler job (a deferred fire outlives the dispatch
+/// borrow). The job rebuilds a [`crate::query_sink::BorrowedQuery`]
+/// over these fields when it runs the handler.
+#[cfg(feature = "query-queryable")]
+struct OwnedQueryEvent {
+    keyexpr: String,
+    parameters: Option<Vec<u8>>,
+    attachment: Option<Vec<u8>>,
+    source_info: Option<SourceInfo>,
+    rid: u64,
+    is_local: bool,
+}
+
+impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+    /// R311li — build the deferred cell + the staging sink one
+    /// `declare_queryable{_aliased}` call installs in the registry: the
+    /// sink copies the matched query out (owned) and stages one queue
+    /// job; the job runs the user handler OUTSIDE the observer lock
+    /// over a [`wz_session_core::query::QueryResponder`] bound to a
+    /// job-local reply buffer, then routes the accumulated replies by
+    /// query origin — wire queries emit each reply through the actions
+    /// layer directly (the [`Self::dispatch_iteration_event_with`]
+    /// SSOT emits the matching ResponseFinal after the drain, so
+    /// Reply-before-Final holds), local queries deliver back into the
+    /// local reply registry (whose own deferred reply fires drain in
+    /// the same pass). The handler signature is unchanged — deferral
+    /// is invisible at the type level.
+    #[cfg(feature = "query-queryable")]
+    pub(super) fn deferred_query_sink(
+        &self,
+        handler: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
+    ) -> (
+        QueryHandlerCell<R>,
+        impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
+    )
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        let erased: BoxedQueryHandler = Box::new(handler);
+        let cell: QueryHandlerCell<R> =
+            wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
+        let queue = self.fires.clone();
+        let cell_for_sink = cell.clone();
+        let observer = self.observer.clone();
+        let actions = self.actions.clone();
+        let sink = move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+            // The registry-provided responder (`_out`, bound to the
+            // observer's pending_replies) is deliberately unused: the
+            // deferred handler's replies are emitted at the drain, and
+            // the registry's Final trigger keys on the MATCH count
+            // (R311li), not on staged replies.
+            let owned = OwnedQueryEvent {
+                keyexpr: view.keyexpr().to_string(),
+                parameters: view.parameters().map(<[u8]>::to_vec),
+                attachment: view.attachment().map(<[u8]>::to_vec),
+                source_info: view.source_info().cloned(),
+                rid: view.rid(),
+                is_local: view.is_local(),
+            };
+            let cell = cell_for_sink.clone();
+            let observer = observer.clone();
+            let actions = actions.clone();
+            queue.stage(Box::new(move || {
+                cell.invoke(move |handler| {
+                    let view = crate::query_sink::BorrowedQuery {
+                        keyexpr: &owned.keyexpr,
+                        parameters: owned.parameters.as_deref(),
+                        attachment: owned.attachment.as_deref(),
+                        source_info: owned.source_info.as_ref(),
+                        rid: owned.rid,
+                        is_local: owned.is_local,
+                    };
+                    let mut replies: Vec<crate::query::QueryReply> = Vec::new();
+                    {
+                        let mut responder = wz_session_core::query::QueryResponder::new(
+                            owned.rid,
+                            owned.keyexpr.clone(),
+                            &mut replies,
+                        );
+                        handler(&view, &mut responder);
+                    }
+                    if owned.is_local {
+                        // Loopback origin: deliver into the local reply
+                        // registry (the requester's pending entry). The
+                        // reply plane's own deferred fires staged here
+                        // drain in the same outer pass.
+                        R::with_mutex_mut(&observer, |obs| {
+                            for reply in replies.drain(..) {
+                                let inbound: crate::reply::InboundReply = reply.into();
+                                obs.replies.deliver_local_reply(&inbound);
+                            }
+                        });
+                    } else {
+                        // Wire origin: emit each reply now (lock-free);
+                        // the dispatch SSOT emits the ResponseFinal
+                        // after the drain. Overflow-rejected replies
+                        // are skipped, mirroring flush_pending.
+                        use wz_session_core::response_sink::ResponseSink as _;
+                        for reply in replies.drain(..) {
+                            if let Ok(response) = reply.into_response() {
+                                actions.send_response(response);
+                            }
+                        }
+                    }
+                })
+            }));
+        };
+        (cell, sink)
+    }
+}
+
 #[non_exhaustive]
 pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     // R311ek — `session` is read only by the `query-queryable`-gated
@@ -94,6 +223,13 @@ pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     pub(super) id: QueryableId,
     pub(super) keyexpr: String,
     pub(super) options: QueryableOptions,
+    /// R311li — the deferred-fire cell holding the user handler (the
+    /// registry-installed sink only stages; the drain runs the handler
+    /// outside the observer lock — the R311lf lock-free callback
+    /// invariant on the queryable plane). Gated like the `session`
+    /// field: the handle is only constructed under the feature.
+    #[cfg(feature = "query-queryable")]
+    pub(super) cell: QueryHandlerCell<R>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
@@ -119,6 +255,12 @@ impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
     /// the [`Drop`] impl will not run a second time. Mirrors
     /// [`Subscriber::undeclare`].
     pub fn undeclare(self) -> bool {
+        // R311li — kill the deferred cell FIRST so a query staged
+        // before this call but not yet drained is suppressed (the
+        // handler never observes a post-undeclare query; the requester
+        // still receives its registry-staged Final).
+        #[cfg(feature = "query-queryable")]
+        self.cell.kill();
         // R311df — observer access via R::with_mutex_mut closure form.
         // R311dz — the observer's `queryables` field gates on
         // `query-queryable`. A build without it never constructs a
@@ -145,6 +287,10 @@ impl<R: SessionRuntime, T: TimeSource> Drop for Queryable<R, T> {
         // R311dz — gated on `query-queryable` (the observer's queryables
         // field). Unreachable at runtime when off (no Queryable is ever
         // constructed) but must compile.
+        // R311li — kill the deferred cell first (same suppression
+        // order as `undeclare`).
+        #[cfg(feature = "query-queryable")]
+        self.cell.kill();
         #[cfg(feature = "query-queryable")]
         R::with_mutex_mut(&self.session.observer, |obs| {
             let _ = obs.queryables.unregister(self.id);

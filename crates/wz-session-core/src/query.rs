@@ -471,6 +471,22 @@ pub struct QueryResponder<'a> {
 
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 impl<'a> QueryResponder<'a> {
+    /// R311li — public constructor: the Session-tier deferred queryable
+    /// job (wz-runtime-tokio) builds a responder over its own reply
+    /// buffer when it runs the user handler OUTSIDE the observer lock,
+    /// then routes the accumulated [`QueryReply`]s per query origin
+    /// (wire -> `ResponseSink::send_response`, local ->
+    /// `ReplyRegistry::deliver_local_reply`). In-module dispatch keeps
+    /// building the struct literally.
+    pub fn new(rid: u64, keyexpr_literal: String, replies: &'a mut Vec<QueryReply>) -> Self {
+        Self {
+            rid,
+            keyexpr_literal,
+            replies,
+            responder: None,
+        }
+    }
+
     /// Emit a Put-form data reply with the given payload bytes.
     /// Multiple calls accumulate; the registry passes the
     /// caller-owned `Vec<QueryReply>` back so each push is one
@@ -841,12 +857,12 @@ impl<C: QuerySink> QueryableRegistry<C> {
         request: &RequestOwned,
         peer_keyexpr_table: &HashMap<u64, String>,
         replies: &mut Vec<QueryReply>,
-    ) {
+    ) -> usize {
         // Only the Query body arm triggers application-visible
         // dispatch — see scope note above.
         let query = match &request.body {
             RequestOwnedVariant::CodecZenohQuery(q) => q,
-            _ => return,
+            _ => return 0,
         };
 
         // R311gn-follow — resolve via the shared resolve_wireexpr SSOT
@@ -854,7 +870,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // None -> drop, covering the empty form + an undeclared id).
         let resolved: String = match resolve_wireexpr(&request.keyexpr.body, peer_keyexpr_table) {
             Some(r) => r,
-            None => return,
+            None => return 0,
         };
 
         // R223 — every Request reaching dispatch_request has been
@@ -871,7 +887,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
             query,
             replies,
             /* is_remote = */ true,
-        );
+        )
     }
 
     /// R238 — in-process query loopback mirror of
@@ -915,8 +931,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
         keyexpr: &str,
         query: &QueryOwned,
         replies: &mut Vec<QueryReply>,
-    ) {
-        self.fire_matching_queryables(rid, keyexpr, query, replies, /* is_remote = */ false);
+    ) -> usize {
+        self.fire_matching_queryables(rid, keyexpr, query, replies, /* is_remote = */ false)
     }
 
     /// R238 — shared fan-out body for [`Self::dispatch_request`]
@@ -943,7 +959,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         query: &QueryOwned,
         replies: &mut Vec<QueryReply>,
         is_remote: bool,
-    ) {
+    ) -> usize {
         // R311gb-3b-cleanup — extract the projection inputs ONCE per
         // matched queryable (the parameters byte slice and attachment
         // view are stable across all matched handlers for a single
@@ -964,11 +980,13 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // this local; each matched queryable's `BorrowedQuery` lends it
         // (`.as_ref()`), matching the attachment/parameters borrow shape.
         let source_info_view = extract_query_source_info(query);
+        let mut matched = 0;
         for queryable in self.queryables.iter_mut() {
             // R311gb (Track 2) — shared match SSOT with the no-heap
             // `dispatch_borrowed` path: locality predicate + bounded
             // pattern split happen in `Queryable::matches`.
             if queryable.matches(keyexpr, is_remote) {
+                matched += 1;
                 let mut responder = QueryResponder {
                     rid,
                     keyexpr_literal: keyexpr.to_string(),
@@ -990,10 +1008,15 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     attachment: attachment_view,
                     source_info: source_info_view.as_ref(),
                     rid,
+                    // R311li — loopback origin marker (pico _is_local
+                    // parity); the deferred Session-tier sink routes
+                    // its replies by this.
+                    is_local: !is_remote,
                 };
                 queryable.sink.handle(&query_view, &mut responder);
             }
         }
+        matched
     }
 
     /// R121j-5c — drain a `Vec<NetworkMessage>` (typically the
@@ -1047,9 +1070,18 @@ impl<C: QuerySink> QueryableRegistry<C> {
                 // matched. In all three cases we owe no Final (the
                 // requester sees no Reply chain at all from this peer
                 // for this rid).
-                let before = pending_replies.len();
-                self.dispatch_request(req, peer_keyexpr_table, pending_replies);
-                if pending_replies.len() > before {
+                // R311li — the Final trigger is the MATCH count, not
+                // the staged-reply delta: a deferred Session-tier sink
+                // stages zero replies at dispatch time (the handler
+                // runs at the post-lock drain), and a matched-but-
+                // silent inline handler still owes the requester its
+                // stream terminator (zenoh-pico emits the reply Final
+                // on query-object drop regardless of reply count; the
+                // prior delta detection starved that querier until
+                // timeout). Non-Query bodies and un-resolvable
+                // keyexprs still owe nothing (matched == 0).
+                let matched = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
+                if matched > 0 {
                     pending_final_rids.push(req.rid);
                 }
             }
@@ -2308,6 +2340,7 @@ mod tests {
                 attachment: None,
                 source_info: None,
                 rid: 7,
+                is_local: false,
             },
             &mut responder,
             /* is_remote = */ true,

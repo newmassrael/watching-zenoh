@@ -499,7 +499,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// both and locks the observer directly retains the documented
     /// obligation to pair every dispatch with
     /// [`Self::drain_deferred_fires`].
-    pub fn dispatch_iteration_event(&self, event: crate::session_glue::IterationEvent<'_>) {
+    pub fn dispatch_iteration_event(&self, event: crate::session_glue::IterationEvent<'_>)
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         self.dispatch_iteration_event_with(event, |_obs| {});
     }
 
@@ -510,14 +513,39 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// constraint (no observer-locking session API re-entry from inside
     /// it). The deferred-fire drain still runs after the lock drops,
     /// covering fires staged by the hook too.
+    ///
+    /// R311li — each queryable-matched request's ResponseFinal is
+    /// staged as a deferred-fire JOB, contiguous (same observer lock
+    /// window) with the handler jobs the registry fan just staged. A
+    /// drainer takes the whole staged batch and runs it sequentially,
+    /// so each rid's deferred handler replies precede its
+    /// ResponseFinal on the wire EVEN when an auxiliary drainer (a
+    /// query/publish tail, the sweep task) steals the batch — the
+    /// ordering is structural, not drainer-identity-dependent. Inline
+    /// (raw-registry) handler replies flush under the lock, before any
+    /// staged job runs. The `SessionLinkActions: Send + Sync` bound is
+    /// the deferred wire-emit capability: the tokio profile satisfies
+    /// it (`Arc` + `Send + Sync` link sink); the MCU profile drives
+    /// registries directly and never constructs these jobs.
     pub fn dispatch_iteration_event_with(
         &self,
         event: crate::session_glue::IterationEvent<'_>,
         under_lock: impl FnOnce(&mut ApplicationLayerObserver),
-    ) {
+    ) where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         R::with_mutex_mut(&self.observer, |obs| {
-            obs.dispatch(event, self.actions.as_ref());
+            obs.dispatch_event(event);
+            obs.flush_pending_replies(self.actions.as_ref());
             under_lock(obs);
+            #[cfg(feature = "query-queryable")]
+            for rid in obs.take_pending_final_rids() {
+                let actions = self.actions.clone();
+                self.fires.stage(Box::new(move || {
+                    use wz_session_core::response_sink::ResponseSink as _;
+                    actions.send_response_final(rid);
+                }));
+            }
         });
         self.drain_deferred_fires();
     }
@@ -1124,17 +1152,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                             observer.replies.deliver_local_reply(&inbound);
                         }
                     }
-                    // Synthetic Final closes the loopback half of the
-                    // pending entry's `remaining_finals` counter so a
-                    // SessionLocal-only z_get finalises immediately and a
-                    // Locality::Any z_get still needs the peer Final to
-                    // finalise (matching zenoh-pico
-                    // `_z_session_deliver_query_locally`'s emit-final
-                    // step at the tail of the local deliver path). Stays
-                    // under `query-get` (ReplyRegistry is query-reply-gated)
-                    // so the wire-only getter finalises the loopback half
-                    // even with no queryable plane (R311fq).
-                    observer.replies.deliver_local_final(rid);
                 }
                 handle
             });
@@ -1157,12 +1174,32 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             }
 
             // R311lg — drain the fires this call staged (the loopback
-            // `deliver_local_reply` / `deliver_local_final` path) so
-            // local replies run synchronously on the caller thread,
-            // outside the observer lock, before `query` returns. An
-            // overlapping drive-loop drain is lossless (the cell
-            // backlog hands the overlapped call to the active drainer).
+            // `deliver_local_reply` path and, R311li, the deferred
+            // local queryable handler jobs — whose replies deliver
+            // back into the local reply registry and drain in this
+            // same pass) so local replies run synchronously on the
+            // caller thread, outside the observer lock, before `query`
+            // returns. An overlapping drive-loop drain is lossless
+            // (the cell backlog hands the overlapped call to the
+            // active drainer).
             self.drain_deferred_fires();
+
+            if allows_local {
+                // R311li — the synthetic loopback Final closes the
+                // loopback half of the pending entry's
+                // `remaining_finals` counter AFTER the drain above ran
+                // every deferred local queryable handler and delivered
+                // its replies — so `on_final` fires after every local
+                // `on_reply` (the pico `_z_session_deliver_query_locally`
+                // emit-final-at-tail ordering, preserved across the
+                // deferred handler shape). Stays under `query-get` so
+                // the wire-only getter finalises the loopback half even
+                // with no queryable plane (R311fq).
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.replies.deliver_local_final(rid);
+                });
+                self.drain_deferred_fires();
+            }
 
             Ok(handle)
         }
@@ -1294,7 +1331,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                             observer.replies.deliver_local_reply(&inbound);
                         }
                     }
-                    observer.replies.deliver_local_final(rid);
                 }
                 handle
             });
@@ -1314,9 +1350,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 }
             }
 
-            // R311lg — drain the loopback-staged fires; see
-            // `Session::query`.
+            // R311lg / R311li — drain + post-drain loopback Final; see
+            // `Session::query` for the ordering rationale.
             self.drain_deferred_fires();
+
+            if allows_local {
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.replies.deliver_local_final(rid);
+                });
+                self.drain_deferred_fires();
+            }
 
             Ok(handle)
         }
@@ -1630,16 +1673,27 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         keyexpr: impl Into<String>,
         options: QueryableOptions,
         callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
-    ) -> Result<Queryable<R, T>, QueryableAliasError> {
+    ) -> Result<Queryable<R, T>, QueryableAliasError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         #[cfg(feature = "query-queryable")]
         {
             let keyexpr_string = keyexpr.into();
+            // R311li — DEFERRED FIRE (the R311lf lock-free callback
+            // invariant on the queryable plane): the registry stores a
+            // staging sink; the handler runs at a drain site OUTSIDE
+            // the observer lock over a job-local responder, may
+            // re-enter any observer-locking session API, and its
+            // replies precede the matching ResponseFinal on the wire
+            // (the dispatch SSOT emits finals after the drain).
+            let (cell, sink) = self.deferred_query_sink(callback);
             // R311df — observer access via R::with_mutex_mut closure form.
             let id = R::with_mutex_mut(&self.observer, |observer| {
                 observer.queryables.register_with_locality(
                     keyexpr_string.clone(),
                     options.allowed_origin,
-                    callback,
+                    sink,
                 )
             });
             Ok(Queryable {
@@ -1647,6 +1701,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 id,
                 keyexpr: keyexpr_string,
                 options,
+                cell,
             })
         }
         #[cfg(not(feature = "query-queryable"))]
@@ -1675,7 +1730,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         inline_suffix: Option<&str>,
         options: QueryableOptions,
         callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
-    ) -> Result<Queryable<R, T>, QueryableAliasError> {
+    ) -> Result<Queryable<R, T>, QueryableAliasError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
         #[cfg(feature = "query-queryable")]
         {
             let base = self

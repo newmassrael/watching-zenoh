@@ -77,6 +77,15 @@ pub trait QueryView {
     /// Request id from the outer `Request.rid` envelope (correlation key
     /// for the matching reply chain).
     fn rid(&self) -> u64;
+    /// R311li — `true` when the query originated in-process (the
+    /// requester is this same session's `query` loopback branch), so a
+    /// reply must route back into the local reply registry rather than
+    /// onto the wire. Mirrors zenoh-pico's `_z_query_t._is_local`.
+    /// Default `false` (wire origin) so `QueryView` impls that predate
+    /// this accessor stay valid.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// Outbound emit contract a [`QuerySink`] writes replies through. The
@@ -144,6 +153,9 @@ pub struct BorrowedQuery<'a> {
     pub source_info: Option<&'a crate::sample::SourceInfo>,
     /// Request id (correlation key).
     pub rid: u64,
+    /// R311li — in-process loopback origin marker (see
+    /// [`QueryView::is_local`]). `false` for wire dispatch.
+    pub is_local: bool,
 }
 
 impl QueryView for BorrowedQuery<'_> {
@@ -162,6 +174,9 @@ impl QueryView for BorrowedQuery<'_> {
     }
     fn rid(&self) -> u64 {
         self.rid
+    }
+    fn is_local(&self) -> bool {
+        self.is_local
     }
 }
 
@@ -282,6 +297,7 @@ mod tests {
                 attachment: None,
                 source_info: None,
                 rid: 42,
+                is_local: false,
             },
             &mut out,
         );
@@ -333,6 +349,7 @@ mod tests {
                 attachment: None,
                 source_info: None,
                 rid: 1,
+                is_local: false,
             },
             &mut out,
         );
@@ -343,6 +360,7 @@ mod tests {
                 attachment: Some(b"att"),
                 source_info: None,
                 rid: 2,
+                is_local: false,
             },
             &mut out,
         );

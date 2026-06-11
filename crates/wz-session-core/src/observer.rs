@@ -504,22 +504,38 @@ impl ApplicationLayerObserver {
     /// enqueue synchronously onto the OutboundWriteDriver mpsc
     /// channel, so the wire order mirrors enqueue order: every
     /// Reply for rid R precedes the matching ResponseFinal for R.
+    ///
+    /// R311li — this combined form (replies AND finals under one call)
+    /// remains the raw-registry / MCU direct-drive drain. The
+    /// Session-tier dispatch SSOT instead calls
+    /// [`Self::flush_pending_replies`] under the observer lock and
+    /// emits the rids from [`Self::take_pending_final_rids`] AFTER the
+    /// deferred-fire drain, so a deferred queryable handler's replies
+    /// (emitted at the drain, outside the lock) still precede their
+    /// ResponseFinal on the wire.
     pub fn flush_pending<S: ResponseSink>(&mut self, actions: &S) {
+        self.flush_pending_replies(actions);
+        #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+        for rid in self.pending_final_rids.drain(..) {
+            actions.send_response_final(rid);
+        }
+        #[cfg(all(feature = "query-queryable", not(feature = "codec-response-final")))]
+        self.pending_final_rids.clear();
+    }
+
+    /// R311li — drain every pending buffer EXCEPT the queryable
+    /// ResponseFinal rids (replies, declarer interest-responses,
+    /// terminated liveliness-get prunes). The Session-tier dispatch
+    /// SSOT pairs this with [`Self::take_pending_final_rids`]; raw /
+    /// MCU consumers keep the combined [`Self::flush_pending`].
+    pub fn flush_pending_replies<S: ResponseSink>(&mut self, actions: &S) {
         #[cfg(feature = "query-queryable")]
-        {
-            for reply in self.pending_replies.drain(..) {
-                // W3: a reply whose bounded field overflows cannot be wire-encoded
-                // (the codec would reject it too); skip it and continue the drain.
-                if let Ok(response) = reply.into_response() {
-                    actions.send_response(response);
-                }
+        for reply in self.pending_replies.drain(..) {
+            // W3: a reply whose bounded field overflows cannot be wire-encoded
+            // (the codec would reject it too); skip it and continue the drain.
+            if let Ok(response) = reply.into_response() {
+                actions.send_response(response);
             }
-            #[cfg(feature = "codec-response-final")]
-            for rid in self.pending_final_rids.drain(..) {
-                actions.send_response_final(rid);
-            }
-            #[cfg(not(feature = "codec-response-final"))]
-            self.pending_final_rids.clear();
         }
         // R283 / R311hn — drain the declarer-side interest-response
         // staging buffer through the borrowed emit seam. Every staged
@@ -566,6 +582,18 @@ impl ApplicationLayerObserver {
             feature = "liveliness-get"
         )))]
         let _ = actions;
+    }
+
+    /// R311li — take the staged queryable ResponseFinal rids out of the
+    /// observer. The Session-tier dispatch SSOT calls this under the
+    /// observer lock (after [`Self::flush_pending_replies`]) and emits
+    /// each rid through the actions layer AFTER the deferred-fire drain
+    /// — the Reply-before-Final invariant owner on the deferred path
+    /// (the combined [`Self::flush_pending`] owns it on the inline /
+    /// MCU path).
+    #[cfg(feature = "query-queryable")]
+    pub fn take_pending_final_rids(&mut self) -> Vec<u64> {
+        core::mem::take(&mut self.pending_final_rids)
     }
 
     /// Combined fan + drain — the production single-call form used
