@@ -206,12 +206,14 @@ use crate::session_glue::{ConsolidationMode, QueryTarget};
 // Each holds one responsibility cluster (its options + handle + error
 // types and their impls); `pub use <mod>::*` preserves the public
 // `wz_runtime_tokio::session::<Type>` paths unchanged.
+mod decl_listener;
 mod liveliness;
 mod matching_listener;
 mod publisher;
 mod querier;
 mod queryable;
 mod subscriber;
+pub use decl_listener::*;
 pub use liveliness::*;
 pub use matching_listener::*;
 pub use publisher::*;
@@ -264,7 +266,18 @@ pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
     /// lock-free and may re-enter any observer-locking session API.
     /// Cheap-`Clone` handle (Arc inside), shared with every deferred
     /// sink this session registers.
-    #[cfg(feature = "session-matching")]
+    ///
+    /// R311lc — the gate union grew with the decl-sink planes: the
+    /// `declare_remote_*_listener` staging sinks (decl_listener.rs)
+    /// share this queue, so the field exists under any feature that can
+    /// construct a deferred sink (mirrors the wz-session-core
+    /// `deferred_fire` module gate union).
+    #[cfg(any(
+        feature = "session-matching",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token",
+    ))]
     fires: wz_session_core::deferred_fire::DeferredFireQueue<R>,
     /// R311cw — the trait-mediated monotonic clock the query / get
     /// methods use to compute reply-pending deadlines. Folded from
@@ -298,7 +311,12 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
         Self {
             actions: self.actions.clone(),
             observer: self.observer.clone(),
-            #[cfg(feature = "session-matching")]
+            #[cfg(any(
+                feature = "session-matching",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "liveliness-token",
+            ))]
             fires: self.fires.clone(),
             clock: self.clock.clone(),
         }
@@ -393,9 +411,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             actions,
             observer,
             // R311kz — fresh deferred-fire queue per logical session;
-            // the deferred matching sinks clone handles out of it at
-            // registration.
-            #[cfg(feature = "session-matching")]
+            // the deferred matching + decl-listener sinks (R311lc)
+            // clone handles out of it at registration.
+            #[cfg(any(
+                feature = "session-matching",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "liveliness-token",
+            ))]
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
         };
@@ -432,9 +455,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     }
 
     /// R311kz — drain the deferred-fire queue, running every staged
-    /// matching-listener callback OUTSIDE the observer mutex (the F-6
-    /// deferred-fire contract). The drive-loop dispatch site calls this
-    /// once per iteration event, AFTER its `observer` lock scope ends:
+    /// listener callback (matching listeners + the R311lc decl
+    /// listeners) OUTSIDE the observer mutex (the F-6 deferred-fire
+    /// contract). The drive-loop dispatch site calls this once per
+    /// iteration event, AFTER its `observer` lock scope ends:
     ///
     /// ```text
     /// { observer.lock().dispatch(event, &actions); }  // lock dropped
@@ -454,14 +478,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// this session's observer MUST pair it with a drain.
     ///
     /// R311g1 signature-stability — the method exists across feature
-    /// states; minus `session-matching` no deferred sink can exist and
+    /// states; minus the deferred-sink feature union (`session-matching`
+    /// and the R311lc decl-sink planes) no deferred sink can exist and
     /// the body is a constant `0`.
     pub fn drain_deferred_fires(&self) -> usize {
-        #[cfg(feature = "session-matching")]
+        #[cfg(any(
+            feature = "session-matching",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token",
+        ))]
         {
             self.fires.drain_and_fire()
         }
-        #[cfg(not(feature = "session-matching"))]
+        #[cfg(not(any(
+            feature = "session-matching",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token",
+        )))]
         {
             0
         }

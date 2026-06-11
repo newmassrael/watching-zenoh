@@ -94,6 +94,17 @@ impl DeclView for BorrowedDecl<'_> {
 /// registry fans inbound `Declare(DeclX)` records to. See the [module
 /// docs](self) for the AP ([`BoxedDeclSink`]) vs MCU (consumer-supplied
 /// closed `enum`) backing contract.
+///
+/// R311kj — RE-ENTRANCY: the production dispatch invokes this while the
+/// owning registry (and on the AP profile the WHOLE
+/// `ApplicationLayerObserver` mutex) is held, so a DIRECT sink install
+/// must NOT call back into any observer-locking session API or it
+/// self-deadlocks (std Mutex) / RefCell-panics (MCU). R311lc — the
+/// Session-tier `declare_remote_*_listener` surfaces install DEFERRED
+/// staging sinks (see the `deferred_fire` module) whose user callback
+/// runs outside the observer lock with NO re-entrancy constraint; the
+/// inline contract here remains exactly for hand-installed sinks on the
+/// raw registries.
 pub trait DeclSink {
     /// Observe one inbound peer declaration. The [`DeclView`] is borrowed
     /// for the duration of the call only.
@@ -105,6 +116,8 @@ pub trait DeclSink {
 /// the `id` (the peer identifies the prior declaration by id; the wire
 /// `UndeclX` body has no keyexpr), so this is a bare scalar — the
 /// control-plane analogue of the reply seam's `on_final(rid)`.
+/// Carries the same R311kj inline re-entrancy constraint (and the same
+/// R311lc deferred Session-tier alternative) as [`DeclSink`].
 pub trait UndeclSink {
     /// Observe one inbound peer undeclaration, identified by its `id`.
     fn on_undeclared(&mut self, id: u64);

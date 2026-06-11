@@ -5061,3 +5061,286 @@ fn publisher_matching_listener_rejects_typed_when_feature_off() {
         "session-matching off must reject typed"
     );
 }
+// ── R311lc Session::declare_remote_*_listener (deferred decl events) ──
+
+/// R311lc — the subscriber-plane decl listener delivers BOTH event
+/// directions as owned [`DeclEvent`]s through the deferred-fire queue
+/// (dispatch + drain, the production drive-loop shape), and
+/// `undeclare()` removes both staging sinks from the registry (the
+/// R311lb id-keyed currency) so later activity is silent.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn remote_subscriber_listener_delivers_decl_and_undecl_events() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let baseline = {
+        let obs = session.observer().lock().unwrap();
+        (
+            obs.remote_subscribers.on_decl_len(),
+            obs.remote_subscribers.on_undecl_len(),
+        )
+    };
+    let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = session
+        .declare_remote_subscriber_listener(move |e| log_cb.lock().unwrap().push(e))
+        .expect("declare-subscriber is on in this lane");
+
+    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(body, &HashMap::new());
+        session.drain_deferred_fires();
+    };
+
+    dispatch(&make_decl_subscriber(5, "home/temp"));
+    dispatch(&make_undecl_subscriber(5));
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            DeclEvent::Declared {
+                id: 5,
+                keyexpr: "home/temp".to_string()
+            },
+            DeclEvent::Undeclared { id: 5 },
+        ],
+        "both directions arrive as owned events in wire order"
+    );
+
+    assert!(listener.undeclare(), "undeclare removes both observers");
+    {
+        let obs = session.observer().lock().unwrap();
+        assert_eq!(
+            (
+                obs.remote_subscribers.on_decl_len(),
+                obs.remote_subscribers.on_undecl_len(),
+            ),
+            baseline,
+            "registry observer lists back to baseline (no leaked sinks)"
+        );
+    }
+    dispatch(&make_decl_subscriber(6, "home/temp"));
+    assert_eq!(log.lock().unwrap().len(), 2, "no fire after undeclare");
+}
+
+/// R311lc — queryable-plane mirror over `remote_queryables`.
+#[cfg(feature = "declare-queryable")]
+#[test]
+fn remote_queryable_listener_delivers_decl_and_undecl_events() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = session
+        .declare_remote_queryable_listener(move |e| log_cb.lock().unwrap().push(e))
+        .expect("declare-queryable is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_queryables
+        .dispatch_declare(&make_decl_queryable(7, "home/temp"), &HashMap::new());
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .remote_queryables
+        .dispatch_declare(&make_undecl_queryable(7), &HashMap::new());
+    // One drain runs both staged fires in stage order.
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            DeclEvent::Declared {
+                id: 7,
+                keyexpr: "home/temp".to_string()
+            },
+            DeclEvent::Undeclared { id: 7 },
+        ]
+    );
+    assert!(listener.undeclare());
+}
+
+/// R290-style local DeclToken / UndeclToken constructors for the
+/// R311lc token-plane listener test (the wz-session-core-test-support
+/// builders are not a dev-dep here per R311ds).
+#[cfg(feature = "liveliness-token")]
+fn make_decl_token(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareOwnedVariant {
+    use wz_codecs::decl_token::DeclToken;
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+    let suffix_len = Some(keyexpr_literal.len() as u64);
+    let keyexpr = Wireexpr {
+        body: WireexprVariant::WireexprLocal(WireexprLocal {
+            id: 0,
+            suffix_len,
+            suffix: Some(keyexpr_literal),
+        }),
+    };
+    wz_codecs::declare::DeclareVariant::CodecZenohDeclToken(DeclToken {
+        id,
+        keyexpr,
+        ..DeclToken::default()
+    })
+    .try_into_owned()
+    .unwrap()
+}
+
+#[cfg(feature = "liveliness-token")]
+fn make_undecl_token(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
+    use wz_codecs::undecl_token::UndeclToken;
+    wz_codecs::declare::DeclareVariant::CodecZenohUndeclToken(UndeclToken {
+        id,
+        ..UndeclToken::default()
+    })
+    .try_into_owned()
+    .unwrap()
+}
+
+/// R311lc — liveliness-token-plane mirror over the `liveliness`
+/// (peer-token) registry.
+#[cfg(feature = "liveliness-token")]
+#[test]
+fn remote_token_listener_delivers_decl_and_undecl_events() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let listener = session
+        .declare_remote_token_listener(move |e| log_cb.lock().unwrap().push(e))
+        .expect("liveliness-token is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness
+        .dispatch_declare(&make_decl_token(9, "liveliness/x"), &HashMap::new());
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness
+        .dispatch_declare(&make_undecl_token(9), &HashMap::new());
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            DeclEvent::Declared {
+                id: 9,
+                keyexpr: "liveliness/x".to_string()
+            },
+            DeclEvent::Undeclared { id: 9 },
+        ]
+    );
+    assert!(listener.undeclare());
+}
+
+/// R311lc — the F-6 deferred-fire contract on the decl plane: the
+/// callback runs OUTSIDE the observer mutex, so it may (1) consult an
+/// observer-locking session API, (2) register ANOTHER decl listener,
+/// and (3) self-undeclare via its own handle — each a deadlock under
+/// the R311kj inline constraint the raw registry sinks carry.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn decl_listener_callback_may_reenter_session_apis() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+
+    type ListenerSlot = Arc<Mutex<Option<DeclListener>>>;
+    let slot: ListenerSlot = Arc::new(Mutex::new(None));
+    let outer_log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let inner_log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let slot_cb = slot.clone();
+    let outer_log_cb = outer_log.clone();
+    let inner_log_cb = inner_log.clone();
+    let session_cb = session.clone();
+    let listener = session
+        .declare_remote_subscriber_listener(move |event| {
+            // (1) Observer-locking consult from inside the callback.
+            let declared = session_cb
+                .observer()
+                .lock()
+                .unwrap()
+                .remote_subscribers
+                .declared_count();
+            assert_eq!(declared, 1, "in-callback registry consult sees the decl");
+            outer_log_cb.lock().unwrap().push(event);
+            // (2) Register ANOTHER listener from inside the callback.
+            let inner_log = inner_log_cb.clone();
+            let inner = session_cb
+                .declare_remote_subscriber_listener(move |e2| {
+                    inner_log.lock().unwrap().push(e2);
+                })
+                .expect("re-entrant registration must succeed");
+            drop(inner); // dropped handle leaves the observers installed
+                         // (3) Self-undeclare via the listener's own handle.
+            if let Some(me) = slot_cb.lock().unwrap().take() {
+                assert!(me.undeclare(), "self-undeclare succeeds");
+            }
+        })
+        .expect("declare-subscriber is on in this lane");
+    *slot.lock().unwrap() = Some(listener);
+
+    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(body, &HashMap::new());
+        session.drain_deferred_fires();
+    };
+
+    dispatch(&make_decl_subscriber(2, "home/temp"));
+    assert_eq!(
+        *outer_log.lock().unwrap(),
+        vec![DeclEvent::Declared {
+            id: 2,
+            keyexpr: "home/temp".to_string()
+        }],
+        "callback ran once without deadlocking"
+    );
+
+    // The outer listener self-undeclared; only the inner listener
+    // (registered during the previous fire) observes the undeclare.
+    dispatch(&make_undecl_subscriber(2));
+    assert_eq!(
+        outer_log.lock().unwrap().len(),
+        1,
+        "self-undeclared outer listener never fires again"
+    );
+    assert_eq!(
+        *inner_log.lock().unwrap(),
+        vec![DeclEvent::Undeclared { id: 2 }],
+        "the listener registered from inside a callback is live"
+    );
+}
+
+/// R311g1 NEG — with `declare-subscriber` off the subscriber-plane
+/// surface keeps its signature and rejects typed.
+#[cfg(not(feature = "declare-subscriber"))]
+#[test]
+fn remote_subscriber_listener_rejects_typed_when_feature_off() {
+    let (session, _driver) = build_session();
+    assert!(
+        matches!(
+            session.declare_remote_subscriber_listener(|_| {}),
+            Err(DeclListenerError::FeatureDisabled)
+        ),
+        "declare-subscriber off must reject typed"
+    );
+}
