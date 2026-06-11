@@ -34610,6 +34610,52 @@
         "R311ln closed the consumer-plane register-then-send orphan family; R311lo closes the handle-RAII mem::forget leak family (all 4 handles)."
       ]
     },
+    "Round 311lp": {
+      "decision_summary": "R311lp keepalive MCU preset wiring verified ALREADY-COMPLETE (R311bs-ca preset membership + R311kx functional feature/forwards/lwIP loop); carry retired, no code change. diagnose-before-carry.",
+      "changes_bullets": [
+        "Decision-only / verification entry — no code change. Empirically falsified the R311kx \"keepalive MCU preset wiring\" carry.",
+        "transport-keepalive inventory atom = active (§5-1-transport, source keep_alive.scxml); facade feature forwards to runtime-tokio/lwip + session-lwip/core.",
+        "All 8 cargo presets (wz/Cargo.toml) AND all 8 atomic §6 preset sections list transport-keepalive — cargo mirror and atomic outputs both aligned.",
+        "lwIP MCU drive loop (wz-session-lwip/src/session_drive.rs:196-199) calls check_keepalive_deadline gated on transport-keepalive.",
+        "Wiring landed across R311bs-ca (preset membership 2026-05-23) + R311kx (functional feature + runtime forwards + lwIP loop 2026-06-11); carry was a defensive over-estimate, now retired."
+      ],
+      "verification_bullets": [
+        "audit-catalog-status.sh: catalog status truthfulness OK (atom status vs cargo gate aligned).",
+        "Enumerated 8/8 cargo presets + 8/8 atomic §6 preset sections: every preset contains transport-keepalive.",
+        "run-ci WZ_RUN_LAYER_G=1 (R311lo HEAD): EXIT=0 incl Layer G MCU lwIP preset builds — keepalive functional in MCU presets.",
+        "No code mutation; validate_workspace orphan delta = 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "minor D/E + A1 pool (queryable-over-multicast reply sink / multicast-declarations atom flip / MCU multicast loop) remain open — next priority.",
+        "keepalive MCU preset wiring retired here (verified already-complete); register-then-send orphan (R311ln) + handle-RAII leak (R311lo) closed earlier this session."
+      ],
+      "publishable_decision_summary": "R311lp keepalive MCU preset wiring verified ALREADY-COMPLETE (R311bs-ca preset membership + R311kx functional feature/forwards/lwIP loop); carry retired, no code change. diagnose-before-carry.",
+      "publishable_changes_bullets": [
+        "Decision-only / verification entry — no code change. Empirically falsified the R311kx \"keepalive MCU preset wiring\" carry.",
+        "transport-keepalive inventory atom = active (§5-1-transport, source keep_alive.scxml); facade feature forwards to runtime-tokio/lwip + session-lwip/core.",
+        "All 8 cargo presets (wz/Cargo.toml) AND all 8 atomic §6 preset sections list transport-keepalive — cargo mirror and atomic outputs both aligned.",
+        "lwIP MCU drive loop (wz-session-lwip/src/session_drive.rs:196-199) calls check_keepalive_deadline gated on transport-keepalive.",
+        "Wiring landed across R311bs-ca (preset membership 2026-05-23) + R311kx (functional feature + runtime forwards + lwIP loop 2026-06-11); carry was a defensive over-estimate, now retired."
+      ],
+      "publishable_verification_bullets": [
+        "audit-catalog-status.sh: catalog status truthfulness OK (atom status vs cargo gate aligned).",
+        "Enumerated 8/8 cargo presets + 8/8 atomic §6 preset sections: every preset contains transport-keepalive.",
+        "run-ci WZ_RUN_LAYER_G=1 (R311lo HEAD): EXIT=0 incl Layer G MCU lwIP preset builds — keepalive functional in MCU presets.",
+        "No code mutation; validate_workspace orphan delta = 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "minor D/E + A1 pool (queryable-over-multicast reply sink / multicast-declarations atom flip / MCU multicast loop) remain open — next priority.",
+        "keepalive MCU preset wiring retired here (verified already-complete); register-then-send orphan (R311ln) + handle-RAII leak (R311lo) closed earlier this session."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
