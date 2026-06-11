@@ -216,20 +216,12 @@ mod keepalive_emitter {
         let wire = rec.snapshot().sends.last().unwrap().0.clone();
 
         let (receiver_actions, _engine2) = fresh_setup();
-        assert!(receiver_actions
-            .last_inbound_keepalive_at
-            .lock()
-            .unwrap()
-            .is_none());
+        assert!(receiver_actions.last_inbound_at.lock().unwrap().is_none());
         receiver_actions
             .handle_inbound(&wire)
             .expect("emitted KeepAlive must parse");
         assert!(
-            receiver_actions
-                .last_inbound_keepalive_at
-                .lock()
-                .unwrap()
-                .is_some(),
+            receiver_actions.last_inbound_at.lock().unwrap().is_some(),
             "inbound KeepAlive resets the receiver's lease window"
         );
     }
@@ -239,7 +231,7 @@ mod keepalive_emitter {
     /// keep emitting KeepAlives at lease/3 cadence from the loop's own
     /// deadline arming, and the lease deadline must still fire (the
     /// R311kw-carried wake-arming fix: the pre-kx loop armed from
-    /// `last_inbound_keepalive_at` alone, so with no peer KeepAlive this
+    /// `last_inbound_at` alone, so with no peer KeepAlive this
     /// test would block on the link poll forever).
     #[tokio::test]
     async fn drive_loop_emits_keepalives_and_expires_silent_peer() {

@@ -301,12 +301,12 @@ fn parse_inbound_decodes_keep_alive_frame() {
 }
 
 #[test]
-fn handle_inbound_keepalive_updates_last_inbound_keepalive_at() {
+fn handle_inbound_keepalive_updates_last_inbound_at() {
     let driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
     let actions = new_session_actions(driver, fixture_session_init_params(), TokioTime::new());
 
     assert!(
-        actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
+        actions.last_inbound_at.lock().unwrap().is_none(),
         "slot starts empty"
     );
 
@@ -320,7 +320,7 @@ fn handle_inbound_keepalive_updates_last_inbound_keepalive_at() {
     let post = actions.clock.now_monotonic_ms();
 
     let stamp = actions
-        .last_inbound_keepalive_at
+        .last_inbound_at
         .lock()
         .unwrap()
         .expect("KeepAlive must populate the timestamp slot");
@@ -338,14 +338,14 @@ fn handle_inbound_non_keepalive_does_not_touch_keepalive_slot() {
     // Seed the slot to verify a non-KeepAlive frame leaves it
     // untouched (no spurious overwrite).
     let seeded = actions.clock.now_monotonic_ms();
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(seeded);
+    *actions.last_inbound_at.lock().unwrap() = Some(seeded);
 
     // Drive an InitAck wire through handle_inbound (R68a path).
     let cookie = vec![0xAB, 0xCD];
     let wire = craft_initack_wire(&cookie);
     let _ = actions.handle_inbound(&wire).expect("InitAck parses");
 
-    let after = *actions.last_inbound_keepalive_at.lock().unwrap();
+    let after = *actions.last_inbound_at.lock().unwrap();
     assert_eq!(
         after,
         Some(seeded),

@@ -226,10 +226,13 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
 /// `critical_section` mutex behind one seam; the reads are SEQUENTIAL, never
 /// nested, so the non-reentrant MCU mutex is safe.
 ///
-/// Baseline (R84) = `max(established_at, last_inbound_keepalive_at)`: the
-/// KeepAlive stamp resets the window per peer ping, the established stamp covers
-/// the pre-first-KeepAlive window so the lease has a defined start at Established
-/// entry (session-fsm §2.5). Both `None` -> `NoBaseline` (no FSM mutation).
+/// Baseline (R84) = `max(established_at, last_inbound_at)`: the RX-activity
+/// stamp resets the window on EVERY successfully parsed inbound message
+/// (R311la — zenoh-pico `_received` parity, unicast/rx.c:88; the former
+/// KeepAlive-only stamp expired sustained data-only flows), the established
+/// stamp covers the pre-first-inbound window so the lease has a defined start
+/// at Established entry (session-fsm §2.5). Both `None` -> `NoBaseline` (no
+/// FSM mutation).
 ///
 /// `now_ms` is parameterised for test determinism; production callers pass
 /// `clock.now_monotonic_ms()` (the same epoch [`SessionLinkActions::clock`]
@@ -274,25 +277,26 @@ fn max_stamp(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 }
 
 /// R311kx — absolute lease-expiry deadline (ms, the shared monotonic
-/// epoch): `max(established_at, last_inbound_keepalive_at) +
+/// epoch): `max(established_at, last_inbound_at) +
 /// adopted_lease_ms`, or `None` pre-Established (no baseline). The wake
 /// twin of [`check_lease_deadline`] — both drive loops arm their sleep /
 /// busy-poll compare on this value and the comparator re-derives the same
 /// deadline at fire time, so the two cannot disagree.
 ///
 /// Closes the R311kw-carried wake-arming gap: the prior loop arming read
-/// `last_inbound_keepalive_at` alone with the LOCAL `params.lease_ms`
-/// window, so an Established peer that never sent a KeepAlive left the
-/// loop blocked on the link poll forever (the R84 `established_at`
-/// comparator fallback was unreachable — no wake ever fired to invoke
-/// it), and a shorter peer-advertised lease (R311kv min) woke late by
-/// the difference.
+/// the inbound stamp alone with the LOCAL `params.lease_ms` window, so an
+/// Established peer that never sent anything left the loop blocked on the
+/// link poll forever (the R84 `established_at` comparator fallback was
+/// unreachable — no wake ever fired to invoke it), and a shorter
+/// peer-advertised lease (R311kv min) woke late by the difference.
+/// R311la — the inbound stamp is the any-RX `last_inbound_at` (pico
+/// `_received` parity), not the former KeepAlive-only slot.
 pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) -> Option<u64> {
-    let keepalive = R::with_mutex_mut(&actions.last_inbound_keepalive_at, |g| *g);
+    let inbound = R::with_mutex_mut(&actions.last_inbound_at, |g| *g);
     let established = R::with_mutex_mut(&actions.established_at, |g| *g);
-    max_stamp(established, keepalive).map(|b| b.saturating_add(actions.adopted_lease_ms()))
+    max_stamp(established, inbound).map(|b| b.saturating_add(actions.adopted_lease_ms()))
 }
 
 /// R311kx — absolute next keepalive TX deadline (ms):

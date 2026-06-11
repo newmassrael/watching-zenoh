@@ -4,7 +4,7 @@
 //! R77 — lease deadline driver wiring tests.
 //!
 //! Exercises `check_lease_deadline`, the production-shaped helper
-//! that consumes `SessionLinkActions::last_inbound_keepalive_at`
+//! that consumes `SessionLinkActions::last_inbound_at`
 //! (populated by R72b on every inbound KeepAlive) and injects
 //! `SessionFsmUnicastEvent::LeaseExpired` into the engine when the
 //! window has elapsed, so the session-fsm
@@ -57,7 +57,7 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActio
 
 // ── Scenario 1: both baseline slots empty (pre-Established) →
 //                NoBaseline, state unchanged. R84 changed this from
-//                "last_inbound_keepalive_at is empty" to "both slots
+//                "last_inbound_at is empty" to "both slots
 //                are empty" because Established.onentry now populates
 //                established_at, so a post-Established session always
 //                has at least one baseline.
@@ -66,7 +66,7 @@ fn r77_no_baseline_when_both_slots_empty_pre_established() {
     let (actions, mut engine) = fresh_setup();
     // Do NOT drive to Established — both slots stay None.
     assert!(
-        actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
+        actions.last_inbound_at.lock().unwrap().is_none(),
         "keepalive slot starts empty"
     );
     assert!(
@@ -97,7 +97,7 @@ fn r84_within_lease_via_established_baseline_alone() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     assert!(
-        actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
+        actions.last_inbound_at.lock().unwrap().is_none(),
         "no peer KeepAlive yet — only established_at populated"
     );
     let established = actions
@@ -149,7 +149,7 @@ fn r84_expired_via_established_baseline_alone() {
 }
 
 // ── R84 Scenario C: both slots populated; the more recent stamp wins
-//                    via max(established_at, last_inbound_keepalive_at).
+//                    via max(established_at, last_inbound_at).
 //                    Stale established + recent KeepAlive ⇒ WithinLease.
 #[test]
 fn r84_keepalive_wins_over_stale_established_via_max() {
@@ -173,7 +173,7 @@ fn r84_keepalive_wins_over_stale_established_via_max() {
     // Counted from keepalive (recent): 1s < 10s ⇒ WithinLease.
     // max() picks keepalive ⇒ WithinLease (correct R84 semantics).
     let keepalive = established + 11 * 1000;
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(keepalive);
+    *actions.last_inbound_at.lock().unwrap() = Some(keepalive);
     let now = established + 12 * 1000;
 
     let outcome = check_lease_deadline(&actions, &mut engine, now);
@@ -194,7 +194,7 @@ fn r77_within_lease_when_stamp_recent() {
     drive_to_established(&mut engine);
     // Fixture lease_ms = 10_000 ⇒ 10s window (R311ku: always ms).
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    *actions.last_inbound_at.lock().unwrap() = Some(stamp);
     let pre_state = engine.get_current_state();
 
     let now = stamp + 1;
@@ -223,7 +223,7 @@ fn r77_expired_drives_established_to_closing() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    *actions.last_inbound_at.lock().unwrap() = Some(stamp);
 
     let now = stamp + 20 * 1000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
@@ -265,7 +265,7 @@ fn r77_expired_at_exact_lease_boundary() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    *actions.last_inbound_at.lock().unwrap() = Some(stamp);
 
     let now = stamp + 10_000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
@@ -285,7 +285,7 @@ fn r311kv_shorter_peer_lease_governs_deadline() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    *actions.last_inbound_at.lock().unwrap() = Some(stamp);
     // Peer advertised 2s in its OPEN; local window is the fixture 10s.
     *actions.peer_open_lease_ms.lock().unwrap() = Some(2_000);
 
@@ -308,7 +308,7 @@ fn r311kv_local_cap_bounds_longer_peer_lease() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     let stamp = actions.clock.now_monotonic_ms();
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    *actions.last_inbound_at.lock().unwrap() = Some(stamp);
     *actions.peer_open_lease_ms.lock().unwrap() = Some(60_000);
 
     let outcome = check_lease_deadline(&actions, &mut engine, stamp + 10_000);
@@ -318,4 +318,153 @@ fn r311kv_local_cap_bounds_longer_peer_lease() {
         "local 10s cap bounds the peer's 60s advertisement"
     );
     assert_eq!(engine.get_current_state(), S::Closing);
+}
+
+// ── R311la: any-RX lease baseline (zenoh-pico `_received` parity,
+//    unicast/rx.c:88 — EVERY successfully decoded transport message
+//    resets the lease, lease.c:141-149). The former KeepAlive-only
+//    stamp expired sustained data-only flows: the R311kx TX
+//    suppression guarantees a busy peer sends no KeepAlives, so the
+//    peer's data frames are its liveness signal.
+
+/// A DATA frame (T_MID_FRAME) resets the lease window exactly as a
+/// KeepAlive does — the stamp lives at the `handle_inbound` success
+/// chokepoint, not in the KeepAlive arm.
+#[cfg(feature = "codec-frame")]
+#[test]
+fn r311la_data_frame_resets_lease_window() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    assert!(
+        actions.last_inbound_at.lock().unwrap().is_none(),
+        "no inbound yet"
+    );
+    // Minimal reliable FRAME: header (T_MID_FRAME 0x05 | R 0x20) + VLE
+    // sn 0 + empty payload batch.
+    actions
+        .handle_inbound(&[0x25, 0x00])
+        .expect("minimal frame parses");
+    let stamp = actions
+        .last_inbound_at
+        .lock()
+        .unwrap()
+        .expect("data frame stamps the RX-activity slot");
+
+    let outcome = check_lease_deadline(&actions, &mut engine, stamp + 9_999);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::WithinLease,
+        "the data frame opened a fresh lease window"
+    );
+    assert_eq!(engine.get_current_state(), S::Established);
+}
+
+/// An `Unknown` MID does NOT stamp: zenoh-pico never reaches its
+/// `_received` mark for an unrecognized MID (the decode fails before
+/// rx.c:88), and wz tears the session down on the FramingError
+/// projection anyway.
+#[test]
+fn r311la_unknown_mid_does_not_stamp() {
+    let (actions, _engine) = fresh_setup();
+    actions
+        .handle_inbound(&[0x1F])
+        .expect("unknown MID parses to InboundFrame::Unknown");
+    assert!(
+        actions.last_inbound_at.lock().unwrap().is_none(),
+        "Unknown must not count as RX activity (pico decode-success scope)"
+    );
+}
+
+/// The Finding-A regression pin, end-to-end: a session whose peer
+/// sends ONLY data frames (no KeepAlives — exactly what the R311kx TX
+/// suppression produces on a busy sender) survives well past the
+/// adopted lease window. Wall-clock-short lease per the R76b loop
+/// testing convention: 300 ms lease, a data frame every ~80 ms, run
+/// ~3 windows. Pre-R311la this expired at established+300ms.
+#[cfg(feature = "codec-frame")]
+#[tokio::test]
+async fn r311la_data_only_peer_survives_past_lease_window() {
+    use std::sync::{Arc as StdArc, Mutex};
+    use wz_runtime_core::TimeSource;
+    use wz_runtime_tokio::session_glue::{
+        drive_session_until_terminal, IterationEvent, SessionTimeouts,
+    };
+    use wz_runtime_tokio::{LinkDriver, Reliability, TxFrame};
+    use wz_session_core::link::{LinkEvent, RxFrame};
+    use wz_session_core::session_init_params::SessionInitParams;
+
+    /// Yields one minimal data FRAME every 80 ms, forever — a peer
+    /// that is busy publishing and (pico-parity) never sends a
+    /// KeepAlive.
+    struct PacedDataDriver {
+        sn: u64,
+    }
+    impl LinkDriver for PacedDataDriver {
+        async fn open(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn send(
+            &mut self,
+            _frame: &TxFrame<'_>,
+            _reliability: Reliability,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn poll_event(&mut self) -> LinkEvent {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            let sn = (self.sn & 0x7F) as u8;
+            self.sn += 1;
+            LinkEvent::Rx(RxFrame::new(vec![0x25, sn]))
+        }
+    }
+
+    let params = SessionInitParams {
+        lease_ms: 300,
+        ..fixture_session_init_params()
+    };
+    let clock = TokioTime::new();
+    let actions = new_session_actions(Arc::new(NoopOutboundDriver::default()), params, clock);
+    let mut engine = new_session_engine(&actions);
+    engine.initialize();
+    drive_to_established(&mut engine);
+    let started = clock.now_monotonic_ms();
+
+    let mut driver = PacedDataDriver { sn: 0 };
+    let lease_expired = StdArc::new(Mutex::new(0u32));
+    let lease_for_cb = lease_expired.clone();
+    let outcome = drive_session_until_terminal(
+        &mut driver,
+        &actions,
+        &mut engine,
+        // ~12 data events x 80 ms ≈ 960 ms ≈ 3 lease windows, plus the
+        // interleaved deadline wakes.
+        Some(24),
+        &clock,
+        &SessionTimeouts::spec_defaults(),
+        |event| {
+            if let IterationEvent::Lease(LeaseCheckOutcome::Expired) = event {
+                *lease_for_cb.lock().unwrap() += 1;
+            }
+        },
+    )
+    .await;
+
+    let elapsed = clock.now_monotonic_ms() - started;
+    assert!(
+        elapsed >= 600,
+        "the loop must have run past two lease windows, ran {elapsed}ms"
+    );
+    assert_eq!(
+        *lease_expired.lock().unwrap(),
+        0,
+        "a data-only peer must never be lease-expired (pico _received parity)"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::Established,
+        "session alive at iteration cap, outcome {outcome:?}"
+    );
 }

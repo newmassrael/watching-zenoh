@@ -660,7 +660,7 @@ pub(crate) fn reassembly_config() -> ReassemblyConfig {
 /// Each iteration:
 ///   1. Returns `Terminated` if `engine.is_in_final_state()` already.
 ///   2. Returns `IterationLimit` if `max_iters` is exhausted.
-///   3. Reads `last_inbound_keepalive_at`. If `Some(stamp)`, computes
+///   3. Reads `last_inbound_at`. If `Some(stamp)`, computes
 ///      the remaining lease window via `stamp + lease - now`.
 ///   4. Selects between `poll_and_dispatch_one` and a sleep of the
 ///      remaining window. The first-to-complete branch's outcome is
@@ -776,11 +776,12 @@ where
         // it disarms and the earlier of the lease-expiry deadline and the
         // keepalive TX deadline applies (R311kx — both via the
         // wz-session-core::drive wake helpers, so the arming shares the
-        // comparators' arithmetic: baseline max(established_at, activity
-        // stamp) + the adopted min(local, peer) window; the prior arming
-        // read last_inbound_keepalive_at alone with the local window, so a
-        // peer that never sent a KeepAlive left the loop blocked on the
-        // link poll forever); in Init / between there is none (block on
+        // comparators' arithmetic: baseline max(established_at, any-RX
+        // `last_inbound_at` — R311la pico `_received` parity) + the
+        // adopted min(local, peer) window; the prior arming read the
+        // inbound stamp alone with the local window, so a silent peer
+        // left the loop blocked on the link poll forever); in Init /
+        // between there is none (block on
         // the link poll). `Some((abs_ms, Some(event)))` = handshake
         // timeout to raise; `Some((abs_ms, None))` = lease / keepalive
         // deadline (-> run both checks, each self-guarded).
@@ -2760,7 +2761,7 @@ mod reconnect_tx_tests {
 
         // Stamp the handshake-scoped slots the open path would populate.
         TokioRuntime::with_mutex_mut(&actions.established_at, |slot| *slot = Some(42));
-        TokioRuntime::with_mutex_mut(&actions.last_inbound_keepalive_at, |slot| *slot = Some(43));
+        TokioRuntime::with_mutex_mut(&actions.last_inbound_at, |slot| *slot = Some(43));
         TokioRuntime::with_mutex_mut(&actions.inbound_cookie, |slot| *slot = Some(vec![1, 2]));
         TokioRuntime::with_mutex_mut(&actions.inbound_peer_zid, |slot| *slot = Some(vec![9; 4]));
         assert!(actions.is_established());
@@ -2772,7 +2773,7 @@ mod reconnect_tx_tests {
             "reset must drop Established so declare gates hold until re-handshake"
         );
         assert!(TokioRuntime::with_mutex_mut(
-            &actions.last_inbound_keepalive_at,
+            &actions.last_inbound_at,
             |slot| slot.is_none()
         ));
         assert!(TokioRuntime::with_mutex_mut(

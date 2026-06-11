@@ -162,12 +162,13 @@ where
         // active handshake deadline; in Established it disarms and the
         // lease-expiry deadline applies — armed via the shared
         // `lease_wake_deadline` helper (R311kx: baseline
-        // max(established_at, keepalive-RX) + the adopted min(local, peer)
-        // window, the same arithmetic the comparator re-derives; the prior
-        // arming read last_inbound_keepalive_at alone with the local
-        // window, so a peer that never sent a KeepAlive was never
-        // lease-checked). Fire when `now_ms >= deadline_ms` — the
-        // busy-poll equivalent of the AP select! sleep branch.
+        // max(established_at, any-RX `last_inbound_at` — R311la pico
+        // `_received` parity) + the adopted min(local, peer) window, the
+        // same arithmetic the comparator re-derives; the prior arming
+        // read the inbound stamp alone with the local window, so a
+        // silent peer was never lease-checked). Fire when
+        // `now_ms >= deadline_ms` — the busy-poll equivalent of the AP
+        // select! sleep branch.
         let deadline: Option<(u64, Option<SessionFsmUnicastEvent>)> =
             match deadline_tracker.poll(engine.get_current_state(), now_ms) {
                 Some((dl_ms, ev)) => Some((dl_ms, Some(ev))),

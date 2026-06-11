@@ -199,13 +199,22 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
     pub inbound_cookie: R::Mutex<Option<Vec<u8>>>,
-    /// R72b — monotonic timestamp in milliseconds of the most
-    /// recently observed inbound KeepAlive frame. Populated by
-    /// `handle_inbound` for `InboundFrame::KeepAlive`. Consumers
-    /// compare this against `params.lease` to compute the lease
-    /// deadline; an absent timestamp falls back to session-start
-    /// time (lease counts from Established entry per session-fsm
-    /// §2.5 keepalive semantics).
+    /// R311la — monotonic timestamp in milliseconds of the most recent
+    /// successfully parsed inbound transport message of ANY kind
+    /// (Frame, Fragment, KeepAlive, handshake, Close — everything but
+    /// `Unknown`). Stamped once at the [`Self::handle_inbound`] success
+    /// chokepoint, the zenoh-pico `_received` parity point
+    /// (unicast/rx.c:88 marks the flag for every decoded message; the
+    /// lease task expires only when nothing arrived in the window,
+    /// lease.c:141-149). The former R72b shape
+    /// (`last_inbound_keepalive_at`, stamped in the KeepAlive arm
+    /// alone) expired a peer that sent only data frames — and the
+    /// R311kx TX suppression guarantees a busy peer sends no
+    /// KeepAlives, so a sustained data flow was killed after one lease
+    /// window. Consumers reach this through the
+    /// [`crate::drive::lease_wake_deadline`] baseline
+    /// (`max(established_at, this)`); an absent stamp falls back to
+    /// Established entry per session-fsm §2.5.
     ///
     /// Storage is `u64` milliseconds since the
     /// [`SessionLinkActions::clock`] epoch (R294: migrated from
@@ -215,20 +224,20 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// halved to 8-byte u64), and the storage form matches the
     /// [`TimeSource::now_monotonic_ms`] contract that wz callers
     /// will use across AP + Phase W targets.
-    pub last_inbound_keepalive_at: R::Mutex<Option<u64>>,
+    pub last_inbound_at: R::Mutex<Option<u64>>,
     /// R84 — monotonic timestamp in milliseconds captured when the
     /// session FSM enters the `Established` state. Populated by the
     /// `record_established_at()` Lua action wired to the
     /// `Established.onentry` block in `session_fsm_unicast.scxml`.
     /// Consumers (specifically `check_lease_deadline`) fall back to
-    /// this stamp when `last_inbound_keepalive_at` is `None` so a
-    /// peer that never sends a KeepAlive after handshake still
-    /// reaches `lease.expired -> Closing` per session-fsm §2.5
-    /// ("lease counts from Established entry"); the prior R77
-    /// behaviour was `NoBaseline` indefinitely in that case.
+    /// this stamp when `last_inbound_at` is `None` so a peer that
+    /// never sends anything after handshake still reaches
+    /// `lease.expired -> Closing` per session-fsm §2.5 ("lease counts
+    /// from Established entry"); the prior R77 behaviour was
+    /// `NoBaseline` indefinitely in that case.
     ///
     /// Storage form and clock semantics match
-    /// `last_inbound_keepalive_at` — both are `u64` ms since the
+    /// `last_inbound_at` — both are `u64` ms since the
     /// shared [`SessionLinkActions::clock`] epoch (R294 migration
     /// from `std::time::Instant`); the lease comparator subtracts
     /// them as pure `u64` arithmetic.
@@ -258,7 +267,7 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// the keepalive emitter compares `now - stamp >= lease/factor` — the
     /// same store-raw / compare-at-check split as the R311ks multicast
     /// per-peer sweep. `None` until the first emit; storage form and clock
-    /// epoch match `last_inbound_keepalive_at` (u64 ms, R294 scale).
+    /// epoch match `last_inbound_at` (u64 ms, R294 scale).
     pub last_outbound_at: R::Mutex<Option<u64>>,
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
@@ -640,7 +649,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             params,
             trace: R::new_mutex(ActionTrace::default()),
             inbound_cookie: R::new_mutex(None::<Vec<u8>>),
-            last_inbound_keepalive_at: R::new_mutex(None::<u64>),
+            last_inbound_at: R::new_mutex(None::<u64>),
             established_at: R::new_mutex(None::<u64>),
             peer_open_lease_ms: R::new_mutex(None::<u64>),
             last_outbound_at: R::new_mutex(None::<u64>),
@@ -1003,20 +1012,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     *slot = Some(body.lease);
                 });
             }
-            #[cfg(feature = "codec-keep-alive")]
-            InboundFrame::KeepAlive { .. } => {
-                // R72b — record receive time so the lease deadline
-                // comparator (now_ms - stamp_ms < lease_ms) advances.
-                // R294 — read `self.clock.now_monotonic_ms()` (shared
-                // epoch with drive_session_until_terminal's clock
-                // param) so the lease comparator's later `now_ms`
-                // read is on the same monotonic scale.
-                let now = self.clock.now_monotonic_ms();
-                R::with_mutex_mut(&self.last_inbound_keepalive_at, |slot| {
-                    *slot = Some(now);
-                });
-            }
             _ => {}
+        }
+        // R311la — RX-activity stamp, the zenoh-pico `_received` parity
+        // point (unicast/rx.c:88 sets the flag for EVERY successfully
+        // decoded transport message, and the lease task expires only
+        // when nothing arrived in the window, lease.c:141-149). The
+        // former R72b stamp lived in the KeepAlive arm alone, so a peer
+        // sending only data frames was expired after one lease window —
+        // and the R311kx TX suppression guarantees a busy peer sends no
+        // KeepAlives, making the gap live. `Unknown` is excluded: pico
+        // never reaches its stamp for an unrecognized MID (the decode
+        // fails before rx.c:88), and the FSM tears the session down on
+        // the FramingError projection anyway. R294 — the stamp shares
+        // the monotonic epoch with the drive loop's clock.
+        if !matches!(frame, InboundFrame::Unknown { .. }) {
+            let now = self.clock.now_monotonic_ms();
+            R::with_mutex_mut(&self.last_inbound_at, |slot| {
+                *slot = Some(now);
+            });
         }
         Ok(frame)
     }
@@ -2914,7 +2928,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is cleared field-by-field instead of being dropped wholesale.
     ///
     /// Cleared (per-transport): `inbound_cookie`,
-    /// `inbound_opensyn_cookie`, `last_inbound_keepalive_at`,
+    /// `inbound_opensyn_cookie`, `last_inbound_at`,
     /// `established_at` (so [`Self::is_established`] reads `false` until
     /// the re-handshake completes), `inbound_peer_zid`,
     /// `inbound_peer_init_caps`, the RX SN gate (`rx_sn`, re-seeded by
@@ -2943,7 +2957,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.transport_available, |g| *g = false);
             R::with_mutex_mut(&self.inbound_cookie, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
-            R::with_mutex_mut(&self.last_inbound_keepalive_at, |slot| *slot = None);
+            R::with_mutex_mut(&self.last_inbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.established_at, |slot| *slot = None);
             // R311kw — the outbound stamp is per-transport: the replacement
             // link starts with no TX history (pico's fresh transport
@@ -3310,7 +3324,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         let a = &self.inner;
         R::with_mutex_mut(&a.trace, |t| t.record_established_at += 1);
         // R294 — `a.clock.now_monotonic_ms()` reads the shared monotonic
-        // clock (same epoch as last_inbound_keepalive_at +
+        // clock (same epoch as last_inbound_at +
         // drive_session_until_terminal) so the lease comparator's u64
         // subtract stays on one scale. Read outside the slot closure.
         let now = a.clock.now_monotonic_ms();

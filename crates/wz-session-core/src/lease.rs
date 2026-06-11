@@ -51,29 +51,32 @@ pub const fn lease_from_wire(in_seconds: bool, wire_value: u64) -> u64 {
 /// `SessionLinkActions`' baseline stamps.
 ///
 /// Baseline selection (R84): the lease counts from
-/// `max(established_at, last_inbound_keepalive_at)` — whichever is
-/// most recent. Both slots being `None` means the FSM has not
-/// reached Established yet AND no peer KeepAlive has been
-/// observed (e.g. pre-handshake), and the helper defers via
-/// `NoBaseline`. The prior R77 baseline was `last_inbound_keepalive_at`
-/// alone, which left `NoBaseline` pinned indefinitely until the
-/// first peer KeepAlive — violating session-fsm §2.5 ("lease
+/// `max(established_at, last_inbound_at)` — whichever is most
+/// recent. R311la — `last_inbound_at` advances on EVERY successfully
+/// parsed inbound message (zenoh-pico `_received` parity,
+/// unicast/rx.c:88), not just KeepAlives, so a sustained data flow
+/// keeps the session alive exactly as pico's lease task does. Both
+/// slots being `None` means the FSM has not reached Established yet
+/// AND nothing has been received (e.g. pre-handshake), and the
+/// helper defers via `NoBaseline`. The prior R77 baseline was the
+/// inbound stamp alone, which left `NoBaseline` pinned indefinitely
+/// until the first inbound — violating session-fsm §2.5 ("lease
 /// counts from Established entry").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseCheckOutcome {
-    /// Both `established_at` and `last_inbound_keepalive_at` are
+    /// Both `established_at` and `last_inbound_at` are
     /// `None`. The helper makes no decision and does NOT inject
     /// `LeaseExpired`. In practice this surfaces only pre-Established
     /// (since `Established.onentry` populates `established_at` per
     /// R84). Production callers treat this as "still polling".
     NoBaseline,
     /// `now.duration_since(baseline) < params.lease_ms` where
-    /// `baseline = max(established_at, last_inbound_keepalive_at)`.
+    /// `baseline = max(established_at, last_inbound_at)`.
     /// The helper performed no FSM mutation; engine state is
     /// unchanged.
     WithinLease,
     /// `now.duration_since(baseline) >= params.lease_ms` where
-    /// `baseline = max(established_at, last_inbound_keepalive_at)`.
+    /// `baseline = max(established_at, last_inbound_at)`.
     /// The helper has invoked
     /// `engine.process_event(SessionFsmUnicastEvent::LeaseExpired)`
     /// so the session-fsm `lease.expired -> Closing(Expired)`
