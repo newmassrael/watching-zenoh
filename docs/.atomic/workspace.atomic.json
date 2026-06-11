@@ -34919,6 +34919,58 @@
         "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
       ]
     },
+    "Round 311lv": {
+      "decision_summary": "R311lv review fix (Finding 1+3): §3.1 multicast RxDispatch extracted to shared wz_session_core::multicast_rx::dispatch_multicast_inbound; AP + MCU loops de-duplicated; wire_const via session-core re-export.",
+      "changes_bullets": [
+        "Finding 1 (SSOT): the §3.1 multicast RxDispatch classify+dispatch (JOIN admit / Frame admit-and-fan / KeepAlive refresh) - duplicated across the AP multicast_glue and the MCU multicast_drive loops - extracted to a new wz_session_core::multicast_rx::dispatch_multicast_inbound (+ the MulticastRxNext enum). Both loops now call the one SSOT; each keeps only its reassembly-divergent tail (Fragment reassembly / out-of-order chain abort / pre-Close chain abort), handed back via MulticastRxNext, since those touch a profile-specific reassembly Router the runtime-agnostic SSOT does not own. This realises the engine-free contract both loops state (\"every decision PRIMITIVE is the shared wz_session_core SSOT; the loops own only the IO + clock structure\").",
+        "wz-runtime-tokio multicast_glue.rs: the inline JOIN / Frame / KeepAlive / Close match is replaced by the dispatch_multicast_inbound call + a MulticastRxNext tail. decode_join / validate_join / FrameIngest / parse_frame_payload / DriverLoopOutcome / wire_const imports retired from the lib (the helper owns them); parse_inbound / InboundFrame are now reassembly-gated (the lib names them only in the Fragment tail).",
+        "wz-session-lwip multicast_drive.rs: the same rewire. This foundation owns no reassembly Router, so its tail acts only on Close (Fragment / out-of-order are dropped, exactly as before).",
+        "Finding 3 (consistency): the AP loop no longer reaches wire_const via a direct wz_codecs path - its lib does not name wire_const after the extraction, and its tests use the wz_session_core::wire_const re-export, matching the MCU side (one path to the transport MIDs through the session SSOT).",
+        "Not in scope (recorded as carries): Finding 2 (run_session #[allow(too_many_arguments)]), Finding 4 (test-support feature vs sibling-crate), Finding 5 (flush_get_prunes drain asymmetry)."
+      ],
+      "verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not the tee-masked notification).",
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed; --features transport-multicast,reassembly: 15 passed - the extraction is behaviour-preserving (the AP reply / declare / push / fragment paths are unchanged; only the classify moved to the SSOT).",
+        "cargo test -p wz-session-lwip --features transport-multicast: 3 passed incl the real-lwIP peer-admit integration now routed through the shared dispatch_multicast_inbound; 10/10 consecutive runs (no-flaky rule).",
+        "cargo test -p wz-session-core --all-features --lib: 577 passed. The new multicast_rx module is gated all(session-multicast, codec-join, codec-frame, codec-close, alloc) so it compiles exactly where both loops need it.",
+        "clippy --all-targets -- -D warnings clean for both loops under transport-multicast and transport-multicast,reassembly. The C2 / C3 / C1q / C1m run-ci lanes lint the new SSOT + both rewired loops."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Finding 2 (NOT addressed here): run_session - the MCU unicast drive loop (session_drive.rs:87) - still carries #[allow(clippy::too_many_arguments)] on its 9-arg signature, now inconsistent with the MulticastDriveConfig parameter-object pattern the two multicast loops share (R311ls/R311lt). Give run_session a SessionDriveConfig param object in a follow-up round (its own scope: it touches the mcu_session_shell test + the mcu-session-acceptor deploy call sites). No #[allow] is the textbook end state.",
+        "Finding 4 (test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) are recorded as accepted judgment calls, not changed.",
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) + Fragment RX/TX + the facade wz transport-multicast forward + a footprint gate remain the open functional increments (R311lu carry).",
+        "minor D/E (cross-profile observer event-stream asymmetry) remains open."
+      ],
+      "publishable_decision_summary": "R311lv review fix (Finding 1+3): §3.1 multicast RxDispatch extracted to shared wz_session_core::multicast_rx::dispatch_multicast_inbound; AP + MCU loops de-duplicated; wire_const via session-core re-export.",
+      "publishable_changes_bullets": [
+        "Finding 1 (SSOT): the §3.1 multicast RxDispatch classify+dispatch (JOIN admit / Frame admit-and-fan / KeepAlive refresh) - duplicated across the AP multicast_glue and the MCU multicast_drive loops - extracted to a new wz_session_core::multicast_rx::dispatch_multicast_inbound (+ the MulticastRxNext enum). Both loops now call the one SSOT; each keeps only its reassembly-divergent tail (Fragment reassembly / out-of-order chain abort / pre-Close chain abort), handed back via MulticastRxNext, since those touch a profile-specific reassembly Router the runtime-agnostic SSOT does not own. This realises the engine-free contract both loops state (\"every decision PRIMITIVE is the shared wz_session_core SSOT; the loops own only the IO + clock structure\").",
+        "wz-runtime-tokio multicast_glue.rs: the inline JOIN / Frame / KeepAlive / Close match is replaced by the dispatch_multicast_inbound call + a MulticastRxNext tail. decode_join / validate_join / FrameIngest / parse_frame_payload / DriverLoopOutcome / wire_const imports retired from the lib (the helper owns them); parse_inbound / InboundFrame are now reassembly-gated (the lib names them only in the Fragment tail).",
+        "wz-session-lwip multicast_drive.rs: the same rewire. This foundation owns no reassembly Router, so its tail acts only on Close (Fragment / out-of-order are dropped, exactly as before).",
+        "Finding 3 (consistency): the AP loop no longer reaches wire_const via a direct wz_codecs path - its lib does not name wire_const after the extraction, and its tests use the wz_session_core::wire_const re-export, matching the MCU side (one path to the transport MIDs through the session SSOT).",
+        "Not in scope (recorded as carries): Finding 2 (run_session #[allow(too_many_arguments)]), Finding 4 (test-support feature vs sibling-crate), Finding 5 (flush_get_prunes drain asymmetry)."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not the tee-masked notification).",
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed; --features transport-multicast,reassembly: 15 passed - the extraction is behaviour-preserving (the AP reply / declare / push / fragment paths are unchanged; only the classify moved to the SSOT).",
+        "cargo test -p wz-session-lwip --features transport-multicast: 3 passed incl the real-lwIP peer-admit integration now routed through the shared dispatch_multicast_inbound; 10/10 consecutive runs (no-flaky rule).",
+        "cargo test -p wz-session-core --all-features --lib: 577 passed. The new multicast_rx module is gated all(session-multicast, codec-join, codec-frame, codec-close, alloc) so it compiles exactly where both loops need it.",
+        "clippy --all-targets -- -D warnings clean for both loops under transport-multicast and transport-multicast,reassembly. The C2 / C3 / C1q / C1m run-ci lanes lint the new SSOT + both rewired loops."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Finding 2 (NOT addressed here): run_session - the MCU unicast drive loop (session_drive.rs:87) - still carries #[allow(clippy::too_many_arguments)] on its 9-arg signature, now inconsistent with the MulticastDriveConfig parameter-object pattern the two multicast loops share (R311ls/R311lt). Give run_session a SessionDriveConfig param object in a follow-up round (its own scope: it touches the mcu_session_shell test + the mcu-session-acceptor deploy call sites). No #[allow] is the textbook end state.",
+        "Finding 4 (test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) are recorded as accepted judgment calls, not changed.",
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) + Fragment RX/TX + the facade wz transport-multicast forward + a footprint gate remain the open functional increments (R311lu carry).",
+        "minor D/E (cross-profile observer event-stream asymmetry) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
