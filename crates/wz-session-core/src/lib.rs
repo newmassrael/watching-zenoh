@@ -315,7 +315,12 @@ pub mod lease;
 /// (`declare-subscriber` / `declare-queryable` / `liveliness-token`,
 /// each under `alloc` since the staging sinks heap-box; the matching
 /// arm already implies `alloc` via its Cargo feature) for the
-/// Session-tier deferred decl listeners (R311lc).
+/// Session-tier deferred decl listeners (R311lc). R311lg — the R311lf
+/// ratify (lock-free callback invariant, all data planes) adds the
+/// first two data-plane arms: `liveliness-subscriber` (deferred
+/// liveliness samples) + `query-reply` (deferred z_get reply/final).
+/// None of the Layer G MCU cross lanes enables either arm, so the
+/// thumbv6m Arc-free envelope is unchanged.
 #[cfg(all(
     feature = "alloc",
     any(
@@ -323,6 +328,8 @@ pub mod lease;
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "liveliness-token",
+        feature = "liveliness-subscriber",
+        feature = "query-reply",
     )
 ))]
 pub mod deferred_fire;

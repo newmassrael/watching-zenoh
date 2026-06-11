@@ -398,6 +398,71 @@ pub struct LivelinessSubscriber<R: SessionRuntime = TokioRuntime, T: TimeSource 
     pub(super) interest_id: u64,
     pub(super) keyexpr: String,
     pub(super) options: LivelinessSubscriberOptions,
+    /// R311lg — the deferred-fire cell holding the user callback (the
+    /// registry-installed sink only stages; the drive loop's drain
+    /// fires through this cell outside the observer lock — the R311lf
+    /// lock-free callback invariant on the liveliness-sample plane).
+    /// Gated like the registry slot: the field exists iff a subscriber
+    /// can be constructed.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub(super) cell: LivelinessSampleCell<R>,
+}
+
+/// R311lg — the type-erased user callback a deferred liveliness
+/// subscriber's cell holds: erased at registration so the
+/// [`LivelinessSubscriber`] handle has a nameable cell type (the
+/// [`DeclListener`] / [`MatchingListener`] convention).
+#[cfg(feature = "liveliness-subscriber")]
+pub(super) type BoxedLivelinessSampleCallback =
+    Box<dyn FnMut(LivelinessSample<'_>) + Send + 'static>;
+
+/// R311lg — the per-subscriber deferred-fire cell (take-call-restore
+/// with the lossless backlog; see [`wz_session_core::deferred_fire`]).
+/// The registry-installed staging sink fires against it;
+/// [`LivelinessSubscriber::undeclare`] / `Drop` kill it so a
+/// staged-but-undrained sample is suppressed and self-undeclare from
+/// inside the callback is safe.
+#[cfg(feature = "liveliness-subscriber")]
+pub(super) type LivelinessSampleCell<R> =
+    wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedLivelinessSampleCallback>;
+
+impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+    /// R311lg — build the deferred cell + the staging sink one
+    /// `declare_liveliness_subscriber{_aliased}` call installs in the
+    /// registry: the sink copies the borrowed [`LivelinessSample`] out
+    /// to its owned fields (a deferred fire outlives the dispatch
+    /// borrow) and stages one queue job per sample; the job
+    /// reconstructs the borrowed sample over the owned copy when it
+    /// invokes the user callback OUTSIDE the observer lock. The
+    /// callback signature is unchanged — deferral is invisible at the
+    /// type level.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub(super) fn deferred_liveliness_sample_sink(
+        &self,
+        callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
+    ) -> (LivelinessSampleCell<R>, BoxedLivelinessSampleSink) {
+        let erased: BoxedLivelinessSampleCallback = Box::new(callback);
+        let cell: LivelinessSampleCell<R> =
+            wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
+        let queue = self.fires.clone();
+        let cell_for_sink = cell.clone();
+        let sink = BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
+            let kind = sample.kind;
+            let keyexpr = sample.keyexpr.to_string();
+            let token_id = sample.token_id;
+            let cell = cell_for_sink.clone();
+            queue.stage(Box::new(move || {
+                cell.invoke(move |cb| {
+                    cb(LivelinessSample {
+                        kind,
+                        keyexpr: &keyexpr,
+                        token_id,
+                    })
+                })
+            }));
+        });
+        (cell, sink)
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
@@ -478,6 +543,12 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
         // `liveliness-subscriber`; gate the unregister on it. The
         // `send_interest_final` action below is signature-stable so the
         // wire-retract path stays unconditional.
+        // R311lg — kill the deferred cell FIRST so a sample staged
+        // before this call but not yet drained is suppressed (the
+        // callback never observes a post-undeclare sample), then
+        // unregister the staging sink under the observer lock.
+        #[cfg(feature = "liveliness-subscriber")]
+        self.cell.kill();
         #[cfg(feature = "liveliness-subscriber")]
         R::with_mutex_mut(&self.session.observer, |observer| {
             observer.liveliness_subscribers.unregister(self.interest_id);
@@ -497,6 +568,11 @@ impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
         // R311ek — registry slot gated on `liveliness-subscriber`; the
         // Interest(Final) wire-retract stays unconditional (signature-
         // stable action).
+        // R311lg — kill the deferred cell first (same suppression
+        // order as `undeclare`): a staged-but-undrained sample never
+        // fires a dropped subscriber's callback.
+        #[cfg(feature = "liveliness-subscriber")]
+        self.cell.kill();
         #[cfg(feature = "liveliness-subscriber")]
         R::with_mutex_mut(&self.session.observer, |observer| {
             observer.liveliness_subscribers.unregister(self.interest_id);

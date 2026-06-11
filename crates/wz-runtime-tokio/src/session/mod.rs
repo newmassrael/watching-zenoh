@@ -171,8 +171,11 @@ use crate::query_sink::{QueryView, ReplyOut};
 // `query-queryable` loopback path (the `QueryReply -> InboundReply`
 // projection fed into `deliver_local_reply`) + its tests, so the import
 // follows that gate; a `query-queryable`-OFF subset (e.g. handshake-only)
-// would otherwise see it unused.
-#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+// would otherwise see it unused. R311lg — the deferred reply staging
+// sink copies each inbound reply into the owned `InboundReply` form, so
+// the import widens to plain `query-get` (the staging sink exists on
+// every getter build, queryable plane or not).
+#[cfg(feature = "query-get")]
 use crate::reply::InboundReply;
 use crate::reply::ReplyHandle;
 use crate::reply_sink::ReplyView;
@@ -271,12 +274,18 @@ pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
     /// `declare_remote_*_listener` staging sinks (decl_listener.rs)
     /// share this queue, so the field exists under any feature that can
     /// construct a deferred sink (mirrors the wz-session-core
-    /// `deferred_fire` module gate union).
+    /// `deferred_fire` module gate union). R311lg — the R311lf ratify
+    /// adds the first data-plane arms: `liveliness-subscriber`
+    /// (deferred liveliness samples) + `query-get` (deferred z_get
+    /// reply/final; `query-get` is the Session-tier arm whose core
+    /// mirror is `query-reply`).
     #[cfg(any(
         feature = "session-matching",
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "liveliness-token",
+        feature = "liveliness-subscriber",
+        feature = "query-get",
     ))]
     fires: wz_session_core::deferred_fire::DeferredFireQueue<R>,
     /// R311cw — the trait-mediated monotonic clock the query / get
@@ -316,6 +325,8 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
                 feature = "declare-subscriber",
                 feature = "declare-queryable",
                 feature = "liveliness-token",
+                feature = "liveliness-subscriber",
+                feature = "query-get",
             ))]
             fires: self.fires.clone(),
             clock: self.clock.clone(),
@@ -418,6 +429,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 feature = "declare-subscriber",
                 feature = "declare-queryable",
                 feature = "liveliness-token",
+                feature = "liveliness-subscriber",
+                feature = "query-get",
             ))]
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
@@ -455,10 +468,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     }
 
     /// R311kz — drain the deferred-fire queue, running every staged
-    /// listener callback (matching listeners + the R311lc decl
-    /// listeners) OUTSIDE the observer mutex (the F-6 deferred-fire
-    /// contract). The drive-loop dispatch site calls this once per
-    /// iteration event, AFTER its `observer` lock scope ends:
+    /// listener callback (matching listeners, the R311lc decl
+    /// listeners, and the R311lg data-plane callbacks — liveliness
+    /// samples + z_get reply/final) OUTSIDE the observer mutex (the
+    /// F-6 deferred-fire contract). The drive-loop dispatch site calls
+    /// this once per iteration event, AFTER its `observer` lock scope
+    /// ends:
     ///
     /// ```text
     /// { observer.lock().dispatch(event, &actions); }  // lock dropped
@@ -478,15 +493,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// this session's observer MUST pair it with a drain.
     ///
     /// R311g1 signature-stability — the method exists across feature
-    /// states; minus the deferred-sink feature union (`session-matching`
-    /// and the R311lc decl-sink planes) no deferred sink can exist and
-    /// the body is a constant `0`.
+    /// states; minus the deferred-sink feature union (`session-matching`,
+    /// the R311lc decl-sink planes, and the R311lg data planes
+    /// `liveliness-subscriber` / `query-get`) no deferred sink can
+    /// exist and the body is a constant `0`.
     pub fn drain_deferred_fires(&self) -> usize {
         #[cfg(any(
             feature = "session-matching",
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "liveliness-token",
+            feature = "liveliness-subscriber",
+            feature = "query-get",
         ))]
         {
             self.fires.drain_and_fire()
@@ -496,6 +514,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "liveliness-token",
+            feature = "liveliness-subscriber",
+            feature = "query-get",
         )))]
         {
             0
@@ -914,6 +934,76 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts)?)
     }
 
+    /// R311lg — build the deferred staging sink one `query*`
+    /// registration installs in the [`crate::reply::ReplyRegistry`]:
+    /// the user `(on_reply, on_final)` pair lives in a deferred-fire
+    /// cell, and the registry-stored sink only copies each inbound
+    /// reply out to its owned form ([`InboundReply`] — the existing AP
+    /// retention form, no third reply struct) and stages one queue job
+    /// per fire. The drain runs the user callbacks OUTSIDE the
+    /// observer lock (the R311lf lock-free callback invariant on the
+    /// reply/final plane), so they may re-enter any observer-locking
+    /// session API — including issuing further queries.
+    ///
+    /// The staged `on_final` job kills the cell after firing: Final is
+    /// terminal (the registry auto-removes the pending entry, so no
+    /// later fire can stage), and the kill drops the user closures
+    /// promptly — outside every framework lock, unlike the pre-R311lg
+    /// inline path which dropped them inside the observer lock window.
+    #[cfg(feature = "query-get")]
+    fn deferred_reply_sink(
+        &self,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> crate::reply_sink::BoxedReplySink {
+        use crate::reply::InboundReplyBody;
+        use crate::reply_sink::{BoxedReplySink, ReplyKind};
+        let cell: wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedReplySink> =
+            wz_session_core::deferred_fire::DeferredListenerCell::new(BoxedReplySink::new(
+                on_reply, on_final,
+            ));
+        let queue = self.fires.clone();
+        let cell_for_reply = cell.clone();
+        let staged_reply = move |view: &dyn ReplyView| {
+            // Owned copy — a deferred fire outlives the dispatch borrow.
+            let owned = InboundReply {
+                rid: view.rid(),
+                keyexpr_literal: view.keyexpr().to_string(),
+                body: match view.kind() {
+                    ReplyKind::Put => InboundReplyBody::Put {
+                        payload: view.payload().to_vec(),
+                    },
+                    ReplyKind::Del => InboundReplyBody::Del,
+                    ReplyKind::Err => InboundReplyBody::Err {
+                        encoding: view
+                            .err_encoding()
+                            .map(|(id, schema)| (id, schema.map(str::to_string))),
+                        payload: view.payload().to_vec(),
+                    },
+                },
+            };
+            let cell = cell_for_reply.clone();
+            queue.stage(Box::new(move || {
+                cell.invoke(move |sink| {
+                    use crate::reply_sink::ReplySink as _;
+                    sink.on_reply(&owned)
+                })
+            }));
+        };
+        let queue = self.fires.clone();
+        let staged_final = move |rid: u64| {
+            let cell = cell.clone();
+            queue.stage(Box::new(move || {
+                cell.invoke(move |sink| {
+                    use crate::reply_sink::ReplySink as _;
+                    sink.on_final(rid)
+                });
+                cell.kill();
+            }));
+        };
+        BoxedReplySink::new(staged_reply, staged_final)
+    }
+
     /// R239 — issue a query on `keyexpr` and route replies to
     /// `on_reply` (one fire per Reply or Err) plus `on_final` (one
     /// fire after every expected branch has emitted its Final).
@@ -1021,6 +1111,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             let deadline_ms = (opts.timeout_ms > 0)
                 .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
+            // R311lg — DEFERRED FIRE (the R311lf lock-free callback
+            // invariant on the reply/final plane): the registry stores
+            // a staging sink; `on_reply` / `on_final` run at a drain
+            // site OUTSIDE the observer lock and may re-enter any
+            // observer-locking session API. Loopback fires staged by
+            // the `deliver_local_*` calls below are drained at this
+            // method's tail, so SessionLocal replies still arrive
+            // synchronously before `query` returns (pico parity:
+            // `_z_session_deliver_query_locally` fires on the caller
+            // thread, outside the session mutex).
+            let sink = self.deferred_reply_sink(on_reply, on_final);
+
             // R311dc — observer access migrates from `.lock().expect()` to
             // R::with_mutex_mut closure form (R311ct API). The closure body
             // performs all observer-side mutations (replies.register +
@@ -1028,13 +1130,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // single lock acquisition, identical to the prior pattern; the
             // closure returns the ReplyHandle which propagates out.
             let handle = R::with_mutex_mut(&self.observer, |observer| {
-                let handle = observer.replies.register(
-                    rid,
-                    expected_finals,
-                    deadline_ms,
-                    on_reply,
-                    on_final,
-                );
+                let handle = observer
+                    .replies
+                    .register_sink(rid, expected_finals, deadline_ms, sink)
+                    .expect("register on the alloc backing never exceeds declared capacity");
                 if allows_local {
                     // R311fq — the in-process queryable fan is gated on
                     // `query-queryable`: `observer.queryables` only exists
@@ -1090,6 +1189,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                         .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta)?;
                 }
             }
+
+            // R311lg — drain the fires this call staged (the loopback
+            // `deliver_local_reply` / `deliver_local_final` path) so
+            // local replies run synchronously on the caller thread,
+            // outside the observer lock, before `query` returns. An
+            // overlapping drive-loop drain is lossless (the cell
+            // backlog hands the overlapped call to the active drainer).
+            self.drain_deferred_fires();
 
             Ok(handle)
         }
@@ -1179,16 +1286,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             let deadline_ms = (opts.timeout_ms > 0)
                 .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
+            // R311lg — deferred staging sink; same lock-free callback
+            // contract + tail drain as `Session::query`.
+            let sink = self.deferred_reply_sink(on_reply, on_final);
+
             // R311dc — closure-form observer access via R::with_mutex_mut
             // (R311ct API). Same closure body shape as Session::query.
             let handle = R::with_mutex_mut(&self.observer, |observer| {
-                let handle = observer.replies.register(
-                    rid,
-                    expected_finals,
-                    deadline_ms,
-                    on_reply,
-                    on_final,
-                );
+                let handle = observer
+                    .replies
+                    .register_sink(rid, expected_finals, deadline_ms, sink)
+                    .expect("register on the alloc backing never exceeds declared capacity");
                 // R311fq — `loopback_keyexpr` feeds only the
                 // query-queryable loopback fan; the wire branch routes by
                 // (mapping_id, inline_suffix). Under a wire-only getter
@@ -1239,6 +1347,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     )?;
                 }
             }
+
+            // R311lg — drain the loopback-staged fires; see
+            // `Session::query`.
+            self.drain_deferred_fires();
 
             Ok(handle)
         }
@@ -1916,6 +2028,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         {
             let keyexpr_string = keyexpr.into();
             let interest_id = self.actions.alloc_next_interest_id();
+            // R311lg — DEFERRED FIRE (the R311lf lock-free callback
+            // invariant on the liveliness-sample plane): the registry
+            // stores a staging sink that copies each matched sample out
+            // and stages it on the session's deferred-fire queue; the
+            // drive loop's dispatch SSOT runs `callback` AFTER the
+            // observer lock drops, so the callback may re-enter any
+            // observer-locking session API (declares, publishes with
+            // local loopback, queries, even its own handle's
+            // `undeclare`) without self-deadlocking.
+            let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
             // Register first, emit Interest second — the order matters for
             // races against an inbound DeclToken whose Interest reached
             // the peer earlier (e.g. a re-declared subscriber after a
@@ -1927,12 +2049,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .liveliness_subscribers
-                    .register(
-                        interest_id,
-                        &keyexpr_string,
-                        options.history,
-                        BoxedLivelinessSampleSink::new(callback),
-                    )
+                    .register(interest_id, &keyexpr_string, options.history, sink)
                     .expect("register on the alloc backing never exceeds declared capacity");
             });
             self.actions.send_interest_liveliness_subscriber(
@@ -1946,6 +2063,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 interest_id,
                 keyexpr: keyexpr_string,
                 options,
+                cell,
             })
         }
         #[cfg(not(feature = "liveliness-subscriber"))]
@@ -2054,6 +2172,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 }
             };
             let interest_id = self.actions.alloc_next_interest_id();
+            // R311lg — deferred staging sink; same lock-free callback
+            // contract as `declare_liveliness_subscriber`.
+            let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
             // Register first against the resolved literal so any racing
             // inbound dispatch (peer responding to an earlier
             // session-arming Interest, an out-of-order DeclToken that
@@ -2065,12 +2186,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .liveliness_subscribers
-                    .register(
-                        interest_id,
-                        &resolved,
-                        options.history,
-                        BoxedLivelinessSampleSink::new(callback),
-                    )
+                    .register(interest_id, &resolved, options.history, sink)
                     .expect("register on the alloc backing never exceeds declared capacity");
             });
             // Wire emit carries the alias form so the peer pays the
@@ -2088,6 +2204,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 interest_id,
                 keyexpr: resolved,
                 options,
+                cell,
             })
         }
         #[cfg(not(feature = "liveliness-subscriber"))]

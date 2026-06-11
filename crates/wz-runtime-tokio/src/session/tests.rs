@@ -1626,6 +1626,10 @@ fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
     .unwrap();
     observer.replies.dispatch_response_final(&response_final);
     drop(observer);
+    // R311lg — the deferred reply sink STAGES the on_final fire; a raw
+    // registry dispatch (bypassing the Session dispatch SSOT) must
+    // pair with a drain, per the F-6 drain-discipline contract.
+    session.drain_deferred_fires();
 
     assert_eq!(
         final_count.load(Ordering::SeqCst),
@@ -5451,5 +5455,231 @@ fn dispatch_iteration_event_with_runs_hook_under_lock_then_drains() {
         log.lock().unwrap().len(),
         1,
         "deferred fire drained after the hook's lock scope ended"
+    );
+}
+
+// ── R311lg deferred data-plane callbacks (liveliness samples + reply/final) ──
+
+/// R311lg — the liveliness-sample plane rides the F-6 deferred-fire
+/// queue (the R311lf lock-free callback invariant): the callback runs
+/// OUTSIDE the observer mutex, so it may re-enter an observer-locking
+/// session API — here `declare_subscriber` (registers under the
+/// observer lock) and the returned handle's Drop (also locks). The
+/// pre-R311lg inline sink self-deadlocked on exactly this shape
+/// (R311kj constraint).
+#[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-token"))]
+#[test]
+fn liveliness_sample_callback_runs_deferred_and_may_reenter_session() {
+    use crate::declare::LivelinessSampleKind;
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    type SampleLog = Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>>;
+    let log: SampleLog = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let session_cb = session.clone();
+    let _sub = session
+        .declare_liveliness_subscriber(
+            "liveliness/**",
+            LivelinessSubscriberOptions::default(),
+            move |sample| {
+                log_cb.lock().unwrap().push((
+                    sample.kind,
+                    sample.keyexpr.to_string(),
+                    sample.token_id,
+                ));
+                // Re-enter an observer-locking session API from inside
+                // the callback; the handle Drop at scope end locks the
+                // observer a second time.
+                let _re = session_cb.declare_subscriber(
+                    "reentry/ok",
+                    SubscribeOptions::default(),
+                    |_s| {},
+                );
+            },
+        )
+        .expect("liveliness-subscriber is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness_subscribers
+        .dispatch_declare(&make_decl_token(9, "liveliness/x"), &HashMap::new());
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the registry sink only STAGES — no fire under the dispatch"
+    );
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![(LivelinessSampleKind::Put, "liveliness/x".to_string(), 9)],
+        "owned-copy deferred sample preserves kind/keyexpr/token_id"
+    );
+}
+
+/// R311lg — a sample staged before `undeclare` but drained after it is
+/// suppressed (the kill-first ordering on the handle): the callback
+/// never observes a post-undeclare sample.
+#[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-token"))]
+#[test]
+fn liveliness_sample_staged_before_undeclare_is_suppressed() {
+    use hashbrown::HashMap;
+    use std::sync::Arc;
+
+    let (session, _driver) = build_session();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let sub = session
+        .declare_liveliness_subscriber(
+            "liveliness/**",
+            LivelinessSubscriberOptions::default(),
+            move |_sample| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("liveliness-subscriber is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness_subscribers
+        .dispatch_declare(&make_decl_token(3, "liveliness/x"), &HashMap::new());
+    sub.undeclare();
+    session.drain_deferred_fires();
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "staged-but-undrained sample is suppressed by the killed cell"
+    );
+}
+
+/// R311lg — cell backlog (lossless overlap): a re-entrant drain that
+/// reaches the SAME cell mid-fire backlogs the call instead of
+/// dropping it; the active drainer delivers it before restoring, so
+/// both samples arrive exactly once in stage order.
+#[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-token"))]
+#[test]
+fn liveliness_sample_reentrant_same_cell_fire_is_backlogged_not_lost() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let log: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let session_cb = session.clone();
+    let _sub = session
+        .declare_liveliness_subscriber(
+            "liveliness/**",
+            LivelinessSubscriberOptions::default(),
+            move |sample| {
+                log_cb.lock().unwrap().push(sample.token_id);
+                if sample.token_id == 1 {
+                    // From INSIDE the callback: stage another sample
+                    // for this same cell and drain re-entrantly. The
+                    // inner drain finds the callback mid-fire and
+                    // BACKLOGS the call (pre-R311lg cells dropped it).
+                    session_cb
+                        .observer()
+                        .lock()
+                        .unwrap()
+                        .liveliness_subscribers
+                        .dispatch_declare(&make_decl_token(2, "liveliness/y"), &HashMap::new());
+                    let _ = session_cb.drain_deferred_fires();
+                    assert_eq!(
+                        *log_cb.lock().unwrap(),
+                        vec![1],
+                        "the backlogged call must NOT run inside the inner drain"
+                    );
+                }
+            },
+        )
+        .expect("liveliness-subscriber is on in this lane");
+
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .liveliness_subscribers
+        .dispatch_declare(&make_decl_token(1, "liveliness/x"), &HashMap::new());
+    session.drain_deferred_fires();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![1, 2],
+        "the overlapped fire is delivered by the active drainer (lossless, FIFO)"
+    );
+}
+
+/// R311lg — the reply/final plane: `on_reply` / `on_final` run
+/// deferred (outside the observer mutex), yet a SessionLocal query
+/// still delivers synchronously before `query` returns (the tail
+/// drain — zenoh-pico `_z_session_deliver_query_locally` fires on the
+/// caller thread, outside the session mutex). The callback re-enters
+/// the session by issuing a SECOND query from inside `on_reply` —
+/// the pre-R311lg inline sink self-deadlocked there (`query` locks
+/// the observer for registration + loopback fan).
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn query_reply_callbacks_run_deferred_lock_free_and_local_sync() {
+    use std::sync::Arc;
+
+    let (session, _driver) = build_session();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("home/temp", |_q, responder| {
+            responder.reply(b"22.5");
+        });
+
+    let outer_replies = Arc::new(AtomicUsize::new(0));
+    let outer_finals = Arc::new(AtomicUsize::new(0));
+    let inner_replies = Arc::new(AtomicUsize::new(0));
+    let inner_finals = Arc::new(AtomicUsize::new(0));
+
+    let or = outer_replies.clone();
+    let of = outer_finals.clone();
+    let ir = inner_replies.clone();
+    let inf = inner_finals.clone();
+    let session_cb = session.clone();
+    session
+        .query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_reply| {
+                or.fetch_add(1, Ordering::SeqCst);
+                let ir = ir.clone();
+                let inf = inf.clone();
+                let _ = session_cb
+                    .query(
+                        "home/temp",
+                        QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                        move |_r| {
+                            ir.fetch_add(1, Ordering::SeqCst);
+                        },
+                        move |_rid| {
+                            inf.fetch_add(1, Ordering::SeqCst);
+                        },
+                    )
+                    .expect("re-entrant query from inside on_reply succeeds lock-free");
+            },
+            move |_rid| {
+                of.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get is on in this lane");
+
+    assert_eq!(
+        (
+            outer_replies.load(Ordering::SeqCst),
+            outer_finals.load(Ordering::SeqCst),
+            inner_replies.load(Ordering::SeqCst),
+            inner_finals.load(Ordering::SeqCst),
+        ),
+        (1, 1, 1, 1),
+        "both queries (outer + re-entrant inner) fully delivered before the outer call returned"
     );
 }

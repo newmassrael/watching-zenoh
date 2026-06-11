@@ -669,6 +669,7 @@ pub(crate) async fn run_demo(
     let sweep_clock = session_clock;
     let observer_for_sweep = observer.clone();
     let actions_for_sweep = actions.clone();
+    let session_for_sweep = session.clone();
     let sweep_cadence_ms = u64::from(reply_log_spec.sweep_cadence_ms);
     let sweep_task = TokioRuntime.spawn(async move {
         loop {
@@ -677,25 +678,33 @@ pub(crate) async fn run_demo(
             // sweep call. Holding the lock across an await would
             // serialise this task against drive_session's inbound
             // dispatch (also holds observer.lock()).
-            let mut obs = match observer_for_sweep.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let now_ms = sweep_clock.now_monotonic_ms();
-            let _ = obs.replies.sweep_timed_out(now_ms);
-            // F3 — the liveliness-get pending table has the same
-            // deadline contract as the reply registry (registered with
-            // an absolute timeout, swept here so an unanswered get
-            // cannot leak its slot); previously documented but unwired.
-            // R311ka — drain the staged reconnect-cache prunes in the
-            // SAME lock window (the registry's airtight-capacity
-            // contract: every staging site drains where it stages; a
-            // deferred drain could overflow the staging across
-            // un-flushed ticks and permanently re-leak a cache entry).
-            let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
-            for interest_id in obs.liveliness_gets.take_finalized() {
-                actions_for_sweep.prune_liveliness_get_interest(interest_id);
+            {
+                let mut obs = match observer_for_sweep.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let now_ms = sweep_clock.now_monotonic_ms();
+                let _ = obs.replies.sweep_timed_out(now_ms);
+                // F3 — the liveliness-get pending table has the same
+                // deadline contract as the reply registry (registered with
+                // an absolute timeout, swept here so an unanswered get
+                // cannot leak its slot); previously documented but unwired.
+                // R311ka — drain the staged reconnect-cache prunes in the
+                // SAME lock window (the registry's airtight-capacity
+                // contract: every staging site drains where it stages; a
+                // deferred drain could overflow the staging across
+                // un-flushed ticks and permanently re-leak a cache entry).
+                let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
+                for interest_id in obs.liveliness_gets.take_finalized() {
+                    actions_for_sweep.prune_liveliness_get_interest(interest_id);
+                }
             }
+            // R311lg — the reply sweep's timed-out on_final fires are
+            // STAGED by the deferred reply sinks; drain them now that
+            // the observer lock is released (the F-6 drain pairing —
+            // every dispatch-like site pairs with a drain). Overlap
+            // with the drive loop's drain is lossless (cell backlog).
+            session_for_sweep.drain_deferred_fires();
         }
     });
 
