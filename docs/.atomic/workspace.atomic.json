@@ -34819,6 +34819,58 @@
         "A1 pool remainder: MCU multicast loop remains open; the no-alloc MCU JOIN/declare TX variant is deferred until the MCU multicast loop shapes it."
       ]
     },
+    "Round 311lt": {
+      "decision_summary": "R311lt MCU multicast loop foundation: run_multicast_session (no_std JOIN emit + RX classify + sweep); Multicast{DriveConfig,Outcome}/wire_const hoisted to session-core SSOT.",
+      "changes_bullets": [
+        "wz-session-core multicast_params.rs: MulticastDriveConfig (R311ls, was tokio-local) + a new MulticastOutcome are hoisted here as the shared SSOT both transport profiles' drive loops consume. lib.rs re-exports wz_codecs::wire_const so loop crates reach the transport-MID constants through the session SSOT rather than taking a direct wz-codecs dep.",
+        "wz-runtime-tokio multicast_glue.rs: drops its local MulticastDriveConfig + MulticastOutcome defs and re-exports them from session-core (existing multicast_glue::Multicast* import paths preserved). MulticastParams + LostCause imports moved into the test module - the lib no longer names either type after the hoist.",
+        "wz-session-lwip: new transport-multicast feature (forwards session-multicast + codec-join / codec-frame / codec-close) + a new multicast_drive.rs: run_multicast_session - the sync MCU poll-loop mirror of the AP drive_multicast_session - plus LwipMulticastDriver (the group-socket TX/RX wrapper, multicast mirror of LwipUdpDriver) and peer_key (the §3.2 src-address attribution helper).",
+        "The loop foundation owns JOIN emit + RX classify (Join / Frame / KeepAlive / Close attributed by source address) + lease sweep + the Frame->observer data plane (the same IterationEvent::Poll(FramePayload) fan the unicast run_session + the AP loop use). It reuses MulticastDispatcher + the JOIN/SN primitives unchanged; only the loop STRUCTURE is new (the run_session philosophy: structure over shared SSOT primitives).",
+        "run-ci C1m (layer_c1m_session_lwip): added a transport-multicast test + clippy -D warnings variant so the new no_std multicast loop is CI-covered - the same close-the-coverage-gap discipline R311ls applied to the AP multicast_glue loop."
+      ],
+      "verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not the tee-masked notification) - including the new C1m transport-multicast test + clippy lane.",
+        "cargo build / clippy / test -p wz-session-lwip --features transport-multicast: builds clean on the no_std MCU profile, clippy --all-targets -D warnings clean, the peer_key unit test passes (lwIP-free, so it runs in the plain unit lane).",
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed - the SSOT hoist is behaviour-preserving (the re-exports keep every Multicast* path resolving).",
+        "cargo test -p wz-session-core --all-features --lib: 577 passed. cargo build -p wz-session-core --no-default-features (and --features alloc) clean - the unconditional wire_const re-export is valid under the minimal feature set.",
+        "session-lwip default + transport-multicast tests coexist in one binary (2 passed under transport-multicast): peer_key is lwIP-free, so it adds no second LwipLink::init alongside session_drive's existing one. The real-lwIP runtime integration test is CARRIED (init-once harness prerequisite - see carry)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "MCU multicast runtime integration test (real-lwIP peer-admit over loopback) is BLOCKED on the init-once test harness: wz-session-lwip's session_drive test already calls LwipLink::init (NO_SYS process-global, not re-entrant), so a second lwIP-initing test needs the deferred wz-link-lwip-test-support init-once harness (the R71 / session_drive carry, now due). The foundation's peer_key unit test is lwIP-free and coexists; the loop's runtime LOGIC is delegated to the already-tested MulticastDispatcher + codec primitives + the byte-identical AP RX-classify, so the integration test is confidence-raising, not correctness-establishing - but it should land next.",
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) is the next functional increment - the no-alloc MCU TX variant the carry deferred until the loop shaped it (it now has). This foundation emits only the JOIN beacon; the data/reply/declare TX paths the AP loop carries (MulticastTxItem + the per-channel mint) are unbuilt on MCU.",
+        "MCU multicast Fragment RX/TX (the reassembly / transport-fragmentation arms the AP loop carries, R311kn/R311ko) + the facade wz transport-multicast forward + a footprint gate for the new feature are follow-on increments.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ],
+      "publishable_decision_summary": "R311lt MCU multicast loop foundation: run_multicast_session (no_std JOIN emit + RX classify + sweep); Multicast{DriveConfig,Outcome}/wire_const hoisted to session-core SSOT.",
+      "publishable_changes_bullets": [
+        "wz-session-core multicast_params.rs: MulticastDriveConfig (R311ls, was tokio-local) + a new MulticastOutcome are hoisted here as the shared SSOT both transport profiles' drive loops consume. lib.rs re-exports wz_codecs::wire_const so loop crates reach the transport-MID constants through the session SSOT rather than taking a direct wz-codecs dep.",
+        "wz-runtime-tokio multicast_glue.rs: drops its local MulticastDriveConfig + MulticastOutcome defs and re-exports them from session-core (existing multicast_glue::Multicast* import paths preserved). MulticastParams + LostCause imports moved into the test module - the lib no longer names either type after the hoist.",
+        "wz-session-lwip: new transport-multicast feature (forwards session-multicast + codec-join / codec-frame / codec-close) + a new multicast_drive.rs: run_multicast_session - the sync MCU poll-loop mirror of the AP drive_multicast_session - plus LwipMulticastDriver (the group-socket TX/RX wrapper, multicast mirror of LwipUdpDriver) and peer_key (the §3.2 src-address attribution helper).",
+        "The loop foundation owns JOIN emit + RX classify (Join / Frame / KeepAlive / Close attributed by source address) + lease sweep + the Frame->observer data plane (the same IterationEvent::Poll(FramePayload) fan the unicast run_session + the AP loop use). It reuses MulticastDispatcher + the JOIN/SN primitives unchanged; only the loop STRUCTURE is new (the run_session philosophy: structure over shared SSOT primitives).",
+        "run-ci C1m (layer_c1m_session_lwip): added a transport-multicast test + clippy -D warnings variant so the new no_std multicast loop is CI-covered - the same close-the-coverage-gap discipline R311ls applied to the AP multicast_glue loop."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not the tee-masked notification) - including the new C1m transport-multicast test + clippy lane.",
+        "cargo build / clippy / test -p wz-session-lwip --features transport-multicast: builds clean on the no_std MCU profile, clippy --all-targets -D warnings clean, the peer_key unit test passes (lwIP-free, so it runs in the plain unit lane).",
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed - the SSOT hoist is behaviour-preserving (the re-exports keep every Multicast* path resolving).",
+        "cargo test -p wz-session-core --all-features --lib: 577 passed. cargo build -p wz-session-core --no-default-features (and --features alloc) clean - the unconditional wire_const re-export is valid under the minimal feature set.",
+        "session-lwip default + transport-multicast tests coexist in one binary (2 passed under transport-multicast): peer_key is lwIP-free, so it adds no second LwipLink::init alongside session_drive's existing one. The real-lwIP runtime integration test is CARRIED (init-once harness prerequisite - see carry)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU multicast runtime integration test (real-lwIP peer-admit over loopback) is BLOCKED on the init-once test harness: wz-session-lwip's session_drive test already calls LwipLink::init (NO_SYS process-global, not re-entrant), so a second lwIP-initing test needs the deferred wz-link-lwip-test-support init-once harness (the R71 / session_drive carry, now due). The foundation's peer_key unit test is lwIP-free and coexists; the loop's runtime LOGIC is delegated to the already-tested MulticastDispatcher + codec primitives + the byte-identical AP RX-classify, so the integration test is confidence-raising, not correctness-establishing - but it should land next.",
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) is the next functional increment - the no-alloc MCU TX variant the carry deferred until the loop shaped it (it now has). This foundation emits only the JOIN beacon; the data/reply/declare TX paths the AP loop carries (MulticastTxItem + the per-channel mint) are unbuilt on MCU.",
+        "MCU multicast Fragment RX/TX (the reassembly / transport-fragmentation arms the AP loop carries, R311kn/R311ko) + the facade wz transport-multicast forward + a footprint gate for the new feature are follow-on increments.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
