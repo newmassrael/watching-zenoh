@@ -276,18 +276,103 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_link_lwip::lwip_test_link;
+    use wz_link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
+    use wz_session_core::multicast_dispatch::MulticastConfig;
+    use wz_session_core::multicast_params::MulticastParams;
+
+    /// Frozen host clock — `now_us` is constant, so no JOIN-interval / lease
+    /// deadline ever advances past a peer's admit time. Keeps the drive-loop
+    /// integration test deterministic (terminates on max_iters; the admitted
+    /// peer is never swept), the same shape as session_drive's `FrozenClock`.
+    #[derive(Clone, Default)]
+    struct FrozenClock;
+    impl ClockSource for FrozenClock {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    /// A multicast params fixture (the AP multicast_glue test's shape): a peer
+    /// JOIN built with one `zid` is admitted by a loop running another.
+    fn params(zid: &[u8]) -> MulticastParams {
+        MulticastParams {
+            version: 0x09,
+            whatami: 0x01, // PEER (wire form)
+            zid: zid.to_vec(),
+            lease_ms: 5_000,
+            join_interval_ms: 1,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+        }
+    }
 
     /// The §3.2 peer key is a stable, collision-free function of the datagram
     /// source: equal `(src_addr, src_port)` -> equal key (so a peer's
     /// successive datagrams attribute to one entry); a differing addr OR port
     /// -> a distinct key (so two peers never alias). lwIP-free (pure
-    /// arithmetic), so it runs in the plain unit lane without the init-once
-    /// link harness the full drive-loop integration test needs.
+    /// arithmetic), so it runs without the init-once link harness.
     #[test]
     fn peer_key_is_a_stable_collision_free_source_key() {
         let a = peer_key(0x7F00_0001, 7446);
         std::assert_eq!(a, peer_key(0x7F00_0001, 7446), "same source -> same key");
         std::assert_ne!(a, peer_key(0x7F00_0002, 7446), "differing addr -> distinct");
         std::assert_ne!(a, peer_key(0x7F00_0001, 7447), "differing port -> distinct");
+    }
+
+    /// R311lu — the drive loop end-to-end over a real lwIP multicast socket: a
+    /// peer's JOIN (a zid distinct from ours), injected onto the group, is
+    /// delivered by `poll_loopback` to the loop's `try_recv`, classified as
+    /// `T_MID_JOIN`, validated, and admitted into the dispatcher's peer table —
+    /// while our own JOIN beacon echoes back and is own-zid-filtered. Shares
+    /// the `lwip_test_link` init-once harness with `session_drive`'s test (one
+    /// `lwip_init` per binary). A distinct port (7449) from the scout (7446) /
+    /// unicast (7447) / link-tier multicast (7448) tests; the harness mutex
+    /// serialises the lwIP group membership.
+    #[test]
+    fn run_multicast_session_admits_a_peer_over_loopback() {
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7449;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        // Inject a PEER's JOIN (distinct zid) onto the group BEFORE wrapping
+        // the socket in the driver — it queues in lwIP, and the loop's first
+        // poll_loopback delivers it to try_recv ahead of our own beacon echo.
+        let peer = params(&[0x01, 0x02, 0x03, 0x04]);
+        let peer_join = encode_join(&peer, &TxSn::new(sn::mask_from_res(peer.seq_num_res)));
+        socket
+            .send_to(group, port, &peer_join)
+            .expect("inject peer JOIN");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = LwipRuntime::new(FrozenClock);
+        let clock = LwipTime::new(&runtime);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let outcome = run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(12),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            &clock,
+            |_event| {},
+        );
+
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the inbound JOIN admitted the peer (our own beacon is zid-filtered)"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
     }
 }

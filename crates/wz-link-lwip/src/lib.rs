@@ -158,7 +158,10 @@ pub mod session_rx_pool_mcu_multicast {
 
 pub mod rx_sockets;
 
-#[cfg(test)]
+// R311lu — also under `test-support` so the exposed `lwip_test_link` harness
+// (which uses `std::sync` for its Once / Mutex) compiles for sibling crates'
+// tests, not only this crate's own `#[cfg(test)]` build.
+#[cfg(any(test, feature = "test-support"))]
 extern crate std;
 
 /// Test-only lwIP harness handle. lwIP under NO_SYS=1 keeps process-global
@@ -169,8 +172,14 @@ extern crate std;
 /// [`std::sync::Once`] and (b) serializes every lwIP-touching test behind
 /// one mutex. Hold the returned guard for the test body; drive the input
 /// path through the returned [`LwipLink`].
-#[cfg(test)]
-pub(crate) fn lwip_test_link() -> (std::sync::MutexGuard<'static, ()>, LwipLink) {
+///
+/// R311lu — `pub` behind the `test-support` feature (was `pub(crate)`,
+/// `#[cfg(test)]`-only) so a sibling crate's test binary shares THIS single
+/// process-global `lwip_init` + multicast-netif setup across all its
+/// lwIP-touching tests (wz-session-lwip's session_drive + multicast_drive
+/// loops). Enable via a dev-dependency feature; never in a production build.
+#[cfg(any(test, feature = "test-support"))]
+pub fn lwip_test_link() -> (std::sync::MutexGuard<'static, ()>, LwipLink) {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static INIT: std::sync::Once = std::sync::Once::new();
     let guard = LOCK

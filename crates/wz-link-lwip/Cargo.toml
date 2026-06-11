@@ -83,5 +83,15 @@ wz-codegen-build = { path = "../wz-codegen-build" }
 # profile would need a mutual-exclusion mechanism (documented carry).
 buffer-pool-session-rx-slim = []
 
+# R311lu — exposes the lwIP init-once test harness (`lwip_test_link`) to
+# sibling crates' tests. lwIP under NO_SYS is a process-global single-init
+# resource, so a downstream test binary (wz-session-lwip: the session_drive
+# loop + the multicast drive loop) MUST share ONE `lwip_init` + multicast-netif
+# setup across all its lwIP-touching tests. That requires linking the single
+# harness from here (a per-crate re-implementation would carry a SECOND
+# `Once`, which would not guard the first). Test-only: enable via a
+# dev-dependency feature, never in a production build.
+test-support = []
+
 [lints]
 workspace = true

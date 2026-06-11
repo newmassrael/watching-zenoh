@@ -115,6 +115,12 @@ lwip-sys = { path = "../lwip-sys" }
 # + the portable-atomic polyfill on the host test path (the MCU deploy
 # supplies the cortex-m / riscv impl at final-binary link instead).
 critical-section = { version = "1", features = ["std"] }
+# R311lu — the test-support feature exposes wz-link-lwip's `lwip_test_link`
+# init-once harness so this crate's lwIP-touching tests (session_drive +
+# multicast_drive) share ONE process-global lwip_init + multicast-netif
+# setup. Dev-only: the production lib build (which already deps wz-link-lwip
+# above without this feature) never pulls the harness.
+wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support"] }
 
 [lints]
 workspace = true

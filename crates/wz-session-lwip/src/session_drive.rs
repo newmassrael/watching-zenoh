@@ -210,8 +210,8 @@ mod tests {
     use alloc::vec;
     use core::cell::RefCell;
 
+    use wz_link_lwip::ipv4_addr_loopback;
     use wz_link_lwip::rx_sockets::bind_session_rx;
-    use wz_link_lwip::{ipv4_addr_loopback, LwipLink};
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::reliability::Reliability;
     use wz_session_core::session_actions::SessionLinkActions;
@@ -248,17 +248,16 @@ mod tests {
     }
 
     /// Stage 4b integration smoke. lwIP under NO_SYS=1 is a process-global
-    /// single-init resource and `LwipLink::init` adds the loopback netif
-    /// (not re-entrant: a second init aborts "netif already added"). The
-    /// idiomatic downstream shape is therefore one init per process — this
-    /// single test inits once and exercises both seams in sequence. (A
-    /// second lwIP-touching test would need an init-once harness shared via
-    /// a `wz-link-lwip-test-support` sibling crate — wz-link-lwip's own
-    /// `lwip_test_link` is `pub(crate)`, not reachable here; deferred until
-    /// a second test actually needs it, R71 / YAGNI.)
+    /// single-init resource (a second `lwip_init` aborts "netif already
+    /// added") while cargo runs a binary's tests on parallel threads. R311lu
+    /// resolved the R71-deferred harness: this test and the multicast_drive
+    /// loop test now share wz-link-lwip's `lwip_test_link` init-once +
+    /// serialized handle (exposed via its `test-support` dev-feature), so two
+    /// lwIP-touching tests coexist in one binary. Hold `_serial` for the test
+    /// body; drive the input path through the returned link.
     #[test]
     fn mcu_session_shell_drives_over_lwip() {
-        let link = LwipLink::init();
+        let (_serial, link) = wz_link_lwip::lwip_test_link();
 
         // (1) Outbound seam: LwipUdpDriver::send_blocking -> LwipUdpSocket::
         // send_to -> lwIP loopback -> LwipUdpDriver::try_recv. The adapter
