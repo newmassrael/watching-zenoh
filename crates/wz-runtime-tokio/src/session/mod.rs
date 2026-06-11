@@ -256,6 +256,16 @@ pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
     /// profiles can bind their own mutex (`embassy_sync::Mutex<...>`,
     /// `critical_section::Mutex<...>`) without touching this field.
     observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+    /// R311kz — per-session deferred-fire queue (the F-6 fix): the
+    /// matching-listener sinks installed in the registries stage their
+    /// fires here (under the observer lock), and the drive-loop
+    /// dispatch site drains it through [`Self::drain_deferred_fires`]
+    /// AFTER the observer lock drops — so the user callbacks run
+    /// lock-free and may re-enter any observer-locking session API.
+    /// Cheap-`Clone` handle (Arc inside), shared with every deferred
+    /// sink this session registers.
+    #[cfg(feature = "session-matching")]
+    fires: wz_session_core::deferred_fire::DeferredFireQueue<R>,
     /// R311cw — the trait-mediated monotonic clock the query / get
     /// methods use to compute reply-pending deadlines. Folded from
     /// the prior method-level `<T: TimeSource>` generic into a
@@ -288,6 +298,8 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
         Self {
             actions: self.actions.clone(),
             observer: self.observer.clone(),
+            #[cfg(feature = "session-matching")]
+            fires: self.fires.clone(),
             clock: self.clock.clone(),
         }
     }
@@ -380,6 +392,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         let session = Self {
             actions,
             observer,
+            // R311kz — fresh deferred-fire queue per logical session;
+            // the deferred matching sinks clone handles out of it at
+            // registration.
+            #[cfg(feature = "session-matching")]
+            fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
         };
         // R236 — forward the local zid from SessionInitParams into
@@ -412,6 +429,42 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// across profiles.
     pub fn observer(&self) -> &Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>> {
         &self.observer
+    }
+
+    /// R311kz — drain the deferred-fire queue, running every staged
+    /// matching-listener callback OUTSIDE the observer mutex (the F-6
+    /// deferred-fire contract). The drive-loop dispatch site calls this
+    /// once per iteration event, AFTER its `observer` lock scope ends:
+    ///
+    /// ```text
+    /// { observer.lock().dispatch(event, &actions); }  // lock dropped
+    /// session.drain_deferred_fires();                 // callbacks run free
+    /// ```
+    ///
+    /// The callbacks may therefore re-enter any observer-locking
+    /// session API — `get_matching_status`, declares, further listener
+    /// registration, even their own `MatchingListener::undeclare` —
+    /// without self-deadlocking. Fires staged BY a running callback are
+    /// drained in the same call (the queue loops until empty). Returns
+    /// the number of callbacks run.
+    ///
+    /// An undrained queue delays fires until the next drain; it never
+    /// drops them — but a dispatch site that never drains starves every
+    /// deferred listener, so any custom drive closure that dispatches
+    /// this session's observer MUST pair it with a drain.
+    ///
+    /// R311g1 signature-stability — the method exists across feature
+    /// states; minus `session-matching` no deferred sink can exist and
+    /// the body is a constant `0`.
+    pub fn drain_deferred_fires(&self) -> usize {
+        #[cfg(feature = "session-matching")]
+        {
+            self.fires.drain_and_fire()
+        }
+        #[cfg(not(feature = "session-matching"))]
+        {
+            0
+        }
     }
 
     /// R311cy — borrow the Session-owned clock (R311cw fold-in

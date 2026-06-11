@@ -356,12 +356,18 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// transition-only; poll [`Self::get_matching_status`] for the
     /// current value, which also seeds the watch baseline).
     ///
-    /// R311kj — CALLBACK CONSTRAINT: the callback fires while the
-    /// session's observer mutex is held (the registries dispatch under
-    /// it). It must NOT call observer-locking session APIs —
-    /// `get_matching_status`, declares, registry consults — or it
-    /// self-deadlocks. Record the status and act after the dispatch
-    /// returns (e.g. via a channel).
+    /// R311kz — DEFERRED FIRE (the F-6 fix; supersedes the R311kj
+    /// callback constraint): the registry-installed sink only STAGES
+    /// the transition onto the session's deferred-fire queue, and the
+    /// drive loop's [`Session::drain_deferred_fires`] runs `callback`
+    /// AFTER the observer lock drops. The callback may therefore call
+    /// any observer-locking session API — `get_matching_status`,
+    /// declares, further listener registration, even its own handle's
+    /// `undeclare` — without self-deadlocking. Transitions arrive in
+    /// stage order; a transition staged before `undeclare` but drained
+    /// after it is suppressed. A custom drive closure that dispatches
+    /// this session's observer directly must pair each dispatch with a
+    /// `drain_deferred_fires()` call or deferred listeners starve.
     ///
     /// R310.5c / R311g1 — the signature is always visible; the body
     /// rejects typed (`Err(FeatureDisabled)`) when `session-matching`
@@ -372,9 +378,17 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     ) -> Result<MatchingListener<R, T>, MatchingListenerError> {
         #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
         {
-            let mut callback = callback;
+            use super::matching_listener::{BoxedMatchingCallback, MatchingListenerCell};
+            let erased: BoxedMatchingCallback = Box::new(callback);
+            let cell: MatchingListenerCell<R> =
+                wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
+            let queue = self.session.fires.clone();
+            let cell_for_sink = cell.clone();
             let sink = wz_session_core::declare::matching::BoxedMatchingSink::new(move |m| {
-                callback(MatchingStatus { matching: m })
+                let cell = cell_for_sink.clone();
+                queue.stage(Box::new(move || {
+                    cell.invoke(|cb| cb(MatchingStatus { matching: m }));
+                }));
             });
             let id = R::with_mutex_mut(&self.session.observer, |obs| {
                 obs.remote_subscribers
@@ -384,6 +398,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 session: self.session.clone(),
                 id,
                 scope: MatchingScope::RemoteSubscribers,
+                cell,
             })
         }
         #[cfg(not(all(feature = "session-matching", feature = "declare-subscriber")))]

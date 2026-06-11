@@ -606,10 +606,12 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     /// itself never fires (pico transition-only semantics; poll
     /// [`Self::get_matching_status`] for the current value).
     ///
-    /// R311kj — CALLBACK CONSTRAINT: the callback fires while the
-    /// session's observer mutex is held; it must NOT call
-    /// observer-locking session APIs (see
-    /// `Publisher::declare_matching_listener`).
+    /// R311kz — DEFERRED FIRE (the F-6 fix; supersedes the R311kj
+    /// callback constraint): the registry sink only stages the
+    /// transition; `callback` runs from
+    /// [`Session::drain_deferred_fires`] AFTER the observer lock drops
+    /// and may re-enter any observer-locking session API (see
+    /// `Publisher::declare_matching_listener` for the full contract).
     ///
     /// R310.5c / R311g1 — signature always visible; typed
     /// `Err(FeatureDisabled)` when `session-matching` or the backing
@@ -620,9 +622,17 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
     ) -> Result<MatchingListener<R, T>, MatchingListenerError> {
         #[cfg(all(feature = "session-matching", feature = "declare-queryable"))]
         {
-            let mut callback = callback;
+            use super::matching_listener::{BoxedMatchingCallback, MatchingListenerCell};
+            let erased: BoxedMatchingCallback = Box::new(callback);
+            let cell: MatchingListenerCell<R> =
+                wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
+            let queue = self.session.fires.clone();
+            let cell_for_sink = cell.clone();
             let sink = wz_session_core::declare::matching::BoxedMatchingSink::new(move |m| {
-                callback(MatchingStatus { matching: m })
+                let cell = cell_for_sink.clone();
+                queue.stage(Box::new(move || {
+                    cell.invoke(|cb| cb(MatchingStatus { matching: m }));
+                }));
             });
             let id = R::with_mutex_mut(&self.session.observer, |obs| {
                 obs.remote_queryables
@@ -632,6 +642,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 session: self.session.clone(),
                 id,
                 scope: MatchingScope::RemoteQueryables,
+                cell,
             })
         }
         #[cfg(not(all(feature = "session-matching", feature = "declare-queryable")))]

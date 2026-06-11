@@ -168,6 +168,11 @@ pub async fn run_acceptor_e2e<H>(
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();
     let actions_for_loop = actions.clone();
+    // R311kz — pair every observer dispatch with a deferred-fire drain
+    // AFTER the lock drops so matching-listener callbacks run lock-free
+    // (the F-6 contract); harness-driven binaries get the same dispatch
+    // shape as the production runner.
+    let session_for_dispatch = opened.session.clone();
     // Bound to a `let` (not an inline `&…::spec_defaults()`) so the
     // borrow outlives the `tokio::select!` future (E0716: a temporary
     // would drop before the select polls the future).
@@ -185,6 +190,7 @@ pub async fn run_acceptor_e2e<H>(
                     .lock()
                     .expect("observer mutex poisoned")
                     .dispatch(event, &actions_for_loop);
+                session_for_dispatch.drain_deferred_fires();
             },
         ) => Some(o),
         _ = shutdown_signal() => None,

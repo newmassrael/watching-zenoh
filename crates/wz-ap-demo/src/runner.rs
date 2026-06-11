@@ -713,6 +713,10 @@ pub(crate) async fn run_demo(
     // outlives the `tokio::select!` future (E0716: a temporary would drop
     // before the select polls the future).
     let session_timeouts = SessionTimeouts::spec_defaults();
+    // R311kz — the dispatch closure pairs every observer dispatch with a
+    // deferred-fire drain AFTER the lock scope ends, so matching-listener
+    // callbacks run lock-free (the F-6 contract).
+    let session_for_dispatch = session.clone();
     let outcome = tokio::select! {
         o = drive_session_until_terminal(
             &mut driver,
@@ -723,36 +727,41 @@ pub(crate) async fn run_demo(
             &session_timeouts,
             |event: IterationEvent<'_>| {
                 log::debug!("wz-ap-demo: iteration event = {event:?}");
-                let mut obs = observer_for_dispatch
-                    .lock()
-                    .expect("observer mutex poisoned by panic in subscriber callback");
-                // Fan the iteration event into the per-domain registries
-                // (subscribers / replies / liveliness / …) + drain staged
-                // outbound records, exactly as before.
-                obs.dispatch(event, &actions);
-                // gc-3 carry #2 — also fan an inbound Push through the
-                // switchboard into the application engine. IterationEvent is
-                // Copy, so the same event drives both the registry dispatch and
-                // the switchboard. The value injector decodes the wire payload
-                // (temp_payload codec) into the typed _event.data; a signal row
-                // (reset) injects an empty _event.data. A matched row advances
-                // the app machine, which we then step + log.
-                #[cfg(feature = "switchboard")]
                 {
-                    let fired = {
-                        let mut injector =
-                            wz_ap_demo_app::SensorMonitorInjector::new(&mut app_engine);
-                        obs.dispatch_switchboard(event, &mut injector)
-                    };
-                    if fired > 0 {
-                        app_engine.step();
-                        log::info!(
-                            "wz-ap-demo: APP SWITCHBOARD FIRED fired={fired} \
-                             app_state={:?}",
-                            app_engine.get_current_state()
-                        );
+                    let mut obs = observer_for_dispatch
+                        .lock()
+                        .expect("observer mutex poisoned by panic in subscriber callback");
+                    // Fan the iteration event into the per-domain registries
+                    // (subscribers / replies / liveliness / …) + drain staged
+                    // outbound records, exactly as before.
+                    obs.dispatch(event, &actions);
+                    // gc-3 carry #2 — also fan an inbound Push through the
+                    // switchboard into the application engine. IterationEvent is
+                    // Copy, so the same event drives both the registry dispatch and
+                    // the switchboard. The value injector decodes the wire payload
+                    // (temp_payload codec) into the typed _event.data; a signal row
+                    // (reset) injects an empty _event.data. A matched row advances
+                    // the app machine, which we then step + log.
+                    #[cfg(feature = "switchboard")]
+                    {
+                        let fired = {
+                            let mut injector =
+                                wz_ap_demo_app::SensorMonitorInjector::new(&mut app_engine);
+                            obs.dispatch_switchboard(event, &mut injector)
+                        };
+                        if fired > 0 {
+                            app_engine.step();
+                            log::info!(
+                                "wz-ap-demo: APP SWITCHBOARD FIRED fired={fired} \
+                                 app_state={:?}",
+                                app_engine.get_current_state()
+                            );
+                        }
                     }
                 }
+                // R311kz — observer lock dropped: run the deferred
+                // matching-listener callbacks staged by this dispatch.
+                session_for_dispatch.drain_deferred_fires();
             },
         ) => Some(o),
         _ = shutdown_signal() => {

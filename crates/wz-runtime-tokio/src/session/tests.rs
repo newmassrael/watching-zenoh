@@ -4858,7 +4858,10 @@ fn liveliness_token_id_counter_independent_of_request_id() {
 /// registration, `true` when a matching remote subscriber declares,
 /// `false` when it undeclares, silent on a non-matching declare, and
 /// silent after `undeclare()` — driven through the production
-/// `dispatch_declare` path the drive loop runs.
+/// `dispatch_declare` path the drive loop runs. R311kz — each dispatch
+/// is paired with `drain_deferred_fires()`, the production drive-loop
+/// shape (the registry sink only stages; the drain runs the callback
+/// outside the observer lock).
 #[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
 #[test]
 fn publisher_matching_listener_fires_on_transitions_only() {
@@ -4881,6 +4884,8 @@ fn publisher_matching_listener_fires_on_transitions_only() {
             .unwrap()
             .remote_subscribers
             .dispatch_declare(body, &HashMap::new());
+        // R311kz — observer lock dropped; run the staged fires.
+        session.drain_deferred_fires();
     };
 
     dispatch(&make_decl_subscriber(1, "garage/door"));
@@ -4934,6 +4939,7 @@ fn querier_matching_listener_fires_on_remote_queryable_transitions() {
         .unwrap()
         .remote_queryables
         .dispatch_declare(&make_decl_queryable(7, "home/temp"), &HashMap::new());
+    session.drain_deferred_fires();
     assert_eq!(*log.lock().unwrap(), vec![true]);
 
     session
@@ -4942,9 +4948,100 @@ fn querier_matching_listener_fires_on_remote_queryable_transitions() {
         .unwrap()
         .remote_queryables
         .dispatch_declare(&make_undecl_queryable(7), &HashMap::new());
+    session.drain_deferred_fires();
     assert_eq!(*log.lock().unwrap(), vec![true, false]);
 
     assert!(listener.undeclare());
+}
+
+/// R311kz — the F-6 deferred-fire contract end-to-end: the callback
+/// runs OUTSIDE the observer mutex, so it may re-enter observer-locking
+/// session APIs. The callback here (1) polls `get_matching_status`
+/// (an observer-locking consult — the R311kj self-deadlock reproducer),
+/// (2) declares a SECOND matching listener from inside the first, and
+/// (3) self-undeclares via its own handle. Pre-R311kz every one of
+/// these deadlocked on the std observer mutex.
+#[cfg(all(feature = "session-matching", feature = "declare-subscriber"))]
+#[test]
+fn matching_listener_callback_may_reenter_session_apis() {
+    use hashbrown::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let pubr = session.declare_publisher("home/temp", PublishOptions::put());
+
+    // Self-handle slot: the callback needs its own MatchingListener to
+    // self-undeclare (two-phase init, the handle exists only after
+    // registration).
+    type ListenerSlot = Arc<Mutex<Option<MatchingListener>>>;
+    let slot: ListenerSlot = Arc::new(Mutex::new(None));
+    let observed: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let inner_log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let slot_cb = slot.clone();
+    let observed_cb = observed.clone();
+    let inner_log_cb = inner_log.clone();
+    let pubr_cb = pubr.clone();
+    let listener = pubr
+        .declare_matching_listener(move |s| {
+            // (1) Observer-locking consult from inside the callback.
+            let polled = pubr_cb.get_matching_status();
+            observed_cb
+                .lock()
+                .unwrap()
+                .push(polled.matching && s.matching);
+            // (2) Register ANOTHER listener from inside the callback.
+            let inner_log = inner_log_cb.clone();
+            let inner = pubr_cb
+                .declare_matching_listener(move |s2| {
+                    inner_log.lock().unwrap().push(s2.matching);
+                })
+                .expect("re-entrant registration must succeed");
+            // Dropping the handle leaves the watch installed (explicit
+            // undeclare only — no Drop hook, the documented contract).
+            drop(inner);
+            // (3) Self-undeclare via the listener's own handle.
+            if let Some(me) = slot_cb.lock().unwrap().take() {
+                assert!(me.undeclare(), "self-undeclare succeeds");
+            }
+        })
+        .expect("session-matching is on in this lane");
+    *slot.lock().unwrap() = Some(listener);
+
+    let dispatch = |body: &wz_codecs::declare::DeclareOwnedVariant| {
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(body, &HashMap::new());
+        session.drain_deferred_fires();
+    };
+
+    // Flip false -> true: the outer callback fires once, polls the
+    // (already-updated) status, registers the inner listener, and
+    // self-undeclares — all without deadlocking.
+    dispatch(&make_decl_subscriber(2, "home/temp"));
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![true],
+        "callback ran once and the in-callback poll agreed with the verdict"
+    );
+
+    // Flip true -> false: the outer listener self-undeclared, so only
+    // the inner listener (registered during the previous fire, seeded
+    // with the then-current `true` verdict) observes the flip.
+    dispatch(&make_undecl_subscriber(2));
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![true],
+        "self-undeclared outer listener never fires again"
+    );
+    assert_eq!(
+        *inner_log.lock().unwrap(),
+        vec![false],
+        "the listener registered from inside a callback is live"
+    );
 }
 
 /// R311g1 NEG — with `session-matching` off the method keeps its

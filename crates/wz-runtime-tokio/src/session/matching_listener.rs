@@ -18,6 +18,27 @@
 
 use super::*;
 
+/// R311kz — the type-erased user callback a matching listener's
+/// deferred cell holds: erased at registration so the
+/// [`MatchingListener`] handle has a nameable cell type.
+#[cfg(all(
+    feature = "session-matching",
+    any(feature = "declare-subscriber", feature = "declare-queryable")
+))]
+pub(super) type BoxedMatchingCallback = Box<dyn FnMut(MatchingStatus) + Send + 'static>;
+
+/// R311kz — the per-listener deferred-fire cell (take-call-restore;
+/// see [`wz_session_core::deferred_fire`]). The registry-installed
+/// sink stages fires against it; [`MatchingListener::undeclare`] kills
+/// it so a staged-but-undrained fire is suppressed and self-undeclare
+/// from inside the callback is safe.
+#[cfg(all(
+    feature = "session-matching",
+    any(feature = "declare-subscriber", feature = "declare-queryable")
+))]
+pub(super) type MatchingListenerCell<R> =
+    wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedMatchingCallback>;
+
 /// Which observer registry a [`MatchingListener`]'s watch lives in.
 /// Publisher listeners watch remote SUBSCRIBERS; querier listeners watch
 /// remote QUERYABLES — the same split as the two `get_matching_status`
@@ -51,18 +72,40 @@ pub struct MatchingListener<R: SessionRuntime = TokioRuntime, T: TimeSource = To
     pub(super) session: Session<R, T>,
     pub(super) id: u64,
     pub(super) scope: MatchingScope,
+    /// R311kz — the deferred-fire cell holding the user callback (the
+    /// registry sink only stages; the drive loop's drain fires through
+    /// this cell outside the observer lock). Gated like the scope
+    /// variants' union: the field exists iff a listener can be
+    /// constructed.
+    #[cfg(all(
+        feature = "session-matching",
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    pub(super) cell: MatchingListenerCell<R>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> MatchingListener<R, T> {
     /// Remove the watch — the callback will not fire again. Returns
     /// whether a watch was removed (`false` = already removed, e.g. a
     /// clone of the underlying session undeclared it first).
+    ///
+    /// R311kz — kills the deferred cell FIRST, so a fire staged before
+    /// this call but not yet drained is suppressed (the callback never
+    /// observes a post-undeclare transition), then unregisters the
+    /// watch under the observer lock. Callable from INSIDE the
+    /// listener's own callback (the take-call-restore cell makes
+    /// self-undeclare deadlock-free).
     pub fn undeclare(self) -> bool {
         // R311g1 / R311kk — bind the handle state unconditionally: under
         // a feature subset where both registry variants are cfg-off (e.g.
         // the C1j handshake-only lane) the zero-arm match below reads
         // neither field and the deny-warnings build would reject them.
         let _ = (&self.session, self.id);
+        #[cfg(all(
+            feature = "session-matching",
+            any(feature = "declare-subscriber", feature = "declare-queryable")
+        ))]
+        self.cell.kill();
         // Each arm rides its variant's gate (see [`MatchingScope`]); a
         // variant that cannot be constructed has no arm, and with both
         // off this is the zero-arm match on an uninhabited enum.
