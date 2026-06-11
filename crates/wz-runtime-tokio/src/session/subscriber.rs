@@ -82,6 +82,12 @@ pub struct Subscriber<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTim
     /// Unconditional like the plane itself (the subscriber registry is
     /// always compiled).
     pub(super) cell: SampleCell<R>,
+    /// R311lo — RAII disarm flag. [`Self::undeclare`] runs the teardown
+    /// once and clears this so the natural [`Drop`] frees the owned
+    /// fields (keyexpr String, the Session Arc clone, the cell Arc)
+    /// instead of the prior `mem::forget(self)` leaking them. `true` at
+    /// construction; `false` once teardown has run.
+    pub(super) armed: bool,
 }
 
 /// R311lh — the type-erased user callback a deferred subscriber's cell
@@ -155,41 +161,44 @@ impl<R: SessionRuntime, T: TimeSource> Subscriber<R, T> {
     /// caller already removed it (currently no public API exposes
     /// raw `unregister(id)` outside this handle, so the false case
     /// is reachable only via a future round adding such a surface).
-    pub fn undeclare(self) -> bool {
-        // R311lh — kill the deferred cell FIRST so a sample staged
-        // before this call but not yet drained is suppressed (the
-        // callback never observes a post-undeclare sample), then
-        // unregister the staging sink under the observer lock.
+    pub fn undeclare(mut self) -> bool {
+        self.teardown()
+    }
+
+    /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the
+    /// single source of the kill-then-unregister discipline (R311lh
+    /// previously had to keep the `undeclare` and `Drop` bodies in
+    /// lock-step by hand). Idempotent via `armed`: the first caller
+    /// kills the deferred cell FIRST (suppressing a sample staged before
+    /// this call but not yet drained, so the callback never observes a
+    /// post-undeclare sample) then unregisters the staging sink under
+    /// the observer lock and disarms; a second call is a no-op. Returns
+    /// whether THIS call removed the registry entry. `unregister` is
+    /// panic-free (boolean return), so the worst-case observable outcome
+    /// on a corrupted observer is "id stays registered" — caller can
+    /// re-`undeclare`.
+    fn teardown(&mut self) -> bool {
+        if !self.armed {
+            return false;
+        }
+        self.armed = false;
         self.cell.kill();
-        // R311de — observer access via R::with_mutex_mut closure form.
-        let removed = R::with_mutex_mut(&self.session.observer, |observer| {
+        // R311de — observer access via R::with_mutex_mut closure form;
+        // per-profile poison-recovery lives inside the runtime impl (AP:
+        // PoisonError::into_inner; MCU: no poison concept under panic =
+        // abort).
+        R::with_mutex_mut(&self.session.observer, |observer| {
             observer.subscribers.unregister(self.id)
-        });
-        // Skip the Drop impl so it does not no-op-unregister an
-        // already-removed id (cosmetic — second unregister is a
-        // boolean false, not a panic, but std::mem::forget makes
-        // the intent explicit at the call site).
-        std::mem::forget(self);
-        removed
+        })
     }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Drop for Subscriber<R, T> {
     fn drop(&mut self) {
-        // R311lh — kill the deferred cell first (same suppression
-        // order as `undeclare`): a staged-but-undrained sample never
-        // fires a dropped subscriber's callback.
-        self.cell.kill();
-        // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
-        // poison-recovery lives inside the runtime impl (AP: recover
-        // PoisonError via into_inner; MCU: no poison concept under
-        // panic = abort). The `unregister` call itself is panic-free
-        // (boolean return), so the worst-case observable outcome on
-        // a corrupted observer is "id stays registered" — caller can
-        // manually re-call `undeclare` if it matters.
-        R::with_mutex_mut(&self.session.observer, |obs| {
-            let _ = obs.subscribers.unregister(self.id);
-        });
+        // R311lo — RAII teardown; disarmed after an explicit
+        // `undeclare`, so this frees the owned fields without a second
+        // unregister.
+        let _ = self.teardown();
     }
 }
 

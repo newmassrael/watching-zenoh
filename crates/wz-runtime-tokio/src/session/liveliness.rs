@@ -107,6 +107,13 @@ pub struct LivelinessToken<R: SessionRuntime = TokioRuntime, T: TimeSource = Tok
     pub(super) id: u64,
     pub(super) keyexpr: String,
     pub(super) options: LivelinessOptions,
+    /// R311lo — RAII disarm flag. [`Self::undeclare`] emits the
+    /// `Declare(UndeclToken)` once and clears this so the natural
+    /// [`Drop`] frees the owned fields (keyexpr String, the Session Arc
+    /// clone) instead of the prior `mem::forget(self)` leaking them, and
+    /// so no duplicate `UndeclToken` is emitted. `true` at construction;
+    /// `false` once teardown has run.
+    pub(super) armed: bool,
 }
 
 impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
@@ -145,47 +152,47 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
     /// duplicate undeclare against an already-retracted id. Mirrors
     /// [`Subscriber::undeclare`] / [`Queryable::undeclare`].
     ///
-    /// `std::mem::forget(self)` keeps the intent explicit — the
-    /// peer ignoring a second `UndeclToken` for the same id is the
-    /// expected zenoh-pico behaviour but the cosmetic "do not emit
-    /// a duplicate" rule matches the textbook RAII consume contract
-    /// across the wz handle family.
-    pub fn undeclare(self) {
+    /// The disarm-flag teardown (R311lo) emits the `UndeclToken`
+    /// exactly once: a second `UndeclToken` for the same id would be
+    /// ignored by the peer anyway, but suppressing it matches the
+    /// textbook RAII consume contract across the wz handle family and
+    /// frees the owned fields rather than `mem::forget` leaking them.
+    pub fn undeclare(mut self) {
+        self.teardown();
+    }
+
+    /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the
+    /// single source of the emit-then-unregister discipline (R248/R283
+    /// previously kept the two bodies in lock-step by hand). Idempotent
+    /// via `armed`: the first caller emits `Declare(UndeclToken)` so the
+    /// peer's liveliness subscribers receive the DELETE sample, drops
+    /// the declarer-side registration (so a later inbound Interest no
+    /// longer replies with this now-undeclared token), and disarms; a
+    /// second call is a no-op (no duplicate wire frame). R311o —
+    /// `send_undeclare_token` is signature-stable (silent no-op when
+    /// declare-* off); when `liveliness-token` is off no LivelinessToken
+    /// is ever constructed so this never runs at runtime. The wire path
+    /// is panic-free under normal operation; a poisoned driver path is a
+    /// future-round carry.
+    fn teardown(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
         self.session.actions.send_undeclare_token(self.id);
-        // R283 — same declarer-side unregister as Drop; the explicit
-        // undeclare path retracts the held-token registration too so a
-        // later inbound Interest does not reply with it.
         #[cfg(feature = "liveliness-token")]
         R::with_mutex_mut(&self.session.observer, |obs| {
             obs.local_tokens.unregister(self.id);
         });
-        std::mem::forget(self);
     }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessToken<R, T> {
     fn drop(&mut self) {
-        // R248 RAII — emit Declare(UndeclToken) so the peer's
-        // liveliness subscribers receive the DELETE sample. See
-        // the struct-level doc-comment on panic semantics: the
-        // wire path is panic-free under normal operation so no
-        // catch_unwind wrapping; a poisoned driver path is a
-        // future-round carry.
-        //
-        // R311o — call is unconditional; send_undeclare_token is
-        // signature-stable (silent no-op when declare-* off). When
-        // `liveliness-token` is off, Session::declare_token returns
-        // Err(FeatureDisabled) so no LivelinessToken instance can
-        // exist on this build, and this Drop never runs.
-        self.session.actions.send_undeclare_token(self.id);
-        // R283 — drop the declarer-side registration so a subsequent
-        // inbound liveliness Interest no longer replies with this
-        // now-undeclared token. Mirrors the Queryable Drop unregister;
-        // gated on `liveliness-token` (the observer's local_tokens field).
-        #[cfg(feature = "liveliness-token")]
-        R::with_mutex_mut(&self.session.observer, |obs| {
-            obs.local_tokens.unregister(self.id);
-        });
+        // R311lo — RAII teardown; disarmed after an explicit
+        // `undeclare`, so this frees the owned fields without emitting a
+        // duplicate UndeclToken.
+        self.teardown();
     }
 }
 
@@ -406,6 +413,13 @@ pub struct LivelinessSubscriber<R: SessionRuntime = TokioRuntime, T: TimeSource 
     /// can be constructed.
     #[cfg(feature = "liveliness-subscriber")]
     pub(super) cell: LivelinessSampleCell<R>,
+    /// R311lo — RAII disarm flag. [`Self::undeclare`] runs the teardown
+    /// once and clears this so the natural [`Drop`] frees the owned
+    /// fields (keyexpr String, the Session Arc clone, the cell Arc)
+    /// instead of the prior `mem::forget(self)` leaking them, and so no
+    /// duplicate `Interest(Final)` is emitted. `true` at construction;
+    /// `false` once teardown has run.
+    pub(super) armed: bool,
 }
 
 /// R311lg — the type-erased user callback a deferred liveliness
@@ -528,56 +542,50 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
     }
 
     /// Explicitly retract this liveliness subscriber. Emits
-    /// `Interest(Final)` on the outbound link and consumes the
-    /// handle so the [`Drop`] impl will not emit a second duplicate
-    /// against an already-retracted id. Mirror of
-    /// [`LivelinessToken::undeclare`]; same `std::mem::forget(self)`
-    /// pattern keeps the intent explicit.
-    pub fn undeclare(self) {
-        // R311dh — observer access via R::with_mutex_mut closure form;
-        // the pre-R311dh `if let Ok(mut observer) = ...lock()` swallow-on-
-        // poison branch is replaced by the trait-mediated closure whose
-        // per-profile impl handles poison recovery (tokio:
-        // PoisonError::into_inner, MCU: no poison concept).
-        // R311ek — the registry slot exists only under
-        // `liveliness-subscriber`; gate the unregister on it. The
-        // `send_interest_final` action below is signature-stable so the
-        // wire-retract path stays unconditional.
-        // R311lg — kill the deferred cell FIRST so a sample staged
-        // before this call but not yet drained is suppressed (the
-        // callback never observes a post-undeclare sample), then
-        // unregister the staging sink under the observer lock.
+    /// `Interest(Final)` on the outbound link exactly once (R311lo
+    /// disarm-flag teardown) and frees the owned fields rather than
+    /// `mem::forget` leaking them. Mirror of
+    /// [`LivelinessToken::undeclare`].
+    pub fn undeclare(mut self) {
+        self.teardown();
+    }
+
+    /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the
+    /// single source of the kill-then-unregister-then-final discipline
+    /// (R280/R311lg previously kept the two bodies in lock-step by
+    /// hand). Idempotent via `armed`: the first caller kills the
+    /// deferred cell FIRST (so a sample staged before this call but not
+    /// yet drained is suppressed — the callback never observes a
+    /// post-undeclare sample), unregisters the local slot so a racing
+    /// inbound dispatch sees no slot, emits `Interest(Final)` so the
+    /// peer drops its end, and disarms; a second call is a no-op (no
+    /// duplicate wire frame). R311ek — the registry slot exists only
+    /// under `liveliness-subscriber`; `send_interest_final` is
+    /// signature-stable so the wire-retract stays unconditional.
+    /// Per-profile poison-recovery lives inside the `R::with_mutex_mut`
+    /// impl.
+    fn teardown(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
         #[cfg(feature = "liveliness-subscriber")]
-        self.cell.kill();
-        #[cfg(feature = "liveliness-subscriber")]
-        R::with_mutex_mut(&self.session.observer, |observer| {
-            observer.liveliness_subscribers.unregister(self.interest_id);
-        });
-        self.session.actions().send_interest_final(self.interest_id);
-        std::mem::forget(self);
+        {
+            self.cell.kill();
+            R::with_mutex_mut(&self.session.observer, |observer| {
+                observer.liveliness_subscribers.unregister(self.interest_id);
+            });
+        }
+        self.session.actions.send_interest_final(self.interest_id);
     }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
     fn drop(&mut self) {
-        // R280 / R311cu RAII — unregister the local slot first so any
-        // racing inbound dispatch sees no slot, then emit
-        // Interest(Final) so the peer drops its end of the
-        // subscription. Per-profile poison-recovery lives inside the
-        // R::with_mutex_mut impl.
-        // R311ek — registry slot gated on `liveliness-subscriber`; the
-        // Interest(Final) wire-retract stays unconditional (signature-
-        // stable action).
-        // R311lg — kill the deferred cell first (same suppression
-        // order as `undeclare`): a staged-but-undrained sample never
-        // fires a dropped subscriber's callback.
-        #[cfg(feature = "liveliness-subscriber")]
-        self.cell.kill();
-        #[cfg(feature = "liveliness-subscriber")]
-        R::with_mutex_mut(&self.session.observer, |observer| {
-            observer.liveliness_subscribers.unregister(self.interest_id);
-        });
-        self.session.actions.send_interest_final(self.interest_id);
+        // R311lo — RAII teardown; disarmed after an explicit
+        // `undeclare`, so this frees the owned fields without emitting a
+        // duplicate Interest(Final).
+        self.teardown();
     }
 }
 

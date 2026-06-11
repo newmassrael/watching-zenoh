@@ -4378,13 +4378,85 @@ fn liveliness_token_undeclare_consumes_handle_and_does_not_double_emit() {
         2,
         "explicit undeclare emits the retraction"
     );
-    // After undeclare(self), the handle is forgotten via
-    // std::mem::forget, so Drop does NOT run — frame_count stays
-    // at 2 even after the scope ends.
+    // R311lo — after undeclare(self) the handle's disarm flag is
+    // cleared, so the end-of-scope Drop runs the teardown but finds it
+    // disarmed and emits nothing (the owned fields are freed rather
+    // than mem::forget-leaked) — frame_count stays at 2.
     assert_eq!(
         driver.frame_count(),
         2,
         "consumed handle must not emit a duplicate UndeclToken via Drop",
+    );
+}
+
+/// R311lo — `undeclare()` must FREE the handle (drop its owned fields)
+/// rather than `mem::forget`-leak them. The handle holds a `Session`
+/// clone, so every leaked handle permanently inflates the session's
+/// `observer` Arc strong-count; an explicit undeclare on a long-running
+/// app would accumulate one leaked Session clone (+ keyexpr String + the
+/// deferred cell Arc) per call. The disarm-flag teardown lets the
+/// natural Drop free those fields, so the count returns to baseline.
+/// Pre-R311lo (`mem::forget(self)`) this assertion would fail: the count
+/// would stay at base+1.
+#[test]
+fn subscriber_undeclare_frees_session_clone_no_leak() {
+    let (session, _driver) = build_session();
+    let base = Arc::strong_count(session.observer());
+    let sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), |_| {});
+    assert!(
+        Arc::strong_count(session.observer()) > base,
+        "the handle holds a Session clone (observer Arc count rises)",
+    );
+    sub.undeclare();
+    assert_eq!(
+        Arc::strong_count(session.observer()),
+        base,
+        "undeclare must free the handle's Session clone (no mem::forget leak)",
+    );
+}
+
+/// R311lo — same no-leak guard on the [`Queryable`] undeclare path.
+#[cfg(feature = "query-queryable")]
+#[test]
+fn queryable_undeclare_frees_session_clone_no_leak() {
+    let (session, _driver) = build_session();
+    let base = Arc::strong_count(session.observer());
+    let q = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+        .expect("query-queryable feature is ON in this test build");
+    assert!(
+        Arc::strong_count(session.observer()) > base,
+        "the handle holds a Session clone (observer Arc count rises)",
+    );
+    q.undeclare();
+    assert_eq!(
+        Arc::strong_count(session.observer()),
+        base,
+        "undeclare must free the handle's Session clone (no mem::forget leak)",
+    );
+}
+
+/// R311lo — same no-leak guard on the [`LivelinessToken`] undeclare
+/// path (the wire-emitting handle family). The `does_not_double_emit`
+/// test above guards the "exactly one UndeclToken" behaviour; this one
+/// guards that the consumed handle's owned fields are freed.
+#[cfg(feature = "liveliness-token")]
+#[test]
+fn liveliness_token_undeclare_frees_session_clone_no_leak() {
+    let (session, _driver) = build_session();
+    let base = Arc::strong_count(session.observer());
+    let token = session
+        .declare_token("liveliness/devA", LivelinessOptions::default())
+        .expect("hardcoded canonical literal keyexpr");
+    assert!(
+        Arc::strong_count(session.observer()) > base,
+        "the handle holds a Session clone (observer Arc count rises)",
+    );
+    token.undeclare();
+    assert_eq!(
+        Arc::strong_count(session.observer()),
+        base,
+        "undeclare must free the handle's Session clone (no mem::forget leak)",
     );
 }
 

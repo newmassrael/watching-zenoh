@@ -230,6 +230,14 @@ pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     /// field: the handle is only constructed under the feature.
     #[cfg(feature = "query-queryable")]
     pub(super) cell: QueryHandlerCell<R>,
+    /// R311lo — RAII disarm flag. [`Self::undeclare`] runs the teardown
+    /// once and clears this so the natural [`Drop`] frees the owned
+    /// fields (keyexpr String, the Session Arc clone, the handler cell
+    /// Arc) instead of the prior `mem::forget(self)` leaking them.
+    /// Unconditional (the OFF build never constructs a Queryable but the
+    /// struct must compile). `true` at construction; `false` once
+    /// teardown has run.
+    pub(super) armed: bool,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
@@ -254,47 +262,50 @@ impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
     /// Explicitly unregister this queryable. Consumes the handle so
     /// the [`Drop`] impl will not run a second time. Mirrors
     /// [`Subscriber::undeclare`].
-    pub fn undeclare(self) -> bool {
-        // R311li — kill the deferred cell FIRST so a query staged
-        // before this call but not yet drained is suppressed (the
-        // handler never observes a post-undeclare query; the requester
-        // still receives its registry-staged Final).
+    pub fn undeclare(mut self) -> bool {
+        self.teardown()
+    }
+
+    /// R311lo — shared teardown for [`Self::undeclare`] + [`Drop`], the
+    /// single source of the kill-then-unregister discipline (R311li
+    /// previously kept the two bodies in lock-step by hand). Idempotent
+    /// via `armed`: the first caller kills the deferred cell FIRST (so a
+    /// query staged before this call but not yet drained is suppressed —
+    /// the handler never observes a post-undeclare query; the requester
+    /// still receives its registry-staged Final) then unregisters under
+    /// the observer lock and disarms; a second call is a no-op. Returns
+    /// whether THIS call removed the registry entry. `unregister` is
+    /// panic-free, so a corrupted observer leaves the queryable
+    /// registered rather than panicking — caller can re-`undeclare`.
+    /// R311dz — the observer's `queryables` field gates on
+    /// `query-queryable`; a build without it never constructs a
+    /// Queryable (`declare_queryable` returns `Err(FeatureDisabled)`),
+    /// so the off-branch is unreachable at runtime but must compile.
+    fn teardown(&mut self) -> bool {
+        if !self.armed {
+            return false;
+        }
+        self.armed = false;
         #[cfg(feature = "query-queryable")]
-        self.cell.kill();
-        // R311df — observer access via R::with_mutex_mut closure form.
-        // R311dz — the observer's `queryables` field gates on
-        // `query-queryable`. A build without it never constructs a
-        // Queryable (declare_queryable returns Err(FeatureDisabled)), so
-        // this off-branch is unreachable at runtime but must compile.
-        #[cfg(feature = "query-queryable")]
-        let removed = R::with_mutex_mut(&self.session.observer, |observer| {
-            observer.queryables.unregister(self.id)
-        });
+        {
+            self.cell.kill();
+            R::with_mutex_mut(&self.session.observer, |observer| {
+                observer.queryables.unregister(self.id)
+            })
+        }
         #[cfg(not(feature = "query-queryable"))]
-        let removed = false;
-        std::mem::forget(self);
-        removed
+        {
+            false
+        }
     }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Drop for Queryable<R, T> {
     fn drop(&mut self) {
-        // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
-        // poison-recovery lives inside the runtime impl. unregister is
-        // panic-free (boolean return), so the worst-case observable
-        // outcome on a corrupted observer is "queryable stays
-        // registered" — caller can manually re-call undeclare.
-        // R311dz — gated on `query-queryable` (the observer's queryables
-        // field). Unreachable at runtime when off (no Queryable is ever
-        // constructed) but must compile.
-        // R311li — kill the deferred cell first (same suppression
-        // order as `undeclare`).
-        #[cfg(feature = "query-queryable")]
-        self.cell.kill();
-        #[cfg(feature = "query-queryable")]
-        R::with_mutex_mut(&self.session.observer, |obs| {
-            let _ = obs.queryables.unregister(self.id);
-        });
+        // R311lo — RAII teardown; disarmed after an explicit
+        // `undeclare`, so this frees the owned fields without a second
+        // unregister.
+        let _ = self.teardown();
     }
 }
 

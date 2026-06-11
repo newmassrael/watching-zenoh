@@ -1669,6 +1669,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             keyexpr: keyexpr_string,
             options,
             cell,
+            // R311lo — armed: Drop/undeclare teardown frees this handle.
+            armed: true,
         }
     }
 
@@ -1776,6 +1778,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 keyexpr: keyexpr_string,
                 options,
                 cell,
+                // R311lo — armed: Drop/undeclare teardown frees this handle.
+                armed: true,
             })
         }
         #[cfg(not(feature = "query-queryable"))]
@@ -1936,6 +1940,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 id: token_id,
                 keyexpr: keyexpr_string,
                 options,
+                // R311lo — armed: Drop/undeclare teardown frees this handle.
+                armed: true,
             })
         }
         #[cfg(not(feature = "liveliness-token"))]
@@ -2036,6 +2042,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 id: token_id,
                 keyexpr: resolved,
                 options,
+                // R311lo — armed: Drop/undeclare teardown frees this handle.
+                armed: true,
             })
         }
         #[cfg(not(feature = "liveliness-token"))]
@@ -2189,6 +2197,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 keyexpr: keyexpr_string,
                 options,
                 cell,
+                // R311lo — armed: Drop/undeclare teardown frees this handle.
+                armed: true,
             })
         }
         #[cfg(not(feature = "liveliness-subscriber"))]
@@ -2342,6 +2352,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 keyexpr: resolved,
                 options,
                 cell,
+                // R311lo — armed: Drop/undeclare teardown frees this handle.
+                armed: true,
             })
         }
         #[cfg(not(feature = "liveliness-subscriber"))]
