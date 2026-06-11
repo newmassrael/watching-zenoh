@@ -592,7 +592,8 @@
         "R311ko: multicast TX fragment split wired at the Push seam; batch_size knob + JOIN mismatch reject",
         "R311kq: JOIN omitted optional = protocol default (8192/0x02); off-default config advertises S=1",
         "R311kr: JOIN T flag = lease wire-unit seconds (whole-second leases); decode projects back to ms",
-        "R311ks: peer sweep holds each peer per ITS JOIN-advertised lease, capped by the local config bound"
+        "R311ks: peer sweep holds each peer per ITS JOIN-advertised lease, capped by the local config bound",
+        "R311lr: multicast-declarations TX landed - interest-response Declare drains to the group."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -34708,6 +34709,64 @@
         "A1 pool remainder: multicast-declarations atom flip + MCU multicast loop remain open (next priority).",
         "multicast-declarations track adds DeclareReplySink + LivelinessGetPrune impls + their drain calls to the multicast loop (ISP slots ready).",
         "drive_multicast_session 8-arg too_many_arguments pre-exists and is run-ci-uncovered (multicast_glue clippy not run under transport-multicast); bundle args into a config struct as its own change."
+      ]
+    },
+    "Round 311lr": {
+      "decision_summary": "R311lr multicast declarer interest-response TX: MulticastReplySink impls DeclareReplySink, DeclareReply tx-item + loop arm, observer flush_declare_replies; mcast has no get-prune (connectionless).",
+      "changes_bullets": [
+        "observer.rs: flush_declare_replies<S: DeclareReplySink> narrow drain added - the DeclareReplySink sibling of flush_query_replies, exposing the private drain_declare_replies. Demand-driven: a single-concern public drain exists only because a consumer (the multicast loop) needs it; the get-prune concern stays bundled in flush_pending (no narrow consumer).",
+        "multicast_glue.rs: MulticastResponseSink renamed MulticastReplySink - it now drains two concerns (query reply + declare interest-response), so the \"Response\" name was a misnomer.",
+        "multicast_glue.rs: MulticastReplySink impls DeclareReplySink (send_declare_token_reply / send_declare_final_reply build the owned Declare via build_token_reply / build_final_reply .try_into_owned() and enqueue MulticastTxItem::DeclareReply) - mirror of the unicast SessionLinkActions: DeclareReplySink.",
+        "multicast_glue.rs: MulticastTxItem::DeclareReply { declare: DeclareOwned } variant (gated liveliness-token, the sole producer; it implies declare-token -> codec-declare) + loop TX arm (mint reliable SN -> encode_frame_with_declare -> multicast_frame_or_fragments, reliable).",
+        "MulticastReplySink intentionally does NOT impl LivelinessGetPrune: the get-prune concern is the session-reconnect declaration-cache prune, and the connectionless multicast transport (JOIN + lease, no re-dial) has no cache to prune. The loop drains via the narrow flush_query_replies + flush_declare_replies, not the 3-concern flush_pending - honoring the R311lq ISP split rather than stubbing an empty LivelinessGetPrune.",
+        "Catalog: appended a §5.1 transport caveat \"R311lr: multicast-declarations TX landed - interest-response Declare drains to the group\" to the accreting multicast log (RX was implicitly live since R311ka; this closes the TX half). No new inventory atom: declare-over-multicast is the composition of declare-* (active) and transport-multicast (active), not an independently-toggleable feature, so a phantom atom would break the atom<->cargo-gate alignment audit-catalog-status.sh enforces."
+      ],
+      "verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 - verdict read from the log, not the tee-masked notification (feedback_runci_verdict_exit_code_only). All lanes 0/A/A2/A3/B/C0/C1[..C1q]/C2/C3/C4[..d]/D/E/E2/F/G pass; Q/M opt-in SKIP.",
+        "cargo test wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed incl the new drive_loop_emits_liveliness_token_reply_over_multicast (a CURRENT liveliness Interest in -> exactly one DeclToken + one DeclFinal multicast out, both interest_id 9 correlated).",
+        "cargo test wz-session-core --all-features --lib: 577 passed - flush_declare_replies is additive, zero regression.",
+        "C1q multicast lane PASS inside run-ci: the new declare test runs under --features transport-multicast,reassembly + transport-fragmentation variants.",
+        "pico parity: the declarer interest-response rides _z_send_declare -> _z_send_n_msg with Z_RELIABILITY_RELIABLE (vendor zenoh-pico src/net/primitives.c:52), transport-agnostic - it dispatches to the multicast transport when the session is multicast.",
+        "validate_workspace after the §5.1 caveat: orphan delta = 0 (T1 ledger=13, new=+0), to be reconfirmed post-append."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "R311ls (next, this session): drive_multicast_session 8-arg too_many_arguments -> collapse into a config struct (runtime handles vs drive config), then ADD a run-ci transport-multicast clippy lane (with the reassembly / transport-fragmentation variants) so multicast_glue - including this round's declare-TX code - is brought under run-ci clippy. This closes the deeper smell: multicast_glue currently has zero run-ci clippy coverage (the 8-arg is its blocker), so today's new code lands clippy-unchecked by CI until R311ls. R311lr + R311ls push together so origin never sees uncovered code. No #[allow] suppression (itself a smell).",
+        "Scope boundary (honest): this round wires the interest-RESPONSE TX only (a held token replying to a peer's liveliness Interest). Proactive own-declaration announce over multicast (a peer multicasting its local subs/queryables/tokens unsolicited) is a separate, not-yet-wired capability; RX of all Declare records was live since R311ka.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open.",
+        "A1 pool remainder: MCU multicast loop remains open; the no-alloc MCU JOIN/declare TX variant is deferred until the MCU multicast loop shapes it."
+      ],
+      "publishable_decision_summary": "R311lr multicast declarer interest-response TX: MulticastReplySink impls DeclareReplySink, DeclareReply tx-item + loop arm, observer flush_declare_replies; mcast has no get-prune (connectionless).",
+      "publishable_changes_bullets": [
+        "observer.rs: flush_declare_replies<S: DeclareReplySink> narrow drain added - the DeclareReplySink sibling of flush_query_replies, exposing the private drain_declare_replies. Demand-driven: a single-concern public drain exists only because a consumer (the multicast loop) needs it; the get-prune concern stays bundled in flush_pending (no narrow consumer).",
+        "multicast_glue.rs: MulticastResponseSink renamed MulticastReplySink - it now drains two concerns (query reply + declare interest-response), so the \"Response\" name was a misnomer.",
+        "multicast_glue.rs: MulticastReplySink impls DeclareReplySink (send_declare_token_reply / send_declare_final_reply build the owned Declare via build_token_reply / build_final_reply .try_into_owned() and enqueue MulticastTxItem::DeclareReply) - mirror of the unicast SessionLinkActions: DeclareReplySink.",
+        "multicast_glue.rs: MulticastTxItem::DeclareReply { declare: DeclareOwned } variant (gated liveliness-token, the sole producer; it implies declare-token -> codec-declare) + loop TX arm (mint reliable SN -> encode_frame_with_declare -> multicast_frame_or_fragments, reliable).",
+        "MulticastReplySink intentionally does NOT impl LivelinessGetPrune: the get-prune concern is the session-reconnect declaration-cache prune, and the connectionless multicast transport (JOIN + lease, no re-dial) has no cache to prune. The loop drains via the narrow flush_query_replies + flush_declare_replies, not the 3-concern flush_pending - honoring the R311lq ISP split rather than stubbing an empty LivelinessGetPrune.",
+        "Catalog: appended a §5.1 transport caveat \"R311lr: multicast-declarations TX landed - interest-response Declare drains to the group\" to the accreting multicast log (RX was implicitly live since R311ka; this closes the TX half). No new inventory atom: declare-over-multicast is the composition of declare-* (active) and transport-multicast (active), not an independently-toggleable feature, so a phantom atom would break the atom<->cargo-gate alignment audit-catalog-status.sh enforces."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 - verdict read from the log, not the tee-masked notification (feedback_runci_verdict_exit_code_only). All lanes 0/A/A2/A3/B/C0/C1[..C1q]/C2/C3/C4[..d]/D/E/E2/F/G pass; Q/M opt-in SKIP.",
+        "cargo test wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed incl the new drive_loop_emits_liveliness_token_reply_over_multicast (a CURRENT liveliness Interest in -> exactly one DeclToken + one DeclFinal multicast out, both interest_id 9 correlated).",
+        "cargo test wz-session-core --all-features --lib: 577 passed - flush_declare_replies is additive, zero regression.",
+        "C1q multicast lane PASS inside run-ci: the new declare test runs under --features transport-multicast,reassembly + transport-fragmentation variants.",
+        "pico parity: the declarer interest-response rides _z_send_declare -> _z_send_n_msg with Z_RELIABILITY_RELIABLE (vendor zenoh-pico src/net/primitives.c:52), transport-agnostic - it dispatches to the multicast transport when the session is multicast.",
+        "validate_workspace after the §5.1 caveat: orphan delta = 0 (T1 ledger=13, new=+0), to be reconfirmed post-append."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ls (next, this session): drive_multicast_session 8-arg too_many_arguments -> collapse into a config struct (runtime handles vs drive config), then ADD a run-ci transport-multicast clippy lane (with the reassembly / transport-fragmentation variants) so multicast_glue - including this round's declare-TX code - is brought under run-ci clippy. This closes the deeper smell: multicast_glue currently has zero run-ci clippy coverage (the 8-arg is its blocker), so today's new code lands clippy-unchecked by CI until R311ls. R311lr + R311ls push together so origin never sees uncovered code. No #[allow] suppression (itself a smell).",
+        "Scope boundary (honest): this round wires the interest-RESPONSE TX only (a held token replying to a peer's liveliness Interest). Proactive own-declaration announce over multicast (a peer multicasting its local subs/queryables/tokens unsolicited) is a separate, not-yet-wired capability; RX of all Declare records was live since R311ka.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open.",
+        "A1 pool remainder: MCU multicast loop remains open; the no-alloc MCU JOIN/declare TX variant is deferred until the MCU multicast loop shapes it."
       ]
     },
     "Round 311n": {
