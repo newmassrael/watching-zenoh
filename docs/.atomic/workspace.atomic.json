@@ -33932,6 +33932,50 @@
         "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
       ]
     },
+    "Round 311la": {
+      "decision_summary": "R311la any-RX lease baseline: every successfully parsed inbound message resets the lease (pico _received parity, rx.c:88) — closes session-review Finding A, where the KeepAlive-only stamp + R311kx suppression expired healthy data-only sessions at established+lease.",
+      "changes_bullets": [
+        "RX-activity stamp moved to the `handle_inbound` SUCCESS chokepoint: every successfully parsed inbound transport message (Frame / Fragment / KeepAlive / handshake / Close) resets the lease — zenoh-pico `_received` parity (unicast/rx.c:88 marks the flag per decoded message; lease.c:141-149 expires only on a silent window). `InboundFrame::Unknown` excluded (pico's decode fails before its stamp; wz tears down via FramingError anyway). Pre-SN-gate placement matches pico (stale frames still count as liveness)",
+        "`last_inbound_keepalive_at` renamed `last_inbound_at` across 10 files (the R72b KeepAlive-arm stamp absorbed by the chokepoint; the arm removed)",
+        "session-review Finding A root cause: the KeepAlive-only baseline + the R311kx wake-arming fix + the R311kx TX suppression (a busy sender emits no KeepAlives, pico parity) combined to expire a healthy data-only session at established + adopted_lease; pre-R311kx the defect was masked by the never-armed lease wake",
+        "docs: field doc, LeaseCheckOutcome, check_lease_deadline / lease_wake_deadline, both drive-loop arming comments rewritten to the any-RX semantics",
+        "tests +3: data FRAME resets the window; Unknown does not stamp; `r311la_data_only_peer_survives_past_lease_window` e2e (300ms lease, data every 80ms, ~3 windows, zero Lease(Expired) — pre-R311la this expired at established+300ms)"
+      ],
+      "verification_bullets": [
+        "session_fsm_lease_deadline 12/12 PASS + 10x consecutive flake sweep 0 FAIL (wall-clock survival e2e); session_keepalive_tx 8/8; drive_session / inbound_dispatch / driver_loop suites green post-rename",
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_M=1 EXIT=0 (unpiped) — Layer M pico interop re-verified (the session-review Finding B gap)",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "session-review minor D/E open: AP loop reports both KeepAlive+Lease verdicts on every deadline wake while the MCU loop reports only the crossed deadline — cross-profile observer event-stream asymmetry; align in a small follow-up if wanted",
+        "session-review minor F open: deferred-fire drain discipline is documentation-enforced; a Drop-guard / dispatch SSOT fn candidate when the decl-sink planes migrate",
+        "decl-sink deferred-fire migration + keepalive atom MCU preset wiring + A1 pool unchanged (Rounds 311kx/311kz)"
+      ],
+      "publishable_decision_summary": "R311la any-RX lease baseline: every successfully parsed inbound message resets the lease (pico _received parity, rx.c:88) — closes session-review Finding A, where the KeepAlive-only stamp + R311kx suppression expired healthy data-only sessions at established+lease.",
+      "publishable_changes_bullets": [
+        "RX-activity stamp moved to the `handle_inbound` SUCCESS chokepoint: every successfully parsed inbound transport message (Frame / Fragment / KeepAlive / handshake / Close) resets the lease — zenoh-pico `_received` parity (unicast/rx.c:88 marks the flag per decoded message; lease.c:141-149 expires only on a silent window). `InboundFrame::Unknown` excluded (pico's decode fails before its stamp; wz tears down via FramingError anyway). Pre-SN-gate placement matches pico (stale frames still count as liveness)",
+        "`last_inbound_keepalive_at` renamed `last_inbound_at` across 10 files (the R72b KeepAlive-arm stamp absorbed by the chokepoint; the arm removed)",
+        "session-review Finding A root cause: the KeepAlive-only baseline + the R311kx wake-arming fix + the R311kx TX suppression (a busy sender emits no KeepAlives, pico parity) combined to expire a healthy data-only session at established + adopted_lease; pre-R311kx the defect was masked by the never-armed lease wake",
+        "docs: field doc, LeaseCheckOutcome, check_lease_deadline / lease_wake_deadline, both drive-loop arming comments rewritten to the any-RX semantics",
+        "tests +3: data FRAME resets the window; Unknown does not stamp; `r311la_data_only_peer_survives_past_lease_window` e2e (300ms lease, data every 80ms, ~3 windows, zero Lease(Expired) — pre-R311la this expired at established+300ms)"
+      ],
+      "publishable_verification_bullets": [
+        "session_fsm_lease_deadline 12/12 PASS + 10x consecutive flake sweep 0 FAIL (wall-clock survival e2e); session_keepalive_tx 8/8; drive_session / inbound_dispatch / driver_loop suites green post-rename",
+        "full run-ci WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_M=1 EXIT=0 (unpiped) — Layer M pico interop re-verified (the session-review Finding B gap)",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session-review minor D/E open: AP loop reports both KeepAlive+Lease verdicts on every deadline wake while the MCU loop reports only the crossed deadline — cross-profile observer event-stream asymmetry; align in a small follow-up if wanted",
+        "session-review minor F open: deferred-fire drain discipline is documentation-enforced; a Drop-guard / dispatch SSOT fn candidate when the decl-sink planes migrate",
+        "decl-sink deferred-fire migration + keepalive atom MCU preset wiring + A1 pool unchanged (Rounds 311kx/311kz)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
