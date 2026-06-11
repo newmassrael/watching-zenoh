@@ -34338,6 +34338,58 @@
         "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
       ]
     },
+    "Round 311lj": {
+      "decision_summary": "R311lj review ratify + Finding A closure: lf..lh textbook, li Reply-before-Final hazard closed by observer-serialized batch take (superseding FinalGuard); publish drain gated on local path.",
+      "changes_bullets": [
+        "session review of the R311lf..li data-plane deferral cascade (lf ratify + lg/lh/li the 4-plane implementation): lf/lg/lh verdict textbook — no hack / doc-around-hack / workaround; SSOT axes hold (single DeferredFireQueue, owned-staging reuses Sample::from_view / InboundReply / QueryResponder / into_response with zero third structs, dispatch SSOT strengthened); li carried one real defect (Finding A below), closed in this same round",
+        "Finding A (real, li-introduced) CLOSED: the Reply-before-Final ordering li claimed as structural held only when a stealing drainer acquired the observer lock first; an auxiliary drainer taking the queue with the queue lock ALONE (drain_deferred_fires / publish / query / sweep tails) could mem::take a half-staged dispatch window — a queryable handler job staged before its trailing ResponseFinal job — and emit the Final ahead of the handler's last Reply on the wire",
+        "fix = observer-serialized batch take (NOT the FinalGuard the review floated): DeferredFireQueue::take_batch + Session::drain_deferred_fires wraps each take in the observer lock; since every stage() runs inside the staging site's observer-lock window, an observer-serialized take observes only whole numbers of complete windows, so [handler, final] always land in one batch on one drainer in FIFO order; jobs still RUN outside the lock (the lock is held only across the cheap Vec swap), preserving the lock-free callback invariant. Chosen over FinalGuard (pico query-rc-drop parity) because it is a localized lock-discipline fix with an obvious invariant vs a cross-layer per-request refcount threaded through sink->job + a raw-path double-emit interaction; FinalGuard is now unnecessary (the Final stays a staged job emitted by the existing send_response_final)",
+        "secondary cleanup: publish / publish_aliased drain only on the allows_local path — a Remote-only publish stages nothing, so its prior unconditional drain was gratuitous (ran drive-loop-staged callbacks on the publish thread); now a method drains iff it staged",
+        "self-contained DeferredFireQueue::drain_and_fire retained (queue lock only) for single-thread fixtures (the deferred_fire_infra unit tests) where no concurrent stager exists; its doc states the non-serialized caveat"
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio --lib 251 PASS (unchanged set — the fix is a lock-discipline change under the existing functional tests; the wire queryable test queryable_handler_runs_deferred_replies_then_final_on_wire pins Reply-frame-before-Final-frame), deferred_fire_infra 4 PASS, wz-session-core PASS",
+        "Finding A closure is by lock-discipline argument (every stage holds the observer lock; the observer-serialized take cannot split a window) + documentation, not a timing stress test (a flaky-prone concurrency harness is rejected per no-flaky-ever); a controlled-interleaving fixture is a carry",
+        "cargo fmt --check + clippy --all-targets deny-warnings clean on wz-session-core / wz-runtime-tokio / wz-ap-demo; wz-ap-demo + wz-e2e-harness build OK",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311lf cascade END STATE holds: all 4 ratified data planes deferred AND the Reply-before-Final ordering is now structurally airtight (R311lj observer-serialized take); the lock-free callback invariant is reached for the ratified enumeration",
+        "Finding A regression guard is a carry: a deterministic controlled-interleaving concurrency fixture (a stager holds the observer lock while a second drainer attempts a take, asserting the take blocks) would pin the observer-serialized take against a revert to queue-lock-only; deferred per no-flaky-ever (timing-based stress rejected) until the fixture is deterministic",
+        "Finding B (pre-existing, carry): declare_liveliness_subscriber registers the sink then does a fallible send_interest...? with no rollback — a send failure orphans the registered sink (the handle is never returned, so its cell cannot be killed); same register-then-fallible-wire class predates lg; fold into the handle-lifetime round",
+        "remaining ratified-adjacent surface: liveliness-get (LivelinessGetRegistry on_reply/on_final still fire inside the observer mutex — outside the 4-plane enumeration but the invariant covers it in spirit), next-round candidate",
+        "pre-existing: mem::forget-based undeclare on LivelinessSubscriber / LivelinessToken / Subscriber / Queryable leaks handle field Arcs per cycle — ManuallyDrop refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ],
+      "publishable_decision_summary": "R311lj review ratify + Finding A closure: lf..lh textbook, li Reply-before-Final hazard closed by observer-serialized batch take (superseding FinalGuard); publish drain gated on local path.",
+      "publishable_changes_bullets": [
+        "session review of the R311lf..li data-plane deferral cascade (lf ratify + lg/lh/li the 4-plane implementation): lf/lg/lh verdict textbook — no hack / doc-around-hack / workaround; SSOT axes hold (single DeferredFireQueue, owned-staging reuses Sample::from_view / InboundReply / QueryResponder / into_response with zero third structs, dispatch SSOT strengthened); li carried one real defect (Finding A below), closed in this same round",
+        "Finding A (real, li-introduced) CLOSED: the Reply-before-Final ordering li claimed as structural held only when a stealing drainer acquired the observer lock first; an auxiliary drainer taking the queue with the queue lock ALONE (drain_deferred_fires / publish / query / sweep tails) could mem::take a half-staged dispatch window — a queryable handler job staged before its trailing ResponseFinal job — and emit the Final ahead of the handler's last Reply on the wire",
+        "fix = observer-serialized batch take (NOT the FinalGuard the review floated): DeferredFireQueue::take_batch + Session::drain_deferred_fires wraps each take in the observer lock; since every stage() runs inside the staging site's observer-lock window, an observer-serialized take observes only whole numbers of complete windows, so [handler, final] always land in one batch on one drainer in FIFO order; jobs still RUN outside the lock (the lock is held only across the cheap Vec swap), preserving the lock-free callback invariant. Chosen over FinalGuard (pico query-rc-drop parity) because it is a localized lock-discipline fix with an obvious invariant vs a cross-layer per-request refcount threaded through sink->job + a raw-path double-emit interaction; FinalGuard is now unnecessary (the Final stays a staged job emitted by the existing send_response_final)",
+        "secondary cleanup: publish / publish_aliased drain only on the allows_local path — a Remote-only publish stages nothing, so its prior unconditional drain was gratuitous (ran drive-loop-staged callbacks on the publish thread); now a method drains iff it staged",
+        "self-contained DeferredFireQueue::drain_and_fire retained (queue lock only) for single-thread fixtures (the deferred_fire_infra unit tests) where no concurrent stager exists; its doc states the non-serialized caveat"
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio --lib 251 PASS (unchanged set — the fix is a lock-discipline change under the existing functional tests; the wire queryable test queryable_handler_runs_deferred_replies_then_final_on_wire pins Reply-frame-before-Final-frame), deferred_fire_infra 4 PASS, wz-session-core PASS",
+        "Finding A closure is by lock-discipline argument (every stage holds the observer lock; the observer-serialized take cannot split a window) + documentation, not a timing stress test (a flaky-prone concurrency harness is rejected per no-flaky-ever); a controlled-interleaving fixture is a carry",
+        "cargo fmt --check + clippy --all-targets deny-warnings clean on wz-session-core / wz-runtime-tokio / wz-ap-demo; wz-ap-demo + wz-e2e-harness build OK",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311lf cascade END STATE holds: all 4 ratified data planes deferred AND the Reply-before-Final ordering is now structurally airtight (R311lj observer-serialized take); the lock-free callback invariant is reached for the ratified enumeration",
+        "Finding A regression guard is a carry: a deterministic controlled-interleaving concurrency fixture (a stager holds the observer lock while a second drainer attempts a take, asserting the take blocks) would pin the observer-serialized take against a revert to queue-lock-only; deferred per no-flaky-ever (timing-based stress rejected) until the fixture is deterministic",
+        "Finding B (pre-existing, carry): declare_liveliness_subscriber registers the sink then does a fallible send_interest...? with no rollback — a send failure orphans the registered sink (the handle is never returned, so its cell cannot be killed); same register-then-fallible-wire class predates lg; fold into the handle-lifetime round",
+        "remaining ratified-adjacent surface: liveliness-get (LivelinessGetRegistry on_reply/on_final still fire inside the observer mutex — outside the 4-plane enumeration but the invariant covers it in spirit), next-round candidate",
+        "pre-existing: mem::forget-based undeclare on LivelinessSubscriber / LivelinessToken / Subscriber / Queryable leaks handle field Arcs per cycle — ManuallyDrop refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
