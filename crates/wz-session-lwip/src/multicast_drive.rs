@@ -57,15 +57,13 @@ use wz_link_lwip::rx_sockets::{SessionMulticastRxSocket, SESSION_MULTICAST_RX_SL
 use wz_link_lwip::{Datagram, LwipLink};
 use wz_runtime_core::TimeSource;
 use wz_runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
-use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-use wz_session_core::inbound::{parse_inbound, InboundFrame};
-use wz_session_core::multicast_dispatch::{FrameIngest, MulticastDispatcher};
-use wz_session_core::multicast_join::{decode_join, encode_join, validate_join};
+use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::multicast_dispatch::MulticastDispatcher;
+use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
-use wz_session_core::network_message::parse_frame_payload;
+use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, TxSn};
-use wz_session_core::wire_const;
 
 /// The MCU multicast I/O seam: a [`SessionMulticastRxSocket`] (joined to the
 /// group at bind) plus the group `(addr, port)` the loop multicasts to. The
@@ -206,60 +204,21 @@ where
         if let Some(dg) = driver.try_recv() {
             let src = peer_key(dg.src_addr, dg.src_port);
             let bytes = dg.data.as_slice();
-            match bytes.first().map(|h| h & 0x1f) {
-                Some(wire_const::T_MID_JOIN) => {
-                    // A JOIN announces its zid; validate (§3.2 rejection
-                    // rules), then admit / refresh the peer at this address.
-                    // Filter our own zid (multicast loopback echoes our beacon
-                    // back; a node is not its own peer).
-                    if let Some(join) = decode_join(bytes) {
-                        if join.zid != params.zid.as_slice() {
-                            if let Some(baseline) = validate_join(&join, params) {
-                                dispatcher.ingest_join(join.zid, src, baseline, now);
-                            }
-                        }
-                    }
-                }
-                Some(wire_const::T_MID_FRAME) => {
-                    // Data plane: decode the Frame, admit it against the
-                    // sender's per-channel SN gate (which refreshes its lease),
-                    // and fan the NetworkMessage batch to the observer. A frame
-                    // from an unknown peer / an out-of-order SN / a malformed
-                    // envelope is dropped — one bad datagram must not stop the
-                    // group.
-                    if let Ok(InboundFrame::Frame {
-                        reliable,
-                        sn,
-                        payload,
-                        has_ext,
-                        extensions,
-                    }) = parse_inbound(bytes)
-                    {
-                        if let FrameIngest::Admitted =
-                            dispatcher.ingest_frame_by_src(src, reliable, sn, now)
-                        {
-                            if let Ok(messages) = parse_frame_payload(&payload) {
-                                let outcome = DriverLoopOutcome::FramePayload {
-                                    reliable,
-                                    sn,
-                                    messages,
-                                    has_ext,
-                                    extensions,
-                                };
-                                on_event(IterationEvent::Poll(&outcome));
-                            }
-                        }
-                    }
-                }
-                Some(wire_const::T_MID_KEEP_ALIVE) => {
-                    // A liveness ping refreshes the sender's lease.
-                    dispatcher.refresh_by_src(src, now);
-                }
-                Some(wire_const::T_MID_CLOSE) => {
-                    // Graceful departure (attributed by source address).
+            // R311lv — the shared RxDispatch SSOT (JOIN admit / Frame
+            // admit-and-fan / KeepAlive refresh) — the same `wz_session_core`
+            // primitive the AP loop drives, so the §3.1 classify lives in one
+            // home. This foundation owns no reassembly Router, so the
+            // out-of-order-chain + Fragment tails are dropped (a fragment is
+            // dropped exactly as pico does with fragmentation off; both arrive
+            // with the MCU reassembly increment); Close is the only tail it
+            // acts on.
+            match dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event) {
+                MulticastRxNext::Done
+                | MulticastRxNext::FrameOutOfOrder { .. }
+                | MulticastRxNext::Fragment => {}
+                MulticastRxNext::Close => {
                     dispatcher.close_by_src(src);
                 }
-                _ => {}
             }
             continue;
         }

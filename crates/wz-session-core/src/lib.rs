@@ -836,3 +836,20 @@ pub mod multicast_dispatch;
     feature = "alloc"
 ))]
 pub mod multicast_join;
+
+/// R311lv — the shared multicast RX classify + dispatch SSOT consumed by both
+/// the AP (`wz-runtime-tokio::multicast_glue`) and MCU
+/// (`wz-session-lwip::multicast_drive`) drive loops, so the §3.1 RxDispatch
+/// decision (transport MID -> [`multicast_dispatch`] method) has ONE home
+/// rather than a copy per loop. Pure orchestration over [`multicast_dispatch`]
+/// + [`multicast_join`] + the inbound / frame codecs; the loops own only the IO
+/// + clock + their reassembly Router (the divergent tail
+/// [`multicast_rx::MulticastRxNext`] hands back).
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-join",
+    feature = "codec-frame",
+    feature = "codec-close",
+    feature = "alloc"
+))]
+pub mod multicast_rx;

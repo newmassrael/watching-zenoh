@@ -86,10 +86,9 @@
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use wz_codecs::wire_const;
 #[cfg(feature = "reassembly")]
 use wz_session_core::drive::sweep_reporting;
-use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+use wz_session_core::driver_loop::IterationEvent;
 // R311lq/R311lr — `multicast_frame_or_fragments` is the codec-agnostic
 // egress splitter shared by every data emit (Push, queryable Response, or
 // the R311lr liveliness Declare reply), so it is gated on the union of the
@@ -120,15 +119,19 @@ use wz_codecs::declare::DeclareOwned;
 use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
 #[cfg(feature = "liveliness-token")]
 use wz_session_core::frame_encode::encode_frame_with_declare;
+// R311lv — the inbound Frame codec is now only named in this loop's
+// reassembly Fragment tail (the JOIN / Frame classify moved to the shared
+// `multicast_rx` SSOT); the tests import their own copy.
+#[cfg(feature = "reassembly")]
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, TxFrame};
+use wz_session_core::multicast_dispatch::MulticastDispatcher;
 #[cfg(feature = "reassembly")]
 use wz_session_core::multicast_dispatch::{
     abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
 };
-use wz_session_core::multicast_dispatch::{FrameIngest, MulticastDispatcher};
-use wz_session_core::multicast_join::{decode_join, encode_join, validate_join};
-use wz_session_core::network_message::parse_frame_payload;
+use wz_session_core::multicast_join::encode_join;
+use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
 #[cfg(feature = "codec-push")]
 use wz_session_core::push_build;
 use wz_session_core::reliability::Reliability;
@@ -548,90 +551,54 @@ where
                     // nothing can be attributed, so the message is ignored.
                     if let Some(src) = rx.src {
                         let now = clock.now_monotonic_ms();
-                        match rx.bytes.first().map(|h| h & 0x1f) {
-                            Some(wire_const::T_MID_JOIN) => {
-                                // A JOIN announces its zid; validate (§3.2
-                                // rejection rules), then admit / refresh the
-                                // peer at this address and seed its RX SN
-                                // baselines. Filter our own zid: with
-                                // multicast loopback on our beacon echoes
-                                // back, and a node is not its own peer.
-                                if let Some(join) = decode_join(&rx.bytes) {
-                                    if join.zid != params.zid.as_slice() {
-                                        if let Some(baseline) =
-                                            validate_join(&join, params)
-                                        {
-                                            dispatcher.ingest_join(
-                                                join.zid, src, baseline, now,
-                                            );
-                                        }
-                                    }
+                        // R311lv — the JOIN admit / Frame admit-and-fan / KeepAlive
+                        // refresh are the shared `wz_session_core` RxDispatch SSOT
+                        // (one home for both the AP + MCU loops). This loop owns
+                        // only the reassembly-divergent tail it hands back.
+                        match dispatch_multicast_inbound(
+                            dispatcher,
+                            params,
+                            &rx.bytes,
+                            src,
+                            now,
+                            &mut on_event,
+                        ) {
+                            MulticastRxNext::Done => {}
+                            MulticastRxNext::FrameOutOfOrder { reliable } => {
+                                // R311kn — an out-of-order FRAME clears the
+                                // channel's in-progress reassembly chain (pico
+                                // clears the dbuf + state, multicast/rx.c
+                                // `_z_multicast_handle_frame`): the dropped frame
+                                // may have superseded the chain's continuation, so
+                                // completing it would mix generations.
+                                #[cfg(feature = "reassembly")]
+                                if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                                    reasm.abort_channel(&multicast_chain_key(idx), reliable);
                                 }
+                                #[cfg(not(feature = "reassembly"))]
+                                let _ = reliable;
                             }
-                            Some(wire_const::T_MID_FRAME) => {
-                                // A1b data plane: decode the Frame envelope,
-                                // admit it against the sender's per-channel SN
-                                // gate (which also refreshes its lease), and
-                                // fan the NetworkMessage batch to the observer
-                                // callback. A frame from an unknown peer, an
-                                // out-of-order SN, or a malformed envelope /
-                                // payload is dropped — pico logs and moves on;
-                                // one bad datagram must not stop the group.
-                                if let Ok(InboundFrame::Frame {
-                                    reliable,
-                                    sn,
-                                    payload,
-                                    has_ext,
-                                    extensions,
-                                }) = parse_inbound(&rx.bytes)
-                                {
-                                    match dispatcher.ingest_frame_by_src(src, reliable, sn, now) {
-                                        FrameIngest::Admitted => {
-                                            if let Ok(messages) = parse_frame_payload(&payload)
-                                            {
-                                                let outcome = DriverLoopOutcome::FramePayload {
-                                                    reliable,
-                                                    sn,
-                                                    messages,
-                                                    has_ext,
-                                                    extensions,
-                                                };
-                                                on_event(IterationEvent::Poll(&outcome));
-                                            }
-                                        }
-                                        // R311kn — an out-of-order FRAME clears
-                                        // the channel's in-progress reassembly
-                                        // chain (pico clears the dbuf + state,
-                                        // multicast/rx.c
-                                        // `_z_multicast_handle_frame`): the
-                                        // dropped frame may have superseded the
-                                        // chain's continuation, so completing it
-                                        // would mix generations.
-                                        #[cfg(feature = "reassembly")]
-                                        FrameIngest::OutOfOrder => {
-                                            if let Some(idx) =
-                                                dispatcher.peer_index_by_src(src)
-                                            {
-                                                reasm.abort_channel(
-                                                    &multicast_chain_key(idx),
-                                                    reliable,
-                                                );
-                                            }
-                                        }
-                                        _ => {}
-                                    }
+                            MulticastRxNext::Close => {
+                                // Graceful departure (attributed by source
+                                // address). R311kn — the departing peer's
+                                // in-progress chains die with it (pico's per-entry
+                                // dbufs), BEFORE the slot index can be re-issued.
+                                #[cfg(feature = "reassembly")]
+                                if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                                    abort_peer_chains(&mut reasm, idx);
                                 }
+                                dispatcher.close_by_src(src);
                             }
-                            // R311kn — the multicast fragment RX arm: SN-gate
-                            // per peer, reassemble per (slot, channel) chain,
-                            // and fan the completed message through the SAME
-                            // observer event the Frame arm uses (zenoh-pico
-                            // `_z_multicast_handle_fragment_inner`). Without
-                            // `reassembly` the MID falls to the `_` arm and
-                            // the fragment is dropped — pico "Fragment dropped
-                            // because fragmentation feature is deactivated".
-                            #[cfg(feature = "reassembly")]
-                            Some(wire_const::T_MID_FRAGMENT) => {
+                            MulticastRxNext::Fragment => {
+                                // R311kn — the multicast fragment RX arm: SN-gate
+                                // per peer, reassemble per (slot, channel) chain,
+                                // and fan the completed message through the SAME
+                                // observer event the Frame arm uses (zenoh-pico
+                                // `_z_multicast_handle_fragment_inner`). Without
+                                // `reassembly` the fragment is dropped — pico
+                                // "Fragment dropped because fragmentation feature
+                                // is deactivated".
+                                #[cfg(feature = "reassembly")]
                                 if let Ok(InboundFrame::Fragment {
                                     reliable,
                                     sn,
@@ -653,24 +620,6 @@ where
                                     );
                                 }
                             }
-                            Some(wire_const::T_MID_KEEP_ALIVE) => {
-                                // A liveness ping refreshes the sender's lease
-                                // (robustness if its JOINs are lost).
-                                dispatcher.refresh_by_src(src, now);
-                            }
-                            Some(wire_const::T_MID_CLOSE) => {
-                                // Graceful departure (the Close carries no zid,
-                                // so it is attributed by source address).
-                                // R311kn — the departing peer's in-progress
-                                // chains die with it (pico's per-entry dbufs),
-                                // BEFORE the slot index can be re-issued.
-                                #[cfg(feature = "reassembly")]
-                                if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                                    abort_peer_chains(&mut reasm, idx);
-                                }
-                                dispatcher.close_by_src(src);
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -706,10 +655,14 @@ mod tests {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::collections::VecDeque;
 
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
     use wz_session_core::link::{LostCause, RxFrame};
     use wz_session_core::multicast_dispatch::MulticastConfig;
+    use wz_session_core::multicast_join::decode_join;
     use wz_session_core::multicast_params::MulticastParams;
     use wz_session_core::multicast_peer::MulticastPeerState;
+    use wz_session_core::network_message::parse_frame_payload;
+    use wz_session_core::wire_const;
 
     use crate::runtime_impl::TokioTime;
 
