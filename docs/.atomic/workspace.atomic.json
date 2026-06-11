@@ -33976,6 +33976,50 @@
         "decl-sink deferred-fire migration + keepalive atom MCU preset wiring + A1 pool unchanged (Rounds 311kx/311kz)"
       ]
     },
+    "Round 311lb": {
+      "decision_summary": "R311lb decl-observer id currency: DeclObserverPair installs return a pair-local id and uninstall removes by it (3 registries grow remove_* delegators) — the registry half the Session-tier deferred decl listeners (R311lc) undeclare through; deferred_fire gate union grows to the decl-sink planes.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/decl_sink.rs — DeclObserverPair observers are id-keyed (KeyedSink slots, pair-shared monotonic counter): install_decl/install_undecl return Result<u64, RegisterError>; new uninstall_decl/uninstall_undecl remove by id via BoundedVec::retain (order-preserving, double-removal false no-op); fire loops read keyed.sink",
+        "crates/wz-session-core/src/declare/{subscriber,queryable,liveliness}.rs — on_*_declared_sink/on_*_undeclared_sink return the registry-local observer id; new remove_*_declared_sink/remove_*_undeclared_sink delegators; the alloc convenience closures (on_subscriber_declared etc.) return the id too",
+        "crates/wz-session-core/src/lib.rs + deferred_fire.rs — deferred_fire module gate union grows from session-matching alone to all(alloc, any(session-matching, declare-subscriber, declare-queryable, liveliness-token)); gating docs rewritten (thumbv6m G.10 lane stays Arc-free: no MCU lane composes the decl features with alloc)",
+        "tests — decl_sink observer_pair_uninstalls_by_id (id-keyed removal, survivor order, cross-list id independence); observer_pair_installs_and_fires_concrete_sinks updated to the keyed shape"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core (codec+decl+matching superset features) 334 PASS incl. the new observer_pair_uninstalls_by_id",
+        "cargo build -p wz-session-core --no-default-features decl subsets: no-alloc (deferred_fire stays out per alloc arm) + alloc both EXIT=0",
+        "cargo clippy -D warnings: wz-session-core (superset features, all-targets) + wz-runtime-tokio default both EXIT=0; cargo test -p wz-runtime-tokio --lib 235 PASS",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311lc wires the Session-tier deferred decl listeners over this id currency: declare_remote_{subscriber,queryable,token}_listener staging sinks + DeclListener handle (kill cell first, then remove_* both sinks)",
+        "R311ld (session-review minor F) lands the dispatch SSOT fn (observer lock + dispatch + drain in one Session method) and migrates wz-e2e-harness + wz-ap-demo dispatch closures onto it",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ],
+      "publishable_decision_summary": "R311lb decl-observer id currency: DeclObserverPair installs return a pair-local id and uninstall removes by it (3 registries grow remove_* delegators) — the registry half the Session-tier deferred decl listeners (R311lc) undeclare through; deferred_fire gate union grows to the decl-sink planes.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/decl_sink.rs — DeclObserverPair observers are id-keyed (KeyedSink slots, pair-shared monotonic counter): install_decl/install_undecl return Result<u64, RegisterError>; new uninstall_decl/uninstall_undecl remove by id via BoundedVec::retain (order-preserving, double-removal false no-op); fire loops read keyed.sink",
+        "crates/wz-session-core/src/declare/{subscriber,queryable,liveliness}.rs — on_*_declared_sink/on_*_undeclared_sink return the registry-local observer id; new remove_*_declared_sink/remove_*_undeclared_sink delegators; the alloc convenience closures (on_subscriber_declared etc.) return the id too",
+        "crates/wz-session-core/src/lib.rs + deferred_fire.rs — deferred_fire module gate union grows from session-matching alone to all(alloc, any(session-matching, declare-subscriber, declare-queryable, liveliness-token)); gating docs rewritten (thumbv6m G.10 lane stays Arc-free: no MCU lane composes the decl features with alloc)",
+        "tests — decl_sink observer_pair_uninstalls_by_id (id-keyed removal, survivor order, cross-list id independence); observer_pair_installs_and_fires_concrete_sinks updated to the keyed shape"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core (codec+decl+matching superset features) 334 PASS incl. the new observer_pair_uninstalls_by_id",
+        "cargo build -p wz-session-core --no-default-features decl subsets: no-alloc (deferred_fire stays out per alloc arm) + alloc both EXIT=0",
+        "cargo clippy -D warnings: wz-session-core (superset features, all-targets) + wz-runtime-tokio default both EXIT=0; cargo test -p wz-runtime-tokio --lib 235 PASS",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311lc wires the Session-tier deferred decl listeners over this id currency: declare_remote_{subscriber,queryable,token}_listener staging sinks + DeclListener handle (kill cell first, then remove_* both sinks)",
+        "R311ld (session-review minor F) lands the dispatch SSOT fn (observer lock + dispatch + drain in one Session method) and migrates wz-e2e-harness + wz-ap-demo dispatch closures onto it",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
