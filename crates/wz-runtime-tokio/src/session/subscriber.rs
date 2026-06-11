@@ -75,6 +75,55 @@ pub struct Subscriber<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTim
     pub(super) id: SubscriptionId,
     pub(super) keyexpr: String,
     pub(super) options: SubscribeOptions,
+    /// R311lh — the deferred-fire cell holding the user callback (the
+    /// registry-installed sink only stages an owned `Sample` copy; the
+    /// drain runs the callback outside the observer lock — the R311lf
+    /// lock-free callback invariant on the subscriber-sample plane).
+    /// Unconditional like the plane itself (the subscriber registry is
+    /// always compiled).
+    pub(super) cell: SampleCell<R>,
+}
+
+/// R311lh — the type-erased user callback a deferred subscriber's cell
+/// holds: erased at registration so the [`Subscriber`] handle has a
+/// nameable cell type (the [`DeclListener`] / [`MatchingListener`]
+/// convention).
+pub(super) type BoxedSampleCallback = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
+
+/// R311lh — the per-subscriber deferred-fire cell (take-call-restore
+/// with the lossless backlog; see [`wz_session_core::deferred_fire`]).
+/// The registry-installed staging sink fires against it;
+/// [`Subscriber::undeclare`] / `Drop` kill it so a
+/// staged-but-undrained sample is suppressed and self-undeclare from
+/// inside the callback is safe.
+pub(super) type SampleCell<R> =
+    wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedSampleCallback>;
+
+impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+    /// R311lh — build the deferred cell + the staging sink one
+    /// `declare_subscriber{_aliased}` call installs in the registry:
+    /// the sink materializes each matched borrowed view into the owned
+    /// retention [`crate::sample::Sample`] (via `Sample::from_view` —
+    /// full-fidelity copy including the five rich metadata fields) and
+    /// stages one queue job per sample; the job redelivers the owned
+    /// sample as `&dyn SampleView` when it invokes the user callback
+    /// OUTSIDE the observer lock. The callback signature is unchanged —
+    /// deferral is invisible at the type level.
+    pub(super) fn deferred_sample_sink(
+        &self,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> (SampleCell<R>, impl FnMut(&dyn SampleView) + Send + 'static) {
+        let erased: BoxedSampleCallback = Box::new(callback);
+        let cell: SampleCell<R> = wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
+        let queue = self.fires.clone();
+        let cell_for_sink = cell.clone();
+        let sink = move |view: &dyn SampleView| {
+            let owned = crate::sample::Sample::from_view(view);
+            let cell = cell_for_sink.clone();
+            queue.stage(Box::new(move || cell.invoke(move |cb| cb(&owned))));
+        };
+        (cell, sink)
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Subscriber<R, T> {
@@ -107,6 +156,11 @@ impl<R: SessionRuntime, T: TimeSource> Subscriber<R, T> {
     /// raw `unregister(id)` outside this handle, so the false case
     /// is reachable only via a future round adding such a surface).
     pub fn undeclare(self) -> bool {
+        // R311lh — kill the deferred cell FIRST so a sample staged
+        // before this call but not yet drained is suppressed (the
+        // callback never observes a post-undeclare sample), then
+        // unregister the staging sink under the observer lock.
+        self.cell.kill();
         // R311de — observer access via R::with_mutex_mut closure form.
         let removed = R::with_mutex_mut(&self.session.observer, |observer| {
             observer.subscribers.unregister(self.id)
@@ -122,6 +176,10 @@ impl<R: SessionRuntime, T: TimeSource> Subscriber<R, T> {
 
 impl<R: SessionRuntime, T: TimeSource> Drop for Subscriber<R, T> {
     fn drop(&mut self) {
+        // R311lh — kill the deferred cell first (same suppression
+        // order as `undeclare`): a staged-but-undrained sample never
+        // fires a dropped subscriber's callback.
+        self.cell.kill();
         // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
         // poison-recovery lives inside the runtime impl (AP: recover
         // PoisonError via into_inner; MCU: no poison concept under

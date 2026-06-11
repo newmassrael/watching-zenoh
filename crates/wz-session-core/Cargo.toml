@@ -437,6 +437,19 @@ session-reconnect = ["alloc"]
 # the membership table it consults is the registries' alloc-gated half.
 session-matching = ["alloc"]
 
+# R311lh — consumer-enable arm for the `deferred_fire` module gate. The
+# Session tier (wz-runtime-tokio, host-only, always alloc + Arc) turns
+# this on through its DEPENDENCY feature list so the deferred-fire
+# machinery exists in every runtime-tokio build — required once the
+# always-compiled subscriber plane defers (R311lf invariant, round (b)).
+# Deliberately NOT implied by any plane feature: the R311le ratify
+# rejected the plane->deferred-fire implication because it would drag
+# `alloc` into the no-alloc decl lane (wz-session-core
+# --no-default-features codec-declare,declare-* build). Direct core
+# consumers (MCU lanes, subset test lanes) never enable it and keep
+# composing through the plane-arm union.
+deferred-fire = ["alloc"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

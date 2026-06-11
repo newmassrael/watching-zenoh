@@ -270,23 +270,16 @@ pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
     /// Cheap-`Clone` handle (Arc inside), shared with every deferred
     /// sink this session registers.
     ///
-    /// R311lc — the gate union grew with the decl-sink planes: the
-    /// `declare_remote_*_listener` staging sinks (decl_listener.rs)
-    /// share this queue, so the field exists under any feature that can
-    /// construct a deferred sink (mirrors the wz-session-core
-    /// `deferred_fire` module gate union). R311lg — the R311lf ratify
-    /// adds the first data-plane arms: `liveliness-subscriber`
-    /// (deferred liveliness samples) + `query-get` (deferred z_get
-    /// reply/final; `query-get` is the Session-tier arm whose core
-    /// mirror is `query-reply`).
-    #[cfg(any(
-        feature = "session-matching",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "liveliness-token",
-        feature = "liveliness-subscriber",
-        feature = "query-get",
-    ))]
+    /// R311lc — the decl-sink planes' staging sinks (decl_listener.rs)
+    /// share this queue; R311lg added the first data planes
+    /// (liveliness samples + z_get reply/final). R311lh — the field is
+    /// UNCONDITIONAL: the always-compiled subscriber plane defers
+    /// (R311lf round (b)), so every Session build needs the queue.
+    /// This host-only crate's `wz-session-core` dependency enables the
+    /// `deferred-fire` consumer arm, so the core module exists in
+    /// every feature subset here; the prior six-feature cfg union
+    /// (R311le forced-inline) is superseded for this tier — core keeps
+    /// its plane-arm union for direct consumers.
     fires: wz_session_core::deferred_fire::DeferredFireQueue<R>,
     /// R311cw — the trait-mediated monotonic clock the query / get
     /// methods use to compute reply-pending deadlines. Folded from
@@ -320,14 +313,6 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
         Self {
             actions: self.actions.clone(),
             observer: self.observer.clone(),
-            #[cfg(any(
-                feature = "session-matching",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "liveliness-token",
-                feature = "liveliness-subscriber",
-                feature = "query-get",
-            ))]
             fires: self.fires.clone(),
             clock: self.clock.clone(),
         }
@@ -422,16 +407,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             actions,
             observer,
             // R311kz — fresh deferred-fire queue per logical session;
-            // the deferred matching + decl-listener sinks (R311lc)
-            // clone handles out of it at registration.
-            #[cfg(any(
-                feature = "session-matching",
-                feature = "declare-subscriber",
-                feature = "declare-queryable",
-                feature = "liveliness-token",
-                feature = "liveliness-subscriber",
-                feature = "query-get",
-            ))]
+            // every deferred sink (matching, decl listeners, data
+            // planes) clones a handle out of it at registration.
+            // R311lh — unconditional, see the field doc.
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
         };
@@ -492,34 +470,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// deferred listener, so any custom drive closure that dispatches
     /// this session's observer MUST pair it with a drain.
     ///
-    /// R311g1 signature-stability — the method exists across feature
-    /// states; minus the deferred-sink feature union (`session-matching`,
-    /// the R311lc decl-sink planes, and the R311lg data planes
-    /// `liveliness-subscriber` / `query-get`) no deferred sink can
-    /// exist and the body is a constant `0`.
+    /// R311lh — unconditional body (no more feature-union fork): the
+    /// always-compiled subscriber plane defers, so a deferred sink can
+    /// exist in every feature subset of this host-only crate and the
+    /// queue field is always present.
     pub fn drain_deferred_fires(&self) -> usize {
-        #[cfg(any(
-            feature = "session-matching",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token",
-            feature = "liveliness-subscriber",
-            feature = "query-get",
-        ))]
-        {
-            self.fires.drain_and_fire()
-        }
-        #[cfg(not(any(
-            feature = "session-matching",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token",
-            feature = "liveliness-subscriber",
-            feature = "query-get",
-        )))]
-        {
-            0
-        }
+        self.fires.drain_and_fire()
     }
 
     /// R311ld — the dispatch SSOT (session-review minor F closure):
@@ -774,6 +730,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             } else {
                 0
             };
+            // R311lh — drain the fires the loopback staged so local
+            // subscriber callbacks run synchronously on the caller
+            // thread, outside the observer lock, before `publish`
+            // returns (pico fires subscription callbacks outside the
+            // session mutex on the delivering thread). An overlapping
+            // drive-loop drain is lossless (cell backlog).
+            self.drain_deferred_fires();
             Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
@@ -880,6 +843,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             } else {
                 0
             };
+            // R311lh — drain the loopback-staged fires; see
+            // `Session::publish`.
+            self.drain_deferred_fires();
             Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
@@ -1563,12 +1529,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
     ) -> Subscriber<R, T> {
         let keyexpr_string = keyexpr.into();
+        // R311lh — DEFERRED FIRE (the R311lf lock-free callback
+        // invariant on the subscriber-sample plane): the registry
+        // stores a staging sink that copies each matched sample to the
+        // owned retention form and stages it on the deferred-fire
+        // queue; `callback` runs at a drain site OUTSIDE the observer
+        // lock and may re-enter any observer-locking session API —
+        // publish with local loopback, queries, declares, handle Drop,
+        // even its own handle's `undeclare`.
+        let (cell, sink) = self.deferred_sample_sink(callback);
         // R311de — observer access via R::with_mutex_mut closure form.
         let id = R::with_mutex_mut(&self.observer, |observer| {
             observer.subscribers.register_with_locality(
                 keyexpr_string.clone(),
                 options.allowed_origin,
-                callback,
+                sink,
             )
         });
         Subscriber {
@@ -1576,6 +1551,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             id,
             keyexpr: keyexpr_string,
             options,
+            cell,
         }
     }
 

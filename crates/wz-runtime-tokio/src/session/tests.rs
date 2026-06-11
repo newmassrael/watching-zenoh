@@ -5683,3 +5683,96 @@ fn query_reply_callbacks_run_deferred_lock_free_and_local_sync() {
         "both queries (outer + re-entrant inner) fully delivered before the outer call returned"
     );
 }
+
+// ── R311lh deferred subscriber-sample plane ──
+
+/// R311lh — the subscriber-sample plane rides the deferred-fire queue:
+/// the callback runs OUTSIDE the observer mutex, so it may re-enter
+/// observer-locking session APIs. The classic echo shape: a sample
+/// callback that PUBLISHES (local loopback locks the observer) —
+/// pre-R311lh this self-deadlocked. The nested publish's own loopback
+/// fire on the same cell backlogs and is delivered before the outer
+/// invoke restores (lossless re-entrant echo, bounded by the guard).
+#[cfg(feature = "pubsub-allow-loop")]
+#[test]
+fn subscriber_sample_callback_runs_deferred_and_may_publish_back() {
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    type DeliveredLog = Arc<Mutex<Vec<(SampleKind, String, Vec<u8>)>>>;
+    let log: DeliveredLog = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let session_cb = session.clone();
+    let _sub = session.declare_subscriber(
+        "home/**",
+        SubscribeOptions::default(),
+        move |sample: &dyn SampleView| {
+            log_cb.lock().unwrap().push((
+                sample.kind(),
+                sample.keyexpr().to_string(),
+                sample.payload().to_vec(),
+            ));
+            // Echo exactly once: re-enter publish (locks the observer
+            // for the loopback fan) from inside the callback.
+            if sample.keyexpr() == "home/temp" {
+                let delivered = session_cb
+                    .publish(
+                        "home/echo",
+                        b"echo",
+                        PublishOptions::put().with_locality(Locality::SessionLocal),
+                    )
+                    .expect("re-entrant publish from inside the callback succeeds lock-free");
+                assert_eq!(delivered, 1, "echo matched this same subscriber");
+            }
+        },
+    );
+
+    let delivered = session
+        .publish(
+            "home/temp",
+            b"21.5",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        )
+        .expect("publish with loopback succeeds");
+    assert_eq!(delivered, 1, "one matching subscriber");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            (SampleKind::Put, "home/temp".to_string(), b"21.5".to_vec()),
+            (SampleKind::Put, "home/echo".to_string(), b"echo".to_vec()),
+        ],
+        "original + echoed sample both delivered synchronously before publish returned"
+    );
+}
+
+/// R311lh — a sample staged before `undeclare` but drained after it is
+/// suppressed (kill-first ordering on the Subscriber handle).
+#[test]
+fn subscriber_sample_staged_before_undeclare_is_suppressed() {
+    use std::sync::Arc;
+
+    let (session, _driver) = build_session();
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_cb = fired.clone();
+    let sub = session.declare_subscriber(
+        "home/**",
+        SubscribeOptions::default(),
+        move |_sample: &dyn SampleView| {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+
+    // Stage a fire through the raw registry (no drain yet).
+    {
+        let mut obs = session.observer().lock().unwrap();
+        let sample = Sample::new_put("home/temp", b"x".to_vec());
+        obs.subscribers.local_publish(&sample);
+    }
+    assert!(sub.undeclare(), "undeclare removes the registration");
+    session.drain_deferred_fires();
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        0,
+        "staged-but-undrained sample is suppressed by the killed cell"
+    );
+}

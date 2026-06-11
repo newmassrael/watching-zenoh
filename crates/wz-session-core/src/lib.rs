@@ -320,10 +320,16 @@ pub mod lease;
 /// first two data-plane arms: `liveliness-subscriber` (deferred
 /// liveliness samples) + `query-reply` (deferred z_get reply/final).
 /// None of the Layer G MCU cross lanes enables either arm, so the
-/// thumbv6m Arc-free envelope is unchanged.
+/// thumbv6m Arc-free envelope is unchanged. R311lh — the
+/// `deferred-fire` consumer-enable arm joins for round (b): the
+/// always-compiled subscriber plane defers at the Session tier, so
+/// wz-runtime-tokio (host-only) enables the module unconditionally
+/// via its dependency feature list; the plane arms stay for direct
+/// core consumers (see the Cargo feature comment).
 #[cfg(all(
     feature = "alloc",
     any(
+        feature = "deferred-fire",
         feature = "session-matching",
         feature = "declare-subscriber",
         feature = "declare-queryable",
