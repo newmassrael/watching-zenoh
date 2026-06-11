@@ -1154,20 +1154,70 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // queryables.local_query + replies.deliver_local_*) under a
             // single lock acquisition, identical to the prior pattern; the
             // closure returns the ReplyHandle which propagates out.
+            // R311ln (Finding B sibling) — register the pending sink,
+            // THEN emit the wire Query, THEN fan the loopback, mirroring
+            // zenoh-pico's `_z_query`
+            // (`vendor/zenoh-pico/src/net/primitives.c:585-629`):
+            // register the pending query under the session mutex, run
+            // `_z_send_n_msg`, then `_z_session_deliver_query_locally`
+            // ONLY when the send returned `_Z_RES_OK`, and
+            // `_z_unregister_pending_query` on any failure. The R239
+            // shape fanned the loopback inside the register lock BEFORE
+            // the wire emit, so a failed `send_request_query` left the
+            // pending entry as a permanent orphan — firing `on_final` on
+            // the deadline sweep for a query the caller got an `Err`
+            // from, plus staged loopback fires invoking `on_reply` for
+            // that same failed query. Emitting first keeps the rollback
+            // unregister-only: the rid is FRESH (`alloc_next_request_id`,
+            // so no solicited reply can correlate before the send) and no
+            // loopback has fanned yet, so dropping the pending entry
+            // drops the sink and its deferred cell — a complete rollback
+            // with no cell kill, the same shape as `liveliness_get`
+            // (R311ll).
             let handle = R::with_mutex_mut(&self.observer, |observer| {
-                let handle = observer
+                observer
                     .replies
                     .register_sink(rid, expected_finals, deadline_ms, sink)
-                    .expect("register on the alloc backing never exceeds declared capacity");
-                if allows_local {
-                    // R311fq — the in-process queryable fan is gated on
-                    // `query-queryable`: `observer.queryables` only exists
-                    // when this process selected the queryable responder
-                    // plane. A pure getter (query-queryable OFF) has no
-                    // local queryable to answer, so the loopback yields
-                    // zero replies and only the synthetic Final fires.
-                    #[cfg(feature = "query-queryable")]
-                    {
+                    .expect("register on the alloc backing never exceeds declared capacity")
+            });
+
+            if allows_remote {
+                // R240 — thread QueryOptions metadata (target /
+                // consolidation / attachment / timeout_ms) through the
+                // wire branch. The R233 PushMetadata pattern is mirrored
+                // here: empty bundle short-circuits to the no-metadata
+                // builder so the byte-stable
+                // `send_request_query` wire shape stays unchanged for
+                // callers that pass `QueryOptions::default()`.
+                let meta = opts.query_metadata();
+                let emit = if meta.is_empty() {
+                    self.actions.send_request_query(rid, 0, Some(keyexpr))
+                } else {
+                    self.actions
+                        .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta)
+                };
+                // R311ln — roll the pending entry back on a failed wire
+                // emit (unregister-only; see the header comment).
+                if let Err(e) = emit {
+                    R::with_mutex_mut(&self.observer, |observer| {
+                        observer.replies.unregister(rid);
+                    });
+                    return Err(e.into());
+                }
+            }
+
+            // R311ln — loopback fan AFTER a successful wire emit (pico
+            // parity: `_z_session_deliver_query_locally` runs only on
+            // `ret == _Z_RES_OK`). R311fq — the in-process queryable fan
+            // is gated on `query-queryable`: `observer.queryables` only
+            // exists when this process selected the queryable responder
+            // plane. A pure getter (query-queryable OFF) has no local
+            // queryable to answer, so the loopback yields zero replies
+            // and only the synthetic Final (below) fires.
+            if allows_local {
+                #[cfg(feature = "query-queryable")]
+                {
+                    R::with_mutex_mut(&self.observer, |observer| {
                         let mut replies: Vec<QueryReply> = Vec::new();
                         // `QueryOwned` has no `Default`; build the borrowed
                         // default and deep-copy into the owned form the
@@ -1182,25 +1232,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                             let inbound: InboundReply = reply.into();
                             observer.replies.deliver_local_reply(&inbound);
                         }
-                    }
-                }
-                handle
-            });
-
-            if allows_remote {
-                // R240 — thread QueryOptions metadata (target /
-                // consolidation / attachment / timeout_ms) through the
-                // wire branch. The R233 PushMetadata pattern is mirrored
-                // here: empty bundle short-circuits to the no-metadata
-                // builder so the byte-stable
-                // `send_request_query` wire shape stays unchanged for
-                // callers that pass `QueryOptions::default()`.
-                let meta = opts.query_metadata();
-                if meta.is_empty() {
-                    self.actions.send_request_query(rid, 0, Some(keyexpr))?;
-                } else {
-                    self.actions
-                        .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta)?;
+                    });
                 }
             }
 
@@ -1326,24 +1358,51 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
 
             // R311dc — closure-form observer access via R::with_mutex_mut
             // (R311ct API). Same closure body shape as Session::query.
+            // R311ln (Finding B sibling) — register, emit the wire
+            // Query, then fan the loopback; same pico `_z_query` order
+            // and unregister-only rollback as `Session::query` (see its
+            // header comment). The aliased wire branch routes by
+            // (mapping_id, inline_suffix); a failed emit rolls the FRESH
+            // rid back with `unregister` alone (no loopback fanned yet,
+            // no solicited reply can correlate before the send).
             let handle = R::with_mutex_mut(&self.observer, |observer| {
-                let handle = observer
+                observer
                     .replies
                     .register_sink(rid, expected_finals, deadline_ms, sink)
-                    .expect("register on the alloc backing never exceeds declared capacity");
-                // R311fq — `loopback_keyexpr` feeds only the
-                // query-queryable loopback fan; the wire branch routes by
-                // (mapping_id, inline_suffix). Under a wire-only getter
-                // (query-queryable OFF) the param is otherwise unused.
-                #[cfg(not(feature = "query-queryable"))]
-                let _ = loopback_keyexpr;
-                if allows_local {
-                    // R311fq — see `Session::query`: in-process queryable
-                    // fan gated on `query-queryable`; synthetic Final stays
-                    // under `query-get` so a wire-only getter still closes
-                    // the loopback half of the pending entry.
-                    #[cfg(feature = "query-queryable")]
-                    {
+                    .expect("register on the alloc backing never exceeds declared capacity")
+            });
+
+            if allows_remote {
+                let meta = opts.query_metadata();
+                let emit = if meta.is_empty() {
+                    self.actions
+                        .send_request_query(rid, mapping_id, inline_suffix)
+                } else {
+                    self.actions
+                        .send_request_query_with_meta(rid, mapping_id, inline_suffix, &meta)
+                };
+                if let Err(e) = emit {
+                    R::with_mutex_mut(&self.observer, |observer| {
+                        observer.replies.unregister(rid);
+                    });
+                    return Err(e.into());
+                }
+            }
+
+            // R311fq — `loopback_keyexpr` feeds only the query-queryable
+            // loopback fan; the wire branch routes by (mapping_id,
+            // inline_suffix). Under a wire-only getter (query-queryable
+            // OFF) the param is otherwise unused.
+            #[cfg(not(feature = "query-queryable"))]
+            let _ = loopback_keyexpr;
+            // R311ln — loopback fan AFTER a successful wire emit (pico
+            // parity). R311fq — gated on `query-queryable`; the synthetic
+            // Final (below) stays under `query-get` so a wire-only getter
+            // still closes the loopback half of the pending entry.
+            if allows_local {
+                #[cfg(feature = "query-queryable")]
+                {
+                    R::with_mutex_mut(&self.observer, |observer| {
                         let mut replies: Vec<QueryReply> = Vec::new();
                         // `QueryOwned` has no `Default`; build the borrowed
                         // default and deep-copy into the owned form the
@@ -1361,23 +1420,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                             let inbound: InboundReply = reply.into();
                             observer.replies.deliver_local_reply(&inbound);
                         }
-                    }
-                }
-                handle
-            });
-
-            if allows_remote {
-                let meta = opts.query_metadata();
-                if meta.is_empty() {
-                    self.actions
-                        .send_request_query(rid, mapping_id, inline_suffix)?;
-                } else {
-                    self.actions.send_request_query_with_meta(
-                        rid,
-                        mapping_id,
-                        inline_suffix,
-                        &meta,
-                    )?;
+                    });
                 }
             }
 

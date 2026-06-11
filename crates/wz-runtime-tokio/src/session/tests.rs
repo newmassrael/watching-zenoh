@@ -4672,6 +4672,52 @@ fn liveliness_get_rolls_back_pending_on_wire_emit_failure() {
     assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
 }
 
+/// R311ln (Finding B sibling) — a wire-emit FAILURE on `Session::query`
+/// must roll the pending entry back, not leave it as a deadline-sweep
+/// orphan firing `on_final` for a query the caller got an `Err` from.
+/// R311ln reordered the wire emit BEFORE the loopback fan (zenoh-pico
+/// `_z_query` parity), so a failed emit takes the unregister-only
+/// rollback path with no loopback delivered — the rid is FRESH so no
+/// solicited reply can correlate before the send and `unregister`
+/// alone drops the sink + its deferred cell. The transport-availability
+/// gate is the deterministic failure trigger (no oversized-keyexpr
+/// fragility); `Locality::Any` (the default) routes the wire branch so
+/// the emit is attempted.
+#[cfg(feature = "query-get")]
+#[test]
+fn query_rolls_back_pending_on_wire_emit_failure() {
+    let (session, driver) = build_session();
+    *session.actions().transport_available.lock().unwrap() = false;
+    let result = session.query("home/temp", QueryOptions::get(), |_| {}, |_| {});
+    assert!(result.is_err(), "wire-emit failure must surface as Err");
+    assert_eq!(
+        session.observer().lock().unwrap().replies.len(),
+        0,
+        "a failed query must leave NO orphan pending entry (Finding B rollback)",
+    );
+    assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
+}
+
+/// R311ln (Finding B sibling) — same unregister-only rollback for the
+/// aliased z_get surface. `mapping_id = 1` is the caller-asserted alias
+/// form (non-zero); the wire branch routes by (mapping_id,
+/// inline_suffix) so the gated emit fails before any loopback fan, and
+/// the pending entry rolls back with no orphan.
+#[cfg(feature = "query-get")]
+#[test]
+fn query_aliased_rolls_back_pending_on_wire_emit_failure() {
+    let (session, driver) = build_session();
+    *session.actions().transport_available.lock().unwrap() = false;
+    let result = session.query_aliased(1, None, "home/temp", QueryOptions::get(), |_| {}, |_| {});
+    assert!(result.is_err(), "wire-emit failure must surface as Err");
+    assert_eq!(
+        session.observer().lock().unwrap().replies.len(),
+        0,
+        "a failed aliased query must leave NO orphan pending entry (Finding B)",
+    );
+    assert_eq!(driver.frame_count(), 0, "gated emit leaves no wire bytes");
+}
+
 #[cfg(all(
     feature = "codec-declare",
     feature = "declare-keyexpr",
