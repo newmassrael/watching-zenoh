@@ -34656,6 +34656,60 @@
         "keepalive MCU preset wiring retired here (verified already-complete); register-then-send orphan (R311ln) + handle-RAII leak (R311lo) closed earlier this session."
       ]
     },
+    "Round 311lq": {
+      "decision_summary": "R311lq queryable-over-multicast reply sink: ISP-split fat ResponseSink into 3 concern traits; multicast loop drains query replies (Response/ResponseFinal) onto the A1c outbound seam.",
+      "changes_bullets": [
+        "response_sink.rs: split fat ResponseSink (5 methods) into ResponseSink + DeclareReplySink + LivelinessGetPrune (ISP).",
+        "observer.rs: decompose flush_pending into per-concern drains; add flush_query_replies<S: ResponseSink> (query-reply only).",
+        "session_actions.rs: SessionLinkActions impls the 3 split sinks as separate impl blocks (full-session bundle).",
+        "multicast_glue.rs: MulticastTxItem::Response/ResponseFinal + MulticastResponseSink (ResponseSink only) + reliable loop framing.",
+        "drive_loop_emits_queryable_reply_over_multicast: deterministic Query-in -> Response+ResponseFinal-out test (rid=7)."
+      ],
+      "verification_bullets": [
+        "full run-ci + Layer G: RUNCI_EXIT=0 (verdict from log, not the tee-masked notification).",
+        "C1e/C1h feature-subset lanes (query-queryable + no codec-response-final) caught a drain_query_finals unused-sink gap; fixed and now pass.",
+        "cargo test wz-session-core --all-features: 577 passed (ISP refactor is behaviour-preserving; wire order byte-identical).",
+        "cargo test wz-runtime-tokio --features transport-multicast --lib: reply test passes (Response + ResponseFinal, rid=7 Final).",
+        "pico parity: multicast reply rides _z_send_n_msg on the multicast transport (src/net/primitives.c _z_send_reply), reliable."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open.",
+        "A1 pool remainder: multicast-declarations atom flip + MCU multicast loop remain open (next priority).",
+        "multicast-declarations track adds DeclareReplySink + LivelinessGetPrune impls + their drain calls to the multicast loop (ISP slots ready).",
+        "drive_multicast_session 8-arg too_many_arguments pre-exists and is run-ci-uncovered (multicast_glue clippy not run under transport-multicast); bundle args into a config struct as its own change."
+      ],
+      "publishable_decision_summary": "R311lq queryable-over-multicast reply sink: ISP-split fat ResponseSink into 3 concern traits; multicast loop drains query replies (Response/ResponseFinal) onto the A1c outbound seam.",
+      "publishable_changes_bullets": [
+        "response_sink.rs: split fat ResponseSink (5 methods) into ResponseSink + DeclareReplySink + LivelinessGetPrune (ISP).",
+        "observer.rs: decompose flush_pending into per-concern drains; add flush_query_replies<S: ResponseSink> (query-reply only).",
+        "session_actions.rs: SessionLinkActions impls the 3 split sinks as separate impl blocks (full-session bundle).",
+        "multicast_glue.rs: MulticastTxItem::Response/ResponseFinal + MulticastResponseSink (ResponseSink only) + reliable loop framing.",
+        "drive_loop_emits_queryable_reply_over_multicast: deterministic Query-in -> Response+ResponseFinal-out test (rid=7)."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci + Layer G: RUNCI_EXIT=0 (verdict from log, not the tee-masked notification).",
+        "C1e/C1h feature-subset lanes (query-queryable + no codec-response-final) caught a drain_query_finals unused-sink gap; fixed and now pass.",
+        "cargo test wz-session-core --all-features: 577 passed (ISP refactor is behaviour-preserving; wire order byte-identical).",
+        "cargo test wz-runtime-tokio --features transport-multicast --lib: reply test passes (Response + ResponseFinal, rid=7 Final).",
+        "pico parity: multicast reply rides _z_send_n_msg on the multicast transport (src/net/primitives.c _z_send_reply), reliable."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open.",
+        "A1 pool remainder: multicast-declarations atom flip + MCU multicast loop remain open (next priority).",
+        "multicast-declarations track adds DeclareReplySink + LivelinessGetPrune impls + their drain calls to the multicast loop (ISP slots ready).",
+        "drive_multicast_session 8-arg too_many_arguments pre-exists and is run-ci-uncovered (multicast_glue clippy not run under transport-multicast); bundle args into a config struct as its own change."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
