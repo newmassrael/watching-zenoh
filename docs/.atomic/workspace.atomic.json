@@ -34472,6 +34472,48 @@
         "mem::forget undeclare Arc leak (ManuallyDrop) + minor D/E + keepalive MCU preset + A1 pool still open."
       ]
     },
+    "Round 311lm": {
+      "decision_summary": "R311lm Finding A — make the half-window split unrepresentable: DeferredFireQueue::drain(serializer) is the only public emptier (take_batch pub(crate), drain_and_fire removed).",
+      "changes_bullets": [
+        "deferred_fire.rs: take_batch pub->pub(crate); drain_and_fire removed; add drain<G>(serializer) SSOT.",
+        "session/mod.rs drain_deferred_fires: delegate to self.fires.drain(&self.observer) (thin wrapper).",
+        "deferred_fire_infra.rs: 4 sites drive real drain via a trivial serializer; + Reply-before-Final guard."
+      ],
+      "verification_bullets": [
+        "deferred_fire_infra: 5 tests pass incl. serialized_drain_keeps_reply_before_final; real drain path.",
+        "clippy wz-runtime-tokio --all-targets clean; wz-session-core builds; fmt clean.",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped, absolute path); take_batch sole caller is drain."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Finding A closed STRUCTURALLY: serializer-less queue empty is now unrepresentable (no test needed for it).",
+        "z_get query/query_aliased register-then-send orphan (Finding B sibling) still open — own round.",
+        "mem::forget undeclare Arc leak (ManuallyDrop) + minor D/E + keepalive MCU preset + A1 pool still open.",
+        "loom not adopted: a faithful loom harness needs the async Runtime; structure made it moot."
+      ],
+      "publishable_decision_summary": "R311lm Finding A — make the half-window split unrepresentable: DeferredFireQueue::drain(serializer) is the only public emptier (take_batch pub(crate), drain_and_fire removed).",
+      "publishable_changes_bullets": [
+        "deferred_fire.rs: take_batch pub->pub(crate); drain_and_fire removed; add drain<G>(serializer) SSOT.",
+        "session/mod.rs drain_deferred_fires: delegate to self.fires.drain(&self.observer) (thin wrapper).",
+        "deferred_fire_infra.rs: 4 sites drive real drain via a trivial serializer; + Reply-before-Final guard."
+      ],
+      "publishable_verification_bullets": [
+        "deferred_fire_infra: 5 tests pass incl. serialized_drain_keeps_reply_before_final; real drain path.",
+        "clippy wz-runtime-tokio --all-targets clean; wz-session-core builds; fmt clean.",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped, absolute path); take_batch sole caller is drain."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Finding A closed STRUCTURALLY: serializer-less queue empty is now unrepresentable (no test needed for it).",
+        "z_get query/query_aliased register-then-send orphan (Finding B sibling) still open — own round.",
+        "mem::forget undeclare Arc leak (ManuallyDrop) + minor D/E + keepalive MCU preset + A1 pool still open.",
+        "loom not adopted: a faithful loom harness needs the async Runtime; structure made it moot."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
