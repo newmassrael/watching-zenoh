@@ -34769,6 +34769,56 @@
         "A1 pool remainder: MCU multicast loop remains open; the no-alloc MCU JOIN/declare TX variant is deferred until the MCU multicast loop shapes it."
       ]
     },
+    "Round 311ls": {
+      "decision_summary": "R311ls: drive_multicast_session 8-arg -> MulticastDriveConfig param object (6 args); run-ci C3 gains transport-multicast clippy lanes - closes the multicast_glue clippy-coverage gap.",
+      "changes_bullets": [
+        "multicast_glue.rs: introduced MulticastDriveConfig<'a> { params, tick_ms, max_iters } - the static drive config, separated from the loop's live collaborators (dispatcher / driver / clock / on_event / outbound) via the Introduce-Parameter-Object refactor. drive_multicast_session goes 8 -> 6 args (clippy too_many_arguments threshold is 7); the body destructures cfg into the same local names so the loop body stays byte-identical.",
+        "Migrated all 22 call sites (18 multicast_glue unit tests + 4 multicast_pubsub_loopback integration) to the cfg form. The 18 unit sites via a depth-aware top-level-comma reorder script; the 4 loopback sites by hand - one had a comma inside an end-of-line comment, which the splitter correctly refused on rather than miscount (no silent corruption).",
+        "run-ci.sh C3 (layer_c3_per_pkg_isolated_lint): added 3 wz-runtime-tokio clippy lanes under transport-multicast / +reassembly / +transport-fragmentation, mirroring the C1q test matrix so every cfg-gated arm is linted.",
+        "Closes the deeper gap: transport-multicast is non-default, so C2/C3 never linted multicast_glue - its code (including R311lr's new declare-TX arm + sink impls) was clippy-unchecked by run-ci until now. The 8-arg too_many_arguments was the blocker to adding the lane; the parameter object removes it.",
+        "No #[allow(clippy::too_many_arguments)] suppression - the parameter object is the structural fix, not a lint mute."
+      ],
+      "verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 - verdict read from the log, not the tee-masked notification - now including the 3 new C3 transport-multicast clippy lanes.",
+        "cargo clippy -p wz-runtime-tokio --features transport-multicast / +reassembly / +transport-fragmentation --all-targets -- -D warnings: all 3 EXIT=0; the prior too_many_arguments (8/7) error is gone.",
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed - the parameter-object refactor is behavior-preserving (loop body byte-identical via the cfg destructure).",
+        "multicast_pubsub_loopback (Layer M e2e) compiles under clippy --all-targets; its 4 call sites migrated to the cfg form by hand.",
+        "cargo fmt --check clean after the script-rebuilt call sites were reflowed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311lr + R311ls are a pair (declare-reply TX + the clippy coverage that lints it); they push together so origin never carries clippy-unchecked multicast code at any commit.",
+        "Scope boundary unchanged: R311lr wired the interest-RESPONSE TX only; proactive own-declaration announce over multicast (a peer multicasting its local subs / queryables / tokens unsolicited) is a separate, not-yet-wired capability.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open.",
+        "A1 pool remainder: MCU multicast loop remains open; the no-alloc MCU JOIN/declare TX variant is deferred until the MCU multicast loop shapes it."
+      ],
+      "publishable_decision_summary": "R311ls: drive_multicast_session 8-arg -> MulticastDriveConfig param object (6 args); run-ci C3 gains transport-multicast clippy lanes - closes the multicast_glue clippy-coverage gap.",
+      "publishable_changes_bullets": [
+        "multicast_glue.rs: introduced MulticastDriveConfig<'a> { params, tick_ms, max_iters } - the static drive config, separated from the loop's live collaborators (dispatcher / driver / clock / on_event / outbound) via the Introduce-Parameter-Object refactor. drive_multicast_session goes 8 -> 6 args (clippy too_many_arguments threshold is 7); the body destructures cfg into the same local names so the loop body stays byte-identical.",
+        "Migrated all 22 call sites (18 multicast_glue unit tests + 4 multicast_pubsub_loopback integration) to the cfg form. The 18 unit sites via a depth-aware top-level-comma reorder script; the 4 loopback sites by hand - one had a comma inside an end-of-line comment, which the splitter correctly refused on rather than miscount (no silent corruption).",
+        "run-ci.sh C3 (layer_c3_per_pkg_isolated_lint): added 3 wz-runtime-tokio clippy lanes under transport-multicast / +reassembly / +transport-fragmentation, mirroring the C1q test matrix so every cfg-gated arm is linted.",
+        "Closes the deeper gap: transport-multicast is non-default, so C2/C3 never linted multicast_glue - its code (including R311lr's new declare-TX arm + sink impls) was clippy-unchecked by run-ci until now. The 8-arg too_many_arguments was the blocker to adding the lane; the parameter object removes it.",
+        "No #[allow(clippy::too_many_arguments)] suppression - the parameter object is the structural fix, not a lint mute."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 - verdict read from the log, not the tee-masked notification - now including the 3 new C3 transport-multicast clippy lanes.",
+        "cargo clippy -p wz-runtime-tokio --features transport-multicast / +reassembly / +transport-fragmentation --all-targets -- -D warnings: all 3 EXIT=0; the prior too_many_arguments (8/7) error is gone.",
+        "cargo test -p wz-runtime-tokio --features transport-multicast --lib multicast_glue: 11 passed - the parameter-object refactor is behavior-preserving (loop body byte-identical via the cfg destructure).",
+        "multicast_pubsub_loopback (Layer M e2e) compiles under clippy --all-targets; its 4 call sites migrated to the cfg form by hand.",
+        "cargo fmt --check clean after the script-rebuilt call sites were reflowed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311lr + R311ls are a pair (declare-reply TX + the clippy coverage that lints it); they push together so origin never carries clippy-unchecked multicast code at any commit.",
+        "Scope boundary unchanged: R311lr wired the interest-RESPONSE TX only; proactive own-declaration announce over multicast (a peer multicasting its local subs / queryables / tokens unsolicited) is a separate, not-yet-wired capability.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open.",
+        "A1 pool remainder: MCU multicast loop remains open; the no-alloc MCU JOIN/declare TX variant is deferred until the MCU multicast loop shapes it."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
