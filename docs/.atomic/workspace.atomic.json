@@ -34064,6 +34064,50 @@
         "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
       ]
     },
+    "Round 311ld": {
+      "decision_summary": "R311ld dispatch SSOT (session-review minor F closure): Session::dispatch_iteration_event(_with) mechanizes the F-6 lock/fan/drain pairing in one method — a dispatch site can no longer forget the deferred-fire drain; harness + ap-demo closures migrate onto it.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs — Session::dispatch_iteration_event (lock observer -> obs.dispatch(event, self.actions) -> drain_deferred_fires after the lock drops) + dispatch_iteration_event_with(event, under_lock) whose hook runs INSIDE the same lock scope after the registry fan (hook carries the R311kj inline constraint; the drain still covers hook-staged fires)",
+        "crates/wz-e2e-harness/src/lib.rs — drive-loop dispatch closure collapses to session.dispatch_iteration_event(event) (the hand-paired lock+dispatch+drain shape removed)",
+        "crates/wz-ap-demo/src/runner.rs — dispatch closure migrates to dispatch_iteration_event_with; the gc-3 switchboard fan + app-engine step ride the under-lock hook (same lock scope as before); observer_for_dispatch binding removed",
+        "tests (session/tests.rs) — dispatch_iteration_event_fans_and_drains_in_one_call (real Poll(FramePayload(Declare)) wire shape; registry membership + deferred listener fire, zero manual drains) + dispatch_iteration_event_with_runs_hook_under_lock_then_drains (hook sees post-fan membership while the fire is still staged; drain lands after the scope)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib 241 PASS (239 + 2 new SSOT tests)",
+        "cargo build -p wz-e2e-harness -p wz-ap-demo EXIT=0; cargo clippy --all-targets -D warnings over wz-runtime-tokio + wz-e2e-harness + wz-ap-demo EXIT=0; fmt --check clean",
+        "pre-commit validate-workspace clean (T1 new=+0)",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT verdict recorded in the wrap-up (run after this entry; unpiped exit-code check)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "session-review minor F CLOSED: the drain discipline is mechanical at every production dispatch site (harness + ap-demo route through the SSOT); only a custom closure that locks the observer directly retains the documented manual-drain obligation",
+        "session-review minor D/E (AP loop reports both KeepAlive+Lease verdicts per deadline wake vs MCU crossed-deadline-only — observer event-stream asymmetry) remains open",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ],
+      "publishable_decision_summary": "R311ld dispatch SSOT (session-review minor F closure): Session::dispatch_iteration_event(_with) mechanizes the F-6 lock/fan/drain pairing in one method — a dispatch site can no longer forget the deferred-fire drain; harness + ap-demo closures migrate onto it.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs — Session::dispatch_iteration_event (lock observer -> obs.dispatch(event, self.actions) -> drain_deferred_fires after the lock drops) + dispatch_iteration_event_with(event, under_lock) whose hook runs INSIDE the same lock scope after the registry fan (hook carries the R311kj inline constraint; the drain still covers hook-staged fires)",
+        "crates/wz-e2e-harness/src/lib.rs — drive-loop dispatch closure collapses to session.dispatch_iteration_event(event) (the hand-paired lock+dispatch+drain shape removed)",
+        "crates/wz-ap-demo/src/runner.rs — dispatch closure migrates to dispatch_iteration_event_with; the gc-3 switchboard fan + app-engine step ride the under-lock hook (same lock scope as before); observer_for_dispatch binding removed",
+        "tests (session/tests.rs) — dispatch_iteration_event_fans_and_drains_in_one_call (real Poll(FramePayload(Declare)) wire shape; registry membership + deferred listener fire, zero manual drains) + dispatch_iteration_event_with_runs_hook_under_lock_then_drains (hook sees post-fan membership while the fire is still staged; drain lands after the scope)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib 241 PASS (239 + 2 new SSOT tests)",
+        "cargo build -p wz-e2e-harness -p wz-ap-demo EXIT=0; cargo clippy --all-targets -D warnings over wz-runtime-tokio + wz-e2e-harness + wz-ap-demo EXIT=0; fmt --check clean",
+        "pre-commit validate-workspace clean (T1 new=+0)",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT verdict recorded in the wrap-up (run after this entry; unpiped exit-code check)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session-review minor F CLOSED: the drain discipline is mechanical at every production dispatch site (harness + ap-demo route through the SSOT); only a custom closure that locks the observer directly retains the documented manual-drain obligation",
+        "session-review minor D/E (AP loop reports both KeepAlive+Lease verdicts per deadline wake vs MCU crossed-deadline-only — observer event-stream asymmetry) remains open",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
