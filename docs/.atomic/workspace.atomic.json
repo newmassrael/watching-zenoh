@@ -34290,6 +34290,54 @@
         "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
       ]
     },
+    "Round 311li": {
+      "decision_summary": "R311li data-plane deferral (c): queryable plane deferred — handler outside the lock, Final staged as a contiguous job (structural Reply-before-Final); silent-handler Final gap fixed (pico parity).",
+      "changes_bullets": [
+        "R311lf delivery round (c) — the queryable plane, the last ratified data plane: declare_queryable{_aliased} install a staging sink (owned query copy: keyexpr/parameters/attachment/source_info/rid/is_local); the handler runs at the drain OUTSIDE the observer lock over a QueryResponder bound to a job-local buffer, then routes replies by origin — wire queries emit through actions directly, local queries deliver into the local reply registry (their deferred reply fires drain in the same pass); handler signature unchanged",
+        "Reply-before-Final restructure: the dispatch SSOT (dispatch_iteration_event_with) stages each matched request's ResponseFinal as a deferred-fire JOB contiguous with the handler jobs (same observer lock window) instead of flushing finals under the lock — a drainer executes a taken batch sequentially, so per-rid ordering is structural and drainer-identity-independent (an auxiliary query/publish-tail or sweep drainer stealing the batch preserves it); observer grows flush_pending_replies + take_pending_final_rids, the combined flush_pending stays the raw-registry / MCU drain",
+        "Final trigger fix (live gap, pico parity): QueryableRegistry::dispatch_messages keys the Final on the MATCH count (fire_matching_queryables/dispatch_request/local_query now return it), not the staged-reply delta — a matched-but-silent inline handler previously sent NO Final and starved the querier until timeout (zenoh-pico emits the reply Final on query-object drop regardless of reply count); non-Query bodies and un-resolvable keyexprs still owe nothing",
+        "QueryView grows is_local (default false; BorrowedQuery field) — the pico _z_query_t._is_local parity the deferred job routes replies by; QueryResponder::new public constructor for the job-local responder",
+        "query/query_aliased local sequencing: the loopback Final is delivered AFTER the tail drain ran every deferred local handler (then a second drain fires on_final) — on_final after every local on_reply, the pico deliver-query-locally emit-final-at-tail ordering preserved across the deferred shape",
+        "deferred wire-emit capability bound: dispatch_iteration_event{_with} + declare_queryable{_aliased} carry where SessionLinkActions<R,T>: Send + Sync + 'static — the tokio profile satisfies it (Arc + Send/Sync link sink); the MCU profile (Rc link sink) drives registries directly and never constructs these jobs; Queryable handle gains the cell, kill-first in undeclare/Drop (the registry-staged Final is still owed, so a racing undeclare never starves the requester)"
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio --lib 251 PASS (247 prior + 4 new: wire-shaped deferred handler with observer-locking re-entry asserting Reply-frame-before-Final-frame on the recording driver; matched-but-silent handler emits the bare Final; SessionLocal query against a deferred queryable delivers reply-then-final synchronously before query returns; staged-before-undeclare suppression with the Final still emitted)",
+        "wz-session-core 236 PASS under the codec-push+query-queryable+codec-response(+final)+query-reply+pubsub-put/del combo; fmt + clippy --all-targets deny-warnings clean (the C2/C3 lane shape); wz-ap-demo + wz-e2e-harness build OK",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311lf cascade: all 4 ratified data planes now deferred (lg liveliness+reply, lh subscriber samples, li queryable) — the AP-tier lock-free callback invariant END STATE is reached for the ratified enumeration; remaining surface: liveliness-get (LivelinessGetRegistry on_reply/on_final still fire inside the observer mutex — fold into a follow-up round, the invariant covers it in spirit)",
+        "session-review candidate for the next review round: the (c) restructure touched the Final ownership axis (registry stages rid -> SSOT stages job; combined flush_pending stays the raw/MCU owner) — verify no third Final emission path crept in",
+        "pre-existing observation (unchanged): mem::forget-based undeclare on LivelinessSubscriber / LivelinessToken / Subscriber / Queryable leaks handle field Arcs per cycle — candidate ManuallyDrop refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ],
+      "publishable_decision_summary": "R311li data-plane deferral (c): queryable plane deferred — handler outside the lock, Final staged as a contiguous job (structural Reply-before-Final); silent-handler Final gap fixed (pico parity).",
+      "publishable_changes_bullets": [
+        "R311lf delivery round (c) — the queryable plane, the last ratified data plane: declare_queryable{_aliased} install a staging sink (owned query copy: keyexpr/parameters/attachment/source_info/rid/is_local); the handler runs at the drain OUTSIDE the observer lock over a QueryResponder bound to a job-local buffer, then routes replies by origin — wire queries emit through actions directly, local queries deliver into the local reply registry (their deferred reply fires drain in the same pass); handler signature unchanged",
+        "Reply-before-Final restructure: the dispatch SSOT (dispatch_iteration_event_with) stages each matched request's ResponseFinal as a deferred-fire JOB contiguous with the handler jobs (same observer lock window) instead of flushing finals under the lock — a drainer executes a taken batch sequentially, so per-rid ordering is structural and drainer-identity-independent (an auxiliary query/publish-tail or sweep drainer stealing the batch preserves it); observer grows flush_pending_replies + take_pending_final_rids, the combined flush_pending stays the raw-registry / MCU drain",
+        "Final trigger fix (live gap, pico parity): QueryableRegistry::dispatch_messages keys the Final on the MATCH count (fire_matching_queryables/dispatch_request/local_query now return it), not the staged-reply delta — a matched-but-silent inline handler previously sent NO Final and starved the querier until timeout (zenoh-pico emits the reply Final on query-object drop regardless of reply count); non-Query bodies and un-resolvable keyexprs still owe nothing",
+        "QueryView grows is_local (default false; BorrowedQuery field) — the pico _z_query_t._is_local parity the deferred job routes replies by; QueryResponder::new public constructor for the job-local responder",
+        "query/query_aliased local sequencing: the loopback Final is delivered AFTER the tail drain ran every deferred local handler (then a second drain fires on_final) — on_final after every local on_reply, the pico deliver-query-locally emit-final-at-tail ordering preserved across the deferred shape",
+        "deferred wire-emit capability bound: dispatch_iteration_event{_with} + declare_queryable{_aliased} carry where SessionLinkActions<R,T>: Send + Sync + 'static — the tokio profile satisfies it (Arc + Send/Sync link sink); the MCU profile (Rc link sink) drives registries directly and never constructs these jobs; Queryable handle gains the cell, kill-first in undeclare/Drop (the registry-staged Final is still owed, so a racing undeclare never starves the requester)"
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio --lib 251 PASS (247 prior + 4 new: wire-shaped deferred handler with observer-locking re-entry asserting Reply-frame-before-Final-frame on the recording driver; matched-but-silent handler emits the bare Final; SessionLocal query against a deferred queryable delivers reply-then-final synchronously before query returns; staged-before-undeclare suppression with the Final still emitted)",
+        "wz-session-core 236 PASS under the codec-push+query-queryable+codec-response(+final)+query-reply+pubsub-put/del combo; fmt + clippy --all-targets deny-warnings clean (the C2/C3 lane shape); wz-ap-demo + wz-e2e-harness build OK",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311lf cascade: all 4 ratified data planes now deferred (lg liveliness+reply, lh subscriber samples, li queryable) — the AP-tier lock-free callback invariant END STATE is reached for the ratified enumeration; remaining surface: liveliness-get (LivelinessGetRegistry on_reply/on_final still fire inside the observer mutex — fold into a follow-up round, the invariant covers it in spirit)",
+        "session-review candidate for the next review round: the (c) restructure touched the Final ownership axis (registry stages rid -> SSOT stages job; combined flush_pending stays the raw/MCU owner) — verify no third Final emission path crept in",
+        "pre-existing observation (unchanged): mem::forget-based undeclare on LivelinessSubscriber / LivelinessToken / Subscriber / Queryable leaks handle field Arcs per cycle — candidate ManuallyDrop refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
