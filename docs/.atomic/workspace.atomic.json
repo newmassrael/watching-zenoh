@@ -34871,6 +34871,54 @@
         "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
       ]
     },
+    "Round 311lu": {
+      "decision_summary": "R311lu MCU multicast integration test: lwip_test_link exposed via test-support (init-once harness, R71 carry); session_drive shares it; run_multicast_session peer-admit over real lwIP loopback, 10/10 no-flake.",
+      "changes_bullets": [
+        "wz-link-lwip: lwip_test_link (the lwIP init-once + multicast-netif + serialize-mutex harness) is exposed pub behind a new test-support feature (was pub(crate) + cfg(test)-only); the extern crate std it needs is gated the same way. This lets a sibling crate's test binary share THIS single process-global lwip_init - a per-crate re-implementation would carry a SECOND Once that could not guard the first (NO_SYS lwip_init is not re-entrant).",
+        "wz-session-lwip: dev-deps wz-link-lwip with the test-support feature; session_drive's mcu_session_shell test migrated from LwipLink::init() to lwip_test_link() (the shared init). The R71 / session_drive deferral - \"a second lwIP-touching test would need the init-once harness\" - is now realised rather than carried.",
+        "multicast_drive.rs: new run_multicast_session_admits_a_peer_over_loopback integration test. A peer JOIN (a zid distinct from ours) injected onto the group is delivered by poll_loopback, classified T_MID_JOIN, validated, and admitted into the dispatcher (active_peers == 1) while our own JOIN beacon echo is own-zid-filtered. It shares the harness with session_drive's test (one lwip_init per binary; a distinct port 7449).",
+        "Closes the R311lt carry: the MCU multicast drive loop's runtime behaviour is now verified end-to-end over a real lwIP multicast socket, not only by compilation + delegation to already-tested primitives."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-lwip --features transport-multicast: 3 passed (peer_key unit + session_drive shell + the new multicast peer-admit integration) - all three share one lwip_init via the lwip_test_link harness, no second-init abort.",
+        "10/10 consecutive runs pass (no-flaky rule): a frozen clock + a bounded max_iters + the harness serialize-mutex make the lwIP-loopback peer admit deterministic.",
+        "session-lwip default test: 1 passed (session_drive via the shared harness). wz-link-lwip default build + clippy clean (the test-support gating is inert without the feature - the production lib never pulls lwip_test_link).",
+        "clippy -p wz-session-lwip --features transport-multicast --all-targets -- -D warnings: clean. clippy -p wz-link-lwip --features test-support --all-targets -- -D warnings: clean.",
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log) - C1m now runs all 3 session-lwip tests under transport-multicast."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) remains the next FUNCTIONAL increment - this loop emits only the JOIN beacon + admits/sweeps peers + fans inbound Frames to the observer; the no-alloc MCU TX variant (the MulticastTxItem mirror + the per-channel mint) is unbuilt.",
+        "MCU multicast Fragment RX/TX (the reassembly / transport-fragmentation arms the AP loop carries, R311kn/R311ko) + the facade wz transport-multicast forward + a footprint gate for the new wz-session-lwip feature remain follow-on increments.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ],
+      "publishable_decision_summary": "R311lu MCU multicast integration test: lwip_test_link exposed via test-support (init-once harness, R71 carry); session_drive shares it; run_multicast_session peer-admit over real lwIP loopback, 10/10 no-flake.",
+      "publishable_changes_bullets": [
+        "wz-link-lwip: lwip_test_link (the lwIP init-once + multicast-netif + serialize-mutex harness) is exposed pub behind a new test-support feature (was pub(crate) + cfg(test)-only); the extern crate std it needs is gated the same way. This lets a sibling crate's test binary share THIS single process-global lwip_init - a per-crate re-implementation would carry a SECOND Once that could not guard the first (NO_SYS lwip_init is not re-entrant).",
+        "wz-session-lwip: dev-deps wz-link-lwip with the test-support feature; session_drive's mcu_session_shell test migrated from LwipLink::init() to lwip_test_link() (the shared init). The R71 / session_drive deferral - \"a second lwIP-touching test would need the init-once harness\" - is now realised rather than carried.",
+        "multicast_drive.rs: new run_multicast_session_admits_a_peer_over_loopback integration test. A peer JOIN (a zid distinct from ours) injected onto the group is delivered by poll_loopback, classified T_MID_JOIN, validated, and admitted into the dispatcher (active_peers == 1) while our own JOIN beacon echo is own-zid-filtered. It shares the harness with session_drive's test (one lwip_init per binary; a distinct port 7449).",
+        "Closes the R311lt carry: the MCU multicast drive loop's runtime behaviour is now verified end-to-end over a real lwIP multicast socket, not only by compilation + delegation to already-tested primitives."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-lwip --features transport-multicast: 3 passed (peer_key unit + session_drive shell + the new multicast peer-admit integration) - all three share one lwip_init via the lwip_test_link harness, no second-init abort.",
+        "10/10 consecutive runs pass (no-flaky rule): a frozen clock + a bounded max_iters + the harness serialize-mutex make the lwIP-loopback peer admit deterministic.",
+        "session-lwip default test: 1 passed (session_drive via the shared harness). wz-link-lwip default build + clippy clean (the test-support gating is inert without the feature - the production lib never pulls lwip_test_link).",
+        "clippy -p wz-session-lwip --features transport-multicast --all-targets -- -D warnings: clean. clippy -p wz-link-lwip --features test-support --all-targets -- -D warnings: clean.",
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log) - C1m now runs all 3 session-lwip tests under transport-multicast."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) remains the next FUNCTIONAL increment - this loop emits only the JOIN beacon + admits/sweeps peers + fans inbound Frames to the observer; the no-alloc MCU TX variant (the MulticastTxItem mirror + the per-channel mint) is unbuilt.",
+        "MCU multicast Fragment RX/TX (the reassembly / transport-fragmentation arms the AP loop carries, R311kn/R311ko) + the facade wz transport-multicast forward + a footprint gate for the new wz-session-lwip feature remain follow-on increments.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
