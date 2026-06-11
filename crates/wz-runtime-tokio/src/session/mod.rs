@@ -174,8 +174,11 @@ use crate::query_sink::{QueryView, ReplyOut};
 // would otherwise see it unused. R311lg — the deferred reply staging
 // sink copies each inbound reply into the owned `InboundReply` form, so
 // the import widens to plain `query-get` (the staging sink exists on
-// every getter build, queryable plane or not).
-#[cfg(feature = "query-get")]
+// every getter build, queryable plane or not). R311lk — the
+// liveliness-get plane installs the same staging sink (it does NOT imply
+// `query-get`), so the import follows the `deferred_reply_sink` gate:
+// `any(query-get, liveliness-get)`.
+#[cfg(any(feature = "query-get", feature = "liveliness-get"))]
 use crate::reply::InboundReply;
 use crate::reply::ReplyHandle;
 use crate::reply_sink::ReplyView;
@@ -966,23 +969,27 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts)?)
     }
 
-    /// R311lg — build the deferred staging sink one `query*`
-    /// registration installs in the [`crate::reply::ReplyRegistry`]:
-    /// the user `(on_reply, on_final)` pair lives in a deferred-fire
+    /// R311lg — build the deferred staging sink a reply-stream
+    /// registration installs: the z_get `query*` path stores it in the
+    /// [`crate::reply::ReplyRegistry`]; R311lk routes the liveliness-get
+    /// path through the same helper into its
+    /// `LivelinessGetRegistry` (both share the `ReplySink` seam, so one
+    /// staging helper backs both reply-stream planes). The
+    /// user `(on_reply, on_final)` pair lives in a deferred-fire
     /// cell, and the registry-stored sink only copies each inbound
     /// reply out to its owned form ([`InboundReply`] — the existing AP
     /// retention form, no third reply struct) and stages one queue job
     /// per fire. The drain runs the user callbacks OUTSIDE the
     /// observer lock (the R311lf lock-free callback invariant on the
     /// reply/final plane), so they may re-enter any observer-locking
-    /// session API — including issuing further queries.
+    /// session API — including issuing further queries or gets.
     ///
     /// The staged `on_final` job kills the cell after firing: Final is
     /// terminal (the registry auto-removes the pending entry, so no
     /// later fire can stage), and the kill drops the user closures
     /// promptly — outside every framework lock, unlike the pre-R311lg
     /// inline path which dropped them inside the observer lock window.
-    #[cfg(feature = "query-get")]
+    #[cfg(any(feature = "query-get", feature = "liveliness-get"))]
     fn deferred_reply_sink(
         &self,
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
@@ -2347,10 +2354,24 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // the order matters against a peer reply whose Interest
             // reached it before we recorded the pending entry (same race
             // reasoning as `declare_liveliness_subscriber`).
+            // R311lk — install a DEFERRED reply sink (the same staging
+            // seam z_get uses since R311lg) rather than the raw user
+            // closures: `on_reply` / `on_final` then run at the
+            // post-dispatch drain OUTSIDE the observer lock, not inside
+            // `LivelinessGetRegistry::dispatch_*` / `sweep_timed_out`
+            // under it, so a get callback may re-enter any
+            // observer-locking session API (e.g. issue another get).
+            // Both fire paths already drain `fires` after releasing the
+            // lock: the inbound DeclToken/DeclFinal dispatch via
+            // `dispatch_iteration_event{_with}`, the timeout sweep via
+            // the host sweep task's trailing `drain_deferred_fires`. The
+            // sink is built before the lock (a pure construction over the
+            // cloned `fires` handle; it never touches the observer).
+            let sink = self.deferred_reply_sink(on_reply, on_final);
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .liveliness_gets
-                    .register_get(interest_id, deadline_ms, on_reply, on_final)
+                    .register(interest_id, deadline_ms, sink)
                     .expect("register on the alloc backing never exceeds declared capacity");
             });
             self.actions.send_interest_liveliness_get(

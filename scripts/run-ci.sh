@@ -1246,6 +1246,14 @@ _wz_consumer_plane_subsets() {
     printf '%s\t%s\n' "zget-reply-only"       "codec-response,codec-response-final,query-get,query-reply"
     printf '%s\t%s\n' "liveliness-sub-only"   "codec-declare,declare-interest,liveliness-subscriber"
     printf '%s\t%s\n' "liveliness-token-only" "liveliness-token"
+    # R311lk — liveliness-get does NOT imply query-get (its wire is the
+    # declaration plane, not Request/Response), yet it installs the SAME
+    # deferred reply-staging sink the z_get path uses (`deferred_reply_sink`
+    # + the owned `InboundReply` copy). This subset is the getter-less
+    # guard that pins that sink + its `InboundReply` import composing on
+    # the liveliness plane alone — without it the `any(query-get,
+    # liveliness-get)` gates regress invisibly (default CI has query-get ON).
+    printf '%s\t%s\n' "liveliness-get-only"   "liveliness-get"
     printf '%s\t%s\n' "declare-observer"      "codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
     # R311gi gc-2c — statechart switchboard plane (keyexpr -> SCXML
     # domain-event injection). `switchboard` implies codec-push (it reacts
