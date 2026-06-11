@@ -632,7 +632,6 @@ pub(crate) async fn run_demo(
     // serialize naturally on the mutex without livelock.
     log::info!("wz-ap-demo: driving session FSM");
     let mut driver = inbound;
-    let observer_for_dispatch = observer.clone();
 
     // gc-3 carry #2 — wire the LIVE application switchboard. Register the
     // demo's keyexpr -> domain-event rows (from wz-ap-demo-app's sidecar) onto
@@ -713,9 +712,10 @@ pub(crate) async fn run_demo(
     // outlives the `tokio::select!` future (E0716: a temporary would drop
     // before the select polls the future).
     let session_timeouts = SessionTimeouts::spec_defaults();
-    // R311kz — the dispatch closure pairs every observer dispatch with a
-    // deferred-fire drain AFTER the lock scope ends, so matching-listener
-    // callbacks run lock-free (the F-6 contract).
+    // R311ld — the Session dispatch SSOT pairs the observer dispatch
+    // with the deferred-fire drain (the F-6 contract) in one call; the
+    // switchboard fan rides the `_with` under-lock hook so it shares
+    // the same lock scope as before.
     let session_for_dispatch = session.clone();
     let outcome = tokio::select! {
         o = drive_session_until_terminal(
@@ -727,21 +727,18 @@ pub(crate) async fn run_demo(
             &session_timeouts,
             |event: IterationEvent<'_>| {
                 log::debug!("wz-ap-demo: iteration event = {event:?}");
-                {
-                    let mut obs = observer_for_dispatch
-                        .lock()
-                        .expect("observer mutex poisoned by panic in subscriber callback");
-                    // Fan the iteration event into the per-domain registries
-                    // (subscribers / replies / liveliness / …) + drain staged
-                    // outbound records, exactly as before.
-                    obs.dispatch(event, &actions);
+                // R311ld — the SSOT fans the event into the per-domain
+                // registries + flushes staged outbound records, then
+                // drains the deferred-fire queue after the lock drops.
+                session_for_dispatch.dispatch_iteration_event_with(event, |obs| {
                     // gc-3 carry #2 — also fan an inbound Push through the
-                    // switchboard into the application engine. IterationEvent is
-                    // Copy, so the same event drives both the registry dispatch and
-                    // the switchboard. The value injector decodes the wire payload
-                    // (temp_payload codec) into the typed _event.data; a signal row
-                    // (reset) injects an empty _event.data. A matched row advances
-                    // the app machine, which we then step + log.
+                    // switchboard into the application engine, under the
+                    // SAME lock scope as the registry fan. IterationEvent
+                    // is Copy, so the same event drives both. The value
+                    // injector decodes the wire payload (temp_payload
+                    // codec) into the typed _event.data; a signal row
+                    // (reset) injects an empty _event.data. A matched row
+                    // advances the app machine, which we then step + log.
                     #[cfg(feature = "switchboard")]
                     {
                         let fired = {
@@ -758,10 +755,9 @@ pub(crate) async fn run_demo(
                             );
                         }
                     }
-                }
-                // R311kz — observer lock dropped: run the deferred
-                // matching-listener callbacks staged by this dispatch.
-                session_for_dispatch.drain_deferred_fires();
+                    #[cfg(not(feature = "switchboard"))]
+                    let _ = obs;
+                });
             },
         ) => Some(o),
         _ = shutdown_signal() => {

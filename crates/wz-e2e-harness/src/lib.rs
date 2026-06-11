@@ -166,12 +166,12 @@ pub async fn run_acceptor_e2e<H>(
     //           closure fans inbound events into the observer, which
     //           routes them to whatever registry `setup` registered.
     let mut driver = inbound;
-    let observer_for_dispatch = observer.clone();
     let actions_for_loop = actions.clone();
-    // R311kz — pair every observer dispatch with a deferred-fire drain
-    // AFTER the lock drops so matching-listener callbacks run lock-free
-    // (the F-6 contract); harness-driven binaries get the same dispatch
-    // shape as the production runner.
+    // R311ld — the Session dispatch SSOT pairs the observer dispatch
+    // with the deferred-fire drain (the F-6 contract) in one call;
+    // harness-driven binaries get the same dispatch shape as the
+    // production runner. The session's own actions handle is the same
+    // Arc this loop threads, so the flush sink is unchanged.
     let session_for_dispatch = opened.session.clone();
     // Bound to a `let` (not an inline `&…::spec_defaults()`) so the
     // borrow outlives the `tokio::select!` future (E0716: a temporary
@@ -186,11 +186,7 @@ pub async fn run_acceptor_e2e<H>(
             &clock,
             &session_timeouts,
             |event: IterationEvent<'_>| {
-                observer_for_dispatch
-                    .lock()
-                    .expect("observer mutex poisoned")
-                    .dispatch(event, &actions_for_loop);
-                session_for_dispatch.drain_deferred_fires();
+                session_for_dispatch.dispatch_iteration_event(event);
             },
         ) => Some(o),
         _ = shutdown_signal() => None,

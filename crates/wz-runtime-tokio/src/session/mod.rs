@@ -502,6 +502,50 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
     }
 
+    /// R311ld — the dispatch SSOT (session-review minor F closure):
+    /// fan one drive-loop [`IterationEvent`](crate::session_glue::IterationEvent)
+    /// into the observer under its lock, then drain the deferred-fire
+    /// queue AFTER the lock drops — the lock/dispatch/drain pairing the
+    /// F-6 contract requires, mechanized in one method so a dispatch
+    /// site cannot forget the drain. The canonical drive-loop closure
+    /// is now:
+    ///
+    /// ```text
+    /// |event: IterationEvent<'_>| session.dispatch_iteration_event(event)
+    /// ```
+    ///
+    /// Uses the session's own actions handle as the flush sink (the
+    /// same `Arc` the dispatch closures previously threaded by hand —
+    /// [`Session::new`] receives it from the same bundle). A site that
+    /// needs extra work under the same lock scope (e.g. the wz-ap-demo
+    /// switchboard fan) uses
+    /// [`Self::dispatch_iteration_event_with`]; a site that bypasses
+    /// both and locks the observer directly retains the documented
+    /// obligation to pair every dispatch with
+    /// [`Self::drain_deferred_fires`].
+    pub fn dispatch_iteration_event(&self, event: crate::session_glue::IterationEvent<'_>) {
+        self.dispatch_iteration_event_with(event, |_obs| {});
+    }
+
+    /// R311ld — [`Self::dispatch_iteration_event`] with an
+    /// `under_lock` extension hook that runs INSIDE the same observer
+    /// lock scope, after the registry fan + pending flush. The hook
+    /// receives the locked observer; it carries the R311kj inline
+    /// constraint (no observer-locking session API re-entry from inside
+    /// it). The deferred-fire drain still runs after the lock drops,
+    /// covering fires staged by the hook too.
+    pub fn dispatch_iteration_event_with(
+        &self,
+        event: crate::session_glue::IterationEvent<'_>,
+        under_lock: impl FnOnce(&mut ApplicationLayerObserver),
+    ) {
+        R::with_mutex_mut(&self.observer, |obs| {
+            obs.dispatch(event, self.actions.as_ref());
+            under_lock(obs);
+        });
+        self.drain_deferred_fires();
+    }
+
     /// R311cy — borrow the Session-owned clock (R311cw fold-in
     /// stored `clock: Arc<T>`). Callers that need to thread the same
     /// monotonic epoch into a peer task (sweep_task,

@@ -5344,3 +5344,112 @@ fn remote_subscriber_listener_rejects_typed_when_feature_off() {
         "declare-subscriber off must reject typed"
     );
 }
+
+// ── R311ld Session::dispatch_iteration_event (dispatch SSOT) ──
+
+/// R311ld — the dispatch SSOT pairs the observer fan with the
+/// deferred-fire drain in ONE call: a real drive-loop-shaped
+/// `IterationEvent::Poll(FramePayload)` carrying a peer
+/// `Declare(DeclSubscriber)` reaches both the registry (membership)
+/// and a deferred decl listener (callback ran, NO manual
+/// `drain_deferred_fires` anywhere in this test).
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn dispatch_iteration_event_fans_and_drains_in_one_call() {
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let _listener = session
+        .declare_remote_subscriber_listener(move |e| log_cb.lock().unwrap().push(e))
+        .expect("declare-subscriber is on in this lane");
+
+    let declare = wz_codecs::declare::DeclareOwned {
+        header: 0,
+        interest_id: None,
+        extensions: None,
+        body: make_decl_subscriber(4, "home/temp"),
+    };
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Declare(
+            Box::new(declare),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![DeclEvent::Declared {
+            id: 4,
+            keyexpr: "home/temp".to_string()
+        }],
+        "one SSOT call fanned the declare AND drained the deferred fire"
+    );
+    assert_eq!(
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .declared_count(),
+        1,
+        "registry membership updated by the same call"
+    );
+}
+
+/// R311ld — the `_with` form runs its hook INSIDE the same lock scope
+/// (the observer handed to it is the locked one) and still drains
+/// afterwards, covering fires staged by the dispatch.
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn dispatch_iteration_event_with_runs_hook_under_lock_then_drains() {
+    use std::sync::{Arc, Mutex};
+
+    let (session, _driver) = build_session();
+    let log: Arc<Mutex<Vec<DeclEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_cb = log.clone();
+    let _listener = session
+        .declare_remote_subscriber_listener(move |e| log_cb.lock().unwrap().push(e))
+        .expect("declare-subscriber is on in this lane");
+
+    let declare = wz_codecs::declare::DeclareOwned {
+        header: 0,
+        interest_id: None,
+        extensions: None,
+        body: make_decl_subscriber(8, "home/temp"),
+    };
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Declare(
+            Box::new(declare),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    let mut hook_saw_membership = 0;
+    session.dispatch_iteration_event_with(
+        crate::session_glue::IterationEvent::Poll(&outcome),
+        |obs| {
+            // The hook observes post-dispatch registry state under the
+            // SAME lock; the deferred listener has NOT fired yet (the
+            // drain runs only after this scope ends).
+            hook_saw_membership = obs.remote_subscribers.declared_count();
+            assert!(
+                log.lock().unwrap().is_empty(),
+                "deferred fire still staged while the hook holds the lock"
+            );
+        },
+    );
+    assert_eq!(hook_saw_membership, 1, "hook ran after the registry fan");
+    assert_eq!(
+        log.lock().unwrap().len(),
+        1,
+        "deferred fire drained after the hook's lock scope ended"
+    );
+}
