@@ -34246,6 +34246,50 @@
         "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
       ]
     },
+    "Round 311lh": {
+      "decision_summary": "R311lh data-plane deferral (b): subscriber-sample plane deferred (owned Sample staging, publish tail drain); deferred-fire consumer feature makes the Session-tier queue unconditional.",
+      "changes_bullets": [
+        "R311lf delivery round (b) — the always-compiled subscriber-sample plane moves to deferred fire; declare_subscriber{_aliased} install a staging sink that materializes each matched view into the owned retention Sample (Sample::from_view — full-fidelity copy incl. the five rich metadata fields, the R311gb-2b helper built for exactly this) and stage per-sample queue jobs; the callback signature is unchanged",
+        "union reshape (the (b) re-examination the R311lg carry flagged): new wz-session-core gate-only feature deferred-fire = [\"alloc\"], enabled UNCONDITIONALLY by wz-runtime-tokio's dependency feature list — the honest encoding once a deferred sink can exist in every feature subset of the host-only Session tier; the runtime-tokio fires field / Clone / new / drain_deferred_fires cfg unions are deleted (field unconditional, drain body unconditional), superseding the R311le forced-inline shape for this tier only; the core module gate keeps the plane-arm union (+ the new arm) for direct core consumers, and no plane implies deferred-fire (the R311le rejection of plane->deferred-fire implication stands — the no-alloc decl lane is untouched)",
+        "Subscriber handle gains the cell (unconditional, like the plane); undeclare + Drop kill-first so a staged-but-undrained sample never fires a removed subscriber's callback",
+        "publish / publish_aliased pair their pubsub-allow-loop loopback branch with a tail drain_deferred_fires so local subscriber callbacks run synchronously on the caller thread, outside the observer lock, before publish returns (pico fires subscription callbacks outside the session mutex on the delivering thread); publish_aliased_auto + Publisher helpers funnel through these"
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio --lib 247 PASS (245 prior + 2 new: echo re-entrancy — sample callback publishes back, nested loopback fire on the same cell backlogs and delivers in order before publish returns; staged-before-undeclare suppression via kill-first)",
+        "cargo fmt --check + clippy deny-warnings clean on wz-session-core / wz-runtime-tokio / wz-ap-demo; wz-ap-demo + wz-e2e-harness build OK",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture) — Layer G MCU lanes do not enable deferred-fire, thumbv6m Arc-free envelope unchanged"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311lf delivery remaining: (c) queryable plane — reply-path restructure (deferred handler emits replies through actions directly, ResponseFinal after handler return — pico z_query_reply shape; the pending_replies staging flush order currently owns the Reply-before-Final invariant) — the last ratified plane",
+        "liveliness-get surface (flagged R311lg): LivelinessGetRegistry on_reply/on_final callbacks still fire inside the observer mutex — fold into (c) or a follow-up round",
+        "pre-existing observation (unchanged): mem::forget-based undeclare on LivelinessSubscriber / LivelinessToken / Subscriber leaks handle field Arcs per cycle — candidate ManuallyDrop refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ],
+      "publishable_decision_summary": "R311lh data-plane deferral (b): subscriber-sample plane deferred (owned Sample staging, publish tail drain); deferred-fire consumer feature makes the Session-tier queue unconditional.",
+      "publishable_changes_bullets": [
+        "R311lf delivery round (b) — the always-compiled subscriber-sample plane moves to deferred fire; declare_subscriber{_aliased} install a staging sink that materializes each matched view into the owned retention Sample (Sample::from_view — full-fidelity copy incl. the five rich metadata fields, the R311gb-2b helper built for exactly this) and stage per-sample queue jobs; the callback signature is unchanged",
+        "union reshape (the (b) re-examination the R311lg carry flagged): new wz-session-core gate-only feature deferred-fire = [\"alloc\"], enabled UNCONDITIONALLY by wz-runtime-tokio's dependency feature list — the honest encoding once a deferred sink can exist in every feature subset of the host-only Session tier; the runtime-tokio fires field / Clone / new / drain_deferred_fires cfg unions are deleted (field unconditional, drain body unconditional), superseding the R311le forced-inline shape for this tier only; the core module gate keeps the plane-arm union (+ the new arm) for direct core consumers, and no plane implies deferred-fire (the R311le rejection of plane->deferred-fire implication stands — the no-alloc decl lane is untouched)",
+        "Subscriber handle gains the cell (unconditional, like the plane); undeclare + Drop kill-first so a staged-but-undrained sample never fires a removed subscriber's callback",
+        "publish / publish_aliased pair their pubsub-allow-loop loopback branch with a tail drain_deferred_fires so local subscriber callbacks run synchronously on the caller thread, outside the observer lock, before publish returns (pico fires subscription callbacks outside the session mutex on the delivering thread); publish_aliased_auto + Publisher helpers funnel through these"
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio --lib 247 PASS (245 prior + 2 new: echo re-entrancy — sample callback publishes back, nested loopback fire on the same cell backlogs and delivers in order before publish returns; staged-before-undeclare suppression via kill-first)",
+        "cargo fmt --check + clippy deny-warnings clean on wz-session-core / wz-runtime-tokio / wz-ap-demo; wz-ap-demo + wz-e2e-harness build OK",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped verdict, log redirect + direct $? capture) — Layer G MCU lanes do not enable deferred-fire, thumbv6m Arc-free envelope unchanged"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311lf delivery remaining: (c) queryable plane — reply-path restructure (deferred handler emits replies through actions directly, ResponseFinal after handler return — pico z_query_reply shape; the pending_replies staging flush order currently owns the Reply-before-Final invariant) — the last ratified plane",
+        "liveliness-get surface (flagged R311lg): LivelinessGetRegistry on_reply/on_final callbacks still fire inside the observer mutex — fold into (c) or a follow-up round",
+        "pre-existing observation (unchanged): mem::forget-based undeclare on LivelinessSubscriber / LivelinessToken / Subscriber leaks handle field Arcs per cycle — candidate ManuallyDrop refactor round",
+        "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
