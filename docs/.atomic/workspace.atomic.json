@@ -34390,6 +34390,46 @@
         "session-review minor D/E open + keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx / 311le)"
       ]
     },
+    "Round 311lk": {
+      "decision_summary": "R311lk liveliness-get reply/final deferral — Session::liveliness_get installs the deferred_reply_sink (R311lg z_get seam) so on_reply/on_final run at the drain, outside the observer lock.",
+      "changes_bullets": [
+        "session/mod.rs liveliness_get: register a deferred_reply_sink (R311lg z_get seam), not raw closures.",
+        "deferred_reply_sink gate + InboundReply import widened query-get -> any(query-get, liveliness-get).",
+        "run-ci.sh: liveliness-get-only subset added to _wz_consumer_plane_subsets (C4b/C4c/C4d/C1j guard)."
+      ],
+      "verification_bullets": [
+        "liveliness-get-only (query-get OFF): rt clippy --all-targets + facade build + test lane all clean.",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped); C1j/C4b/C4c/C4d liveliness-get-only lanes OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "liveliness-get on_reply/on_final now drain-fired; ratify 4-plane + get plane all lock-free.",
+        "Finding A regression-guard fixture (controlled-interleaving, no-flaky-ever) still open.",
+        "Finding B register-then-fallible-send no-rollback sink orphan; join handle-lifetime round.",
+        "mem::forget undeclare Arc leak (ManuallyDrop refactor) + minor D/E + keepalive MCU preset + A1 pool."
+      ],
+      "publishable_decision_summary": "R311lk liveliness-get reply/final deferral — Session::liveliness_get installs the deferred_reply_sink (R311lg z_get seam) so on_reply/on_final run at the drain, outside the observer lock.",
+      "publishable_changes_bullets": [
+        "session/mod.rs liveliness_get: register a deferred_reply_sink (R311lg z_get seam), not raw closures.",
+        "deferred_reply_sink gate + InboundReply import widened query-get -> any(query-get, liveliness-get).",
+        "run-ci.sh: liveliness-get-only subset added to _wz_consumer_plane_subsets (C4b/C4c/C4d/C1j guard)."
+      ],
+      "publishable_verification_bullets": [
+        "liveliness-get-only (query-get OFF): rt clippy --all-targets + facade build + test lane all clean.",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped); C1j/C4b/C4c/C4d liveliness-get-only lanes OK."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "liveliness-get on_reply/on_final now drain-fired; ratify 4-plane + get plane all lock-free.",
+        "Finding A regression-guard fixture (controlled-interleaving, no-flaky-ever) still open.",
+        "Finding B register-then-fallible-send no-rollback sink orphan; join handle-lifetime round.",
+        "mem::forget undeclare Arc leak (ManuallyDrop refactor) + minor D/E + keepalive MCU preset + A1 pool."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
