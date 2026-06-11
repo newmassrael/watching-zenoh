@@ -34514,6 +34514,54 @@
         "loom not adopted: a faithful loom harness needs the async Runtime; structure made it moot."
       ]
     },
+    "Round 311ln": {
+      "decision_summary": "R311ln z_get query{,_aliased} register-then-send orphan: reorder to pico _z_query order (wire emit before loopback fan) + unregister-only rollback on failed emit (Finding B sibling).",
+      "changes_bullets": [
+        "session/mod.rs query + query_aliased: register sink, emit wire Query, THEN fan loopback (was register+loopback, then emit).",
+        "On a failed send_request_query{,_with_meta} the FRESH-rid pending entry rolls back via replies.unregister(rid) alone.",
+        "Mirrors pico _z_query (primitives.c:585-629): send_n_msg, then deliver_query_locally only on ret==OK, unregister on any err.",
+        "No cell kill: no loopback fanned pre-emit and no solicited reply can correlate a fresh rid before the send (liveliness_get shape).",
+        "Querier::get / QuerierAliased::get delegate to query / query_aliased_auto so they inherit the rollback transitively.",
+        "tests.rs: 2 transport-gated rollback tests (query + query_aliased) asserting 0 orphan pending entry + 0 wire frames."
+      ],
+      "verification_bullets": [
+        "cargo fmt -p wz-runtime-tokio --check: clean.",
+        "cargo check + clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean.",
+        "cargo test -p wz-runtime-tokio --lib -- query: 61 passed (2 new rollback + existing loopback-ordering; 0 regressions).",
+        "full run-ci WZ_RUN_LAYER_G=1: EXIT=0, all required layers pass (Layer G 13 MCU lanes x2 arch OK; G.6/G.11 KNOWN_SKIP riscv gcc absent)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "mem::forget-based undeclare Arc leak -> ManuallyDrop refactor (handle lifetime); independent round, next priority.",
+        "minor D/E + keepalive MCU preset wiring + A1 pool remain open.",
+        "z_get rollback closes the R311lk~lm carry #1 (Finding B query sibling); the consumer-plane register-then-send orphan family is now empty."
+      ],
+      "publishable_decision_summary": "R311ln z_get query{,_aliased} register-then-send orphan: reorder to pico _z_query order (wire emit before loopback fan) + unregister-only rollback on failed emit (Finding B sibling).",
+      "publishable_changes_bullets": [
+        "session/mod.rs query + query_aliased: register sink, emit wire Query, THEN fan loopback (was register+loopback, then emit).",
+        "On a failed send_request_query{,_with_meta} the FRESH-rid pending entry rolls back via replies.unregister(rid) alone.",
+        "Mirrors pico _z_query (primitives.c:585-629): send_n_msg, then deliver_query_locally only on ret==OK, unregister on any err.",
+        "No cell kill: no loopback fanned pre-emit and no solicited reply can correlate a fresh rid before the send (liveliness_get shape).",
+        "Querier::get / QuerierAliased::get delegate to query / query_aliased_auto so they inherit the rollback transitively.",
+        "tests.rs: 2 transport-gated rollback tests (query + query_aliased) asserting 0 orphan pending entry + 0 wire frames."
+      ],
+      "publishable_verification_bullets": [
+        "cargo fmt -p wz-runtime-tokio --check: clean.",
+        "cargo check + clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean.",
+        "cargo test -p wz-runtime-tokio --lib -- query: 61 passed (2 new rollback + existing loopback-ordering; 0 regressions).",
+        "full run-ci WZ_RUN_LAYER_G=1: EXIT=0, all required layers pass (Layer G 13 MCU lanes x2 arch OK; G.6/G.11 KNOWN_SKIP riscv gcc absent)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "mem::forget-based undeclare Arc leak -> ManuallyDrop refactor (handle lifetime); independent round, next priority.",
+        "minor D/E + keepalive MCU preset wiring + A1 pool remain open.",
+        "z_get rollback closes the R311lk~lm carry #1 (Finding B query sibling); the consumer-plane register-then-send orphan family is now empty."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
