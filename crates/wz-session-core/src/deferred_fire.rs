@@ -40,7 +40,13 @@
 //!   of the cell, runs it with the cell unlocked, and restores it
 //!   afterwards — so a callback may undeclare ITSELF (the undeclare
 //!   marks the cell dead; the restore then drops the callback instead
-//!   of resurrecting it) without deadlocking on its own cell.
+//!   of resurrecting it) without deadlocking on its own cell. R311lg —
+//!   an invoke that finds the callback mid-fire on another drainer
+//!   BACKLOGS its call instead of skipping it (lossless overlap): the
+//!   active drainer runs the backlog FIFO before restoring, so every
+//!   accepted fire is delivered exactly once even when two drain
+//!   sites overlap on one cell (drive loop + a query-tail or
+//!   sweep-task drain — the data-plane shape).
 //!
 //! ## Contracts
 //!
@@ -49,10 +55,12 @@
 //!   dispatch SSOT does this); an undrained queue delays fires until
 //!   the next drain, it never drops them.
 //! - **Ordering.** Jobs run in stage order — wire order across planes
-//!   (a matching flip staged before a decl fire runs before it),
-//!   single-drainer. Production has one drive loop per session, so a
-//!   single drainer is the operating shape; two concurrent drainers
-//!   would interleave batches (each batch internally ordered).
+//!   (a matching flip staged before a decl fire runs before it) when
+//!   a single drainer drains. Production has one drive loop per
+//!   session as the primary drainer; auxiliary drainers (a query-tail
+//!   drain, the reply sweep task) interleave batches (each batch
+//!   internally ordered) and per-cell delivery stays FIFO + lossless
+//!   via the cell backlog.
 //! - **Late fires.** A fire staged before an undeclare but drained
 //!   after it is suppressed by the dead-marked cell — the callback
 //!   never observes a post-undeclare event.
@@ -71,6 +79,7 @@
 //! keeps the inline-fire path.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -154,12 +163,20 @@ impl<R: Runtime> DeferredFireQueue<R> {
     }
 }
 
+/// R311lg — one deferred call handed to the ACTIVE drainer by an
+/// invoke that found the callback mid-fire (lossless overlap; see
+/// [`DeferredListenerCell::invoke`]).
+type BacklogCall<F> = Box<dyn FnOnce(&mut F) + Send + 'static>;
+
 /// Slot state behind a [`DeferredListenerCell`]: the callback (absent
 /// while a job is mid-fire — taken out so the user code runs with the
-/// cell unlocked) and the dead marker an undeclare sets.
+/// cell unlocked), the dead marker an undeclare sets, and the FIFO
+/// backlog of calls that arrived while the callback was mid-fire
+/// (R311lg — drained by the active drainer before it restores).
 struct CellState<F> {
     callback: Option<F>,
     dead: bool,
+    backlog: VecDeque<BacklogCall<F>>,
 }
 
 /// Per-listener callback slot fired through by a deferred [`FireJob`].
@@ -185,20 +202,23 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
             state: Arc::new(R::new_mutex(CellState {
                 callback: Some(callback),
                 dead: false,
+                backlog: VecDeque::new(),
             })),
         }
     }
 
-    /// Mark the listener dead and drop the callback if it is at rest.
-    /// The undeclare path: a staged-but-undrained job for this cell
-    /// becomes a no-op, and a job CURRENTLY mid-fire (callback taken
-    /// out) drops the callback at restore instead of resurrecting it —
-    /// which is what makes self-undeclare from inside the callback
-    /// safe.
+    /// Mark the listener dead, drop the callback if it is at rest, and
+    /// discard any backlogged calls. The undeclare path: a
+    /// staged-but-undrained job for this cell becomes a no-op, a
+    /// backlogged call is dropped, and a job CURRENTLY mid-fire
+    /// (callback taken out) drops the callback at restore instead of
+    /// resurrecting it — which is what makes self-undeclare from
+    /// inside the callback safe.
     pub fn kill(&self) {
         R::with_mutex_mut(&self.state, |s| {
             s.dead = true;
             s.callback = None;
+            s.backlog.clear();
         });
     }
 
@@ -209,20 +229,65 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
 
     /// Take-call-restore: run `f` over the callback with the cell
     /// UNLOCKED (the callback may re-enter any session API, including
-    /// [`kill`](Self::kill) on this very cell). Skips silently when the
-    /// cell is dead or the callback is mid-fire elsewhere (single-
-    /// drainer production never overlaps; a second drainer's overlap
-    /// skips rather than blocks).
-    pub fn invoke(&self, f: impl FnOnce(&mut F)) {
-        let taken = R::with_mutex_mut(&self.state, |s| s.callback.take());
+    /// [`kill`](Self::kill) on this very cell). Silently drops the call
+    /// when the cell is dead.
+    ///
+    /// R311lg — lossless overlap: when the callback is mid-fire on
+    /// another drainer (drive loop vs a query-tail / sweep-task drain —
+    /// the data-plane multi-drainer shape), the call is BACKLOGGED
+    /// instead of skipped; the active drainer runs the backlog FIFO
+    /// before restoring the callback, so every call accepted by a live
+    /// cell runs exactly once, serialized, still outside every
+    /// framework lock. A re-entrant invoke from INSIDE this cell's own
+    /// callback backlogs the same way and runs before the restore.
+    pub fn invoke(&self, f: impl FnOnce(&mut F) + Send + 'static) {
+        let mut pending = Some(f);
+        let taken = R::with_mutex_mut(&self.state, |s| {
+            if s.dead {
+                // Drop the call; `pending` falls out of scope at fn
+                // exit, outside the cell lock.
+                return None;
+            }
+            match s.callback.take() {
+                Some(callback) => Some(callback),
+                None => {
+                    // Mid-fire on another drainer: hand the call over.
+                    let call = pending.take().expect("pending set just above");
+                    s.backlog.push_back(Box::new(call));
+                    None
+                }
+            }
+        });
         let Some(mut callback) = taken else {
             return;
         };
-        f(&mut callback);
-        R::with_mutex_mut(&self.state, |s| {
-            if !s.dead {
-                s.callback = Some(callback);
-            }
-        });
+        let call = pending
+            .take()
+            .expect("the active drainer keeps its own call");
+        call(&mut callback);
+        // Restore-or-drain loop: run backlogged calls (FIFO) until the
+        // backlog is empty, then restore — unless a kill arrived, in
+        // which case the callback (and any remaining backlog) is
+        // dropped. `callback_slot` is taken by the restore arm, so a
+        // surviving `Some` after the loop drops outside the cell lock.
+        let mut callback_slot = Some(callback);
+        loop {
+            let next = R::with_mutex_mut(&self.state, |s| {
+                if s.dead {
+                    s.backlog.clear();
+                    None
+                } else if let Some(call) = s.backlog.pop_front() {
+                    Some(call)
+                } else {
+                    s.callback = callback_slot.take();
+                    None
+                }
+            });
+            let Some(call) = next else { return };
+            let callback = callback_slot
+                .as_mut()
+                .expect("backlog calls are handed to the active drainer only");
+            call(callback);
+        }
     }
 }

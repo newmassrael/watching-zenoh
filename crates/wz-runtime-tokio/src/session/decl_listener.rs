@@ -243,14 +243,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 keyexpr: view.keyexpr().to_string(),
             };
             let cell = cell_for_decl.clone();
-            queue.stage(Box::new(move || cell.invoke(|cb| cb(event))));
+            queue.stage(Box::new(move || cell.invoke(move |cb| cb(event))));
         });
         let queue = self.fires.clone();
         let cell_for_undecl = cell.clone();
         let undecl_sink = wz_session_core::decl_sink::BoxedUndeclSink::new(move |id| {
             let cell = cell_for_undecl.clone();
             queue.stage(Box::new(move || {
-                cell.invoke(|cb| cb(DeclEvent::Undeclared { id }))
+                cell.invoke(move |cb| cb(DeclEvent::Undeclared { id }))
             }));
         });
         (cell, decl_sink, undecl_sink)

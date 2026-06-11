@@ -631,7 +631,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             let sink = wz_session_core::declare::matching::BoxedMatchingSink::new(move |m| {
                 let cell = cell_for_sink.clone();
                 queue.stage(Box::new(move || {
-                    cell.invoke(|cb| cb(MatchingStatus { matching: m }));
+                    cell.invoke(move |cb| cb(MatchingStatus { matching: m }));
                 }));
             });
             let id = R::with_mutex_mut(&self.session.observer, |obs| {
