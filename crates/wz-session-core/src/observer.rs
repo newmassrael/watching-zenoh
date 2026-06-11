@@ -184,7 +184,7 @@ use crate::reply::ReplyRegistry;
 // `ResponseSink` in wz-runtime-tokio so existing call sites
 // (`observer.dispatch(event, &actions)`) resolve `S = SessionLinkActions
 // <R, T>` by inference, unchanged.
-use crate::response_sink::ResponseSink;
+use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use alloc::vec::Vec;
 
 /// Six-registry application-layer dispatch bundle. See module-level
@@ -513,14 +513,22 @@ impl ApplicationLayerObserver {
     /// deferred-fire drain, so a deferred queryable handler's replies
     /// (emitted at the drain, outside the lock) still precede their
     /// ResponseFinal on the wire.
-    pub fn flush_pending<S: ResponseSink>(&mut self, actions: &S) {
+    ///
+    /// R311lq — the `actions` bound is the union of the three observer
+    /// drain-sink concerns ([`ResponseSink`] + [`DeclareReplySink`] +
+    /// [`LivelinessGetPrune`]) because this full drain touches all three
+    /// staged buffers. A consumer that drains only ONE concern (the
+    /// multicast reply loop, query-replies only) calls the narrower
+    /// [`Self::flush_query_replies`] instead and need only implement
+    /// [`ResponseSink`]. Body is a pure composition of the per-concern
+    /// drains — same emit order as before the R311lq segregation
+    /// (replies, declarer interest-responses, get-prunes, then finals).
+    pub fn flush_pending<S>(&mut self, actions: &S)
+    where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
         self.flush_pending_replies(actions);
-        #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
-        for rid in self.pending_final_rids.drain(..) {
-            actions.send_response_final(rid);
-        }
-        #[cfg(all(feature = "query-queryable", not(feature = "codec-response-final")))]
-        self.pending_final_rids.clear();
+        self.drain_query_finals(actions);
     }
 
     /// R311li — drain every pending buffer EXCEPT the queryable
@@ -528,21 +536,85 @@ impl ApplicationLayerObserver {
     /// terminated liveliness-get prunes). The Session-tier dispatch
     /// SSOT pairs this with [`Self::take_pending_final_rids`]; raw /
     /// MCU consumers keep the combined [`Self::flush_pending`].
-    pub fn flush_pending_replies<S: ResponseSink>(&mut self, actions: &S) {
+    ///
+    /// R311lq — a pure composition of the per-concern drains (the
+    /// segregated [`Self::drain_query_replies`] /
+    /// [`Self::drain_declare_replies`] / [`Self::drain_get_prunes`]),
+    /// in the same stage order as before. The `actions` bound is the
+    /// three-concern union because this aggregate touches all three
+    /// staged buffers; a single-concern consumer drains its concern
+    /// directly and is bounded on only that trait.
+    pub fn flush_pending_replies<S>(&mut self, actions: &S)
+    where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
+        self.drain_query_replies(actions);
+        self.drain_declare_replies(actions);
+        self.drain_get_prunes(actions);
+    }
+
+    /// R311lq — drain the queryable reply CHAIN (data replies then their
+    /// terminal `ResponseFinal` rids) through a [`ResponseSink`]. This is
+    /// the query-reply concern in isolation: a consumer that drives a
+    /// queryable but neither the liveliness-token nor liveliness-get
+    /// planes (the multicast reply loop) drains exactly this and need only
+    /// implement [`ResponseSink`]. Reply-before-Final ordering is
+    /// self-contained here (data replies drain before the finals), so the
+    /// invariant lives with the concern rather than spread across a fat
+    /// drain.
+    pub fn flush_query_replies<S: ResponseSink>(&mut self, sink: &S) {
+        self.drain_query_replies(sink);
+        self.drain_query_finals(sink);
+    }
+
+    /// R311lq — drain the staged queryable data replies (`pending_replies`)
+    /// through `send_response`. Does NOT touch the terminal rids (see
+    /// [`Self::drain_query_finals`]); the Session-tier path drains data
+    /// replies under the lock and defers the finals past the deferred-fire
+    /// drain, so the two halves are separate primitives.
+    fn drain_query_replies<S: ResponseSink>(&mut self, sink: &S) {
         #[cfg(feature = "query-queryable")]
         for reply in self.pending_replies.drain(..) {
             // W3: a reply whose bounded field overflows cannot be wire-encoded
             // (the codec would reject it too); skip it and continue the drain.
             if let Ok(response) = reply.into_response() {
-                actions.send_response(response);
+                sink.send_response(response);
             }
         }
-        // R283 / R311hn — drain the declarer-side interest-response
-        // staging buffer through the borrowed emit seam. Every staged
-        // `DeclResponseItem` is emitted in stage order, so each
-        // interest-response batch's `Token`s precede its terminating
-        // `Final`. The sink owns the encode (a `VecSink` on AP, a
-        // `SliceSink` on MCU) — no owned `DeclareOwned` crosses the seam.
+        // Without `query-queryable` the staging buffer does not exist; the
+        // signature stays stable so the composing drains wire it
+        // unconditionally.
+        #[cfg(not(feature = "query-queryable"))]
+        let _ = sink;
+    }
+
+    /// R311lq — drain the staged queryable ResponseFinal rids
+    /// (`pending_final_rids`) through `send_response_final`. Pairs with
+    /// [`Self::drain_query_replies`] to form the full reply chain; emitted
+    /// last so every data Reply for rid R precedes the matching
+    /// ResponseFinal for R.
+    fn drain_query_finals<S: ResponseSink>(&mut self, sink: &S) {
+        #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+        for rid in self.pending_final_rids.drain(..) {
+            sink.send_response_final(rid);
+        }
+        #[cfg(all(feature = "query-queryable", not(feature = "codec-response-final")))]
+        self.pending_final_rids.clear();
+        // `sink` is consumed only by the `send_response_final` loop above; in
+        // every other combo (no `query-queryable`, or `query-queryable` without
+        // `codec-response-final`) it is unused but the signature stays stable.
+        #[cfg(not(all(feature = "query-queryable", feature = "codec-response-final")))]
+        let _ = sink;
+    }
+
+    /// R311lq — drain the declarer-side interest-response staging buffer
+    /// (`pending_declares`) through a [`DeclareReplySink`].
+    ///
+    /// R283 / R311hn — every staged `DeclResponseItem` is emitted in stage
+    /// order, so each interest-response batch's `Token`s precede its
+    /// terminating `Final`. The sink owns the encode (a `VecSink` on AP, a
+    /// `SliceSink` on MCU) — no owned `DeclareOwned` crosses the seam.
+    fn drain_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
         #[cfg(feature = "liveliness-token")]
         for item in core::mem::take(&mut self.pending_declares) {
             match item {
@@ -554,34 +626,30 @@ impl ApplicationLayerObserver {
                     // drain; a token unregistered between stage and drain
                     // is skipped (its chain's Final still terminates).
                     if let Some(keyexpr) = self.local_tokens.keyexpr_for(token_id) {
-                        actions.send_declare_token_reply(token_id, keyexpr, interest_id);
+                        sink.send_declare_token_reply(token_id, keyexpr, interest_id);
                     }
                 }
                 DeclResponseItem::Final { interest_id } => {
-                    actions.send_declare_final_reply(interest_id)
+                    sink.send_declare_final_reply(interest_id)
                 }
             }
         }
-        // F3 — drain the terminated-get staging (inbound DeclFinal +
-        // timeout sweeps) through the reconnect-cache prune seam: a
-        // finished one-shot get must not replay its CURRENT Interest on
-        // the next reconnect. The sink no-ops when `session-reconnect`
-        // is off, so the drain is unconditional within the gate.
+        #[cfg(not(feature = "liveliness-token"))]
+        let _ = sink;
+    }
+
+    /// R311lq — drain the terminated-get staging (inbound DeclFinal +
+    /// timeout sweeps) through a [`LivelinessGetPrune`]: a finished
+    /// one-shot get must not replay its CURRENT Interest on the next
+    /// reconnect. The sink no-ops when `session-reconnect` is off, so the
+    /// drain is unconditional within the gate.
+    fn drain_get_prunes<S: LivelinessGetPrune>(&mut self, sink: &S) {
         #[cfg(feature = "liveliness-get")]
         for interest_id in self.liveliness_gets.take_finalized() {
-            actions.prune_liveliness_get_interest(interest_id);
+            sink.prune_liveliness_get_interest(interest_id);
         }
-        // R307 — without `query-queryable` (and, R283/F3, without
-        // `liveliness-token` / `liveliness-get`) the staging buffers do
-        // not exist; `actions` is then unused in this branch but the
-        // method signature stays stable so callers (`Self::dispatch`)
-        // can wire it unconditionally.
-        #[cfg(not(any(
-            feature = "query-queryable",
-            feature = "liveliness-token",
-            feature = "liveliness-get"
-        )))]
-        let _ = actions;
+        #[cfg(not(feature = "liveliness-get"))]
+        let _ = sink;
     }
 
     /// R311li — take the staged queryable ResponseFinal rids out of the
@@ -600,7 +668,10 @@ impl ApplicationLayerObserver {
     /// inside the `drive_session_until_terminal` observer closure.
     /// Equivalent to `dispatch_event(event)` followed by
     /// `flush_pending(actions)`.
-    pub fn dispatch<S: ResponseSink>(&mut self, event: IterationEvent<'_>, actions: &S) {
+    pub fn dispatch<S>(&mut self, event: IterationEvent<'_>, actions: &S)
+    where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
         self.dispatch_event(event);
         self.flush_pending(actions);
     }

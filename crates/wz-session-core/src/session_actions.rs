@@ -86,7 +86,7 @@ use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError};
     feature = "transport-keepalive",
 ))]
 use crate::reliability::Reliability;
-use crate::response_sink::ResponseSink;
+use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
 use crate::session_fsm_unicast::SessionFsmUnicastActions as SessionFsmUnicastActionsTrait;
@@ -556,11 +556,19 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // bundle. The inherent `send_response` / `send_response_final`
 // methods (below, in the `impl<R: SessionRuntime, T: TimeSource>` block) carry
 // the real encode + enqueue; these trait methods delegate to them so
-// `ApplicationLayerObserver::flush_pending<S: ResponseSink>` can drive any
-// runtime's actions handle. The delegating `self.send_response(..)` calls
-// resolve to the inherent methods (inherent shadows trait in method-call
-// resolution), so there is no recursion. The method set is empty in a
-// build with neither response codec, matching the trait's gated surface.
+// The observer's reply drain (`flush_query_replies<S: ResponseSink>` and
+// the composing `flush_pending`) can drive any runtime's actions handle.
+// The delegating `self.send_response(..)` calls resolve to the inherent
+// methods (inherent shadows trait in method-call resolution), so there is
+// no recursion. The method set is empty in a build with neither response
+// codec, matching the trait's gated surface.
+//
+// R311lq — `SessionLinkActions` is the full-session bundle, so it
+// implements ALL THREE observer drain-sink concerns. They are separate
+// `impl` blocks (one per cohesive trait) rather than one fat impl: the
+// segregation lets a partial runtime sink (the multicast reply loop)
+// implement only `ResponseSink` without being forced to satisfy the
+// liveliness concerns.
 impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
     #[cfg(feature = "codec-response")]
     fn send_response(&self, response: ResponseOwned) {
@@ -570,21 +578,24 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     fn send_response_final(&self, request_id: u64) {
         self.send_response_final(request_id);
     }
-    // R283 / R311hn (Track 2) — drain targets for the declarer-side
-    // interest-response borrowed emit seam. The registry/observer pass
-    // borrowed args (no owned `DeclareOwned` crosses the seam); this AP
-    // sink owns the encode by building a `DeclareOwned` and routing it
-    // through the inherent `Self::send_declare` (encode via `VecSink` +
-    // enqueue). An MCU sink would instead encode through `SliceSink` over
-    // a stack buffer. Inherent-method resolution shadows nothing here
-    // (these are distinct names from the inherent `send_declare`).
-    // R311ho — the reply wire shape has a single source in
-    // `wz-session-core::declare::local_token` (`build_token_reply` /
-    // `build_final_reply`, borrowed). The AP sink derives the owned form
-    // via `Declare::into_owned` and routes it through the inherent
-    // `Self::send_declare` (encode via `VecSink` + enqueue); an MCU sink
-    // encodes the same borrowed value through `SliceSink`. No reply-shape
-    // duplication across profiles.
+}
+
+// R283 / R311hn (Track 2) — drain targets for the declarer-side
+// interest-response borrowed emit seam. The registry/observer pass
+// borrowed args (no owned `DeclareOwned` crosses the seam); this AP
+// sink owns the encode by building a `DeclareOwned` and routing it
+// through the inherent `Self::send_declare` (encode via `VecSink` +
+// enqueue). An MCU sink would instead encode through `SliceSink` over
+// a stack buffer. Inherent-method resolution shadows nothing here
+// (these are distinct names from the inherent `send_declare`).
+// R311ho — the reply wire shape has a single source in
+// `wz-session-core::declare::local_token` (`build_token_reply` /
+// `build_final_reply`, borrowed). The AP sink derives the owned form
+// via `Declare::into_owned` and routes it through the inherent
+// `Self::send_declare` (encode via `VecSink` + enqueue); an MCU sink
+// encodes the same borrowed value through `SliceSink`. No reply-shape
+// duplication across profiles.
+impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R, T> {
     #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         self.send_declare(
@@ -601,11 +612,14 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
                 .expect("DeclFinal reply carries no bounded fields"),
         );
     }
-    // F3/R311ka — drain target for the registry's staged get
-    // terminations; delegates to the inherent twin (the same shape as
-    // `send_response` / `send_response_final` above), so sweep callers
-    // that hold the actions handle directly (the wz-ap-demo ticker)
-    // need no trait import.
+}
+
+// F3/R311ka — drain target for the registry's staged get
+// terminations; delegates to the inherent twin (the same shape as
+// `send_response` / `send_response_final` above), so sweep callers
+// that hold the actions handle directly (the wz-ap-demo ticker)
+// need no trait import.
+impl<R: SessionRuntime, T: TimeSource> LivelinessGetPrune for SessionLinkActions<R, T> {
     #[cfg(feature = "liveliness-get")]
     fn prune_liveliness_get_interest(&self, interest_id: u64) {
         SessionLinkActions::prune_liveliness_get_interest(self, interest_id);

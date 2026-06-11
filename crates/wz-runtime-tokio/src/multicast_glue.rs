@@ -84,14 +84,27 @@
 //! shutdown signal threaded into the `select!`; that is a deferred
 //! follow-up (Round C drives until link loss).
 
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use wz_codecs::wire_const;
 #[cfg(feature = "reassembly")]
 use wz_session_core::drive::sweep_reporting;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+// R311lq — `multicast_frame_or_fragments` is the codec-agnostic egress
+// splitter shared by every data emit (Push or queryable Response), so it is
+// gated on the union of the data codecs that can ride the loop, not Push
+// alone.
 #[cfg(feature = "codec-push")]
-use wz_session_core::frame_encode::{encode_frame_with_push, multicast_frame_or_fragments};
+use wz_session_core::frame_encode::encode_frame_with_push;
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+use wz_session_core::frame_encode::multicast_frame_or_fragments;
+// R311lq — queryable reply egress over multicast: the same Frame encoders
+// the unicast `SessionLinkActions::send_response{,_final}` use, sent on the
+// multicast group instead of a per-peer writer channel.
+#[cfg(feature = "codec-response")]
+use wz_session_core::frame_encode::encode_frame_with_response;
+#[cfg(feature = "codec-response-final")]
+use wz_session_core::frame_encode::encode_frame_with_response_final;
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
 #[cfg(feature = "reassembly")]
@@ -105,6 +118,8 @@ use wz_session_core::network_message::parse_frame_payload;
 #[cfg(feature = "codec-push")]
 use wz_session_core::push_build;
 use wz_session_core::reliability::Reliability;
+#[cfg(feature = "codec-response-final")]
+use wz_session_core::response_final_build::build_response_final;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, TxSn};
 
@@ -140,6 +155,74 @@ pub enum MulticastTxItem {
         /// the frame's R flag).
         reliable: bool,
     },
+    /// R311lq — a queryable `Response(Reply|Err)` over multicast: the
+    /// reply a queryable's handler produced for a Query that arrived on
+    /// the group. Staged by the observer during `dispatch_event` and
+    /// drained through [`MulticastResponseSink`] onto this channel; the
+    /// loop frames it via the [`encode_frame_with_response`] SSOT and
+    /// multicasts it (reliable — zenoh-pico replies on the multicast
+    /// transport through the same `_z_send_n_msg` path with
+    /// `Z_RELIABILITY_RELIABLE`). The querier on the group matches it to
+    /// its pending Query by request id.
+    #[cfg(feature = "codec-response")]
+    Response {
+        /// The built `Response` network message (drained from the
+        /// observer's `pending_replies` via `QueryReply::into_response`).
+        response: wz_codecs::response::ResponseOwned,
+    },
+    /// R311lq — the `ResponseFinal` terminating a multicast reply chain
+    /// for `request_id`. Unconditionally reliable: dropping it would leave
+    /// the querier's `z_get` waiting for a terminal that never re-emits.
+    /// Built from the rid via [`build_response_final`] and framed via
+    /// [`encode_frame_with_response_final`].
+    #[cfg(feature = "codec-response-final")]
+    ResponseFinal {
+        /// The request id whose reply chain this frame terminates (drained
+        /// from the observer's `pending_final_rids`).
+        request_id: u64,
+    },
+}
+
+/// R311lq — a [`ResponseSink`](wz_session_core::response_sink::ResponseSink)
+/// backed by the multicast drive loop's A1c outbound channel. The
+/// application's `on_event` closure drains its observer's staged queryable
+/// replies through this sink
+/// (`observer.flush_query_replies(&sink)`); each emit enqueues a
+/// [`MulticastTxItem`] that [`drive_multicast_session`] frames into a
+/// `T_MID_FRAME` and multicasts to the group — the multicast mirror of the
+/// unicast `SessionLinkActions: ResponseSink`, which enqueues onto the
+/// per-peer writer channel instead.
+///
+/// It implements ONLY `ResponseSink`: the multicast reply loop drains only
+/// the queryable-reply concern, so per the R311lq interface segregation it
+/// is not forced to satisfy the liveliness declare / get-prune sinks (those
+/// arrive with the multicast-declarations track, each adding its own sink
+/// impl + drain call). `Clone` so the closure can hold a sender clone while
+/// the loop owns the paired receiver.
+#[derive(Clone)]
+pub struct MulticastResponseSink {
+    tx: UnboundedSender<MulticastTxItem>,
+}
+
+impl MulticastResponseSink {
+    /// Wrap a clone of the loop's outbound-channel sender as a reply sink.
+    pub fn new(tx: UnboundedSender<MulticastTxItem>) -> Self {
+        Self { tx }
+    }
+}
+
+impl wz_session_core::response_sink::ResponseSink for MulticastResponseSink {
+    #[cfg(feature = "codec-response")]
+    fn send_response(&self, response: wz_codecs::response::ResponseOwned) {
+        // Fire-and-forget, mirroring `SessionLinkActions::send_response`'s
+        // F2 contract (no error channel): a dropped receiver (the loop
+        // ended) drops the reply exactly as a dead link would.
+        let _ = self.tx.send(MulticastTxItem::Response { response });
+    }
+    #[cfg(feature = "codec-response-final")]
+    fn send_response_final(&self, request_id: u64) {
+        let _ = self.tx.send(MulticastTxItem::ResponseFinal { request_id });
+    }
 }
 
 /// Convenience builder: a literal-keyexpr Put as a queued
@@ -295,6 +378,49 @@ where
                             let frame = TxFrame { bytes: &dgram };
                             let _ = driver.send(&frame, reliability).await;
                         }
+                    }
+                    // R311lq — queryable reply egress: a Query that arrived on
+                    // the group was dispatched to a queryable whose handler
+                    // staged a reply; the observer drained it through
+                    // `MulticastResponseSink` onto this channel. Reliable like
+                    // a reliable-ring put (zenoh-pico replies via the same
+                    // `_z_send_n_msg` multicast TX with `Z_RELIABILITY_RELIABLE`,
+                    // src/net/primitives.c `_z_send_reply`); a large reply
+                    // re-frames as a `T_MID_FRAGMENT` chain exactly like an
+                    // oversize Push. Send failure is non-fatal (a dropped reply
+                    // hangs that one querier's `z_get` until its timeout, as a
+                    // lost unicast reply would).
+                    #[cfg(feature = "codec-response")]
+                    MulticastTxItem::Response { response } => {
+                        let frame_sn = tx_sn.mint(/* reliable = */ true);
+                        let dgram =
+                            encode_frame_with_response(frame_sn, response, /* reliable = */ true);
+                        for dgram in multicast_frame_or_fragments(
+                            dgram,
+                            frame_sn,
+                            true,
+                            params.batch_size as usize,
+                            &mut tx_sn,
+                        ) {
+                            let frame = TxFrame { bytes: &dgram };
+                            let _ = driver.send(&frame, Reliability::Reliable).await;
+                        }
+                    }
+                    // R311lq — the terminal of a multicast reply chain. Always
+                    // reliable and always tiny (a single VLE rid), so it never
+                    // reaches the fragment budget: one minted reliable-ring SN,
+                    // one frame, one send. Mirrors the unicast
+                    // `send_response_final` (reliability pinned).
+                    #[cfg(feature = "codec-response-final")]
+                    MulticastTxItem::ResponseFinal { request_id } => {
+                        let frame_sn = tx_sn.mint(/* reliable = */ true);
+                        let dgram = encode_frame_with_response_final(
+                            frame_sn,
+                            build_response_final(request_id),
+                            /* reliable = */ true,
+                        );
+                        let frame = TxFrame { bytes: &dgram };
+                        let _ = driver.send(&frame, Reliability::Reliable).await;
                     }
                 },
                 None => outbound_open = false,
@@ -774,6 +900,99 @@ mod tests {
             fired.load(Ordering::SeqCst),
             1,
             "the Push must reach the subscriber exactly once (replay SN-dropped)"
+        );
+    }
+
+    /// R311lq — the queryable REPLY plane end-to-end inside the loop: a peer
+    /// JOINs, then sends a Query Frame (at the JOIN-advertised next SN)
+    /// matching a registered queryable. The observer dispatches the Query to
+    /// the handler (which stages a reply), the `on_event` closure drains the
+    /// staged reply through `MulticastResponseSink` onto the loop's outbound
+    /// channel, and the loop frames the `Response` + its terminal
+    /// `ResponseFinal` and multicasts them to the group — the multicast mirror
+    /// of the unicast queryable reply path (zenoh-pico `_z_send_reply` ->
+    /// `_z_send_n_msg` over the multicast transport, src/net/primitives.c).
+    #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+    #[tokio::test]
+    async fn drive_loop_emits_queryable_reply_over_multicast() {
+        use wz_session_core::frame_encode::encode_frame_with_request;
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::observer::ApplicationLayerObserver;
+        use wz_session_core::request_build::build_request_query;
+
+        let peer_b = [0x01, 0x02, 0x03, 0x04];
+        let join = join0(&params(&peer_b)); // next_sn_reliable = 0
+                                            // A literal-keyexpr Query for "demo/mc", request id 7, on the reliable
+                                            // channel at the JOIN-advertised next SN (so the per-peer SN gate
+                                            // admits it).
+        let query = encode_frame_with_request(
+            /*sn=*/ 0,
+            build_request_query(7, 0, Some("demo/mc")).expect("query fixture"),
+            /*reliable=*/ true,
+        );
+
+        let mut driver = FakeDriver::with([(join, src(2)), (query, src(2))]);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let clock = TokioTime::new();
+
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .queryables
+            .register("demo/mc", |_query, responder| {
+                responder.reply(b"reply-over-multicast");
+            });
+
+        // The reply sink shares the loop's outbound channel: the closure
+        // enqueues drained replies, the loop drains the channel and frames
+        // them onto the group (the A1c TX seam).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = MulticastResponseSink::new(tx);
+
+        let outcome = drive_multicast_session(
+            &mut dispatcher,
+            &params(&[0xAA, 0xBB, 0xCC, 0xDD]),
+            &mut driver,
+            &clock,
+            Some(12),
+            5,
+            |event| {
+                observer.dispatch_event(event);
+                // Drain only the queryable-reply concern — the multicast loop
+                // does not (yet) carry the liveliness declare / get-prune
+                // planes, so per R311lq it implements only `ResponseSink`.
+                observer.flush_query_replies(&sink);
+            },
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        assert_eq!(dispatcher.active_peers(), 1, "JOIN admitted the querier");
+
+        // Classify the multicast TX: skip the JOIN beacons (not T_MID_FRAME),
+        // decode each Frame payload, and tally the reply-chain messages.
+        let mut responses = 0usize;
+        let mut finals = 0usize;
+        for dg in &driver.sent {
+            if let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(dg) {
+                if let Ok(messages) = parse_frame_payload(&payload) {
+                    for m in &messages {
+                        match m {
+                            NetworkMessage::Response(_) => responses += 1,
+                            NetworkMessage::ResponseFinal(rf) => {
+                                assert_eq!(rf.request_id, 7, "Final terminates rid 7's chain");
+                                finals += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(responses, 1, "exactly one Response reached the group");
+        assert_eq!(
+            finals, 1,
+            "exactly one ResponseFinal terminated the reply chain"
         );
     }
 
