@@ -25,6 +25,17 @@ type BoxedCallback = Box<dyn FnMut() + Send>;
 /// needs its own cell handle, which exists only after construction).
 type CellSlot = Arc<Mutex<Option<Cell<BoxedCallback>>>>;
 
+/// R311lm — a trivial serializer for the single-threaded infra tests.
+/// `DeferredFireQueue::drain` (the sole public emptier since `take_batch`
+/// went `pub(crate)`) takes each batch while holding a caller-supplied
+/// serializer; production passes the observer mutex, but the queue is
+/// opaque to the serializer's identity, so any same-runtime mutex
+/// serializes the (uncontended) take here. These tests now exercise the
+/// REAL production drain path, not a separate single-thread version.
+fn serializer() -> <TokioRuntime as wz_runtime_core::Runtime>::Mutex<()> {
+    <TokioRuntime as wz_runtime_core::Runtime>::new_mutex(())
+}
+
 /// Jobs run in stage order, the queue is empty after a drain, and an
 /// empty drain is a zero-cost no-op.
 #[test]
@@ -36,10 +47,35 @@ fn drain_runs_jobs_in_stage_order() {
         queue.stage(Box::new(move || log.lock().unwrap().push(i)));
     }
     assert_eq!(queue.len(), 3);
-    assert_eq!(queue.drain_and_fire(), 3);
+    assert_eq!(queue.drain(&serializer()), 3);
     assert_eq!(*log.lock().unwrap(), vec![0, 1, 2]);
     assert!(queue.is_empty());
-    assert_eq!(queue.drain_and_fire(), 0);
+    assert_eq!(queue.drain(&serializer()), 0);
+}
+
+/// R311li/R311lj/R311lm — the Reply-before-Final contiguity guarantee,
+/// now STRUCTURAL. A queryable handler ("reply") job and the
+/// ResponseFinal ("final") job staged after it in ONE window are emptied
+/// by the single serialized `drain` (the only public emptier —
+/// `take_batch` is `pub(crate)`), so they run on one drainer in stage
+/// order. There is no public path that could `mem::take` a half-staged
+/// window and emit the Final ahead of its Reply (the Finding-A hazard
+/// the R311li review surfaced); this pins the observable ordering the
+/// structure now enforces by construction.
+#[test]
+fn serialized_drain_keeps_reply_before_final() {
+    let queue = Queue::new();
+    let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+    let o_reply = order.clone();
+    queue.stage(Box::new(move || o_reply.lock().unwrap().push("reply")));
+    let o_final = order.clone();
+    queue.stage(Box::new(move || o_final.lock().unwrap().push("final")));
+    assert_eq!(queue.drain(&serializer()), 2);
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["reply", "final"],
+        "serialized drain runs the staged pair in order: Reply before Final",
+    );
 }
 
 /// A job staged BY a running job (a callback whose session call flips
@@ -59,7 +95,7 @@ fn drain_loops_until_empty() {
             log_inner.lock().unwrap().push("inner");
         }));
     }));
-    assert_eq!(queue.drain_and_fire(), 2);
+    assert_eq!(queue.drain(&serializer()), 2);
     assert_eq!(*log.lock().unwrap(), vec!["outer", "inner"]);
 }
 
@@ -79,7 +115,7 @@ fn kill_suppresses_staged_fire() {
 
     cell.kill();
     assert!(cell.is_dead());
-    queue.drain_and_fire();
+    queue.drain(&serializer());
     assert_eq!(*fired.lock().unwrap(), 0, "dead cell must not fire");
 }
 

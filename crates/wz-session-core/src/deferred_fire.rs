@@ -54,19 +54,23 @@
 //!   the queue after releasing the observer lock (the session-tier
 //!   dispatch SSOT does this); an undrained queue delays fires until
 //!   the next drain, it never drops them.
-//! - **Batch atomicity (R311lj).** A production drain takes its batch
-//!   under the OBSERVER lock (`Session::drain_deferred_fires` wraps
-//!   `take_batch` in the observer lock). Since every `stage` runs
-//!   inside the staging site's observer-lock window, the take cannot
-//!   interleave a half-staged window: it observes a whole number of
-//!   complete windows. This is what guarantees a queryable handler job
-//!   and its trailing ResponseFinal job (both staged in one dispatch
-//!   window) land in one batch on one drainer, so Reply precedes Final
-//!   on the wire even when an auxiliary drainer (a query-tail / publish
-//!   / sweep drain) races the drive loop. Without the observer-lock
-//!   take, an auxiliary drainer could `mem::take` the queue mid-window
-//!   (queue lock only) and split that pair — the Finding-A hazard the
-//!   R311li session review surfaced.
+//! - **Batch atomicity (R311lj behaviour, R311lm structure).** The
+//!   ONLY way to empty the queue is [`DeferredFireQueue::drain`], which
+//!   takes each batch while holding a caller-supplied *serializer* lock
+//!   (the AP session passes its observer mutex). Since every `stage`
+//!   runs inside that same lock's window, the take cannot interleave a
+//!   half-staged window: it observes a whole number of complete windows.
+//!   This guarantees a queryable handler job and its trailing
+//!   ResponseFinal job (both staged in one dispatch window) land in one
+//!   batch on one drainer, so Reply precedes Final on the wire even when
+//!   an auxiliary drainer (a query-tail / publish / sweep drain) races
+//!   the drive loop. R311li's session review surfaced the Finding-A
+//!   hazard — an auxiliary drainer `mem::take`-ing the queue mid-window
+//!   without the serializer and splitting that pair. R311lj closed it by
+//!   making the production drain take under the observer lock; R311lm
+//!   makes that the *only representable* drain: `take_batch` is
+//!   `pub(crate)` and `drain` is the sole public emptier, so a bypassing
+//!   take is a compile-time impossibility, not a convention to uphold.
 //! - **Ordering.** Jobs run in stage order — wire order across planes
 //!   (a matching flip staged before a decl fire runs before it). With
 //!   the observer-lock take, every batch is a whole number of complete
@@ -147,42 +151,53 @@ impl<R: Runtime> DeferredFireQueue<R> {
     }
 
     /// Swap the staged jobs out as one batch and return them, leaving
-    /// the queue empty. Takes ONLY the queue lock. The caller runs the
-    /// returned jobs after releasing every framework lock.
+    /// the queue empty. Takes ONLY the queue lock.
     ///
-    /// R311lj — batch-atomicity seam: a caller that takes this under
-    /// the OBSERVER lock (the [`crate::deferred_fire`] serialization
-    /// contract) is guaranteed a whole number of complete staging
-    /// windows, because every `stage` call holds the observer lock for
-    /// the duration of its window. The take then cannot interleave a
-    /// window that stages a queryable handler job and its trailing
-    /// ResponseFinal job — they land in one batch, run on one drainer,
-    /// in order (Reply-before-Final). A take that does NOT hold the
-    /// observer lock (the self-contained [`Self::drain_and_fire`], used
-    /// only where no concurrent stager exists — the infra unit tests)
-    /// may split a window; that path is for single-thread fixtures.
-    pub fn take_batch(&self) -> Vec<FireJob> {
+    /// R311lm — `pub(crate)`: the ONLY caller is [`Self::drain`], which
+    /// performs the take while holding the serializer lock. There is no
+    /// public path that takes a batch without that lock, so a batch can
+    /// never be taken mid-staging-window — the Finding-A half-window
+    /// split (R311li session review) is *unrepresentable*, not merely
+    /// guarded by convention. R311lj established the take-under-the-lock
+    /// discipline by documentation; R311lm makes it structural by
+    /// removing every public take that bypasses the serializer.
+    pub(crate) fn take_batch(&self) -> Vec<FireJob> {
         R::with_mutex_mut(&self.jobs, core::mem::take)
     }
 
-    /// Drain and run every staged job OUTSIDE every framework lock.
-    /// Call with the observer lock RELEASED. Loops until the queue is
-    /// empty so fires staged by the running callbacks themselves (a
-    /// callback's own declare can flip another watch synchronously via
-    /// a loopback dispatch) run in the same drain. Returns the number
-    /// of jobs run.
+    /// THE single drain entry point: take the staged batch while holding
+    /// `serializer`, then run the batch with every lock RELEASED, looping
+    /// until the queue is empty. The drain-until-empty loop catches fires
+    /// staged by the running callbacks themselves (a callback's own
+    /// declare can flip another watch synchronously via a loopback
+    /// dispatch). Returns the number of jobs run.
     ///
-    /// R311lj — self-contained take (queue lock only); it does NOT
-    /// serialize against staging via the observer lock, so a CONCURRENT
-    /// stager can split a batch across two of these. Production drains
-    /// route through the observer-serialized
-    /// `Session::drain_deferred_fires` instead; this self-contained
-    /// form is for single-thread fixtures (the infra unit tests) where
-    /// no concurrent stager exists.
-    pub fn drain_and_fire(&self) -> usize {
+    /// `serializer` is the SAME lock every [`stage`](Self::stage) site
+    /// holds for the duration of its staging window (the AP session
+    /// passes its observer mutex). Because the take and the stages share
+    /// that lock, the take observes only WHOLE staging windows: a
+    /// queryable handler job and its trailing ResponseFinal job (staged
+    /// in one window) always land in one batch, run on one drainer, in
+    /// order (Reply-before-Final) — even when an auxiliary drainer (a
+    /// query/publish tail, the sweep task) races the drive loop. R311lm —
+    /// because [`take_batch`](Self::take_batch) is `pub(crate)`, this
+    /// serialized form is the ONLY way to empty the queue, so the
+    /// Finding-A split (R311li) is structurally impossible rather than
+    /// convention-enforced. The serializer type `G` is opaque: the queue
+    /// does not know it is an observer, only that some lock serializes
+    /// staging against draining (the honest contract, zero coupling to
+    /// the observer type).
+    ///
+    /// MUST be called with `serializer` RELEASED (the jobs run between
+    /// re-takes may re-enter any serializer-locking API); calling it
+    /// while holding `serializer` self-deadlocks on the first take.
+    pub fn drain<G>(&self, serializer: &<R as Runtime>::Mutex<G>) -> usize
+    where
+        G: Send + 'static,
+    {
         let mut fired = 0;
         loop {
-            let batch = self.take_batch();
+            let batch = R::with_mutex_mut(serializer, |_serialized| self.take_batch());
             if batch.is_empty() {
                 return fired;
             }

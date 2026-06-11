@@ -478,38 +478,24 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// exist in every feature subset of this host-only crate and the
     /// queue field is always present.
     ///
-    /// R311lj — each batch is taken under the OBSERVER lock (not the
-    /// queue lock alone). Staging always holds the observer lock, so a
-    /// take serialized against it observes a whole number of complete
-    /// staging windows — a queryable handler job and the ResponseFinal
-    /// job staged after it in the same dispatch window land in ONE
-    /// batch on ONE drainer, in order. This closes the Finding-A
-    /// Reply-before-Final hazard the R311li review surfaced: an
-    /// auxiliary drainer (a query-tail / publish / sweep drain) racing
-    /// the drive loop can no longer `mem::take` a half-staged window
-    /// and emit a Final ahead of its last Reply. The jobs still RUN
-    /// outside the lock (the lock-free callback invariant): the lock is
-    /// held only across the cheap `take_batch` swap, then dropped
-    /// before the batch fires, so a callback may re-enter any
-    /// observer-locking session API. The loop re-takes (under the lock
-    /// again) until the queue is empty, so fires a running callback
-    /// stages are drained in the same call.
+    /// R311lm — delegates to the single serialized drain SSOT
+    /// ([`wz_session_core::deferred_fire::DeferredFireQueue::drain`]),
+    /// passing the observer mutex as the serializer. The discipline that
+    /// closes the Finding-A Reply-before-Final hazard (R311li review,
+    /// R311lj fix) — take each batch under the observer lock so a take
+    /// observes only whole staging windows — now lives THERE, enforced
+    /// structurally: `take_batch` is `pub(crate)`, so `drain` is the only
+    /// representable way to empty the queue and an auxiliary drainer (a
+    /// query-tail / publish / sweep drain) physically cannot `mem::take`
+    /// a half-staged window. Jobs run OUTSIDE the lock (the lock-free
+    /// callback invariant), so a callback may re-enter any
+    /// observer-locking session API; the drain loops until empty.
     ///
     /// MUST be called with the observer lock RELEASED (the standing
     /// drain-after-dispatch contract); calling it while holding the
-    /// observer lock self-deadlocks on the re-take.
+    /// observer lock self-deadlocks on the first take.
     pub fn drain_deferred_fires(&self) -> usize {
-        let mut fired = 0;
-        loop {
-            let batch = R::with_mutex_mut(&self.observer, |_obs| self.fires.take_batch());
-            if batch.is_empty() {
-                return fired;
-            }
-            for job in batch {
-                job();
-                fired += 1;
-            }
-        }
+        self.fires.drain(&self.observer)
     }
 
     /// R311ld — the dispatch SSOT (session-review minor F closure):
