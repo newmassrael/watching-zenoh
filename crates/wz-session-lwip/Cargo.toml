@@ -74,6 +74,22 @@ buffer-pool-session-rx-slim = ["wz-link-lwip/buffer-pool-session-rx-slim"]
 # adopted_lease / LEASE_EXPIRE_FACTOR, exactly as the AP loop does.
 transport-keepalive = ["wz-session-core/transport-keepalive"]
 
+# R311lt — MCU multicast transport drive loop (`run_multicast_session`): the
+# no_std mirror of the AP `wz-runtime-tokio::multicast_glue` loop. Forwards to
+# the wz-session-core `session-multicast` capability (the MulticastDispatcher
+# Router + the engine-free §3.1 multicast session FSM + the JOIN wire SSOT)
+# and its `codec-join` / `codec-frame` deps; the multicast RX/TX socket
+# (`bind_session_multicast_rx`) is always available from wz-link-lwip. Off by
+# default. With it on, `run_multicast_session` emits the periodic JOIN beacon,
+# classifies inbound (Join / Frame / KeepAlive / Close) by source address, and
+# sweeps leases — the same shape the AP loop's RX foundation drives.
+transport-multicast = [
+    "wz-session-core/session-multicast",
+    "wz-session-core/codec-join",
+    "wz-session-core/codec-frame",
+    "wz-session-core/codec-close",
+]
+
 [dependencies]
 # §5.P runtime tier: LwipRuntime<C> + LwipTime<C> + the Runtime /
 # TimeSource trait surface (with_mutex_mut, now_monotonic_ms). alloc +

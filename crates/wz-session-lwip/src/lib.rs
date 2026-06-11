@@ -47,6 +47,10 @@ extern crate alloc;
 extern crate std;
 
 pub mod driver;
+// R311lt — the MCU multicast drive loop (no_std mirror of the AP
+// wz-runtime-tokio multicast_glue), gated on the transport-multicast capability.
+#[cfg(feature = "transport-multicast")]
+pub mod multicast_drive;
 pub mod session_drive;
 
 pub use driver::LwipUdpDriver;

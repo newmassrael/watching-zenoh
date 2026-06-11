@@ -1038,13 +1038,19 @@ layer_c1q_multicast_glue() {
 # crate's subgraph (no tokio, no http-send) and `no_std` is correct.
 # Mirrors the Layer G.11 cross-real lane but on the host (real lwIP build
 # = host always has lwip_real_build). Covers the default (non-reassembly)
-# drive path + the reassembly drive path, test + clippy each.
+# drive path + the reassembly drive path + the R311lt transport-multicast
+# drive loop (run_multicast_session), test + clippy each. The
+# transport-multicast variant lints the no_std MCU multicast loop under
+# run-ci so its code is covered (the same close-the-coverage-gap discipline
+# R311ls applied to the AP multicast_glue loop).
 layer_c1m_session_lwip() {
     (cd crates \
         && cargo test -p wz-session-lwip --quiet \
         && cargo test -p wz-session-lwip --features reassembly --quiet \
+        && cargo test -p wz-session-lwip --features transport-multicast --quiet \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings)
+        && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings)
 }
 
 # ─── Layer C1n — wz-mcu-session-acceptor isolated host e2e + clippy ──

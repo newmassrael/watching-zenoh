@@ -29,6 +29,12 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+// R311lt — re-export the wz-codecs transport-MID constants so runtime crates
+// that drive a loop's raw-byte MID classification (the AP `multicast_glue`
+// loop, the MCU `wz-session-lwip::multicast_drive` loop) reach them through the
+// session SSOT instead of taking a direct `wz-codecs` dependency.
+pub use wz_codecs::wire_const;
+
 /// R221 — zenoh keyexpr structural canonicalization mirror.
 ///
 /// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the

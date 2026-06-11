@@ -121,14 +121,13 @@ use wz_session_core::declare::local_token::{build_final_reply, build_token_reply
 #[cfg(feature = "liveliness-token")]
 use wz_session_core::frame_encode::encode_frame_with_declare;
 use wz_session_core::inbound::{parse_inbound, InboundFrame};
-use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
+use wz_session_core::link::{LinkEvent, TxFrame};
 #[cfg(feature = "reassembly")]
 use wz_session_core::multicast_dispatch::{
     abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
 };
 use wz_session_core::multicast_dispatch::{FrameIngest, MulticastDispatcher};
 use wz_session_core::multicast_join::{decode_join, encode_join, validate_join};
-use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::network_message::parse_frame_payload;
 #[cfg(feature = "codec-push")]
 use wz_session_core::push_build;
@@ -320,40 +319,18 @@ pub fn multicast_put_literal(
     })
 }
 
-/// Outcome of one [`drive_multicast_session`] run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MulticastOutcome {
-    /// The session left Running (e.g. a pre-stopped dispatcher).
-    Stopped,
-    /// The multicast link was lost.
-    LinkLost(LostCause),
-    /// The bounded iteration budget was exhausted (test guard).
-    IterationLimit,
-}
+// R311lt — `MulticastOutcome` moved to the shared SSOT
+// `wz_session_core::multicast_params` (consumed by both the AP and MCU
+// multicast loops); re-exported so existing `multicast_glue::MulticastOutcome`
+// import paths still resolve.
+pub use wz_session_core::multicast_params::MulticastOutcome;
 
-/// R311ls — the static parameterization of one [`drive_multicast_session`]
-/// run, split out from the loop's live collaborators (the dispatcher /
-/// driver / clock handles, the observer callback, the outbound channel) via
-/// the Introduce-Parameter-Object refactoring. The "what configures this
-/// drive" inputs read as one unit, and the entry point stays within
-/// clippy's argument-count bound — the multicast loop is the only
-/// `wz-runtime-tokio` surface large enough to trip it, and (unlike the
-/// default-feature C2/C3 clippy lanes) the `transport-multicast` arm is now
-/// linted in run-ci, so the bound is enforced rather than incidentally
-/// hidden behind a non-default feature.
-pub struct MulticastDriveConfig<'a> {
-    /// The multicast protocol config (zid, lease, batch_size, JOIN interval,
-    /// SN / req-id resolutions) the loop advertises in its JOIN beacon and
-    /// enforces on inbound peers.
-    pub params: &'a MulticastParams,
-    /// Scheduler cadence: the loop falls to a PeerSweep tick every `tick_ms`
-    /// (>= the §3.1 lease/3 cadence; sweeping more often only sharpens
-    /// eviction, and sweep is idempotent).
-    pub tick_ms: u64,
-    /// Bounded select-loop budget for tests (`Some(n)`); production passes
-    /// `None` to run until the link is lost.
-    pub max_iters: Option<usize>,
-}
+// R311lt — `MulticastDriveConfig` moved to the shared SSOT
+// `wz_session_core::multicast_params` (consumed by both this AP loop and the
+// MCU `wz_session_lwip::multicast_drive::run_multicast_session`); re-exported
+// here so existing `multicast_glue::MulticastDriveConfig` import paths still
+// resolve.
+pub use wz_session_core::multicast_params::MulticastDriveConfig;
 
 /// Drive a multicast session: bring the link up, then own the §3.1 Running
 /// concerns (periodic JOIN emit, RX classify -> dispatch + the A1b data
@@ -729,8 +706,9 @@ mod tests {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::collections::VecDeque;
 
-    use wz_session_core::link::RxFrame;
+    use wz_session_core::link::{LostCause, RxFrame};
     use wz_session_core::multicast_dispatch::MulticastConfig;
+    use wz_session_core::multicast_params::MulticastParams;
     use wz_session_core::multicast_peer::MulticastPeerState;
 
     use crate::runtime_impl::TokioTime;

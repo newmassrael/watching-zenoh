@@ -133,3 +133,44 @@ impl MulticastParams {
             || self.batch_size != PROTOCOL_DEFAULT_BATCH_SIZE
     }
 }
+
+/// R311ls/R311lt — the static parameterization of one multicast drive-loop
+/// run, separated from the loop's live collaborators (dispatcher / link /
+/// clock handles, the observer callback, the I/O seam) via the
+/// Introduce-Parameter-Object refactor. Shared by BOTH transport profiles'
+/// drive loops — the AP `wz_runtime_tokio::multicast_glue::drive_multicast_session`
+/// and the MCU `wz_session_lwip::multicast_drive::run_multicast_session` — so
+/// the "what configures the loop" inputs have one SSOT and each entry point
+/// stays within clippy's argument-count bound (the multicast loops are large
+/// enough to trip it). The `params` borrow lives for the call's duration; the
+/// two scalars are owned.
+pub struct MulticastDriveConfig<'a> {
+    /// The multicast protocol config (zid, lease, batch_size, JOIN interval,
+    /// SN / req-id resolutions) the loop advertises in its JOIN beacon and
+    /// enforces on inbound peers.
+    pub params: &'a MulticastParams,
+    /// Scheduler cadence: the loop falls to a PeerSweep tick every `tick_ms`
+    /// (>= the §3.1 lease/3 cadence; sweeping more often only sharpens
+    /// eviction, and sweep is idempotent).
+    pub tick_ms: u64,
+    /// Bounded select-loop / poll-loop budget for tests (`Some(n)`);
+    /// production passes `None` to run until the link is lost.
+    pub max_iters: Option<usize>,
+}
+
+/// R311lt — outcome of one multicast drive-loop run, shared by the AP
+/// (`drive_multicast_session`) and MCU (`run_multicast_session`) loops so the
+/// two profiles report the same terminal vocabulary. The MCU poll loop never
+/// produces [`Self::LinkLost`] (its `try_recv` has no link-loss event — a
+/// silent group is just an empty poll), so that variant is AP-only in
+/// practice; the enum stays shared for the common cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MulticastOutcome {
+    /// The session left Running (e.g. a pre-stopped dispatcher).
+    Stopped,
+    /// The multicast link was lost (AP only — the `select!` `LinkEvent::Lost`
+    /// arm; the MCU poll loop has no equivalent event).
+    LinkLost(crate::link::LostCause),
+    /// The bounded iteration budget was exhausted (test guard).
+    IterationLimit,
+}
