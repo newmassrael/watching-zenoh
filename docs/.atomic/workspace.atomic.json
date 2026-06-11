@@ -34430,6 +34430,48 @@
         "mem::forget undeclare Arc leak (ManuallyDrop refactor) + minor D/E + keepalive MCU preset + A1 pool."
       ]
     },
+    "Round 311ll": {
+      "decision_summary": "R311ll Finding B — liveliness declare/get roll back the registered slot when the wire emit fails (no orphan); subscriber kills the cell, get unregisters (fresh-id).",
+      "changes_bullets": [
+        "session/mod.rs declare_liveliness_subscriber{,_aliased}: on send Err, cell.kill + unregister, return Err.",
+        "session/mod.rs liveliness_get: on send Err, unregister pending (fresh-id => no cell race), return Err.",
+        "session/tests.rs: 2 rollback regression tests via the transport-availability gate (no orphan slot/entry)."
+      ],
+      "verification_bullets": [
+        "Both new tests pass: subscriber slot_count==0 + get len==0 after a failed emit; frame_count==0.",
+        "clippy --all-targets default + liveliness-sub-only + liveliness-get-only all clean (-D warnings).",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped, absolute path)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "Same register-then-fallible-send orphan exists in z_get query/query_aliased (loopback complicates rollback) — carry.",
+        "A correct query rollback needs deferred_reply_sink to expose its cell + loopback reorder; own round.",
+        "Finding A regression-guard fixture (controlled-interleaving, no-flaky-ever) NEXT this session.",
+        "mem::forget undeclare Arc leak (ManuallyDrop) + minor D/E + keepalive MCU preset + A1 pool still open."
+      ],
+      "publishable_decision_summary": "R311ll Finding B — liveliness declare/get roll back the registered slot when the wire emit fails (no orphan); subscriber kills the cell, get unregisters (fresh-id).",
+      "publishable_changes_bullets": [
+        "session/mod.rs declare_liveliness_subscriber{,_aliased}: on send Err, cell.kill + unregister, return Err.",
+        "session/mod.rs liveliness_get: on send Err, unregister pending (fresh-id => no cell race), return Err.",
+        "session/tests.rs: 2 rollback regression tests via the transport-availability gate (no orphan slot/entry)."
+      ],
+      "publishable_verification_bullets": [
+        "Both new tests pass: subscriber slot_count==0 + get len==0 after a failed emit; frame_count==0.",
+        "clippy --all-targets default + liveliness-sub-only + liveliness-get-only all clean (-D warnings).",
+        "full run-ci WZ_RUN_LAYER_G=1 EXIT=0 (unpiped, absolute path)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Same register-then-fallible-send orphan exists in z_get query/query_aliased (loopback complicates rollback) — carry.",
+        "A correct query rollback needs deferred_reply_sink to expose its cell + loopback reorder; own round.",
+        "Finding A regression-guard fixture (controlled-interleaving, no-flaky-ever) NEXT this session.",
+        "mem::forget undeclare Arc leak (ManuallyDrop) + minor D/E + keepalive MCU preset + A1 pool still open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
