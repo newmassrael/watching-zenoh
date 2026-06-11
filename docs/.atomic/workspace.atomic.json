@@ -34150,6 +34150,50 @@
         "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
       ]
     },
+    "Round 311lf": {
+      "decision_summary": "R311lf data-plane callback deferral ratify (decision-only): lock-free callback contract adopted as profile-independent invariant — all 4 data planes, no opt-out; single queue + wire-emit SSOT pinned.",
+      "changes_bullets": [
+        "decision-only entry (no code change): R311le NEXT-RATIFY residual (b) RESOLVED as ADOPT — the lock-free callback contract is ratified as a profile-independent invariant: application callbacks never run under framework locks. Deferral is the AP/Session-tier mechanism for it; the MCU direct-drive lane has no observer mutex, satisfies the invariant by construction, and keeps its borrowed zero-copy inline fire",
+        "end state = all 4 data planes (subscriber samples / liveliness samples / reply+final / queryable query handlers), no exceptions and no per-listener opt-in: existing Session-tier declare_subscriber / declare_liveliness_subscriber / query reply sinks / declare_queryable semantics upgrade to deferred fire (a parallel inline+deferred variant pair was rejected as permanent dual semantics; the asymmetric alternative — decl/matching deferred but data inline with a documented constraint — was rejected as doc-around-hazard, the same shape F-6 retired)",
+        "SSOT pins: one shared DeferredFireQueue across all planes (the stage-order/wire-order contract rides queue singularity); wire-emit SSOT stays actions.send_response / send_response_final with the Reply-before-Final invariant owned once per profile path (AP deferred = job-internal order, MCU inline = flush_pending order); the lock/dispatch/drain pairing stays inside Session::dispatch_iteration_event",
+        "delivery ratified as bisectable rounds with explicitly transitional intermediate states: (a) liveliness samples + reply/final (owned-copy cheap, pure consumers), (b) subscriber samples (owned Sample staging on the AP path), (c) queryables (reply-path restructure: deferred handler emits replies through actions directly, ResponseFinal after handler return — pico z_query_reply shape)",
+        "evidence basis: zenoh-pico fires all 4 planes outside the session mutex with owned/moved data (collect-then-fire: subscription.c:235-259 unlock then :287/:292/:299 fire; queryable.c:238-273 rc-moved query; query.c:176 unlock then :181 fire); wz exposure today from inside any data callback: publish(local loopback) / query / every declare_* / liveliness_get / Subscriber+Queryable handle Drop all self-deadlock (session/mod.rs observer-locking sites + subscriber.rs Drop)"
+      ],
+      "verification_bullets": [
+        "decision-only; no code mutation this round — analysis verified by direct read: wz observer-locking Session sites (session/mod.rs publish:751 query:1030 declares:1455/1550/1708/1927/2065/2161, subscriber.rs:123-132 Drop), observer fan under lock (observer.rs:397-472, dispatch:575-578), borrowed sink contracts (sink.rs / query_sink.rs / reply_sink.rs / liveliness_sample.rs), zenoh-pico parity (subscription.c / queryable.c / query.c collect-then-fire)",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "implementation cascade opened by this ratify: (a) R311lg liveliness samples + reply/final deferral (next), (b) subscriber samples owned staging, (c) queryable reply-path restructure — order is delivery sequencing only, the ratified end state is all-4-planes",
+        "deferred-fire union maintenance: each data plane joining the union must update all 6 inline cfg sites (R311le forced-inline); the subscribers registry is always-compiled, so the union shape needs one re-examination when (b) lands",
+        "session-review minor D/E open: AP loop reports both KeepAlive+Lease verdicts per deadline wake vs MCU crossed-deadline-only — cross-profile observer event-stream asymmetry",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ],
+      "publishable_decision_summary": "R311lf data-plane callback deferral ratify (decision-only): lock-free callback contract adopted as profile-independent invariant — all 4 data planes, no opt-out; single queue + wire-emit SSOT pinned.",
+      "publishable_changes_bullets": [
+        "decision-only entry (no code change): R311le NEXT-RATIFY residual (b) RESOLVED as ADOPT — the lock-free callback contract is ratified as a profile-independent invariant: application callbacks never run under framework locks. Deferral is the AP/Session-tier mechanism for it; the MCU direct-drive lane has no observer mutex, satisfies the invariant by construction, and keeps its borrowed zero-copy inline fire",
+        "end state = all 4 data planes (subscriber samples / liveliness samples / reply+final / queryable query handlers), no exceptions and no per-listener opt-in: existing Session-tier declare_subscriber / declare_liveliness_subscriber / query reply sinks / declare_queryable semantics upgrade to deferred fire (a parallel inline+deferred variant pair was rejected as permanent dual semantics; the asymmetric alternative — decl/matching deferred but data inline with a documented constraint — was rejected as doc-around-hazard, the same shape F-6 retired)",
+        "SSOT pins: one shared DeferredFireQueue across all planes (the stage-order/wire-order contract rides queue singularity); wire-emit SSOT stays actions.send_response / send_response_final with the Reply-before-Final invariant owned once per profile path (AP deferred = job-internal order, MCU inline = flush_pending order); the lock/dispatch/drain pairing stays inside Session::dispatch_iteration_event",
+        "delivery ratified as bisectable rounds with explicitly transitional intermediate states: (a) liveliness samples + reply/final (owned-copy cheap, pure consumers), (b) subscriber samples (owned Sample staging on the AP path), (c) queryables (reply-path restructure: deferred handler emits replies through actions directly, ResponseFinal after handler return — pico z_query_reply shape)",
+        "evidence basis: zenoh-pico fires all 4 planes outside the session mutex with owned/moved data (collect-then-fire: subscription.c:235-259 unlock then :287/:292/:299 fire; queryable.c:238-273 rc-moved query; query.c:176 unlock then :181 fire); wz exposure today from inside any data callback: publish(local loopback) / query / every declare_* / liveliness_get / Subscriber+Queryable handle Drop all self-deadlock (session/mod.rs observer-locking sites + subscriber.rs Drop)"
+      ],
+      "publishable_verification_bullets": [
+        "decision-only; no code mutation this round — analysis verified by direct read: wz observer-locking Session sites (session/mod.rs publish:751 query:1030 declares:1455/1550/1708/1927/2065/2161, subscriber.rs:123-132 Drop), observer fan under lock (observer.rs:397-472, dispatch:575-578), borrowed sink contracts (sink.rs / query_sink.rs / reply_sink.rs / liveliness_sample.rs), zenoh-pico parity (subscription.c / queryable.c / query.c collect-then-fire)",
+        "pre-commit validate-workspace clean (T1 new=+0)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "implementation cascade opened by this ratify: (a) R311lg liveliness samples + reply/final deferral (next), (b) subscriber samples owned staging, (c) queryable reply-path restructure — order is delivery sequencing only, the ratified end state is all-4-planes",
+        "deferred-fire union maintenance: each data plane joining the union must update all 6 inline cfg sites (R311le forced-inline); the subscribers registry is always-compiled, so the union shape needs one re-examination when (b) lands",
+        "session-review minor D/E open: AP loop reports both KeepAlive+Lease verdicts per deadline wake vs MCU crossed-deadline-only — cross-profile observer event-stream asymmetry",
+        "keepalive atom MCU preset wiring + A1 pool unchanged (see Round 311kx)"
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
