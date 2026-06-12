@@ -89,36 +89,16 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 #[cfg(feature = "reassembly")]
 use wz_session_core::drive::sweep_reporting;
 use wz_session_core::driver_loop::IterationEvent;
-// R311lq/R311lr — `multicast_frame_or_fragments` is the codec-agnostic
-// egress splitter shared by every data emit (Push, queryable Response, or
-// the R311lr liveliness Declare reply), so it is gated on the union of the
-// emit paths that can ride the loop, not Push alone.
-#[cfg(feature = "codec-push")]
-use wz_session_core::frame_encode::encode_frame_with_push;
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "liveliness-token"
-))]
-use wz_session_core::frame_encode::multicast_frame_or_fragments;
-// R311lq — queryable reply egress over multicast: the same Frame encoders
-// the unicast `SessionLinkActions::send_response{,_final}` use, sent on the
-// multicast group instead of a per-peer writer channel.
-#[cfg(feature = "codec-response")]
-use wz_session_core::frame_encode::encode_frame_with_response;
-#[cfg(feature = "codec-response-final")]
-use wz_session_core::frame_encode::encode_frame_with_response_final;
-// R311lr — declarer-side liveliness interest-response egress over multicast:
-// the borrowed reply builders + Frame encoder the unicast
-// `SessionLinkActions: DeclareReplySink` uses, multicast to the group instead
-// of a per-peer writer. Gated on `liveliness-token` (the sole producer; it
-// implies `declare-token` -> `codec-declare`, so the encoder is in scope).
-#[cfg(feature = "liveliness-token")]
-use wz_codecs::declare::DeclareOwned;
+// R311lr — the declarer-side liveliness interest-response reply builders the
+// AP loop's `MulticastReplySink` composes before enqueuing a
+// `MulticastTxItem::DeclareReply` (the borrowed-keyexpr `build_*_reply` SSOT,
+// the same wire shape the unicast `SessionLinkActions: DeclareReplySink`
+// derives). Gated on `liveliness-token` (the sole producer). The Frame
+// encoders + the egress splitter moved to the shared
+// `wz_session_core::multicast_tx` SSOT (R311lx); this loop no longer names
+// them.
 #[cfg(feature = "liveliness-token")]
 use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
-#[cfg(feature = "liveliness-token")]
-use wz_session_core::frame_encode::encode_frame_with_declare;
 // R311lv — the inbound Frame codec is now only named in this loop's
 // reassembly Fragment tail (the JOIN / Frame classify moved to the shared
 // `multicast_rx` SSOT); the tests import their own copy.
@@ -132,11 +112,25 @@ use wz_session_core::multicast_dispatch::{
 };
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
+// R311lx — the shared TX emit SSOT: the item-variant -> mint -> encode ->
+// fragment decision the loop's outbound arm used to carry inline. The enum +
+// the `multicast_put_literal` builder are re-exported so the loop's public TX
+// API (and its tests) are unchanged by the move.
 #[cfg(feature = "codec-push")]
-use wz_session_core::push_build;
+pub use wz_session_core::multicast_tx::multicast_put_literal;
+pub use wz_session_core::multicast_tx::MulticastTxItem;
+// The emit SSOT exists only when a TX body codec inhabits `MulticastTxItem`;
+// gated on that union so a (degenerate) multicast-without-data build still
+// compiles — the loop's outbound arm consumes the then-uninhabited item with an
+// empty match instead of naming the gated-out `multicast_tx_emit`.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::reliability::Reliability;
-#[cfg(feature = "codec-response-final")]
-use wz_session_core::response_final_build::build_response_final;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, TxSn};
 
@@ -144,83 +138,11 @@ use wz_runtime_core::TimeSource;
 
 use crate::LinkDriver;
 
-/// One queued outbound data emission for the multicast drive loop's TX
-/// half (A1c). The application side holds the paired
-/// `tokio::sync::mpsc::UnboundedSender` and enqueues items; the loop
-/// mints the channel SN, wraps the network message in a `T_MID_FRAME` —
-/// re-framed as a `T_MID_FRAGMENT` chain when it exceeds the group batch
-/// budget (R311ko,
-/// [`multicast_frame_or_fragments`](wz_session_core::frame_encode::multicast_frame_or_fragments))
-/// — and multicasts it to the group: the multicast mirror of the unicast
-/// writer-channel seam
-/// (zenoh-pico `_z_send_n_msg` over the multicast transport). The enum is
-/// unconditional (signature stability); the variants are gated by the
-/// codec that encodes them, so a build without any data codec carries an
-/// uninhabited type and a dead arm-free match.
-#[derive(Debug)]
-pub enum MulticastTxItem {
-    /// A pub/sub Push (`z_put` / `z_del` over multicast). Framed via the
-    /// [`encode_frame_with_push`] SSOT with a freshly minted channel SN.
-    #[cfg(feature = "codec-push")]
-    Push {
-        /// The built Push network message
-        /// ([`push_build::build_push_literal`] and friends).
-        push: wz_codecs::push::PushOwned,
-        /// Channel selection: reliable mints on the reliable ring,
-        /// best-effort on the other (multicast UDP delivery is
-        /// best-effort either way; the flag governs the SN channel +
-        /// the frame's R flag).
-        reliable: bool,
-    },
-    /// R311lq — a queryable `Response(Reply|Err)` over multicast: the
-    /// reply a queryable's handler produced for a Query that arrived on
-    /// the group. Staged by the observer during `dispatch_event` and
-    /// drained through [`MulticastReplySink`] onto this channel; the
-    /// loop frames it via the [`encode_frame_with_response`] SSOT and
-    /// multicasts it (reliable — zenoh-pico replies on the multicast
-    /// transport through the same `_z_send_n_msg` path with
-    /// `Z_RELIABILITY_RELIABLE`). The querier on the group matches it to
-    /// its pending Query by request id.
-    #[cfg(feature = "codec-response")]
-    Response {
-        /// The built `Response` network message (drained from the
-        /// observer's `pending_replies` via `QueryReply::into_response`).
-        response: wz_codecs::response::ResponseOwned,
-    },
-    /// R311lq — the `ResponseFinal` terminating a multicast reply chain
-    /// for `request_id`. Unconditionally reliable: dropping it would leave
-    /// the querier's `z_get` waiting for a terminal that never re-emits.
-    /// Built from the rid via [`build_response_final`] and framed via
-    /// [`encode_frame_with_response_final`].
-    #[cfg(feature = "codec-response-final")]
-    ResponseFinal {
-        /// The request id whose reply chain this frame terminates (drained
-        /// from the observer's `pending_final_rids`).
-        request_id: u64,
-    },
-    /// R311lr — a declarer-side liveliness interest-response
-    /// `Declare(DeclToken|DeclFinal)` over multicast: the reply a held
-    /// liveliness token produced for an `Interest` (CURRENT) that arrived on
-    /// the group. Staged by the observer during `dispatch_event` and drained
-    /// through [`MulticastReplySink`]'s
-    /// [`DeclareReplySink`](wz_session_core::response_sink::DeclareReplySink)
-    /// impl onto this channel; the loop frames it via the
-    /// [`encode_frame_with_declare`] SSOT and multicasts it (reliable —
-    /// zenoh-pico's `_z_send_declare` rides `_z_send_n_msg` with
-    /// `Z_RELIABILITY_RELIABLE`, src/net/primitives.c:52, which dispatches to
-    /// the multicast transport when the session is multicast). The querier on
-    /// the group matches it to its pending liveliness Interest by
-    /// `interest_id`. Carries the owned `DeclareOwned` because the
-    /// borrowed-arg sink seam resolves the keyexpr at drain (mirror of the
-    /// unicast `SessionLinkActions: DeclareReplySink`, which routes the same
-    /// owned form through its inherent `send_declare`).
-    #[cfg(feature = "liveliness-token")]
-    DeclareReply {
-        /// The built `Declare` reply (a `DeclToken` for a held token, or the
-        /// terminating `DeclFinal`), already owned via `Declare::try_into_owned`.
-        declare: DeclareOwned,
-    },
-}
+// R311lx — `MulticastTxItem` moved to the shared `wz_session_core::multicast_tx`
+// SSOT (the TX twin of the `multicast_rx` RX SSOT) and is re-exported above, so
+// this loop's public TX API is unchanged by the move. The per-variant
+// mint/encode/fragment orchestration the outbound arm carried inline now lives
+// in `multicast_tx_emit`.
 
 /// R311lq/R311lr — the multicast drive loop's observer-drain sink, backed by
 /// its A1c outbound channel. The application's `on_event` closure drains its
@@ -302,25 +224,10 @@ impl wz_session_core::response_sink::DeclareReplySink for MulticastReplySink {
     }
 }
 
-/// Convenience builder: a literal-keyexpr Put as a queued
-/// [`MulticastTxItem`] on the RELIABLE channel — zenoh's put default
-/// (zenoh-pico `Z_RELIABILITY_DEFAULT = Z_RELIABILITY_RELIABLE`,
-/// api/constants.h:203, multicast included; the reliable channel has no
-/// retransmit on either implementation — pico rx.c "only monotonic SNs
-/// are ensured" — so the flag selects the SN ring + frame R flag, not a
-/// delivery guarantee). Composes [`push_build::build_push_literal`];
-/// richer pushes (Del / best-effort / aliased keyexpr / metadata)
-/// construct the item directly.
-#[cfg(feature = "codec-push")]
-pub fn multicast_put_literal(
-    keyexpr_suffix: &str,
-    payload: &[u8],
-) -> Result<MulticastTxItem, sce_forge_runtime::codec::CodecError> {
-    Ok(MulticastTxItem::Push {
-        push: push_build::build_push_literal(keyexpr_suffix, payload)?,
-        reliable: true,
-    })
-}
+// R311lx — `multicast_put_literal` moved to `wz_session_core::multicast_tx`
+// alongside `MulticastTxItem` (it composes the session-core `build_push_literal`
+// SSOT, so it belongs with the shared item type rather than in the AP loop) and
+// is re-exported above for API stability.
 
 // R311lt — `MulticastOutcome` moved to the shared SSOT
 // `wz_session_core::multicast_params` (consumed by both the AP and MCU
@@ -433,113 +340,44 @@ where
 
         tokio::select! {
             item = outbound.recv(), if outbound_open => match item {
-                Some(item) => match item {
-                    #[cfg(feature = "codec-push")]
-                    MulticastTxItem::Push { push, reliable } => {
-                        // TxData: mint the channel SN, wrap in a
-                        // T_MID_FRAME (frame_encode SSOT), multicast to
-                        // the group. R311ko — a frame past the group
-                        // batch budget re-frames as a T_MID_FRAGMENT
-                        // chain riding the same minted SN
-                        // (multicast_frame_or_fragments, zenoh-pico
-                        // common-TX parity). Send failure is non-fatal
-                        // like the JOIN beacon (UDP multicast is
-                        // best-effort; the SN gap a dropped datagram
-                        // leaves stays inside receivers' half-window —
-                        // though a hole in a fragment chain aborts that
-                        // chain at every receiver, as on pico).
-                        let frame_sn = tx_sn.mint(reliable);
-                        let dgram = encode_frame_with_push(frame_sn, push, reliable);
-                        let reliability = if reliable {
-                            Reliability::Reliable
-                        } else {
-                            Reliability::BestEffort
-                        };
-                        for dgram in multicast_frame_or_fragments(
-                            dgram,
-                            frame_sn,
-                            reliable,
-                            params.batch_size as usize,
-                            &mut tx_sn,
-                        ) {
-                            let frame = TxFrame { bytes: &dgram };
-                            let _ = driver.send(&frame, reliability).await;
-                        }
-                    }
-                    // R311lq — queryable reply egress: a Query that arrived on
-                    // the group was dispatched to a queryable whose handler
-                    // staged a reply; the observer drained it through
-                    // `MulticastReplySink` onto this channel. Reliable like
-                    // a reliable-ring put (zenoh-pico replies via the same
-                    // `_z_send_n_msg` multicast TX with `Z_RELIABILITY_RELIABLE`,
-                    // src/net/primitives.c `_z_send_reply`); a large reply
-                    // re-frames as a `T_MID_FRAGMENT` chain exactly like an
-                    // oversize Push. Send failure is non-fatal (a dropped reply
-                    // hangs that one querier's `z_get` until its timeout, as a
-                    // lost unicast reply would).
-                    #[cfg(feature = "codec-response")]
-                    MulticastTxItem::Response { response } => {
-                        let frame_sn = tx_sn.mint(/* reliable = */ true);
-                        let dgram =
-                            encode_frame_with_response(frame_sn, response, /* reliable = */ true);
-                        for dgram in multicast_frame_or_fragments(
-                            dgram,
-                            frame_sn,
-                            true,
-                            params.batch_size as usize,
-                            &mut tx_sn,
-                        ) {
-                            let frame = TxFrame { bytes: &dgram };
-                            let _ = driver.send(&frame, Reliability::Reliable).await;
-                        }
-                    }
-                    // R311lq — the terminal of a multicast reply chain. Always
-                    // reliable and always tiny (a single VLE rid), so it never
-                    // reaches the fragment budget: one minted reliable-ring SN,
-                    // one frame, one send. Mirrors the unicast
-                    // `send_response_final` (reliability pinned).
-                    #[cfg(feature = "codec-response-final")]
-                    MulticastTxItem::ResponseFinal { request_id } => {
-                        let frame_sn = tx_sn.mint(/* reliable = */ true);
-                        let dgram = encode_frame_with_response_final(
-                            frame_sn,
-                            build_response_final(request_id),
-                            /* reliable = */ true,
-                        );
+                // R311lx — hand the item to the shared TX emit SSOT (mint ->
+                // encode_frame_with_* -> fragment, the decision the four inline
+                // arms used to carry); multicast each returned datagram on this
+                // loop's driver. The SSOT pins reliability per variant (Push by
+                // its flag; Response / ResponseFinal / DeclareReply reliable).
+                // Send failure is non-fatal like the JOIN beacon — UDP multicast
+                // is best-effort; the SN gap a dropped datagram leaves stays
+                // inside receivers' half-window (a hole in a fragment chain
+                // aborts that chain at every receiver, as on pico).
+                #[cfg(any(
+                    feature = "codec-push",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "liveliness-token"
+                ))]
+                Some(item) => {
+                    let frames = multicast_tx_emit(item, &mut tx_sn, params);
+                    let reliability = if frames.reliable {
+                        Reliability::Reliable
+                    } else {
+                        Reliability::BestEffort
+                    };
+                    for dgram in frames.datagrams {
                         let frame = TxFrame { bytes: &dgram };
-                        let _ = driver.send(&frame, Reliability::Reliable).await;
+                        let _ = driver.send(&frame, reliability).await;
                     }
-                    // R311lr — declarer-side liveliness interest-response
-                    // egress: an `Interest` (CURRENT) that arrived on the group
-                    // matched a held liveliness token whose `Declare(DeclToken)`
-                    // + terminating `DeclFinal` reply the observer staged; the
-                    // closure drained it through `MulticastReplySink`'s
-                    // `DeclareReplySink` impl onto this channel. Reliable —
-                    // zenoh-pico's `_z_send_declare` rides `_z_send_n_msg` with
-                    // `Z_RELIABILITY_RELIABLE` (src/net/primitives.c:52), which
-                    // dispatches to the multicast transport for a multicast
-                    // session; a large held-token keyexpr re-frames as a
-                    // `T_MID_FRAGMENT` chain exactly like an oversize Push /
-                    // Response. Send failure is non-fatal (a dropped reply leaves
-                    // that one querier's liveliness Interest unanswered until its
-                    // timeout, as a lost unicast Declare would).
-                    #[cfg(feature = "liveliness-token")]
-                    MulticastTxItem::DeclareReply { declare } => {
-                        let frame_sn = tx_sn.mint(/* reliable = */ true);
-                        let dgram =
-                            encode_frame_with_declare(frame_sn, declare, /* reliable = */ true);
-                        for dgram in multicast_frame_or_fragments(
-                            dgram,
-                            frame_sn,
-                            true,
-                            params.batch_size as usize,
-                            &mut tx_sn,
-                        ) {
-                            let frame = TxFrame { bytes: &dgram };
-                            let _ = driver.send(&frame, Reliability::Reliable).await;
-                        }
-                    }
-                },
+                }
+                // No TX body codec: `MulticastTxItem` is uninhabited, so `recv()`
+                // can only yield `None`; consume the unconstructable item with an
+                // empty match to keep the arm exhaustive without naming the
+                // gated-out emit SSOT.
+                #[cfg(not(any(
+                    feature = "codec-push",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "liveliness-token"
+                )))]
+                Some(item) => match item {},
                 None => outbound_open = false,
             },
             event = driver.poll_event() => match event {

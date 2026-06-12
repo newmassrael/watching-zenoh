@@ -853,3 +853,20 @@ pub mod multicast_join;
     feature = "alloc"
 ))]
 pub mod multicast_rx;
+
+/// R311lx — the shared multicast TX emit SSOT consumed by both the AP
+/// (`wz-runtime-tokio::multicast_glue`) and MCU
+/// (`wz-session-lwip::multicast_drive`) drive loops, so the §3.1 TxData
+/// decision ([`MulticastTxItem`](multicast_tx::MulticastTxItem) -> mint ->
+/// `encode_frame_with_*` -> [`multicast_frame_or_fragments`](frame_encode::multicast_frame_or_fragments))
+/// has ONE home rather than a copy per loop. The TX twin of [`multicast_rx`];
+/// the loops own only the IO (how the next item is obtained, how each returned
+/// datagram is sent). Needs codec-frame + alloc; the per-variant body codecs
+/// (codec-push / codec-response / codec-response-final / liveliness-token) gate
+/// the enum variants and the matching emit arms.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-frame",
+    feature = "alloc"
+))]
+pub mod multicast_tx;
