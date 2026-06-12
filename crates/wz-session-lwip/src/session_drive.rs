@@ -61,9 +61,35 @@ impl SessionRole {
     }
 }
 
+/// R311lw — the static parameterization of one [`run_session`] drive: the
+/// handshake-deadline budget, the FSM activation role, and the test-only
+/// iteration cap, separated from the loop's live collaborators (the
+/// runtime / link / driver / actions / clock handles + the `on_event`
+/// observer) via the Introduce-Parameter-Object refactor. The unicast MCU
+/// sibling of
+/// [`wz_session_core::multicast_params::MulticastDriveConfig`]
+/// (R311ls/R311lt): it brings `run_session` within clippy's argument-count
+/// bound, retiring the `#[allow(clippy::too_many_arguments)]` the prior
+/// 9-arg signature carried. All three fields are `Copy`, so — unlike
+/// `MulticastDriveConfig`, which must borrow its non-`Copy` `params` (the
+/// `Vec`-bearing `MulticastParams`) — this owns them by value and carries
+/// no lifetime.
+pub struct SessionDriveConfig {
+    /// The handshake deadline budget ([`SessionTimeouts::spec_defaults`]);
+    /// seeds the [`HandshakeDeadlineTracker`] the loop polls each tick.
+    pub timeouts: SessionTimeouts,
+    /// The role to activate the FSM with before the loop starts
+    /// ([`SessionRole::Acceptor`] listens for an inbound peer;
+    /// [`SessionRole::Initiator`] dials the configured peer).
+    pub role: SessionRole,
+    /// `Some(n)` caps the loop for test determinism; `None` drives unbounded
+    /// for production.
+    pub max_iters: Option<usize>,
+}
+
 /// Drive one logical session over the lwIP link to a terminal FSM state (or
-/// the `max_iters` cap). Builds the FSM engine from `actions` via the shared
-/// [`new_session_engine`], activates `role`, then polls until
+/// the `config.max_iters` cap). Builds the FSM engine from `actions` via the
+/// shared [`new_session_engine`], activates `config.role`, then polls until
 /// `engine.is_in_final_state()`.
 ///
 /// Parameters:
@@ -79,27 +105,33 @@ impl SessionRole {
 ///   with `clock` (R263) so the lease comparator's `now_ms` and the recorded
 ///   keepalive / established stamps agree. Build one [`LwipTime`], clone it
 ///   into `new_generic`, pass the original here.
-/// - `timeouts` — handshake deadline budget ([`SessionTimeouts::spec_defaults`]).
-/// - `max_iters` — `Some(n)` caps the loop for test determinism; `None` for
-///   unbounded production drive.
+/// - `config` — the static run parameterization ([`SessionDriveConfig`]:
+///   handshake-deadline budget, FSM activation role, test iteration cap),
+///   the unicast sibling of the multicast loops' `MulticastDriveConfig`.
 /// - `on_event` — the per-iteration observer (`Poll` with the decoded
 ///   `FramePayload` batch the application dispatches, or `Lease`).
-#[allow(clippy::too_many_arguments)]
 pub fn run_session<C, F>(
     runtime: &LwipRuntime<C>,
     link: &LwipLink,
     driver: &alloc::rc::Rc<LwipUdpDriver>,
     actions: &alloc::rc::Rc<SessionLinkActions<LwipRuntime<C>, LwipTime<C>>>,
     clock: &LwipTime<C>,
-    timeouts: &SessionTimeouts,
-    role: SessionRole,
-    max_iters: Option<usize>,
+    config: SessionDriveConfig,
     mut on_event: F,
 ) -> DriverOutcome
 where
     C: ClockSource,
     F: FnMut(IterationEvent<'_>),
 {
+    // The static parameter-object SSOT (R311lw); destructure into the local
+    // names the body uses, mirroring the multicast loops' `MulticastDriveConfig`
+    // handling.
+    let SessionDriveConfig {
+        timeouts,
+        role,
+        max_iters,
+    } = config;
+
     let mut engine = new_session_engine(actions);
     // `new_session_engine` returns an un-initialized engine (the AP
     // convention — the caller runs the SCXML initial transition into the
@@ -112,7 +144,7 @@ where
     engine.initialize();
     engine.process_event(role.start_event());
 
-    let mut deadline_tracker = HandshakeDeadlineTracker::new(*timeouts);
+    let mut deadline_tracker = HandshakeDeadlineTracker::new(timeouts);
     #[cfg(feature = "reassembly")]
     let mut reasm = mcu_reassembly();
     let mut iter: usize = 0;
@@ -305,16 +337,17 @@ mod tests {
                     clock.clone(),
                 );
 
-            let timeouts = SessionTimeouts::spec_defaults();
             let outcome = run_session(
                 &runtime,
                 &link,
                 &driver,
                 &actions,
                 &clock,
-                &timeouts,
-                SessionRole::Acceptor,
-                Some(32),
+                SessionDriveConfig {
+                    timeouts: SessionTimeouts::spec_defaults(),
+                    role: SessionRole::Acceptor,
+                    max_iters: Some(32),
+                },
                 |_event| {},
             );
             std::assert_eq!(outcome, DriverOutcome::IterationLimit);

@@ -54,4 +54,4 @@ pub mod multicast_drive;
 pub mod session_drive;
 
 pub use driver::LwipUdpDriver;
-pub use session_drive::{run_session, SessionRole};
+pub use session_drive::{run_session, SessionDriveConfig, SessionRole};

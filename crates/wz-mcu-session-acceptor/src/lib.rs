@@ -59,7 +59,7 @@ use wz::link_lwip::rx_sockets::{bind_session_rx, SESSION_RX_SLOT_SIZE};
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 use wz::runtime_lwip::{LwipRuntime, LwipTime};
 use wz::session_lwip::driver::SharedSessionSocket;
-use wz::session_lwip::{run_session, LwipUdpDriver, SessionRole};
+use wz::session_lwip::{run_session, LwipUdpDriver, SessionDriveConfig, SessionRole};
 #[cfg(feature = "reassembly")]
 use wz_session_wire_fixtures::craft_fragment_wire;
 use wz_session_wire_fixtures::{craft_frame_wire, craft_initsyn_wire, craft_opensyn_wire};
@@ -363,9 +363,11 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
         &driver,
         &actions,
         &clock,
-        &timeouts,
-        SessionRole::Acceptor,
-        Some(MAX_ITERS),
+        SessionDriveConfig {
+            timeouts,
+            role: SessionRole::Acceptor,
+            max_iters: Some(MAX_ITERS),
+        },
         |event| {
             match event {
                 IterationEvent::Poll(outcome) => match outcome {
