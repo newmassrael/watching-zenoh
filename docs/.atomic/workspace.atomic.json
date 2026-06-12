@@ -34971,6 +34971,52 @@
         "minor D/E (cross-profile observer event-stream asymmetry) remains open."
       ]
     },
+    "Round 311lw": {
+      "decision_summary": "R311lw Finding 2: run_session #[allow(too_many_arguments)] retired via a SessionDriveConfig param object (timeouts/role/max_iters), the unicast sibling of MulticastDriveConfig.",
+      "changes_bullets": [
+        "wz-session-lwip session_drive.rs: introduce SessionDriveConfig { timeouts, role, max_iters } - the static parameterization of one run_session drive, separated from the loop's live collaborators (the runtime / link / driver / actions / clock handles + the on_event observer) via Introduce-Parameter-Object. run_session drops from 9 args to 7 (runtime, link, driver, actions, clock, config, on_event) and the #[allow(clippy::too_many_arguments)] the prior signature carried is removed. The body destructures config into the local names at the top, mirroring how the two multicast loops handle MulticastDriveConfig.",
+        "All three fields are Copy (SessionTimeouts derives Copy, SessionRole is a Copy enum, max_iters is Option<usize>), so SessionDriveConfig owns them by value and carries no lifetime - unlike wz_session_core MulticastDriveConfig, which must borrow its non-Copy params (the Vec-bearing MulticastParams). The HandshakeDeadlineTracker::new(*timeouts) deref becomes a by-value pass.",
+        "SessionDriveConfig is defined LOCAL to wz-session-lwip (next to SessionRole + run_session), not hoisted into wz-session-core: run_session is the MCU-only unicast loop (the AP unicast drive_session_until_terminal has a different shape), so unlike MulticastDriveConfig it is not shared across both transport profiles. Exported via the wz_session_lwip lib pub use; it reaches the facade through the existing pub use wz_session_lwip as session_lwip.",
+        "Both run_session call sites rewired to pass SessionDriveConfig: the session_drive.rs mcu_session_shell test and wz-mcu-session-acceptor run_acceptor_e2e (lib.rs:360, shared verbatim by the host e2e + the deploy/mcu-session-acceptor QEMU bin). SessionDriveConfig added to the acceptor's wz::session_lwip import."
+      ],
+      "verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not a tee/pipe-masked tail).",
+        "C1m wz-session-lwip: default test 1 passed (mcu_session_shell_drives_over_lwip, call site #1); clippy --all-targets clean under default AND transport-multicast -D warnings - this is the direct proof the #[allow(clippy::too_many_arguments)] removal is valid (7 args is within clippy's argument-count bound).",
+        "C1n wz-mcu-session-acceptor: host_acceptor_e2e 1 passed (run_acceptor_e2e -> run_session, call site #2: full acceptor handshake InitSyn->InitAck->OpenSyn->OpenAck->Established + a post-handshake Frame dispatch over a live lwIP loopback); clippy --all-targets clean -D warnings.",
+        "Behaviour-preserving: a pure Introduce-Parameter-Object refactor, no FSM / wire / timing change; the destructured timeouts/role/max_iters drive the loop identically to the prior positional args (the earlier '0 tests' tail was a --quiet pipe truncation artifact, not a skipped test - the verdict is the per-binary EXIT code)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) + Fragment RX/TX + the facade wz transport-multicast forward + a footprint gate for the wz-session-lwip multicast feature remain the open functional increments (R311lu/lv carry) - the next FUNCTIONAL track.",
+        "Finding 4 (the test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) remain accepted judgment calls (R311lv), not changed.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ],
+      "publishable_decision_summary": "R311lw Finding 2: run_session #[allow(too_many_arguments)] retired via a SessionDriveConfig param object (timeouts/role/max_iters), the unicast sibling of MulticastDriveConfig.",
+      "publishable_changes_bullets": [
+        "wz-session-lwip session_drive.rs: introduce SessionDriveConfig { timeouts, role, max_iters } - the static parameterization of one run_session drive, separated from the loop's live collaborators (the runtime / link / driver / actions / clock handles + the on_event observer) via Introduce-Parameter-Object. run_session drops from 9 args to 7 (runtime, link, driver, actions, clock, config, on_event) and the #[allow(clippy::too_many_arguments)] the prior signature carried is removed. The body destructures config into the local names at the top, mirroring how the two multicast loops handle MulticastDriveConfig.",
+        "All three fields are Copy (SessionTimeouts derives Copy, SessionRole is a Copy enum, max_iters is Option<usize>), so SessionDriveConfig owns them by value and carries no lifetime - unlike wz_session_core MulticastDriveConfig, which must borrow its non-Copy params (the Vec-bearing MulticastParams). The HandshakeDeadlineTracker::new(*timeouts) deref becomes a by-value pass.",
+        "SessionDriveConfig is defined LOCAL to wz-session-lwip (next to SessionRole + run_session), not hoisted into wz-session-core: run_session is the MCU-only unicast loop (the AP unicast drive_session_until_terminal has a different shape), so unlike MulticastDriveConfig it is not shared across both transport profiles. Exported via the wz_session_lwip lib pub use; it reaches the facade through the existing pub use wz_session_lwip as session_lwip.",
+        "Both run_session call sites rewired to pass SessionDriveConfig: the session_drive.rs mcu_session_shell test and wz-mcu-session-acceptor run_acceptor_e2e (lib.rs:360, shared verbatim by the host e2e + the deploy/mcu-session-acceptor QEMU bin). SessionDriveConfig added to the acceptor's wz::session_lwip import."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not a tee/pipe-masked tail).",
+        "C1m wz-session-lwip: default test 1 passed (mcu_session_shell_drives_over_lwip, call site #1); clippy --all-targets clean under default AND transport-multicast -D warnings - this is the direct proof the #[allow(clippy::too_many_arguments)] removal is valid (7 args is within clippy's argument-count bound).",
+        "C1n wz-mcu-session-acceptor: host_acceptor_e2e 1 passed (run_acceptor_e2e -> run_session, call site #2: full acceptor handshake InitSyn->InitAck->OpenSyn->OpenAck->Established + a post-handshake Frame dispatch over a live lwIP loopback); clippy --all-targets clean -D warnings.",
+        "Behaviour-preserving: a pure Introduce-Parameter-Object refactor, no FSM / wire / timing change; the destructured timeouts/role/max_iters drive the loop identically to the prior positional args (the earlier '0 tests' tail was a --quiet pipe truncation artifact, not a skipped test - the verdict is the per-binary EXIT code)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU multicast TX publish seam (app z_put / queryable reply / liveliness declare over the group) + Fragment RX/TX + the facade wz transport-multicast forward + a footprint gate for the wz-session-lwip multicast feature remain the open functional increments (R311lu/lv carry) - the next FUNCTIONAL track.",
+        "Finding 4 (the test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) remain accepted judgment calls (R311lv), not changed.",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
