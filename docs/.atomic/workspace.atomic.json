@@ -35017,6 +35017,54 @@
         "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
       ]
     },
+    "Round 311lx": {
+      "decision_summary": "R311lx Round A: multicast TX emit extracted to shared wz_session_core::multicast_tx SSOT (MulticastTxItem + multicast_tx_emit, the TX twin of multicast_rx); AP loop de-duplicated to call it.",
+      "changes_bullets": [
+        "New wz_session_core::multicast_tx SSOT (the TX twin of R311lv's multicast_rx): MulticastTxItem (moved from wz-runtime-tokio) + MulticastTxFrames + multicast_tx_emit(item, &mut TxSn, &MulticastParams) -> MulticastTxFrames. The §3.1 TxData decision (item variant -> mint -> encode_frame_with_* -> multicast_frame_or_fragments) now has ONE home consumed by both transport profiles' loops, realising the engine-free contract for the egress half - it was inline-duplicated in the AP loop, the same smell R311lv removed for RX. Module gated all(session-multicast, codec-frame, alloc); the per-variant body codecs (codec-push/response/response-final/liveliness-token) gate the enum variants + emit arms; the emit fn is union-gated so it exists only when a body codec inhabits the item.",
+        "multicast_put_literal moved alongside MulticastTxItem (it composes the session-core build_push_literal SSOT, so it belongs with the shared item type). Both re-exported from wz_runtime_tokio::multicast_glue via pub use, so the AP loop's public TX API + its tests are unchanged by the move.",
+        "wz-runtime-tokio multicast_glue de-duplicated: the inline 4-arm outbound match (Push/Response/ResponseFinal/DeclareReply, ~110 LOC) replaced by a multicast_tx_emit call + a send loop, so the AP loop now owns only the IO (the mpsc recv + the async LinkDriver::send). The emit import + the outbound Some(item) arm are union-gated, with a not(union) `match item {}` arm preserving the uninhabited-item build (matching the prior per-codec import gating; no robustness regression). The encode_frame_with_* / multicast_frame_or_fragments / build_response_final / push_build imports retired from the loop (the SSOT owns them); build_token_reply / build_final_reply stay (the AP MulticastReplySink composes them before enqueuing).",
+        "ResponseFinal now routes through multicast_frame_or_fragments like the other three variants (one uniform egress path): byte-identical (a single tiny VLE rid never reaches the budget, so it returns its one frame with no follow-on mint) but it removes the special-case arm and keeps params + tx_sn used by every arm, so the union-gated emit fn has no unused-parameter edge in any single-codec config."
+      ],
+      "verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not a tee/pipe-masked tail).",
+        "C1q multicast_glue lib tests behaviour-preserving across all 3 feature combos: transport-multicast 11 passed, transport-multicast,reassembly 15, transport-multicast,transport-fragmentation 17 - the Push / queryable Response / liveliness DeclareReply / oversize-fragment-chain TX paths all emit identically through the new SSOT.",
+        "clippy --all-targets -D warnings clean: wz-runtime-tokio under transport-multicast and transport-multicast,reassembly,transport-fragmentation; wz-session-core under the full multicast feature set AND the degenerate session-multicast,codec-frame,alloc (uninhabited MulticastTxItem) - the union-gated emit fn + the empty-match loop arm compile clean in the no-body-codec build.",
+        "fmt --check clean. Behaviour-preserving extraction: no FSM / wire / SN-mint change; only the item-variant -> encode decision's home moved from the AP loop to the shared SSOT."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Round B (the actual MCU TX publish seam) is the immediate follow-on: wz_session_lwip::multicast_drive::run_multicast_session calls the SAME multicast_tx_emit, fed by a pull-callback IO seam (next_tx: FnMut() -> Option<MulticastTxItem>, symmetric with the on_event push-callback), minting via a now-mutable tx_sn and sending via send_to_group + a deterministic test. The shared SSOT is in place; Round B is the MCU loop's IO wiring onto it.",
+        "After Round B: Fragment RX/TX on the MCU multicast loop + the facade wz transport-multicast forward + a footprint gate for the wz-session-lwip multicast feature remain (R311lu/lv carry).",
+        "Finding 4 (the test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) remain accepted judgment calls (R311lv).",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ],
+      "publishable_decision_summary": "R311lx Round A: multicast TX emit extracted to shared wz_session_core::multicast_tx SSOT (MulticastTxItem + multicast_tx_emit, the TX twin of multicast_rx); AP loop de-duplicated to call it.",
+      "publishable_changes_bullets": [
+        "New wz_session_core::multicast_tx SSOT (the TX twin of R311lv's multicast_rx): MulticastTxItem (moved from wz-runtime-tokio) + MulticastTxFrames + multicast_tx_emit(item, &mut TxSn, &MulticastParams) -> MulticastTxFrames. The §3.1 TxData decision (item variant -> mint -> encode_frame_with_* -> multicast_frame_or_fragments) now has ONE home consumed by both transport profiles' loops, realising the engine-free contract for the egress half - it was inline-duplicated in the AP loop, the same smell R311lv removed for RX. Module gated all(session-multicast, codec-frame, alloc); the per-variant body codecs (codec-push/response/response-final/liveliness-token) gate the enum variants + emit arms; the emit fn is union-gated so it exists only when a body codec inhabits the item.",
+        "multicast_put_literal moved alongside MulticastTxItem (it composes the session-core build_push_literal SSOT, so it belongs with the shared item type). Both re-exported from wz_runtime_tokio::multicast_glue via pub use, so the AP loop's public TX API + its tests are unchanged by the move.",
+        "wz-runtime-tokio multicast_glue de-duplicated: the inline 4-arm outbound match (Push/Response/ResponseFinal/DeclareReply, ~110 LOC) replaced by a multicast_tx_emit call + a send loop, so the AP loop now owns only the IO (the mpsc recv + the async LinkDriver::send). The emit import + the outbound Some(item) arm are union-gated, with a not(union) `match item {}` arm preserving the uninhabited-item build (matching the prior per-codec import gating; no robustness regression). The encode_frame_with_* / multicast_frame_or_fragments / build_response_final / push_build imports retired from the loop (the SSOT owns them); build_token_reply / build_final_reply stay (the AP MulticastReplySink composes them before enqueuing).",
+        "ResponseFinal now routes through multicast_frame_or_fragments like the other three variants (one uniform egress path): byte-identical (a single tiny VLE rid never reaches the budget, so it returns its one frame with no follow-on mint) but it removes the special-case arm and keeps params + tx_sn used by every arm, so the union-gated emit fn has no unused-parameter edge in any single-codec config."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not a tee/pipe-masked tail).",
+        "C1q multicast_glue lib tests behaviour-preserving across all 3 feature combos: transport-multicast 11 passed, transport-multicast,reassembly 15, transport-multicast,transport-fragmentation 17 - the Push / queryable Response / liveliness DeclareReply / oversize-fragment-chain TX paths all emit identically through the new SSOT.",
+        "clippy --all-targets -D warnings clean: wz-runtime-tokio under transport-multicast and transport-multicast,reassembly,transport-fragmentation; wz-session-core under the full multicast feature set AND the degenerate session-multicast,codec-frame,alloc (uninhabited MulticastTxItem) - the union-gated emit fn + the empty-match loop arm compile clean in the no-body-codec build.",
+        "fmt --check clean. Behaviour-preserving extraction: no FSM / wire / SN-mint change; only the item-variant -> encode decision's home moved from the AP loop to the shared SSOT."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Round B (the actual MCU TX publish seam) is the immediate follow-on: wz_session_lwip::multicast_drive::run_multicast_session calls the SAME multicast_tx_emit, fed by a pull-callback IO seam (next_tx: FnMut() -> Option<MulticastTxItem>, symmetric with the on_event push-callback), minting via a now-mutable tx_sn and sending via send_to_group + a deterministic test. The shared SSOT is in place; Round B is the MCU loop's IO wiring onto it.",
+        "After Round B: Fragment RX/TX on the MCU multicast loop + the facade wz transport-multicast forward + a footprint gate for the wz-session-lwip multicast feature remain (R311lu/lv carry).",
+        "Finding 4 (the test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) remain accepted judgment calls (R311lv).",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
