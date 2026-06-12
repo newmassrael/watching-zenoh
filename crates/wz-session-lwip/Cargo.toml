@@ -59,6 +59,20 @@ reassembly = [
     "wz-session-core/reassembly",
 ]
 
+# R311mf — transport fragmentation (Tier B TX) on the MCU multicast loop.
+# Forwards the wz-session-core transport-fragmentation umbrella (which pulls
+# `reassembly` + `codec-fragment` + `alloc`) and re-uses this crate's own
+# `reassembly` forward so the MCU reassembly Router (wz-runtime-lwip) is built
+# too. No drive-loop code change: `run_multicast_session` already frames its TX
+# seam through the shared `multicast_tx_emit` SSOT, which splits an oversize
+# payload via `multicast_frame_or_fragments` once this feature is on — exactly
+# as the AP loop does. Off by default; pair with codec-push (or another TX body
+# codec) to publish fragmentable data.
+transport-fragmentation = [
+    "reassembly",
+    "wz-session-core/transport-fragmentation",
+]
+
 # Slim session-rx buffer-pool profile (nrf51-class / Cortex-M0, 16 KB SRAM).
 # Forwards to the wz-link-lwip selector; SharedSessionSocket =
 # Rc<RefCell<SessionRxSocket>> + SessionDatagram = Datagram<SESSION_RX_SLOT_

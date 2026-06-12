@@ -68,10 +68,22 @@
 //! sink (not duplicated AP/MCU; per the R311lq segregation it stubs no
 //! `LivelinessGetPrune` — connectionless multicast has no reconnect cache).
 //!
+//! ## Fragment RX/TX (R311mf — the AP R311kn/R311ko arms, ported)
+//!
+//! Under `reassembly` the RX path reassembles inbound `T_MID_FRAGMENT` chains
+//! through the shared `ingest_multicast_fragment` SSOT (per-peer SN gate ->
+//! per-(slot, channel) chain -> the completed message fans as the SAME
+//! `FramePayload` `Poll` a whole Frame does), aborts a channel's chain on an
+//! out-of-order Frame, and aborts a departing/evicted peer's chains before its
+//! slot recycles — identical to the AP loop. Under `transport-fragmentation`
+//! (which implies `reassembly`) the TX seam fragments an oversize payload for
+//! free: the same `multicast_tx_emit` SSOT the loop already drives splits it via
+//! `multicast_frame_or_fragments`, so the `next_tx` drain emits the fragment
+//! datagrams with no loop change. Off both features, Fragment tails drop (pico's
+//! "fragmentation deactivated" behaviour) and the TX seam emits whole Frames.
+//!
 //! ## Not yet here (R311lt foundation; follow-on increments)
 //!
-//! - **Fragment RX/TX** — the `reassembly` / `transport-fragmentation` arms the
-//!   AP loop carries (R311kn / R311ko).
 //! - **`MulticastOutcome::LinkLost`** — the MCU poll loop has no link-loss
 //!   event (a silent group is an empty `try_recv`), so it returns only
 //!   `Stopped` / `IterationLimit`.
@@ -87,6 +99,24 @@ use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
+// R311mf — multicast Fragment RX reassembly, the MCU twin of the AP loop's
+// R311kn arm: the shared wz_session_core SSOT (ingest_multicast_fragment /
+// abort_peer_chains / multicast_chain_key), the MCU reassembly Router
+// (mcu_reassembly over the SCE buffer-pool, the same one run_session drives),
+// the inbound Fragment codec (parse_inbound), and the deadline sweep reporter.
+// All `reassembly`-gated: without it the loop drops Fragment tails (pico's
+// "fragmentation deactivated" behaviour). transport-fragmentation implies
+// reassembly, so a fragmenting-TX node auto-reassembles inbound.
+#[cfg(feature = "reassembly")]
+use wz_runtime_lwip::reassembly_rx::mcu_reassembly;
+#[cfg(feature = "reassembly")]
+use wz_session_core::drive::sweep_reporting;
+#[cfg(feature = "reassembly")]
+use wz_session_core::inbound::{parse_inbound, InboundFrame};
+#[cfg(feature = "reassembly")]
+use wz_session_core::multicast_dispatch::{
+    abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
+};
 // R311ly/R311lz — the shared TX emit SSOT (the AP loop calls the same).
 // MulticastTxItem is the unconditional pull-seam item type (uninhabited without
 // a TX body codec); multicast_tx_emit exists only when a TX body codec inhabits
@@ -349,6 +379,12 @@ where
     let mut next_join_ms = clock.now_monotonic_ms();
     let mut next_sweep_ms = clock.now_monotonic_ms();
     let mut iter: usize = 0;
+    // R311mf — the per-(slot, channel) reassembly Router for inbound multicast
+    // Fragment chains, dimensioned to the MCU pool (mcu_reassembly =
+    // ReassemblyDispatcher<4, 4096>, the same Router run_session owns). Only
+    // built when `reassembly` is on; otherwise the Fragment arm is a drop.
+    #[cfg(feature = "reassembly")]
+    let mut reasm = mcu_reassembly();
 
     loop {
         if dispatcher.session_state() != SessionFsmMulticastState::Running {
@@ -417,16 +453,62 @@ where
             // R311lv — the shared RxDispatch SSOT (JOIN admit / Frame
             // admit-and-fan / KeepAlive refresh) — the same `wz_session_core`
             // primitive the AP loop drives, so the §3.1 classify lives in one
-            // home. This foundation owns no reassembly Router, so the
-            // out-of-order-chain + Fragment tails are dropped (a fragment is
-            // dropped exactly as pico does with fragmentation off; both arrive
-            // with the MCU reassembly increment); Close is the only tail it
-            // acts on.
+            // home. R311mf — the reassembly-divergent tail (out-of-order-chain
+            // abort + Fragment reassembly + per-peer chain death at Close) is
+            // now wired through the shared SSOT, the MCU twin of the AP loop's
+            // R311kn arm; `reassembly`-gated, so without it Fragment tails drop
+            // (pico's fragmentation-off behaviour).
             match dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event) {
-                MulticastRxNext::Done
-                | MulticastRxNext::FrameOutOfOrder { .. }
-                | MulticastRxNext::Fragment => {}
+                MulticastRxNext::Done => {}
+                MulticastRxNext::FrameOutOfOrder { reliable } => {
+                    // An out-of-order FRAME clears the channel's in-progress
+                    // reassembly chain (pico clears the dbuf + state,
+                    // multicast/rx.c `_z_multicast_handle_frame`): the dropped
+                    // frame may have superseded the chain's continuation, so
+                    // completing it would mix generations.
+                    #[cfg(feature = "reassembly")]
+                    if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                        reasm.abort_channel(&multicast_chain_key(idx), reliable);
+                    }
+                    #[cfg(not(feature = "reassembly"))]
+                    let _ = reliable;
+                }
+                MulticastRxNext::Fragment => {
+                    // SN-gate per peer, reassemble per (slot, channel) chain,
+                    // and fan the completed message through the SAME observer
+                    // event the Frame arm uses (zenoh-pico
+                    // `_z_multicast_handle_fragment_inner`). Without
+                    // `reassembly` the fragment is dropped.
+                    #[cfg(feature = "reassembly")]
+                    if let Ok(InboundFrame::Fragment {
+                        reliable,
+                        sn,
+                        more,
+                        payload,
+                        ..
+                    }) = parse_inbound(bytes)
+                    {
+                        ingest_multicast_fragment(
+                            dispatcher,
+                            &mut reasm,
+                            src,
+                            reliable,
+                            sn,
+                            more,
+                            &payload,
+                            now,
+                            &mut on_event,
+                        );
+                    }
+                }
                 MulticastRxNext::Close => {
+                    // Graceful departure (attributed by source address). The
+                    // departing peer's in-progress chains die with it (pico's
+                    // per-entry dbufs), BEFORE the slot index can be re-issued.
+                    #[cfg(feature = "reassembly")]
+                    if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                        abort_peer_chains(&mut reasm, idx);
+                    }
                     dispatcher.close_by_src(src);
                 }
             }
@@ -435,7 +517,18 @@ where
 
         // PeerSweep: evict peers past their advertised lease on the tick_ms
         // cadence (idempotent; sweeping more often only sharpens eviction).
+        // R311mf — under `reassembly`, an evicted peer's chains are aborted
+        // before its slot index recycles (sweep_with hook), and the stalled
+        // reassembly chains whose continuation never arrived are reclaimed on
+        // the same tick (sweep_reporting surfaces the drop count) — the MCU
+        // twin of the AP loop's reassembly sweep.
         if now >= next_sweep_ms {
+            #[cfg(feature = "reassembly")]
+            {
+                sweep_reporting(&mut reasm, now, &mut on_event);
+                dispatcher.sweep_with(now, |idx| abort_peer_chains(&mut reasm, idx));
+            }
+            #[cfg(not(feature = "reassembly"))]
             dispatcher.sweep(now);
             next_sweep_ms = now.saturating_add(tick_ms);
         }
@@ -945,6 +1038,115 @@ mod tests {
             drained_finals,
             1,
             "the reply chain's terminating ResponseFinal was staged + drained too"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// R311mf — the multicast Fragment RX/TX leg end-to-end over real lwIP: an
+    /// oversize `z_put` queued on `next_tx` is split by the shared
+    /// `multicast_tx_emit` SSOT into multiple `T_MID_FRAGMENT` datagrams (the
+    /// 200-byte payload exceeds the 64-byte batch budget), multicast to the
+    /// group, and (via multicast loopback) reassembled by the loop's R311mf
+    /// Fragment arm back into the SAME single Push the whole-Frame path fans.
+    /// Same pre-admit-our-source trick as the Push round-trip: a distinct-zid
+    /// JOIN injected from our socket creates the (src_addr, src_port) peer entry
+    /// the echoed fragments attribute to; they mint consecutive SNs from the
+    /// JOIN's advertised next_sn 0 on the reliable ring, so the per-peer SN gate
+    /// admits the chain in order. A distinct port (7456) from the prior tests.
+    #[cfg(all(feature = "transport-fragmentation", feature = "codec-push"))]
+    #[test]
+    fn run_multicast_session_reassembles_a_fragmented_put_over_loopback() {
+        use wz_session_core::driver_loop::DriverLoopOutcome;
+        use wz_session_core::multicast_tx::multicast_put_literal;
+        use wz_session_core::network_message::NetworkMessage;
+
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7456;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        // Pre-admit a peer at OUR loopback source (distinct zid -> not
+        // own-filtered) advertising next_sn 0 on a fresh ring; injected before
+        // wrapping the socket so the loop's first poll creates the peer entry the
+        // echoed fragments attribute to (mirror of the Push round-trip test). Its
+        // advertised batch_size MUST equal ours (64): validate_join admits a JOIN
+        // only when its batch_size matches the receiver's params (multicast_join
+        // §3.2), so a peer on the default 2_048 would be silently rejected and
+        // the echoed fragments would hit an UnknownPeer drop.
+        let mut other = params(&[0x01, 0x02, 0x03, 0x04]);
+        other.batch_size = 64;
+        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        socket
+            .send_to(group, port, &other_join)
+            .expect("inject peer JOIN");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = LwipRuntime::new(FrozenClock);
+        // A 64-byte batch budget forces the 200-byte payload to fragment (the
+        // owned-push codec caps payloads, so 200 stays under the cap while
+        // exceeding the batch — the AP fragmentation test's sizing).
+        let mut self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        self_params.batch_size = 64;
+        let payload: std::vec::Vec<u8> = (0..200u32).map(|i| (i.wrapping_mul(13)) as u8).collect();
+
+        // Prove the TX side actually fragments at this budget BEFORE the loop:
+        // the shared SSOT splits the oversize frame into >1 datagram, so the
+        // round trip below exercises the Fragment RX arm, not the whole-Frame
+        // arm (a single frame would ride the admitted-Frame path instead).
+        let mut probe_sn = TxSn::new(sn::mask_from_res(self_params.seq_num_res));
+        let probe = multicast_put_literal("demo/mc", &payload).expect("build put");
+        let probe_frames = multicast_tx_emit(probe, &mut probe_sn, &self_params);
+        std::assert!(
+            probe_frames.datagrams.len() > 1,
+            "the 200-byte payload must fragment at batch_size 64 (got {} datagrams)",
+            probe_frames.datagrams.len()
+        );
+
+        // One queued Put on the reliable channel; the pull-seam yields it once,
+        // then None. Frozen clock + bounded max_iters keep the round trip
+        // deterministic; the fragments are received one-per-iteration in wire
+        // order (lwIP loopback is FIFO), so the strict-in-order SN gate admits
+        // the whole chain.
+        let mut pending = Some(multicast_put_literal("demo/mc", &payload).expect("build put"));
+
+        let mut saw_push = false;
+        let mut saw_drop = false;
+        let outcome = run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(32),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |event| match event {
+                IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                    if messages
+                        .iter()
+                        .any(|m| matches!(m, NetworkMessage::Push(_)))
+                    {
+                        saw_push = true;
+                    }
+                }
+                IterationEvent::ReassemblyDropped(_) => saw_drop = true,
+                _ => {}
+            },
+            || pending.take(),
+        );
+
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert!(
+            !saw_drop,
+            "the in-order fragment chain reassembles cleanly (no drop)"
+        );
+        std::assert!(
+            saw_push,
+            "the fragmented Put was split by multicast_tx_emit, multicast to the \
+             group, echoed back, and reassembled by the Fragment RX arm into one Push"
         );
 
         link.leave_multicast_group(group).expect("leave group");

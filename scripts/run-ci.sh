@@ -1057,6 +1057,11 @@ layer_c1q_multicast_glue() {
 # (MulticastReplyQueue with no liveliness-token, so its ResponseSink-only gate is
 # exercised). The maximal build now also carries query-queryable so every
 # multicast_tx_emit arm + both observer-staging sinks compile + run together.
+# R311mf adds the Fragment RX/TX arms: transport-multicast,reassembly lints the
+# reassembly RX path composing WITHOUT fragmentation (the honest non-fragmenting
+# reassembly node), and transport-multicast,transport-fragmentation,codec-push
+# runs the real-lwIP fragment round-trip (an oversize Put split by
+# multicast_tx_emit, reassembled by the Fragment RX arm into one Push).
 layer_c1m_session_lwip() {
     (cd crates \
         && cargo test -p wz-session-lwip --quiet \
@@ -1070,6 +1075,9 @@ layer_c1m_session_lwip() {
         && cargo test -p wz-session-lwip \
             --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
             --quiet \
+        && cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet \
+        && cargo test -p wz-session-lwip \
+            --features transport-multicast,transport-fragmentation,codec-push --quiet \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings \
@@ -1080,7 +1088,10 @@ layer_c1m_session_lwip() {
             --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
-            --quiet -- -D warnings)
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,reassembly --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features transport-multicast,transport-fragmentation,codec-push --quiet -- -D warnings)
 }
 
 # ─── Layer C1n — wz-mcu-session-acceptor isolated host e2e + clippy ──
@@ -1949,6 +1960,11 @@ layer_g_cross_compile_cortex_m() {
         # compiling that Arc-bearing module. So the full TX-codec +
         # liveliness-token subset cross-builds on EVERY non-riscv target —
         # the M0 liveliness inline-fire reach the prior rounds carried.
+        # R311mf: a final wz-session-lwip cross-build pins the multicast
+        # Fragment RX/TX path (transport-multicast,transport-fragmentation,
+        # codec-push) — the reassembly Router + the TX splitter cross-compile on
+        # every non-riscv target including thumbv6m (Vec-backed, no Arc), the M0
+        # fragment reach.
         if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
             echo "  G.11 session-lwip cross-real $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
         elif (cd crates && \
@@ -1971,6 +1987,12 @@ layer_g_cross_compile_cortex_m() {
                 cargo build -p wz \
                     --target "$t" --no-default-features \
                     --features session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
+                    --quiet) && \
+             (cd crates && \
+                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                cargo build -p wz-session-lwip \
+                    --target "$t" \
+                    --features transport-multicast,transport-fragmentation,codec-push \
                     --quiet); then
             echo "  G.11 session-lwip cross-real $t OK"
         else
