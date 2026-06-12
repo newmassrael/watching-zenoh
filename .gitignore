@@ -18,6 +18,9 @@ deploy/mcu-noheap-probe/target/
 # Stage 5 — deploy/mcu-session-acceptor is the fourth standalone
 # workspace (acceptor session e2e bin; Layer Q.4). Same target/ policy.
 deploy/mcu-session-acceptor/target/
+# R311mi — deploy/mcu-multicast-e2e is the fifth standalone workspace
+# (multicast footprint bin; Layer Q.5). Same target/ policy.
+deploy/mcu-multicast-e2e/target/
 **/*.rs.bk
 
 # Cargo.lock policy: COMMITTED for the wz Rust workspace

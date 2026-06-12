@@ -66,6 +66,16 @@ members = [
     # (C1n) exercises its handshake e2e. Mirrors the wz-ap-demo-app
     # lib-owns-the-scenario / bin-stays-thin split on the MCU profile.
     "wz-mcu-session-acceptor",
+    # R311mi — the MCU multicast transport e2e scenario SSOT (no_std lib;
+    # run_multicast_e2e<C> shared verbatim by the host integration test
+    # (C1r) and the deploy/mcu-multicast-e2e footprint bin). Like
+    # wz-mcu-session-acceptor it forces wz-session-core/no_std through the
+    # facade session-lwip funnel, so the workspace `cargo test` lanes
+    # (C1/C2) `--exclude` it and a dedicated isolated host lane (C1r)
+    # exercises its multicast round trip. Unlike the acceptor there is no
+    # QEMU boot (multicast self-loopback is a host-only lwIP affordance —
+    # the bin is build + footprint-size only).
+    "wz-mcu-multicast-e2e",
     # Stage 5 (R311it) — the no_std SSOT for synthetic session handshake
     # wire bytes (craft_initsyn/opensyn/initack/frame). De-duplicates the
     # copies that were in the three wz-runtime-tokio session-FSM test files

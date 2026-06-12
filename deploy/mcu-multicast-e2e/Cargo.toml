@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-multicast-e2e — R311mi composable-framework MCU multicast footprint
+# artifact.
+#
+# A Cortex-M binary that links the FULL MCU multicast feature profile
+# (session-lwip + transport-multicast + transport-fragmentation + codec-push)
+# via wz_mcu_multicast_e2e::run_multicast_e2e, so the composable-framework
+# footprint gate (scripts/check-footprint.sh, Layer Q.5) can size the ROM the
+# multicast transport adds. The e2e LOGIC lives in the wz-mcu-multicast-e2e
+# lib, shared verbatim with the host integration test (Layer C1r) — the bin is
+# only the SysTick clock + heap + the verdict map.
+#
+# # Why build + size, NOT a QEMU boot (unlike deploy/mcu-session-acceptor)
+#
+# Multicast self-loopback needs LWIP_LOOPIF_MULTICAST + LWIP_TESTMODE +
+# ip4_set_default_multicast_netif(netif_get_loopif()), which the repo confines
+# to the HOST lwIP port (the cross / deploy ports omit it — "real deploys join
+# on their ethernet netif, not loopback"). So this bin's run_multicast_e2e
+# returns join_ok=false on a QEMU loopback environment (no IGMP netif); the
+# RUNTIME proof of the round trip lives on the host (C1r), and this artifact is
+# cross-compiled + footprint-sized only. It is a REAL multicast deploy that
+# boots on hardware with a real IGMP netif (out of QEMU-CI scope) — the link is
+# a genuine run_multicast_e2e call, not a footprint-retention trick.
+#
+# # Why mps2-class only (no microbit / Cortex-M0 variant)
+#
+# The multicast session-rx pool is 32 x 1536 (~49 KB, independent of the slim
+# buffer-pool toggle — see wz-link-lwip rx_sockets), which does not fit nrf51's
+# 16 KB SRAM. A slim multicast pool is a separate future item; until then the
+# multicast footprint is gated on the mps2-class triples (M3 / M4 / M7) where
+# the profile genuinely deploys. .text is still a per-target ROM measurement;
+# RAM-fit is the (deferred) slim-multicast-pool concern, consistent with
+# check-footprint.sh's ROM-axis-only philosophy.
+
+[workspace]
+# Empty workspace table — declares this crate as its own workspace root so
+# cargo does not search upward into `crates/Cargo.toml`'s member list.
+
+[package]
+name = "mcu-multicast-e2e"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+description = "R311mi composable-framework MCU multicast footprint artifact — links the full multicast profile via wz_mcu_multicast_e2e::run_multicast_e2e (transport-multicast + transport-fragmentation + codec-push) for the Layer Q.5 footprint gate on Cortex-M3/M4/M7."
+
+[[bin]]
+name = "mcu-multicast-e2e"
+path = "src/main.rs"
+
+[dependencies]
+# Cortex-M runtime + entry point. `critical-section-single-core` provides
+# the critical_section impl that wz-runtime-lwip::sync + the session-core
+# no_std portable-atomic backend require on Cortex-M.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+
+# Semihosting for the PASS/FAIL/SKIP line + `debug::exit` (the bin is not
+# CI-booted, but a developer booting it on real multicast hardware gets a
+# host-visible verdict).
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+# Heap allocator. The multicast stack (alloc-backed dispatcher + the 32 x 1536
+# multicast rx socket + the reassembly slot pool + the codec byte buffers)
+# needs a #[global_allocator]; embedded-alloc is the conventional Cortex-M
+# choice. Sized generously for the mps2 4 MB SRAM.
+embedded-alloc = "0.6"
+
+# Atomic backend parity with the wz session stack (M3/M4/M7 get native
+# LDREX/STREX; the feature set mirrors the wz-runtime-lwip / session-core
+# declarations so cargo unifies one portable-atomic configuration).
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The SINGLE upstream dep: the MCU multicast e2e SSOT. Re-exports the
+# `ClockSource` trait this bin impls (SysTick) + the `LwipLink` it constructs,
+# so the bin never names the wz facade or wz-session-core directly — the lib is
+# the composition boundary (it enables session-lwip + the multicast profile on
+# the facade).
+wz-mcu-multicast-e2e = { path = "../../crates/wz-mcu-multicast-e2e" }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

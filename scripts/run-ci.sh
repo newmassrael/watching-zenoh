@@ -628,9 +628,13 @@ layer_c1_cargo_test() {
     # Stage 5 — wz-mcu-session-acceptor (the MCU acceptor e2e SSOT) depends
     # on wz-session-lwip + the facade session-lwip funnel, so it inherits the
     # same no_std-forcing hazard; excluded here and tested ISOLATED in C1n.
+    # R311mi — wz-mcu-multicast-e2e (the MCU multicast e2e SSOT) depends on the
+    # same facade session-lwip funnel, so it carries the same hazard; excluded
+    # here and tested ISOLATED in C1r.
     (cd crates && cargo test --workspace \
         --exclude wz-session-lwip \
-        --exclude wz-mcu-session-acceptor --quiet)
+        --exclude wz-mcu-session-acceptor \
+        --exclude wz-mcu-multicast-e2e --quiet)
 }
 
 # ─── Layer C1b — cargo test -p wz-runtime-core --features alloc ────
@@ -1139,6 +1143,31 @@ layer_c1n_mcu_session_acceptor() {
             --all-targets --quiet -- -D warnings)
 }
 
+# ─── Layer C1r — wz-mcu-multicast-e2e isolated host e2e + clippy ─────
+#
+# R311mi. wz-mcu-multicast-e2e owns the MCU multicast transport e2e SSOT
+# (run_multicast_e2e<C>, shared verbatim by this host test and the
+# deploy/mcu-multicast-e2e footprint bin). It composes wz-session-lwip + the
+# facade session-lwip funnel, so — like wz-mcu-session-acceptor (C1n) — it
+# inherits wz-session-lwip's no_std forcing and CANNOT participate in the
+# `--workspace` unification (Layer C1 / C2 exclude it). Built ISOLATED here
+# via `-p`, where cargo resolves only this crate's subgraph (no tokio) and
+# `no_std` is correct + lwip_real_build holds (host always has a real lwIP
+# build). The host integration test is the RUNTIME PROOF the footprint bin
+# cannot give via QEMU (multicast self-loopback is a host-only lwIP
+# affordance): it drives the full multicast profile end to end over a live
+# lwIP loopback — a peer JOIN admitted (transport-multicast) + an oversize
+# Put split into a T_MID_FRAGMENT chain (transport-fragmentation TX) +
+# reassembled into one Push (reassembly RX + codec-push) — via
+# wz_session_lwip::run_multicast_session. The crate has no feature variants
+# (the multicast profile is fixed on its wz dep), so one test + one clippy
+# pass cover it.
+layer_c1r_mcu_multicast_e2e() {
+    (cd crates \
+        && cargo test -p wz-mcu-multicast-e2e --quiet \
+        && cargo clippy -p wz-mcu-multicast-e2e --all-targets --quiet -- -D warnings)
+}
+
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
 #
 # R311bo: mirror the gate to deploy/mcu-qemu-demo (standalone
@@ -1155,10 +1184,13 @@ layer_c2_cargo_clippy() {
     # Stage 4b — exclude wz-session-lwip (no_std-engine crate, mutually
     # exclusive with tokio's http-send in a unified graph; isolated clippy
     # is in Layer C1m). Stage 5 — exclude wz-mcu-session-acceptor for the
-    # same reason (isolated clippy in C1n). Same rationale as the C1 exclude.
+    # same reason (isolated clippy in C1n). R311mi — exclude
+    # wz-mcu-multicast-e2e for the same reason (isolated clippy in C1r).
+    # Same rationale as the C1 exclude.
     (cd crates && cargo clippy --workspace --all-targets \
         --exclude wz-session-lwip \
-        --exclude wz-mcu-session-acceptor --quiet -- -D warnings) || return 1
+        --exclude wz-mcu-session-acceptor \
+        --exclude wz-mcu-multicast-e2e --quiet -- -D warnings) || return 1
 
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
@@ -2397,6 +2429,43 @@ layer_q_qemu_mcu_e2e() {
         echo "  Q.4.microbit SKIP (rustup target thumbv6m-none-eabi absent)"
     fi
 
+    # ── Q.5 — R311mi multicast footprint artifact (deploy/mcu-multicast-e2e).
+    #
+    # Cross-builds the FULL MCU multicast profile bin (session-lwip +
+    # transport-multicast + transport-fragmentation + codec-push) on the
+    # mps2-class triples (M3 / M4 / M7) and footprint-gates each via
+    # `check-footprint.sh <target> multicast-e2e`. NO qemu boot: multicast
+    # self-loopback is a host-only lwIP affordance (the cross port omits
+    # LWIP_LOOPIF_MULTICAST), so run_multicast_e2e returns join_ok=false on
+    # QEMU — the RUNTIME proof is the host C1r lane; this lane is build +
+    # footprint-size only. mps2-class only: the 32 x 1536 multicast rx pool
+    # (~49 KB, slim-toggle-independent) does not fit nrf51's 16 KB SRAM (a slim
+    # multicast pool is a deferred item), so thumbv6m is not built/gated here.
+    # Reaches here only with arm-none-eabi-gcc present (the Q.1 gate returned
+    # early otherwise); $lwip_port is the same cross-test port the Q.2/Q.4
+    # builds use.
+    local mctarget
+    for mctarget in thumbv7m-none-eabi thumbv7em-none-eabihf; do
+        if ! grep -q "^${mctarget}$" <<< "$installed"; then
+            echo "  Q.5.${mctarget} SKIP (rustup target absent)"
+            continue
+        fi
+        if WZ_LWIP_PORT="$lwip_port" cargo build --release \
+            --manifest-path deploy/mcu-multicast-e2e/Cargo.toml \
+            --target "$mctarget" --bin mcu-multicast-e2e --quiet; then
+            echo "  Q.5.${mctarget} build mcu-multicast-e2e OK"
+            any_built=1
+        else
+            echo "  Q.5.${mctarget} build mcu-multicast-e2e FAIL" >&2
+            fail=1
+            continue
+        fi
+        # Footprint gate (ROM-axis ±256 B; bss INFO). No qemu run for this bin.
+        if ! bash scripts/check-footprint.sh "$mctarget" multicast-e2e; then
+            fail=1
+        fi
+    done
+
     if [[ $any_built -eq 0 && $probe_built -eq 0 ]]; then
         echo "Layer Q SKIP (no Layer Q rustup targets installed)"
         return 0
@@ -2456,6 +2525,7 @@ run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1
 run_layer C1l layer_c1l_reassembly || overall=1
 run_layer C1m layer_c1m_session_lwip || overall=1
 run_layer C1n layer_c1n_mcu_session_acceptor || overall=1
+run_layer C1r layer_c1r_mcu_multicast_e2e || overall=1
 run_layer C1o layer_c1o_keyexpr_gating_behavior || overall=1
 run_layer C1p layer_c1p_multicast || overall=1
 run_layer C1q layer_c1q_multicast_glue || overall=1

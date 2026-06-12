@@ -29,7 +29,12 @@
 #                  BoxFuture-per-spawn budget, not to this script.
 #
 # Usage:
-#   scripts/check-footprint.sh <target-triple>
+#   scripts/check-footprint.sh <target-triple> [artifact]
+#
+# artifact (default `qemu-demo`):
+#   qemu-demo      — deploy/mcu-qemu-demo (the bare lwIP UDP floor; §6.7)
+#   multicast-e2e  — deploy/mcu-multicast-e2e (the full multicast profile;
+#                    R311mi). mps2-class targets only.
 #
 # Exit codes:
 #   0  PASS (within band, or SKIP)
@@ -92,6 +97,39 @@ declare -A BASELINE_BSS=(
     ["thumbv8m.main-none-eabi"]=270100
 )
 
+# ─── multicast-e2e baseline ─────────────────────────────────────────
+#
+# The `multicast-e2e` artifact (deploy/mcu-multicast-e2e) links the FULL MCU
+# multicast feature profile (session-lwip + transport-multicast +
+# transport-fragmentation + codec-push) via run_multicast_e2e. Authoritative
+# source: the §6.9 preset-mcu-multicast-pub footprint caveats (R311mj gave the
+# profile a living preset Section, mirroring §6.7's anchor for the
+# cortex-m4-default artifact; the figures originate from R311mi). Update this
+# table AND the §6.9 footprint caveats together via a new Round entry — never
+# one without the other (atomic ledger + CI gate record the same footprint
+# truth), exactly as §6.7 governs the qemu-demo table.
+#
+# mps2-class only (M3 / M4 / M7): the 32 x 1536 multicast rx pool (~49 KB,
+# slim-toggle-independent) does not fit nrf51's 16 KB SRAM, so there is no
+# thumbv6m baseline (a slim multicast pool is a deferred item). .text is the
+# multicast transport's ROM over the bare-UDP floor (~50 KB vs mcu-qemu-demo's
+# ~20 KB); data the static .data; bss the 256 KB heap + lwIP/IGMP pools
+# (HEAP_SIZE-dominated, INFO-only per the R311bj caveat (c)).
+declare -A BASELINE_MC_TEXT=(
+    # R311mi — initial measurement (cross-test lwIP port, opt-level=s + LTO).
+    ["thumbv7m-none-eabi"]=50680
+    ["thumbv7em-none-eabihf"]=50484
+)
+declare -A BASELINE_MC_DATA=(
+    ["thumbv7m-none-eabi"]=4
+    ["thumbv7em-none-eabihf"]=4
+)
+declare -A BASELINE_MC_BSS=(
+    # 256 KB heap + lwIP/IGMP static pools. INFO-only (HEAP_SIZE-dominated).
+    ["thumbv7m-none-eabi"]=270100
+    ["thumbv7em-none-eabihf"]=270100
+)
+
 # Per-axis tolerance in bytes. Matches the north-star atomic-feature
 # footprint threshold (≥256 bytes ROM reduction = "measurable").
 TOLERANCE=256
@@ -99,19 +137,44 @@ TOLERANCE=256
 # ─── argument parsing ──────────────────────────────────────────────
 target="${1:-}"
 if [[ -z "$target" ]]; then
-    echo "check-footprint: usage: $0 <target-triple>" >&2
+    echo "check-footprint: usage: $0 <target-triple> [artifact]" >&2
+    echo "  artifact: qemu-demo (default) | multicast-e2e" >&2
     exit 2
 fi
 
-if [[ -z "${BASELINE_TEXT[$target]:-}" ]]; then
-    echo "check-footprint: no baseline for target '$target'" >&2
+# Select the artifact: which binary to size + which baseline table to gate
+# against. `qemu-demo` (default) preserves the original single-artifact
+# behaviour (the Q.3 lane calls `check-footprint.sh <target>`); `multicast-e2e`
+# gates the R311mi multicast footprint bin. namerefs point _bt/_bd/_bb at the
+# chosen baseline tables so the measure + gate logic below stays artifact-
+# agnostic.
+artifact="${2:-qemu-demo}"
+case "$artifact" in
+    qemu-demo)
+        bin="deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
+        declare -n _bt=BASELINE_TEXT _bd=BASELINE_DATA _bb=BASELINE_BSS
+        baseline_anchor="§6.7 preset-cortex-m4-default caveat (a)/(b)"
+        ;;
+    multicast-e2e)
+        bin="deploy/mcu-multicast-e2e/target/${target}/release/mcu-multicast-e2e"
+        declare -n _bt=BASELINE_MC_TEXT _bd=BASELINE_MC_DATA _bb=BASELINE_MC_BSS
+        baseline_anchor="the R311mi multicast footprint ledger entry"
+        ;;
+    *)
+        echo "check-footprint: unknown artifact '$artifact'" \
+             "(qemu-demo | multicast-e2e)" >&2
+        exit 2
+        ;;
+esac
+
+if [[ -z "${_bt[$target]:-}" ]]; then
+    echo "check-footprint: no $artifact baseline for target '$target'" >&2
     echo "  add baseline to scripts/check-footprint.sh + matching caveat" \
-         "to §6.7 in the same Round entry" >&2
+         "to $baseline_anchor in the same Round entry" >&2
     exit 2
 fi
 
 # ─── prerequisite tooling + binary ─────────────────────────────────
-bin="deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
 if [[ ! -f "$bin" ]]; then
     echo "  footprint SKIP (binary missing: $bin)"
     exit 0
@@ -130,9 +193,9 @@ read -r meas_text meas_data meas_bss _ < <(
         | awk 'NR==2 {print $1, $2, $3}'
 )
 
-base_text="${BASELINE_TEXT[$target]}"
-base_data="${BASELINE_DATA[$target]}"
-base_bss="${BASELINE_BSS[$target]}"
+base_text="${_bt[$target]}"
+base_data="${_bd[$target]}"
+base_bss="${_bb[$target]}"
 
 delta_text=$((meas_text - base_text))
 delta_data=$((meas_data - base_data))
@@ -167,20 +230,20 @@ fi
 # from informational to enforcing.
 bss_status="INFO"
 
-echo "  footprint $target text=$meas_text ($(fmt_delta $delta_text)) $text_status / data=$meas_data ($(fmt_delta $delta_data)) $data_status / bss=$meas_bss ($(fmt_delta $delta_bss)) $bss_status [tol=±$TOLERANCE]"
+echo "  footprint[$artifact] $target text=$meas_text ($(fmt_delta $delta_text)) $text_status / data=$meas_data ($(fmt_delta $delta_data)) $data_status / bss=$meas_bss ($(fmt_delta $delta_bss)) $bss_status [tol=±$TOLERANCE]"
 
 if [[ "$fail" -ne 0 ]]; then
     echo "" >&2
-    echo "check-footprint: $target out of band against R311bj caveat" >&2
+    echo "check-footprint: $artifact $target out of band against $baseline_anchor" >&2
     echo "  baseline: text=$base_text data=$base_data bss=$base_bss" >&2
     echo "  measured: text=$meas_text data=$meas_data bss=$meas_bss" >&2
     echo "  tolerance: ±$TOLERANCE bytes per ROM axis" >&2
     echo "" >&2
     echo "If the growth is intentional (new atomic feature, codec," >&2
     echo "  runtime primitive), land a Round N+k entry that:" >&2
-    echo "  1. Updates scripts/check-footprint.sh BASELINE_* table." >&2
-    echo "  2. Updates §6.7 caveat (a)/(b) with the new figure +" >&2
-    echo "     rationale for the growth." >&2
+    echo "  1. Updates the matching scripts/check-footprint.sh baseline table" >&2
+    echo "     (BASELINE_* for qemu-demo, BASELINE_MC_* for multicast-e2e)." >&2
+    echo "  2. Updates $baseline_anchor with the new figure + rationale." >&2
     echo "If the growth is unintentional, root-cause the bytes" >&2
     echo "  before landing the change." >&2
     exit 1

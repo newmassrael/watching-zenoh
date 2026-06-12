@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-mcu-multicast-e2e — the MCU multicast transport e2e SSOT (R311mi).
+#
+# A `#![no_std]` library that owns ONE thing: `run_multicast_e2e<C>` — the
+# full MCU multicast feature profile exercised end to end over a real lwIP
+# loopback: a peer JOIN admitted into the §3.2 peer table (transport-
+# multicast), an oversize application `z_put` split into a `T_MID_FRAGMENT`
+# chain by the shared `multicast_tx_emit` SSOT (transport-fragmentation TX),
+# multicast to the group, and reassembled by the R311mf Fragment RX arm back
+# into one `Push` (codec-push + reassembly RX). The multicast machinery is
+# the shared `wz-session-core` SSOT driven by `wz_session_lwip::
+# run_multicast_session`; this crate is only the e2e TOPOLOGY (the
+# pre-admit-our-source loopback trick + the oversize payload) plus the
+# verdict.
+#
+# # Why a library (not folded into the deploy bin)
+#
+# The exact same scenario runs in two places: the host integration test
+# (`tests/host_multicast_e2e.rs`, fast lane, real lwIP on the host build
+# where loopback multicast is a sanctioned test affordance) AND the
+# `deploy/mcu-multicast-e2e` footprint bin (the cross-compiled artifact the
+# composable-framework footprint gate sizes). Factoring the scenario into a
+# `ClockSource`-generic `fn` makes the host test and the bin share ONE
+# implementation. Mirrors the wz-mcu-session-acceptor lib-owns-the-scenario
+# / bin-stays-thin split.
+#
+# # Why no QEMU boot (unlike the acceptor's Layer Q.4)
+#
+# Multicast self-loopback on lwIP needs `LWIP_LOOPIF_MULTICAST` +
+# `LWIP_TESTMODE` + `ip4_set_default_multicast_netif(netif_get_loopif())`,
+# which the repo confines to the HOST port (`port/include/lwipopts.h`); the
+# cross / deploy ports deliberately omit it ("real deploys join on their
+# ethernet netif, not loopback"). Dragging those test-only flags into a
+# deploy port + the bin would be a test fiction masquerading as a deploy, so
+# the runtime proof stays on the host (its sanctioned home) and the bin is
+# build + footprint-size only. On-target buildability is the Layer G cross
+# lane; the bin is a real multicast deploy artifact that boots on hardware
+# with a real IGMP netif (out of QEMU-CI scope).
+#
+# # Why it composes via the wz facade
+#
+# It enables the multicast atomic features ON the `wz` facade dep
+# (`session-lwip` / `transport-multicast` / `transport-fragmentation` /
+# `codec-push`) — the composable-framework north star: the e2e proves the
+# MCU multicast profile composes through the same facade -> session-lwip ->
+# runtime-lwip -> session-core funnel a real deploy uses (the R311mg lesson:
+# the facade is the composition surface, not the crate). The low-level
+# multicast types the facade does not re-export (MulticastParams /
+# MulticastDispatcher / multicast_tx_emit / encode_join) come from a direct
+# wz-session-core dep, exactly as wz-mcu-session-acceptor pulls its session
+# types directly; the feature set matches the facade funnel so cargo unifies
+# onto one wz-session-core instance.
+#
+# # Why `#![cfg(lwip_real_build)]`
+#
+# The crate names `wz::session_lwip::multicast_drive::run_multicast_session`,
+# which only exists in a real lwIP build (host, or cross with WZ_LWIP_PORT).
+# build.rs relays the lwip-sys `DEP_LWIP_LWIP_REAL_BUILD` bit into the
+# `lwip_real_build` cfg; without it the crate collapses to an empty body
+# (mirrors wz-link-lwip / wz-session-lwip / wz-mcu-session-acceptor). The
+# lwip-sys direct dep exists SOLELY for that metadata relay; no FFI here.
+
+[package]
+name = "wz-mcu-multicast-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "MCU multicast transport e2e SSOT — run_multicast_e2e<C> drives a real lwIP-loopback peer-admit + oversize-Put fragment + reassemble round trip via wz_session_lwip::run_multicast_session, shared by the host test and the footprint bin."
+
+[lib]
+name = "wz_mcu_multicast_e2e"
+path = "src/lib.rs"
+
+[dependencies]
+# The composable-framework boundary. `session-lwip` lights up
+# `wz::{session_lwip, link_lwip, runtime_lwip}` together with the
+# lwip_real_build cfg; transport-multicast / transport-fragmentation /
+# codec-push wire the full multicast profile through the facade ->
+# session-lwip -> runtime-lwip -> session-core funnel. transport-
+# fragmentation implies reassembly, so the inbound Fragment RX arm + the
+# outbound fragment split both light up.
+wz = { path = "../wz", default-features = false, features = [
+    "session-lwip",
+    "transport-multicast",
+    "transport-fragmentation",
+    "codec-push",
+] }
+# The runtime-agnostic session SSOT — the multicast types the facade does
+# not re-export (MulticastParams / MulticastDispatcher / MulticastConfig /
+# MulticastDriveConfig / MulticastOutcome / multicast_tx_emit /
+# MulticastTxItem / multicast_put_literal / encode_join / TxSn /
+# DriverLoopOutcome / IterationEvent / NetworkMessage). The feature set
+# matches the facade funnel above so cargo unifies one wz-session-core
+# instance (transport-fragmentation pulls reassembly + codec-fragment +
+# alloc; codec-push pulls codec-frame).
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "no_std",
+    "session-multicast",
+    "codec-join",
+    "codec-frame",
+    "codec-close",
+    "codec-push",
+    "transport-fragmentation",
+] }
+# Direct dep SOLELY for DEP_LWIP_LWIP_REAL_BUILD -> lwip_real_build cfg
+# propagation in build.rs (mirrors wz-link-lwip / wz-session-lwip /
+# wz-mcu-session-acceptor). No FFI is called here.
+lwip-sys = { path = "../lwip-sys" }
+
+[dev-dependencies]
+# critical-section's std impl backs LwipRuntime's critical_section::Mutex on
+# the host integration-test path (the deploy bin supplies the cortex-m impl
+# at final-binary link instead).
+critical-section = { version = "1", features = ["std"] }
+# The test-support feature exposes wz-link-lwip's `lwip_test_link` init-once
+# harness, which routes multicast TX over the IGMP-capable loop netif
+# (ip4_set_default_multicast_netif(netif_get_loopif()) — the LWIP_TESTMODE
+# host affordance) so the host e2e observes the self-loopback round trip.
+# Dev-only: the production lib + the deploy bin never pull the harness.
+wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support"] }
+
+[lints]
+workspace = true
