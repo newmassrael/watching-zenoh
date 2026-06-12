@@ -35491,6 +35491,50 @@
         "Pre-existing facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls (R311lv)."
       ]
     },
+    "Round 311mh": {
+      "decision_summary": "R311mh: extract the multicast reassembly-tail SSOT (dispatch + sweep) into multicast_rx so the AP + MCU loops stop hand-mirroring the FrameOutOfOrder/Fragment/Close + sweep tail wiring.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/multicast_rx.rs: two new SSOTs close the session-review Finding B (the dispatch CLASSIFY was already shared via dispatch_multicast_inbound, but the reassembly TAIL wiring was hand-mirrored byte-for-byte in the AP multicast_glue + MCU multicast_drive loops). dispatch_multicast_inbound_reassembling wraps the classify + applies the full tail (FrameOutOfOrder -> abort_channel, Fragment -> parse_inbound + ingest_multicast_fragment, Close -> abort_peer_chains + close_by_src) with the caller's Router; sweep_multicast_reassembling does the deadline-reclaim-report + evict-with-chain-abort pair. Both gated all(reassembly, alloc); the Router type stays caller-owned (profile-specific pool dims), passed by &mut.",
+        "crates/wz-session-core/src/{drive.rs,reassembly_dispatch.rs}: sweep_reporting RELOCATED from the session-unicast-gated drive module to reassembly_dispatch (next to ReassemblyDispatcher). It is a pure reassembly helper (no unicast actions / runtime generic, unlike its ingest twin report_outcome_reassembling which stays in drive); housing it in drive would have forced sweep_multicast_reassembling to gate on session-unicast - a false coupling (multicast does not need unicast). Now gated all(reassembly, alloc) at its true home.",
+        "crates/wz-runtime-tokio/src/multicast_glue.rs + crates/wz-session-lwip/src/multicast_drive.rs: both loops drop the ~30-line duplicated tail match + the duplicated sweep pair, replaced by one dispatch_multicast_inbound_reassembling call (reassembly build) / a bare dispatch_multicast_inbound + Close-only match (non-reassembly), and one sweep_multicast_reassembling call / bare sweep. Imports gated accordingly so no tail symbol is named unused in either variant.",
+        "crates/wz-runtime-tokio/src/session_glue.rs + crates/wz-session-lwip/src/session_drive.rs: the unicast loops split their import - report_outcome_reassembling stays from drive, sweep_reporting now from reassembly_dispatch."
+      ],
+      "verification_bullets": [
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). \"run-ci: all required layers pass\", no FAIL lines.",
+        "Behaviour-preserving: Layer C1l (reassembly subsystem) + C1m (session-lwip multicast incl reassembly + transport-fragmentation + the fragment round-trip 5/5) + C1p (multicast dispatcher) + C1q (AP multicast_glue incl reassembly + transport-fragmentation) all pass; Layer G pass with G.11 session-lwip cross-real thumbv6m-none-eabi OK (the MCU fragment cross-build now routes through the new SSOT).",
+        "Both loops clippy --all-targets -D warnings clean in the reassembly AND non-reassembly variants (the gated imports leave no unused symbol either way). fmt --check clean across the 3 touched crates after the import-wrap normalisation."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Session-review Finding B is CLOSED: the multicast RX + sweep reassembly tail lives ONCE in wz-session-core (multicast_rx); the AP + MCU loops own only IO + clock structure + the Router instance. Finding A was closed by R311mf (crate) + R311mg (facade) - MCU multicast Fragment RX/TX reachable through both layers.",
+        "Structural improvement banked: sweep_reporting is now at its true home (reassembly_dispatch), so a future session-multicast-without-unicast profile keeps the multicast sweep SSOT uncoupled from unicast.",
+        "Open north-star: a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry), now including the transport-fragmentation profile.",
+        "Pre-existing facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls (R311lv)."
+      ],
+      "publishable_decision_summary": "R311mh: extract the multicast reassembly-tail SSOT (dispatch + sweep) into multicast_rx so the AP + MCU loops stop hand-mirroring the FrameOutOfOrder/Fragment/Close + sweep tail wiring.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/multicast_rx.rs: two new SSOTs close the session-review Finding B (the dispatch CLASSIFY was already shared via dispatch_multicast_inbound, but the reassembly TAIL wiring was hand-mirrored byte-for-byte in the AP multicast_glue + MCU multicast_drive loops). dispatch_multicast_inbound_reassembling wraps the classify + applies the full tail (FrameOutOfOrder -> abort_channel, Fragment -> parse_inbound + ingest_multicast_fragment, Close -> abort_peer_chains + close_by_src) with the caller's Router; sweep_multicast_reassembling does the deadline-reclaim-report + evict-with-chain-abort pair. Both gated all(reassembly, alloc); the Router type stays caller-owned (profile-specific pool dims), passed by &mut.",
+        "crates/wz-session-core/src/{drive.rs,reassembly_dispatch.rs}: sweep_reporting RELOCATED from the session-unicast-gated drive module to reassembly_dispatch (next to ReassemblyDispatcher). It is a pure reassembly helper (no unicast actions / runtime generic, unlike its ingest twin report_outcome_reassembling which stays in drive); housing it in drive would have forced sweep_multicast_reassembling to gate on session-unicast - a false coupling (multicast does not need unicast). Now gated all(reassembly, alloc) at its true home.",
+        "crates/wz-runtime-tokio/src/multicast_glue.rs + crates/wz-session-lwip/src/multicast_drive.rs: both loops drop the ~30-line duplicated tail match + the duplicated sweep pair, replaced by one dispatch_multicast_inbound_reassembling call (reassembly build) / a bare dispatch_multicast_inbound + Close-only match (non-reassembly), and one sweep_multicast_reassembling call / bare sweep. Imports gated accordingly so no tail symbol is named unused in either variant.",
+        "crates/wz-runtime-tokio/src/session_glue.rs + crates/wz-session-lwip/src/session_drive.rs: the unicast loops split their import - report_outcome_reassembling stays from drive, sweep_reporting now from reassembly_dispatch."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). \"run-ci: all required layers pass\", no FAIL lines.",
+        "Behaviour-preserving: Layer C1l (reassembly subsystem) + C1m (session-lwip multicast incl reassembly + transport-fragmentation + the fragment round-trip 5/5) + C1p (multicast dispatcher) + C1q (AP multicast_glue incl reassembly + transport-fragmentation) all pass; Layer G pass with G.11 session-lwip cross-real thumbv6m-none-eabi OK (the MCU fragment cross-build now routes through the new SSOT).",
+        "Both loops clippy --all-targets -D warnings clean in the reassembly AND non-reassembly variants (the gated imports leave no unused symbol either way). fmt --check clean across the 3 touched crates after the import-wrap normalisation."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Session-review Finding B is CLOSED: the multicast RX + sweep reassembly tail lives ONCE in wz-session-core (multicast_rx); the AP + MCU loops own only IO + clock structure + the Router instance. Finding A was closed by R311mf (crate) + R311mg (facade) - MCU multicast Fragment RX/TX reachable through both layers.",
+        "Structural improvement banked: sweep_reporting is now at its true home (reassembly_dispatch), so a future session-multicast-without-unicast profile keeps the multicast sweep SSOT uncoupled from unicast.",
+        "Open north-star: a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry), now including the transport-fragmentation profile.",
+        "Pre-existing facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls (R311lv)."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
