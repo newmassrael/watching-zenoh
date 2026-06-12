@@ -15,9 +15,16 @@
 //! The JOIN admit, the Frame admit-and-fan, and the KeepAlive lease refresh are
 //! handled here in full (none touch reassembly state). The reassembly-divergent
 //! tails — Fragment reassembly, the out-of-order-Frame chain abort, and the
-//! pre-Close peer-chain abort — are returned as [`MulticastRxNext`] for the
-//! caller to layer with its own (feature-gated, profile-specific) reassembly
-//! Router, a type the runtime-agnostic SSOT does not own.
+//! pre-Close peer-chain abort — are returned as [`MulticastRxNext`].
+//!
+//! Two entry points layer that: [`dispatch_multicast_inbound`] is the classify
+//! that returns the tail (a non-reassembly loop calls it and acts only on
+//! `Close`); [`dispatch_multicast_inbound_reassembling`] (R311mh) is the
+//! reassembly-aware wrapper that applies the FULL tail with the caller's
+//! reassembly Router, so a reassembly-built loop calls ONE function and the tail
+//! wiring is no longer hand-mirrored per loop. The Router type itself
+//! (`ReassemblyDispatcher`) stays caller-owned (feature-gated, profile-specific
+//! pool dims) — the SSOT takes it by `&mut`.
 
 use core::net::SocketAddr;
 
@@ -28,6 +35,15 @@ use crate::multicast_join::{decode_join, validate_join};
 use crate::multicast_params::MulticastParams;
 use crate::network_message::parse_frame_payload;
 use crate::wire_const;
+// R311mh — the reassembly-divergent tail SSOT (dispatch_multicast_inbound_reassembling
+// below): the Fragment / FrameOutOfOrder / Close handlers a reassembly-capable
+// loop layers onto the classify. Gated like ingest_multicast_fragment.
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+use crate::multicast_dispatch::{
+    abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
+};
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+use crate::reassembly_dispatch::ReassemblyDispatcher;
 
 /// What an inbound multicast datagram still needs from the caller AFTER the
 /// shared [`dispatch_multicast_inbound`] has applied the non-reassembly
@@ -131,4 +147,98 @@ where
         Some(wire_const::T_MID_CLOSE) => MulticastRxNext::Close,
         _ => MulticastRxNext::Done,
     }
+}
+
+/// The reassembly-aware RX dispatch: [`dispatch_multicast_inbound`] PLUS the
+/// reassembly-divergent tail, applied with the caller's reassembly Router so
+/// the out-of-order-Frame chain abort, Fragment reassembly, and pre-Close
+/// peer-chain abort live HERE ONCE instead of being hand-mirrored in each
+/// drive loop's match (R311mh — the session-review Finding B: the classify was
+/// already SSOT via [`dispatch_multicast_inbound`], but the tail wiring was
+/// duplicated byte-for-byte between the AP `multicast_glue` and MCU
+/// `multicast_drive` loops). Both reassembly-built loops call THIS; a
+/// non-reassembly loop calls the plain [`dispatch_multicast_inbound`] and acts
+/// only on [`MulticastRxNext::Close`] (FrameOutOfOrder / Fragment are no-ops
+/// without a Router). zenoh-pico parity: the Close tail aborts the peer's
+/// chains BEFORE `close_by_src`, so a recycled slot index can never continue a
+/// dead peer's chain.
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+pub fn dispatch_multicast_inbound_reassembling<
+    F,
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    params: &MulticastParams,
+    bytes: &[u8],
+    src: SocketAddr,
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    F: FnMut(IterationEvent<'_>),
+{
+    match dispatch_multicast_inbound(dispatcher, params, bytes, src, now_ms, on_event) {
+        MulticastRxNext::Done => {}
+        MulticastRxNext::FrameOutOfOrder { reliable } => {
+            // An out-of-order Frame clears the channel's in-progress chain
+            // (pico clears the dbuf + state, multicast/rx.c): the dropped frame
+            // may have superseded the chain's continuation.
+            if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                reasm.abort_channel(&multicast_chain_key(idx), reliable);
+            }
+        }
+        MulticastRxNext::Fragment => {
+            // SN-gate per peer, reassemble per (slot, channel) chain; a
+            // completed chain fans the SAME FramePayload Poll a whole Frame does
+            // (zenoh-pico `_z_multicast_handle_fragment_inner`).
+            if let Ok(InboundFrame::Fragment {
+                reliable,
+                sn,
+                more,
+                payload,
+                ..
+            }) = parse_inbound(bytes)
+            {
+                ingest_multicast_fragment(
+                    dispatcher, reasm, src, reliable, sn, more, &payload, now_ms, on_event,
+                );
+            }
+        }
+        MulticastRxNext::Close => {
+            // The departing peer's in-progress chains die with it BEFORE its
+            // slot index can recycle (pico's per-entry dbufs).
+            if let Some(idx) = dispatcher.peer_index_by_src(src) {
+                abort_peer_chains(reasm, idx);
+            }
+            dispatcher.close_by_src(src);
+        }
+    }
+}
+
+/// The reassembly-aware multicast sweep tick: reclaim stalled reassembly chains
+/// past their deadline (surfacing the timed-out count as an
+/// [`IterationEvent::ReassemblyTimeout`]) THEN evict leased-out peers, aborting
+/// each evicted slot's chains before its index recycles. The reassembly twin of
+/// the bare [`MulticastDispatcher::sweep`] — R311mh extracts it so the AP
+/// `multicast_glue` and MCU `multicast_drive` loops stop hand-mirroring the
+/// identical `sweep_reporting` + `sweep_with(abort_peer_chains)` pair. A
+/// non-reassembly loop calls the bare `sweep` instead.
+#[cfg(all(feature = "reassembly", feature = "alloc"))]
+pub fn sweep_multicast_reassembling<
+    F,
+    const MAX_PEERS: usize,
+    const SLOTS: usize,
+    const CAP: usize,
+>(
+    dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    F: FnMut(IterationEvent<'_>),
+{
+    crate::reassembly_dispatch::sweep_reporting(reasm, now_ms, on_event);
+    dispatcher.sweep_with(now_ms, |idx| abort_peer_chains(reasm, idx));
 }

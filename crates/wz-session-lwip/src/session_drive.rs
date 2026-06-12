@@ -37,7 +37,11 @@ use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeout
 #[cfg(feature = "reassembly")]
 use wz_runtime_lwip::reassembly_rx::mcu_reassembly;
 #[cfg(feature = "reassembly")]
-use wz_session_core::drive::{report_outcome_reassembling, sweep_reporting};
+use wz_session_core::drive::report_outcome_reassembling;
+// R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
+// helper, not a unicast-drive one).
+#[cfg(feature = "reassembly")]
+use wz_session_core::reassembly_dispatch::sweep_reporting;
 
 use crate::driver::LwipUdpDriver;
 

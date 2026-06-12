@@ -610,7 +610,11 @@ use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatche
 // drive loop passes its `TokioReassembly` dims (the `Fragment` type is now
 // named only inside that shared helper).
 #[cfg(feature = "reassembly")]
-use wz_session_core::drive::{report_outcome_reassembling, sweep_reporting};
+use wz_session_core::drive::report_outcome_reassembling;
+// R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
+// helper, not a unicast-drive one).
+#[cfg(feature = "reassembly")]
+use wz_session_core::reassembly_dispatch::sweep_reporting;
 
 /// Reassembly slot-pool dimensions for the unicast tokio session. R311in
 /// — sourced from the SCE-codegen'd AP buffer-pool constants

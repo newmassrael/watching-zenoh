@@ -86,8 +86,6 @@
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-#[cfg(feature = "reassembly")]
-use wz_session_core::drive::sweep_reporting;
 use wz_session_core::driver_loop::IterationEvent;
 // R311md — the declarer-side liveliness reply builders (build_*_reply) moved into
 // the shared `wz_session_core::multicast_reply_sink::MulticastReplySink<Q>` SSOT
@@ -95,19 +93,18 @@ use wz_session_core::driver_loop::IterationEvent;
 // longer names them (it contributes only the `TokioReplyBacking`). The Frame
 // encoders + the egress splitter likewise live in the shared
 // `wz_session_core::multicast_tx` SSOT (R311lx).
-// R311lv — the inbound Frame codec is now only named in this loop's
-// reassembly Fragment tail (the JOIN / Frame classify moved to the shared
-// `multicast_rx` SSOT); the tests import their own copy.
-#[cfg(feature = "reassembly")]
-use wz_session_core::inbound::{parse_inbound, InboundFrame};
 use wz_session_core::link::{LinkEvent, TxFrame};
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
-#[cfg(feature = "reassembly")]
-use wz_session_core::multicast_dispatch::{
-    abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
-};
 use wz_session_core::multicast_join::encode_join;
+// R311mh — the RX dispatch SSOTs: a reassembly build drives the reassembly-aware
+// dispatch + sweep (the tail wiring lives in `multicast_rx`, not hand-mirrored
+// here); a non-reassembly build calls the bare classify + acts on Close only.
+#[cfg(not(feature = "reassembly"))]
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
+#[cfg(feature = "reassembly")]
+use wz_session_core::multicast_rx::{
+    dispatch_multicast_inbound_reassembling, sweep_multicast_reassembling,
+};
 // R311lx — the shared TX emit SSOT: the item-variant -> mint -> encode ->
 // fragment decision the loop's outbound arm used to carry inline. The enum +
 // the `multicast_put_literal` builder are re-exported so the loop's public TX
@@ -351,11 +348,29 @@ where
                     // nothing can be attributed, so the message is ignored.
                     if let Some(src) = rx.src {
                         let now = clock.now_monotonic_ms();
-                        // R311lv — the JOIN admit / Frame admit-and-fan / KeepAlive
-                        // refresh are the shared `wz_session_core` RxDispatch SSOT
-                        // (one home for both the AP + MCU loops). This loop owns
-                        // only the reassembly-divergent tail it hands back.
-                        match dispatch_multicast_inbound(
+                        // R311lv/R311mh — the JOIN admit / Frame admit-and-fan /
+                        // KeepAlive refresh AND the reassembly-divergent tail
+                        // (FrameOutOfOrder chain abort / Fragment reassembly /
+                        // pre-Close peer-chain abort) are the shared
+                        // `wz_session_core` RX dispatch SSOTs — one home for both
+                        // the AP + MCU loops, so this loop owns only the IO +
+                        // clock structure. A reassembly build calls the
+                        // reassembly-aware variant (the Router is the loop's);
+                        // a non-reassembly build calls the bare classify and acts
+                        // only on Close (FrameOutOfOrder / Fragment are no-ops
+                        // without a Router).
+                        #[cfg(feature = "reassembly")]
+                        dispatch_multicast_inbound_reassembling(
+                            dispatcher,
+                            &mut reasm,
+                            params,
+                            &rx.bytes,
+                            src,
+                            now,
+                            &mut on_event,
+                        );
+                        #[cfg(not(feature = "reassembly"))]
+                        if let MulticastRxNext::Close = dispatch_multicast_inbound(
                             dispatcher,
                             params,
                             &rx.bytes,
@@ -363,63 +378,7 @@ where
                             now,
                             &mut on_event,
                         ) {
-                            MulticastRxNext::Done => {}
-                            MulticastRxNext::FrameOutOfOrder { reliable } => {
-                                // R311kn — an out-of-order FRAME clears the
-                                // channel's in-progress reassembly chain (pico
-                                // clears the dbuf + state, multicast/rx.c
-                                // `_z_multicast_handle_frame`): the dropped frame
-                                // may have superseded the chain's continuation, so
-                                // completing it would mix generations.
-                                #[cfg(feature = "reassembly")]
-                                if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                                    reasm.abort_channel(&multicast_chain_key(idx), reliable);
-                                }
-                                #[cfg(not(feature = "reassembly"))]
-                                let _ = reliable;
-                            }
-                            MulticastRxNext::Close => {
-                                // Graceful departure (attributed by source
-                                // address). R311kn — the departing peer's
-                                // in-progress chains die with it (pico's per-entry
-                                // dbufs), BEFORE the slot index can be re-issued.
-                                #[cfg(feature = "reassembly")]
-                                if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                                    abort_peer_chains(&mut reasm, idx);
-                                }
-                                dispatcher.close_by_src(src);
-                            }
-                            MulticastRxNext::Fragment => {
-                                // R311kn — the multicast fragment RX arm: SN-gate
-                                // per peer, reassemble per (slot, channel) chain,
-                                // and fan the completed message through the SAME
-                                // observer event the Frame arm uses (zenoh-pico
-                                // `_z_multicast_handle_fragment_inner`). Without
-                                // `reassembly` the fragment is dropped — pico
-                                // "Fragment dropped because fragmentation feature
-                                // is deactivated".
-                                #[cfg(feature = "reassembly")]
-                                if let Ok(InboundFrame::Fragment {
-                                    reliable,
-                                    sn,
-                                    more,
-                                    payload,
-                                    ..
-                                }) = parse_inbound(&rx.bytes)
-                                {
-                                    ingest_multicast_fragment(
-                                        dispatcher,
-                                        &mut reasm,
-                                        src,
-                                        reliable,
-                                        sn,
-                                        more,
-                                        &payload,
-                                        now,
-                                        &mut on_event,
-                                    );
-                                }
-                            }
+                            dispatcher.close_by_src(src);
                         }
                     }
                 }
@@ -437,11 +396,11 @@ where
                 // recycles, and the reassembly deadline sweep runs on the
                 // same tick (the unicast loop's per-iteration twin).
                 let now = clock.now_monotonic_ms();
+                // R311mh — the reassembly sweep tail (deadline reclaim + report,
+                // then evict-with-chain-abort) is the shared multicast_rx SSOT;
+                // a non-reassembly loop calls the bare sweep.
                 #[cfg(feature = "reassembly")]
-                {
-                    sweep_reporting(&mut reasm, now, &mut on_event);
-                    dispatcher.sweep_with(now, |idx| abort_peer_chains(&mut reasm, idx));
-                }
+                sweep_multicast_reassembling(dispatcher, &mut reasm, now, &mut on_event);
                 #[cfg(not(feature = "reassembly"))]
                 dispatcher.sweep(now);
             }

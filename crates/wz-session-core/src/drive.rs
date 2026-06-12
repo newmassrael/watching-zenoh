@@ -466,29 +466,8 @@ pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F
     }
 }
 
-/// Run one reassembly deadline sweep and report the eviction count.
-///
-/// The shared SSOT both drive loops call once per iteration in place of a
-/// bare [`ReassemblyDispatcher::sweep`]: it aborts + reclaims every chain
-/// whose `reassembly_timeout_ms` deadline has elapsed at `now_ms`, then — if
-/// any chain timed out — raises a single [`IterationEvent::ReassemblyTimeout`]
-/// carrying the count so the observer sees the eviction (the sweep itself is
-/// otherwise silent). A zero-eviction sweep reports nothing, so the steady
-/// state stays event-free.
-///
-/// Generic over the pool dims so the AP (32 / 65536) and MCU (4 / 4096)
-/// profiles share one path, exactly as [`report_outcome_reassembling`] does
-/// for the ingest side.
-#[cfg(feature = "reassembly")]
-pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, F>(
-    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
-    now_ms: u64,
-    on_event: &mut F,
-) where
-    F: FnMut(IterationEvent<'_>),
-{
-    let timed_out = reasm.sweep(now_ms);
-    if timed_out > 0 {
-        on_event(IterationEvent::ReassemblyTimeout(timed_out));
-    }
-}
+// R311mh — `sweep_reporting` relocated to `crate::reassembly_dispatch`: it is a
+// pure reassembly helper (no unicast actions / runtime generic, unlike its
+// ingest twin `report_outcome_reassembling`), so housing it in this
+// session-unicast-gated module wrongly coupled the multicast sweep SSOT to
+// `session-unicast`. It now lives next to `ReassemblyDispatcher`.

@@ -98,24 +98,22 @@ use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
-use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
-// R311mf — multicast Fragment RX reassembly, the MCU twin of the AP loop's
-// R311kn arm: the shared wz_session_core SSOT (ingest_multicast_fragment /
-// abort_peer_chains / multicast_chain_key), the MCU reassembly Router
-// (mcu_reassembly over the SCE buffer-pool, the same one run_session drives),
-// the inbound Fragment codec (parse_inbound), and the deadline sweep reporter.
-// All `reassembly`-gated: without it the loop drops Fragment tails (pico's
-// "fragmentation deactivated" behaviour). transport-fragmentation implies
-// reassembly, so a fragmenting-TX node auto-reassembles inbound.
+// R311mf/R311mh — multicast Fragment RX reassembly. The reassembly-divergent
+// tail (FrameOutOfOrder chain abort / Fragment reassembly / pre-Close peer-chain
+// abort) + the sweep tail are the shared wz_session_core multicast_rx SSOTs
+// (dispatch_multicast_inbound_reassembling / sweep_multicast_reassembling) — the
+// MCU loop owns only the Router (mcu_reassembly over the SCE buffer-pool, the
+// same one run_session drives). All `reassembly`-gated: without it the loop
+// drops Fragment tails (pico's "fragmentation deactivated") and calls the bare
+// classify + sweep. transport-fragmentation implies reassembly, so a
+// fragmenting-TX node auto-reassembles inbound.
 #[cfg(feature = "reassembly")]
 use wz_runtime_lwip::reassembly_rx::mcu_reassembly;
+#[cfg(not(feature = "reassembly"))]
+use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
 #[cfg(feature = "reassembly")]
-use wz_session_core::drive::sweep_reporting;
-#[cfg(feature = "reassembly")]
-use wz_session_core::inbound::{parse_inbound, InboundFrame};
-#[cfg(feature = "reassembly")]
-use wz_session_core::multicast_dispatch::{
-    abort_peer_chains, ingest_multicast_fragment, multicast_chain_key,
+use wz_session_core::multicast_rx::{
+    dispatch_multicast_inbound_reassembling, sweep_multicast_reassembling,
 };
 // R311ly/R311lz — the shared TX emit SSOT (the AP loop calls the same).
 // MulticastTxItem is the unconditional pull-seam item type (uninhabited without
@@ -450,84 +448,42 @@ where
         if let Some(dg) = driver.try_recv() {
             let src = peer_key(dg.src_addr, dg.src_port);
             let bytes = dg.data.as_slice();
-            // R311lv — the shared RxDispatch SSOT (JOIN admit / Frame
-            // admit-and-fan / KeepAlive refresh) — the same `wz_session_core`
-            // primitive the AP loop drives, so the §3.1 classify lives in one
-            // home. R311mf — the reassembly-divergent tail (out-of-order-chain
-            // abort + Fragment reassembly + per-peer chain death at Close) is
-            // now wired through the shared SSOT, the MCU twin of the AP loop's
-            // R311kn arm; `reassembly`-gated, so without it Fragment tails drop
-            // (pico's fragmentation-off behaviour).
-            match dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event) {
-                MulticastRxNext::Done => {}
-                MulticastRxNext::FrameOutOfOrder { reliable } => {
-                    // An out-of-order FRAME clears the channel's in-progress
-                    // reassembly chain (pico clears the dbuf + state,
-                    // multicast/rx.c `_z_multicast_handle_frame`): the dropped
-                    // frame may have superseded the chain's continuation, so
-                    // completing it would mix generations.
-                    #[cfg(feature = "reassembly")]
-                    if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                        reasm.abort_channel(&multicast_chain_key(idx), reliable);
-                    }
-                    #[cfg(not(feature = "reassembly"))]
-                    let _ = reliable;
-                }
-                MulticastRxNext::Fragment => {
-                    // SN-gate per peer, reassemble per (slot, channel) chain,
-                    // and fan the completed message through the SAME observer
-                    // event the Frame arm uses (zenoh-pico
-                    // `_z_multicast_handle_fragment_inner`). Without
-                    // `reassembly` the fragment is dropped.
-                    #[cfg(feature = "reassembly")]
-                    if let Ok(InboundFrame::Fragment {
-                        reliable,
-                        sn,
-                        more,
-                        payload,
-                        ..
-                    }) = parse_inbound(bytes)
-                    {
-                        ingest_multicast_fragment(
-                            dispatcher,
-                            &mut reasm,
-                            src,
-                            reliable,
-                            sn,
-                            more,
-                            &payload,
-                            now,
-                            &mut on_event,
-                        );
-                    }
-                }
-                MulticastRxNext::Close => {
-                    // Graceful departure (attributed by source address). The
-                    // departing peer's in-progress chains die with it (pico's
-                    // per-entry dbufs), BEFORE the slot index can be re-issued.
-                    #[cfg(feature = "reassembly")]
-                    if let Some(idx) = dispatcher.peer_index_by_src(src) {
-                        abort_peer_chains(&mut reasm, idx);
-                    }
-                    dispatcher.close_by_src(src);
-                }
+            // R311lv/R311mf/R311mh — the shared RX dispatch SSOTs: JOIN admit /
+            // Frame admit-and-fan / KeepAlive refresh PLUS the reassembly-
+            // divergent tail (out-of-order-chain abort + Fragment reassembly +
+            // per-peer chain death at Close) all live in `wz_session_core`, so
+            // the AP + MCU loops share one home and own only the IO + clock
+            // structure. A reassembly build drives the reassembly-aware dispatch
+            // (the Router is the loop's); without it the loop calls the bare
+            // classify and acts only on Close (FrameOutOfOrder / Fragment are
+            // no-ops without a Router — pico's fragmentation-off behaviour).
+            #[cfg(feature = "reassembly")]
+            dispatch_multicast_inbound_reassembling(
+                dispatcher,
+                &mut reasm,
+                params,
+                bytes,
+                src,
+                now,
+                &mut on_event,
+            );
+            #[cfg(not(feature = "reassembly"))]
+            if let MulticastRxNext::Close =
+                dispatch_multicast_inbound(dispatcher, params, bytes, src, now, &mut on_event)
+            {
+                dispatcher.close_by_src(src);
             }
             continue;
         }
 
         // PeerSweep: evict peers past their advertised lease on the tick_ms
         // cadence (idempotent; sweeping more often only sharpens eviction).
-        // R311mf — under `reassembly`, an evicted peer's chains are aborted
-        // before its slot index recycles (sweep_with hook), and the stalled
-        // reassembly chains whose continuation never arrived are reclaimed on
-        // the same tick (sweep_reporting surfaces the drop count) — the MCU
-        // twin of the AP loop's reassembly sweep.
+        // R311mh — under `reassembly` the deadline-reclaim + evict-with-chain-
+        // abort tail is the shared multicast_rx sweep SSOT (the AP loop calls
+        // the same); a non-reassembly loop calls the bare sweep.
         if now >= next_sweep_ms {
             #[cfg(feature = "reassembly")]
-            {
-                sweep_reporting(&mut reasm, now, &mut on_event);
-                dispatcher.sweep_with(now, |idx| abort_peer_chains(&mut reasm, idx));
-            }
+            sweep_multicast_reassembling(dispatcher, &mut reasm, now, &mut on_event);
             #[cfg(not(feature = "reassembly"))]
             dispatcher.sweep(now);
             next_sweep_ms = now.saturating_add(tick_ms);

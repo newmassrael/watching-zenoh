@@ -69,6 +69,11 @@ use crate::reassembly_slot::{
     ReassemblySlotInject, ReassemblySlotPolicy, ReassemblySlotState,
 };
 use sce_rust_runtime::Engine;
+// R311mh — `sweep_reporting` (below) raises an IterationEvent on a timed-out
+// chain; the event surface needs `alloc` (the driver_loop module), so the
+// reporting wrapper is alloc-gated within this reassembly-gated module.
+#[cfg(feature = "alloc")]
+use crate::driver_loop::IterationEvent;
 
 /// Maximum peer-key byte length: sized to the widest key a transport
 /// feeds the chain key — the unicast peer ZID (a zenoh ZID is up to 16
@@ -529,6 +534,37 @@ fn stage<const CAP: usize>(buf: &mut BoundedVec<u8, CAP>, payload: &[u8]) -> Res
         buf.push(b).map_err(|_| ())?;
     }
     Ok(())
+}
+
+/// Run one reassembly deadline sweep and report the eviction count.
+///
+/// The shared SSOT both drive loops call once per iteration in place of a
+/// bare [`ReassemblyDispatcher::sweep`]: it aborts + reclaims every chain
+/// whose `reassembly_timeout_ms` deadline has elapsed at `now_ms`, then — if
+/// any chain timed out — raises a single [`IterationEvent::ReassemblyTimeout`]
+/// carrying the count so the observer sees the eviction (the sweep itself is
+/// otherwise silent). A zero-eviction sweep reports nothing, so the steady
+/// state stays event-free.
+///
+/// Generic over the pool dims so the AP (32 / 65536) and MCU (4 / 4096)
+/// profiles share one path. R311mh relocated it here from `crate::drive`: it
+/// is a pure reassembly helper (no unicast actions / runtime generic), so it
+/// belongs next to [`ReassemblyDispatcher`], not in the session-unicast-gated
+/// drive module — that is what let the multicast sweep SSOT
+/// ([`crate::multicast_rx::sweep_multicast_reassembling`]) reuse it without a
+/// false `session-unicast` coupling.
+#[cfg(feature = "alloc")]
+pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, F>(
+    reasm: &mut ReassemblyDispatcher<SLOTS, CAP>,
+    now_ms: u64,
+    on_event: &mut F,
+) where
+    F: FnMut(IterationEvent<'_>),
+{
+    let timed_out = reasm.sweep(now_ms);
+    if timed_out > 0 {
+        on_event(IterationEvent::ReassemblyTimeout(timed_out));
+    }
 }
 
 #[cfg(test)]
