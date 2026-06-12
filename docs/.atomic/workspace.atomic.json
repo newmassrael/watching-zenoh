@@ -35403,6 +35403,52 @@
         "Finding 4 (test-support feature vs sibling-crate convention) + Finding 5 (observer flush_get_prunes 2-of-3 drain asymmetry) remain accepted judgment calls (R311lv); minor D/E (cross-profile observer event-stream asymmetry) remains open."
       ]
     },
+    "Round 311mf": {
+      "decision_summary": "R311mf: MCU multicast Fragment RX/TX - the AP R311kn/ko arms ported to run_multicast_session: reassembly RX wiring + a transport-fragmentation feature that splits TX via the shared multicast_tx_emit SSOT.",
+      "changes_bullets": [
+        "crates/wz-session-lwip/src/multicast_drive.rs: run_multicast_session now wires the reassembly-divergent RX tail through the shared wz-session-core SSOT, the MCU twin of the AP loop's R311kn arm. Under `reassembly` a per-(slot,channel) Router (mcu_reassembly = ReassemblyDispatcher<4,4096>, the same run_session owns) is built before the loop; the FrameOutOfOrder arm aborts the channel's in-progress chain (reasm.abort_channel via peer_index_by_src), the Fragment arm parses the inbound T_MID_FRAGMENT (parse_inbound -> InboundFrame::Fragment) and reassembles via ingest_multicast_fragment (per-peer SN gate -> chain -> the completed message fans as the SAME FramePayload Poll a whole Frame does), and the Close arm aborts the departing peer's chains before close_by_src. The sweep arm becomes sweep_with(now, abort_peer_chains) + sweep_reporting under `reassembly`, the bare sweep otherwise. Without the feature the arms keep the prior drop-Fragment behaviour (pico fragmentation-off).",
+        "crates/wz-session-lwip/Cargo.toml: a new `transport-fragmentation` feature = [reassembly, wz-session-core/transport-fragmentation] forwards the core umbrella (reassembly + codec-fragment + alloc) and re-uses this crate's reassembly forward for the wz-runtime-lwip Router. No drive-loop code change for TX: run_multicast_session already frames its next_tx seam through the shared multicast_tx_emit SSOT, which splits an oversize payload via multicast_frame_or_fragments once the feature is on - exactly as the AP loop. The MCU TX port was a feature forward; the fragmentation SSOT was already shared (R311ko).",
+        "Test run_multicast_session_reassembles_a_fragmented_put_over_loopback (gated transport-fragmentation,codec-push): the real-lwIP fragment leg. A 200-byte z_put at batch_size 64 is proven to fragment (>1 datagram via a direct multicast_tx_emit probe), multicast to the group, echoed back, and reassembled by the Fragment RX arm into one observed Push (no ReassemblyDropped). The pre-admitted peer JOIN advertises batch_size 64 to match self: validate_join admits only when the JOIN's batch_size equals the receiver's params, else the echoed fragments hit an UnknownPeer drop.",
+        "scripts/run-ci.sh: C1m gains a transport-multicast,reassembly arm (the reassembly RX path composing WITHOUT fragmentation) + a transport-multicast,transport-fragmentation,codec-push arm (the round-trip), test + clippy each. G.11 cross-real adds a wz-session-lwip transport-multicast,transport-fragmentation,codec-push build on every non-riscv target - the reassembly Router + TX splitter cross-compile on thumbv6m (Vec-backed, no Arc), the M0 fragment reach."
+      ],
+      "verification_bullets": [
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). \"run-ci: all required layers pass\", no FAIL lines.",
+        "Layer C1m pass: the new transport-multicast,reassembly + transport-multicast,transport-fragmentation,codec-push arms (test + clippy each) pass alongside the existing multicast lanes; the fragment round-trip test passes (5 tests in the fragmentation build).",
+        "Root cause found during bring-up + recorded: the first round-trip failed silently (saw_push false, no drop event) because validate_join (multicast_join.rs) rejects a JOIN whose batch_size != the receiver's params; the pre-admitted peer was on the default 2_048 while self ran 64, so the peer was never admitted and the echoed fragments hit an UnknownPeer drop. A direct-drive diagnostic (admit + feed the 5 probe fragments through dispatch + ingest) confirmed the SSOT completes (completed=1, dropped=0) once batch_size matches; the fix set the peer JOIN's batch_size to 64.",
+        "G.11 session-lwip cross-real OK on all 6 ARM targets incl thumbv6m-none-eabi (the new fragment build); riscv32imac SKIPs on the missing toolchain. A standalone thumbv6m cross-build of -p wz-session-lwip --features transport-multicast,transport-fragmentation,codec-push returns 0 - the fragment path is Arc-free (M0-safe). fmt --check + clippy --all-targets -D warnings clean for the new arms."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "MCU multicast Fragment RX/TX is now wired (the R311mc/md/me carry #2 is CLOSED): run_multicast_session reassembles inbound fragment chains + (with transport-fragmentation) splits oversize TX through the shared SSOTs, at AP R311kn/ko parity, M0-reachable.",
+        "Open north-star: a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry) - now including the transport-fragmentation profile.",
+        "Pre-existing (out-of-scope) facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile (unicast session_glue unconditional vs session-unicast-gated modules). A separate facade feature-completeness item.",
+        "Finding 4 (test-support feature vs sibling-crate convention) + Finding 5 (observer flush_get_prunes 2-of-3 drain asymmetry) remain accepted judgment calls (R311lv); minor D/E (cross-profile observer event-stream asymmetry) remains open."
+      ],
+      "publishable_decision_summary": "R311mf: MCU multicast Fragment RX/TX - the AP R311kn/ko arms ported to run_multicast_session: reassembly RX wiring + a transport-fragmentation feature that splits TX via the shared multicast_tx_emit SSOT.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-lwip/src/multicast_drive.rs: run_multicast_session now wires the reassembly-divergent RX tail through the shared wz-session-core SSOT, the MCU twin of the AP loop's R311kn arm. Under `reassembly` a per-(slot,channel) Router (mcu_reassembly = ReassemblyDispatcher<4,4096>, the same run_session owns) is built before the loop; the FrameOutOfOrder arm aborts the channel's in-progress chain (reasm.abort_channel via peer_index_by_src), the Fragment arm parses the inbound T_MID_FRAGMENT (parse_inbound -> InboundFrame::Fragment) and reassembles via ingest_multicast_fragment (per-peer SN gate -> chain -> the completed message fans as the SAME FramePayload Poll a whole Frame does), and the Close arm aborts the departing peer's chains before close_by_src. The sweep arm becomes sweep_with(now, abort_peer_chains) + sweep_reporting under `reassembly`, the bare sweep otherwise. Without the feature the arms keep the prior drop-Fragment behaviour (pico fragmentation-off).",
+        "crates/wz-session-lwip/Cargo.toml: a new `transport-fragmentation` feature = [reassembly, wz-session-core/transport-fragmentation] forwards the core umbrella (reassembly + codec-fragment + alloc) and re-uses this crate's reassembly forward for the wz-runtime-lwip Router. No drive-loop code change for TX: run_multicast_session already frames its next_tx seam through the shared multicast_tx_emit SSOT, which splits an oversize payload via multicast_frame_or_fragments once the feature is on - exactly as the AP loop. The MCU TX port was a feature forward; the fragmentation SSOT was already shared (R311ko).",
+        "Test run_multicast_session_reassembles_a_fragmented_put_over_loopback (gated transport-fragmentation,codec-push): the real-lwIP fragment leg. A 200-byte z_put at batch_size 64 is proven to fragment (>1 datagram via a direct multicast_tx_emit probe), multicast to the group, echoed back, and reassembled by the Fragment RX arm into one observed Push (no ReassemblyDropped). The pre-admitted peer JOIN advertises batch_size 64 to match self: validate_join admits only when the JOIN's batch_size equals the receiver's params, else the echoed fragments hit an UnknownPeer drop.",
+        "scripts/run-ci.sh: C1m gains a transport-multicast,reassembly arm (the reassembly RX path composing WITHOUT fragmentation) + a transport-multicast,transport-fragmentation,codec-push arm (the round-trip), test + clippy each. G.11 cross-real adds a wz-session-lwip transport-multicast,transport-fragmentation,codec-push build on every non-riscv target - the reassembly Router + TX splitter cross-compile on thumbv6m (Vec-backed, no Arc), the M0 fragment reach."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). \"run-ci: all required layers pass\", no FAIL lines.",
+        "Layer C1m pass: the new transport-multicast,reassembly + transport-multicast,transport-fragmentation,codec-push arms (test + clippy each) pass alongside the existing multicast lanes; the fragment round-trip test passes (5 tests in the fragmentation build).",
+        "Root cause found during bring-up + recorded: the first round-trip failed silently (saw_push false, no drop event) because validate_join (multicast_join.rs) rejects a JOIN whose batch_size != the receiver's params; the pre-admitted peer was on the default 2_048 while self ran 64, so the peer was never admitted and the echoed fragments hit an UnknownPeer drop. A direct-drive diagnostic (admit + feed the 5 probe fragments through dispatch + ingest) confirmed the SSOT completes (completed=1, dropped=0) once batch_size matches; the fix set the peer JOIN's batch_size to 64.",
+        "G.11 session-lwip cross-real OK on all 6 ARM targets incl thumbv6m-none-eabi (the new fragment build); riscv32imac SKIPs on the missing toolchain. A standalone thumbv6m cross-build of -p wz-session-lwip --features transport-multicast,transport-fragmentation,codec-push returns 0 - the fragment path is Arc-free (M0-safe). fmt --check + clippy --all-targets -D warnings clean for the new arms."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU multicast Fragment RX/TX is now wired (the R311mc/md/me carry #2 is CLOSED): run_multicast_session reassembles inbound fragment chains + (with transport-fragmentation) splits oversize TX through the shared SSOTs, at AP R311kn/ko parity, M0-reachable.",
+        "Open north-star: a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry) - now including the transport-fragmentation profile.",
+        "Pre-existing (out-of-scope) facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile (unicast session_glue unconditional vs session-unicast-gated modules). A separate facade feature-completeness item.",
+        "Finding 4 (test-support feature vs sibling-crate convention) + Finding 5 (observer flush_get_prunes 2-of-3 drain asymmetry) remain accepted judgment calls (R311lv); minor D/E (cross-profile observer event-stream asymmetry) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
@@ -41731,5 +41777,5 @@
   "entities": {},
   "predicates": {},
   "narrative_facts": {},
-  "schema_version": 19
+  "schema_version": 20
 }
