@@ -35359,6 +35359,50 @@
         "Finding 4 (test-support feature vs sibling-crate convention) + Finding 5 (observer flush_get_prunes 2-of-3 drain asymmetry) remain accepted judgment calls (R311lv); minor D/E (cross-profile observer event-stream asymmetry) remains open."
       ]
     },
+    "Round 311me": {
+      "decision_summary": "R311me: deferred_fire gate collapsed to `deferred-fire` alone; liveliness-token no longer drags Arc onto the M0 multicast profile, so thumbv6m liveliness cross-builds via the inline-fire path.",
+      "changes_bullets": [
+        "lib.rs: the deferred_fire module #[cfg] collapses from all(feature=\"alloc\", any(deferred-fire, session-matching, declare-subscriber, declare-queryable, liveliness-token, liveliness-subscriber, query-reply)) to feature=\"deferred-fire\" alone (the feature implies alloc). The pre-R311lh plane arms were dead weight: no wz-session-core code instantiates a deferred type under them (only doc-links in decl_sink.rs / declare/matching.rs), and the only real consumer, AP wz-runtime-tokio, enables deferred-fire unconditionally on its wz-session-core dependency - so the module still compiles for the tier that uses it.",
+        "Root cause closed: liveliness-token in the gate forced `use alloc::sync::Arc;` (deferred_fire.rs:101) to compile on the MCU multicast profile; thumbv6m (ARMv6-M) has no target_has_atomic=\"ptr\", so the otherwise-unused module failed to build (E0432 unresolved import alloc::sync). The MCU multicast liveliness / queryable reply is staged inline through the Rc<RefCell<VecDeque>>-backed MulticastReplyQueue (wz-session-lwip multicast_drive.rs), never the deferred seam - so dropping the module from that profile IS the inline-fire path the R311mc/md carry asked for, not a behaviour change.",
+        "Docs synced (non-store source files): the lib.rs deferred_fire module-decl comment, the deferred_fire.rs \"## Gating\" doc, and the wz-session-core Cargo.toml deferred-fire feature comment all rewritten to record the sole-gate structure and why the plane arms were removed (redundant post-R311lh + the thumbv6m Arc break).",
+        "scripts/run-ci.sh G.11 Build 4 (facade cross-real + liveliness-token): the `[[ \"$t\" == thumbv6m-none-eabi ]] ||` skip guard removed so liveliness-token now cross-builds on M0 too (a plain subshell like Build 3); the comment block updated from \"SKIPS thumbv6m / carry\" to the inline-fire reach."
+      ],
+      "verification_bullets": [
+        "Reproduced the failure FIRST: wz-session-core cross-build for thumbv6m-none-eabi with the MCU multicast liveliness feature set (alloc,session-unicast,no_std,codec-join,codec-frame,codec-close,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable,session-multicast) failed E0432 \"unresolved import alloc::sync\" at deferred_fire.rs:101 - root cause confirmed before the fix (the unused module compiled only because liveliness-token was a gate arm).",
+        "After collapsing the gate the same thumbv6m build passes. AP unaffected: wz-runtime-tokio builds + the deferred_fire_infra integration test 5/5 pass; the host subset (liveliness-token WITHOUT deferred-fire) and the no-alloc decl lane (--no-default-features codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber) both build.",
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). G.11 session-lwip cross-real now reports thumbv6m-none-eabi OK - the un-skipped Build 4 (facade session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable) - alongside the 5 other ARM targets; riscv32imac SKIPs on the missing riscv32-unknown-elf-gcc (pre-existing, toolchain-only)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "M0 (ARMv6-M) liveliness multicast staging now cross-builds via the inline-fire path - the R311mc/md M0-reach carry is CLOSED. queryable + liveliness multicast replies both ride thumbv6m through the Rc-backed MulticastReplyQueue; the deferred_fire seam stays AP-only (wz-runtime-tokio).",
+        "Open north-star: Fragment RX/TX on the MCU multicast loop (the R311kn/ko reassembly / transport-fragmentation arms ported from the AP loop to the MCU multicast loop) + a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry).",
+        "Pre-existing (out-of-scope) facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile (unicast session_glue unconditional vs session-unicast-gated modules). A separate facade feature-completeness item.",
+        "Finding 4 (test-support feature vs sibling-crate convention) + Finding 5 (observer flush_get_prunes 2-of-3 drain asymmetry) remain accepted judgment calls (R311lv); minor D/E (cross-profile observer event-stream asymmetry) remains open."
+      ],
+      "publishable_decision_summary": "R311me: deferred_fire gate collapsed to `deferred-fire` alone; liveliness-token no longer drags Arc onto the M0 multicast profile, so thumbv6m liveliness cross-builds via the inline-fire path.",
+      "publishable_changes_bullets": [
+        "lib.rs: the deferred_fire module #[cfg] collapses from all(feature=\"alloc\", any(deferred-fire, session-matching, declare-subscriber, declare-queryable, liveliness-token, liveliness-subscriber, query-reply)) to feature=\"deferred-fire\" alone (the feature implies alloc). The pre-R311lh plane arms were dead weight: no wz-session-core code instantiates a deferred type under them (only doc-links in decl_sink.rs / declare/matching.rs), and the only real consumer, AP wz-runtime-tokio, enables deferred-fire unconditionally on its wz-session-core dependency - so the module still compiles for the tier that uses it.",
+        "Root cause closed: liveliness-token in the gate forced `use alloc::sync::Arc;` (deferred_fire.rs:101) to compile on the MCU multicast profile; thumbv6m (ARMv6-M) has no target_has_atomic=\"ptr\", so the otherwise-unused module failed to build (E0432 unresolved import alloc::sync). The MCU multicast liveliness / queryable reply is staged inline through the Rc<RefCell<VecDeque>>-backed MulticastReplyQueue (wz-session-lwip multicast_drive.rs), never the deferred seam - so dropping the module from that profile IS the inline-fire path the R311mc/md carry asked for, not a behaviour change.",
+        "Docs synced (non-store source files): the lib.rs deferred_fire module-decl comment, the deferred_fire.rs \"## Gating\" doc, and the wz-session-core Cargo.toml deferred-fire feature comment all rewritten to record the sole-gate structure and why the plane arms were removed (redundant post-R311lh + the thumbv6m Arc break).",
+        "scripts/run-ci.sh G.11 Build 4 (facade cross-real + liveliness-token): the `[[ \"$t\" == thumbv6m-none-eabi ]] ||` skip guard removed so liveliness-token now cross-builds on M0 too (a plain subshell like Build 3); the comment block updated from \"SKIPS thumbv6m / carry\" to the inline-fire reach."
+      ],
+      "publishable_verification_bullets": [
+        "Reproduced the failure FIRST: wz-session-core cross-build for thumbv6m-none-eabi with the MCU multicast liveliness feature set (alloc,session-unicast,no_std,codec-join,codec-frame,codec-close,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable,session-multicast) failed E0432 \"unresolved import alloc::sync\" at deferred_fire.rs:101 - root cause confirmed before the fix (the unused module compiled only because liveliness-token was a gate arm).",
+        "After collapsing the gate the same thumbv6m build passes. AP unaffected: wz-runtime-tokio builds + the deferred_fire_infra integration test 5/5 pass; the host subset (liveliness-token WITHOUT deferred-fire) and the no-alloc decl lane (--no-default-features codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber) both build.",
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). G.11 session-lwip cross-real now reports thumbv6m-none-eabi OK - the un-skipped Build 4 (facade session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable) - alongside the 5 other ARM targets; riscv32imac SKIPs on the missing riscv32-unknown-elf-gcc (pre-existing, toolchain-only)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "M0 (ARMv6-M) liveliness multicast staging now cross-builds via the inline-fire path - the R311mc/md M0-reach carry is CLOSED. queryable + liveliness multicast replies both ride thumbv6m through the Rc-backed MulticastReplyQueue; the deferred_fire seam stays AP-only (wz-runtime-tokio).",
+        "Open north-star: Fragment RX/TX on the MCU multicast loop (the R311kn/ko reassembly / transport-fragmentation arms ported from the AP loop to the MCU multicast loop) + a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry).",
+        "Pre-existing (out-of-scope) facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile (unicast session_glue unconditional vs session-unicast-gated modules). A separate facade feature-completeness item.",
+        "Finding 4 (test-support feature vs sibling-crate convention) + Finding 5 (observer flush_get_prunes 2-of-3 drain asymmetry) remain accepted judgment calls (R311lv); minor D/E (cross-profile observer event-stream asymmetry) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
