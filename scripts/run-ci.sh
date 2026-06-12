@@ -1046,17 +1046,31 @@ layer_c1q_multicast_glue() {
 # transport-multicast,codec-push variant: the MCU multicast TX seam
 # (run_multicast_session's next_tx pull -> multicast_tx_emit -> send_to_group)
 # + its real-lwIP Push round-trip test, which the codec-free transport-multicast
-# build (uninhabited MulticastTxItem) does not exercise.
+# build (uninhabited MulticastTxItem) does not exercise. R311lz makes the TX seam
+# variant-complete and adds two combos: transport-multicast,liveliness-token
+# exercises a NON-codec-push TX variant (the DeclareReply round-trip) and lints
+# the union TX gate WITHOUT codec-push (the case the old codec-push-only gating
+# would have mis-compiled to `match item {}` on an inhabited type); the maximal
+# transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token
+# build compiles every multicast_tx_emit arm together and runs both TX tests.
 layer_c1m_session_lwip() {
     (cd crates \
         && cargo test -p wz-session-lwip --quiet \
         && cargo test -p wz-session-lwip --features reassembly --quiet \
         && cargo test -p wz-session-lwip --features transport-multicast --quiet \
         && cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet \
+        && cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet \
+        && cargo test -p wz-session-lwip \
+            --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token \
+            --quiet \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings \
-        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,codec-push --quiet -- -D warnings)
+        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,codec-push --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,liveliness-token --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token \
+            --quiet -- -D warnings)
 }
 
 # ─── Layer C1n — wz-mcu-session-acceptor isolated host e2e + clippy ──

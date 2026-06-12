@@ -93,9 +93,23 @@ transport-multicast = [
 # codec-push so the multicast drive loop's TX seam frames an app z_put as a
 # T_MID_FRAME via the shared multicast_tx_emit SSOT. Orthogonal to
 # transport-multicast (which is RX / JOIN / lease only); a publishing multicast
-# node enables both. Other TX body codecs (response / declare) are not yet
-# forwarded here — codec-push is the MCU multicast loop's only TX variant.
+# node enables both.
 codec-push = ["wz-session-core/codec-push"]
+# R311lz — the remaining multicast TX body codecs, forwarding the matching
+# wz-session-core features so the drive loop's `next_tx` seam reaches every arm
+# of the shared multicast_tx_emit SSOT, not just Push (the loop's TX gate is the
+# union of these). `codec-response` + `codec-response-final` are the queryable
+# reply chain (a reply payload + its terminating ResponseFinal — forwarded
+# together because a reply needs both); `liveliness-token` is the declarer-side
+# interest-response (DeclToken / DeclFinal) and transitively pulls codec-declare,
+# so a multicast node can frame a held-token reply over the group. Each is
+# orthogonal to transport-multicast; a node enables the variant(s) it publishes.
+# The application produces these reply items today (it builds + queues them on
+# next_tx); the observer-staging auto-producer (the no_std MulticastReplySink
+# mirror) is the follow-on increment.
+codec-response = ["wz-session-core/codec-response"]
+codec-response-final = ["wz-session-core/codec-response-final"]
+liveliness-token = ["wz-session-core/liveliness-token"]
 
 [dependencies]
 # §5.P runtime tier: LwipRuntime<C> + LwipTime<C> + the Runtime /

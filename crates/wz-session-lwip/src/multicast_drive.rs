@@ -38,13 +38,24 @@
 //! `run_session` loop and the AP `drive_multicast_session` loop fan, so one
 //! `ApplicationLayerObserver` routes both transports' data identically.
 //!
+//! ## TX publish seam (R311ly Push; R311lz variant-complete)
+//!
+//! The `next_tx` pull-seam drains application outbound items each iteration and
+//! frames them through the shared `multicast_tx_emit` SSOT — variant-complete as
+//! of R311lz: Push (`z_put`), the queryable reply chain (`Response` +
+//! `ResponseFinal`), and the liveliness `DeclareReply` all route through the one
+//! SSOT the AP loop calls, each gated by its TX body codec (the loop's TX gate is
+//! their union). The seam EMITS every variant; what remains is the *observer
+//! staging* that auto-PRODUCES the reply variants — an application that builds
+//! its own reply items publishes them today.
+//!
 //! ## Not yet here (R311lt foundation; follow-on increments)
 //!
-//! - **TX publish seam** — the application-side data emit (the MCU mirror of
-//!   the AP loop's `outbound` channel + `MulticastTxItem`). This foundation
-//!   emits only the JOIN beacon; an app `z_put` / queryable reply / liveliness
-//!   declare over the group is the next increment (the no-alloc MCU TX variant
-//!   the carry deferred until the loop shaped it — now it has).
+//! - **MCU observer staging** — the no_std reply-sink mirror of the AP loop's
+//!   `MulticastReplySink` (which enqueues `Response` / `DeclareReply` from the
+//!   observer's staged replies onto its outbound channel). The TX seam emits
+//!   these variants; the auto-producer that feeds them from inbound
+//!   Query / Interest frames is the next increment.
 //! - **Fragment RX/TX** — the `reassembly` / `transport-fragmentation` arms the
 //!   AP loop carries (R311kn / R311ko).
 //! - **`MulticastOutcome::LinkLost`** — the MCU poll loop has no link-loss
@@ -62,10 +73,18 @@ use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
-// R311ly — the shared TX emit SSOT (the AP loop calls the same). MulticastTxItem
-// is the unconditional pull-seam item type (uninhabited without a TX body
-// codec); multicast_tx_emit exists only when codec-push inhabits it.
-#[cfg(feature = "codec-push")]
+// R311ly/R311lz — the shared TX emit SSOT (the AP loop calls the same).
+// MulticastTxItem is the unconditional pull-seam item type (uninhabited without
+// a TX body codec); multicast_tx_emit exists only when a TX body codec inhabits
+// it, so the import is gated on the same union as the SSOT fn. R311lz extended
+// the seam from codec-push-only to every forwarded TX variant (Push / queryable
+// Response + ResponseFinal / liveliness DeclareReply).
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
 use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
@@ -148,13 +167,15 @@ fn peer_key(src_addr: u32, src_port: u16) -> SocketAddr {
 ///   inbound `try_recv`).
 /// - `on_event` — the per-iteration observer (`Poll` with the decoded
 ///   `FramePayload` batch the application dispatches).
-/// - `next_tx` — the application TX pull-seam (R311ly): each iteration the loop
-///   drains pending outbound items ([`MulticastTxItem`], e.g. a `z_put` Push)
-///   and frames each via the shared `multicast_tx_emit` SSOT before the pump, so
-///   the datagrams ride the same `run_until_idle` as the JOIN beacon. The MCU
-///   mirror of the AP loop's `outbound` mpsc receiver; the busy-poll loop pulls
-///   rather than `select!`s. Without a TX body codec the item is uninhabited and
-///   the seam is inert (a publish-free / RX-only node passes `|| None`).
+/// - `next_tx` — the application TX pull-seam (R311ly; variant-complete R311lz):
+///   each iteration the loop drains pending outbound items ([`MulticastTxItem`]
+///   — a `z_put` Push, a queryable `Response` / `ResponseFinal`, or a liveliness
+///   `DeclareReply`) and frames each via the shared `multicast_tx_emit` SSOT
+///   before the pump, so the datagrams ride the same `run_until_idle` as the
+///   JOIN beacon. The MCU mirror of the AP loop's `outbound` mpsc receiver; the
+///   busy-poll loop pulls rather than `select!`s. Without a TX body codec the
+///   item is uninhabited and the seam is inert (a publish-free / RX-only node
+///   passes `|| None`).
 pub fn run_multicast_session<C, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
@@ -187,11 +208,22 @@ where
     dispatcher.notify_link_ready();
 
     // The TX mint state (per-channel next SN). The JOIN beacon advertises the
-    // live values (an immutable borrow); the codec-push TX drain mints from here
-    // per data frame, so the binding is `mut` only when that path compiles.
-    #[cfg(feature = "codec-push")]
+    // live values (an immutable borrow); the TX-codec drain mints from here per
+    // data frame, so the binding is `mut` only when a TX body codec inhabits the
+    // item (the same union gating `multicast_tx_emit`).
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    ))]
     let mut tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
-    #[cfg(not(feature = "codec-push"))]
+    #[cfg(not(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "liveliness-token"
+    )))]
     let tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
     // Emit the first JOIN beacon immediately, then every join_interval_ms; the
     // sweep runs on its own tick_ms cadence (the busy-poll equivalents of the
@@ -224,8 +256,16 @@ where
         // and multicasting it to the group. Drained right after the JOIN beacon
         // so the datagrams ride THIS iteration's run_until_idle. send_to_group is
         // best-effort (multicast UDP); the SSOT's per-variant reliability flag is
-        // inert here (the MCU group socket takes no reliability arg).
-        #[cfg(feature = "codec-push")]
+        // inert here (the MCU group socket takes no reliability arg). Gated on the
+        // TX-body-codec union (R311lz): every forwarded variant — Push, queryable
+        // Response / ResponseFinal, liveliness DeclareReply — routes through the
+        // one SSOT, so this drain is variant-agnostic (the item carries which).
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        ))]
         while let Some(item) = next_tx() {
             for dgram in multicast_tx_emit(item, &mut tx_sn, params).datagrams {
                 driver.send_to_group(&dgram);
@@ -234,7 +274,12 @@ where
         // No TX body codec: MulticastTxItem is uninhabited, so next_tx can only
         // yield None; call it to keep the seam used (it stays in the signature for
         // the RX-only build) and consume the unconstructable item type-correctly.
-        #[cfg(not(feature = "codec-push"))]
+        #[cfg(not(any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        )))]
         if let Some(item) = next_tx() {
             match item {}
         }
@@ -459,6 +504,99 @@ mod tests {
             saw_push,
             "the queued Put was framed by multicast_tx_emit, multicast to the \
              group, echoed back, admitted at our source, and observed as a Push"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// R311lz — the multicast TX seam is variant-complete: a NON-`codec-push`
+    /// item (a liveliness `DeclareReply` — the terminating `DeclFinal` for an
+    /// interest) queued on `next_tx` is framed by the SAME shared
+    /// `multicast_tx_emit` SSOT, multicast to the group, and (via multicast
+    /// loopback) observed back as a `Declare(DeclFinal)`. This proves the loop's
+    /// TX gate now reaches every forwarded variant, not just Push — the round's
+    /// union-gate generalisation. Same pre-admit-our-source trick as the Push
+    /// test: a distinct-zid JOIN injected from our socket creates the
+    /// (src_addr, src_port) peer entry the echoed Declare Frame matches, passes
+    /// the SN gate (SN 0 against the JOIN's advertised next_sn 0 — DeclareReply is
+    /// pinned reliable, so it mints on the reliable ring), and fans to `on_event`.
+    /// A distinct port (7453) from the Push (7452) / peer-admit (7449) tests.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn run_multicast_session_publishes_a_declare_reply_over_loopback() {
+        use wz_session_core::declare::local_token::build_final_reply;
+        use wz_session_core::driver_loop::DriverLoopOutcome;
+        use wz_session_core::network_message::NetworkMessage;
+
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7453;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        // Pre-admit a peer at OUR loopback source (distinct zid -> not
+        // own-filtered), advertising next_sn 0 on a fresh ring; injected before
+        // wrapping the socket so the loop's first poll creates the peer entry the
+        // echoed Declare matches (mirror of the Push round-trip test).
+        let other = params(&[0x01, 0x02, 0x03, 0x04]);
+        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        socket
+            .send_to(group, port, &other_join)
+            .expect("inject peer JOIN");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = LwipRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // One queued DeclFinal reply for interest id 9 — the trivial terminal of a
+        // liveliness interest-response, owned via try_into_owned (DeclFinal
+        // borrows nothing). The pull-seam yields it once, then None.
+        let declare = build_final_reply(9)
+            .try_into_owned()
+            .expect("DeclFinal reply carries no bounded fields");
+        let mut pending = Some(MulticastTxItem::DeclareReply { declare });
+
+        // The only Declare we emit is this DeclFinal (build_final_reply), so an
+        // observed Declare carrying interest id 9 IS our round-tripped reply —
+        // the variant-body check the AP test does (DeclFinal vs DeclToken) would
+        // need wz-codecs, which this MCU crate does not dep; interest_id is the
+        // correlation the querier matches on regardless, so it suffices here.
+        let mut saw_declare = false;
+        let outcome = run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(16),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |event| {
+                if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) =
+                    event
+                {
+                    for m in messages.iter() {
+                        if let NetworkMessage::Declare(d) = m {
+                            std::assert_eq!(
+                                d.interest_id,
+                                Some(9),
+                                "the DeclFinal terminates interest id 9"
+                            );
+                            saw_declare = true;
+                        }
+                    }
+                }
+            },
+            || pending.take(),
+        );
+
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert!(
+            saw_declare,
+            "the queued DeclareReply was framed by multicast_tx_emit, multicast to \
+             the group, echoed back, admitted at our source, and observed as a \
+             Declare carrying interest id 9"
         );
 
         link.leave_multicast_group(group).expect("leave group");
