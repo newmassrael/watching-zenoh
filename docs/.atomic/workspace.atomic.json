@@ -1862,6 +1862,47 @@
         "R311jd: deploy/mcu_minimal.yaml declares udp_session.mtu_bytes 256 = the slim slot_size SSOT anchor"
       ]
     },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub": {
+      "title": "§6.9 preset-mcu-multicast-pub v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
+      "intent": "Minimal MCU multicast publisher preset (mps2-class): wz-session-lwip multicast loop - peer admit + oversize z_put framed as a fragment chain; footprint-tracked composition of deploy/mcu-multicast-e2e.",
+      "outputs_bullets": [
+        "platform-bare-metal",
+        "runtime-lwip",
+        "runtime-no-std",
+        "transport-multicast",
+        "transport-link-udp",
+        "transport-fragmentation",
+        "locator-udp",
+        "link-frame",
+        "link-fragment",
+        "codec-join",
+        "codec-frame",
+        "codec-fragment",
+        "codec-close",
+        "codec-push",
+        "facade feature set: session-lwip + transport-multicast + transport-fragmentation + codec-push",
+        "ground truth for the exact features: deploy/mcu-multicast-e2e/Cargo.toml"
+      ],
+      "caveats_bullets": [
+        "(a) R311mj footprint thumbv7m-none-eabi text=50680 data=4 bss=270100 (mps2-an385 M3 cross-build)",
+        "(b) R311mj footprint thumbv7em-none-eabihf text=50484 data=4 bss=270100 (mps2-an386/an500 M4/M7)",
+        "(c) bss = 256KB embedded-alloc HEAP + lwIP/IGMP static pools; INFO-only, heap-dominated",
+        "(d) gate: scripts/check-footprint.sh <triple> multicast-e2e (Layer Q.5); ROM axes +/-256B",
+        "(e) no QEMU boot: multicast self-loopback is host-only lwIP; runtime proof is host Layer C1r",
+        "(f) mps2-class only: 32x1536 multicast rx pool ~49KB exceeds nrf51 16KB SRAM; thumbv6m deferred",
+        "(g) reproducible: bash scripts/run-ci.sh --layer Q then arm-none-eabi-size the built ELF",
+        "(h) figures are R311mi measurements; this section is their living home (was R311mi ledger-only)"
+      ],
+      "impact_scope": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ]
+    },
     "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism": {
       "title": "§7 Cargo feature emission mechanism",
       "parent_doc": "docs/feature_inventory.md",
@@ -35533,6 +35574,106 @@
         "Structural improvement banked: sweep_reporting is now at its true home (reassembly_dispatch), so a future session-multicast-without-unicast profile keeps the multicast sweep SSOT uncoupled from unicast.",
         "Open north-star: a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry), now including the transport-fragmentation profile.",
         "Pre-existing facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls (R311lv)."
+      ]
+    },
+    "Round 311mi": {
+      "decision_summary": "R311mi: add a composable-framework footprint gate for the full MCU multicast feature profile via a host-runtime-proven SSOT (wz-mcu-multicast-e2e, Layer C1r) + a cross-compiled footprint deploy bin (deploy/mcu-multicast-e2e, Layer Q.5 check-footprint.sh multicast-e2e), closing the R311lu/lv footprint-gate carry; no QEMU boot because multicast self-loopback is a host-only lwIP affordance, so the runtime proof lives on the host.",
+      "changes_bullets": [
+        "crates/wz-mcu-multicast-e2e: new no_std SSOT crate (#![cfg(lwip_real_build)]). run_multicast_e2e<C>(&LwipLink, clock) -> MulticastE2eReport drives the FULL MCU multicast feature profile (session-lwip + transport-multicast + transport-fragmentation + codec-push) end to end via wz_session_lwip::run_multicast_session: a crafted peer JOIN (distinct zid, batch_size=64 matching self so validate_join admits it) admitted into the §3.2 table + an oversize 200-byte Put split into a T_MID_FRAGMENT chain by multicast_tx_emit + reassembled by the R311mf Fragment RX arm into one Push. Mirrors the wz-mcu-session-acceptor lib-owns-the-scenario / bin-stays-thin split; composes via the wz facade (the R311mg composition-surface lesson). The caller supplies &LwipLink so the host test injects a multicast-routed lwip_test_link link and the bin a plain LwipLink::init(). Re-exports ClockSource + LwipLink + MulticastOutcome (single-dep boundary). Registered in crates/Cargo.toml members.",
+        "crates/wz-mcu-multicast-e2e/tests/host_multicast_e2e.rs: the RUNTIME PROOF the footprint bin cannot give via QEMU. Uses wz_link_lwip::lwip_test_link (the sanctioned host-only LWIP_LOOPIF_MULTICAST + LWIP_TESTMODE loopback-multicast affordance) to observe the full round trip (asserts join_ok + outcome=IterationLimit + tx_fragmented + peer_admitted + saw_push + !saw_drop). The multicast-loopback runtime proof's correct home is the host: dragging the test-only lwIP flags into a deploy port + the bin would be a test fiction masquerading as a deploy AND contradict the ratified cross/deploy-port policy (\"LWIP_LOOPIF_MULTICAST is host-only - real deploys join on their ethernet netif, not loopback\").",
+        "deploy/mcu-multicast-e2e: new standalone-workspace cortex-m bin (SysTick clock + 256 KB heap + sys_now + verdict map). Cross-compiles the full multicast profile to a final-linked ELF so it is footprint-measurable (Layer G.11 builds only -p wz, a lib that cannot be sized). main calls run_multicast_e2e (a genuine call site, not a black_box footprint-retention trick); join_ok=false on a QEMU loopback env -> SKIP exit (the bin is build + footprint only; it is a real multicast deploy that boots on hardware with a real IGMP netif). mps2-class only: the 32x1536 multicast rx pool (~49 KB, slim-toggle-independent) does not fit nrf51's 16 KB SRAM, so there is no microbit fork.",
+        "scripts/check-footprint.sh: extended with a second optional `artifact` arg (qemu-demo default | multicast-e2e) selecting the binary + baseline table via bash namerefs, preserving the original single-arg Q.3 behaviour byte-for-byte. New BASELINE_MC_{TEXT,DATA,BSS} table anchored to THIS entry (not §6.7, which anchors the cortex-m4-default / mcu-qemu-demo artifact): thumbv7m-none-eabi text=50680, thumbv7em-none-eabihf text=50484, data=4, bss=270100 INFO (ROM axes ±256 B hard-gated; bss HEAP_SIZE-dominated INFO per R311bj caveat (c)).",
+        "scripts/run-ci.sh: new Layer C1r (isolated host test + clippy of wz-mcu-multicast-e2e, mirrors C1n) + new Layer Q.5 (cross-build the deploy bin on the mps2-class triples + footprint-gate via check-footprint.sh multicast-e2e; NO qemu boot). C1/C2 --exclude wz-mcu-multicast-e2e (no_std-forcing through the facade funnel, like the acceptor). Layer 0 fmt auto-discovers the new standalone deploy workspace.",
+        "deploy/mcu-noheap-probe/src/main.rs: repaired a PRE-EXISTING Q.0 build break that R311mi's Layer Q run exposed (opt-in Layer Q had masked it since the query-source-info round). The stage-2 BorrowedQuery initializer was missing the is_local field added to the struct after the probe last named it; set is_local=false (wire dispatch, the probe's is_remote=true query). Mechanical stale-field repair, unrelated to multicast but build-error-priority."
+      ],
+      "verification_bullets": [
+        "Full host run-ci + Layer G + Layer Q (WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail), \"run-ci: all required layers pass\", no FAIL lines.",
+        "Layer C1r (new isolated host lane): wz-mcu-multicast-e2e host integration test PASS + clippy --all-targets clean. host_multicast_e2e drives the full multicast profile over a routed lwIP loopback and asserts join_ok + outcome=IterationLimit + tx_fragmented + peer_admitted + saw_push + !saw_drop (the transport-multicast peer admit + transport-fragmentation oversize-Put split + reassembly-RX-into-one-Push round trip). C1/C2 --exclude it (no_std-forced like the acceptor).",
+        "Layer Q.5 (new footprint lane): mcu-multicast-e2e cross-builds OK on thumbv7m-none-eabi + thumbv7em-none-eabihf via the cross-test lwIP port; check-footprint.sh multicast-e2e gates each at +0 within the +/-256 B ROM band (text=50680/50484, data=4, bss=270100 INFO). No qemu boot (multicast self-loopback is a host-only lwIP affordance). The multicast profile's -p wz cross stays covered by Layer G.11.",
+        "Probe repair verified: Layer Q.0 mcu-noheap-probe now builds (no global allocator) + boots PASS on all 4 machines (microbit/M0 + mps2 M3/M4/M7) - the stale BorrowedQuery.is_local break is closed. fmt --check OK across crates + the auto-discovered deploy/mcu-multicast-e2e standalone workspace; the check-footprint.sh default (qemu-demo) arg path is unchanged (thumbv7m qemu-demo still +0 OK)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The R311lu/lv footprint-gate carry is CLOSED for the mps2-class multicast profile: deploy/mcu-multicast-e2e is footprint-gated (Layer Q.5, ROM-axis +/-256 B: thumbv7m text=50680 / thumbv7em-eabihf text=50484, data=4, bss=270100 INFO) and its exact scenario is host-runtime-proven (Layer C1r - peer admit + oversize Put fragment + reassemble into one Push). The multicast profile's on-target buildability stays covered by Layer G.11 (-p wz cross).",
+        "Deferred: a slim multicast rx pool (the 32x1536 multicast pool is slim-toggle-independent today) so the multicast profile fits nrf51-class 16 KB SRAM and a thumbv6m multicast footprint baseline can be added (the reason Q.5 is mps2-class only).",
+        "Deferred: a differential footprint gate (feature ON/OFF ROM delta) would express the north-star \">=256 B measurable when disabled\" claim more directly than the established absolute-baseline idiom; introducing it is a separate gate-philosophy ratify (otherwise it fragments check-footprint.sh into two idioms).",
+        "Banked collateral: R311mi's Layer Q run exposed + fixed a pre-existing Q.0 break (mcu-noheap-probe stale BorrowedQuery.is_local) that opt-in Layer Q had masked since the query-source-info round - a reminder that opt-in lanes drift silently between full Layer-Q runs.",
+        "Pre-existing facade gap (R311lv): AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls."
+      ],
+      "publishable_decision_summary": "R311mi: add a composable-framework footprint gate for the full MCU multicast feature profile via a host-runtime-proven SSOT (wz-mcu-multicast-e2e, Layer C1r) + a cross-compiled footprint deploy bin (deploy/mcu-multicast-e2e, Layer Q.5 check-footprint.sh multicast-e2e), closing the R311lu/lv footprint-gate carry; no QEMU boot because multicast self-loopback is a host-only lwIP affordance, so the runtime proof lives on the host.",
+      "publishable_changes_bullets": [
+        "crates/wz-mcu-multicast-e2e: new no_std SSOT crate (#![cfg(lwip_real_build)]). run_multicast_e2e<C>(&LwipLink, clock) -> MulticastE2eReport drives the FULL MCU multicast feature profile (session-lwip + transport-multicast + transport-fragmentation + codec-push) end to end via wz_session_lwip::run_multicast_session: a crafted peer JOIN (distinct zid, batch_size=64 matching self so validate_join admits it) admitted into the §3.2 table + an oversize 200-byte Put split into a T_MID_FRAGMENT chain by multicast_tx_emit + reassembled by the R311mf Fragment RX arm into one Push. Mirrors the wz-mcu-session-acceptor lib-owns-the-scenario / bin-stays-thin split; composes via the wz facade (the R311mg composition-surface lesson). The caller supplies &LwipLink so the host test injects a multicast-routed lwip_test_link link and the bin a plain LwipLink::init(). Re-exports ClockSource + LwipLink + MulticastOutcome (single-dep boundary). Registered in crates/Cargo.toml members.",
+        "crates/wz-mcu-multicast-e2e/tests/host_multicast_e2e.rs: the RUNTIME PROOF the footprint bin cannot give via QEMU. Uses wz_link_lwip::lwip_test_link (the sanctioned host-only LWIP_LOOPIF_MULTICAST + LWIP_TESTMODE loopback-multicast affordance) to observe the full round trip (asserts join_ok + outcome=IterationLimit + tx_fragmented + peer_admitted + saw_push + !saw_drop). The multicast-loopback runtime proof's correct home is the host: dragging the test-only lwIP flags into a deploy port + the bin would be a test fiction masquerading as a deploy AND contradict the ratified cross/deploy-port policy (\"LWIP_LOOPIF_MULTICAST is host-only - real deploys join on their ethernet netif, not loopback\").",
+        "deploy/mcu-multicast-e2e: new standalone-workspace cortex-m bin (SysTick clock + 256 KB heap + sys_now + verdict map). Cross-compiles the full multicast profile to a final-linked ELF so it is footprint-measurable (Layer G.11 builds only -p wz, a lib that cannot be sized). main calls run_multicast_e2e (a genuine call site, not a black_box footprint-retention trick); join_ok=false on a QEMU loopback env -> SKIP exit (the bin is build + footprint only; it is a real multicast deploy that boots on hardware with a real IGMP netif). mps2-class only: the 32x1536 multicast rx pool (~49 KB, slim-toggle-independent) does not fit nrf51's 16 KB SRAM, so there is no microbit fork.",
+        "scripts/check-footprint.sh: extended with a second optional `artifact` arg (qemu-demo default | multicast-e2e) selecting the binary + baseline table via bash namerefs, preserving the original single-arg Q.3 behaviour byte-for-byte. New BASELINE_MC_{TEXT,DATA,BSS} table anchored to THIS entry (not §6.7, which anchors the cortex-m4-default / mcu-qemu-demo artifact): thumbv7m-none-eabi text=50680, thumbv7em-none-eabihf text=50484, data=4, bss=270100 INFO (ROM axes ±256 B hard-gated; bss HEAP_SIZE-dominated INFO per R311bj caveat (c)).",
+        "scripts/run-ci.sh: new Layer C1r (isolated host test + clippy of wz-mcu-multicast-e2e, mirrors C1n) + new Layer Q.5 (cross-build the deploy bin on the mps2-class triples + footprint-gate via check-footprint.sh multicast-e2e; NO qemu boot). C1/C2 --exclude wz-mcu-multicast-e2e (no_std-forcing through the facade funnel, like the acceptor). Layer 0 fmt auto-discovers the new standalone deploy workspace.",
+        "deploy/mcu-noheap-probe/src/main.rs: repaired a PRE-EXISTING Q.0 build break that R311mi's Layer Q run exposed (opt-in Layer Q had masked it since the query-source-info round). The stage-2 BorrowedQuery initializer was missing the is_local field added to the struct after the probe last named it; set is_local=false (wire dispatch, the probe's is_remote=true query). Mechanical stale-field repair, unrelated to multicast but build-error-priority."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci + Layer G + Layer Q (WZ_RUN_LAYER_G=1 WZ_RUN_LAYER_Q=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail), \"run-ci: all required layers pass\", no FAIL lines.",
+        "Layer C1r (new isolated host lane): wz-mcu-multicast-e2e host integration test PASS + clippy --all-targets clean. host_multicast_e2e drives the full multicast profile over a routed lwIP loopback and asserts join_ok + outcome=IterationLimit + tx_fragmented + peer_admitted + saw_push + !saw_drop (the transport-multicast peer admit + transport-fragmentation oversize-Put split + reassembly-RX-into-one-Push round trip). C1/C2 --exclude it (no_std-forced like the acceptor).",
+        "Layer Q.5 (new footprint lane): mcu-multicast-e2e cross-builds OK on thumbv7m-none-eabi + thumbv7em-none-eabihf via the cross-test lwIP port; check-footprint.sh multicast-e2e gates each at +0 within the +/-256 B ROM band (text=50680/50484, data=4, bss=270100 INFO). No qemu boot (multicast self-loopback is a host-only lwIP affordance). The multicast profile's -p wz cross stays covered by Layer G.11.",
+        "Probe repair verified: Layer Q.0 mcu-noheap-probe now builds (no global allocator) + boots PASS on all 4 machines (microbit/M0 + mps2 M3/M4/M7) - the stale BorrowedQuery.is_local break is closed. fmt --check OK across crates + the auto-discovered deploy/mcu-multicast-e2e standalone workspace; the check-footprint.sh default (qemu-demo) arg path is unchanged (thumbv7m qemu-demo still +0 OK)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The R311lu/lv footprint-gate carry is CLOSED for the mps2-class multicast profile: deploy/mcu-multicast-e2e is footprint-gated (Layer Q.5, ROM-axis +/-256 B: thumbv7m text=50680 / thumbv7em-eabihf text=50484, data=4, bss=270100 INFO) and its exact scenario is host-runtime-proven (Layer C1r - peer admit + oversize Put fragment + reassemble into one Push). The multicast profile's on-target buildability stays covered by Layer G.11 (-p wz cross).",
+        "Deferred: a slim multicast rx pool (the 32x1536 multicast pool is slim-toggle-independent today) so the multicast profile fits nrf51-class 16 KB SRAM and a thumbv6m multicast footprint baseline can be added (the reason Q.5 is mps2-class only).",
+        "Deferred: a differential footprint gate (feature ON/OFF ROM delta) would express the north-star \">=256 B measurable when disabled\" claim more directly than the established absolute-baseline idiom; introducing it is a separate gate-philosophy ratify (otherwise it fragments check-footprint.sh into two idioms).",
+        "Banked collateral: R311mi's Layer Q run exposed + fixed a pre-existing Q.0 break (mcu-noheap-probe stale BorrowedQuery.is_local) that opt-in Layer Q had masked since the query-source-info round - a reminder that opt-in lanes drift silently between full Layer-Q runs.",
+        "Pre-existing facade gap (R311lv): AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls."
+      ]
+    },
+    "Round 311mj": {
+      "decision_summary": "R311mj: session-review F1 fix - elevate the MCU multicast profile to a named preset Section §6.9 preset-mcu-multicast-pub with §6.7-style footprint caveats, giving the multicast footprint a living Section anchor (was R311mi ledger-entry-only); re-anchor scripts/check-footprint.sh multicast-e2e to §6.9.",
+      "changes_bullets": [
+        "Added preset Section §6.9 preset-mcu-multicast-pub (feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub): intent + 16 outputs bullets (the multicast-pub catalog composition + the deploy/mcu-multicast-e2e facade feature set + a Cargo.toml ground-truth pointer) + 8 footprint caveats (a)-(h) recording the R311mi figures (thumbv7m text=50680 / thumbv7em text=50484, data=4, bss=270100 INFO; gate recipe; no-QEMU-boot rationale; mps2-class-only rationale) + impact_scope to §5.1-transport, §5.4-session, §5.13-runtime, §3.1-footprint. This gives the MCU multicast footprint a LIVING preset Section anchor (was R311mi ledger-entry-only), mirroring §6.7's anchor for the cortex-m4-default / mcu-qemu-demo artifact - the session-review F1 fix. The multicast profile is now a named composable-framework preset (north-star preset-layer aligned), not only a CI footprint probe.",
+        "scripts/check-footprint.sh: the BASELINE_MC_* comment re-anchored from \"the R311mi ledger entry\" to \"the §6.9 preset-mcu-multicast-pub footprint caveats\", restoring the §6.7-style contract (update the CI table AND the Section caveats together, never one without the other - atomic ledger + CI gate record the same footprint truth) for the multicast artifact. No baseline figure change: the anchor migration is comment-only, the gate still gates +0."
+      ],
+      "verification_bullets": [
+        "validate_workspace after the §6.9 build (add-section + title/intent/outputs/impact-scope + 8 add-section-caveat): T1 orphan total=13 new=+0 (the 4 impact_scope cross-refs all resolve - no new orphan), sections 258->259 (+1 §6.9), T3 warn=4 / T4 info=4 unchanged, orphan_refs 19+0, publishable 23=23.",
+        "scripts/check-footprint.sh: bash -n syntax OK; multicast-e2e gate still +0 OK on both mps2 triples (figures unchanged - the anchor migration is comment-only); the default qemu-demo arg path is unchanged. Each of the 8 footprint caveats is within the MAX_BULLET_CHAR=100 limit (96/96/87/89/92/95/88/95).",
+        "No source / build.rs / Cargo change: R311mj is audit / catalog-anchor work on R311mi's already-verified figures (mirrors R311bj's anchor-only entry on §6.7). The R311mi full run-ci G+Q RUNCI_EXIT=0 evidence stands; this entry adds no code to re-gate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Session-review F1 CLOSED: the MCU multicast footprint now has a living preset Section (§6.9 preset-mcu-multicast-pub) as its authoritative anchor, with §6.7 parity (the CI baseline table + the Section footprint caveats are kept in sync by the same documented contract). The multicast profile is a named composable-framework preset, north-star preset-layer aligned.",
+        "Session-review F2 (frozen judgment call): the pre-existing mcu-noheap-probe is_local repair was folded into R311mi's changes (causally exposed by R311mi's Layer Q run) rather than its own entry; a stricter reading would split it, but the commit structure separates it (its own commit) so the only co-location is the ledger. Frozen, not re-litigated.",
+        "Session-review F3 (deferred): a differential footprint gate (feature ON/OFF ROM delta) expresses the north-star \">=256B measurable when disabled\" claim more directly than the absolute-baseline idiom; it is a separate gate-philosophy ratify (introducing it now would fragment check-footprint.sh into two idioms).",
+        "Session-review F4 (deferred with the slim pool): a slim multicast rx pool (the 32x1536 pool is slim-toggle-independent today) would let the multicast profile fit nrf51-class 16KB SRAM and add a thumbv6m multicast .text baseline (the gate is ROM-only, so M0 .text is measurable once the profile is deployable there).",
+        "Pre-existing facade gap (R311lv): AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls."
+      ],
+      "publishable_decision_summary": "R311mj: session-review F1 fix - elevate the MCU multicast profile to a named preset Section §6.9 preset-mcu-multicast-pub with §6.7-style footprint caveats, giving the multicast footprint a living Section anchor (was R311mi ledger-entry-only); re-anchor scripts/check-footprint.sh multicast-e2e to §6.9.",
+      "publishable_changes_bullets": [
+        "Added preset Section §6.9 preset-mcu-multicast-pub (feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub): intent + 16 outputs bullets (the multicast-pub catalog composition + the deploy/mcu-multicast-e2e facade feature set + a Cargo.toml ground-truth pointer) + 8 footprint caveats (a)-(h) recording the R311mi figures (thumbv7m text=50680 / thumbv7em text=50484, data=4, bss=270100 INFO; gate recipe; no-QEMU-boot rationale; mps2-class-only rationale) + impact_scope to §5.1-transport, §5.4-session, §5.13-runtime, §3.1-footprint. This gives the MCU multicast footprint a LIVING preset Section anchor (was R311mi ledger-entry-only), mirroring §6.7's anchor for the cortex-m4-default / mcu-qemu-demo artifact - the session-review F1 fix. The multicast profile is now a named composable-framework preset (north-star preset-layer aligned), not only a CI footprint probe.",
+        "scripts/check-footprint.sh: the BASELINE_MC_* comment re-anchored from \"the R311mi ledger entry\" to \"the §6.9 preset-mcu-multicast-pub footprint caveats\", restoring the §6.7-style contract (update the CI table AND the Section caveats together, never one without the other - atomic ledger + CI gate record the same footprint truth) for the multicast artifact. No baseline figure change: the anchor migration is comment-only, the gate still gates +0."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace after the §6.9 build (add-section + title/intent/outputs/impact-scope + 8 add-section-caveat): T1 orphan total=13 new=+0 (the 4 impact_scope cross-refs all resolve - no new orphan), sections 258->259 (+1 §6.9), T3 warn=4 / T4 info=4 unchanged, orphan_refs 19+0, publishable 23=23.",
+        "scripts/check-footprint.sh: bash -n syntax OK; multicast-e2e gate still +0 OK on both mps2 triples (figures unchanged - the anchor migration is comment-only); the default qemu-demo arg path is unchanged. Each of the 8 footprint caveats is within the MAX_BULLET_CHAR=100 limit (96/96/87/89/92/95/88/95).",
+        "No source / build.rs / Cargo change: R311mj is audit / catalog-anchor work on R311mi's already-verified figures (mirrors R311bj's anchor-only entry on §6.7). The R311mi full run-ci G+Q RUNCI_EXIT=0 evidence stands; this entry adds no code to re-gate."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Session-review F1 CLOSED: the MCU multicast footprint now has a living preset Section (§6.9 preset-mcu-multicast-pub) as its authoritative anchor, with §6.7 parity (the CI baseline table + the Section footprint caveats are kept in sync by the same documented contract). The multicast profile is a named composable-framework preset, north-star preset-layer aligned.",
+        "Session-review F2 (frozen judgment call): the pre-existing mcu-noheap-probe is_local repair was folded into R311mi's changes (causally exposed by R311mi's Layer Q run) rather than its own entry; a stricter reading would split it, but the commit structure separates it (its own commit) so the only co-location is the ledger. Frozen, not re-litigated.",
+        "Session-review F3 (deferred): a differential footprint gate (feature ON/OFF ROM delta) expresses the north-star \">=256B measurable when disabled\" claim more directly than the absolute-baseline idiom; it is a separate gate-philosophy ratify (introducing it now would fragment check-footprint.sh into two idioms).",
+        "Session-review F4 (deferred with the slim pool): a slim multicast rx pool (the 32x1536 pool is slim-toggle-independent today) would let the multicast profile fit nrf51-class 16KB SRAM and add a thumbv6m multicast .text baseline (the gate is ROM-only, so M0 .text is measurable once the profile is deployable there).",
+        "Pre-existing facade gap (R311lv): AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls."
       ]
     },
     "Round 311n": {
