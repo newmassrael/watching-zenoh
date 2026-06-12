@@ -35449,6 +35449,48 @@
         "Finding 4 (test-support feature vs sibling-crate convention) + Finding 5 (observer flush_get_prunes 2-of-3 drain asymmetry) remain accepted judgment calls (R311lv); minor D/E (cross-profile observer event-stream asymmetry) remains open."
       ]
     },
+    "Round 311mg": {
+      "decision_summary": "R311mg: wz facade transport-fragmentation now weak-forwards wz-session-lwip?/ - R311mf's MCU multicast Fragment RX/TX was crate-only and unreachable through the public facade surface.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: the facade transport-fragmentation feature gains the wz-session-lwip?/transport-fragmentation weak-forward (was wz-runtime-tokio?/transport-fragmentation alone). R311mf landed the MCU multicast Fragment RX/TX in the wz-session-lwip crate's OWN transport-fragmentation feature, but the facade forwarded only the AP runtime, so a session-lwip + transport-fragmentation build through the public facade left the MCU TX splitter + reassembly RX dormant - unreachable through the composition surface. Mirrors the R311mc transport-multicast / codec-* / liveliness-token / query-queryable wz-session-lwip?/ forwards. The stale \"the MCU TX path is deferred\" comment is updated to record the R311mf/R311mg wiring.",
+        "scripts/run-ci.sh G.11: the final cross-real build now goes THROUGH the facade (cargo build -p wz --features session-lwip,transport-multicast,transport-fragmentation,codec-push) instead of -p wz-session-lwip direct, so the public composition surface (the facade forward) is what is cross-built, like Builds 3/4 for the other multicast features. The R311mf direct-crate build masked the facade gap (it compiled the crate without exercising the facade forward at all)."
+      ],
+      "verification_bullets": [
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). \"run-ci: all required layers pass\", no FAIL lines.",
+        "G.11 session-lwip cross-real OK on all 6 ARM targets incl thumbv6m-none-eabi via the facade fragment path (the new -p wz session-lwip,transport-multicast,transport-fragmentation,codec-push build); riscv32imac SKIPs on the missing toolchain. Layer C1m pass (the host crate-level fragment round-trip + reassembly arms unchanged).",
+        "Standalone facade cross-build: cargo build -p wz --target thumbv6m-none-eabi --no-default-features --features session-lwip,transport-multicast,transport-fragmentation,codec-push returns 0 - the facade forward composes the MCU fragment path with no Cargo resolver error, Arc-free on M0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "carry #2 (MCU multicast Fragment RX/TX) is now CLOSED at BOTH the crate (R311mf) AND the facade (R311mg) layer - the atom is reachable through the public composition surface, north-star-aligned (the prior \"CLOSED\" claim was crate-only and premature).",
+        "Follow-up R311mh (queued, session-review Finding B): extract the reassembly-tail wiring (FrameOutOfOrder abort / Fragment ingest / Close abort+close_by_src) into a single wz-session-core dispatch_multicast_inbound_reassembling SSOT so the AP multicast_glue + MCU multicast_drive loops stop hand-mirroring identical tail match arms (the dispatch CLASSIFICATION is already SSOT; the TAIL wiring is duplicated).",
+        "Open north-star: a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry), now including the transport-fragmentation profile.",
+        "Pre-existing facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls (R311lv)."
+      ],
+      "publishable_decision_summary": "R311mg: wz facade transport-fragmentation now weak-forwards wz-session-lwip?/ - R311mf's MCU multicast Fragment RX/TX was crate-only and unreachable through the public facade surface.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: the facade transport-fragmentation feature gains the wz-session-lwip?/transport-fragmentation weak-forward (was wz-runtime-tokio?/transport-fragmentation alone). R311mf landed the MCU multicast Fragment RX/TX in the wz-session-lwip crate's OWN transport-fragmentation feature, but the facade forwarded only the AP runtime, so a session-lwip + transport-fragmentation build through the public facade left the MCU TX splitter + reassembly RX dormant - unreachable through the composition surface. Mirrors the R311mc transport-multicast / codec-* / liveliness-token / query-queryable wz-session-lwip?/ forwards. The stale \"the MCU TX path is deferred\" comment is updated to record the R311mf/R311mg wiring.",
+        "scripts/run-ci.sh G.11: the final cross-real build now goes THROUGH the facade (cargo build -p wz --features session-lwip,transport-multicast,transport-fragmentation,codec-push) instead of -p wz-session-lwip direct, so the public composition surface (the facade forward) is what is cross-built, like Builds 3/4 for the other multicast features. The R311mf direct-crate build masked the facade gap (it compiled the crate without exercising the facade forward at all)."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the trailing exit-code line, not a pipe/tee-masked tail). \"run-ci: all required layers pass\", no FAIL lines.",
+        "G.11 session-lwip cross-real OK on all 6 ARM targets incl thumbv6m-none-eabi via the facade fragment path (the new -p wz session-lwip,transport-multicast,transport-fragmentation,codec-push build); riscv32imac SKIPs on the missing toolchain. Layer C1m pass (the host crate-level fragment round-trip + reassembly arms unchanged).",
+        "Standalone facade cross-build: cargo build -p wz --target thumbv6m-none-eabi --no-default-features --features session-lwip,transport-multicast,transport-fragmentation,codec-push returns 0 - the facade forward composes the MCU fragment path with no Cargo resolver error, Arc-free on M0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "carry #2 (MCU multicast Fragment RX/TX) is now CLOSED at BOTH the crate (R311mf) AND the facade (R311mg) layer - the atom is reachable through the public composition surface, north-star-aligned (the prior \"CLOSED\" claim was crate-only and premature).",
+        "Follow-up R311mh (queued, session-review Finding B): extract the reassembly-tail wiring (FrameOutOfOrder abort / Fragment ingest / Close abort+close_by_src) into a single wz-session-core dispatch_multicast_inbound_reassembling SSOT so the AP multicast_glue + MCU multicast_drive loops stop hand-mirroring identical tail match arms (the dispatch CLASSIFICATION is already SSOT; the TAIL wiring is duplicated).",
+        "Open north-star: a footprint gate for the wz-session-lwip multicast features (R311lu/lv carry), now including the transport-fragmentation profile.",
+        "Pre-existing facade gap: AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item. Finding 4/5 + minor D/E remain accepted judgment calls (R311lv)."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
