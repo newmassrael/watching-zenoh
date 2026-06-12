@@ -1935,6 +1935,18 @@ layer_g_cross_compile_cortex_m() {
         # R311ja: the `Rc` ActionsHandle (see G.10) lets the whole MCU
         # session shell — handshake + reassembly consumer + facade — cross-
         # compile on ARMv6-M, the no-alloc M0 session reach end to end.
+        # R311mc: two more facade builds pin the multicast forward — proving
+        # wz's wz-session-lwip?/ weak-forwards cfg-in the MCU multicast drive
+        # loop + MulticastReplyQueue THROUGH the facade (not just at the
+        # wz-session-lwip crate boundary, C1m). Build 3 is the Arc-free subset
+        # (transport-multicast + TX codecs + query-queryable) on EVERY target:
+        # the queryable observer-staging ResponseSink is Rc<RefCell<VecDeque>>-
+        # backed, so it rides thumbv6m. Build 4 ADDS liveliness-token but SKIPS
+        # thumbv6m: liveliness-token is a deferred_fire arm (Arc over R::Mutex,
+        # needs target_has_atomic="ptr"), so it honors the documented thumbv6m
+        # Arc-free envelope (lib.rs deferred_fire gate). M0 liveliness staging
+        # via the inline-fire path is a carry (the deferred_fire module doc's
+        # MCU inline path is not yet wired for the multicast observer drain).
         if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
             echo "  G.11 session-lwip cross-real $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
         elif (cd crates && \
@@ -1945,7 +1957,19 @@ layer_g_cross_compile_cortex_m() {
                 WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
                 cargo build -p wz \
                     --target "$t" --no-default-features \
-                    --features session-lwip --quiet); then
+                    --features session-lwip --quiet) && \
+             (cd crates && \
+                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                cargo build -p wz \
+                    --target "$t" --no-default-features \
+                    --features session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,query-queryable \
+                    --quiet) && \
+             { [[ "$t" == "thumbv6m-none-eabi" ]] || (cd crates && \
+                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                cargo build -p wz \
+                    --target "$t" --no-default-features \
+                    --features session-lwip,transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
+                    --quiet); }; then
             echo "  G.11 session-lwip cross-real $t OK"
         else
             echo "  G.11 session-lwip cross-real $t FAIL" >&2

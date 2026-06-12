@@ -178,14 +178,19 @@ codec-open-body = ["wz-runtime-tokio?/codec-open-body", "wz-runtime-lwip?/codec-
 # pubsub at lib.rs is codec-push-gated because dispatch_push references
 # the Push type directly). Honest semantics: feature-off = no pub/sub
 # data carrier on the wire AND no in-process pubsub registry.
-codec-push = ["wz-runtime-tokio?/codec-push"]
+# R311mc — codec-push / codec-response / codec-response-final additionally
+# weak-forward to wz-session-lwip: the MCU multicast TX seam frames these body
+# codecs through multicast_tx_emit, so a session-lwip publishing node needs them
+# cfg-in on the MCU crate too (the AP wz-runtime-tokio?/ forward alone left the
+# MCU loop's TX arms cfg-out).
+codec-push = ["wz-runtime-tokio?/codec-push", "wz-session-lwip?/codec-push"]
 # R311j — codec-request forwards wz-runtime-tokio.
 codec-request = ["wz-runtime-tokio?/codec-request"]
 # R311k — codec-response forwards wz-runtime-tokio. After R311k all 4
 # body codecs imply codec-frame so codec-frame OFF requires every body
 # codec OFF (handshake-only deploy: Init / Open / Close + KeepAlive).
-codec-response = ["wz-runtime-tokio?/codec-response"]
-codec-response-final = ["wz-runtime-tokio?/codec-response-final"]
+codec-response = ["wz-runtime-tokio?/codec-response", "wz-session-lwip?/codec-response"]
+codec-response-final = ["wz-runtime-tokio?/codec-response-final", "wz-session-lwip?/codec-response-final"]
 codec-scout = ["wz-runtime-tokio?/codec-scout"]
 
 # ----- domain: declare (7 atomic, all active) -----
@@ -289,7 +294,10 @@ liveliness-history = []
 # wz-runtime-tokio iff the runtime-tokio feature is also enabled
 # (cargo's `?` syntax: forward only if the optional crate is active).
 liveliness-subscriber = ["wz-runtime-tokio?/liveliness-subscriber"]
-liveliness-token = ["wz-runtime-tokio?/liveliness-token"]
+# R311mc — liveliness-token additionally weak-forwards to wz-session-lwip: the
+# MCU multicast loop's DeclareReplySink (MulticastReplyQueue) auto-replies to an
+# inbound liveliness Interest over the group, gated on this same-named feature.
+liveliness-token = ["wz-runtime-tokio?/liveliness-token", "wz-session-lwip?/liveliness-token"]
 
 # ----- domain: locator (9 atomic, 0 active / 9 reserved) -----
 # R311ce — audit-only ratify. Locator URI parser (scheme://host:port)
@@ -370,7 +378,10 @@ switchboard = ["wz-runtime-tokio?/switchboard"]
 query-attachment = ["attachment-bytes", "wz-runtime-tokio?/query-attachment"]
 query-consolidation = ["wz-runtime-tokio?/query-consolidation"]
 query-get = ["wz-runtime-tokio?/query-get"]
-query-queryable = ["wz-runtime-tokio?/query-queryable"]
+# R311mc — query-queryable additionally weak-forwards to wz-session-lwip: the
+# MCU multicast loop's ResponseSink (MulticastReplyQueue) auto-replies to an
+# inbound Query over the group, gated on this same-named registry feature.
+query-queryable = ["wz-runtime-tokio?/query-queryable", "wz-session-lwip?/query-queryable"]
 query-reply = ["wz-runtime-tokio?/query-reply"]
 query-reply-err = ["wz-runtime-tokio?/query-reply-err"]
 query-selector-parameters = ["wz-runtime-tokio?/query-selector-parameters"]
@@ -585,7 +596,15 @@ transport-link-unixsock = []
 transport-link-vsock = []
 transport-link-ws = []
 transport-lowlatency = []
-transport-multicast = ["wz-runtime-tokio?/transport-multicast"]
+# R311mc — transport-multicast additionally weak-forwards to wz-session-lwip:
+# the MCU multicast drive loop (run_multicast_session) + its observer-staging
+# sinks (MulticastReplyQueue) live in wz-session-lwip's OWN transport-multicast
+# feature, so without this forward a session-lwip + transport-multicast build lit
+# the AP capability but the MCU multicast loop stayed cfg-out (the
+# transport-keepalive forwarding shape, R311kx). The TX body codecs + the
+# observer-staging registries (codec-push / codec-response / codec-response-final
+# / liveliness-token / query-queryable) carry their own wz-session-lwip?/ forward.
+transport-multicast = ["wz-runtime-tokio?/transport-multicast", "wz-session-lwip?/transport-multicast"]
 transport-shm = []
 transport-unicast = ["wz-runtime-tokio?/transport-unicast"]
 
