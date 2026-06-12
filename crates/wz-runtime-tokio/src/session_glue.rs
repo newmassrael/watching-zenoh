@@ -603,8 +603,13 @@ pub use wz_session_core::driver_loop::DriverOutcome;
 
 // ── R311im — reassembly pool wiring for the steady-state drive loop ──
 
+// R311mk — the `TokioReassembly` Router type + `reassembly_config` were
+// hoisted to the transport-agnostic `crate::reassembly` SSOT module so a
+// `transport-multicast`-only build (no `transport-unicast`, hence no
+// `session_glue`) can still reach the AP pool config. The unicast drive loop
+// below imports them back under their bare names.
 #[cfg(feature = "reassembly")]
-use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+use crate::reassembly::{reassembly_config, TokioReassembly};
 // Stage 3 — the reassembly-pool ingest + completion re-parse is the
 // const-generic `wz_session_core::drive::report_outcome_reassembling`; the AP
 // drive loop passes its `TokioReassembly` dims (the `Fragment` type is now
@@ -615,45 +620,6 @@ use wz_session_core::drive::report_outcome_reassembling;
 // helper, not a unicast-drive one).
 #[cfg(feature = "reassembly")]
 use wz_session_core::reassembly_dispatch::sweep_reporting;
-
-/// Reassembly slot-pool dimensions for the unicast tokio session. R311in
-/// — sourced from the SCE-codegen'd AP buffer-pool constants
-/// ([`crate::reassembly_pool_ap`]), whose single SSOT is
-/// `sources/network/reassembly_pool_ap.scxml` (`sce:kind="buffer-pool"`).
-/// These replace the prior hand-transcribed `4 / 4096` literals; the
-/// values, the spec §4 table, and the deploy.yaml block no longer drift
-/// because there is now one SCE-owned, build-validated source.
-///
-/// The emit types the slot dims as `usize`, so they bind directly as the
-/// dispatcher const generics (no cast). The AP machine's dims are larger
-/// than the MCU's (32 / 65536 vs 4 / 4096) — the tokio host IS the AP
-/// node, so it correctly uses the AP machine's pool.
-#[cfg(feature = "reassembly")]
-const REASSEMBLY_SLOTS: usize = crate::reassembly_pool_ap::SLOT_COUNT;
-#[cfg(feature = "reassembly")]
-const REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_ap::SLOT_SIZE;
-
-/// The unicast tokio session's reassembly Router type. The std `alloc`
-/// backing keeps each chain's staging buffer on the heap;
-/// `REASSEMBLY_SLOT_SIZE` is the per-chain cap the dispatcher enforces
-/// explicitly (so reassembly is bounded on the AP profile too).
-#[cfg(feature = "reassembly")]
-pub type TokioReassembly = ReassemblyDispatcher<REASSEMBLY_SLOTS, REASSEMBLY_SLOT_SIZE>;
-
-/// Reassembly config (`per_peer_quota` / `reassembly_timeout_ms`) sourced
-/// from the same SCE-codegen'd AP buffer-pool constants. The emit types
-/// them as `u32`; [`ReassemblyConfig`] takes `u16` / `u64`, so the two
-/// widening casts are the only adaptation.
-/// `pub(crate)`: the multicast drive loop (`crate::multicast_glue`) runs
-/// its own pool instance over the SAME SCE-sourced AP dims/knobs (one
-/// buffer-pool policy SSOT, two transports).
-#[cfg(feature = "reassembly")]
-pub(crate) fn reassembly_config() -> ReassemblyConfig {
-    ReassemblyConfig::new(
-        crate::reassembly_pool_ap::PER_PEER_QUOTA as u16,
-        crate::reassembly_pool_ap::REASSEMBLY_TIMEOUT_MS as u64,
-    )
-}
 
 /// R76b — production driver loop. Composes `poll_and_dispatch_one`
 /// (one LinkEvent per iteration) with a `tokio::select!` race

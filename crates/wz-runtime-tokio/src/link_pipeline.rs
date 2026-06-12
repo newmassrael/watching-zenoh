@@ -43,8 +43,13 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
-use crate::session_glue::BoxedLinkDriver;
+// R311mk — import `BoxedLinkDriver` from its SSOT home (the shared
+// `wz_session_core::link` tier) rather than via the `crate::session_glue`
+// re-export hop. The link pipeline is transport-agnostic (a multicast deploy
+// binds a UDP multicast socket too), so it must not depend on the
+// `transport-unicast`-gated `session_glue`.
 use crate::{poll_framed, LinkDriver, LinkEvent, ReadState, Reliability, TxFrame};
+use wz_session_core::link::BoxedLinkDriver;
 
 /// Dial an outbound TCP connection — the single raw-dial primitive for the
 /// stream transport. Returns the connected [`TcpStream`] unwrapped so the

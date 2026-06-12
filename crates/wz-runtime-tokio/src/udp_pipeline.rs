@@ -50,8 +50,13 @@ use tokio::sync::mpsc;
 use wz_runtime_core::Runtime;
 
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
-use crate::session_glue::BoxedLinkDriver;
+// R311mk — import `BoxedLinkDriver` from its SSOT home (the shared
+// `wz_session_core::link` tier) rather than via the `crate::session_glue`
+// re-export hop. The link pipeline is transport-agnostic (a multicast deploy
+// binds a UDP multicast socket too), so it must not depend on the
+// `transport-unicast`-gated `session_glue`.
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+use wz_session_core::link::BoxedLinkDriver;
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather

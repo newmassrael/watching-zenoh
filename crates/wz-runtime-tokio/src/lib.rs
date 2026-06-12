@@ -36,6 +36,18 @@ use tokio::net::UdpSocket;
 #[cfg(feature = "transport-link-tcp")]
 use wz_codecs::stream_envelope::StreamEnvelope;
 
+// R311mk — `session_glue` is the unicast handshake driver (it names the
+// `SessionFsmUnicast{Policy,Event}` types + drives `session_actions` /
+// `session_timeouts` / `drive`, all `session-unicast`-gated in
+// wz-session-core), so it is gated on `transport-unicast`. Previously it
+// compiled unconditionally and a `transport-multicast`-only build (no
+// `transport-unicast`) failed on its unicast imports — the facade
+// composability gap this round closes. The shared reassembly-pool wiring it
+// used to host moved to the always-available `crate::reassembly` SSOT; the
+// multicast transport drive loop (`multicast_glue`) is independent of this
+// module (it dispatches into the shared `ApplicationLayerObserver` directly,
+// not through the unicast `SessionLinkActions`).
+#[cfg(feature = "transport-unicast")]
 pub mod session_glue;
 
 /// SCE-generated AP reassembly buffer-pool config. The emit comes from
@@ -65,6 +77,16 @@ pub mod session_glue;
 pub mod reassembly_pool_ap {
     include!(concat!(env!("OUT_DIR"), "/reassembly_pool_ap.rs"));
 }
+
+/// R311mk — shared AP reassembly-pool wiring: the [`reassembly::TokioReassembly`]
+/// Router type + [`reassembly::reassembly_config`], hoisted out of
+/// [`session_glue`] (the unicast handshake driver) so a `transport-multicast`-only
+/// build reaches the pool config without `transport-unicast`. Transport-agnostic
+/// SSOT — both the unicast and multicast drive loops run a pool instance over
+/// the same SCE-sourced AP dims/knobs. Gated on `reassembly` (the dims come from
+/// [`reassembly_pool_ap`]).
+#[cfg(feature = "reassembly")]
+pub mod reassembly;
 
 // Crate-local fixtures for this crate's OWN unit tests (recording driver
 // + actions builders). Kept in-crate — NOT in the test-support sibling —
@@ -256,6 +278,16 @@ pub mod observer;
 /// [`session::PublishOptions::allowed_destination`]. Mirrors
 /// zenoh-pico's `_z_session_t`. R228 scope: literal-keyexpr Put +
 /// Del. Aliased publish + full Sample metadata are R229+ carries.
+///
+/// R311mk — gated on `transport-unicast`: the [`session::Session`] handle
+/// owns a [`session_glue::SessionLinkActions`] bundle (the unicast action
+/// machinery), so it is the unicast-session API surface. A
+/// `transport-multicast`-only build drives multicast through
+/// [`multicast_glue::drive_multicast_session`] over a shared
+/// [`observer::ApplicationLayerObserver`] instead of a `Session` handle.
+/// Unifying multicast under the `Session` handle (the zenoh-cpp
+/// transport-agnostic-session shape) is a separate north-star cascade.
+#[cfg(feature = "transport-unicast")]
 pub mod session;
 
 /// R311y — per-runtime synchronization primitive aliases (`Mutex<T>`,

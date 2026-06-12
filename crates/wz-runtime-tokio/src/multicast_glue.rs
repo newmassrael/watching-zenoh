@@ -260,6 +260,20 @@ where
 
     // The TX mint state (per-channel next SN). The JOIN beacon advertises
     // the live values; every outbound data frame mints from here.
+    // R311mk — `tx_sn` is mutated only by the TX-emit arm below (gated on the
+    // data-plane body codecs). A JOIN-only multicast build (transport-multicast
+    // with no codec-push/response/response-final/liveliness-token, now reachable
+    // since the transport-unicast decouple) reads it for the beacon
+    // (`encode_join`) but never mints, so `mut` is conditionally unused.
+    #[cfg_attr(
+        not(any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "liveliness-token"
+        )),
+        allow(unused_mut)
+    )]
     let mut tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
     // R311kn — the loop owns the multicast reassembly Router: per-peer
     // fragment chains keyed by the peer's pool-slot index (zenoh-pico's
@@ -267,8 +281,7 @@ where
     // Same SCE-sourced AP pool dims/knobs as the unicast loop — one
     // buffer-pool policy SSOT, two transports.
     #[cfg(feature = "reassembly")]
-    let mut reasm =
-        crate::session_glue::TokioReassembly::new(crate::session_glue::reassembly_config());
+    let mut reasm = crate::reassembly::TokioReassembly::new(crate::reassembly::reassembly_config());
     // Once every sender is dropped `recv()` would resolve `None` forever;
     // disarm the select arm instead of busy-looping on it.
     let mut outbound_open = true;

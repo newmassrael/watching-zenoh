@@ -378,7 +378,15 @@ transport-unicast = ["wz-session-core/session-unicast"]
 # would be an inert beacon, so the dep is a kconfig select, not an
 # optional compose (which consumer arms then act on the fanned messages
 # stays per-consumer-feature, exactly as on the unicast path).
-transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec-frame"]
+# R311mk — `codec-close` joins the select set: the shared multicast RX SSOT
+# `wz_session_core::multicast_rx` is gated on codec-close (it decodes
+# `T_MID_CLOSE` and aborts the leaving peer's reassembly chains via
+# `close_by_src` — multicast_rx.rs:147,209), and `multicast_glue` consumes
+# that SSOT. Without this the previously-default-masked `multicast_rx`
+# import did not resolve in a `transport-multicast`-without-default build
+# (the facade composability gap). A multicast transport that cannot process
+# a peer's Close is incomplete, so codec-close is a select, not optional.
+transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec-frame", "codec-close"]
 # chunk-5 — forward to the wz-session-core same-named gate so the migrated
 # start/stop_keepalive_worker action bodies compile under the keepalive axis.
 transport-keepalive = ["wz-session-core/transport-keepalive"]

@@ -613,6 +613,16 @@ transport-lowlatency = []
 # transport-keepalive forwarding shape, R311kx). The TX body codecs + the
 # observer-staging registries (codec-push / codec-response / codec-response-final
 # / liveliness-token / query-queryable) carry their own wz-session-lwip?/ forward.
+# R311mk note — codec-close is NOT listed here: it is pulled by each runtime
+# profile's OWN transport-multicast (wz-runtime-tokio/transport-multicast +=
+# codec-close; wz-session-lwip/transport-multicast already pulls
+# wz-session-core/codec-close) because the shared multicast RX SSOT
+# (wz-session-core::multicast_rx, gated on codec-close: it decodes T_MID_CLOSE
+# + aborts the leaving peer's reassembly chains) is consumed by those crates'
+# drive loops. Mirrors codec-join / codec-frame, which the facade likewise
+# does NOT re-list — the crate forward self-selects them. Adding a facade-level
+# codec-close forward would be redundant AND would perturb wz-runtime-lwip's
+# feature set for the MCU multicast footprint bin (Q.5).
 transport-multicast = ["wz-runtime-tokio?/transport-multicast", "wz-session-lwip?/transport-multicast"]
 transport-shm = []
 transport-unicast = ["wz-runtime-tokio?/transport-unicast"]
