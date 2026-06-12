@@ -281,6 +281,10 @@ fn main() -> ! {
                 parameters: None,
                 attachment: None,
                 rid: 1,
+                // `false` for wire dispatch (this is a remote query — `is_remote
+                // = true` below); the query-source-info round added this field
+                // to BorrowedQuery after this probe last named the struct.
+                is_local: false,
             },
             &mut out,
             /* is_remote = */ true,
