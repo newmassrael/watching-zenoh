@@ -1960,11 +1960,14 @@ layer_g_cross_compile_cortex_m() {
         # compiling that Arc-bearing module. So the full TX-codec +
         # liveliness-token subset cross-builds on EVERY non-riscv target —
         # the M0 liveliness inline-fire reach the prior rounds carried.
-        # R311mf: a final wz-session-lwip cross-build pins the multicast
-        # Fragment RX/TX path (transport-multicast,transport-fragmentation,
-        # codec-push) — the reassembly Router + the TX splitter cross-compile on
-        # every non-riscv target including thumbv6m (Vec-backed, no Arc), the M0
-        # fragment reach.
+        # R311mf/R311mg: a final facade build pins the multicast Fragment RX/TX
+        # path THROUGH the facade (session-lwip,transport-multicast,
+        # transport-fragmentation,codec-push) — proving wz's
+        # wz-session-lwip?/transport-fragmentation forward (R311mg) reaches the
+        # MCU reassembly Router + TX splitter, which cross-compile on every
+        # non-riscv target including thumbv6m (Vec-backed, no Arc), the M0
+        # fragment reach. Built via the facade (not -p wz-session-lwip direct)
+        # so the public composition surface is what is tested, like Build 3/4.
         if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
             echo "  G.11 session-lwip cross-real $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
         elif (cd crates && \
@@ -1990,9 +1993,9 @@ layer_g_cross_compile_cortex_m() {
                     --quiet) && \
              (cd crates && \
                 WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
-                cargo build -p wz-session-lwip \
-                    --target "$t" \
-                    --features transport-multicast,transport-fragmentation,codec-push \
+                cargo build -p wz \
+                    --target "$t" --no-default-features \
+                    --features session-lwip,transport-multicast,transport-fragmentation,codec-push \
                     --quiet); then
             echo "  G.11 session-lwip cross-real $t OK"
         else

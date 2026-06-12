@@ -574,12 +574,21 @@ time-timestamp-source = []
 # missing feature would surface as a Cargo resolver error. They land as
 # wire-up cascades as their behavior arrives. `transport-multicast`
 # (Round C) and `transport-fragmentation` (R311jm — AP TX-side
-# fragmentation + full-duplex `reassembly`; the MCU TX path is deferred,
-# so the `wz-runtime-tokio?/` forward is inert on the lwIP presets) are
-# wired such cascades.
+# fragmentation + full-duplex `reassembly`; R311mf wired the MCU TX path
+# too, so R311mg adds the `wz-session-lwip?/` forward below — the lwIP
+# multicast loop now splits oversize TX via the shared multicast_tx_emit
+# SSOT once the feature is on) are wired such cascades.
 transport-batching = ["wz-runtime-tokio?/transport-batching", "wz-runtime-lwip?/transport-batching"]
 transport-compression = []
-transport-fragmentation = ["wz-runtime-tokio?/transport-fragmentation"]
+# R311mg — transport-fragmentation additionally weak-forwards to
+# wz-session-lwip: R311mf landed the MCU multicast Fragment RX/TX in the
+# wz-session-lwip crate's OWN transport-fragmentation feature, so without
+# this forward a session-lwip + transport-fragmentation build through the
+# facade would leave the MCU TX splitter + reassembly RX dormant (the gap
+# the prior `wz-runtime-tokio?/`-only forward left). Mirrors the R311mc
+# transport-multicast / codec-* / liveliness-token / query-queryable
+# forwards.
+transport-fragmentation = ["wz-runtime-tokio?/transport-fragmentation", "wz-session-lwip?/transport-fragmentation"]
 # R311kx — transport-keepalive additionally weak-forwards to
 # wz-session-lwip: the MCU keepalive TX emitter (run_session's
 # check_keepalive_deadline busy-poll arm) is gated on wz-session-lwip's
