@@ -445,9 +445,15 @@ session-matching = ["alloc"]
 # Deliberately NOT implied by any plane feature: the R311le ratify
 # rejected the plane->deferred-fire implication because it would drag
 # `alloc` into the no-alloc decl lane (wz-session-core
-# --no-default-features codec-declare,declare-* build). Direct core
-# consumers (MCU lanes, subset test lanes) never enable it and keep
-# composing through the plane-arm union.
+# --no-default-features codec-declare,declare-* build).
+# R311me — this is now the SOLE gate of the deferred_fire module (lib.rs).
+# The pre-R311lh plane arms (session-matching / declare-* / liveliness-* /
+# query-reply) were dropped from that gate: no core code instantiates a
+# deferred type under them, so they only compiled the module unused — and
+# `liveliness-token` pulled `Arc` onto the Arc-free MCU multicast profile,
+# breaking the thumbv6m M0 liveliness cross-build. Non-AP consumers (MCU
+# lanes, subset test lanes) never enable `deferred-fire` and drive
+# registries inline.
 deferred-fire = ["alloc"]
 
 [build-dependencies]

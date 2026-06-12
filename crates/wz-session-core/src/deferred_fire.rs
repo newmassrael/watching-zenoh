@@ -86,15 +86,19 @@
 //! ## Gating
 //!
 //! `alloc::sync::Arc` needs `target_has_atomic = "ptr"` (absent on
-//! ARMv6-M), so the module rides the consumer-feature union — exactly
-//! the envelope of the session tier that needs it, keeping the
-//! thumbv6m session-unicast lane (G.10) Arc-free. R311lb grew the
-//! union from `session-matching` alone to the decl-sink planes
-//! (`declare-subscriber` / `declare-queryable` / `liveliness-token`,
-//! each under `alloc`) for the Session-tier deferred decl listeners
-//! (R311lc). The single-task MCU profile that drives registries
-//! directly (no outer observer mutex) does not need deferral and
-//! keeps the inline-fire path.
+//! ARMv6-M), so this module is gated on the `deferred-fire` feature
+//! ALONE (R311me; the feature implies `alloc`). Its sole consumer is the
+//! AP Session tier (wz-runtime-tokio), which enables `deferred-fire`
+//! unconditionally; every other profile keeps the inline-fire path. The
+//! single-task MCU profile drives registries directly (no outer observer
+//! mutex) and stages its multicast liveliness / queryable replies through
+//! the Rc-backed `MulticastReplyQueue`, so it never enables
+//! `deferred-fire` and stays Arc-free on thumbv6m. (Before R311me the gate
+//! also fired on the decl-sink / data-plane features — a pre-R311lh
+//! artifact, grown by R311lb/lc/lg, that compiled this module *unused*
+//! wherever `liveliness-token` et al. were on; that is what dragged `Arc`
+//! onto the M0 multicast profile. See the lib.rs module-decl comment for
+//! the full history.)
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;

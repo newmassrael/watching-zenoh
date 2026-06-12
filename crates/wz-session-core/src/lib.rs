@@ -313,37 +313,31 @@ pub mod lease;
 
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let
-/// decl/matching callbacks run OUTSIDE the session observer mutex.
-/// Rides the consumer-feature union because `alloc::sync::Arc` needs
-/// `target_has_atomic = "ptr"` (absent on ARMv6-M) — the gate keeps
-/// the thumbv6m session-unicast lane Arc-free. R311lb — the union
-/// grew from `session-matching` alone to the decl-sink planes
-/// (`declare-subscriber` / `declare-queryable` / `liveliness-token`,
-/// each under `alloc` since the staging sinks heap-box; the matching
-/// arm already implies `alloc` via its Cargo feature) for the
-/// Session-tier deferred decl listeners (R311lc). R311lg — the R311lf
-/// ratify (lock-free callback invariant, all data planes) adds the
-/// first two data-plane arms: `liveliness-subscriber` (deferred
-/// liveliness samples) + `query-reply` (deferred z_get reply/final).
-/// None of the Layer G MCU cross lanes enables either arm, so the
-/// thumbv6m Arc-free envelope is unchanged. R311lh — the
-/// `deferred-fire` consumer-enable arm joins for round (b): the
-/// always-compiled subscriber plane defers at the Session tier, so
-/// wz-runtime-tokio (host-only) enables the module unconditionally
-/// via its dependency feature list; the plane arms stay for direct
-/// core consumers (see the Cargo feature comment).
-#[cfg(all(
-    feature = "alloc",
-    any(
-        feature = "deferred-fire",
-        feature = "session-matching",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "liveliness-token",
-        feature = "liveliness-subscriber",
-        feature = "query-reply",
-    )
-))]
+/// decl/matching/data callbacks run OUTSIDE the session observer mutex.
+/// Pure Session-tier infra — its only consumer is wz-runtime-tokio (the
+/// AP runtime), which enables `deferred-fire` unconditionally on its
+/// wz-session-core dependency.
+///
+/// R311me — gated on `deferred-fire` ALONE. `alloc::sync::Arc` needs
+/// `target_has_atomic = "ptr"` (absent on ARMv6-M), and `deferred-fire`
+/// implies `alloc`, so making it the sole gate keeps the module off
+/// every profile that does not run the AP deferral machinery. Before
+/// R311me the gate also fired on the decl-sink / data-plane features
+/// (`session-matching` / `declare-subscriber` / `declare-queryable` /
+/// `liveliness-token` / `liveliness-subscriber` / `query-reply`), a
+/// pre-R311lh artifact: those arms were how the AP Session-tier deferred
+/// listeners (R311lb/lc/lg) reached the module before R311lh introduced
+/// the explicit `deferred-fire` consumer feature. No wz-session-core
+/// code instantiates a deferred type under those arms (only doc-links),
+/// so post-R311lh they were dead weight — and one of them,
+/// `liveliness-token`, dragged `alloc::sync::Arc` into the Arc-free MCU
+/// multicast profile (the single-task loop drives registries inline and
+/// stages its liveliness / queryable replies through the Rc-backed
+/// `MulticastReplyQueue`, never the deferred seam), breaking the
+/// thumbv6m M0 liveliness cross-build. Collapsing the gate restores that
+/// M0 inline-fire reach with no AP change (wz-runtime-tokio still
+/// enables `deferred-fire`).
+#[cfg(feature = "deferred-fire")]
 pub mod deferred_fire;
 
 /// Query-side enums (ConsolidationMode + QueryTarget) shared by the
