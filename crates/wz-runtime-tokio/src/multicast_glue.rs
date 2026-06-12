@@ -190,7 +190,9 @@ impl wz_session_core::response_sink::ResponseSink for MulticastReplySink {
         // Fire-and-forget, mirroring `SessionLinkActions::send_response`'s
         // F2 contract (no error channel): a dropped receiver (the loop
         // ended) drops the reply exactly as a dead link would.
-        let _ = self.tx.send(MulticastTxItem::Response { response });
+        let _ = self.tx.send(MulticastTxItem::Response {
+            response: Box::new(response),
+        });
     }
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64) {
@@ -213,14 +215,18 @@ impl wz_session_core::response_sink::DeclareReplySink for MulticastReplySink {
         let declare = build_token_reply(token_id, keyexpr, interest_id)
             .try_into_owned()
             .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES");
-        let _ = self.tx.send(MulticastTxItem::DeclareReply { declare });
+        let _ = self.tx.send(MulticastTxItem::DeclareReply {
+            declare: Box::new(declare),
+        });
     }
     #[cfg(feature = "liveliness-token")]
     fn send_declare_final_reply(&self, interest_id: u64) {
         let declare = build_final_reply(interest_id)
             .try_into_owned()
             .expect("DeclFinal reply carries no bounded fields");
-        let _ = self.tx.send(MulticastTxItem::DeclareReply { declare });
+        let _ = self.tx.send(MulticastTxItem::DeclareReply {
+            declare: Box::new(declare),
+        });
     }
 }
 

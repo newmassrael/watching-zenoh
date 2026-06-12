@@ -21,6 +21,14 @@
 //! orchestration is behaviour-identical to the inline arm the AP loop carried
 //! before R311lx; only its home moved.
 
+// Only the boxed variants (Push / Response / DeclareReply) name Box; a build
+// with only the unboxed ResponseFinal (or no data codec) must not import it.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "liveliness-token"
+))]
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 /// One queued outbound data emission for a multicast drive loop's TX half
@@ -35,6 +43,17 @@ use alloc::vec::Vec;
 /// transport). The enum is unconditional (signature stability); the variants
 /// are gated by the codec that encodes them, so a build without any data codec
 /// carries an uninhabited type and a dead arm-free match.
+///
+/// R311mb — the large owned-message variants (`Push` / `Response` /
+/// `DeclareReply`) box their payload, mirroring [`NetworkMessage`'s][nm] own
+/// `Box<PushOwned>` / `Box<ResponseOwned>` / `Box<DeclareOwned>` (the small
+/// `ResponseFinal`, a bare rid, stays inline). This bounds the enum to a pointer
+/// rather than its 700+ byte largest variant, so a `VecDeque<MulticastTxItem>`
+/// reply queue (the MCU `MulticastReplyQueue`) holds pointer-sized slots — the
+/// owned payloads already heap-allocate, so the extra `Box` is marginal — and it
+/// keeps clippy's `large_enum_variant` quiet across every codec subset.
+///
+/// [nm]: crate::network_message::NetworkMessage
 #[derive(Debug)]
 pub enum MulticastTxItem {
     /// A pub/sub Push (`z_put` / `z_del` over multicast). Framed via the
@@ -44,8 +63,8 @@ pub enum MulticastTxItem {
     Push {
         /// The built Push network message
         /// ([`build_push_literal`](crate::push_build::build_push_literal) and
-        /// friends).
-        push: wz_codecs::push::PushOwned,
+        /// friends). Boxed (R311mb) to bound the enum size.
+        push: Box<wz_codecs::push::PushOwned>,
         /// Channel selection: reliable mints on the reliable ring,
         /// best-effort on the other (multicast UDP delivery is
         /// best-effort either way; the flag governs the SN channel +
@@ -66,7 +85,8 @@ pub enum MulticastTxItem {
     Response {
         /// The built `Response` network message (drained from the
         /// observer's `pending_replies` via `QueryReply::into_response`).
-        response: wz_codecs::response::ResponseOwned,
+        /// Boxed (R311mb) to bound the enum size.
+        response: Box<wz_codecs::response::ResponseOwned>,
     },
     /// R311lq — the `ResponseFinal` terminating a multicast reply chain
     /// for `request_id`. Unconditionally reliable: dropping it would leave
@@ -101,7 +121,8 @@ pub enum MulticastTxItem {
     DeclareReply {
         /// The built `Declare` reply (a `DeclToken` for a held token, or the
         /// terminating `DeclFinal`), already owned via `Declare::try_into_owned`.
-        declare: wz_codecs::declare::DeclareOwned,
+        /// Boxed (R311mb) to bound the enum size.
+        declare: Box<wz_codecs::declare::DeclareOwned>,
     },
 }
 
@@ -165,7 +186,7 @@ pub fn multicast_tx_emit(
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Push { push, reliable } => {
             let frame_sn = tx_sn.mint(reliable);
-            let dgram = crate::frame_encode::encode_frame_with_push(frame_sn, push, reliable);
+            let dgram = crate::frame_encode::encode_frame_with_push(frame_sn, *push, reliable);
             let datagrams = crate::frame_encode::multicast_frame_or_fragments(
                 dgram,
                 frame_sn,
@@ -186,7 +207,7 @@ pub fn multicast_tx_emit(
         MulticastTxItem::Response { response } => {
             let frame_sn = tx_sn.mint(/* reliable = */ true);
             let dgram = crate::frame_encode::encode_frame_with_response(
-                frame_sn, response, /* reliable = */ true,
+                frame_sn, *response, /* reliable = */ true,
             );
             let datagrams = crate::frame_encode::multicast_frame_or_fragments(
                 dgram,
@@ -236,7 +257,7 @@ pub fn multicast_tx_emit(
         MulticastTxItem::DeclareReply { declare } => {
             let frame_sn = tx_sn.mint(/* reliable = */ true);
             let dgram = crate::frame_encode::encode_frame_with_declare(
-                frame_sn, declare, /* reliable = */ true,
+                frame_sn, *declare, /* reliable = */ true,
             );
             let datagrams = crate::frame_encode::multicast_frame_or_fragments(
                 dgram,
@@ -268,7 +289,10 @@ pub fn multicast_put_literal(
     payload: &[u8],
 ) -> Result<MulticastTxItem, sce_forge_runtime::codec::CodecError> {
     Ok(MulticastTxItem::Push {
-        push: crate::push_build::build_push_literal(keyexpr_suffix, payload)?,
+        push: Box::new(crate::push_build::build_push_literal(
+            keyexpr_suffix,
+            payload,
+        )?),
         reliable: true,
     })
 }

@@ -1050,9 +1050,13 @@ layer_c1q_multicast_glue() {
 # variant-complete and adds two combos: transport-multicast,liveliness-token
 # exercises a NON-codec-push TX variant (the DeclareReply round-trip) and lints
 # the union TX gate WITHOUT codec-push (the case the old codec-push-only gating
-# would have mis-compiled to `match item {}` on an inhabited type); the maximal
-# transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token
-# build compiles every multicast_tx_emit arm together and runs both TX tests.
+# would have mis-compiled to `match item {}` on an inhabited type). R311ma/R311mb
+# add the observer-staging tests: transport-multicast,liveliness-token covers the
+# liveliness DeclareReplySink drain, and transport-multicast,query-queryable,
+# codec-response,codec-response-final covers the queryable ResponseSink drain
+# (MulticastReplyQueue with no liveliness-token, so its ResponseSink-only gate is
+# exercised). The maximal build now also carries query-queryable so every
+# multicast_tx_emit arm + both observer-staging sinks compile + run together.
 layer_c1m_session_lwip() {
     (cd crates \
         && cargo test -p wz-session-lwip --quiet \
@@ -1061,7 +1065,10 @@ layer_c1m_session_lwip() {
         && cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet \
         && cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet \
         && cargo test -p wz-session-lwip \
-            --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token \
+            --features transport-multicast,query-queryable,codec-response,codec-response-final \
+            --quiet \
+        && cargo test -p wz-session-lwip \
+            --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
             --quiet \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
@@ -1069,7 +1076,10 @@ layer_c1m_session_lwip() {
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,codec-push --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,liveliness-token --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets \
-            --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token \
+            --features transport-multicast,query-queryable,codec-response,codec-response-final \
+            --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets \
+            --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
             --quiet -- -D warnings)
 }
 

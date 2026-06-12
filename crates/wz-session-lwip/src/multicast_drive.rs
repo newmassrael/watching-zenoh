@@ -49,24 +49,21 @@
 //! staging* that auto-PRODUCES the reply variants — an application that builds
 //! its own reply items publishes them today.
 //!
-//! ## Observer staging (R311ma — liveliness)
+//! ## Observer staging (R311ma liveliness; R311mb queryable)
 //!
 //! [`MulticastReplyQueue`] is the no_std mirror of the AP loop's
-//! `MulticastReplySink`: the observer drains its staged liveliness declare
-//! replies into it (`flush_declare_replies`), the loop's `next_tx` seam drains
-//! them back out. So a held-token declarer on the MCU now auto-replies to an
-//! inbound liveliness Interest over the group without the application
-//! hand-building the reply items. It implements only [`DeclareReplySink`]; the
-//! queryable `ResponseSink` reply chain (which names a `wz_codecs` codec type
-//! this crate does not yet dep, + the `query-queryable` registry forward) is the
-//! follow-on.
+//! `MulticastReplySink`: the application's observer drains its staged replies
+//! into it — liveliness interest-responses via `flush_declare_replies`
+//! ([`DeclareReplySink`], R311ma) and queryable `Response` / `ResponseFinal`
+//! via `flush_query_replies` ([`ResponseSink`], R311mb) — and the loop's
+//! `next_tx` seam drains them back out. So a held-token declarer OR a registered
+//! queryable on the MCU now auto-replies to an inbound liveliness Interest /
+//! Query over the group without the application hand-building the reply items.
+//! Per the R311lq segregation it stubs no `LivelinessGetPrune` (the
+//! connectionless multicast transport has no reconnect cache).
 //!
 //! ## Not yet here (R311lt foundation; follow-on increments)
 //!
-//! - **Queryable observer staging** — extend [`MulticastReplyQueue`] to
-//!   `ResponseSink` (the `Response` / `ResponseFinal` reply chain) once the
-//!   `query-queryable` registry + a `wz_codecs` dep land, so a multicast
-//!   queryable on the MCU auto-replies like the liveliness declarer does now.
 //! - **Fragment RX/TX** — the `reassembly` / `transport-fragmentation` arms the
 //!   AP loop carries (R311kn / R311ko).
 //! - **`MulticastOutcome::LinkLost`** — the MCU poll loop has no link-loss
@@ -100,19 +97,46 @@ use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, TxSn};
-// R311ma — the no_std multicast reply queue (MulticastReplyQueue, below) is the
-// MCU mirror of the AP loop's MulticastReplySink: the observer drains its staged
-// liveliness declare replies into it via DeclareReplySink, the loop's next_tx
-// seam drains them back out. Backed by alloc (Rc<RefCell<VecDeque>>) rather than
-// a tokio mpsc, because the busy-poll loop is single-task (no cross-thread Send).
-// Gated on liveliness-token (the one reply variant the sink stages this round;
-// the queryable ResponseSink path is the carried follow-on).
-#[cfg(feature = "liveliness-token")]
+// R311ma/R311mb — the no_std multicast reply queue (MulticastReplyQueue, below)
+// is the MCU mirror of the AP loop's MulticastReplySink: the observer drains its
+// staged replies into it (declare via DeclareReplySink, query via ResponseSink),
+// the loop's next_tx seam drains them back out. Backed by alloc
+// (Rc<RefCell<VecDeque>>) rather than a tokio mpsc, because the busy-poll loop is
+// single-task (no cross-thread Send). The type + its alloc backing exist when any
+// reply variant inhabits it; each producer-trait impl is gated by its own codec
+// family (R311mb added the queryable ResponseSink half).
+// Box::new is called only in the ResponseSink (codec-response) + DeclareReplySink
+// (liveliness-token) arms; a codec-response-final-only build pushes the unboxed
+// ResponseFinal, so it must not import Box (narrower than the type's U gate).
+#[cfg(any(feature = "codec-response", feature = "liveliness-token"))]
+use alloc::boxed::Box;
+#[cfg(any(
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
 use alloc::collections::VecDeque;
-#[cfg(feature = "liveliness-token")]
+#[cfg(any(
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
 use alloc::rc::Rc;
-#[cfg(feature = "liveliness-token")]
+#[cfg(any(
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
 use core::cell::RefCell;
+// The queryable ResponseSink half (R311mb): send_response names the wz_codecs
+// owned response, so this MCU crate deps wz-codecs directly (forwarded by its
+// codec-response feature) — the one wz_codecs type named here.
+#[cfg(feature = "codec-response")]
+use wz_codecs::response::ResponseOwned;
+#[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+use wz_session_core::response_sink::ResponseSink;
+// The liveliness DeclareReplySink half (R311ma): the reply builders are
+// inferred-owned, so no wz_codecs type is named for this arm.
 #[cfg(feature = "liveliness-token")]
 use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
 #[cfg(feature = "liveliness-token")]
@@ -160,14 +184,14 @@ impl LwipMulticastDriver {
     }
 }
 
-/// R311ma — the no_std multicast reply queue: the MCU mirror of the AP loop's
-/// `MulticastReplySink`
-/// ([`wz_runtime_tokio::multicast_glue`](https://docs.rs)). A liveliness-token
-/// declarer on the group stages its interest-response replies here — the
-/// application's `on_event` closure drives
+/// R311ma/R311mb — the no_std multicast reply queue: the MCU mirror of the AP
+/// loop's `MulticastReplySink` (`wz_runtime_tokio::multicast_glue`). An
+/// application's observer stages its interest / query responses here — the
+/// `on_event` closure drives
 /// [`ApplicationLayerObserver::flush_declare_replies`](wz_session_core::observer::ApplicationLayerObserver::flush_declare_replies)
-/// with this queue as the [`DeclareReplySink`], enqueuing a
-/// `Declare(DeclToken)` + terminating `DeclFinal` for each matched Interest —
+/// (liveliness, this queue as [`DeclareReplySink`]) and/or
+/// [`flush_query_replies`](wz_session_core::observer::ApplicationLayerObserver::flush_query_replies)
+/// (queryable, this queue as [`ResponseSink`]), enqueuing the staged replies —
 /// and the loop's `next_tx` seam drains them back out via [`Self::pop`], framing
 /// each through the shared `multicast_tx_emit` SSOT.
 ///
@@ -177,20 +201,31 @@ impl LwipMulticastDriver {
 /// no cross-thread `Send`, an `Rc<RefCell>` is the single-task analogue of the
 /// channel. `Clone` shares the backing store between the two closures.
 ///
-/// Per the R311lq interface segregation it implements only [`DeclareReplySink`]
-/// — the concern a liveliness node drains. The queryable
-/// [`ResponseSink`](wz_session_core::response_sink::ResponseSink) reply chain
-/// (which names `wz_codecs::response::ResponseOwned`, a codec type this MCU
-/// crate does not yet dep) is the carried follow-on; `LivelinessGetPrune` is not
-/// implemented at all (the connectionless multicast transport has no reconnect
-/// declaration cache to prune, same rationale as the AP sink).
-#[cfg(feature = "liveliness-token")]
+/// Per the R311lq interface segregation it implements exactly the two
+/// observer-drain concerns a multicast node uses — [`DeclareReplySink`]
+/// (the liveliness interest-response, R311ma) and [`ResponseSink`] (the
+/// queryable `Response` + `ResponseFinal` chain, R311mb) — each as a separate
+/// impl gated by its codec family. It does NOT implement `LivelinessGetPrune`:
+/// the connectionless multicast transport (JOIN + lease, never a re-dial) has no
+/// reconnect declaration cache to prune, so honoring the segregation it stubs
+/// nothing (same rationale as the AP sink). The type + its alloc backing exist
+/// when any reply variant inhabits it (the codec-response / codec-response-final
+/// / liveliness-token union).
+#[cfg(any(
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
 #[derive(Clone, Default)]
 pub struct MulticastReplyQueue {
     queue: Rc<RefCell<VecDeque<MulticastTxItem>>>,
 }
 
-#[cfg(feature = "liveliness-token")]
+#[cfg(any(
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
 impl MulticastReplyQueue {
     /// A fresh empty reply queue.
     pub fn new() -> Self {
@@ -201,6 +236,32 @@ impl MulticastReplyQueue {
     /// when empty — the loop then keeps serving RX + the JOIN beacon.
     pub fn pop(&self) -> Option<MulticastTxItem> {
         self.queue.borrow_mut().pop_front()
+    }
+}
+
+// R311mb — the queryable-reply drain, mirroring the AP `MulticastReplySink`'s
+// `ResponseSink` impl: the observer hands the sink the owned `Response` (drained
+// from `pending_replies` via `QueryReply::into_response`) and the terminal rid,
+// and the sink enqueues each as the matching `MulticastTxItem` for the loop to
+// frame + multicast. A separate impl block from `DeclareReplySink` per the
+// R311lq segregation — a query `Response` is a distinct message family from a
+// liveliness `Declare`. Gated on the query-reply codec family; `send_response`
+// names the one wz_codecs owned type this crate references.
+#[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
+impl ResponseSink for MulticastReplyQueue {
+    #[cfg(feature = "codec-response")]
+    fn send_response(&self, response: ResponseOwned) {
+        self.queue
+            .borrow_mut()
+            .push_back(MulticastTxItem::Response {
+                response: Box::new(response),
+            });
+    }
+    #[cfg(feature = "codec-response-final")]
+    fn send_response_final(&self, request_id: u64) {
+        self.queue
+            .borrow_mut()
+            .push_back(MulticastTxItem::ResponseFinal { request_id });
     }
 }
 
@@ -218,7 +279,9 @@ impl DeclareReplySink for MulticastReplyQueue {
             .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES");
         self.queue
             .borrow_mut()
-            .push_back(MulticastTxItem::DeclareReply { declare });
+            .push_back(MulticastTxItem::DeclareReply {
+                declare: Box::new(declare),
+            });
     }
     fn send_declare_final_reply(&self, interest_id: u64) {
         let declare = build_final_reply(interest_id)
@@ -226,7 +289,9 @@ impl DeclareReplySink for MulticastReplyQueue {
             .expect("DeclFinal reply carries no bounded fields");
         self.queue
             .borrow_mut()
-            .push_back(MulticastTxItem::DeclareReply { declare });
+            .push_back(MulticastTxItem::DeclareReply {
+                declare: Box::new(declare),
+            });
     }
 }
 
@@ -652,7 +717,9 @@ mod tests {
         let declare = build_final_reply(9)
             .try_into_owned()
             .expect("DeclFinal reply carries no bounded fields");
-        let mut pending = Some(MulticastTxItem::DeclareReply { declare });
+        let mut pending = Some(MulticastTxItem::DeclareReply {
+            declare: Box::new(declare),
+        });
 
         // The only Declare we emit is this DeclFinal (build_final_reply), so an
         // observed Declare carrying interest id 9 IS our round-tripped reply —
@@ -803,6 +870,119 @@ mod tests {
             2,
             "the observer staged a DeclToken + DeclFinal for the interest, the \
              queue enqueued both, and next_tx drained both"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// R311mb — the queryable observer-staging round trip on the MCU loop: an
+    /// inbound `Query` for a registered queryable is dispatched to the observer,
+    /// whose handler stages a `Response` + terminating `ResponseFinal`; the
+    /// `on_event` closure drains them through [`MulticastReplyQueue`]'s
+    /// `ResponseSink` impl into the shared queue, and the loop's `next_tx` seam
+    /// drains the queue back out. The MCU mirror of the AP
+    /// `drive_loop_emits_queryable_reply_over_multicast`. Asserts the observer
+    /// staged exactly one `Response` + one `ResponseFinal` and the seam drained
+    /// both — proving the queryable observer -> sink -> next_tx wiring.
+    ///
+    /// Like the liveliness sibling it asserts on the DRAINED items, not a
+    /// loopback echo (the injected Query at SN 0 advances the shared source peer
+    /// entry past our reply mints, so an echoed `Response` at SN 0 would be
+    /// SN-stale-dropped). Distinct port (7455). Runs only when the queryable
+    /// registry (`query-queryable`) + both reply codecs are present.
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "codec-response",
+        feature = "codec-response-final"
+    ))]
+    #[test]
+    fn run_multicast_session_stages_observer_query_replies_into_next_tx() {
+        use wz_session_core::frame_encode::encode_frame_with_request;
+        use wz_session_core::observer::ApplicationLayerObserver;
+        use wz_session_core::request_build::build_request_query;
+
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7455;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        // A peer JOIN (distinct zid, next_sn 0) admits the querier at our
+        // loopback source; the Query then rides that peer's reliable channel at
+        // the advertised SN 0 so the per-peer SN gate admits it.
+        let other = params(&[0x01, 0x02, 0x03, 0x04]);
+        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        socket
+            .send_to(group, port, &other_join)
+            .expect("inject peer JOIN");
+        // A literal-keyexpr Query for "demo/mc", request id 7, at SN 0.
+        let query = encode_frame_with_request(
+            0,
+            build_request_query(7, 0, Some("demo/mc")).expect("query fixture"),
+            true,
+        );
+        socket.send_to(group, port, &query).expect("inject Query");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = LwipRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // A registered queryable at the queried keyexpr — its handler stages one
+        // reply, which the observer terminates with a ResponseFinal.
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .queryables
+            .register("demo/mc", |_query, responder| {
+                responder.reply(b"reply-over-multicast");
+            });
+
+        // The reply queue shared between on_event (the observer flushes its
+        // staged query replies into it) and next_tx (drains them back out).
+        let queue = MulticastReplyQueue::new();
+        let drain = queue.clone();
+
+        let mut drained_responses = 0usize;
+        let mut drained_finals = 0usize;
+        let outcome = run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(16),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |event| {
+                observer.dispatch_event(event);
+                observer.flush_query_replies(&queue);
+            },
+            || {
+                let item = drain.pop();
+                match &item {
+                    Some(MulticastTxItem::Response { .. }) => drained_responses += 1,
+                    Some(MulticastTxItem::ResponseFinal { .. }) => drained_finals += 1,
+                    _ => {}
+                }
+                item
+            },
+        );
+
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the inbound JOIN admitted the querying peer"
+        );
+        std::assert_eq!(
+            drained_responses,
+            1,
+            "the observer staged one Response, the queue enqueued it, next_tx drained it"
+        );
+        std::assert_eq!(
+            drained_finals,
+            1,
+            "the reply chain's terminating ResponseFinal was staged + drained too"
         );
 
         link.leave_multicast_group(group).expect("leave group");
