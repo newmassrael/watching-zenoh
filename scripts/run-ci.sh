@@ -164,6 +164,13 @@
 #              feature-OFF arm — invisible to C2 `clippy --workspace`
 #              which runs the all-on feature union. CLIPPY third of the
 #              build/behaviour/lint runtime-crate composability triad.)
+#   Layer C4e — transport-axis (multicast-without-unicast) BUILD+CLIPPY
+#              (R311mk; the orthogonal axis the consumer-plane matrices
+#              C4b/C4c/C1j/C4d cannot express. They vary the consumer plane
+#              on a transport-unicast base; this lane varies the transport
+#              atom — it builds the facade + clippy-checks the crate under
+#              transport-multicast WITHOUT transport-unicast, guarding the
+#              unicast decouple that made transport-multicast compose alone.)
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
@@ -1422,10 +1429,16 @@ layer_c4b_facade_subset_matrix() {
 # never drift from each other OR from the facade lane. Each emitted line
 # is `name<TAB>full-feature-string`.
 #
-# transport-unicast is pinned ON in every subset: it is FOUNDATIONAL
-# (the sole session FSM; transport-multicast stays reserved with no
-# consumer), so a transport-unicast-OFF subset does not type-check and
-# is not a coherent shape to guard — same status as keyexpr-canon. The
+# transport-unicast is pinned ON in every subset HERE because this matrix
+# varies the CONSUMER plane on a unicast base — each consumer plane
+# (pubsub / queryable / declare / liveliness) hangs off the unicast Session
+# handle. R311mk note: transport-unicast is no longer FOUNDATIONAL-as-in-
+# unconditional — the unicast decouple made transport-multicast an
+# independently-composable atom, so a transport-multicast-WITHOUT-
+# transport-unicast build IS now a coherent shape. That orthogonal transport
+# axis is guarded by Layer C4e (_wz_transport_axis_subsets), not here: these
+# consumer-plane rows still pin unicast because they exercise the Session
+# handle, which is the unicast API surface. The
 # crate base differs from the facade base (C4b) by exactly `runtime-tokio`
 # (the facade selects a runtime; this crate IS one) and the facade-only
 # forwarding markers keyexpr-literal / transport-keepalive — the plane
@@ -1540,6 +1553,63 @@ layer_c4d_runtime_tokio_subset_clippy() {
         fi
         echo "  C4d wz-runtime-tokio subset $name clippy OK"
     done < <(_wz_runtime_tokio_coherent_subsets)
+}
+
+# ─── transport-axis subsets (the multicast transport WITHOUT unicast) ──
+#
+# R311mk — the consumer-plane matrix (_wz_consumer_plane_subsets, shared by
+# C4b/C4c/C1j/C4d) varies the CONSUMER plane on a transport-unicast base. The
+# transport axis is orthogonal: transport-multicast is now an independently-
+# composable atom (the unicast decouple lifted session_glue + the Session
+# handle behind transport-unicast and relocated the shared reassembly + link
+# machinery to their SSOT homes), so a transport-multicast-WITHOUT-
+# transport-unicast build is a coherent shape the unicast-based matrices
+# cannot express. These rows guard that surface. `name<TAB>extra-features`.
+_wz_transport_axis_subsets() {
+    # JOIN-only multicast (no data body codecs): the bare beacon + lease
+    # transport. This is the config that exposed the conditional tx_sn
+    # unused-mut (the TX-mint arm is gated on the data-plane body codecs).
+    printf '%s\t%s\n' "multicast-join-only"  "transport-multicast"
+    # Multicast with a Push data plane (tx_sn is minted by multicast_tx_emit).
+    printf '%s\t%s\n' "multicast-data"       "transport-multicast,codec-push,pubsub-put"
+    # Realistic multicast deploy shape: binds a real UDP multicast socket
+    # (transport-link-udp pulls the UdpDriver + the link pipeline, which must
+    # not depend on the transport-unicast-gated session_glue).
+    printf '%s\t%s\n' "multicast-udp-deploy" "transport-multicast,transport-link-udp"
+}
+
+# ─── Layer C4e — transport-axis (multicast-without-unicast) BUILD+CLIPPY ─
+#
+# R311mk: C4b/C4c/C1j/C4d vary the CONSUMER plane on a transport-unicast base;
+# this lane varies the TRANSPORT axis. Before the unicast decouple,
+# transport-multicast could not build without transport-unicast (session_glue
+# compiled unconditionally and named the unicast FSM types), so the facade
+# `runtime-tokio,transport-multicast` profile was unbuildable — a catalog
+# composability gap, since transport-multicast is an ATOMIC feature and must
+# compose alone (an implication edge to transport-unicast would have welded
+# two atoms and mis-stated the protocol: zenoh-pico builds multicast-only).
+# This lane builds the facade (the reported-gap shape) AND clippy-checks the
+# wz-runtime-tokio crate in isolation (deny-warnings, the conditional tx_sn
+# unused-mut guard) under each multicast-without-unicast subset, so the
+# decouple cannot silently regress. No `cargo test` twin: a multicast-only
+# crate has no unicast-handshake tests to run and the multicast behaviour is
+# already covered with unicast on by C1p/C1q + the MCU e2e by C1r.
+layer_c4e_transport_axis_matrix() {
+    local name extra
+    while IFS=$'\t' read -r name extra; do
+        # Facade build — the reported-gap shape (runtime-tokio + the subset).
+        if ! (cd crates && cargo build -p wz --no-default-features --features "runtime-tokio,$extra" --quiet); then
+            echo "  C4e FAIL: wz facade transport-axis subset $name did not build"
+            return 1
+        fi
+        # Crate clippy in isolation — `cargo clippy` subsumes the build and
+        # adds deny-warnings over the crate alone.
+        if ! (cd crates && cargo clippy -p wz-runtime-tokio --no-default-features --features "$extra" --quiet -- -D warnings); then
+            echo "  C4e FAIL: wz-runtime-tokio transport-axis subset $name clippy not clean"
+            return 1
+        fi
+        echo "  C4e transport-axis subset $name OK (facade build + crate clippy)"
+    done < <(_wz_transport_axis_subsets)
 }
 
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
@@ -2536,6 +2606,7 @@ run_layer C4 layer_c4_preset_matrix || overall=1
 run_layer C4b layer_c4b_facade_subset_matrix || overall=1
 run_layer C4c layer_c4c_runtime_tokio_subset_matrix || overall=1
 run_layer C4d layer_c4d_runtime_tokio_subset_clippy || overall=1
+run_layer C4e layer_c4e_transport_axis_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
