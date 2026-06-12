@@ -35065,6 +35065,56 @@
         "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
       ]
     },
+    "Round 311ly": {
+      "decision_summary": "R311ly Round B: MCU multicast TX seam - run_multicast_session next_tx pull-callback feeds the shared multicast_tx_emit SSOT (z_put over the group); 8->7 args via clock-derivation, no #[allow].",
+      "changes_bullets": [
+        "wz_session_lwip::multicast_drive::run_multicast_session gains the application TX publish seam (the R311lu/lv carry): a next_tx: FnMut() -> Option<MulticastTxItem> pull-callback, symmetric with the on_event push-callback - the MCU busy-poll mirror of the AP loop's tokio mpsc outbound receiver. Each iteration, right after the JOIN beacon and before the lwIP pump, the loop drains pending outbound items and frames each through the SAME shared wz_session_core::multicast_tx::multicast_tx_emit SSOT (R311lx) the AP loop calls, multicasting the datagrams via send_to_group so they ride that iteration's run_until_idle. The MCU multicast loop now emits app data, not only the JOIN beacon.",
+        "The TX emit + the mut tx_sn binding are gated on codec-push (wz-session-lwip's only forwarded TX body codec); a codec-free transport-multicast build leaves MulticastTxItem uninhabited, so the seam stays in the signature - next_tx is consumed by a not(codec-push) `if let Some(item) = next_tx() { match item {} }` - without an unused-parameter or unused-mut lint, so the RX-only multicast build is unchanged.",
+        "New wz-session-lwip `codec-push` feature forwards wz-session-core/codec-push (orthogonal to transport-multicast; a publishing multicast node enables both). build_push_literal needs only codec-push, so multicast_put_literal builds a literal-keyexpr Put with no extra pub/sub feature.",
+        "Adding next_tx took the loop to 8 args (clippy too_many_arguments 8/7). Resolved NOT with #[allow] (the hack R311lw just removed from run_session) but by dropping the redundant clock parameter: the multicast loop derives its monotonic clock from the runtime it already pumps (LwipTime::new(runtime)). Unlike the unicast run_session (R263 external clock to share the actions clock-clone epoch) or the AP loop (ambient tokio, no runtime param), the multicast loop has no actions bundle, so an external clock was a redundant re-derivation. 7 args, no #[allow].",
+        "Deterministic real-lwIP test run_multicast_session_publishes_a_put_over_loopback (codec-push): a queued Put is framed + multicast, echoed by multicast loopback, admitted at our own source via a pre-injected distinct-zid JOIN (the §3.2 source-keyed peer entry), and observed by on_event as a Push - a true TX -> loopback -> RX round trip, frozen-clock deterministic."
+      ],
+      "verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not a tee/pipe-masked tail).",
+        "C1m wz-session-lwip: transport-multicast 3 passed (RX-only - the new test is cfg-out and the not(codec-push) seam branch compiles clean); transport-multicast,codec-push 4 passed incl run_multicast_session_publishes_a_put_over_loopback; default 1 passed (multicast module cfg-out). The Push TX test 10/10 consecutive runs (no-flaky rule: frozen clock + bounded max_iters + the lwip_test_link serialize-mutex).",
+        "clippy --all-targets -D warnings clean for both transport-multicast and transport-multicast,codec-push: the 8->7 arg reduction cleared too_many_arguments without an #[allow], and the single-codec-push gating compiles clean in the codec-free build.",
+        "C1m run-ci lane extended with the transport-multicast,codec-push test + clippy so the MCU multicast TX path is covered under run-ci (closing the gap the codec-free transport-multicast build leaves)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The MCU multicast loop now publishes Push. The other AP TX variants (queryable Response / ResponseFinal / liveliness DeclareReply) are not yet forwarded to the MCU side (wz-session-lwip exposes only codec-push); the shared multicast_tx_emit SSOT already handles them, so adding them is a feature-forward (codec-response / liveliness-token on wz-session-lwip) + the MCU observer staging when those land.",
+        "Fragment RX/TX on the MCU multicast loop (the reassembly / transport-fragmentation arms the AP loop carries, R311kn/R311ko) + the facade wz transport-multicast forward + a footprint gate for the wz-session-lwip multicast features remain (R311lu/lv carry).",
+        "Finding 4 (the test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) remain accepted judgment calls (R311lv).",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ],
+      "publishable_decision_summary": "R311ly Round B: MCU multicast TX seam - run_multicast_session next_tx pull-callback feeds the shared multicast_tx_emit SSOT (z_put over the group); 8->7 args via clock-derivation, no #[allow].",
+      "publishable_changes_bullets": [
+        "wz_session_lwip::multicast_drive::run_multicast_session gains the application TX publish seam (the R311lu/lv carry): a next_tx: FnMut() -> Option<MulticastTxItem> pull-callback, symmetric with the on_event push-callback - the MCU busy-poll mirror of the AP loop's tokio mpsc outbound receiver. Each iteration, right after the JOIN beacon and before the lwIP pump, the loop drains pending outbound items and frames each through the SAME shared wz_session_core::multicast_tx::multicast_tx_emit SSOT (R311lx) the AP loop calls, multicasting the datagrams via send_to_group so they ride that iteration's run_until_idle. The MCU multicast loop now emits app data, not only the JOIN beacon.",
+        "The TX emit + the mut tx_sn binding are gated on codec-push (wz-session-lwip's only forwarded TX body codec); a codec-free transport-multicast build leaves MulticastTxItem uninhabited, so the seam stays in the signature - next_tx is consumed by a not(codec-push) `if let Some(item) = next_tx() { match item {} }` - without an unused-parameter or unused-mut lint, so the RX-only multicast build is unchanged.",
+        "New wz-session-lwip `codec-push` feature forwards wz-session-core/codec-push (orthogonal to transport-multicast; a publishing multicast node enables both). build_push_literal needs only codec-push, so multicast_put_literal builds a literal-keyexpr Put with no extra pub/sub feature.",
+        "Adding next_tx took the loop to 8 args (clippy too_many_arguments 8/7). Resolved NOT with #[allow] (the hack R311lw just removed from run_session) but by dropping the redundant clock parameter: the multicast loop derives its monotonic clock from the runtime it already pumps (LwipTime::new(runtime)). Unlike the unicast run_session (R263 external clock to share the actions clock-clone epoch) or the AP loop (ambient tokio, no runtime param), the multicast loop has no actions bundle, so an external clock was a redundant re-derivation. 7 args, no #[allow].",
+        "Deterministic real-lwIP test run_multicast_session_publishes_a_put_over_loopback (codec-push): a queued Put is framed + multicast, echoed by multicast loopback, admitted at our own source via a pre-injected distinct-zid JOIN (the §3.2 source-keyed peer entry), and observed by on_event as a Push - a true TX -> loopback -> RX round trip, frozen-clock deterministic."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci + Layer G (WZ_RUN_LAYER_G=1): RUNCI_EXIT=0 (read from the log, not a tee/pipe-masked tail).",
+        "C1m wz-session-lwip: transport-multicast 3 passed (RX-only - the new test is cfg-out and the not(codec-push) seam branch compiles clean); transport-multicast,codec-push 4 passed incl run_multicast_session_publishes_a_put_over_loopback; default 1 passed (multicast module cfg-out). The Push TX test 10/10 consecutive runs (no-flaky rule: frozen clock + bounded max_iters + the lwip_test_link serialize-mutex).",
+        "clippy --all-targets -D warnings clean for both transport-multicast and transport-multicast,codec-push: the 8->7 arg reduction cleared too_many_arguments without an #[allow], and the single-codec-push gating compiles clean in the codec-free build.",
+        "C1m run-ci lane extended with the transport-multicast,codec-push test + clippy so the MCU multicast TX path is covered under run-ci (closing the gap the codec-free transport-multicast build leaves)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The MCU multicast loop now publishes Push. The other AP TX variants (queryable Response / ResponseFinal / liveliness DeclareReply) are not yet forwarded to the MCU side (wz-session-lwip exposes only codec-push); the shared multicast_tx_emit SSOT already handles them, so adding them is a feature-forward (codec-response / liveliness-token on wz-session-lwip) + the MCU observer staging when those land.",
+        "Fragment RX/TX on the MCU multicast loop (the reassembly / transport-fragmentation arms the AP loop carries, R311kn/R311ko) + the facade wz transport-multicast forward + a footprint gate for the wz-session-lwip multicast features remain (R311lu/lv carry).",
+        "Finding 4 (the test-support feature vs the established test-support sibling-crate convention) + Finding 5 (the observer's flush_get_prunes 2-of-3 per-concern public-drain asymmetry) remain accepted judgment calls (R311lv).",
+        "minor D/E (cross-profile observer event-stream asymmetry: AP reports KeepAlive+Lease per wake vs MCU crossed-only) remains open."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
