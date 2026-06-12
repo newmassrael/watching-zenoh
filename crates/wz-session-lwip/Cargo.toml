@@ -89,6 +89,13 @@ transport-multicast = [
     "wz-session-core/codec-frame",
     "wz-session-core/codec-close",
 ]
+# R311ly — the multicast pub/sub TX body codec: forwards wz-session-core's
+# codec-push so the multicast drive loop's TX seam frames an app z_put as a
+# T_MID_FRAME via the shared multicast_tx_emit SSOT. Orthogonal to
+# transport-multicast (which is RX / JOIN / lease only); a publishing multicast
+# node enables both. Other TX body codecs (response / declare) are not yet
+# forwarded here — codec-push is the MCU multicast loop's only TX variant.
+codec-push = ["wz-session-core/codec-push"]
 
 [dependencies]
 # §5.P runtime tier: LwipRuntime<C> + LwipTime<C> + the Runtime /

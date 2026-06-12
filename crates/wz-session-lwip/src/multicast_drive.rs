@@ -62,6 +62,12 @@ use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
 use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
+// R311ly — the shared TX emit SSOT (the AP loop calls the same). MulticastTxItem
+// is the unconditional pull-seam item type (uninhabited without a TX body
+// codec); multicast_tx_emit exists only when codec-push inhabits it.
+#[cfg(feature = "codec-push")]
+use wz_session_core::multicast_tx::multicast_tx_emit;
+use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, TxSn};
 
@@ -132,24 +138,36 @@ fn peer_key(src_addr: u32, src_port: u16) -> SocketAddr {
 /// - `runtime` / `link` — the lwIP runtime + link pumped each tick
 ///   (`run_until_idle` + `poll_loopback` + `check_timeouts`), the loopback /
 ///   QEMU shape (a real-NIC deploy drives netif input from the RX ISR instead).
+///   The loop derives its monotonic clock from `runtime` directly: unlike the
+///   unicast [`run_session`](crate::session_drive::run_session) (which takes an
+///   external clock so its epoch matches the R263 actions clock-clone), the
+///   multicast loop has no actions bundle, so the runtime is its only time
+///   source and a separate `clock` parameter would just be a redundant
+///   re-derivation of `LwipTime::new(runtime)`.
 /// - `driver` — the [`LwipMulticastDriver`] (group socket: JOIN/data TX +
 ///   inbound `try_recv`).
-/// - `clock` — the shared monotonic clock (its epoch must agree with any stamps
-///   the dispatcher records).
 /// - `on_event` — the per-iteration observer (`Poll` with the decoded
 ///   `FramePayload` batch the application dispatches).
-pub fn run_multicast_session<C, F, const MAX_PEERS: usize>(
+/// - `next_tx` — the application TX pull-seam (R311ly): each iteration the loop
+///   drains pending outbound items ([`MulticastTxItem`], e.g. a `z_put` Push)
+///   and frames each via the shared `multicast_tx_emit` SSOT before the pump, so
+///   the datagrams ride the same `run_until_idle` as the JOIN beacon. The MCU
+///   mirror of the AP loop's `outbound` mpsc receiver; the busy-poll loop pulls
+///   rather than `select!`s. Without a TX body codec the item is uninhabited and
+///   the seam is inert (a publish-free / RX-only node passes `|| None`).
+pub fn run_multicast_session<C, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
     runtime: &LwipRuntime<C>,
     link: &LwipLink,
     driver: &mut LwipMulticastDriver,
-    clock: &LwipTime<C>,
     mut on_event: F,
+    mut next_tx: G,
 ) -> MulticastOutcome
 where
     C: ClockSource,
     F: FnMut(IterationEvent<'_>),
+    G: FnMut() -> Option<MulticastTxItem>,
 {
     // Destructure into the same local names the body uses (the shared
     // parameter-object SSOT; R311ls/R311lt).
@@ -159,12 +177,21 @@ where
         max_iters,
     } = cfg;
 
+    // The loop's monotonic clock, derived from the runtime it pumps (R311ly):
+    // the dispatcher's stamps all come from this one source, so there is no
+    // external epoch to match (contrast the unicast run_session's R263 clock).
+    let clock = LwipTime::new(runtime);
+
     // Idle -> LinkOpening -> Running.
     dispatcher.create();
     dispatcher.notify_link_ready();
 
     // The TX mint state (per-channel next SN). The JOIN beacon advertises the
-    // live values; a future data-emit increment mints from here.
+    // live values (an immutable borrow); the codec-push TX drain mints from here
+    // per data frame, so the binding is `mut` only when that path compiles.
+    #[cfg(feature = "codec-push")]
+    let mut tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
+    #[cfg(not(feature = "codec-push"))]
     let tx_sn = TxSn::new(sn::mask_from_res(params.seq_num_res));
     // Emit the first JOIN beacon immediately, then every join_interval_ms; the
     // sweep runs on its own tick_ms cadence (the busy-poll equivalents of the
@@ -190,6 +217,26 @@ where
             let dgram = encode_join(params, &tx_sn);
             driver.send_to_group(&dgram);
             next_join_ms = now.saturating_add(params.join_interval_ms);
+        }
+
+        // TxData: drain the application's pending outbound items, framing each
+        // through the shared multicast_tx_emit SSOT (the same the AP loop calls)
+        // and multicasting it to the group. Drained right after the JOIN beacon
+        // so the datagrams ride THIS iteration's run_until_idle. send_to_group is
+        // best-effort (multicast UDP); the SSOT's per-variant reliability flag is
+        // inert here (the MCU group socket takes no reliability arg).
+        #[cfg(feature = "codec-push")]
+        while let Some(item) = next_tx() {
+            for dgram in multicast_tx_emit(item, &mut tx_sn, params).datagrams {
+                driver.send_to_group(&dgram);
+            }
+        }
+        // No TX body codec: MulticastTxItem is uninhabited, so next_tx can only
+        // yield None; call it to keep the seam used (it stays in the signature for
+        // the RX-only build) and consume the unconstructable item type-correctly.
+        #[cfg(not(feature = "codec-push"))]
+        if let Some(item) = next_tx() {
+            match item {}
         }
 
         // Drive the lwIP input path (loopback / QEMU shape) + the runtime task
@@ -308,7 +355,6 @@ mod tests {
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
         let runtime = LwipRuntime::new(FrozenClock);
-        let clock = LwipTime::new(&runtime);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         let outcome = run_multicast_session(
@@ -321,8 +367,10 @@ mod tests {
             &runtime,
             &link,
             &mut driver,
-            &clock,
             |_event| {},
+            // RX-only: no application TX. Under the no-codec C1m build the item
+            // is uninhabited, so this is the only well-typed seam value.
+            || None,
         );
 
         std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
@@ -330,6 +378,87 @@ mod tests {
             dispatcher.active_peers(),
             1,
             "the inbound JOIN admitted the peer (our own beacon is zid-filtered)"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// R311ly — the multicast TX seam end-to-end over real lwIP: a `z_put` Push
+    /// queued on the loop's `next_tx` pull-seam is framed by the shared
+    /// `multicast_tx_emit` SSOT, multicast to the group, and (via multicast
+    /// loopback) delivered back to the loop's own socket. To OBSERVE it as an
+    /// admitted data frame we pre-admit a peer at our own loopback source: a JOIN
+    /// with a DISTINCT zid (so it is not own-zid-filtered), injected from our
+    /// socket, creates a peer entry keyed by (src_addr, src_port); the echoed
+    /// Push Frame (zid-less, attributed by source) then matches that entry,
+    /// passes the SN gate (SN 0 against the JOIN's advertised next_sn 0), and
+    /// fans to `on_event`. Shares the lwip_test_link harness; a distinct port
+    /// (7452) from the peer-admit (7449) / link-tier (7448) tests.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn run_multicast_session_publishes_a_put_over_loopback() {
+        use wz_session_core::driver_loop::DriverLoopOutcome;
+        use wz_session_core::multicast_tx::multicast_put_literal;
+        use wz_session_core::network_message::NetworkMessage;
+
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7452;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        // Pre-admit a peer at OUR loopback source: a JOIN with a zid distinct
+        // from ours (so it is admitted, not own-zid-filtered) advertising
+        // next_sn 0 on a fresh ring. Injected before wrapping the socket so the
+        // loop's first poll delivers it ahead of our own beacon / Push echo,
+        // creating the (src_addr, src_port) peer entry the echoed Push matches.
+        let other = params(&[0x01, 0x02, 0x03, 0x04]);
+        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        socket
+            .send_to(group, port, &other_join)
+            .expect("inject peer JOIN");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = LwipRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // One queued Put on the reliable channel (pico Z_RELIABILITY_DEFAULT);
+        // the pull-seam yields it once, then None (the loop keeps serving RX +
+        // JOIN). Frozen clock + bounded max_iters keep the round trip
+        // deterministic (no-flaky).
+        let mut pending = Some(multicast_put_literal("demo/mc", b"tx-half").expect("build put"));
+
+        let mut saw_push = false;
+        let outcome = run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(16),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |event| {
+                if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) =
+                    event
+                {
+                    if messages
+                        .iter()
+                        .any(|m| matches!(m, NetworkMessage::Push(_)))
+                    {
+                        saw_push = true;
+                    }
+                }
+            },
+            || pending.take(),
+        );
+
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert!(
+            saw_push,
+            "the queued Put was framed by multicast_tx_emit, multicast to the \
+             group, echoed back, admitted at our source, and observed as a Push"
         );
 
         link.leave_multicast_group(group).expect("leave group");

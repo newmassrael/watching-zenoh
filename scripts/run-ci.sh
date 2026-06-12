@@ -1042,15 +1042,21 @@ layer_c1q_multicast_glue() {
 # drive loop (run_multicast_session), test + clippy each. The
 # transport-multicast variant lints the no_std MCU multicast loop under
 # run-ci so its code is covered (the same close-the-coverage-gap discipline
-# R311ls applied to the AP multicast_glue loop).
+# R311ls applied to the AP multicast_glue loop). R311ly adds the
+# transport-multicast,codec-push variant: the MCU multicast TX seam
+# (run_multicast_session's next_tx pull -> multicast_tx_emit -> send_to_group)
+# + its real-lwIP Push round-trip test, which the codec-free transport-multicast
+# build (uninhabited MulticastTxItem) does not exercise.
 layer_c1m_session_lwip() {
     (cd crates \
         && cargo test -p wz-session-lwip --quiet \
         && cargo test -p wz-session-lwip --features reassembly --quiet \
         && cargo test -p wz-session-lwip --features transport-multicast --quiet \
+        && cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet \
         && cargo clippy -p wz-session-lwip --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-session-lwip --all-targets --features reassembly --quiet -- -D warnings \
-        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings)
+        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast --quiet -- -D warnings \
+        && cargo clippy -p wz-session-lwip --all-targets --features transport-multicast,codec-push --quiet -- -D warnings)
 }
 
 # ─── Layer C1n — wz-mcu-session-acceptor isolated host e2e + clippy ──
