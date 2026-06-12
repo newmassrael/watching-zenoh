@@ -49,13 +49,24 @@
 //! staging* that auto-PRODUCES the reply variants — an application that builds
 //! its own reply items publishes them today.
 //!
+//! ## Observer staging (R311ma — liveliness)
+//!
+//! [`MulticastReplyQueue`] is the no_std mirror of the AP loop's
+//! `MulticastReplySink`: the observer drains its staged liveliness declare
+//! replies into it (`flush_declare_replies`), the loop's `next_tx` seam drains
+//! them back out. So a held-token declarer on the MCU now auto-replies to an
+//! inbound liveliness Interest over the group without the application
+//! hand-building the reply items. It implements only [`DeclareReplySink`]; the
+//! queryable `ResponseSink` reply chain (which names a `wz_codecs` codec type
+//! this crate does not yet dep, + the `query-queryable` registry forward) is the
+//! follow-on.
+//!
 //! ## Not yet here (R311lt foundation; follow-on increments)
 //!
-//! - **MCU observer staging** — the no_std reply-sink mirror of the AP loop's
-//!   `MulticastReplySink` (which enqueues `Response` / `DeclareReply` from the
-//!   observer's staged replies onto its outbound channel). The TX seam emits
-//!   these variants; the auto-producer that feeds them from inbound
-//!   Query / Interest frames is the next increment.
+//! - **Queryable observer staging** — extend [`MulticastReplyQueue`] to
+//!   `ResponseSink` (the `Response` / `ResponseFinal` reply chain) once the
+//!   `query-queryable` registry + a `wz_codecs` dep land, so a multicast
+//!   queryable on the MCU auto-replies like the liveliness declarer does now.
 //! - **Fragment RX/TX** — the `reassembly` / `transport-fragmentation` arms the
 //!   AP loop carries (R311kn / R311ko).
 //! - **`MulticastOutcome::LinkLost`** — the MCU poll loop has no link-loss
@@ -89,6 +100,23 @@ use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, TxSn};
+// R311ma — the no_std multicast reply queue (MulticastReplyQueue, below) is the
+// MCU mirror of the AP loop's MulticastReplySink: the observer drains its staged
+// liveliness declare replies into it via DeclareReplySink, the loop's next_tx
+// seam drains them back out. Backed by alloc (Rc<RefCell<VecDeque>>) rather than
+// a tokio mpsc, because the busy-poll loop is single-task (no cross-thread Send).
+// Gated on liveliness-token (the one reply variant the sink stages this round;
+// the queryable ResponseSink path is the carried follow-on).
+#[cfg(feature = "liveliness-token")]
+use alloc::collections::VecDeque;
+#[cfg(feature = "liveliness-token")]
+use alloc::rc::Rc;
+#[cfg(feature = "liveliness-token")]
+use core::cell::RefCell;
+#[cfg(feature = "liveliness-token")]
+use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
+#[cfg(feature = "liveliness-token")]
+use wz_session_core::response_sink::DeclareReplySink;
 
 /// The MCU multicast I/O seam: a [`SessionMulticastRxSocket`] (joined to the
 /// group at bind) plus the group `(addr, port)` the loop multicasts to. The
@@ -129,6 +157,76 @@ impl LwipMulticastDriver {
     /// attribution.
     pub fn try_recv(&mut self) -> Option<Datagram<SESSION_MULTICAST_RX_SLOT_SIZE>> {
         self.socket.try_recv()
+    }
+}
+
+/// R311ma — the no_std multicast reply queue: the MCU mirror of the AP loop's
+/// `MulticastReplySink`
+/// ([`wz_runtime_tokio::multicast_glue`](https://docs.rs)). A liveliness-token
+/// declarer on the group stages its interest-response replies here — the
+/// application's `on_event` closure drives
+/// [`ApplicationLayerObserver::flush_declare_replies`](wz_session_core::observer::ApplicationLayerObserver::flush_declare_replies)
+/// with this queue as the [`DeclareReplySink`], enqueuing a
+/// `Declare(DeclToken)` + terminating `DeclFinal` for each matched Interest —
+/// and the loop's `next_tx` seam drains them back out via [`Self::pop`], framing
+/// each through the shared `multicast_tx_emit` SSOT.
+///
+/// Backed by `Rc<RefCell<VecDeque<MulticastTxItem>>>`, not the AP's tokio mpsc:
+/// the busy-poll loop is single-task, so `on_event` (which pushes) and `next_tx`
+/// (which pops) run at different points of the SAME iteration on one thread —
+/// no cross-thread `Send`, an `Rc<RefCell>` is the single-task analogue of the
+/// channel. `Clone` shares the backing store between the two closures.
+///
+/// Per the R311lq interface segregation it implements only [`DeclareReplySink`]
+/// — the concern a liveliness node drains. The queryable
+/// [`ResponseSink`](wz_session_core::response_sink::ResponseSink) reply chain
+/// (which names `wz_codecs::response::ResponseOwned`, a codec type this MCU
+/// crate does not yet dep) is the carried follow-on; `LivelinessGetPrune` is not
+/// implemented at all (the connectionless multicast transport has no reconnect
+/// declaration cache to prune, same rationale as the AP sink).
+#[cfg(feature = "liveliness-token")]
+#[derive(Clone, Default)]
+pub struct MulticastReplyQueue {
+    queue: Rc<RefCell<VecDeque<MulticastTxItem>>>,
+}
+
+#[cfg(feature = "liveliness-token")]
+impl MulticastReplyQueue {
+    /// A fresh empty reply queue.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drain one queued reply for the loop's `next_tx` seam (FIFO order). `None`
+    /// when empty — the loop then keeps serving RX + the JOIN beacon.
+    pub fn pop(&self) -> Option<MulticastTxItem> {
+        self.queue.borrow_mut().pop_front()
+    }
+}
+
+// R311ma — the declarer-side liveliness interest-response drain, mirroring the
+// AP `MulticastReplySink`'s `DeclareReplySink` impl: the observer hands the sink
+// the borrowed (token_id, keyexpr, interest_id), the sink owns the encode by
+// building the owned `Declare` via the shared `build_*_reply` SSOT (the same
+// wire shape the unicast `SessionLinkActions: DeclareReplySink` derives) and
+// enqueues it for the loop to frame + multicast.
+#[cfg(feature = "liveliness-token")]
+impl DeclareReplySink for MulticastReplyQueue {
+    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        let declare = build_token_reply(token_id, keyexpr, interest_id)
+            .try_into_owned()
+            .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES");
+        self.queue
+            .borrow_mut()
+            .push_back(MulticastTxItem::DeclareReply { declare });
+    }
+    fn send_declare_final_reply(&self, interest_id: u64) {
+        let declare = build_final_reply(interest_id)
+            .try_into_owned()
+            .expect("DeclFinal reply carries no bounded fields");
+        self.queue
+            .borrow_mut()
+            .push_back(MulticastTxItem::DeclareReply { declare });
     }
 }
 
@@ -597,6 +695,114 @@ mod tests {
             "the queued DeclareReply was framed by multicast_tx_emit, multicast to \
              the group, echoed back, admitted at our source, and observed as a \
              Declare carrying interest id 9"
+        );
+
+        link.leave_multicast_group(group).expect("leave group");
+    }
+
+    /// R311ma — the observer-staging round trip on the MCU loop: an inbound
+    /// liveliness `Interest` (CURRENT) for a held local token is dispatched to
+    /// the observer, which stages a `Declare(DeclToken)` + terminating
+    /// `DeclFinal`; the `on_event` closure drains them through
+    /// [`MulticastReplyQueue`]'s `DeclareReplySink` impl into the shared queue,
+    /// and the loop's `next_tx` seam drains the queue back out (each item then
+    /// framed by `multicast_tx_emit`). The MCU mirror of the AP
+    /// `drive_loop_emits_liveliness_token_reply_over_multicast`. Asserts the
+    /// observer staged exactly the two declare replies and the seam drained
+    /// both — proving the observer -> sink -> next_tx wiring.
+    ///
+    /// It asserts on the DRAINED items, not a loopback echo: observing the echo
+    /// would hit the per-peer SN gate (the injected Interest at SN 0 advances the
+    /// shared source peer entry past our reply mints, so our echoed DeclToken at
+    /// SN 0 would be SN-stale-dropped). The wire emit of a queued DeclareReply is
+    /// separately covered by `run_multicast_session_publishes_a_declare_reply_over_loopback`.
+    /// Distinct port (7454) from the prior multicast tests.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn run_multicast_session_stages_observer_declare_replies_into_next_tx() {
+        use wz_session_core::frame_encode::encode_frame_with_interest;
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+        use wz_session_core::observer::ApplicationLayerObserver;
+
+        let (_serial, link) = lwip_test_link();
+        let group = SESSION_MULTICAST_GROUP_DEFAULT;
+        let port: u16 = 7454;
+        let mut socket = bind_session_multicast_rx(&link, group, port).expect("bind + join group");
+
+        // A peer JOIN (distinct zid, advertising next_sn 0) admits the peer at
+        // our loopback source; the liveliness Interest then rides that peer's
+        // reliable channel at the advertised SN 0 so the per-peer SN gate admits
+        // it. Both injected before wrapping the socket (delivered ahead of our
+        // own beacon echo by the loop's first polls).
+        let other = params(&[0x01, 0x02, 0x03, 0x04]);
+        let other_join = encode_join(&other, &TxSn::new(sn::mask_from_res(other.seq_num_res)));
+        socket
+            .send_to(group, port, &other_join)
+            .expect("inject peer JOIN");
+        // A CURRENT liveliness get for "demo/live", interest id 9, at SN 0
+        // (mapping_id 0 + literal suffix = a literal keyexpr).
+        let interest = encode_frame_with_interest(
+            0,
+            build_interest_liveliness_get(9, 0, Some("demo/live")).expect("interest fixture"),
+            true,
+        );
+        socket
+            .send_to(group, port, &interest)
+            .expect("inject Interest");
+
+        let mut driver = LwipMulticastDriver::new(socket, group, port);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let runtime = LwipRuntime::new(FrozenClock);
+        let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // A held local liveliness token at the queried keyexpr — the declarer
+        // replies with it (and only it: the sole registered token matches).
+        let mut observer = ApplicationLayerObserver::new();
+        observer
+            .local_tokens
+            .register(/*token_id=*/ 3, "demo/live")
+            .expect("register held token");
+
+        // The reply queue shared between on_event (the observer flushes its
+        // staged declare replies into it) and next_tx (drains them back out).
+        let queue = MulticastReplyQueue::new();
+        let drain = queue.clone();
+
+        let mut drained_declares = 0usize;
+        let outcome = run_multicast_session(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &self_params,
+                tick_ms: 5,
+                max_iters: Some(16),
+            },
+            &runtime,
+            &link,
+            &mut driver,
+            |event| {
+                observer.dispatch_event(event);
+                observer.flush_declare_replies(&queue);
+            },
+            || {
+                let item = drain.pop();
+                if let Some(MulticastTxItem::DeclareReply { .. }) = &item {
+                    drained_declares += 1;
+                }
+                item
+            },
+        );
+
+        std::assert_eq!(outcome, MulticastOutcome::IterationLimit);
+        std::assert_eq!(
+            dispatcher.active_peers(),
+            1,
+            "the inbound JOIN admitted the querying peer"
+        );
+        std::assert_eq!(
+            drained_declares,
+            2,
+            "the observer staged a DeclToken + DeclFinal for the interest, the \
+             queue enqueued both, and next_tx drained both"
         );
 
         link.leave_multicast_group(group).expect("leave group");
