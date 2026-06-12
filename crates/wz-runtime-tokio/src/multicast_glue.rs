@@ -89,16 +89,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 #[cfg(feature = "reassembly")]
 use wz_session_core::drive::sweep_reporting;
 use wz_session_core::driver_loop::IterationEvent;
-// R311lr — the declarer-side liveliness interest-response reply builders the
-// AP loop's `MulticastReplySink` composes before enqueuing a
-// `MulticastTxItem::DeclareReply` (the borrowed-keyexpr `build_*_reply` SSOT,
-// the same wire shape the unicast `SessionLinkActions: DeclareReplySink`
-// derives). Gated on `liveliness-token` (the sole producer). The Frame
-// encoders + the egress splitter moved to the shared
-// `wz_session_core::multicast_tx` SSOT (R311lx); this loop no longer names
-// them.
-#[cfg(feature = "liveliness-token")]
-use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
+// R311md — the declarer-side liveliness reply builders (build_*_reply) moved into
+// the shared `wz_session_core::multicast_reply_sink::MulticastReplySink<Q>` SSOT
+// along with the ResponseSink / DeclareReplySink construction, so this loop no
+// longer names them (it contributes only the `TokioReplyBacking`). The Frame
+// encoders + the egress splitter likewise live in the shared
+// `wz_session_core::multicast_tx` SSOT (R311lx).
 // R311lv — the inbound Frame codec is now only named in this loop's
 // reassembly Fragment tail (the JOIN / Frame classify moved to the shared
 // `multicast_rx` SSOT); the tests import their own copy.
@@ -144,91 +140,51 @@ use crate::LinkDriver;
 // mint/encode/fragment orchestration the outbound arm carried inline now lives
 // in `multicast_tx_emit`.
 
-/// R311lq/R311lr — the multicast drive loop's observer-drain sink, backed by
-/// its A1c outbound channel. The application's `on_event` closure drains its
-/// observer's staged outbound effects through this sink; each emit enqueues a
-/// [`MulticastTxItem`] that [`drive_multicast_session`] frames into a
-/// `T_MID_FRAME` and multicasts to the group — the multicast mirror of the
-/// unicast `SessionLinkActions`, which enqueues onto the per-peer writer
-/// channel instead.
-///
-/// Per the R311lq interface segregation it implements EXACTLY the two
-/// observer-drain concerns the multicast loop actually uses, as separate
-/// impl blocks:
-/// - [`ResponseSink`](wz_session_core::response_sink::ResponseSink) — the
-///   queryable reply chain (`observer.flush_query_replies(&sink)`).
-/// - [`DeclareReplySink`](wz_session_core::response_sink::DeclareReplySink)
-///   — R311lr, the declarer-side liveliness interest-response
-///   (`observer.flush_declare_replies(&sink)`): a held token's
-///   `Declare(DeclToken)` + terminating `DeclFinal` reply to a peer's
-///   liveliness Interest that arrived on the group.
-///
-/// It deliberately does NOT implement
-/// [`LivelinessGetPrune`](wz_session_core::response_sink::LivelinessGetPrune).
-/// That concern is the session-reconnect declaration-cache prune (F3), and
-/// the connectionless multicast transport (JOIN + lease, never a re-dial) has
-/// no reconnect cache — so there is genuinely nothing to prune. Honoring the
-/// segregation, the loop implements only the concerns it drains rather than
-/// stubbing an empty `LivelinessGetPrune` to reach the fat `flush_pending`.
-/// `Clone` so the closure can hold a sender clone while the loop owns the
-/// paired receiver.
+/// R311md — the AP loop's [`MulticastReplyEnqueue`] backing for the shared
+/// observer-drain reply sink. Wraps the loop's A1c outbound channel sender; the
+/// shared [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
+/// constructs each [`MulticastTxItem`] and calls this backing's `enqueue`, which
+/// sends it onto the channel [`drive_multicast_session`] drains, frames into a
+/// `T_MID_FRAME`, and multicasts to the group — the multicast mirror of the
+/// unicast `SessionLinkActions` (which enqueues onto the per-peer writer
+/// channel). `Clone` so the `on_event` closure can hold a sender clone while the
+/// loop owns the paired receiver. Fire-and-forget: a dropped receiver (the loop
+/// ended) drops the item exactly as a dead link would.
 #[derive(Clone)]
-pub struct MulticastReplySink {
+pub struct TokioReplyBacking {
     tx: UnboundedSender<MulticastTxItem>,
 }
 
-impl MulticastReplySink {
-    /// Wrap a clone of the loop's outbound-channel sender as a reply sink.
+impl TokioReplyBacking {
+    /// Wrap a clone of the loop's outbound-channel sender as a reply backing.
     pub fn new(tx: UnboundedSender<MulticastTxItem>) -> Self {
         Self { tx }
     }
 }
 
-impl wz_session_core::response_sink::ResponseSink for MulticastReplySink {
-    #[cfg(feature = "codec-response")]
-    fn send_response(&self, response: wz_codecs::response::ResponseOwned) {
-        // Fire-and-forget, mirroring `SessionLinkActions::send_response`'s
-        // F2 contract (no error channel): a dropped receiver (the loop
-        // ended) drops the reply exactly as a dead link would.
-        let _ = self.tx.send(MulticastTxItem::Response {
-            response: Box::new(response),
-        });
-    }
-    #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64) {
-        let _ = self.tx.send(MulticastTxItem::ResponseFinal { request_id });
+impl wz_session_core::multicast_reply_sink::MulticastReplyEnqueue for TokioReplyBacking {
+    fn enqueue(&self, item: MulticastTxItem) {
+        let _ = self.tx.send(item);
     }
 }
 
-// R311lr — the declarer-side liveliness interest-response drain. The observer
-// stages a held token's reply (token id + interest id) and resolves the
-// keyexpr from its registry at drain, then hands this sink the borrowed
-// (token_id, keyexpr, interest_id); the sink owns the encode by building the
-// owned `Declare` form via the shared `build_*_reply` SSOT (the same wire
-// shape the unicast `SessionLinkActions: DeclareReplySink` derives) and
-// enqueues it. A separate impl block from `ResponseSink` per the R311lq
-// segregation — a declare reply is a distinct message family from a query
-// `Response`.
-impl wz_session_core::response_sink::DeclareReplySink for MulticastReplySink {
-    #[cfg(feature = "liveliness-token")]
-    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        let declare = build_token_reply(token_id, keyexpr, interest_id)
-            .try_into_owned()
-            .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES");
-        let _ = self.tx.send(MulticastTxItem::DeclareReply {
-            declare: Box::new(declare),
-        });
-    }
-    #[cfg(feature = "liveliness-token")]
-    fn send_declare_final_reply(&self, interest_id: u64) {
-        let declare = build_final_reply(interest_id)
-            .try_into_owned()
-            .expect("DeclFinal reply carries no bounded fields");
-        let _ = self.tx.send(MulticastTxItem::DeclareReply {
-            declare: Box::new(declare),
-        });
-    }
-}
+/// R311lq/R311lr/R311md — the AP multicast observer-drain reply sink: the shared
+/// [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
+/// over the AP [`TokioReplyBacking`]. The application's `on_event` closure drains
+/// its observer's staged replies through it — `flush_query_replies` (the
+/// queryable `Response` plus terminating `ResponseFinal` chain) and
+/// `flush_declare_replies` (the declarer-side liveliness interest-response, a held
+/// token's `Declare(DeclToken)` plus terminating `DeclFinal`) — and each
+/// constructed [`MulticastTxItem`] rides the outbound channel
+/// [`drive_multicast_session`] frames + multicasts.
+///
+/// R311md folded the per-variant `ResponseSink` / `DeclareReplySink` construction
+/// into the shared sink (one home for the AP + MCU loops; it was a duplicated
+/// impl before). The R311lq segregation — exactly the two drained concerns, NOT
+/// `LivelinessGetPrune` (connectionless multicast has no reconnect cache) — now
+/// lives in the shared sink.
+pub type MulticastReplySink =
+    wz_session_core::multicast_reply_sink::MulticastReplySink<TokioReplyBacking>;
 
 // R311lx — `multicast_put_literal` moved to `wz_session_core::multicast_tx`
 // alongside `MulticastTxItem` (it composes the session-core `build_push_literal`
@@ -871,7 +827,7 @@ mod tests {
         // enqueues drained replies, the loop drains the channel and frames
         // them onto the group (the A1c TX seam).
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = MulticastReplySink::new(tx);
+        let sink = MulticastReplySink::new(TokioReplyBacking::new(tx));
 
         let outcome = drive_multicast_session(
             &mut dispatcher,
@@ -975,7 +931,7 @@ mod tests {
         // drains the staged declare interest-response onto it, the loop frames
         // each `Declare` onto the group (the A1c TX seam).
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = MulticastReplySink::new(tx);
+        let sink = MulticastReplySink::new(TokioReplyBacking::new(tx));
 
         let outcome = drive_multicast_session(
             &mut dispatcher,

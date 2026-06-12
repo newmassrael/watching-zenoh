@@ -870,3 +870,18 @@ pub mod multicast_rx;
     feature = "alloc"
 ))]
 pub mod multicast_tx;
+
+/// R311md — the shared observer-drain reply sink SSOT
+/// ([`MulticastReplySink<Q>`](multicast_reply_sink::MulticastReplySink) +
+/// [`MulticastReplyEnqueue`](multicast_reply_sink::MulticastReplyEnqueue)). The
+/// "staged reply -> [`MulticastTxItem`](multicast_tx::MulticastTxItem)"
+/// construction has ONE home, generic over the enqueue backing, so the AP and
+/// MCU multicast loops contribute only a backing rather than a duplicated
+/// `ResponseSink` / `DeclareReplySink` impl. The TX-staging sibling of
+/// [`multicast_rx`] / [`multicast_tx`]. Same gate as `multicast_tx`.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "codec-frame",
+    feature = "alloc"
+))]
+pub mod multicast_reply_sink;

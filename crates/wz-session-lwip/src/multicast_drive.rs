@@ -49,18 +49,24 @@
 //! staging* that auto-PRODUCES the reply variants — an application that builds
 //! its own reply items publishes them today.
 //!
-//! ## Observer staging (R311ma liveliness; R311mb queryable)
+//! ## Observer staging (R311ma liveliness; R311mb queryable; R311md shared SSOT)
 //!
-//! [`MulticastReplyQueue`] is the no_std mirror of the AP loop's
-//! `MulticastReplySink`: the application's observer drains its staged replies
-//! into it — liveliness interest-responses via `flush_declare_replies`
-//! ([`DeclareReplySink`], R311ma) and queryable `Response` / `ResponseFinal`
-//! via `flush_query_replies` ([`ResponseSink`], R311mb) — and the loop's
-//! `next_tx` seam drains them back out. So a held-token declarer OR a registered
-//! queryable on the MCU now auto-replies to an inbound liveliness Interest /
-//! Query over the group without the application hand-building the reply items.
-//! Per the R311lq segregation it stubs no `LivelinessGetPrune` (the
-//! connectionless multicast transport has no reconnect cache).
+//! [`MulticastReplyQueue`] is the no_std MCU
+//! [`MulticastReplyEnqueue`](wz_session_core::multicast_reply_sink::MulticastReplyEnqueue)
+//! backing for the shared
+//! [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
+//! (the wz-session-core SSOT, R311md — the TX-staging twin of `multicast_rx` /
+//! `multicast_tx`). The application wraps the backing in that sink
+//! (`MulticastReplySink::new(queue.clone())`) and its observer drains its staged
+//! replies through the sink — liveliness interest-responses via
+//! `flush_declare_replies` (R311ma) and queryable `Response` / `ResponseFinal`
+//! via `flush_query_replies` (R311mb) — and the loop's `next_tx` seam drains them
+//! back out via [`MulticastReplyQueue::pop`]. So a held-token declarer OR a
+//! registered queryable on the MCU auto-replies to an inbound liveliness Interest
+//! / Query over the group without the application hand-building the reply items.
+//! The `ResponseSink` / `DeclareReplySink` construction lives ONCE in the shared
+//! sink (not duplicated AP/MCU; per the R311lq segregation it stubs no
+//! `LivelinessGetPrune` — connectionless multicast has no reconnect cache).
 //!
 //! ## Not yet here (R311lt foundation; follow-on increments)
 //!
@@ -97,19 +103,15 @@ use wz_session_core::multicast_tx::multicast_tx_emit;
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::session_fsm_multicast::SessionFsmMulticastState;
 use wz_session_core::sn::{self, TxSn};
-// R311ma/R311mb — the no_std multicast reply queue (MulticastReplyQueue, below)
-// is the MCU mirror of the AP loop's MulticastReplySink: the observer drains its
-// staged replies into it (declare via DeclareReplySink, query via ResponseSink),
-// the loop's next_tx seam drains them back out. Backed by alloc
-// (Rc<RefCell<VecDeque>>) rather than a tokio mpsc, because the busy-poll loop is
-// single-task (no cross-thread Send). The type + its alloc backing exist when any
-// reply variant inhabits it; each producer-trait impl is gated by its own codec
-// family (R311mb added the queryable ResponseSink half).
-// Box::new is called only in the ResponseSink (codec-response) + DeclareReplySink
-// (liveliness-token) arms; a codec-response-final-only build pushes the unboxed
-// ResponseFinal, so it must not import Box (narrower than the type's U gate).
-#[cfg(any(feature = "codec-response", feature = "liveliness-token"))]
-use alloc::boxed::Box;
+// R311ma/R311mb/R311md — the no_std multicast reply backing (MulticastReplyQueue,
+// below): the observer drains its staged replies through the shared generic
+// wz_session_core::multicast_reply_sink::MulticastReplySink<MulticastReplyQueue>,
+// which constructs each MulticastTxItem and calls this backing's
+// MulticastReplyEnqueue::enqueue (push_back); the loop's next_tx seam drains them
+// back out via pop(). Backed by alloc (Rc<RefCell<VecDeque>>) rather than a tokio
+// mpsc, because the busy-poll loop is single-task (no cross-thread Send). R311md
+// folded the ResponseSink / DeclareReplySink construction into the shared sink,
+// so this crate names no wz_codecs type and provides ONLY the enqueue backing.
 #[cfg(any(
     feature = "codec-response",
     feature = "codec-response-final",
@@ -128,19 +130,12 @@ use alloc::rc::Rc;
     feature = "liveliness-token"
 ))]
 use core::cell::RefCell;
-// The queryable ResponseSink half (R311mb): send_response names the wz_codecs
-// owned response, so this MCU crate deps wz-codecs directly (forwarded by its
-// codec-response feature) — the one wz_codecs type named here.
-#[cfg(feature = "codec-response")]
-use wz_codecs::response::ResponseOwned;
-#[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
-use wz_session_core::response_sink::ResponseSink;
-// The liveliness DeclareReplySink half (R311ma): the reply builders are
-// inferred-owned, so no wz_codecs type is named for this arm.
-#[cfg(feature = "liveliness-token")]
-use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
-#[cfg(feature = "liveliness-token")]
-use wz_session_core::response_sink::DeclareReplySink;
+#[cfg(any(
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 
 /// The MCU multicast I/O seam: a [`SessionMulticastRxSocket`] (joined to the
 /// group at bind) plus the group `(addr, port)` the loop multicasts to. The
@@ -184,33 +179,33 @@ impl LwipMulticastDriver {
     }
 }
 
-/// R311ma/R311mb — the no_std multicast reply queue: the MCU mirror of the AP
-/// loop's `MulticastReplySink` (`wz_runtime_tokio::multicast_glue`). An
-/// application's observer stages its interest / query responses here — the
-/// `on_event` closure drives
-/// [`ApplicationLayerObserver::flush_declare_replies`](wz_session_core::observer::ApplicationLayerObserver::flush_declare_replies)
-/// (liveliness, this queue as [`DeclareReplySink`]) and/or
+/// R311ma/R311mb/R311md — the no_std multicast reply backing: the MCU
+/// [`MulticastReplyEnqueue`] provider for the shared generic
+/// [`MulticastReplySink`](wz_session_core::multicast_reply_sink::MulticastReplySink).
+/// An application's observer drains its staged interest / query responses through
+/// `MulticastReplySink::new(queue.clone())` — the `on_event` closure drives
+/// [`flush_declare_replies`](wz_session_core::observer::ApplicationLayerObserver::flush_declare_replies)
+/// (liveliness) and/or
 /// [`flush_query_replies`](wz_session_core::observer::ApplicationLayerObserver::flush_query_replies)
-/// (queryable, this queue as [`ResponseSink`]), enqueuing the staged replies —
-/// and the loop's `next_tx` seam drains them back out via [`Self::pop`], framing
-/// each through the shared `multicast_tx_emit` SSOT.
+/// (queryable) with that sink; the sink constructs each [`MulticastTxItem`] and
+/// calls this backing's [`MulticastReplyEnqueue::enqueue`], and the loop's
+/// `next_tx` seam drains them back out via [`Self::pop`], framing each through
+/// the shared `multicast_tx_emit` SSOT.
 ///
 /// Backed by `Rc<RefCell<VecDeque<MulticastTxItem>>>`, not the AP's tokio mpsc:
-/// the busy-poll loop is single-task, so `on_event` (which pushes) and `next_tx`
-/// (which pops) run at different points of the SAME iteration on one thread —
-/// no cross-thread `Send`, an `Rc<RefCell>` is the single-task analogue of the
-/// channel. `Clone` shares the backing store between the two closures.
+/// the busy-poll loop is single-task, so the sink (which pushes) and `next_tx`
+/// (which pops) run at different points of the SAME iteration on one thread — no
+/// cross-thread `Send`, an `Rc<RefCell>` is the single-task analogue of the
+/// channel. `Clone` shares the backing store between the sink clone and the
+/// loop's `pop` end.
 ///
-/// Per the R311lq interface segregation it implements exactly the two
-/// observer-drain concerns a multicast node uses — [`DeclareReplySink`]
-/// (the liveliness interest-response, R311ma) and [`ResponseSink`] (the
-/// queryable `Response` + `ResponseFinal` chain, R311mb) — each as a separate
-/// impl gated by its codec family. It does NOT implement `LivelinessGetPrune`:
-/// the connectionless multicast transport (JOIN + lease, never a re-dial) has no
-/// reconnect declaration cache to prune, so honoring the segregation it stubs
-/// nothing (same rationale as the AP sink). The type + its alloc backing exist
-/// when any reply variant inhabits it (the codec-response / codec-response-final
-/// / liveliness-token union).
+/// R311md: the `ResponseSink` / `DeclareReplySink` construction (which
+/// `MulticastTxItem`, the `build_*_reply` + `Box::new`) moved to the shared
+/// [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
+/// SSOT, so this backing names no wz_codecs type — the wz-codecs dep R311mb added
+/// here is gone, and the duplicated AP/MCU impls collapsed to one. The backing
+/// exists when any reply variant inhabits `MulticastTxItem` (the codec-response /
+/// codec-response-final / liveliness-token union).
 #[cfg(any(
     feature = "codec-response",
     feature = "codec-response-final",
@@ -239,59 +234,19 @@ impl MulticastReplyQueue {
     }
 }
 
-// R311mb — the queryable-reply drain, mirroring the AP `MulticastReplySink`'s
-// `ResponseSink` impl: the observer hands the sink the owned `Response` (drained
-// from `pending_replies` via `QueryReply::into_response`) and the terminal rid,
-// and the sink enqueues each as the matching `MulticastTxItem` for the loop to
-// frame + multicast. A separate impl block from `DeclareReplySink` per the
-// R311lq segregation — a query `Response` is a distinct message family from a
-// liveliness `Declare`. Gated on the query-reply codec family; `send_response`
-// names the one wz_codecs owned type this crate references.
-#[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
-impl ResponseSink for MulticastReplyQueue {
-    #[cfg(feature = "codec-response")]
-    fn send_response(&self, response: ResponseOwned) {
-        self.queue
-            .borrow_mut()
-            .push_back(MulticastTxItem::Response {
-                response: Box::new(response),
-            });
-    }
-    #[cfg(feature = "codec-response-final")]
-    fn send_response_final(&self, request_id: u64) {
-        self.queue
-            .borrow_mut()
-            .push_back(MulticastTxItem::ResponseFinal { request_id });
-    }
-}
-
-// R311ma — the declarer-side liveliness interest-response drain, mirroring the
-// AP `MulticastReplySink`'s `DeclareReplySink` impl: the observer hands the sink
-// the borrowed (token_id, keyexpr, interest_id), the sink owns the encode by
-// building the owned `Declare` via the shared `build_*_reply` SSOT (the same
-// wire shape the unicast `SessionLinkActions: DeclareReplySink` derives) and
-// enqueues it for the loop to frame + multicast.
-#[cfg(feature = "liveliness-token")]
-impl DeclareReplySink for MulticastReplyQueue {
-    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        let declare = build_token_reply(token_id, keyexpr, interest_id)
-            .try_into_owned()
-            .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES");
-        self.queue
-            .borrow_mut()
-            .push_back(MulticastTxItem::DeclareReply {
-                declare: Box::new(declare),
-            });
-    }
-    fn send_declare_final_reply(&self, interest_id: u64) {
-        let declare = build_final_reply(interest_id)
-            .try_into_owned()
-            .expect("DeclFinal reply carries no bounded fields");
-        self.queue
-            .borrow_mut()
-            .push_back(MulticastTxItem::DeclareReply {
-                declare: Box::new(declare),
-            });
+// R311md — the single enqueue backing the shared MulticastReplySink<Q> drains
+// into. The observer-drain construction (which MulticastTxItem the staged reply
+// becomes, the build_*_reply + Box::new) lives ONCE in
+// wz_session_core::multicast_reply_sink; this backing owns only the push_back
+// onto the single-task queue (the MCU analogue of the AP backing's mpsc send).
+#[cfg(any(
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "liveliness-token"
+))]
+impl MulticastReplyEnqueue for MulticastReplyQueue {
+    fn enqueue(&self, item: MulticastTxItem) {
+        self.queue.borrow_mut().push_back(item);
     }
 }
 
@@ -718,7 +673,7 @@ mod tests {
             .try_into_owned()
             .expect("DeclFinal reply carries no bounded fields");
         let mut pending = Some(MulticastTxItem::DeclareReply {
-            declare: Box::new(declare),
+            declare: alloc::boxed::Box::new(declare),
         });
 
         // The only Declare we emit is this DeclFinal (build_final_reply), so an
@@ -830,9 +785,13 @@ mod tests {
             .register(/*token_id=*/ 3, "demo/live")
             .expect("register held token");
 
-        // The reply queue shared between on_event (the observer flushes its
-        // staged declare replies into it) and next_tx (drains them back out).
+        // The reply backing shared between the sink (the observer flushes its
+        // staged declare replies through it) and next_tx (drains them back out).
+        // R311md: the observer drains the shared MulticastReplySink<Q>, which
+        // enqueues onto this backing.
+        use wz_session_core::multicast_reply_sink::MulticastReplySink;
         let queue = MulticastReplyQueue::new();
+        let sink = MulticastReplySink::new(queue.clone());
         let drain = queue.clone();
 
         let mut drained_declares = 0usize;
@@ -848,7 +807,7 @@ mod tests {
             &mut driver,
             |event| {
                 observer.dispatch_event(event);
-                observer.flush_declare_replies(&queue);
+                observer.flush_declare_replies(&sink);
             },
             || {
                 let item = drain.pop();
@@ -936,9 +895,12 @@ mod tests {
                 responder.reply(b"reply-over-multicast");
             });
 
-        // The reply queue shared between on_event (the observer flushes its
-        // staged query replies into it) and next_tx (drains them back out).
+        // The reply backing shared between the sink (the observer flushes its
+        // staged query replies through it) and next_tx (drains them back out).
+        // R311md: the observer drains the shared MulticastReplySink<Q>.
+        use wz_session_core::multicast_reply_sink::MulticastReplySink;
         let queue = MulticastReplyQueue::new();
+        let sink = MulticastReplySink::new(queue.clone());
         let drain = queue.clone();
 
         let mut drained_responses = 0usize;
@@ -955,7 +917,7 @@ mod tests {
             &mut driver,
             |event| {
                 observer.dispatch_event(event);
-                observer.flush_query_replies(&queue);
+                observer.flush_query_replies(&sink);
             },
             || {
                 let item = drain.pop();

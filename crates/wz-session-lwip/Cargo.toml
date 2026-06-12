@@ -106,11 +106,11 @@ codec-push = ["wz-session-core/codec-push"]
 # orthogonal to transport-multicast; a node enables the variant(s) it publishes.
 # The application produces these reply items today; R311ma/R311mb added the
 # observer-staging auto-producer (MulticastReplyQueue) that builds them from
-# inbound Interest / Query frames. codec-response ALSO forwards wz-codecs so the
-# ResponseSink impl can name wz_codecs::response::ResponseOwned (the one
-# wz_codecs type this crate references; the declare / push arms use inferred
-# owned types, so they forward wz-session-core only).
-codec-response = ["wz-session-core/codec-response", "wz-codecs/codec-response"]
+# inbound Interest / Query frames. R311md folded the ResponseSink /
+# DeclareReplySink construction into the shared wz-session-core
+# multicast_reply_sink SSOT, so this crate names no wz_codecs type and forwards
+# wz-session-core only (the wz-codecs direct dep R311mb needed is gone).
+codec-response = ["wz-session-core/codec-response"]
 codec-response-final = ["wz-session-core/codec-response-final"]
 liveliness-token = ["wz-session-core/liveliness-token"]
 # R311mb — the queryable observer-staging registry: forwards the wz-session-core
@@ -135,13 +135,6 @@ wz-link-lwip = { path = "../wz-link-lwip" }
 # the shared drive-loop primitives. no_std selects the heapless engine;
 # alloc the Vec/String/Arc-backed bundle.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "session-unicast", "no_std"] }
-# R311mb — wz-codecs direct dep SOLELY so the MulticastReplyQueue ResponseSink
-# impl can name wz_codecs::response::ResponseOwned (the queryable reply body type
-# that appears in the send_response signature). default-features = false keeps it
-# no_std; alloc backs ResponseOwned; the codec-response gate is forwarded by this
-# crate's codec-response feature. Mirrors how wz-runtime-tokio deps wz-codecs for
-# the AP loop's reply path.
-wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
 # The Runtime / TimeSource traits named directly by run_session
 # (with_mutex_mut for the lease-baseline read; now_monotonic_ms).
 wz-runtime-core = { path = "../wz-runtime-core", default-features = false, features = ["alloc"] }
