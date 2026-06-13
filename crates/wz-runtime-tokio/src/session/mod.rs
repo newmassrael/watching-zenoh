@@ -521,6 +521,51 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         Ok(0)
     }
 
+    /// R311mq (Level B, B5a) — the MULTICAST dispatch SSOT: fan one
+    /// drive-loop [`IterationEvent`](wz_session_core::driver_loop::IterationEvent)
+    /// into THIS session's observer under its lock, then drain the
+    /// deferred-fire queue after the lock drops. The multicast analogue of
+    /// the unicast [`Self::dispatch_iteration_event`], MINUS the unicast
+    /// reply flush: that method's `flush_pending_replies` +
+    /// `take_pending_final_rids` legs thread the unicast `SessionLinkActions`
+    /// handle a multicast session has no analogue of, and the multicast
+    /// reply plane (queryable `Response` / declarer `Declare`) drains
+    /// separately through
+    /// [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink). So
+    /// this method carries ONLY the dispatch + drain pairing the deferred
+    /// subscriber plane needs — the same `dispatch -> (lock drops) -> drain`
+    /// discipline the F-6 contract mechanizes so a dispatch site cannot
+    /// forget the drain.
+    ///
+    /// Wire the multicast drive loop's `on_event` to this so a subscriber
+    /// declared through [`Self::declare_subscriber`] (B4) — whose deferred
+    /// staging sink stages onto THIS session's `fires` — fires on a
+    /// wire-arrived multicast Frame. B4 left that wire-RX leg unconnected:
+    /// the standalone
+    /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
+    /// loop dispatched into a free-standing observer and never drained the
+    /// session's queue, so a Session-declared deferred subscriber saw
+    /// loopback Puts but not wire ones. Canonical closure:
+    ///
+    /// ```text
+    /// drive_multicast_session(
+    ///     .., |event| session.dispatch_multicast_iteration_event(event), ..)
+    /// ```
+    ///
+    /// Gated `transport-multicast` (it is meaningful only for a multicast
+    /// session); a unicast session uses [`Self::dispatch_iteration_event`],
+    /// which additionally flushes the unicast reply plane.
+    #[cfg(feature = "transport-multicast")]
+    pub fn dispatch_multicast_iteration_event(
+        &self,
+        event: wz_session_core::driver_loop::IterationEvent<'_>,
+    ) {
+        R::with_mutex_mut(&self.observer, |obs| {
+            obs.dispatch_event(event);
+        });
+        self.drain_deferred_fires();
+    }
+
     /// Borrow the observer handle. Application code registers
     /// callbacks on the contained registries through this — typically
     /// `session.observer().lock().unwrap().subscribers.register(...)`

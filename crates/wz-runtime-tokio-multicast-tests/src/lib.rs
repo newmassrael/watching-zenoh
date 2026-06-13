@@ -120,4 +120,64 @@ mod tests {
 
         drop(sub);
     }
+
+    /// R311mq (B5a) — wiring the multicast drive loop's dispatch into a
+    /// Session's observer + fires connects a `Session::declare_subscriber`'d
+    /// deferred subscriber to wire-arrived multicast Frames. Feeding the B5a
+    /// dispatch SSOT (`dispatch_multicast_iteration_event`) the IterationEvent
+    /// a Push Frame produces fires the subscriber exactly once: the deferred
+    /// staging sink stages onto the session's fires, and the SSOT drains it
+    /// after the observer lock drops. B4 left this wire-RX leg unconnected
+    /// (the standalone drive loop dispatched into a free-standing observer and
+    /// never drained the session's queue), so a Session-declared deferred
+    /// subscriber saw loopback Puts but not wire ones until B5a.
+    #[test]
+    fn multicast_dispatch_event_fires_declared_subscriber() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wz_runtime_tokio::session::SubscribeOptions;
+        use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::push_build::build_push_literal;
+
+        // No TX seam exercised here (the receiver is dropped); the proof is the
+        // RX dispatch path into the Session's subscriber registry.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+        let session: Session = Session::new_multicast(
+            Arc::new(wz_runtime_tokio::sync::Mutex::new(
+                ApplicationLayerObserver::new(),
+            )),
+            Arc::new(TokioTime::new()),
+            tx,
+        );
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let sub = {
+            let fired = fired.clone();
+            session.declare_subscriber("demo/mc", SubscribeOptions::new(), move |sample| {
+                assert_eq!(sample.keyexpr(), "demo/mc");
+                assert_eq!(sample.payload(), b"wire-rx");
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        // The IterationEvent a wire Push Frame produces: a FramePayload batch
+        // carrying one NetworkMessage::Push built through the production
+        // builder so the fixture cannot drift from the wire shape.
+        let push = build_push_literal("demo/mc", b"wire-rx").expect("push fixture");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: std::vec![NetworkMessage::Push(Box::new(push))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        session.dispatch_multicast_iteration_event(IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "the wire Push reached the Session-declared subscriber exactly once"
+        );
+        drop(sub);
+    }
 }

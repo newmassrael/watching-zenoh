@@ -35,12 +35,28 @@ publish = false
 
 [dev-dependencies]
 # R311mp (B4) — `pubsub-allow-loop` enables the multicast `Session::publish`
-# local-loopback leg + lets `declare_subscriber` deliver in-process, so the B4
-# loopback test compiles against the multicast-only surface.
+# local-loopback leg + lets `declare_subscriber` deliver in-process.
+# R311mq (B5a) — `pubsub-put` enables the wire-RX subscriber dispatch path
+# (SubscriberRegistry::dispatch_push) the B5a wire-RX test exercises. All
+# features here are already on in a `transport-multicast,codec-push` build, so
+# the multicast-only isolation (no transport-unicast) is unchanged.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
     "transport-multicast",
     "codec-push",
     "pubsub-allow-loop",
+    "pubsub-put",
+] }
+# R311mq (B5a) — wz-session-core directly so the B5a wire-RX test can synthesize
+# the `IterationEvent` a Push Frame produces (DriverLoopOutcome::FramePayload +
+# NetworkMessage::Push via the production `build_push_literal`). Only features
+# the multicast-only wz-runtime-tokio build already pulls transitively, so
+# feature unification adds nothing to the shared wz-session-core view.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "codec-frame",
+    "codec-push",
+    "pubsub-put",
+    "session-multicast",
 ] }
 tokio = { version = "1", features = ["sync"] }
 

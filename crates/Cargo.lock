@@ -1537,6 +1537,7 @@ version = "0.1.0"
 dependencies = [
  "tokio",
  "wz-runtime-tokio",
+ "wz-session-core",
 ]
 
 [[package]]
