@@ -69,7 +69,7 @@ pub(super) enum MatchingScope {
 /// the watch installed, exactly as a dropped pico listener struct whose
 /// owner never called undeclare).
 pub struct MatchingListener<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     pub(super) id: u64,
     pub(super) scope: MatchingScope,
     /// R311kz — the deferred-fire cell holding the user callback (the

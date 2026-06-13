@@ -34,7 +34,7 @@ use wz::runtime_tokio::reply_sink::ReplyView;
 use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{
     LivelinessGetOptions, LivelinessOptions, LivelinessToken, PublishAliasError, PublishOptions,
-    Session,
+    TokioSession,
 };
 use wz::runtime_tokio::session_glue::SessionLinkActions;
 use wz::runtime_tokio::Reliability;
@@ -171,24 +171,17 @@ const DECLARE_INTER_EMIT_MS: u64 = 100;
 /// SIGKILL still bypasses Rust `Drop` entirely; under that path
 /// the peer only sees connection EOF.
 pub(crate) async fn declare_task<T>(
-    session: Session,
+    session: TokioSession,
     spec: DeclareEmitSpec,
     clock: T,
     token_tx: Option<oneshot::Sender<LivelinessToken>>,
 ) where
     T: TimeSource + Send + 'static,
 {
-    // B5b-2b — these demo tasks drive the UNICAST action surface
-    // (is_established gate + send_declare_keyexpr preamble); a multicast
-    // session has no such bundle, so skip honestly (no panic) rather than
-    // unwrap. The demo always wires unicast sessions, so this never fires.
-    let Ok(actions) = session.actions() else {
-        log::warn!(
-            "wz-ap-demo: task requires a unicast session (multicast has no \
-             SessionLinkActions bundle); skipping"
-        );
-        return;
-    };
+    // R311nf — `session` is now `TokioSession` (= `Session<_,_,Unicast>`),
+    // so `actions()` is infallible: the type system statically guarantees
+    // the unicast action bundle exists.
+    let actions = session.actions();
     let deadline_ms = clock.now_monotonic_ms() + DECLARE_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.is_established() {
@@ -320,21 +313,13 @@ where
 /// surface enforces [`crate::Session::is_established`] (a one-shot get
 /// emitted mid-handshake is discarded by the peer), so the task must
 /// not call before the gate fires.
-pub(crate) async fn liveliness_get_task<T>(session: Session, keyexpr: String, clock: T)
+pub(crate) async fn liveliness_get_task<T>(session: TokioSession, keyexpr: String, clock: T)
 where
     T: TimeSource + Send + 'static,
 {
-    // B5b-2b — these demo tasks drive the UNICAST action surface
-    // (is_established gate + send_declare_keyexpr preamble); a multicast
-    // session has no such bundle, so skip honestly (no panic) rather than
-    // unwrap. The demo always wires unicast sessions, so this never fires.
-    let Ok(actions) = session.actions() else {
-        log::warn!(
-            "wz-ap-demo: task requires a unicast session (multicast has no \
-             SessionLinkActions bundle); skipping"
-        );
-        return;
-    };
+    // R311nf — `session` is `TokioSession` (= `Session<_,_,Unicast>`);
+    // `actions()` is infallible on the unicast typestate.
+    let actions = session.actions();
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.is_established() {
@@ -382,7 +367,7 @@ where
 /// R254 carry); `std::time::Instant` is no longer referenced in this
 /// function.
 pub(crate) async fn publisher_task<T>(
-    session: Session,
+    session: TokioSession,
     keyexpr: String,
     operation: PushOperation,
     declare_id: Option<u64>,
@@ -396,17 +381,10 @@ pub(crate) async fn publisher_task<T>(
     // through `Session::publish` / `publish_aliased_auto` which keep
     // the loopback branch live so a co-located subscriber on the
     // publish keyexpr fires in-process without crossing the wire.
-    // B5b-2b — these demo tasks drive the UNICAST action surface
-    // (is_established gate + send_declare_keyexpr preamble); a multicast
-    // session has no such bundle, so skip honestly (no panic) rather than
-    // unwrap. The demo always wires unicast sessions, so this never fires.
-    let Ok(actions) = session.actions() else {
-        log::warn!(
-            "wz-ap-demo: task requires a unicast session (multicast has no \
-             SessionLinkActions bundle); skipping"
-        );
-        return;
-    };
+    // R311nf — `session` is `TokioSession` (= `Session<_,_,Unicast>`);
+    // `actions()` is infallible — the type system statically guarantees
+    // the unicast action bundle exists (multicast is a separate type).
+    let actions = session.actions();
 
     // ── Step 1: wait for Established. Both acceptor and initiator
     //           reach Established on the same `record_established_at`

@@ -70,8 +70,15 @@ impl SubscribeOptions {
 // Drop is generic via R::with_mutex_mut (R311ct API) so per-profile
 // poison-recovery semantics stay inside the runtime impl.
 #[non_exhaustive]
-pub struct Subscriber<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+pub struct Subscriber<R: SessionRuntime = TokioRuntime> {
+    /// R311nf — the observer handle (was a full `Session<R, T>` clone). A
+    /// `Subscriber` is transport-agnostic: it only unregisters from the
+    /// observer's subscriber registry on teardown, so it depends on the
+    /// observer alone, not the typed `Session<R, T, Tp>` (ISP). This dropped
+    /// the unused `T: TimeSource` param the stored `Session` had dragged in,
+    /// and lets a `Session<R, T, Multicast>` declare subscribers (B4) without
+    /// the handle gaining a transport type param.
+    pub(super) observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
     pub(super) id: SubscriptionId,
     pub(super) keyexpr: String,
     pub(super) options: SubscribeOptions,
@@ -116,7 +123,7 @@ pub(super) type SampleCell<R> =
 // lifted both. (The aliased counterpart `declare_subscriber_aliased` stays
 // unicast: it resolves through the unicast outbound mapping table, which a
 // connectionless multicast session has no analogue of.)
-impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
     /// R311lh — build the deferred cell + the staging sink one
     /// `declare_subscriber{_aliased}` call installs in the registry:
     /// the sink materializes each matched borrowed view into the owned
@@ -143,7 +150,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     }
 }
 
-impl<R: SessionRuntime, T: TimeSource> Subscriber<R, T> {
+impl<R: SessionRuntime> Subscriber<R> {
     /// The stable id assigned by
     /// [`crate::pubsub::SubscriberRegistry::register_with_locality`].
     /// Exposed for diagnostics; callers should not rely on the
@@ -198,13 +205,13 @@ impl<R: SessionRuntime, T: TimeSource> Subscriber<R, T> {
         // per-profile poison-recovery lives inside the runtime impl (AP:
         // PoisonError::into_inner; MCU: no poison concept under panic =
         // abort).
-        R::with_mutex_mut(&self.session.observer, |observer| {
+        R::with_mutex_mut(&self.observer, |observer| {
             observer.subscribers.unregister(self.id)
         })
     }
 }
 
-impl<R: SessionRuntime, T: TimeSource> Drop for Subscriber<R, T> {
+impl<R: SessionRuntime> Drop for Subscriber<R> {
     fn drop(&mut self) {
         // R311lo — RAII teardown; disarmed after an explicit
         // `undeclare`, so this frees the owned fields without a second
@@ -224,11 +231,6 @@ pub enum SubscribeAliasError {
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_subscriber_aliased call).
     UnknownMapping(u64),
-    /// B5b-2b (R311nc) — the aliased subscribe resolves the unicast
-    /// outbound keyexpr-mapping table, which a multicast session has no
-    /// analogue of; the `Session::actions()` projection rejects. No
-    /// subscriber was declared.
-    RequiresUnicast,
 }
 
 impl std::fmt::Display for SubscribeAliasError {
@@ -238,12 +240,6 @@ impl std::fmt::Display for SubscribeAliasError {
                 f,
                 "SubscribeAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
-            ),
-            SubscribeAliasError::RequiresUnicast => write!(
-                f,
-                "SubscribeAliasError: aliased subscribe requires a unicast transport; \
-                 this session holds a multicast transport (no outbound keyexpr-mapping \
-                 table); no subscriber was declared"
             ),
         }
     }

@@ -39,7 +39,7 @@ use super::*;
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
 pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
     pub(super) options: PublishOptions,
 }
@@ -215,7 +215,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
 pub struct PublisherAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     pub(super) mapping_id: u64,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: PublishOptions,
@@ -299,7 +299,6 @@ impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
         let base = self
             .session
             .actions()
-            .map_err(|_| PublishAliasError::RequiresUnicast)?
             .resolve_outbound_mapping(self.mapping_id)
             .ok_or(PublishAliasError::UnknownMapping(self.mapping_id))?;
         let _effective_keyexpr = match self.inline_suffix.as_deref() {

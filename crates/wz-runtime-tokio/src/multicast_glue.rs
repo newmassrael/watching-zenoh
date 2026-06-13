@@ -1581,14 +1581,16 @@ mod tests {
     #[test]
     fn both_build_multicast_session_is_live() {
         use crate::observer::ApplicationLayerObserver;
-        use crate::session::{PublishOptions, Session};
+        use crate::session::{PublishOptions, TokioMulticastSession};
         use std::sync::Arc;
-        use wz_session_core::send_wire_error::SendWireError;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        // Legal only because R311nd dropped the `not(transport-unicast)` gate:
-        // this is a BOTH-transport build, yet it holds a multicast `Session`.
-        let session: Session = Session::new_multicast(
+        // R311nf — `TokioMulticastSession` is the typestate alias for
+        // `Session<TokioRuntime, TokioTime, Multicast>`. In a both-transport build
+        // this is distinct from `TokioSession` (= `Session<_,_,Unicast>`) at the
+        // type level; `actions()` does not exist on `TokioMulticastSession` —
+        // calling it is a compile error rather than a runtime reject.
+        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(crate::sync::Mutex::new(ApplicationLayerObserver::new())),
             Arc::new(TokioTime::new()),
             tx,
@@ -1607,14 +1609,5 @@ mod tests {
             "the enqueued multicast item is a Put Push"
         );
         assert!(rx.try_recv().is_err(), "publish enqueued exactly one item");
-
-        // The LIVE actions() multicast arm: a multicast `Session` has no unicast
-        // action bundle, so the projection is an honest `UnsupportedVariant`
-        // reject — never a panic, never a `FeatureDisabled` conflation (#3b).
-        assert_eq!(
-            session.actions().map(|_| ()),
-            Err(SendWireError::UnsupportedVariant),
-            "a multicast Session's actions() honestly rejects",
-        );
     }
 }

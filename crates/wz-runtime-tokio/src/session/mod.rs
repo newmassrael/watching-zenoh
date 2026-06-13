@@ -295,9 +295,15 @@ use crate::session_glue::{ConsolidationMode, QueryTarget};
 // ungated and compile in every transport configuration. Each `mod X;` is
 // gated together with its `pub use X::*;` so the re-export disappears in
 // lockstep with the module.
+// R311nf — `decl_listener` / `matching_listener` are UNICAST-only features
+// (declare-listeners + publisher/querier matching status; a multicast session
+// has no declares / publishers / queriers), so the typestate gates them
+// `transport-unicast` and they store a `Session<R, T, Unicast>`.
+#[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]
 mod liveliness;
+#[cfg(feature = "transport-unicast")]
 mod matching_listener;
 // R311nb (Level B, B5b-2b tail) — the transport-AGNOSTIC publish value
 // surface (`PublishOptions` / `PublishError` / `build_loopback_sample`),
@@ -315,9 +321,15 @@ mod subscriber;
 // R311mm (Level B, B1) — the per-session transport sum; internal-only
 // (`SessionTransport` is `pub(crate)`), so it gets no `pub use` re-export.
 mod transport;
+// R311nf — the transport typestate (was the `SessionTransport` runtime sum).
+// `TransportState` is the ungated trait surface (struct bound + agnostic impl
+// bound); the `Unicast` / `Multicast` markers are each gated on their catalog
+// atom, named only by the matching transport-gated alias + impl block.
+#[cfg(feature = "transport-unicast")]
 pub use decl_listener::*;
 #[cfg(feature = "transport-unicast")]
 pub use liveliness::*;
+#[cfg(feature = "transport-unicast")]
 pub use matching_listener::*;
 pub use publish_common::*;
 #[cfg(feature = "transport-unicast")]
@@ -327,7 +339,11 @@ pub use querier::*;
 #[cfg(feature = "transport-unicast")]
 pub use queryable::*;
 pub use subscriber::*;
-use transport::SessionTransport;
+#[cfg(feature = "transport-multicast")]
+pub use transport::Multicast;
+pub use transport::TransportState;
+#[cfg(feature = "transport-unicast")]
+pub use transport::Unicast;
 
 /// Application-level session bundle. Owns the outbound action handle
 /// plus a shared reference to the inbound observer so a single call
@@ -345,24 +361,25 @@ use transport::SessionTransport;
 /// loopback dispatches from a background task are observable to the
 /// main `drive_session` loop's `observer.dispatch` calls and vice
 /// versa.
-pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    /// Outbound action handle. Cloned `Arc` — multiple `Session`s
-    /// can share the same actions if the application binds several
-    /// publish surfaces to the same physical session. R311di-pre-f1b
-    /// binds the actions' TimeSource parameter to the same `T` as
-    /// the surrounding Session so the action bundle's `clock` field
-    /// (R311di-pre-f1 reparam) shares the monotonic epoch with the
-    /// Session's own `clock: Arc<T>` slot — the R311cw single-epoch
-    /// invariant ("single Session value owns the monotonic epoch
-    /// its background sweep + per-call deadlines share") now extends
-    /// to the action bundle by type.
-    ///
-    /// R311mm (Level B, B1) — the field is now the [`SessionTransport`] sum
-    /// (B1 inhabits only `Unicast`, wrapping the same
-    /// `Arc<SessionLinkActions<R, T>>`); the [`Self::actions`] accessor
-    /// projects the unicast handle. See `session::transport` for why a sum
-    /// type, not a trait object.
-    transport: SessionTransport<R, T>,
+pub struct Session<R: SessionRuntime, T: TimeSource, Tp>
+where
+    Tp: TransportState<R, T>,
+{
+    /// The transport-specific payload, projected from the [`Tp`](TransportState)
+    /// typestate marker: the unicast [`SessionLinkActions`] bundle on a
+    /// `Session<R, T, Unicast>`, or the multicast TX seam on a
+    /// `Session<R, T, Multicast>`. R311nf lifted this from the R311mm runtime
+    /// sum `SessionTransport<R, T>` to the `<Tp as TransportState<R, T>>::Payload`
+    /// projection: the transport is now known at the type level, so the
+    /// transport-specific surface (unicast `actions` / `dispatch_iteration_event`,
+    /// multicast `dispatch_multicast_iteration_event`) lives on transport-gated
+    /// `impl` blocks and an illegal cross-transport call is a compile error,
+    /// not a runtime `Err(UnsupportedVariant)` / silent no-op. R311di-pre-f1b
+    /// binds the unicast payload's TimeSource parameter to the same `T` as the
+    /// surrounding Session so the action bundle's `clock` field shares the
+    /// monotonic epoch with the Session's own `clock: Arc<T>` slot (the R311cw
+    /// single-epoch invariant).
+    transport: <Tp as TransportState<R, T>>::Payload,
     /// Inbound observer wrapped in the per-runtime mutex alias
     /// (`R::Mutex<...>` — R311ar GAT) so [`Session::publish`]'s
     /// loopback branch can borrow the subscriber registry through
@@ -419,7 +436,15 @@ pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
 // so the inner mutex alias's and TimeSource impl's Clone-status are
 // irrelevant). R311cw extends the bound set with `T: TimeSource` so
 // `Session<R, T>` clones uniformly across both type parameters.
-impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
+// R311nf — `where <Tp as TransportState>::Payload: Clone` replaces the
+// old enum's hand-written cfg'd `Clone` match. Both concrete payloads
+// satisfy it: the unicast `Arc<SessionLinkActions<R, T>>` is `Clone` for any
+// inner; the multicast `MulticastPayload` derives `Clone` (its `tx` sender is
+// `Clone`, and the no-`codec-push` form is field-less).
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Clone for Session<R, T, Tp>
+where
+    <Tp as TransportState<R, T>>::Payload: Clone,
+{
     fn clone(&self) -> Self {
         Self {
             transport: self.transport.clone(),
@@ -430,20 +455,26 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
     }
 }
 
-/// R311cq — explicit alias for the tokio-runtime-bound Session. The
-/// bare `Session` name still resolves to this through the R267
-/// default-param `Session<R: Runtime = TokioRuntime, T: TimeSource =
-/// TokioTime>`, so existing call sites stay unchanged. The alias
-/// surfaces the runtime binding explicitly for downstream code that
-/// wants its signatures to read `fn x(s: TokioSession)` rather than
-/// `fn x(s: Session)` — useful once the R267 helper cascade lands
-/// and wz-runtime-lwip surfaces its own
-/// `LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>` alias so
-/// the two runtimes compose side-by-side without bare-`Session`
-/// ambiguity. R311cw extended the alias's second slot from inferred
-/// `TimeSource = TokioTime` default to explicit naming so the
-/// Session<R, T> shape reads literally at the alias site.
-pub type TokioSession = Session<TokioRuntime, TokioTime>;
+/// R311cq — explicit alias for the tokio-runtime-bound UNICAST Session.
+/// R311nf dropped the bare-`Session` default-param ergonomic (the transport
+/// typestate `Tp` has no safe default: a `Tp = Unicast` default would name a
+/// `transport-unicast`-gated marker that is absent in a multicast-only build,
+/// and the "defaults must be trailing" rule forbids a non-defaulted `Tp` after
+/// the defaulted `R` / `T`). So the bare `Session` name no longer resolves;
+/// call sites name the transport explicitly through this alias (unicast) or
+/// [`TokioMulticastSession`] (multicast). Gated `transport-unicast` because it
+/// names the `Unicast` marker; a future wz-runtime-lwip surfaces its own
+/// `LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>, Unicast>` alias.
+#[cfg(feature = "transport-unicast")]
+pub type TokioSession = Session<TokioRuntime, TokioTime, Unicast>;
+
+/// R311nf — explicit alias for the tokio-runtime-bound MULTICAST Session (the
+/// multicast counterpart of [`TokioSession`]). Gated `transport-multicast`.
+/// A both-transport build exposes both aliases side by side; the typestate
+/// keeps their surfaces disjoint (no `dispatch_iteration_event` on this one,
+/// no `dispatch_multicast_iteration_event` on [`TokioSession`]).
+#[cfg(feature = "transport-multicast")]
+pub type TokioMulticastSession = Session<TokioRuntime, TokioTime, Multicast>;
 
 // R311mn (Level B, B2) — the TRANSPORT-AGNOSTIC `Session` surface. These
 // methods read the transport-independent fields (`observer` / `fires` /
@@ -453,40 +484,15 @@ pub type TokioSession = Session<TokioRuntime, TokioTime>;
 // multicast-only build. They are split out of the (now `transport-unicast`-
 // gated) big impl block below precisely so a multicast-only `Session` still
 // exposes observer / clock / deferred-fire-drain / zid-dedup. The unicast
-// publish / query / declare surface stays in the gated block.
-impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
-    /// R311mn (Level B, B2) — construct a multicast `Session` from the shared
-    /// observer + clock (the handshake-free multicast transport has no
-    /// `SessionLinkActions` bundle). R311mo (B3) adds the `codec-push`-gated
-    /// `tx` argument: the sender half of the channel
-    /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
-    /// drains, so [`Self::publish`] can enqueue onto it (a bare multicast
-    /// build with no data plane omits `tx` and gets an RX-only session).
-    /// R311nd (B5b-2b tail) — gate widened from
-    /// `all(transport-multicast, not(transport-unicast))` to plain
-    /// `transport-multicast` (mirrors the `SessionTransport::Multicast`
-    /// variant gate): a both-transport build can now construct a multicast
-    /// `Session` alongside the unicast `Session::new`.
-    #[cfg(feature = "transport-multicast")]
-    pub fn new_multicast(
-        observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
-        clock: Arc<T>,
-        #[cfg(feature = "codec-push")] tx: tokio::sync::mpsc::UnboundedSender<
-            wz_session_core::multicast_tx::MulticastTxItem,
-        >,
-    ) -> Self {
-        Self {
-            transport: SessionTransport::Multicast {
-                #[cfg(feature = "codec-push")]
-                tx,
-                _marker: core::marker::PhantomData,
-            },
-            observer,
-            fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
-            clock,
-        }
-    }
-
+// publish / query / declare surface stays on the `Unicast` block.
+//
+// R311nf — the block is generic over the transport typestate
+// `Tp: TransportState<R, T>`, so every method here compiles for BOTH a
+// `Session<R, T, Unicast>` and a `Session<R, T, Multicast>`. The send seam
+// (`send_network_message`) dispatches through `Tp::send_network_message` at
+// compile time; the loopback / observer / clock / zid surface touches no
+// transport payload at all.
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
     /// R311nb (Level B, B5b-2b tail) — publish a literal-keyexpr Sample. The
     /// single, TRANSPORT-AGNOSTIC publish SSOT: it supersedes BOTH the prior
     /// `transport-unicast` `publish` and the multicast-only
@@ -647,18 +653,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// error the unicast `dispatch_*` family returns and lives ungated in
     /// `wz_session_core` (the `transport-unicast`-gated `session_glue` re-export
     /// is just a path), so the seam's `Result` is already transport-uniform.
-    // R311mu (B5b-2b-2) / R311mw (B5b-2b-3) — gate widened from `codec-push`
-    // to admit the query-only and liveliness-only builds: the seam now carries
-    // Request (z_get, `codec-request`-gated) and Declare (liveliness-token
-    // declare/undeclare, `codec-declare`-gated), neither of which implies
-    // `codec-push`. The disjuncts gate the fn to exactly where it has a
-    // caller — `all(transport-unicast, any(codec-push, codec-request,
-    // codec-declare))` for the unicast publish + query + liveliness surface,
-    // and `all(transport-multicast, not(transport-unicast), codec-push)` for
-    // the multicast publish — so the multicast arm (which references the
-    // `codec-push`-gated `tx` / `MulticastTxItem`) only compiles where
-    // `codec-push` is on, and a multicast-only build with `codec-request` /
-    // `codec-declare` but no `codec-push` simply has no seam (no caller).
+    // R311nf — the send seam is now a thin forwarder to the typestate's
+    // [`TransportState::send_network_message`]: the per-transport send body
+    // lives in `session::transport` (one place each — the unicast
+    // `SessionLinkActions` dispatch family, the multicast `MulticastTxItem`
+    // enqueue), and this agnostic method dispatches by type at compile time
+    // (no runtime `match`, no `_ =>` arm, no transport-mismatch projection).
+    // The gate is unchanged from R311nd — it pins the seam to exactly the
+    // builds with a caller: the unicast publish + query + liveliness surface
+    // (`any(codec-push, codec-request, codec-declare, declare-interest)`) and
+    // the multicast publish (`all(transport-multicast, codec-push)`).
     #[cfg(any(
         all(
             feature = "transport-unicast",
@@ -669,9 +673,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 feature = "declare-interest"
             )
         ),
-        // R311nd — `not(transport-unicast)` dropped: in a both-transport build
-        // the multicast publish caller coexists with the unicast callers, so
-        // the seam exists whenever a multicast build carries `codec-push`.
         all(feature = "transport-multicast", feature = "codec-push")
     ))]
     pub fn send_network_message(
@@ -680,94 +681,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         reliable: bool,
         express: bool,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
-        match &self.transport {
-            // Unicast arm (B5b-2): route the built NetworkMessage to the
-            // SessionLinkActions dispatch_* family + the express batch flush.
-            #[cfg(feature = "transport-unicast")]
-            SessionTransport::Unicast(actions) => {
-                actions.send_network_message(msg, reliable, express)
-            }
-            // Multicast arm (B5b-1): wrap a Push as a MulticastTxItem and
-            // fire-and-forget onto the drive loop's channel (a closed receiver
-            // drops it exactly as a dead link would). `express` is moot — UDP
-            // multicast is best-effort with no batch window. R311nd —
-            // `not(transport-unicast)` dropped so this arm is LIVE in a
-            // both-transport build (the `match` runtime-dispatches).
-            #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
-            SessionTransport::Multicast { tx, .. } => {
-                use wz_session_core::network_message::NetworkMessage;
-                use wz_session_core::send_wire_error::SendWireError;
-                let _ = express;
-                let item = match msg {
-                    NetworkMessage::Push(push) => {
-                        wz_session_core::multicast_tx::MulticastTxItem::Push { push, reliable }
-                    }
-                    // A multicast Session originates only Push; any other
-                    // variant is an honest transport-variant mismatch (the
-                    // R311na #3b fix — was FeatureDisabled, now the distinct
-                    // UnsupportedVariant). The reply-plane variants
-                    // (Response / ResponseFinal / Oam) are emitted by the
-                    // drive-loop MulticastReplySink, never routed here.
-                    _ => return Err(SendWireError::UnsupportedVariant),
-                };
-                let _ = tx.send(item);
-                Ok(())
-            }
-            // R311nd — a multicast Session in a build WITHOUT `codec-push` has
-            // no `tx` channel (the variant degenerates to `{ _marker }`) and no
-            // MulticastTxItem to build, so it cannot originate any wire
-            // message. Honest reject keeps the `match` exhaustive in a
-            // both-transport, non-codec-push build (e.g. codec-request only).
-            #[cfg(all(feature = "transport-multicast", not(feature = "codec-push")))]
-            SessionTransport::Multicast { .. } => {
-                Err(wz_session_core::send_wire_error::SendWireError::UnsupportedVariant)
-            }
-        }
-    }
-
-    /// R311mq (Level B, B5a) — the MULTICAST dispatch SSOT: fan one
-    /// drive-loop [`IterationEvent`](wz_session_core::driver_loop::IterationEvent)
-    /// into THIS session's observer under its lock, then drain the
-    /// deferred-fire queue after the lock drops. The multicast analogue of
-    /// the unicast [`Self::dispatch_iteration_event`], MINUS the unicast
-    /// reply flush: that method's `flush_pending_replies` +
-    /// `take_pending_final_rids` legs thread the unicast `SessionLinkActions`
-    /// handle a multicast session has no analogue of, and the multicast
-    /// reply plane (queryable `Response` / declarer `Declare`) drains
-    /// separately through
-    /// [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink). So
-    /// this method carries ONLY the dispatch + drain pairing the deferred
-    /// subscriber plane needs — the same `dispatch -> (lock drops) -> drain`
-    /// discipline the F-6 contract mechanizes so a dispatch site cannot
-    /// forget the drain.
-    ///
-    /// Wire the multicast drive loop's `on_event` to this so a subscriber
-    /// declared through [`Self::declare_subscriber`] (B4) — whose deferred
-    /// staging sink stages onto THIS session's `fires` — fires on a
-    /// wire-arrived multicast Frame. B4 left that wire-RX leg unconnected:
-    /// the standalone
-    /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
-    /// loop dispatched into a free-standing observer and never drained the
-    /// session's queue, so a Session-declared deferred subscriber saw
-    /// loopback Puts but not wire ones. Canonical closure:
-    ///
-    /// ```text
-    /// drive_multicast_session(
-    ///     .., |event| session.dispatch_multicast_iteration_event(event), ..)
-    /// ```
-    ///
-    /// Gated `transport-multicast` (it is meaningful only for a multicast
-    /// session); a unicast session uses [`Self::dispatch_iteration_event`],
-    /// which additionally flushes the unicast reply plane.
-    #[cfg(feature = "transport-multicast")]
-    pub fn dispatch_multicast_iteration_event(
-        &self,
-        event: wz_session_core::driver_loop::IterationEvent<'_>,
-    ) {
-        R::with_mutex_mut(&self.observer, |obs| {
-            obs.dispatch_event(event);
-        });
-        self.drain_deferred_fires();
+        Tp::send_network_message(&self.transport, msg, reliable, express)
     }
 
     /// Borrow the observer handle. Application code registers
@@ -937,7 +851,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         keyexpr: impl Into<String>,
         options: SubscribeOptions,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> Subscriber<R, T> {
+    ) -> Subscriber<R> {
         let keyexpr_string = keyexpr.into();
         // R311lh — DEFERRED FIRE (the R311lf lock-free callback
         // invariant on the subscriber-sample plane): the registry
@@ -957,7 +871,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             )
         });
         Subscriber {
-            session: self.clone(),
+            // R311nf — store the observer handle, not a full `Session` clone
+            // (the decoupled `Subscriber<R>` is transport-agnostic).
+            observer: self.observer.clone(),
             id,
             keyexpr: keyexpr_string,
             options,
@@ -968,32 +884,82 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     }
 }
 
-// R311cy — pure-accessor method generic lift. The three accessors
-// below (`actions` / `observer` / `is_established`) and the
-// R311cy-added `clock` accessor read fields directly without acquiring
-// any per-runtime lock, so their bodies compile identically for any
-// `R: Runtime` impl. Moving them to a dedicated `impl<R: Runtime, T:
-// TimeSource> Session<R, T>` block is the first concrete step of the
-// multi-round method generic lift cascade (R311cv carry #4): the
-// 100+ AP-bound methods that DO call `self.observer.lock().expect()`
-// stay on the `impl<T: TimeSource> Session<TokioRuntime, T>` block
-// until follow-up rounds migrate them to the `R::with_mutex_mut`
-// closure form (R311ct API). The `observer()` return type lifts
-// from the per-runtime alias `&Arc<Mutex<...>>` to the trait-
-// projected `&Arc<<R as Runtime>::Mutex<...>>`; for the AP profile
-// this resolves to the same `std::sync::Mutex<...>` concrete type so
-// every existing `session.observer().lock()` call site keeps
-// compiling under `R = TokioRuntime` (no breaking change to consumers).
-//
-// R311mn (Level B, B2) — gated `transport-unicast`: every method in this
-// block projects the unicast transport variant (`self.actions()`) or names
-// a `session_glue` type, so the whole block is the unicast `Session`
-// surface. The five transport-agnostic methods (observer / clock /
-// drain_deferred_fires / set_own_zid / clear_own_zid) were lifted into the
-// ungated block above; this block now compiles only when
-// `transport-unicast` is on.
+// R311nf — the MULTICAST `Session` surface: `impl Session<R, T, Multicast>`.
+// The handshake-free constructor + the multicast dispatch SSOT. A
+// `Session<R, T, Unicast>` does not have these methods, and a
+// `Session<R, T, Multicast>` does not have the unicast
+// `dispatch_iteration_event` / declare / query surface — the typestate keeps
+// the two disjoint, so the review's illegal-state-representable
+// (`dispatch_iteration_event` silently no-op on multicast) is now a compile
+// error rather than a runtime guard.
+#[cfg(feature = "transport-multicast")]
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
+    /// R311mn (Level B, B2) / R311nf — construct a multicast `Session` from the
+    /// shared observer + clock (the handshake-free multicast transport has no
+    /// `SessionLinkActions` bundle). R311mo (B3) adds the `codec-push`-gated
+    /// `tx` argument: the sender half of the channel
+    /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
+    /// drains, so [`Self::publish`] can enqueue onto it (a bare multicast build
+    /// with no data plane omits `tx` and gets an RX-only session). R311nf —
+    /// returns the `Multicast` typestate; the `transport` field IS the
+    /// `MulticastPayload` (no enum-variant wrap, no `PhantomData`).
+    pub fn new_multicast(
+        observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+        clock: Arc<T>,
+        #[cfg(feature = "codec-push")] tx: tokio::sync::mpsc::UnboundedSender<
+            wz_session_core::multicast_tx::MulticastTxItem,
+        >,
+    ) -> Self {
+        Self {
+            transport: transport::MulticastPayload {
+                #[cfg(feature = "codec-push")]
+                tx,
+            },
+            observer,
+            fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
+            clock,
+        }
+    }
+
+    /// R311mq (Level B, B5a) — the MULTICAST dispatch SSOT: fan one drive-loop
+    /// [`IterationEvent`](wz_session_core::driver_loop::IterationEvent) into THIS
+    /// session's observer under its lock, then drain the deferred-fire queue
+    /// after the lock drops. The multicast analogue of the unicast
+    /// [`Session::dispatch_iteration_event`], MINUS the unicast reply flush (a
+    /// multicast session has no `SessionLinkActions`; the multicast reply plane
+    /// drains separately through
+    /// [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink)). Carries
+    /// only the `dispatch -> (lock drops) -> drain` pairing the deferred
+    /// subscriber plane needs (the F-6 contract). Wire the multicast drive
+    /// loop's `on_event` to this:
+    ///
+    /// ```text
+    /// drive_multicast_session(
+    ///     .., |event| session.dispatch_multicast_iteration_event(event), ..)
+    /// ```
+    pub fn dispatch_multicast_iteration_event(
+        &self,
+        event: wz_session_core::driver_loop::IterationEvent<'_>,
+    ) {
+        R::with_mutex_mut(&self.observer, |obs| {
+            obs.dispatch_event(event);
+        });
+        self.drain_deferred_fires();
+    }
+}
+
+// R311nf — the UNICAST `Session` surface: `impl Session<R, T, Unicast>`. Every
+// method here is unicast-only (it borrows the `SessionLinkActions` bundle via
+// the now-infallible `self.actions()`, or names a `session_glue` type), so the
+// typestate confines it to a `Session<R, T, Unicast>` — a `Session<R, T,
+// Multicast>` simply does not have `dispatch_iteration_event` / `query` /
+// `declare_*` (the illegal call is a compile error, not a runtime reject). The
+// transport-agnostic surface (publish / observer / clock / drain / zid /
+// declare_subscriber) lives in the `impl<R, T, Tp> Session<R, T, Tp>` block
+// above; the multicast-only surface lives in the `impl Session<R, T,
+// Multicast>` block below.
 #[cfg(feature = "transport-unicast")]
-impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Construct a new session bundle from existing handles.
     /// `actions` typically comes from
     /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
@@ -1053,7 +1019,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         // re-asked a known-`Ok` question).
         let zid = actions.params.zid.clone();
         let session = Self {
-            transport: SessionTransport::Unicast(actions),
+            // R311nf — on `Session<R, T, Unicast>` the `transport` field IS the
+            // `Arc<SessionLinkActions<R, T>>` payload (`<Unicast as
+            // TransportState<R, T>>::Payload`); no enum-variant wrap.
+            transport: actions,
             observer,
             // R311kz — fresh deferred-fire queue per logical session;
             // every deferred sink (matching, decl listeners, data
@@ -1078,27 +1047,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// needs to invoke non-publish methods like `send_declare_*` or
     /// `send_request_query` directly on the actions surface.
     ///
-    /// B5b-2b (R311nc) — fallible projection. The action bundle is the
-    /// per-peer UNICAST handshake machinery; a session whose transport is
-    /// not unicast has no such bundle, so this returns
-    /// [`SendWireError::UnsupportedVariant`] rather than a borrow it cannot
-    /// honestly produce. In a unicast-only build the only representable
-    /// transport is `Unicast`, so the `Err` arm is unconstructible and
-    /// every caller's `?` is statically infallible; the fallibility
-    /// materialises only once a both-transport build can hold a multicast
-    /// `Session` (the B5b-2b tail, designed WITH this projection per the
-    /// R311na #3b ratify — an honest reject, never an `unreachable!`).
-    pub fn actions(&self) -> Result<&Arc<SessionLinkActions<R, T>>, SendWireError> {
-        match &self.transport {
-            SessionTransport::Unicast(actions) => Ok(actions),
-            // R311nd — the LIVE multicast arm (the gate dropped this round, so
-            // a both-transport build can hold this variant at runtime). A
-            // multicast session has no unicast handshake bundle, so the honest
-            // projection is `UnsupportedVariant` — never a panic, never a
-            // `FeatureDisabled` conflation (the R311na #3b ratify).
-            #[cfg(feature = "transport-multicast")]
-            SessionTransport::Multicast { .. } => Err(SendWireError::UnsupportedVariant),
-        }
+    /// R311nf — INFALLIBLE on `Session<R, T, Unicast>`: the `transport` field
+    /// IS the `Arc<SessionLinkActions<R, T>>` payload, so this is a plain field
+    /// borrow. The R311nc fallible `Result<_, SendWireError>` projection (whose
+    /// `Err(UnsupportedVariant)` arm signalled "called on a multicast session")
+    /// is retired: a multicast session is now a distinct type
+    /// `Session<R, T, Multicast>` that simply has no `actions()` method, so the
+    /// transport mismatch is a compile error rather than a runtime reject.
+    pub fn actions(&self) -> &Arc<SessionLinkActions<R, T>> {
+        &self.transport
     }
 
     // R311mn (B2) — `observer` / `drain_deferred_fires` are
@@ -1162,19 +1119,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     {
         R::with_mutex_mut(&self.observer, |obs| {
             obs.dispatch_event(event);
-            // B5b-2b — the unicast reply flush + ResponseFinal staging need
-            // the unicast action bundle; a multicast session (driven by
-            // dispatch_multicast_iteration_event, which omits this flush) has
-            // none, so skip these legs honestly when actions() is not unicast.
-            // In every current build actions() is Ok, so this is a
-            // behaviour-preserving guard (the order flush -> under_lock ->
-            // final-rids is unchanged).
-            if let Ok(actions) = self.actions() {
-                obs.flush_pending_replies(actions.as_ref());
-            }
+            // R311nf — the unicast reply flush + ResponseFinal staging run
+            // UNCONDITIONALLY now: this method lives on `Session<R, T, Unicast>`,
+            // so `actions()` is the infallible unicast bundle borrow. The
+            // R311nd `if let Ok(actions)` guard (which silently skipped these
+            // legs on a multicast session — the illegal-state-representable the
+            // review flagged) is gone: a multicast session is a distinct type
+            // that does not have this method, and is driven by
+            // `dispatch_multicast_iteration_event` instead.
+            obs.flush_pending_replies(self.actions().as_ref());
             under_lock(obs);
             #[cfg(feature = "query-queryable")]
-            if let Ok(actions) = self.actions() {
+            {
+                let actions = self.actions();
                 for rid in obs.take_pending_final_rids() {
                     let actions = actions.clone();
                     self.fires.stage(Box::new(move || {
@@ -1208,12 +1165,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// [`Self::declare_liveliness_subscriber`] remains best-effort —
     /// see its doc-comment for the asymmetric-gate carry.
     pub fn is_established(&self) -> bool {
-        // B5b-2b — a session whose transport is not unicast has no unicast
-        // session-FSM and is therefore never "Established" in this sense;
-        // `false` is the honest answer (it correctly suppresses
-        // pre-Established interest emission), keeping the `-> bool`
-        // signature stable. In a unicast build actions() is always Ok.
-        self.actions().map(|a| a.is_established()).unwrap_or(false)
+        // R311nf — on `Session<R, T, Unicast>` `actions()` is the infallible
+        // bundle borrow, so this is a direct proxy (the R311ne
+        // `.unwrap_or(false)` that absorbed the multicast projection is gone;
+        // a multicast session has no `is_established` — it has no unicast FSM).
+        self.actions().is_established()
     }
 
     /// R311jp — zenoh-pico `zp_batch_start` parity: open a TX batching
@@ -1228,21 +1184,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// Errors with `SendWireError::FeatureDisabled` when the
     /// `transport-batching` feature is off (R311g signature stability).
     pub fn batch_start(&self) -> Result<(), SendWireError> {
-        self.actions()?.batch_start()
+        self.actions().batch_start()
     }
 
     /// R311jp — zenoh-pico `zp_batch_flush` parity: send the currently
     /// batched messages now, keeping the batching window open. No-op when
     /// nothing is batched.
     pub fn batch_flush(&self) -> Result<(), SendWireError> {
-        self.actions()?.batch_flush()
+        self.actions().batch_flush()
     }
 
     /// R311jp — zenoh-pico `zp_batch_stop` parity: close the batching
     /// window and send the currently batched messages. Sends after this
     /// call flush per message again.
     pub fn batch_stop(&self) -> Result<(), SendWireError> {
-        self.actions()?.batch_stop()
+        self.actions().batch_stop()
     }
 
     // R311mn (B2) — `set_own_zid` / `clear_own_zid` are transport-agnostic
@@ -1419,7 +1375,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     ) -> Result<usize, PublishAliasError> {
         let base = self
             .actions()
-            .map_err(|_| PublishAliasError::RequiresUnicast)?
             .resolve_outbound_mapping(mapping_id)
             .ok_or(PublishAliasError::UnknownMapping(mapping_id))?;
         let loopback_keyexpr = match inline_suffix {
@@ -1595,7 +1550,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
         #[cfg(feature = "query-get")]
         {
-            let rid = self.actions()?.alloc_next_request_id();
+            let rid = self.actions().alloc_next_request_id();
             let expected_finals = opts.expected_finals();
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
@@ -1843,7 +1798,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
         #[cfg(feature = "query-get")]
         {
-            let rid = self.actions()?.alloc_next_request_id();
+            let rid = self.actions().alloc_next_request_id();
             let expected_finals = opts.expected_finals();
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
@@ -2008,7 +1963,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "query-get")]
         {
             let base = self
-                .actions()?
+                .actions()
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(QueryAliasError::UnknownMapping(mapping_id))?;
             let loopback_keyexpr = match inline_suffix {
@@ -2185,10 +2140,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         inline_suffix: Option<&str>,
         options: SubscribeOptions,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> Result<Subscriber<R, T>, SubscribeAliasError> {
+    ) -> Result<Subscriber<R>, SubscribeAliasError> {
         let base = self
             .actions()
-            .map_err(|_| SubscribeAliasError::RequiresUnicast)?
             .resolve_outbound_mapping(mapping_id)
             .ok_or(SubscribeAliasError::UnknownMapping(mapping_id))?;
         let resolved = match inline_suffix {
@@ -2251,10 +2205,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // B5b-2b — gate unicast at the API boundary (a multicast session
             // has no SessionLinkActions for the wire-reply leg), then thread
             // the resolved bundle into the sink builder.
-            let actions = self
-                .actions()
-                .map_err(|_| QueryableAliasError::RequiresUnicast)?
-                .clone();
+            let actions = self.actions().clone();
             let (cell, sink) = self.deferred_query_sink(actions, callback);
             // R311df — observer access via R::with_mutex_mut closure form.
             let id = R::with_mutex_mut(&self.observer, |observer| {
@@ -2308,7 +2259,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         {
             let base = self
                 .actions()
-                .map_err(|_| QueryableAliasError::RequiresUnicast)?
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(QueryableAliasError::UnknownMapping(mapping_id))?;
             let resolved = match inline_suffix {
@@ -2400,9 +2350,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // a multicast session has none, so reject honestly here (before
             // the seam) rather than letting the multicast send arm's
             // UnsupportedVariant reach map_decl_err's `other => unreachable!`.
-            let actions = self
-                .actions()
-                .map_err(|_| LivelinessAliasError::RequiresUnicast)?;
+            let actions = self.actions();
             let token_id = actions.alloc_next_token_id();
             // declare_token always builds in literal mode (mapping_id = 0,
             // suffix = Some(_)), so the alias-resolution reject variants
@@ -2506,9 +2454,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // B5b-2b — bind the unicast action bundle once (a multicast
             // session has none, so reject honestly before resolving the
             // outbound mapping table the alias needs).
-            let actions = self
-                .actions()
-                .map_err(|_| LivelinessAliasError::RequiresUnicast)?;
+            let actions = self.actions();
             let base = actions
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(LivelinessAliasError::UnknownMapping(mapping_id))?;
@@ -2699,7 +2645,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             let keyexpr_string = keyexpr.into();
-            let interest_id = self.actions()?.alloc_next_interest_id();
+            let interest_id = self.actions().alloc_next_interest_id();
             // R311lg — DEFERRED FIRE (the R311lf lock-free callback
             // invariant on the liveliness-sample plane): the registry
             // stores a staging sink that copies each matched sample out
@@ -2771,7 +2717,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             }
             // A4 — record for post-reconnect replay; session-state bookkeeping
             // AROUND the seam emit.
-            self.actions()?.cache_subscriber_interest(
+            self.actions().cache_subscriber_interest(
                 interest_id,
                 options.history,
                 /*keyexpr_mapping_id=*/ 0,
@@ -2874,14 +2820,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // bug-class error (caller forgot send_declare_keyexpr) before
             // the state-dependent retry loop. R282 + R283 ordering rule.
             let base = self
-                .actions()?
+                .actions()
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(LivelinessSubscriberAliasError::UnknownMapping(mapping_id))?;
             // R283 Established gate. Done after mapping resolution so a
             // pre-Established call with a bad mapping surfaces the bad
             // mapping (the bug) rather than the transient state. No
             // interest-id is burned on the early-return path.
-            if !self.actions()?.is_established() {
+            if !self.actions().is_established() {
                 return Err(LivelinessSubscriberAliasError::NotEstablished);
             }
             let resolved = match inline_suffix {
@@ -2892,7 +2838,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     composed
                 }
             };
-            let interest_id = self.actions()?.alloc_next_interest_id();
+            let interest_id = self.actions().alloc_next_interest_id();
             // R311lg — deferred staging sink; same lock-free callback
             // contract as `declare_liveliness_subscriber`.
             let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
@@ -2948,7 +2894,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             }
             // A4 — record for post-reconnect replay; session-state bookkeeping
             // AROUND the seam emit.
-            self.actions()?.cache_subscriber_interest(
+            self.actions().cache_subscriber_interest(
                 interest_id,
                 options.history,
                 mapping_id,
@@ -3023,7 +2969,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // `false` on a non-unicast transport, and "retry after the session
             // re-establishes" is futile on multicast. The transport check must
             // front-run the establishment gate, not the other way around.
-            let actions = self.actions()?;
+            let actions = self.actions();
             if !actions.is_established() {
                 return Err(LivelinessGetError::NotEstablished);
             }

@@ -106,7 +106,7 @@ struct OwnedQueryEvent {
     is_local: bool,
 }
 
-impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// R311li — build the deferred cell + the staging sink one
     /// `declare_queryable{_aliased}` call installs in the registry: the
     /// sink copies the matched query out (owned) and stages one queue
@@ -223,7 +223,7 @@ pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     // would carry this field unread. Gating it on the feature keeps the
     // struct dead-code-clean under `deny(warnings)` without an `#[allow]`.
     #[cfg(feature = "query-queryable")]
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     // R311ek — `query-queryable`-OFF `PhantomData` arm keeps the `R` / `T`
     // type parameters live (their only field-level carrier is the gated
     // `session` above). PhantomData fields are exempt from the dead-code

@@ -66,7 +66,7 @@ use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_tokio::session::{
     LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken, Queryable,
-    QueryableOptions, Session, SubscribeOptions, Subscriber,
+    QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
 };
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
@@ -305,7 +305,7 @@ fn install_observer_callbacks(
 /// the gate across the non-aliased declare_* surface is the R284
 /// carry.
 fn install_session_handles(
-    session: &Session,
+    session: &TokioSession,
     key: Option<String>,
     liveliness_subscriber_keyexpr: Option<&str>,
     queryable_spec: Option<(String, String)>,
@@ -412,7 +412,7 @@ fn install_session_handles(
 /// while the writer task is still draining (R277 + R278 + R284
 /// ordering invariant).
 fn spawn_background_tasks(
-    session: &Session,
+    session: &TokioSession,
     actions: &Arc<SessionLinkActions>,
     publisher_spec: Option<(String, PushOperation, Option<u64>)>,
     query_spec: Option<String>,
@@ -596,7 +596,7 @@ pub(crate) async fn run_demo(
     // R311cw — Session::new takes `Arc<T>` clock; wrapping the shared
     // `session_clock` keeps the monotonic epoch load-bearing for the R261
     // register-time deadline_ms vs sweep-time now_ms comparison.
-    let session = Session::new(actions.clone(), observer.clone(), Arc::new(session_clock));
+    let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(session_clock));
 
     let _handles = install_session_handles(
         &session,

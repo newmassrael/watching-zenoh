@@ -106,7 +106,7 @@ pub(super) enum DeclListenerScope {
 /// hook, consistent with the other wz handles (a dropped handle leaves
 /// the observers installed).
 pub struct DeclListener<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     /// R311lb registry-local id of the installed declaration observer.
     pub(super) decl_id: u64,
     /// R311lb registry-local id of the installed undeclaration observer.
@@ -211,7 +211,7 @@ impl core::fmt::Display for DeclListenerError {
 
 impl core::error::Error for DeclListenerError {}
 
-impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// R311lc — build the listener cell + the two staging sinks one
     /// `declare_remote_*_listener` surface installs: the decl sink
     /// stages an owned [`DeclEvent::Declared`] (copying the borrowed

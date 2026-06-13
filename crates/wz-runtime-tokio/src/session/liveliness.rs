@@ -109,7 +109,7 @@ impl LivelinessOptions {
 // unrepresentable rather than test-guarded.
 #[non_exhaustive]
 pub struct LivelinessToken<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    session: Session<R, T>,
+    session: Session<R, T, Unicast>,
     id: u64,
     keyexpr: String,
     options: LivelinessOptions,
@@ -143,7 +143,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
     /// matching `local_tokens.unregister` runs in [`Self::teardown`].
     #[cfg(feature = "liveliness-token")]
     pub(super) fn new_held(
-        session: Session<R, T>,
+        session: Session<R, T, Unicast>,
         token_id: u64,
         keyexpr: String,
         options: LivelinessOptions,
@@ -249,13 +249,11 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
                 /*reliable=*/ true,
                 /*express=*/ false,
             );
-            // B5b-2b — best-effort teardown (mirrors the ignored
-            // send_network_message above): a multicast session has no unicast
-            // token-declaration registry to prune, so skip honestly when
-            // actions() is not unicast.
-            if let Ok(actions) = self.session.actions() {
-                actions.prune_token_declaration(self.id);
-            }
+            // R311nf — the handle owns a `Session<R, T, Unicast>`, so
+            // `actions()` is the infallible unicast bundle borrow (the R311nc
+            // `if let Ok` guard for a possible multicast session is gone — a
+            // LivelinessToken cannot exist on a multicast session).
+            self.session.actions().prune_token_declaration(self.id);
         }
         // R311mw — a transport-unicast build without `declare-undeclare`
         // cannot emit an UndeclToken (the seam block above is cfg'd out) and
@@ -502,7 +500,7 @@ impl LivelinessSubscriberOptions {
 // Interest(Final) emit was already unconditional.
 #[non_exhaustive]
 pub struct LivelinessSubscriber<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     pub(super) interest_id: u64,
     pub(super) keyexpr: String,
     pub(super) options: LivelinessSubscriberOptions,
@@ -541,7 +539,7 @@ pub(super) type BoxedLivelinessSampleCallback =
 pub(super) type LivelinessSampleCell<R> =
     wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedLivelinessSampleCallback>;
 
-impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// R311lg — build the deferred cell + the staging sink one
     /// `declare_liveliness_subscriber{_aliased}` call installs in the
     /// registry: the sink copies the borrowed [`LivelinessSample`] out
@@ -695,13 +693,10 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
                 /*reliable=*/ true,
                 /*express=*/ false,
             );
-            // B5b-2b — best-effort teardown (mirrors the ignored
-            // send_network_message above): a multicast session has no unicast
-            // interest registry to prune, so skip honestly when actions() is
-            // not unicast.
-            if let Ok(actions) = self.session.actions() {
-                actions.prune_interest(self.interest_id);
-            }
+            // R311nf — the handle owns a `Session<R, T, Unicast>`, so
+            // `actions()` is the infallible unicast bundle borrow (a
+            // LivelinessSubscriber cannot exist on a multicast session).
+            self.session.actions().prune_interest(self.interest_id);
         }
         // R311mx — when `declare-interest` is off (⟹ `liveliness-subscriber`
         // off, so the block above is also cfg'd out) nothing else reads

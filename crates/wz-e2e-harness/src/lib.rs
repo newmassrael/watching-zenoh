@@ -26,7 +26,7 @@ use tokio::net::TcpListener;
 
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::runtime_impl::TokioTime;
-use wz::runtime_tokio::session::Session;
+use wz::runtime_tokio::session::TokioSession;
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, SigningKey,
 };
@@ -50,7 +50,7 @@ pub struct OpenedE2e {
     /// The Established session. The setup calls `publish` / `declare_*`
     /// on it; any returned RAII handle is held by the harness across the
     /// drive loop (see [`run_acceptor_e2e`]).
-    pub session: Session,
+    pub session: TokioSession,
     /// The shared monotonic clock (one epoch across the open helper,
     /// Session, and drive loop). `Copy`, so a setup may capture it into a
     /// spawned emission task.
@@ -158,7 +158,7 @@ pub async fn run_acceptor_e2e<H>(
     // ── Step 3: plane-specific setup. The observer is the same Arc the
     //           Session registers into and the drive loop dispatches into.
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
-    let session = Session::new(actions.clone(), observer.clone(), Arc::new(clock));
+    let session = TokioSession::new(actions.clone(), observer.clone(), Arc::new(clock));
     let opened = OpenedE2e { session, clock };
     let hold = setup(&opened)?;
 

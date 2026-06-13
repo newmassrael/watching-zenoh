@@ -26,7 +26,7 @@ mod tests {
     use wz_runtime_tokio::multicast_glue::MulticastTxItem;
     use wz_runtime_tokio::observer::ApplicationLayerObserver;
     use wz_runtime_tokio::runtime_impl::TokioTime;
-    use wz_runtime_tokio::session::{PublishOptions, Session};
+    use wz_runtime_tokio::session::{PublishOptions, TokioMulticastSession};
 
     /// A multicast `Session::publish` builds a `MulticastTxItem::Push` (Put)
     /// and enqueues exactly one onto the TX seam the drive loop drains — the
@@ -41,7 +41,7 @@ mod tests {
     fn multicast_session_publish_enqueues_one_put_push() {
         // The Session owns the sender; the drive loop would drain the receiver.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        let session: Session = Session::new_multicast(
+        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(wz_runtime_tokio::sync::Mutex::new(
                 ApplicationLayerObserver::new(),
             )),
@@ -78,7 +78,7 @@ mod tests {
         use wz_runtime_tokio::session::SubscribeOptions;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        let session: Session = Session::new_multicast(
+        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(wz_runtime_tokio::sync::Mutex::new(
                 ApplicationLayerObserver::new(),
             )),
@@ -145,7 +145,7 @@ mod tests {
         // No TX seam exercised here (the receiver is dropped); the proof is the
         // RX dispatch path into the Session's subscriber registry.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        let session: Session = Session::new_multicast(
+        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(wz_runtime_tokio::sync::Mutex::new(
                 ApplicationLayerObserver::new(),
             )),
@@ -195,7 +195,7 @@ mod tests {
         use wz_session_core::push_build::build_push_literal;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
-        let session: Session = Session::new_multicast(
+        let session: TokioMulticastSession = TokioMulticastSession::new_multicast(
             Arc::new(wz_runtime_tokio::sync::Mutex::new(
                 ApplicationLayerObserver::new(),
             )),

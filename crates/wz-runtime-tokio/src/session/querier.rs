@@ -520,7 +520,7 @@ impl From<SendWireError> for QueryAliasError {
 // Session<R> has manual Clone too).
 #[non_exhaustive]
 pub struct Querier<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
     pub(super) options: QueryOptions,
 }
@@ -734,7 +734,7 @@ pub struct MatchingStatus {
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
 pub struct QuerierAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
+    pub(super) session: Session<R, T, Unicast>,
     pub(super) mapping_id: u64,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: QueryOptions,
@@ -827,7 +827,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
     pub fn get_matching_status(&self) -> Result<MatchingStatus, QueryAliasError> {
         let base = self
             .session
-            .actions()?
+            .actions()
             .resolve_outbound_mapping(self.mapping_id)
             .ok_or(QueryAliasError::UnknownMapping(self.mapping_id))?;
         let _effective_keyexpr = match self.inline_suffix.as_deref() {

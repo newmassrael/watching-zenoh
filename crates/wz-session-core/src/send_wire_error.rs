@@ -56,27 +56,26 @@ pub enum SendWireError {
     /// enqueue would otherwise swallow the bytes silently. A no-emit
     /// reject; the caller retries after the session re-establishes.
     TransportUnavailable,
-    /// B5b-2b (R311nc) — the requested operation is not supported on this
-    /// session's TRANSPORT VARIANT. Two honest, structurally-distinct
-    /// conditions funnel here, both meaning "the wire op cannot run on the
-    /// transport this session actually holds":
+    /// B5b-2b (R311nc) / R311nf — a non-`Push`
+    /// [`NetworkMessage`](crate::network_message::NetworkMessage)
+    /// reached the MULTICAST send arm of the
+    /// `Session::send_network_message` seam. A multicast session
+    /// originates only `Push` (its reply plane is drive-loop-sink-emitted,
+    /// not routed through the seam); any other variant is an honest reject.
     ///
-    /// * a unicast-only operation (query / declare / aliased-publish /
-    ///   batching, anything that needs the per-peer `SessionLinkActions`
-    ///   handshake bundle) was invoked on a MULTICAST session, which has
-    ///   no such bundle — the `Session::actions()` projection returns this;
-    /// * a non-`Push` [`NetworkMessage`](crate::network_message::NetworkMessage)
-    ///   reached the MULTICAST send arm of the
-    ///   `Session::send_network_message` seam — a multicast session
-    ///   originates only `Push` (its reply plane is drive-loop-sink-emitted,
-    ///   not routed through the seam).
+    /// R311nf narrowed the original two-condition definition: the prior
+    /// first condition — "a unicast-only operation invoked on a multicast
+    /// session, returning via `Session::actions()`" — is now a compile
+    /// error rather than a runtime reject. `Session<_,_,Unicast>::actions()`
+    /// is infallible; `Session<_,_,Multicast>` has no `actions()` method at
+    /// all. This variant's sole remaining runtime meaning is the multicast
+    /// non-Push message-variant mismatch described above.
     ///
     /// Deliberately DISTINCT from `FeatureDisabled` (a build-time codec
     /// elision — the matching Cargo feature may well be ON here) and from
     /// `TransportUnavailable` (a unicast link mid-reconnect). The R311na
-    /// review #3b deferral ratified this distinction: a transport-variant
-    /// mismatch must not be conflated with a feature-off no-op, and the
-    /// catch must be an honest reject, never an `unreachable!`/panic.
+    /// review #3b deferral ratified the distinction: a transport-variant
+    /// mismatch must not be conflated with a feature-off no-op.
     ///
     /// Variant ordering: appended at end so existing match arms in
     /// downstream crates surface a non-exhaustive-match warning rather
@@ -103,11 +102,10 @@ impl fmt::Display for SendWireError {
                  emitted; retry after the session re-establishes",
             ),
             Self::UnsupportedVariant => f.write_str(
-                "send_wire: operation not supported on this session's \
-                 transport variant (a unicast-only op on a multicast \
-                 session, or a non-Push message on the multicast send \
-                 arm) — no bytes emitted; not a feature-off nor a \
-                 reconnect condition",
+                "send_wire: non-Push NetworkMessage reached the multicast \
+                 send arm — multicast originates only Push; all other \
+                 message variants are compile-time-excluded from multicast \
+                 sessions (R311nf typestate) — no bytes emitted",
             ),
         }
     }
