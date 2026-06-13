@@ -1555,4 +1555,66 @@ mod tests {
         assert_eq!(outcome, MulticastOutcome::IterationLimit);
         assert_eq!(dispatcher.active_peers(), 0, "own JOIN must not self-admit");
     }
+
+    /// R311nd (B5b-2b tail) — the FIRST live both-build multicast `Session`
+    /// caller. With the `not(transport-unicast)` gate dropped this round, a
+    /// build carrying BOTH transports can construct a multicast `Session`
+    /// (alongside the unicast `Session::new`): `publish` routes through the
+    /// send seam's LIVE multicast arm onto the TX channel, and
+    /// `Session::actions()` honestly rejects with `UnsupportedVariant`. This
+    /// proves the new `SessionTransport::Multicast` arm is runtime-LIVE in a
+    /// both-build, not runtime-dead — the R311na #3b "design the projection
+    /// WITH a real caller" requirement, and why the gate-drop lands in the same
+    /// commit as this test.
+    ///
+    /// Gated `all(transport-unicast, transport-multicast, codec-push)` so it
+    /// runs under the EXISTING Layer C1q (`cargo test -p wz-runtime-tokio
+    /// --features transport-multicast --lib multicast_glue`, a both-build
+    /// because the crate default carries `transport-unicast` + `codec-push`).
+    /// The complementary unicast `actions()`-is-`Ok` path is covered by the
+    /// default-build (C1) unicast `Session` suite.
+    #[cfg(all(
+        feature = "transport-unicast",
+        feature = "transport-multicast",
+        feature = "codec-push"
+    ))]
+    #[test]
+    fn both_build_multicast_session_is_live() {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::session::{PublishOptions, Session};
+        use std::sync::Arc;
+        use wz_session_core::send_wire_error::SendWireError;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+        // Legal only because R311nd dropped the `not(transport-unicast)` gate:
+        // this is a BOTH-transport build, yet it holds a multicast `Session`.
+        let session: Session = Session::new_multicast(
+            Arc::new(crate::sync::Mutex::new(ApplicationLayerObserver::new())),
+            Arc::new(TokioTime::new()),
+            tx,
+        );
+
+        // publish routes through the send seam's LIVE multicast arm -> one Push
+        // onto the TX channel the drive loop drains. No local subscriber, so
+        // the loopback leg fires nothing.
+        let fired = session
+            .publish("demo/both", b"hello-both", PublishOptions::put())
+            .expect("multicast Put builds within codec capacity");
+        assert_eq!(fired, 0, "no local subscriber: loopback fires nothing");
+        let item = rx.try_recv().expect("publish enqueued one tx item");
+        assert!(
+            matches!(item, MulticastTxItem::Push { .. }),
+            "the enqueued multicast item is a Put Push"
+        );
+        assert!(rx.try_recv().is_err(), "publish enqueued exactly one item");
+
+        // The LIVE actions() multicast arm: a multicast `Session` has no unicast
+        // action bundle, so the projection is an honest `UnsupportedVariant`
+        // reject — never a panic, never a `FeatureDisabled` conflation (#3b).
+        assert_eq!(
+            session.actions().map(|_| ()),
+            Err(SendWireError::UnsupportedVariant),
+            "a multicast Session's actions() honestly rejects",
+        );
+    }
 }

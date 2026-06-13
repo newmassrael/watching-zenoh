@@ -20,30 +20,30 @@
 //! cannot add a transport without changing the wire spec), so a sum type is
 //! the correct modeling, not a trait object. Each variant is `#[cfg]`-gated
 //! on its catalog atom, so a single-transport build composes a degenerate
-//! single-variant sum (the catalog composition made type-visible) and the
-//! send-path `match` stays exhaustive with no `_ =>` escape arm.
+//! single-variant sum (the catalog composition made type-visible); a
+//! both-transport build composes the full two-variant sum and the send-path
+//! `match` runtime-dispatches over it — in every build the `match` stays
+//! exhaustive with no `_ =>` escape arm.
 //!
-//! B1 inhabited only [`SessionTransport::Unicast`]. R311mn (B2) adds the
-//! [`SessionTransport::Multicast`] variant — gated
-//! `all(transport-multicast, not(transport-unicast))` so it exists only in a
-//! multicast-ONLY build (see the variant's doc for why the `not(...)` gate
-//! and how B5 removes it) — and loosens the `session` module gate from
-//! `transport-unicast` to `any(transport-unicast, transport-multicast)`.
-//! Because the two variants are gated on mutually-exclusive configurations,
-//! the sum is always single-variant in any valid build (Unicast in a
-//! unicast-only or both-transports build; Multicast in a multicast-only
-//! build).
+//! B1 inhabited only [`SessionTransport::Unicast`]. R311mn (B2) added the
+//! [`SessionTransport::Multicast`] variant, initially gated
+//! `all(transport-multicast, not(transport-unicast))` so it existed only in a
+//! multicast-ONLY build. R311nd (B5b-2b tail) drops the `not(transport-unicast)`
+//! qualifier — the variant is now plain `transport-multicast`-gated, so a
+//! both-transport build can HOLD a multicast `Session` (the Level B
+//! unification of multicast under the `Session` handle). The sum is therefore
+//! single-variant in a single-transport build (Unicast in unicast-only,
+//! Multicast in multicast-only) and TWO-variant in a both-transport build,
+//! where [`Session::send_network_message`](super::Session::send_network_message)
+//! runtime-dispatches and [`Session::actions`](super::Session::actions)
+//! honestly rejects the multicast arm with `SendWireError::UnsupportedVariant`.
 
-#[cfg(all(feature = "transport-multicast", not(feature = "transport-unicast")))]
+#[cfg(feature = "transport-multicast")]
 use core::marker::PhantomData;
 #[cfg(feature = "transport-unicast")]
 use std::sync::Arc;
 
-#[cfg(all(
-    feature = "transport-multicast",
-    not(feature = "transport-unicast"),
-    feature = "codec-push"
-))]
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 use wz_session_core::multicast_tx::MulticastTxItem;
 
 use wz_runtime_core::TimeSource;
@@ -97,10 +97,22 @@ pub(crate) enum SessionTransport<R: SessionRuntime, T: TimeSource> {
     /// `codec-push`-gated (the Put item builder + the item type need a TX
     /// body codec) — a bare multicast build (JOIN/frame/close only, no data
     /// plane) keeps just `_marker`, an RX-only / beacon-node session.
-    /// `_marker` ties the otherwise-unused `R`/`T` to the enum (the unicast
-    /// variant that uses them is `cfg`'d out here, and the TX channel is not
-    /// generic over `R`/`T`).
-    #[cfg(all(feature = "transport-multicast", not(feature = "transport-unicast")))]
+    /// `_marker` ties the otherwise-unused `R`/`T` to the enum (in a
+    /// multicast-only build the unicast variant that uses them is `cfg`'d
+    /// out, and the TX channel is not generic over `R`/`T`; in a both-build
+    /// the `Unicast` arm already binds `R`/`T`, so the marker is redundant
+    /// but harmless).
+    ///
+    /// R311nd (B5b-2b tail) — gate widened from
+    /// `all(transport-multicast, not(transport-unicast))` to plain
+    /// `transport-multicast`: a both-transport build can now HOLD a multicast
+    /// `Session` (the Level B unification), so the variant is representable
+    /// alongside `Unicast`. The send path
+    /// [`Session::send_network_message`](super::Session::send_network_message)
+    /// runtime-dispatches over the two arms, and
+    /// [`Session::actions`](super::Session::actions) honestly rejects with
+    /// `SendWireError::UnsupportedVariant` on this arm.
+    #[cfg(feature = "transport-multicast")]
     Multicast {
         #[cfg(feature = "codec-push")]
         tx: tokio::sync::mpsc::UnboundedSender<MulticastTxItem>,
@@ -119,7 +131,7 @@ impl<R: SessionRuntime, T: TimeSource> Clone for SessionTransport<R, T> {
         match self {
             #[cfg(feature = "transport-unicast")]
             SessionTransport::Unicast(actions) => SessionTransport::Unicast(actions.clone()),
-            #[cfg(all(feature = "transport-multicast", not(feature = "transport-unicast")))]
+            #[cfg(feature = "transport-multicast")]
             SessionTransport::Multicast {
                 #[cfg(feature = "codec-push")]
                 tx,

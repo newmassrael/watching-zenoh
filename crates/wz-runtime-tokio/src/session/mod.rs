@@ -462,9 +462,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
     /// drains, so [`Self::publish`] can enqueue onto it (a bare multicast
     /// build with no data plane omits `tx` and gets an RX-only session).
-    /// Gated `all(transport-multicast, not(transport-unicast))` to mirror the
-    /// `SessionTransport::Multicast` variant gate (see `session::transport`).
-    #[cfg(all(feature = "transport-multicast", not(feature = "transport-unicast")))]
+    /// R311nd (B5b-2b tail) — gate widened from
+    /// `all(transport-multicast, not(transport-unicast))` to plain
+    /// `transport-multicast` (mirrors the `SessionTransport::Multicast`
+    /// variant gate): a both-transport build can now construct a multicast
+    /// `Session` alongside the unicast `Session::new`.
+    #[cfg(feature = "transport-multicast")]
     pub fn new_multicast(
         observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
@@ -666,11 +669,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 feature = "declare-interest"
             )
         ),
-        all(
-            feature = "transport-multicast",
-            not(feature = "transport-unicast"),
-            feature = "codec-push"
-        )
+        // R311nd — `not(transport-unicast)` dropped: in a both-transport build
+        // the multicast publish caller coexists with the unicast callers, so
+        // the seam exists whenever a multicast build carries `codec-push`.
+        all(feature = "transport-multicast", feature = "codec-push")
     ))]
     pub fn send_network_message(
         &self,
@@ -688,8 +690,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // Multicast arm (B5b-1): wrap a Push as a MulticastTxItem and
             // fire-and-forget onto the drive loop's channel (a closed receiver
             // drops it exactly as a dead link would). `express` is moot — UDP
-            // multicast is best-effort with no batch window.
-            #[cfg(all(feature = "transport-multicast", not(feature = "transport-unicast")))]
+            // multicast is best-effort with no batch window. R311nd —
+            // `not(transport-unicast)` dropped so this arm is LIVE in a
+            // both-transport build (the `match` runtime-dispatches).
+            #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
             SessionTransport::Multicast { tx, .. } => {
                 use wz_session_core::network_message::NetworkMessage;
                 use wz_session_core::send_wire_error::SendWireError;
@@ -698,11 +702,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     NetworkMessage::Push(push) => {
                         wz_session_core::multicast_tx::MulticastTxItem::Push { push, reliable }
                     }
-                    // Unreachable: a multicast Session originates only Push.
-                    _ => return Err(SendWireError::FeatureDisabled),
+                    // A multicast Session originates only Push; any other
+                    // variant is an honest transport-variant mismatch (the
+                    // R311na #3b fix — was FeatureDisabled, now the distinct
+                    // UnsupportedVariant). The reply-plane variants
+                    // (Response / ResponseFinal / Oam) are emitted by the
+                    // drive-loop MulticastReplySink, never routed here.
+                    _ => return Err(SendWireError::UnsupportedVariant),
                 };
                 let _ = tx.send(item);
                 Ok(())
+            }
+            // R311nd — a multicast Session in a build WITHOUT `codec-push` has
+            // no `tx` channel (the variant degenerates to `{ _marker }`) and no
+            // MulticastTxItem to build, so it cannot originate any wire
+            // message. Honest reject keeps the `match` exhaustive in a
+            // both-transport, non-codec-push build (e.g. codec-request only).
+            #[cfg(all(feature = "transport-multicast", not(feature = "codec-push")))]
+            SessionTransport::Multicast { .. } => {
+                Err(wz_session_core::send_wire_error::SendWireError::UnsupportedVariant)
             }
         }
     }
@@ -1075,6 +1093,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     pub fn actions(&self) -> Result<&Arc<SessionLinkActions<R, T>>, SendWireError> {
         match &self.transport {
             SessionTransport::Unicast(actions) => Ok(actions),
+            // R311nd — the LIVE multicast arm (the gate dropped this round, so
+            // a both-transport build can hold this variant at runtime). A
+            // multicast session has no unicast handshake bundle, so the honest
+            // projection is `UnsupportedVariant` — never a panic, never a
+            // `FeatureDisabled` conflation (the R311na #3b ratify).
+            #[cfg(feature = "transport-multicast")]
+            SessionTransport::Multicast { .. } => Err(SendWireError::UnsupportedVariant),
         }
     }
 
