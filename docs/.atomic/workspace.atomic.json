@@ -36008,6 +36008,48 @@
         "Design note: Option A (fallible actions() exposed at every call site) was rejected for the send-seam structure after reading zenoh-pico (transport.c:29 + primitives.c all route through _z_send_n_msg); the application API must stay transport-agnostic with the split hidden in the seam."
       ]
     },
+    "Round 311ms": {
+      "decision_summary": "B5b-2 (Level B): the send seam's unicast arm + migrate the unicast publish onto it. Add SessionLinkActions::send_network_message (NetworkMessage -> dispatch_* + express batch flush), extend Session::send_network_message to (msg, reliable, express) with a transport-unicast-gated unicast arm, and route the unicast publish remote leg through the seam instead of self.actions().send_push_* - the first data-plane op lifted off the action bundle (a step toward the B5b-2b actions() dismantling). Behaviour-preserving.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: added SessionLinkActions::send_network_message (codec-push-gated) - the UNICAST arm of the send seam: NetworkMessage::Push -> dispatch_push (SN mint + frame + batch-absorb), then express -> flush_open_batch (the flush_batch_if_express parity, lifted here so a seam-routed publish stays transport-agnostic and no longer reaches into the action bundle for the flush); a non-Push returns SendWireError::FeatureDisabled (symmetric with the multicast arm).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: extended Session::send_network_message to (msg, reliable, express), gate all(codec-push, any(transport-unicast, transport-multicast)), added the transport-unicast-gated unicast arm (delegates to SessionLinkActions::send_network_message) beside the multicast arm. The two arms are gated mutually-exclusively so the match is single-arm in every build until B5b-2b drops the not(transport-unicast) gate.",
+        "crates/wz-runtime-tokio/src/session/mod.rs: migrated the unicast Session::publish remote leg off self.actions().send_push_with_meta_literal / send_push_del_with_meta_literal onto the seam - builds the Put/Del as NetworkMessage::Push via build_push_*_with_meta then send_network_message(msg, reliable, express); express derived from meta.qos.is_express() under transport-batching. The unicast publish no longer calls self.actions() (one data-plane op off the 33-site actions() surface). The multicast publish call + the C1s seam-direct test updated to the 3-arg signature."
+      ],
+      "verification_bullets": [
+        "Full wz-runtime-tokio suite: 257 lib + all integration binaries pass, 0 failed (incl. 59 publish tests) - the unicast publish migration is behaviour-preserving. wz-session-core 129+ pass (the router's home).",
+        "clippy --all-targets -D warnings clean on default-unicast + transport-batching (the express flush path) + C1s + the C4e subsets; fmt clean.",
+        "C1s 4 tests pass (seam signature change). Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B5b-2 lands the seam's unicast arm + lifts the unicast publish off actions() onto the seam (first data-plane op dismantled). Remaining B5b-2b: drop the not(transport-unicast) gate so a both-transports build holds a multicast Session and the send_network_message match runtime-dispatches; this forces the remaining actions() call sites (query / declare / liveliness / batch / aliased - all transport-unicast-gated methods) to become transport-aware = the actions() dismantling, with the genuinely-unicast-handshake surface (is_established / send_declare_keyexpr / batch) staying transport-projected.",
+        "Convergence debt: publish signatures still differ (unicast (k,v,opts) vs multicast (k,v)); build_loopback_sample still publisher-mod-local (unicast-gated) - both converge when the gate drops and the multicast publish gains opts.",
+        "The other outbound variants (Request/Response/Declare/Interest) migrate onto the seam's unicast arm as their operations move there; reply messages stay on the drive-loop MulticastReplySink."
+      ],
+      "publishable_decision_summary": "B5b-2 (Level B): the send seam's unicast arm + migrate the unicast publish onto it. Add SessionLinkActions::send_network_message (NetworkMessage -> dispatch_* + express batch flush), extend Session::send_network_message to (msg, reliable, express) with a transport-unicast-gated unicast arm, and route the unicast publish remote leg through the seam instead of self.actions().send_push_* - the first data-plane op lifted off the action bundle (a step toward the B5b-2b actions() dismantling). Behaviour-preserving.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: added SessionLinkActions::send_network_message (codec-push-gated) - the UNICAST arm of the send seam: NetworkMessage::Push -> dispatch_push (SN mint + frame + batch-absorb), then express -> flush_open_batch (the flush_batch_if_express parity, lifted here so a seam-routed publish stays transport-agnostic and no longer reaches into the action bundle for the flush); a non-Push returns SendWireError::FeatureDisabled (symmetric with the multicast arm).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: extended Session::send_network_message to (msg, reliable, express), gate all(codec-push, any(transport-unicast, transport-multicast)), added the transport-unicast-gated unicast arm (delegates to SessionLinkActions::send_network_message) beside the multicast arm. The two arms are gated mutually-exclusively so the match is single-arm in every build until B5b-2b drops the not(transport-unicast) gate.",
+        "crates/wz-runtime-tokio/src/session/mod.rs: migrated the unicast Session::publish remote leg off self.actions().send_push_with_meta_literal / send_push_del_with_meta_literal onto the seam - builds the Put/Del as NetworkMessage::Push via build_push_*_with_meta then send_network_message(msg, reliable, express); express derived from meta.qos.is_express() under transport-batching. The unicast publish no longer calls self.actions() (one data-plane op off the 33-site actions() surface). The multicast publish call + the C1s seam-direct test updated to the 3-arg signature."
+      ],
+      "publishable_verification_bullets": [
+        "Full wz-runtime-tokio suite: 257 lib + all integration binaries pass, 0 failed (incl. 59 publish tests) - the unicast publish migration is behaviour-preserving. wz-session-core 129+ pass (the router's home).",
+        "clippy --all-targets -D warnings clean on default-unicast + transport-batching (the express flush path) + C1s + the C4e subsets; fmt clean.",
+        "C1s 4 tests pass (seam signature change). Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B5b-2 lands the seam's unicast arm + lifts the unicast publish off actions() onto the seam (first data-plane op dismantled). Remaining B5b-2b: drop the not(transport-unicast) gate so a both-transports build holds a multicast Session and the send_network_message match runtime-dispatches; this forces the remaining actions() call sites (query / declare / liveliness / batch / aliased - all transport-unicast-gated methods) to become transport-aware = the actions() dismantling, with the genuinely-unicast-handshake surface (is_established / send_declare_keyexpr / batch) staying transport-projected.",
+        "Convergence debt: publish signatures still differ (unicast (k,v,opts) vs multicast (k,v)); build_loopback_sample still publisher-mod-local (unicast-gated) - both converge when the gate drops and the multicast publish gains opts.",
+        "The other outbound variants (Request/Response/Declare/Interest) migrate onto the seam's unicast arm as their operations move there; reply messages stay on the drive-loop MulticastReplySink."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
