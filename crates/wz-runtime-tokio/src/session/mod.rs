@@ -2442,26 +2442,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 /*mapping_id=*/ 0,
                 Some(&keyexpr_string),
             );
-            // R283 — register the held token in the declarer-side registry
-            // so an inbound non-final liveliness Interest can reply with
-            // it. The proactive declare emit above covers peers already
-            // subscribed; this registration is the CURRENT-replay state that
-            // lets a peer which subscribes LATER still learn the token via its
-            // Interest. Removed by LivelinessToken::Drop.
-            R::with_mutex_mut(&self.observer, |observer| {
-                observer
-                    .local_tokens
-                    .register(token_id, &keyexpr_string)
-                    .expect("register on the alloc backing never exceeds declared capacity");
-            });
-            Ok(LivelinessToken {
-                session: self.clone(),
-                id: token_id,
-                keyexpr: keyexpr_string,
+            // R311mz — the held-token registration (R283) now lives inside
+            // LivelinessToken::new_held, the sole constructor, so the literal
+            // and aliased declare paths register identically by construction.
+            Ok(LivelinessToken::new_held(
+                self.clone(),
+                token_id,
+                keyexpr_string,
                 options,
-                // R311lo — armed: Drop/undeclare teardown frees this handle.
-                armed: true,
-            })
+            ))
         }
         #[cfg(not(feature = "liveliness-token"))]
         {
@@ -2576,14 +2565,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // on `_Z_RES_OK`); session-state bookkeeping AROUND the seam emit.
             self.actions()
                 .cache_token_declaration(token_id, mapping_id, inline_suffix);
-            Ok(LivelinessToken {
-                session: self.clone(),
-                id: token_id,
-                keyexpr: resolved,
+            // R311mz — new_held registers the RESOLVED literal in the
+            // declarer-side LocalTokenRegistry. The prior code constructed the
+            // handle WITHOUT registering, so an aliased-declared token was
+            // never replayed to a peer that subscribed later (the asymmetry
+            // with the literal declare_token path; pico always registers —
+            // net/liveliness.c:77). The shared constructor makes the two paths
+            // register identically by construction.
+            Ok(LivelinessToken::new_held(
+                self.clone(),
+                token_id,
+                resolved,
                 options,
-                // R311lo — armed: Drop/undeclare teardown frees this handle.
-                armed: true,
-            })
+            ))
         }
         #[cfg(not(feature = "liveliness-token"))]
         {

@@ -101,22 +101,72 @@ impl LivelinessOptions {
 // R311cu — R267 helper cascade. `!Clone`; Drop body touches only
 // session.actions (concrete Arc<SessionLinkActions>, R-independent)
 // so Drop is generic over R without needing R::with_mutex_mut.
+// R311mz — fields are PRIVATE (not `pub(super)`): the only constructor is
+// [`Self::new_held`], which registers the token in the declarer-side
+// `LocalTokenRegistry`. With the fields sealed, the literal `declare_token`
+// and aliased `declare_token_aliased` paths cannot build a held token without
+// that registration, so the prior asymmetry (aliased skipped it) is
+// unrepresentable rather than test-guarded.
 #[non_exhaustive]
 pub struct LivelinessToken<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    pub(super) session: Session<R, T>,
-    pub(super) id: u64,
-    pub(super) keyexpr: String,
-    pub(super) options: LivelinessOptions,
+    session: Session<R, T>,
+    id: u64,
+    keyexpr: String,
+    options: LivelinessOptions,
     /// R311lo — RAII disarm flag. [`Self::undeclare`] emits the
     /// `Declare(UndeclToken)` once and clears this so the natural
     /// [`Drop`] frees the owned fields (keyexpr String, the Session Arc
     /// clone) instead of the prior `mem::forget(self)` leaking them, and
     /// so no duplicate `UndeclToken` is emitted. `true` at construction;
     /// `false` once teardown has run.
-    pub(super) armed: bool,
+    armed: bool,
 }
 
 impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
+    /// R311mz — the SOLE constructor for a held liveliness token. The
+    /// declarer-side registration lives here, not at the call site, so the
+    /// literal [`Session::declare_token`] and aliased
+    /// [`Session::declare_token_aliased`] paths register IDENTICALLY by
+    /// construction: with the fields private, a `LivelinessToken` cannot be
+    /// built without registering the token in the
+    /// [`LocalTokenRegistry`](wz_session_core::declare::local_token::LocalTokenRegistry),
+    /// so the prior asymmetry — `declare_token_aliased` silently skipped the
+    /// register, leaving an aliased token un-replayable to a peer that
+    /// subscribed LATER (its inbound non-final liveliness Interest got no
+    /// `Declare(DeclToken)` reply) — is unrepresentable, not merely tested.
+    ///
+    /// pico parity: `_z_declare_liveliness_token` always inserts the token into
+    /// `_local_tokens` (`vendor/zenoh-pico/src/net/liveliness.c:77`), with the
+    /// keyexpr resolved before the call, regardless of literal/alias form.
+    /// `keyexpr` here is that RESOLVED literal — registered for inbound-Interest
+    /// matching AND stored on the handle for `keyexpr()` introspection. The
+    /// matching `local_tokens.unregister` runs in [`Self::teardown`].
+    #[cfg(feature = "liveliness-token")]
+    pub(super) fn new_held(
+        session: Session<R, T>,
+        token_id: u64,
+        keyexpr: String,
+        options: LivelinessOptions,
+    ) -> Self {
+        // R283 — register the held token so an inbound non-final liveliness
+        // Interest can reply with it (the CURRENT-replay state for peers that
+        // subscribe LATER; the proactive declare emit at the call site already
+        // covers peers subscribed at declare time).
+        R::with_mutex_mut(&session.observer, |observer| {
+            observer
+                .local_tokens
+                .register(token_id, &keyexpr)
+                .expect("register on the alloc backing never exceeds declared capacity");
+        });
+        Self {
+            session,
+            id: token_id,
+            keyexpr,
+            options,
+            // R311lo — armed: Drop/undeclare teardown frees this handle.
+            armed: true,
+        }
+    }
     /// The stable token id allocated at declare time by
     /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
     /// diagnostics; callers should not rely on the exact value
