@@ -1046,6 +1046,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
     ) -> Self {
+        // R236 — read the local zid from SessionInitParams BEFORE moving
+        // `actions` into the transport sum, so the dedup install below needs
+        // no fallible re-projection of a value this ctor builds as `Unicast`
+        // by construction (R311ne — drops the defensive `if let Ok` that
+        // re-asked a known-`Ok` question).
+        let zid = actions.params.zid.clone();
         let session = Self {
             transport: SessionTransport::Unicast(actions),
             observer,
@@ -1056,22 +1062,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
         };
-        // R236 — forward the local zid from SessionInitParams into
-        // the subscriber registry so wire-arrived self-echo Pushes
-        // are dedup'd from session creation onward. The `1..=16`
-        // range check inside `set_own_zid` quietly rejects an
-        // out-of-range value (returns `false`); empty zid skipped
-        // here so the registry stays in its pre-R231 default state
-        // for test fixtures that don't supply a zid.
-        // B5b-2b — `new` just built `SessionTransport::Unicast`, so
-        // `actions()` is `Ok` by construction; `if let Ok` reads the zid
-        // without a panic form (no `.expect`), and the single bind avoids
-        // re-projecting the transport twice.
-        if let Ok(actions) = session.actions() {
-            let zid = actions.params.zid.clone();
-            if !zid.is_empty() {
-                let _ = session.set_own_zid(zid);
-            }
+        // Forward the zid into the subscriber registry so wire-arrived
+        // self-echo Pushes are dedup'd from session creation onward. The
+        // `1..=16` range check inside `set_own_zid` quietly rejects an
+        // out-of-range value (returns `false`); empty zid skipped here so the
+        // registry stays in its pre-R231 default state for test fixtures that
+        // don't supply a zid.
+        if !zid.is_empty() {
+            let _ = session.set_own_zid(zid);
         }
         session
     }
@@ -2543,6 +2541,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     // B5b-2b — multicast-session declare reject (the send seam
                     // returns UnsupportedVariant; SendDeclareError::from maps it
                     // to RequiresUnicast), typed through to the declare surface.
+                    // R311ne — GATE-SHADOWED: the `let actions = self.actions()
+                    // .map_err(...)?` bind at the top of this method front-runs
+                    // the seam, so a multicast session returns RequiresUnicast
+                    // there and never reaches here. Kept as an honest typed
+                    // projection (not `unreachable!`) so a future caller that
+                    // reaches the seam directly degrades without a panic.
                     SendDeclareError::RequiresUnicast => LivelinessAliasError::RequiresUnicast,
                     SendDeclareError::UnknownMappingId(id) => {
                         // Race against a concurrent send_undeclare_kexpr
@@ -3012,11 +3016,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     ) -> Result<(), LivelinessGetError> {
         #[cfg(feature = "liveliness-get")]
         {
-            if !self.is_established() {
+            // B5b-2b (R311ne) — project the transport FIRST so a multicast
+            // session honestly rejects with RequiresUnicast (via
+            // From<SendWireError> for LivelinessGetError) instead of the
+            // misleading NotEstablished gate below: is_established() reads
+            // `false` on a non-unicast transport, and "retry after the session
+            // re-establishes" is futile on multicast. The transport check must
+            // front-run the establishment gate, not the other way around.
+            let actions = self.actions()?;
+            if !actions.is_established() {
                 return Err(LivelinessGetError::NotEstablished);
             }
             let keyexpr_string = keyexpr.into();
-            let interest_id = self.actions()?.alloc_next_interest_id();
+            let interest_id = actions.alloc_next_interest_id();
             // R262 — absolute monotonic-ms deadline (same epoch contract
             // as `Session::query`: the application threads one `Arc<T>`
             // clock through both `Session::new` and
@@ -3084,8 +3096,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 return Err(e.into());
             }
             // A4 — record for post-reconnect replay; session-state bookkeeping
-            // AROUND the seam emit.
-            self.actions()?.cache_get_interest(
+            // AROUND the seam emit (reuses the `actions` bound above).
+            actions.cache_get_interest(
                 interest_id,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
