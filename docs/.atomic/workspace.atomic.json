@@ -35738,6 +35738,142 @@
         "Pre-existing facade gap note now RESOLVED for the reported shape: the R311mi/mj carry \"AP runtime-tokio,transport-multicast without transport-unicast does not compile - a separate facade feature-completeness item\" was this round's work."
       ]
     },
+    "Round 311ml": {
+      "decision_summary": "B0 (Level B doc prep): retire the stale transport-unicast FOUNDATIONAL / cfg-off-not-buildable claims R311mk left in lib.rs + run-ci.sh. transport-multicast is independently composable since R311mk so a multicast-only build IS buildable; transport-unicast still gates session_glue (it names SessionFsmUnicast types) but is no longer unconditional.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: appended an R311ml supersede note after the R311cb session_fsm_unicast re-export paragraph. The R311cb \"cfg-off is intentionally not buildable until transport-multicast introduces an alternate FSM\" clause no longer holds: R311mk made a transport-multicast-only build (transport-unicast OFF) compile and drive multicast via multicast_glue::drive_multicast_session. transport-unicast still gates the re-export + session_glue (they name SessionFsmUnicast types) but is no longer FOUNDATIONAL-as-unconditional. R311cb body preserved; correction appended (additive-marker convention, not a rewrite).",
+        "scripts/run-ci.sh: corrected the two stale \"transport-unicast is FOUNDATIONAL\" framings (the Layer C4c header parenthetical + the _wz_consumer_plane_subsets body comment) to the accurate reason - those consumer-plane subsets pin transport-unicast because they exercise the unicast Session FSM, not because it is foundational; the orthogonal multicast-without-unicast axis is Layer C4e (R311mk). keyexpr-canon is genuinely FOUNDATIONAL and was preserved. Resolves the internal contradiction with the R311mk note already at the consumer-plane header."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio OK (doc-comment edit; intra-doc links resolve). bash -n scripts/run-ci.sh OK. Comments-only, no behavior change.",
+        "Full host run-ci (--skip-codegen, all C-layers incl. C4e) all required layers pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B0 closes the R311mk doc-debt. Level B cascade continues: B1 (R311mm SessionTransport sum seam), B2 (R311mn multicast-only Session compiles), B3 (R311mo multicast Session::publish)."
+      ],
+      "publishable_decision_summary": "B0 (Level B doc prep): retire the stale transport-unicast FOUNDATIONAL / cfg-off-not-buildable claims R311mk left in lib.rs + run-ci.sh. transport-multicast is independently composable since R311mk so a multicast-only build IS buildable; transport-unicast still gates session_glue (it names SessionFsmUnicast types) but is no longer unconditional.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: appended an R311ml supersede note after the R311cb session_fsm_unicast re-export paragraph. The R311cb \"cfg-off is intentionally not buildable until transport-multicast introduces an alternate FSM\" clause no longer holds: R311mk made a transport-multicast-only build (transport-unicast OFF) compile and drive multicast via multicast_glue::drive_multicast_session. transport-unicast still gates the re-export + session_glue (they name SessionFsmUnicast types) but is no longer FOUNDATIONAL-as-unconditional. R311cb body preserved; correction appended (additive-marker convention, not a rewrite).",
+        "scripts/run-ci.sh: corrected the two stale \"transport-unicast is FOUNDATIONAL\" framings (the Layer C4c header parenthetical + the _wz_consumer_plane_subsets body comment) to the accurate reason - those consumer-plane subsets pin transport-unicast because they exercise the unicast Session FSM, not because it is foundational; the orthogonal multicast-without-unicast axis is Layer C4e (R311mk). keyexpr-canon is genuinely FOUNDATIONAL and was preserved. Resolves the internal contradiction with the R311mk note already at the consumer-plane header."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio OK (doc-comment edit; intra-doc links resolve). bash -n scripts/run-ci.sh OK. Comments-only, no behavior change.",
+        "Full host run-ci (--skip-codegen, all C-layers incl. C4e) all required layers pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B0 closes the R311mk doc-debt. Level B cascade continues: B1 (R311mm SessionTransport sum seam), B2 (R311mn multicast-only Session compiles), B3 (R311mo multicast Session::publish)."
+      ]
+    },
+    "Round 311mm": {
+      "decision_summary": "B1 (Level B seam): introduce the per-session SessionTransport<R,T> sum (the Rust analogue of zenoh-pico's _z_transport_t tagged union, fusing tag+payload so the desync illegal-state is unrepresentable; a closed protocol-defined transport catalog modelled as a sum type, not a trait object). Replace Session.actions field with transport; project the unicast handle via the actions() accessor. Unicast byte-equivalent; only the Unicast variant inhabited.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/transport.rs (NEW): the per-session SessionTransport<R,T> sum - the Rust analogue of zenoh-pico's _z_transport_t tagged union (transport.h:224), fusing the C union's separate tag + payload into one inseparable value so the desync illegal-state (tag disagreeing with payload) is unrepresentable. A closed, protocol-defined transport catalog (unicast/multicast/raweth) modelled as a sum type, not a trait object (a third party cannot add a transport without changing the wire spec). B1 inhabits only the Unicast(Arc<SessionLinkActions<R,T>>) variant.",
+        "crates/wz-runtime-tokio/src/session/{mod,liveliness,queryable}.rs: replaced the Session.actions field with transport: SessionTransport<R,T>; the actions() accessor now projects the unicast handle via match. 33 field-access sites routed through the accessor. Unicast path byte-equivalent."
+      ],
+      "verification_bullets": [
+        "Full host run-ci all required layers pass (the with-unicast Session path is unchanged). cargo build + clippy -D warnings + cargo test (lib 257) clean. fmt clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B1 is the seam; B2 (R311mn) inhabits the Multicast variant + makes a multicast-only build compile."
+      ],
+      "publishable_decision_summary": "B1 (Level B seam): introduce the per-session SessionTransport<R,T> sum (the Rust analogue of zenoh-pico's _z_transport_t tagged union, fusing tag+payload so the desync illegal-state is unrepresentable; a closed protocol-defined transport catalog modelled as a sum type, not a trait object). Replace Session.actions field with transport; project the unicast handle via the actions() accessor. Unicast byte-equivalent; only the Unicast variant inhabited.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/transport.rs (NEW): the per-session SessionTransport<R,T> sum - the Rust analogue of zenoh-pico's _z_transport_t tagged union (transport.h:224), fusing the C union's separate tag + payload into one inseparable value so the desync illegal-state (tag disagreeing with payload) is unrepresentable. A closed, protocol-defined transport catalog (unicast/multicast/raweth) modelled as a sum type, not a trait object (a third party cannot add a transport without changing the wire spec). B1 inhabits only the Unicast(Arc<SessionLinkActions<R,T>>) variant.",
+        "crates/wz-runtime-tokio/src/session/{mod,liveliness,queryable}.rs: replaced the Session.actions field with transport: SessionTransport<R,T>; the actions() accessor now projects the unicast handle via match. 33 field-access sites routed through the accessor. Unicast path byte-equivalent."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci all required layers pass (the with-unicast Session path is unchanged). cargo build + clippy -D warnings + cargo test (lib 257) clean. fmt clean."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B1 is the seam; B2 (R311mn) inhabits the Multicast variant + makes a multicast-only build compile."
+      ]
+    },
+    "Round 311mn": {
+      "decision_summary": "B2 (Level B): make the session module compile in a multicast-only build. Gate the unicast Session API surface on transport-unicast (session_glue imports + ~27 methods), split the 5 transport-agnostic methods into an ungated impl block, loosen the module gate to any(unicast,multicast), add the Multicast variant gated all(transport-multicast, not(transport-unicast)) so both-builds keep the unicast Session + standalone multicast loop until B5, and add a pub new_multicast constructor.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: loosened the session module gate from transport-unicast to any(transport-unicast, transport-multicast).",
+        "crates/wz-runtime-tokio/src/session/transport.rs: added the Multicast variant gated all(transport-multicast, not(transport-unicast)) - a multicast Session is representable only in a multicast-ONLY build for now (a both-transports build keeps the unicast Session + the standalone drive_multicast_session loop until B5, which drops the not(...) gate and makes the send path runtime-transport-aware). The two variants are gated on mutually-exclusive configs, so actions()'s match stays exhaustive in every build (no panic arm, no Option churn).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: gated the unicast Session API surface on transport-unicast (the session_glue imports + ~27 methods in a transport-unicast impl block) and split the 5 transport-agnostic methods (observer/clock/drain_deferred_fires/set_own_zid/clear_own_zid) into an ungated impl block; added a pub new_multicast constructor (gated all(transport-multicast, not(transport-unicast))).",
+        "crates/wz-runtime-tokio/src/session/subscriber.rs: gated the deferred_sample_sink impl (its only caller is the unicast declare_subscriber). crates/wz-runtime-tokio/src/multicast_glue.rs: gated 3 cfg(test) inbound-parse imports to the codec subsets that use them (a latent R311mk issue exposed by the new multicast-only --all-targets clippy)."
+      ],
+      "verification_bullets": [
+        "3-config build (unicast-only / multicast-only / both) OK. clippy default + multicast-only --all-targets -D warnings clean. cargo test 374 passed 0 failed (lib 257 = B1). fmt clean. Full host run-ci all required layers pass, incl. Layer C4e (the multicast-without-unicast facade builds)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B2 yields the multicast Session's agnostic surface + constructor; B3 (R311mo) adds multicast publish. B5 (deferred) unifies multicast under the Session in both-builds (drops the not(transport-unicast) gate, makes operations runtime-transport-match, retires the standalone loop as the public API)."
+      ],
+      "publishable_decision_summary": "B2 (Level B): make the session module compile in a multicast-only build. Gate the unicast Session API surface on transport-unicast (session_glue imports + ~27 methods), split the 5 transport-agnostic methods into an ungated impl block, loosen the module gate to any(unicast,multicast), add the Multicast variant gated all(transport-multicast, not(transport-unicast)) so both-builds keep the unicast Session + standalone multicast loop until B5, and add a pub new_multicast constructor.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: loosened the session module gate from transport-unicast to any(transport-unicast, transport-multicast).",
+        "crates/wz-runtime-tokio/src/session/transport.rs: added the Multicast variant gated all(transport-multicast, not(transport-unicast)) - a multicast Session is representable only in a multicast-ONLY build for now (a both-transports build keeps the unicast Session + the standalone drive_multicast_session loop until B5, which drops the not(...) gate and makes the send path runtime-transport-aware). The two variants are gated on mutually-exclusive configs, so actions()'s match stays exhaustive in every build (no panic arm, no Option churn).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: gated the unicast Session API surface on transport-unicast (the session_glue imports + ~27 methods in a transport-unicast impl block) and split the 5 transport-agnostic methods (observer/clock/drain_deferred_fires/set_own_zid/clear_own_zid) into an ungated impl block; added a pub new_multicast constructor (gated all(transport-multicast, not(transport-unicast))).",
+        "crates/wz-runtime-tokio/src/session/subscriber.rs: gated the deferred_sample_sink impl (its only caller is the unicast declare_subscriber). crates/wz-runtime-tokio/src/multicast_glue.rs: gated 3 cfg(test) inbound-parse imports to the codec subsets that use them (a latent R311mk issue exposed by the new multicast-only --all-targets clippy)."
+      ],
+      "publishable_verification_bullets": [
+        "3-config build (unicast-only / multicast-only / both) OK. clippy default + multicast-only --all-targets -D warnings clean. cargo test 374 passed 0 failed (lib 257 = B1). fmt clean. Full host run-ci all required layers pass, incl. Layer C4e (the multicast-without-unicast facade builds)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B2 yields the multicast Session's agnostic surface + constructor; B3 (R311mo) adds multicast publish. B5 (deferred) unifies multicast under the Session in both-builds (drops the not(transport-unicast) gate, makes operations runtime-transport-match, retires the standalone loop as the public API)."
+      ]
+    },
+    "Round 311mo": {
+      "decision_summary": "B3 (Level B): the multicast Session::publish. Promote the Multicast variant to carry the codec-push-gated TX sender, add new_multicast(tx) + a multicast publish (gated all(transport-multicast, not(transport-unicast), codec-push)) that builds a MulticastTxItem::Push via multicast_put_literal and enqueues onto the drive loop's channel (remote-only literal Put). Close the test gap with an isolated multicast-only test crate + Layer C1s, since the test-support dev-dep forces transport-unicast.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/transport.rs: promoted the Multicast variant from a unit marker to a struct-like { #[cfg(codec-push)] tx: UnboundedSender<MulticastTxItem>, _marker } - tx is the sender half of the channel drive_multicast_session drains (a bare multicast build with no data plane keeps just _marker, an RX-only node).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: new_multicast gains the codec-push-gated tx arg; added the multicast Session::publish (gated all(transport-multicast, not(transport-unicast), codec-push) so it never collides with the unicast publish) - builds a MulticastTxItem::Push via multicast_put_literal and enqueues it (fire-and-forget, remote-only literal Put; loopback/Del/metadata are later rounds, mirroring how the unicast publish grew from R228).",
+        "crates/wz-runtime-tokio-multicast-tests/ (NEW): an isolated multicast-only test crate (dev-dep on wz-runtime-tokio with only transport-multicast,codec-push) - wz-runtime-tokio's own cargo test cannot reach the multicast-only Session because its test-support dev-dep forces transport-unicast via feature unification. scripts/run-ci.sh: new Layer C1s runs it via -p (excluded from the C1/C2 --workspace unification, like the wz-mcu-* crates); crates/Cargo.toml registers the member."
+      ],
+      "verification_bullets": [
+        "5-config build matrix (unicast / bare-multicast / multicast+push / both / both+push) OK - unicast & multicast publish never collide. clippy 3-config + fmt clean. The isolated C1s test multicast_session_publish_enqueues_one_put_push passes (RUNTIME proof: publish builds + enqueues exactly one Put Push). Full host run-ci all required layers pass, incl. C1s."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B3 covers literal Put publish. Open Level B carries: B4 (multicast declare/subscribe - handle types become transport-agnostic + local loopback) and B5 (both-build unification: drop not(transport-unicast), runtime-transport-match operations, retire the standalone loop as the public API). Multicast publish Del/aliased/metadata/reliability options are incremental follow-ons."
+      ],
+      "publishable_decision_summary": "B3 (Level B): the multicast Session::publish. Promote the Multicast variant to carry the codec-push-gated TX sender, add new_multicast(tx) + a multicast publish (gated all(transport-multicast, not(transport-unicast), codec-push)) that builds a MulticastTxItem::Push via multicast_put_literal and enqueues onto the drive loop's channel (remote-only literal Put). Close the test gap with an isolated multicast-only test crate + Layer C1s, since the test-support dev-dep forces transport-unicast.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/transport.rs: promoted the Multicast variant from a unit marker to a struct-like { #[cfg(codec-push)] tx: UnboundedSender<MulticastTxItem>, _marker } - tx is the sender half of the channel drive_multicast_session drains (a bare multicast build with no data plane keeps just _marker, an RX-only node).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: new_multicast gains the codec-push-gated tx arg; added the multicast Session::publish (gated all(transport-multicast, not(transport-unicast), codec-push) so it never collides with the unicast publish) - builds a MulticastTxItem::Push via multicast_put_literal and enqueues it (fire-and-forget, remote-only literal Put; loopback/Del/metadata are later rounds, mirroring how the unicast publish grew from R228).",
+        "crates/wz-runtime-tokio-multicast-tests/ (NEW): an isolated multicast-only test crate (dev-dep on wz-runtime-tokio with only transport-multicast,codec-push) - wz-runtime-tokio's own cargo test cannot reach the multicast-only Session because its test-support dev-dep forces transport-unicast via feature unification. scripts/run-ci.sh: new Layer C1s runs it via -p (excluded from the C1/C2 --workspace unification, like the wz-mcu-* crates); crates/Cargo.toml registers the member."
+      ],
+      "publishable_verification_bullets": [
+        "5-config build matrix (unicast / bare-multicast / multicast+push / both / both+push) OK - unicast & multicast publish never collide. clippy 3-config + fmt clean. The isolated C1s test multicast_session_publish_enqueues_one_put_push passes (RUNTIME proof: publish builds + enqueues exactly one Put Push). Full host run-ci all required layers pass, incl. C1s."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B3 covers literal Put publish. Open Level B carries: B4 (multicast declare/subscribe - handle types become transport-agnostic + local loopback) and B5 (both-build unification: drop not(transport-unicast), runtime-transport-match operations, retire the standalone loop as the public API). Multicast publish Del/aliased/metadata/reliability options are incremental follow-ons."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
