@@ -35918,6 +35918,50 @@
         "Incremental multicast publish follow-ons (mirroring how the unicast publish grew at R229+): PublishOptions (Locality/kind/reliability), at which point build_loopback_sample moves transport-agnostic and is shared; Del; aliased; metadata fields."
       ]
     },
+    "Round 311mq": {
+      "decision_summary": "B5a (Level B): the multicast dispatch SSOT - add Session::dispatch_multicast_iteration_event (dispatch_event into the session observer + drain the deferred-fire queue, no unicast reply flush) so wiring the multicast drive loop on_event to it connects a Session::declare_subscriber deferred subscriber to wire-arrived multicast Frames (the B4 wire-RX gap).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: added Session::dispatch_multicast_iteration_event (transport-multicast-gated, in the ungated transport-agnostic impl block) - the multicast analogue of the unicast dispatch_iteration_event MINUS the unicast reply flush (flush_pending_replies / take_pending_final_rids thread the SessionLinkActions handle a multicast session has no analogue of; the multicast reply plane drains separately via MulticastReplySink). Body = R::with_mutex_mut(observer, dispatch_event) then drain_deferred_fires() after the lock drops (the F-6 dispatch+drain pairing as an SSOT).",
+        "crates/wz-runtime-tokio-multicast-tests/: added the B5a wire-RX test - a Session::declare_subscriber'd deferred subscriber fires exactly once when the dispatch SSOT is fed the IterationEvent a Push Frame produces (built via the production build_push_literal -> NetworkMessage::Push -> DriverLoopOutcome::FramePayload, so the fixture cannot drift from the wire shape).",
+        "crates/wz-runtime-tokio-multicast-tests/Cargo.toml: added pubsub-put (the wire SubscriberRegistry::dispatch_push path) to the wz-runtime-tokio dev-dep + wz-session-core as a dev-dep (synthesize the IterationEvent). Both pull only features the multicast-only wz-runtime-tokio build already enables, so the no-transport-unicast isolation is unchanged."
+      ],
+      "verification_bullets": [
+        "C1s isolated multicast test crate: 3 tests pass (B3 enqueue + B4 loopback + the new B5a wire-RX).",
+        "clippy --all-targets -D warnings clean on C1s + bare transport-multicast (driver_loop reachable without codec-push) + multicast-data + the both-build (default + transport-multicast: dispatch_multicast_iteration_event coexists with the unicast dispatch_iteration_event); fmt clean.",
+        "Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B5a closes the B4 wire-RX gap for the dispatch seam in a multicast-only build: the standalone drive_multicast_session loop's on_event can now route into a Session (|e| session.dispatch_multicast_iteration_event(e)) so Session-declared deferred subscribers fire on wire Frames, not just loopback.",
+        "Remaining B5 concerns: drop the not(transport-unicast) gate on SessionTransport::Multicast + the multicast publish so a both-build represents a multicast Session; make Session operations runtime-transport-match (publish/dispatch on the transport variant); retire the standalone loop as the public API = actions() dismantling.",
+        "A production multicast caller (an AP demo/deploy wiring drive_multicast_session under a Session, the unicast drive_session_until_terminal twin) is still pending - drive_multicast_session has no non-test caller yet.",
+        "Incremental multicast publish follow-ons (PublishOptions -> shared build_loopback_sample, Del, aliased, metadata) unchanged."
+      ],
+      "publishable_decision_summary": "B5a (Level B): the multicast dispatch SSOT - add Session::dispatch_multicast_iteration_event (dispatch_event into the session observer + drain the deferred-fire queue, no unicast reply flush) so wiring the multicast drive loop on_event to it connects a Session::declare_subscriber deferred subscriber to wire-arrived multicast Frames (the B4 wire-RX gap).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: added Session::dispatch_multicast_iteration_event (transport-multicast-gated, in the ungated transport-agnostic impl block) - the multicast analogue of the unicast dispatch_iteration_event MINUS the unicast reply flush (flush_pending_replies / take_pending_final_rids thread the SessionLinkActions handle a multicast session has no analogue of; the multicast reply plane drains separately via MulticastReplySink). Body = R::with_mutex_mut(observer, dispatch_event) then drain_deferred_fires() after the lock drops (the F-6 dispatch+drain pairing as an SSOT).",
+        "crates/wz-runtime-tokio-multicast-tests/: added the B5a wire-RX test - a Session::declare_subscriber'd deferred subscriber fires exactly once when the dispatch SSOT is fed the IterationEvent a Push Frame produces (built via the production build_push_literal -> NetworkMessage::Push -> DriverLoopOutcome::FramePayload, so the fixture cannot drift from the wire shape).",
+        "crates/wz-runtime-tokio-multicast-tests/Cargo.toml: added pubsub-put (the wire SubscriberRegistry::dispatch_push path) to the wz-runtime-tokio dev-dep + wz-session-core as a dev-dep (synthesize the IterationEvent). Both pull only features the multicast-only wz-runtime-tokio build already enables, so the no-transport-unicast isolation is unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "C1s isolated multicast test crate: 3 tests pass (B3 enqueue + B4 loopback + the new B5a wire-RX).",
+        "clippy --all-targets -D warnings clean on C1s + bare transport-multicast (driver_loop reachable without codec-push) + multicast-data + the both-build (default + transport-multicast: dispatch_multicast_iteration_event coexists with the unicast dispatch_iteration_event); fmt clean.",
+        "Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B5a closes the B4 wire-RX gap for the dispatch seam in a multicast-only build: the standalone drive_multicast_session loop's on_event can now route into a Session (|e| session.dispatch_multicast_iteration_event(e)) so Session-declared deferred subscribers fire on wire Frames, not just loopback.",
+        "Remaining B5 concerns: drop the not(transport-unicast) gate on SessionTransport::Multicast + the multicast publish so a both-build represents a multicast Session; make Session operations runtime-transport-match (publish/dispatch on the transport variant); retire the standalone loop as the public API = actions() dismantling.",
+        "A production multicast caller (an AP demo/deploy wiring drive_multicast_session under a Session, the unicast drive_session_until_terminal twin) is still pending - drive_multicast_session has no non-test caller yet.",
+        "Incremental multicast publish follow-ons (PublishOptions -> shared build_loopback_sample, Del, aliased, metadata) unchanged."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
