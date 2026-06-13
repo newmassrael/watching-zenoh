@@ -506,6 +506,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         self.send_network_message(
             wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
             /*reliable=*/ true,
+            /*express=*/ false,
         )?;
         // Local loopback leg (B4): deliver to in-process subscribers + drain
         // the staged fires on the caller thread, mirroring the unicast publish
@@ -527,68 +528,79 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         Ok(0)
     }
 
-    /// R311mr (Level B, B5b-1) — the transport-dispatch SEND SEAM, the wz
-    /// analogue of zenoh-pico's `_z_send_n_msg`
+    /// R311mr (B5b-1) / R311ms (B5b-2) — the transport-dispatch SEND SEAM, the
+    /// wz analogue of zenoh-pico's `_z_send_n_msg`
     /// (`zenoh-pico/src/transport/transport.c:29` — `switch (zt->_type)` over
-    /// the unicast / multicast transport tag). Takes a fully-built
+    /// the unicast / multicast transport tag, called by every put / get /
+    /// declare primitive in `src/net/primitives.c`). Takes a fully-built
     /// [`NetworkMessage`](wz_session_core::network_message::NetworkMessage) (the
-    /// transport-agnostic outbound currency, pico's `_z_network_message_t`) and
-    /// routes it to the owned transport's send path. The whole point is that
-    /// the application API above it (`publish`, later query / declare / reply)
-    /// stays transport-agnostic — it builds a `NetworkMessage` and calls this
-    /// seam; the transport split lives HERE, not at every call site (the
-    /// north-star pico shape, not a fallible `actions()` projection exposed
-    /// everywhere).
+    /// transport-agnostic outbound currency, pico's `_z_network_message_t`) plus
+    /// the channel `reliable` flag and the batching `express` hint, and routes
+    /// it to the owned transport's send path. The whole point is that the
+    /// application API above it (`publish`, later query / declare / reply) stays
+    /// transport-agnostic — it builds a `NetworkMessage` and calls this seam;
+    /// the transport split lives HERE, not at every call site (the north-star
+    /// pico shape, not a fallible `actions()` projection exposed everywhere).
     ///
-    /// B5b-1 scope: the MULTICAST arm only (gated
-    /// `all(transport-multicast, not(transport-unicast), codec-push)`). The
-    /// unicast arm (routing a `NetworkMessage` to the
-    /// [`SessionLinkActions`](crate::session_glue::SessionLinkActions)
-    /// `dispatch_*` family) plus dropping the `not(transport-unicast)` gate so a
-    /// both-transports build runtime-matches is B5b-2 — that round also
-    /// dismantles [`Self::actions`] across its 33 call sites. Until then the
-    /// seam exists only in a multicast-only build, where the match is a
-    /// degenerate single arm.
+    /// `express` mirrors pico `_z_send_n_msg`'s `cong_ctrl` arm: the UNICAST arm
+    /// drains its open batch window after an express-flagged send (the
+    /// `flush_batch_if_express` parity); the MULTICAST arm ignores it (UDP
+    /// multicast is best-effort with no per-session batch window).
     ///
-    /// Multicast origination is Push-only today: a multicast `Session` exposes
-    /// `publish` but no query / declare surface (those would originate
-    /// `Request` / `Interest` / `Declare`), and the reply messages
-    /// (`Response` / `ResponseFinal` / declarer `Declare`) are emitted by the
-    /// drive-loop [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink),
-    /// not this seam. So a non-`Push` `NetworkMessage` reaching here is an
-    /// unreachable-by-construction programming error rather than a wire case;
-    /// it returns [`SendWireError::FeatureDisabled`](wz_session_core::send_wire_error::SendWireError)
-    /// (an honest no-emit reject) instead of panicking. `SendWireError` is the
-    /// SAME error the unicast `dispatch_*` family returns, so B5b-2's unicast
-    /// arm needs no error unification — the seam's `Result` type is already
-    /// transport-uniform (it lives ungated in `wz_session_core`, reachable in a
-    /// multicast-only build that the `transport-unicast`-gated `session_glue`
-    /// re-export is not).
+    /// B5b-2 scope: both arms now exist, but they never COEXIST in one build —
+    /// the unicast arm is `transport-unicast`-gated and the multicast arm
+    /// `all(transport-multicast, not(transport-unicast))`-gated, so the `match`
+    /// is a degenerate single arm in every build (unicast in a unicast-only /
+    /// both-transports build; multicast in a multicast-only build). Dropping
+    /// the `not(transport-unicast)` gate so a both-transports build holds a
+    /// multicast `Session` and the `match` runtime-dispatches is B5b-2b — that
+    /// round also dismantles [`Self::actions`] across its remaining call sites
+    /// (publish having moved here).
+    ///
+    /// Origination is Push-only on both arms today: the unicast arm migrates the
+    /// other outbound variants (Request / Response / Declare / Interest) as
+    /// their operations move onto the seam; the multicast arm exposes only
+    /// `publish` (the reply messages are emitted by the drive-loop
+    /// [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink), not
+    /// this seam). A non-`Push` reaching either arm returns
+    /// [`SendWireError::FeatureDisabled`](wz_session_core::send_wire_error::SendWireError)
+    /// — an honest no-emit reject, never a panic. `SendWireError` is the SAME
+    /// error the unicast `dispatch_*` family returns and lives ungated in
+    /// `wz_session_core` (the `transport-unicast`-gated `session_glue` re-export
+    /// is just a path), so the seam's `Result` is already transport-uniform.
     #[cfg(all(
-        feature = "transport-multicast",
-        not(feature = "transport-unicast"),
-        feature = "codec-push"
+        feature = "codec-push",
+        any(feature = "transport-unicast", feature = "transport-multicast")
     ))]
     pub fn send_network_message(
         &self,
         msg: wz_session_core::network_message::NetworkMessage,
         reliable: bool,
+        express: bool,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
-        use wz_session_core::network_message::NetworkMessage;
-        use wz_session_core::send_wire_error::SendWireError;
         match &self.transport {
+            // Unicast arm (B5b-2): route the built NetworkMessage to the
+            // SessionLinkActions dispatch_* family + the express batch flush.
+            #[cfg(feature = "transport-unicast")]
+            SessionTransport::Unicast(actions) => {
+                actions.send_network_message(msg, reliable, express)
+            }
+            // Multicast arm (B5b-1): wrap a Push as a MulticastTxItem and
+            // fire-and-forget onto the drive loop's channel (a closed receiver
+            // drops it exactly as a dead link would). `express` is moot — UDP
+            // multicast is best-effort with no batch window.
+            #[cfg(all(feature = "transport-multicast", not(feature = "transport-unicast")))]
             SessionTransport::Multicast { tx, .. } => {
+                use wz_session_core::network_message::NetworkMessage;
+                use wz_session_core::send_wire_error::SendWireError;
+                let _ = express;
                 let item = match msg {
                     NetworkMessage::Push(push) => {
                         wz_session_core::multicast_tx::MulticastTxItem::Push { push, reliable }
                     }
-                    // Unreachable: a multicast Session originates only Push (see
-                    // the method docs). An honest no-emit reject, never a panic.
+                    // Unreachable: a multicast Session originates only Push.
                     _ => return Err(SendWireError::FeatureDisabled),
                 };
-                // Fire-and-forget onto the drive loop's channel; a closed
-                // receiver (the loop ended) drops the item exactly as a dead
-                // link would.
                 let _ = tx.send(item);
                 Ok(())
             }
@@ -1138,16 +1150,40 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         if opts.allowed_destination.allows_remote() {
             let reliable = opts.reliable_bool();
             let meta = opts.push_metadata();
-            match opts.kind {
-                SampleKind::Put => {
-                    self.actions()
-                        .send_push_with_meta_literal(keyexpr, payload, reliable, &meta)?;
-                }
+            // R311ms (B5b-2) — express batch-flush hint for the send seam's
+            // unicast arm (drains the open batch window after an express send,
+            // the `flush_batch_if_express` parity). Moot without
+            // `transport-batching`.
+            #[cfg(feature = "transport-batching")]
+            let express = meta
+                .qos
+                .as_ref()
+                .is_some_and(crate::sample::QosLevel::is_express);
+            #[cfg(not(feature = "transport-batching"))]
+            let express = false;
+            // R311ms (B5b-2) — build the Put / Del as a `NetworkMessage::Push`
+            // (the transport-agnostic outbound currency) and route it through
+            // the [`Self::send_network_message`] send seam, NOT
+            // `self.actions().send_push_*` — the first data-plane op lifted off
+            // the unicast action bundle and onto the seam (a step toward the
+            // B5b-2b `actions()` dismantling). The build's `CodecError` maps to
+            // `SendWireError::Codec` (the same path the prior
+            // `send_push_with_meta_literal` took: Codec -> ExceedsCapacity via
+            // `From<SendWireError> for PublishError`).
+            let push = match opts.kind {
+                SampleKind::Put => wz_session_core::push_build::build_push_literal_with_meta(
+                    keyexpr, payload, &meta,
+                ),
                 SampleKind::Del => {
-                    self.actions()
-                        .send_push_del_with_meta_literal(keyexpr, reliable, &meta)?;
+                    wz_session_core::push_build::build_push_del_literal_with_meta(keyexpr, &meta)
                 }
             }
+            .map_err(SendWireError::Codec)?;
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+                reliable,
+                express,
+            )?;
         }
         // R311cc — pubsub-allow-loop gates the local_publish loopback
         // branch of Session::publish. cfg-off short-circuits to 0

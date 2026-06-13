@@ -1443,6 +1443,51 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
+    /// R311ms (Level B, B5b-2) — the UNICAST arm of the transport send seam:
+    /// route a built [`NetworkMessage`](crate::network_message::NetworkMessage)
+    /// to the matching `dispatch_*` family plus the express batch flush. The
+    /// unicast twin of the multicast arm in
+    /// [`Session::send_network_message`](../../wz_runtime_tokio/session/struct.Session.html);
+    /// that seam (the `_z_send_n_msg` analogue) dispatches to one of the two
+    /// arms on the transport tag.
+    ///
+    /// B5b-2 inhabits the Push arm (the publish data plane): `dispatch_push`
+    /// mints the SN, frames, and batch-absorbs; then `express` drains the open
+    /// batch window (the [`Self::flush_batch_if_express`] parity, lifted here
+    /// so a publish that routes through the seam stays transport-agnostic — it
+    /// no longer reaches into the unicast action bundle for the flush). The
+    /// other outbound variants (Request / Response / Declare / Interest) migrate
+    /// as their operations move onto the seam; an inbound-only or
+    /// not-yet-migrated variant returns [`SendWireError::FeatureDisabled`] (an
+    /// honest no-emit reject, never a panic) — symmetric with the multicast arm.
+    #[cfg(feature = "codec-push")]
+    pub fn send_network_message(
+        &self,
+        msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+    ) -> Result<(), SendWireError> {
+        use crate::network_message::NetworkMessage;
+        match msg {
+            NetworkMessage::Push(push) => {
+                self.dispatch_push(*push, reliable)?;
+                #[cfg(feature = "transport-batching")]
+                if express {
+                    self.flush_open_batch();
+                }
+                #[cfg(not(feature = "transport-batching"))]
+                let _ = express;
+                Ok(())
+            }
+            // Not yet routed through the seam (or inbound-only). Honest no-emit
+            // reject, never a panic — symmetric with the multicast arm.
+            _ => {
+                let _ = express;
+                Err(SendWireError::FeatureDisabled)
+            }
+        }
+    }
+
     /// See [`Self::dispatch_push`].
     #[cfg(any(
         feature = "declare-keyexpr",

@@ -202,7 +202,7 @@ mod tests {
 
         let push = build_push_literal("demo/mc", b"via-seam").expect("push fixture");
         session
-            .send_network_message(NetworkMessage::Push(Box::new(push)), true)
+            .send_network_message(NetworkMessage::Push(Box::new(push)), true, false)
             .expect("the seam routes a Push to the multicast channel");
 
         let item = rx.try_recv().expect("seam enqueued the Push");
