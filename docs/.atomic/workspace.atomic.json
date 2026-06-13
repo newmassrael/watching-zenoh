@@ -36832,6 +36832,42 @@
         "UNPUSHED 누적: R311nh(2)+R311ni(이번) 로컬. origin/main=520293e. 사용자가 'Step2까지 모아서 push' 선택—이제 push 시점. 명시동의 대기."
       ]
     },
+    "Round 311nj": {
+      "decision_summary": "R311nj: R311ni 세션리뷰 보정 — TX-frag e2e의 false-positive 위험 청산(발행 전 negotiated_batch_mtu==64 단언으로 분할을 구조적 보장화).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/layer3_reassembly_tx.rs: 발행 전 `assert_eq!(opened_init.actions.negotiated_batch_mtu(), 64)` + acceptor 대칭 단언 추가. 리뷰어(독립+자가)가 확인한 HIGH 결함: 200B payload가 msg_put 256B 코덱 한도 내라, MTU 협상이 조용히 65535로 회귀해도 단일 프레임으로 전달되어 `fired==1` 통과=fragmented/non-fragmented 구분 불가(false-positive). MTU==64 단언으로 200>64→emit_frame_or_fragments 분할 branch 구조적 보장. docstring도 multicast sibling을 동등 proof로 과주장하던 표현 수정(multicast는 batch_size 직접 param=협상 회귀 벡터 없음; unicast는 협상이라 명시 단언 필요)."
+      ],
+      "verification_bullets": [
+        "독립 리뷰어(general-purpose)가 #1 HIGH false-positive를 자가의심과 동일하게 확인; R311nh full-qualify는 교과서적(fn-gate 좁히면 signature-stability 위반)이고 C1h 6c/C1l 주석도 정확하다고 독립 검증.",
+        "하드닝 후 테스트 통과(EXIT=0) — negotiated_batch_mtu()가 실제 64임을 증명(아니면 assert 실패). 즉 원래도 제대로 분할했고 이제 구조적 보장.",
+        "10/10 flaky 아님. full host run-ci EXIT=0: 'all required layers pass'."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "기반 굳히기 DONE(R311nh gate-skew + R311ni TX-frag e2e + R311nj 하드닝). 메타교훈: 실소켓 e2e는 행동 assert만으로는 false-positive 가능—분할/프래그먼틀 같은 전제는 구조적으로 단언해야 함([[feedback-no-flaky-ever]] 인접).",
+        "낮은우선 follow-up(리뷰어 #2 MED): multicast `oversize_put_fragments_and_reassembles_across_nodes`도 fragment count 미단언—단 batch_size 직접 param이라 회귀벡터 없어 위험 낮음. 원하면 recording UDP driver로 강화 가능.",
+        "NEXT proof-gap: wz↔zenoh-pico 라이브 interop e2e. UNPUSHED: R311nj(이번) 로컬; origin/main=b3d13ef. push=명시동의."
+      ],
+      "publishable_decision_summary": "R311nj: R311ni 세션리뷰 보정 — TX-frag e2e의 false-positive 위험 청산(발행 전 negotiated_batch_mtu==64 단언으로 분할을 구조적 보장화).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/layer3_reassembly_tx.rs: 발행 전 `assert_eq!(opened_init.actions.negotiated_batch_mtu(), 64)` + acceptor 대칭 단언 추가. 리뷰어(독립+자가)가 확인한 HIGH 결함: 200B payload가 msg_put 256B 코덱 한도 내라, MTU 협상이 조용히 65535로 회귀해도 단일 프레임으로 전달되어 `fired==1` 통과=fragmented/non-fragmented 구분 불가(false-positive). MTU==64 단언으로 200>64→emit_frame_or_fragments 분할 branch 구조적 보장. docstring도 multicast sibling을 동등 proof로 과주장하던 표현 수정(multicast는 batch_size 직접 param=협상 회귀 벡터 없음; unicast는 협상이라 명시 단언 필요)."
+      ],
+      "publishable_verification_bullets": [
+        "독립 리뷰어(general-purpose)가 #1 HIGH false-positive를 자가의심과 동일하게 확인; R311nh full-qualify는 교과서적(fn-gate 좁히면 signature-stability 위반)이고 C1h 6c/C1l 주석도 정확하다고 독립 검증.",
+        "하드닝 후 테스트 통과(EXIT=0) — negotiated_batch_mtu()가 실제 64임을 증명(아니면 assert 실패). 즉 원래도 제대로 분할했고 이제 구조적 보장.",
+        "10/10 flaky 아님. full host run-ci EXIT=0: 'all required layers pass'."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "기반 굳히기 DONE(R311nh gate-skew + R311ni TX-frag e2e + R311nj 하드닝). 메타교훈: 실소켓 e2e는 행동 assert만으로는 false-positive 가능—분할/프래그먼틀 같은 전제는 구조적으로 단언해야 함([[feedback-no-flaky-ever]] 인접).",
+        "낮은우선 follow-up(리뷰어 #2 MED): multicast `oversize_put_fragments_and_reassembles_across_nodes`도 fragment count 미단언—단 batch_size 직접 param이라 회귀벡터 없어 위험 낮음. 원하면 recording UDP driver로 강화 가능.",
+        "NEXT proof-gap: wz↔zenoh-pico 라이브 interop e2e. UNPUSHED: R311nj(이번) 로컬; origin/main=b3d13ef. push=명시동의."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
