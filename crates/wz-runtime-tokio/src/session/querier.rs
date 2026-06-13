@@ -324,6 +324,14 @@ pub enum LivelinessGetError {
     /// `Interest` mirror, so no wire bytes were emitted. Semantic
     /// projection of the codec-layer reject.
     ExceedsCapacity,
+    /// B5b-2b (R311nc) — a liveliness get was attempted on a session whose
+    /// transport is not unicast. The interest/get path needs the per-peer
+    /// `SessionLinkActions` handshake bundle, which a multicast session has
+    /// no analogue of; the `Session::actions()` projection rejects with
+    /// `SendWireError::UnsupportedVariant`. Distinct from `NotEstablished`
+    /// (a unicast session still mid-handshake — that one resolves; this
+    /// one never will on multicast).
+    RequiresUnicast,
 }
 
 impl std::fmt::Display for LivelinessGetError {
@@ -345,6 +353,12 @@ impl std::fmt::Display for LivelinessGetError {
                 "LivelinessGetError: keyexpr exceeded the declared codec capacity \
                  (MAX_KEYEXPR_BYTES); the Interest was not emitted"
             ),
+            LivelinessGetError::RequiresUnicast => write!(
+                f,
+                "LivelinessGetError: liveliness get requires a unicast transport; \
+                 this session holds a multicast transport (no interest handshake \
+                 bundle); the Interest was not emitted"
+            ),
         }
     }
 }
@@ -359,6 +373,7 @@ impl From<SendWireError> for LivelinessGetError {
             // F2 — the reconnect window IS a not-yet-(re)Established
             // session; the existing variant names the same contract.
             SendWireError::TransportUnavailable => LivelinessGetError::NotEstablished,
+            SendWireError::UnsupportedVariant => LivelinessGetError::RequiresUnicast,
         }
     }
 }
@@ -412,6 +427,13 @@ pub enum QueryAliasError {
     /// Request(Query) was not emitted; retry after the session
     /// re-establishes (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
     TransportUnavailable,
+    /// B5b-2b (R311nc) — an aliased query was attempted on a session whose
+    /// transport is not unicast. The query path needs the per-peer
+    /// `SessionLinkActions` handshake bundle (and the outbound mapping
+    /// table the alias resolves against), which a multicast session has no
+    /// analogue of; the `Session::actions()` projection rejects with
+    /// `SendWireError::UnsupportedVariant`. No wire bytes were emitted.
+    RequiresUnicast,
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -438,6 +460,12 @@ impl std::fmt::Display for QueryAliasError {
                  reconnecting); the Request(Query) was not emitted — retry after \
                  the session re-establishes"
             ),
+            QueryAliasError::RequiresUnicast => write!(
+                f,
+                "QueryAliasError: aliased query requires a unicast transport; this \
+                 session holds a multicast transport (no query handshake bundle / \
+                 outbound mapping table); the Request(Query) was not emitted"
+            ),
         }
     }
 }
@@ -450,6 +478,7 @@ impl From<SendWireError> for QueryAliasError {
             SendWireError::Codec(_) => QueryAliasError::ExceedsCapacity,
             SendWireError::FeatureDisabled => QueryAliasError::FeatureDisabled,
             SendWireError::TransportUnavailable => QueryAliasError::TransportUnavailable,
+            SendWireError::UnsupportedVariant => QueryAliasError::RequiresUnicast,
         }
     }
 }
@@ -798,7 +827,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
     pub fn get_matching_status(&self) -> Result<MatchingStatus, QueryAliasError> {
         let base = self
             .session
-            .actions()
+            .actions()?
             .resolve_outbound_mapping(self.mapping_id)
             .ok_or(QueryAliasError::UnknownMapping(self.mapping_id))?;
         let _effective_keyexpr = match self.inline_suffix.as_deref() {

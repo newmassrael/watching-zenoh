@@ -1045,8 +1045,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         // out-of-range value (returns `false`); empty zid skipped
         // here so the registry stays in its pre-R231 default state
         // for test fixtures that don't supply a zid.
-        if !session.actions().params.zid.is_empty() {
-            let _ = session.set_own_zid(session.actions().params.zid.clone());
+        // B5b-2b — `new` just built `SessionTransport::Unicast`, so
+        // `actions()` is `Ok` by construction; `if let Ok` reads the zid
+        // without a panic form (no `.expect`), and the single bind avoids
+        // re-projecting the transport twice.
+        if let Ok(actions) = session.actions() {
+            let zid = actions.params.zid.clone();
+            if !zid.is_empty() {
+                let _ = session.set_own_zid(zid);
+            }
         }
         session
     }
@@ -1054,9 +1061,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// Borrow the outbound action handle. Useful when the caller
     /// needs to invoke non-publish methods like `send_declare_*` or
     /// `send_request_query` directly on the actions surface.
-    pub fn actions(&self) -> &Arc<SessionLinkActions<R, T>> {
+    ///
+    /// B5b-2b (R311nc) — fallible projection. The action bundle is the
+    /// per-peer UNICAST handshake machinery; a session whose transport is
+    /// not unicast has no such bundle, so this returns
+    /// [`SendWireError::UnsupportedVariant`] rather than a borrow it cannot
+    /// honestly produce. In a unicast-only build the only representable
+    /// transport is `Unicast`, so the `Err` arm is unconstructible and
+    /// every caller's `?` is statically infallible; the fallibility
+    /// materialises only once a both-transport build can hold a multicast
+    /// `Session` (the B5b-2b tail, designed WITH this projection per the
+    /// R311na #3b ratify — an honest reject, never an `unreachable!`).
+    pub fn actions(&self) -> Result<&Arc<SessionLinkActions<R, T>>, SendWireError> {
         match &self.transport {
-            SessionTransport::Unicast(actions) => actions,
+            SessionTransport::Unicast(actions) => Ok(actions),
         }
     }
 
@@ -1121,15 +1139,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     {
         R::with_mutex_mut(&self.observer, |obs| {
             obs.dispatch_event(event);
-            obs.flush_pending_replies(self.actions().as_ref());
+            // B5b-2b — the unicast reply flush + ResponseFinal staging need
+            // the unicast action bundle; a multicast session (driven by
+            // dispatch_multicast_iteration_event, which omits this flush) has
+            // none, so skip these legs honestly when actions() is not unicast.
+            // In every current build actions() is Ok, so this is a
+            // behaviour-preserving guard (the order flush -> under_lock ->
+            // final-rids is unchanged).
+            if let Ok(actions) = self.actions() {
+                obs.flush_pending_replies(actions.as_ref());
+            }
             under_lock(obs);
             #[cfg(feature = "query-queryable")]
-            for rid in obs.take_pending_final_rids() {
-                let actions = self.actions().clone();
-                self.fires.stage(Box::new(move || {
-                    use wz_session_core::response_sink::ResponseSink as _;
-                    actions.send_response_final(rid);
-                }));
+            if let Ok(actions) = self.actions() {
+                for rid in obs.take_pending_final_rids() {
+                    let actions = actions.clone();
+                    self.fires.stage(Box::new(move || {
+                        use wz_session_core::response_sink::ResponseSink as _;
+                        actions.send_response_final(rid);
+                    }));
+                }
             }
         });
         self.drain_deferred_fires();
@@ -1156,7 +1185,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// [`Self::declare_liveliness_subscriber`] remains best-effort —
     /// see its doc-comment for the asymmetric-gate carry.
     pub fn is_established(&self) -> bool {
-        self.actions().is_established()
+        // B5b-2b — a session whose transport is not unicast has no unicast
+        // session-FSM and is therefore never "Established" in this sense;
+        // `false` is the honest answer (it correctly suppresses
+        // pre-Established interest emission), keeping the `-> bool`
+        // signature stable. In a unicast build actions() is always Ok.
+        self.actions().map(|a| a.is_established()).unwrap_or(false)
     }
 
     /// R311jp — zenoh-pico `zp_batch_start` parity: open a TX batching
@@ -1171,21 +1205,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// Errors with `SendWireError::FeatureDisabled` when the
     /// `transport-batching` feature is off (R311g signature stability).
     pub fn batch_start(&self) -> Result<(), SendWireError> {
-        self.actions().batch_start()
+        self.actions()?.batch_start()
     }
 
     /// R311jp — zenoh-pico `zp_batch_flush` parity: send the currently
     /// batched messages now, keeping the batching window open. No-op when
     /// nothing is batched.
     pub fn batch_flush(&self) -> Result<(), SendWireError> {
-        self.actions().batch_flush()
+        self.actions()?.batch_flush()
     }
 
     /// R311jp — zenoh-pico `zp_batch_stop` parity: close the batching
     /// window and send the currently batched messages. Sends after this
     /// call flush per message again.
     pub fn batch_stop(&self) -> Result<(), SendWireError> {
-        self.actions().batch_stop()
+        self.actions()?.batch_stop()
     }
 
     // R311mn (B2) — `set_own_zid` / `clear_own_zid` are transport-agnostic
@@ -1362,6 +1396,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     ) -> Result<usize, PublishAliasError> {
         let base = self
             .actions()
+            .map_err(|_| PublishAliasError::RequiresUnicast)?
             .resolve_outbound_mapping(mapping_id)
             .ok_or(PublishAliasError::UnknownMapping(mapping_id))?;
         let loopback_keyexpr = match inline_suffix {
@@ -1537,7 +1572,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
         #[cfg(feature = "query-get")]
         {
-            let rid = self.actions().alloc_next_request_id();
+            let rid = self.actions()?.alloc_next_request_id();
             let expected_finals = opts.expected_finals();
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
@@ -1785,7 +1820,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
         #[cfg(feature = "query-get")]
         {
-            let rid = self.actions().alloc_next_request_id();
+            let rid = self.actions()?.alloc_next_request_id();
             let expected_finals = opts.expected_finals();
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
@@ -1950,7 +1985,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "query-get")]
         {
             let base = self
-                .actions()
+                .actions()?
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(QueryAliasError::UnknownMapping(mapping_id))?;
             let loopback_keyexpr = match inline_suffix {
@@ -2130,6 +2165,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     ) -> Result<Subscriber<R, T>, SubscribeAliasError> {
         let base = self
             .actions()
+            .map_err(|_| SubscribeAliasError::RequiresUnicast)?
             .resolve_outbound_mapping(mapping_id)
             .ok_or(SubscribeAliasError::UnknownMapping(mapping_id))?;
         let resolved = match inline_suffix {
@@ -2189,7 +2225,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // re-enter any observer-locking session API, and its
             // replies precede the matching ResponseFinal on the wire
             // (the dispatch SSOT emits finals after the drain).
-            let (cell, sink) = self.deferred_query_sink(callback);
+            // B5b-2b — gate unicast at the API boundary (a multicast session
+            // has no SessionLinkActions for the wire-reply leg), then thread
+            // the resolved bundle into the sink builder.
+            let actions = self
+                .actions()
+                .map_err(|_| QueryableAliasError::RequiresUnicast)?
+                .clone();
+            let (cell, sink) = self.deferred_query_sink(actions, callback);
             // R311df — observer access via R::with_mutex_mut closure form.
             let id = R::with_mutex_mut(&self.observer, |observer| {
                 observer.queryables.register_with_locality(
@@ -2242,6 +2285,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         {
             let base = self
                 .actions()
+                .map_err(|_| QueryableAliasError::RequiresUnicast)?
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(QueryableAliasError::UnknownMapping(mapping_id))?;
             let resolved = match inline_suffix {
@@ -2329,7 +2373,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "liveliness-token")]
         {
             let keyexpr_string = keyexpr.into();
-            let token_id = self.actions().alloc_next_token_id();
+            // B5b-2b — the declare family needs the unicast action bundle;
+            // a multicast session has none, so reject honestly here (before
+            // the seam) rather than letting the multicast send arm's
+            // UnsupportedVariant reach map_decl_err's `other => unreachable!`.
+            let actions = self
+                .actions()
+                .map_err(|_| LivelinessAliasError::RequiresUnicast)?;
+            let token_id = actions.alloc_next_token_id();
             // declare_token always builds in literal mode (mapping_id = 0,
             // suffix = Some(_)), so the alias-resolution reject variants
             // cannot fire; the `unreachable!()` guards future refactors that
@@ -2362,8 +2413,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // registration outside `_z_send_n_msg`. reliable=true / express=false
             // match the prior `send_declare_token` (dispatch_declare reliable,
             // no flush — a Declare carries no express window).
-            let declare = self
-                .actions()
+            let declare = actions
                 .prepare_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
                 .map_err(map_decl_err)?;
             self.send_network_message(
@@ -2374,7 +2424,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration`
             // on `_Z_RES_OK`); session-state bookkeeping AROUND the seam emit.
-            self.actions().cache_token_declaration(
+            actions.cache_token_declaration(
                 token_id,
                 /*mapping_id=*/ 0,
                 Some(&keyexpr_string),
@@ -2430,8 +2480,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     ) -> Result<LivelinessToken<R, T>, LivelinessAliasError> {
         #[cfg(feature = "liveliness-token")]
         {
-            let base = self
+            // B5b-2b — bind the unicast action bundle once (a multicast
+            // session has none, so reject honestly before resolving the
+            // outbound mapping table the alias needs).
+            let actions = self
                 .actions()
+                .map_err(|_| LivelinessAliasError::RequiresUnicast)?;
+            let base = actions
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(LivelinessAliasError::UnknownMapping(mapping_id))?;
             let resolved = match inline_suffix {
@@ -2442,7 +2497,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     composed
                 }
             };
-            let token_id = self.actions().alloc_next_token_id();
+            let token_id = actions.alloc_next_token_id();
             // R311mw (B5b-2b-3) — aliased Declare onto the send seam; same
             // shape as `Session::declare_token`, routed by (mapping_id,
             // inline_suffix) instead of (0, literal). The seam's
@@ -2460,6 +2515,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     SendDeclareError::TransportUnavailable => {
                         LivelinessAliasError::TransportUnavailable
                     }
+                    // B5b-2b — multicast-session declare reject (the send seam
+                    // returns UnsupportedVariant; SendDeclareError::from maps it
+                    // to RequiresUnicast), typed through to the declare surface.
+                    SendDeclareError::RequiresUnicast => LivelinessAliasError::RequiresUnicast,
                     SendDeclareError::UnknownMappingId(id) => {
                         // Race against a concurrent send_undeclare_kexpr
                         // between the pre-check resolve_outbound_mapping
@@ -2488,8 +2547,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     ),
                 }
             }
-            let declare = self
-                .actions()
+            let declare = actions
                 .prepare_declare_token(token_id, mapping_id, inline_suffix)
                 .map_err(map_decl_err)?;
             self.send_network_message(
@@ -2500,8 +2558,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration`
             // on `_Z_RES_OK`); session-state bookkeeping AROUND the seam emit.
-            self.actions()
-                .cache_token_declaration(token_id, mapping_id, inline_suffix);
+            actions.cache_token_declaration(token_id, mapping_id, inline_suffix);
             // R311mz — new_held registers the RESOLVED literal in the
             // declarer-side LocalTokenRegistry. The prior code constructed the
             // handle WITHOUT registering, so an aliased-declared token was
@@ -2613,7 +2670,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             let keyexpr_string = keyexpr.into();
-            let interest_id = self.actions().alloc_next_interest_id();
+            let interest_id = self.actions()?.alloc_next_interest_id();
             // R311lg — DEFERRED FIRE (the R311lf lock-free callback
             // invariant on the liveliness-sample plane): the registry
             // stores a staging sink that copies each matched sample out
@@ -2685,7 +2742,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             }
             // A4 — record for post-reconnect replay; session-state bookkeeping
             // AROUND the seam emit.
-            self.actions().cache_subscriber_interest(
+            self.actions()?.cache_subscriber_interest(
                 interest_id,
                 options.history,
                 /*keyexpr_mapping_id=*/ 0,
@@ -2788,14 +2845,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // bug-class error (caller forgot send_declare_keyexpr) before
             // the state-dependent retry loop. R282 + R283 ordering rule.
             let base = self
-                .actions()
+                .actions()?
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(LivelinessSubscriberAliasError::UnknownMapping(mapping_id))?;
             // R283 Established gate. Done after mapping resolution so a
             // pre-Established call with a bad mapping surfaces the bad
             // mapping (the bug) rather than the transient state. No
             // interest-id is burned on the early-return path.
-            if !self.actions().is_established() {
+            if !self.actions()?.is_established() {
                 return Err(LivelinessSubscriberAliasError::NotEstablished);
             }
             let resolved = match inline_suffix {
@@ -2806,7 +2863,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     composed
                 }
             };
-            let interest_id = self.actions().alloc_next_interest_id();
+            let interest_id = self.actions()?.alloc_next_interest_id();
             // R311lg — deferred staging sink; same lock-free callback
             // contract as `declare_liveliness_subscriber`.
             let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
@@ -2862,7 +2919,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             }
             // A4 — record for post-reconnect replay; session-state bookkeeping
             // AROUND the seam emit.
-            self.actions().cache_subscriber_interest(
+            self.actions()?.cache_subscriber_interest(
                 interest_id,
                 options.history,
                 mapping_id,
@@ -2934,7 +2991,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 return Err(LivelinessGetError::NotEstablished);
             }
             let keyexpr_string = keyexpr.into();
-            let interest_id = self.actions().alloc_next_interest_id();
+            let interest_id = self.actions()?.alloc_next_interest_id();
             // R262 — absolute monotonic-ms deadline (same epoch contract
             // as `Session::query`: the application threads one `Arc<T>`
             // clock through both `Session::new` and
@@ -3003,7 +3060,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             }
             // A4 — record for post-reconnect replay; session-state bookkeeping
             // AROUND the seam emit.
-            self.actions().cache_get_interest(
+            self.actions()?.cache_get_interest(
                 interest_id,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),

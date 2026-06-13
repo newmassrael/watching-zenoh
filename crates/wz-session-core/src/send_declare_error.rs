@@ -70,6 +70,15 @@ pub enum SendDeclareError {
     /// cached and nothing reaches the wire; the caller re-declares
     /// after the session re-establishes.
     TransportUnavailable,
+    /// B5b-2b (R311nc) — a DECLARE was attempted on a session whose
+    /// transport is not unicast. The declare family needs the per-peer
+    /// `SessionLinkActions` handshake bundle, which a multicast session
+    /// has no analogue of; the `Session::actions()` projection rejects
+    /// with `SendWireError::UnsupportedVariant`, surfaced here as the
+    /// declare-plane projection. A no-emit reject, structurally distinct
+    /// from `FeatureDisabled` (a declare-* feature may well be ON) and
+    /// `TransportUnavailable` (a unicast link mid-reconnect).
+    RequiresUnicast,
 }
 
 impl fmt::Display for SendDeclareError {
@@ -105,6 +114,11 @@ impl fmt::Display for SendDeclareError {
                 "send_declare: transport not available (link released or \
                  reconnecting; Established not re-entered) — no bytes \
                  emitted; re-declare after the session re-establishes",
+            ),
+            Self::RequiresUnicast => f.write_str(
+                "send_declare: operation requires a unicast transport; this \
+                 session holds a multicast transport (no declare handshake \
+                 bundle) — no bytes emitted",
             ),
         }
     }
@@ -142,6 +156,7 @@ impl From<crate::send_wire_error::SendWireError> for SendDeclareError {
             W::Codec(c) => Self::Codec(c),
             W::FeatureDisabled => Self::FeatureDisabled,
             W::TransportUnavailable => Self::TransportUnavailable,
+            W::UnsupportedVariant => Self::RequiresUnicast,
         }
     }
 }

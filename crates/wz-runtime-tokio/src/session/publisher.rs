@@ -299,6 +299,7 @@ impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
         let base = self
             .session
             .actions()
+            .map_err(|_| PublishAliasError::RequiresUnicast)?
             .resolve_outbound_mapping(self.mapping_id)
             .ok_or(PublishAliasError::UnknownMapping(self.mapping_id))?;
         let _effective_keyexpr = match self.inline_suffix.as_deref() {
@@ -343,6 +344,12 @@ pub enum PublishAliasError {
     /// released or reconnecting; Established not re-entered); projected
     /// from the underlying [`PublishError::TransportUnavailable`].
     TransportUnavailable,
+    /// B5b-2b (R311nc) — the aliased publish surface (which resolves the
+    /// unicast outbound keyexpr-mapping table) was used on a session whose
+    /// transport is not unicast. A multicast session has no mapping table;
+    /// the `Session::actions()` projection rejects. No wire bytes were
+    /// emitted.
+    RequiresUnicast,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -364,6 +371,12 @@ impl std::fmt::Display for PublishAliasError {
                  reconnecting); the Push was not emitted — retry after the \
                  session re-establishes"
             ),
+            PublishAliasError::RequiresUnicast => write!(
+                f,
+                "PublishAliasError: aliased publish requires a unicast transport; \
+                 this session holds a multicast transport (no outbound keyexpr- \
+                 mapping table); the Push was not emitted"
+            ),
         }
     }
 }
@@ -375,6 +388,7 @@ impl From<PublishError> for PublishAliasError {
         match e {
             PublishError::ExceedsCapacity => PublishAliasError::ExceedsCapacity,
             PublishError::TransportUnavailable => PublishAliasError::TransportUnavailable,
+            PublishError::RequiresUnicast => PublishAliasError::RequiresUnicast,
         }
     }
 }

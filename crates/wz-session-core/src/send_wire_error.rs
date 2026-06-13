@@ -56,6 +56,32 @@ pub enum SendWireError {
     /// enqueue would otherwise swallow the bytes silently. A no-emit
     /// reject; the caller retries after the session re-establishes.
     TransportUnavailable,
+    /// B5b-2b (R311nc) — the requested operation is not supported on this
+    /// session's TRANSPORT VARIANT. Two honest, structurally-distinct
+    /// conditions funnel here, both meaning "the wire op cannot run on the
+    /// transport this session actually holds":
+    ///
+    /// * a unicast-only operation (query / declare / aliased-publish /
+    ///   batching, anything that needs the per-peer `SessionLinkActions`
+    ///   handshake bundle) was invoked on a MULTICAST session, which has
+    ///   no such bundle — the `Session::actions()` projection returns this;
+    /// * a non-`Push` [`NetworkMessage`](crate::network_message::NetworkMessage)
+    ///   reached the MULTICAST send arm of the
+    ///   `Session::send_network_message` seam — a multicast session
+    ///   originates only `Push` (its reply plane is drive-loop-sink-emitted,
+    ///   not routed through the seam).
+    ///
+    /// Deliberately DISTINCT from `FeatureDisabled` (a build-time codec
+    /// elision — the matching Cargo feature may well be ON here) and from
+    /// `TransportUnavailable` (a unicast link mid-reconnect). The R311na
+    /// review #3b deferral ratified this distinction: a transport-variant
+    /// mismatch must not be conflated with a feature-off no-op, and the
+    /// catch must be an honest reject, never an `unreachable!`/panic.
+    ///
+    /// Variant ordering: appended at end so existing match arms in
+    /// downstream crates surface a non-exhaustive-match warning rather
+    /// than silently rebind a prior variant.
+    UnsupportedVariant,
 }
 
 impl fmt::Display for SendWireError {
@@ -75,6 +101,13 @@ impl fmt::Display for SendWireError {
                 "send_wire: transport not available (link released or \
                  reconnecting; Established not re-entered) — no bytes \
                  emitted; retry after the session re-establishes",
+            ),
+            Self::UnsupportedVariant => f.write_str(
+                "send_wire: operation not supported on this session's \
+                 transport variant (a unicast-only op on a multicast \
+                 session, or a non-Push message on the multicast send \
+                 arm) — no bytes emitted; not a feature-off nor a \
+                 reconnect condition",
             ),
         }
     }

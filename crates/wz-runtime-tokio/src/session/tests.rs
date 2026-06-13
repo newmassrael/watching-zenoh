@@ -29,10 +29,16 @@ use wz_runtime_tokio_test_support::fixture_session_init_params;
 fn mark_session_established(session: &Session) {
     *session
         .actions()
+        .expect("unicast test session")
         .established_at
         .lock()
-        .expect("established_at poisoned in test fixture") =
-        Some(session.actions().clock.now_monotonic_ms());
+        .expect("established_at poisoned in test fixture") = Some(
+        session
+            .actions()
+            .expect("unicast test session")
+            .clock
+            .now_monotonic_ms(),
+    );
 }
 
 /// Convenience constructor that returns a (Session,
@@ -1174,6 +1180,7 @@ fn publish_aliased_auto_resolves_loopback_from_outbound_table() {
     // restating the literal — the table lookup feeds loopback.
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let fired = session
@@ -1208,6 +1215,7 @@ fn publish_aliased_auto_composes_inline_suffix_with_table_base() {
 
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home")
         .expect("hardcoded canonical literal keyexpr");
     let fired = session
@@ -1258,6 +1266,7 @@ fn publish_aliased_auto_returns_unknown_mapping_after_undeclare() {
 
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     // First publish OK.
@@ -1266,7 +1275,10 @@ fn publish_aliased_auto_returns_unknown_mapping_after_undeclare() {
         .expect("first publish succeeds after declare");
 
     // Retract the mapping.
-    session.actions().send_undeclare_kexpr(7);
+    session
+        .actions()
+        .expect("unicast test session")
+        .send_undeclare_kexpr(7);
 
     // Second publish fails typed.
     let err = session
@@ -2453,6 +2465,7 @@ fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
     let (session, driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
 
@@ -2526,6 +2539,7 @@ fn query_aliased_auto_with_inline_suffix_concatenates_for_loopback() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
 
@@ -3019,6 +3033,7 @@ fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
     let (session, driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
 
@@ -3090,6 +3105,7 @@ fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
 
@@ -3135,6 +3151,7 @@ fn querier_aliased_get_twice_allocates_independent_rids() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let qa = session.declare_querier_aliased(
@@ -3158,6 +3175,7 @@ fn querier_aliased_clone_shares_session_and_options() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let qa = session.declare_querier_aliased(
@@ -3198,6 +3216,7 @@ fn querier_aliased_get_matching_status_false_after_declare_with_no_peer() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
@@ -3219,6 +3238,7 @@ fn querier_aliased_get_matching_status_true_when_peer_decl_matches_base_literal(
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
@@ -3246,6 +3266,7 @@ fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     // QuerierAliased with inline_suffix produces effective
@@ -3302,6 +3323,7 @@ fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
@@ -3318,7 +3340,10 @@ fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
     // Local-side retracts the keyexpr mapping — subsequent
     // get_matching_status surfaces UnknownMapping just like
     // QuerierAliased::get does.
-    session.actions().send_undeclare_kexpr(7);
+    session
+        .actions()
+        .expect("unicast test session")
+        .send_undeclare_kexpr(7);
     assert_eq!(
         qa.get_matching_status(),
         Err(QueryAliasError::UnknownMapping(7)),
@@ -3441,6 +3466,7 @@ fn publisher_aliased_put_resolves_loopback_through_outbound_table() {
     let (session, driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
 
@@ -3502,6 +3528,7 @@ fn publisher_aliased_delete_routes_to_del_kind() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "clear/me")
         .expect("hardcoded canonical literal keyexpr");
     let kind_seen: Arc<Mutex<Option<SampleKind>>> = Arc::new(Mutex::new(None));
@@ -3682,6 +3709,7 @@ fn publisher_aliased_get_matching_status_threads_inline_suffix_into_consult() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let pa = session.declare_publisher_aliased(7, Some("/kitchen"), PublishOptions::put());
@@ -3710,6 +3738,7 @@ fn publisher_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let pa = session.declare_publisher_aliased(7, None, PublishOptions::put());
@@ -3723,7 +3752,10 @@ fn publisher_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         pa.get_matching_status(),
         Ok(MatchingStatus { matching: true })
     );
-    session.actions().send_undeclare_kexpr(7);
+    session
+        .actions()
+        .expect("unicast test session")
+        .send_undeclare_kexpr(7);
     assert_eq!(
         pa.get_matching_status(),
         Err(PublishAliasError::UnknownMapping(7)),
@@ -3880,6 +3912,7 @@ fn declare_subscriber_aliased_resolves_literal_at_declare_time() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
 
@@ -3916,6 +3949,7 @@ fn declare_subscriber_aliased_with_inline_suffix_composes_literal() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let sub = session
@@ -3956,6 +3990,7 @@ fn declare_subscriber_aliased_survives_mapping_retract_after_declare() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let fired = Arc::new(AtomicUsize::new(0));
@@ -3967,7 +4002,10 @@ fn declare_subscriber_aliased_survives_mapping_retract_after_declare() {
         .expect("declared mapping resolves");
 
     // Retract the mapping.
-    session.actions().send_undeclare_kexpr(7);
+    session
+        .actions()
+        .expect("unicast test session")
+        .send_undeclare_kexpr(7);
 
     // Publish on the literal — subscriber still fires (already
     // registered against the resolved literal).
@@ -4153,6 +4191,7 @@ fn declare_queryable_aliased_resolves_literal_at_declare_time() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let fired = Arc::new(AtomicUsize::new(0));
@@ -4191,6 +4230,7 @@ fn declare_queryable_aliased_with_inline_suffix_composes_literal() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
     let q = session
@@ -4470,6 +4510,7 @@ fn declare_token_aliased_resolves_literal_at_declare_time() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     let token = session
@@ -4493,6 +4534,7 @@ fn declare_token_aliased_with_inline_suffix_composes_literal() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     let token = session
@@ -4537,6 +4579,7 @@ fn declare_token_aliased_wire_frame_uses_alias_form() {
     // "liveliness/dev7"); first wire frame is this Declare(DeclKexpr).
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     let baseline_frames = driver.frame_count();
@@ -4590,6 +4633,7 @@ fn declare_liveliness_subscriber_aliased_resolves_literal_at_declare_time() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     mark_session_established(&session);
@@ -4630,6 +4674,7 @@ fn declare_liveliness_subscriber_aliased_with_inline_suffix_composes_literal() {
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     mark_session_established(&session);
@@ -4701,7 +4746,12 @@ fn declare_liveliness_subscriber_rolls_back_slot_on_wire_emit_failure() {
     // Flip the pub transport-availability flag off so the next wire emit
     // returns Err(TransportUnavailable) at the F2 gate, before any encode
     // or driver write.
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session
+        .actions()
+        .expect("unicast test session")
+        .transport_available
+        .lock()
+        .unwrap() = false;
     let result = session.declare_liveliness_subscriber(
         "live/**",
         LivelinessSubscriberOptions::default(),
@@ -4733,7 +4783,12 @@ fn liveliness_get_rolls_back_pending_on_wire_emit_failure() {
     // liveliness_get enforces the Established gate; satisfy it, THEN fail
     // the emit at the transport-availability gate.
     mark_session_established(&session);
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session
+        .actions()
+        .expect("unicast test session")
+        .transport_available
+        .lock()
+        .unwrap() = false;
     let result = session.liveliness_get("live/**", LivelinessGetOptions::default(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
@@ -4759,7 +4814,12 @@ fn liveliness_get_rolls_back_pending_on_wire_emit_failure() {
 #[test]
 fn query_rolls_back_pending_on_wire_emit_failure() {
     let (session, driver) = build_session();
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session
+        .actions()
+        .expect("unicast test session")
+        .transport_available
+        .lock()
+        .unwrap() = false;
     let result = session.query("home/temp", QueryOptions::get(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
@@ -4779,7 +4839,12 @@ fn query_rolls_back_pending_on_wire_emit_failure() {
 #[test]
 fn query_aliased_rolls_back_pending_on_wire_emit_failure() {
     let (session, driver) = build_session();
-    *session.actions().transport_available.lock().unwrap() = false;
+    *session
+        .actions()
+        .expect("unicast test session")
+        .transport_available
+        .lock()
+        .unwrap() = false;
     let result = session.query_aliased(1, None, "home/temp", QueryOptions::get(), |_| {}, |_| {});
     assert!(result.is_err(), "wire-emit failure must surface as Err");
     assert_eq!(
@@ -4808,6 +4873,7 @@ fn declare_liveliness_subscriber_aliased_wire_frame_uses_alias_form() {
     // wire frame is this Declare(DeclKexpr).
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     mark_session_established(&session);
@@ -4860,6 +4926,7 @@ fn declare_liveliness_subscriber_aliased_survives_mapping_retract_after_declare(
     let (session, _driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     mark_session_established(&session);
@@ -4874,7 +4941,10 @@ fn declare_liveliness_subscriber_aliased_survives_mapping_retract_after_declare(
     let interest_id = sub.interest_id();
 
     // Retract the mapping.
-    session.actions().send_undeclare_kexpr(7);
+    session
+        .actions()
+        .expect("unicast test session")
+        .send_undeclare_kexpr(7);
 
     // Slot still keyed against the resolved literal.
     assert_eq!(
@@ -4908,6 +4978,7 @@ fn declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wir
     let (session, driver) = build_session();
     session
         .actions()
+        .expect("unicast test session")
         .send_declare_keyexpr(7, "liveliness/dev7")
         .expect("hardcoded canonical literal keyexpr");
     let baseline_frames = driver.frame_count();
@@ -4978,7 +5049,10 @@ fn is_established_predicate_flips_after_record_established_at() {
         "freshly-built session is pre-Established (no record_established_at fired)",
     );
     assert!(
-        !session.actions().is_established(),
+        !session
+            .actions()
+            .expect("unicast test session")
+            .is_established(),
         "Session::is_established proxy reads the same source",
     );
     mark_session_established(&session);
@@ -4987,7 +5061,10 @@ fn is_established_predicate_flips_after_record_established_at() {
         "post record_established_at, is_established() is true",
     );
     assert!(
-        session.actions().is_established(),
+        session
+            .actions()
+            .expect("unicast test session")
+            .is_established(),
         "actions-layer predicate flips in lockstep",
     );
 }
@@ -5018,9 +5095,18 @@ fn liveliness_token_id_counter_independent_of_request_id() {
     // SessionLinkActions::next_outbound_token_id.
     let (session, _driver) = build_session();
     // Burn three request ids first.
-    let r0 = session.actions().alloc_next_request_id();
-    let r1 = session.actions().alloc_next_request_id();
-    let r2 = session.actions().alloc_next_request_id();
+    let r0 = session
+        .actions()
+        .expect("unicast test session")
+        .alloc_next_request_id();
+    let r1 = session
+        .actions()
+        .expect("unicast test session")
+        .alloc_next_request_id();
+    let r2 = session
+        .actions()
+        .expect("unicast test session")
+        .alloc_next_request_id();
     assert_eq!((r0, r1, r2), (0, 1, 2));
     // Token allocation still starts from 0.
     let t = session
@@ -6157,7 +6243,7 @@ fn queryable_staged_before_undeclare_suppressed_but_final_still_sent() {
     // combined flush (the SSOT path stages it as a job instead).
     {
         let mut obs = session.observer().lock().unwrap();
-        obs.flush_pending(&*session.actions().clone());
+        obs.flush_pending(&*session.actions().expect("unicast test session").clone());
     }
     assert_eq!(fired.load(Ordering::SeqCst), 0, "handler suppressed");
     assert_eq!(

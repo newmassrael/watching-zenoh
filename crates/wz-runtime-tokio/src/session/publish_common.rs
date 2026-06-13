@@ -289,6 +289,16 @@ pub enum PublishError {
     /// bytes were emitted; retry after the session re-establishes
     /// (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity).
     TransportUnavailable,
+    /// B5b-2b (R311nc) — an ALIASED publish (`publish_aliased{,_auto}`,
+    /// which resolves the unicast outbound keyexpr-mapping table) was
+    /// attempted on a session whose transport is not unicast. A multicast
+    /// session has no outbound mapping table; the `Session::actions()`
+    /// projection rejects with `SendWireError::UnsupportedVariant`,
+    /// surfaced here. No wire bytes were emitted. The transport-agnostic
+    /// literal [`Session::publish`](crate::session::Session::publish) does
+    /// NOT raise this — it routes through the send seam and runs on either
+    /// transport; only the unicast-mapping aliased path does.
+    RequiresUnicast,
 }
 
 impl std::fmt::Display for PublishError {
@@ -304,6 +314,12 @@ impl std::fmt::Display for PublishError {
                 "PublishError: transport not available (link released or \
                  reconnecting); the Push was not emitted — retry after the \
                  session re-establishes"
+            ),
+            PublishError::RequiresUnicast => write!(
+                f,
+                "PublishError: aliased publish requires a unicast transport \
+                 (no outbound keyexpr-mapping table on a multicast session); \
+                 the Push was not emitted"
             ),
         }
     }
@@ -325,6 +341,7 @@ impl From<SendWireError> for PublishError {
                 unreachable!("publish remote leg is codec-push-gated")
             }
             SendWireError::TransportUnavailable => PublishError::TransportUnavailable,
+            SendWireError::UnsupportedVariant => PublishError::RequiresUnicast,
         }
     }
 }

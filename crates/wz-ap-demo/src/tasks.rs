@@ -178,7 +178,17 @@ pub(crate) async fn declare_task<T>(
 ) where
     T: TimeSource + Send + 'static,
 {
-    let actions = session.actions();
+    // B5b-2b — these demo tasks drive the UNICAST action surface
+    // (is_established gate + send_declare_keyexpr preamble); a multicast
+    // session has no such bundle, so skip honestly (no panic) rather than
+    // unwrap. The demo always wires unicast sessions, so this never fires.
+    let Ok(actions) = session.actions() else {
+        log::warn!(
+            "wz-ap-demo: task requires a unicast session (multicast has no \
+             SessionLinkActions bundle); skipping"
+        );
+        return;
+    };
     let deadline_ms = clock.now_monotonic_ms() + DECLARE_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.is_established() {
@@ -314,7 +324,17 @@ pub(crate) async fn liveliness_get_task<T>(session: Session, keyexpr: String, cl
 where
     T: TimeSource + Send + 'static,
 {
-    let actions = session.actions();
+    // B5b-2b — these demo tasks drive the UNICAST action surface
+    // (is_established gate + send_declare_keyexpr preamble); a multicast
+    // session has no such bundle, so skip honestly (no panic) rather than
+    // unwrap. The demo always wires unicast sessions, so this never fires.
+    let Ok(actions) = session.actions() else {
+        log::warn!(
+            "wz-ap-demo: task requires a unicast session (multicast has no \
+             SessionLinkActions bundle); skipping"
+        );
+        return;
+    };
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.is_established() {
@@ -376,7 +396,17 @@ pub(crate) async fn publisher_task<T>(
     // through `Session::publish` / `publish_aliased_auto` which keep
     // the loopback branch live so a co-located subscriber on the
     // publish keyexpr fires in-process without crossing the wire.
-    let actions = session.actions();
+    // B5b-2b — these demo tasks drive the UNICAST action surface
+    // (is_established gate + send_declare_keyexpr preamble); a multicast
+    // session has no such bundle, so skip honestly (no panic) rather than
+    // unwrap. The demo always wires unicast sessions, so this never fires.
+    let Ok(actions) = session.actions() else {
+        log::warn!(
+            "wz-ap-demo: task requires a unicast session (multicast has no \
+             SessionLinkActions bundle); skipping"
+        );
+        return;
+    };
 
     // ── Step 1: wait for Established. Both acceptor and initiator
     //           reach Established on the same `record_established_at`
@@ -546,6 +576,16 @@ pub(crate) async fn publisher_task<T>(
             // skip so the burst still terminates — the next iterations
             // succeed once the supervisor re-establishes.
             Err(e @ PublishAliasError::TransportUnavailable) => {
+                log::warn!(
+                    "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
+                     skipping this iteration"
+                );
+            }
+            // B5b-2b — an aliased publish on a non-unicast transport rejects
+            // typed. publisher_task guards unicast at its top (the let-else
+            // on session.actions()), so this is defensively unreachable here;
+            // logged + skipped uniformly with the other reject arms.
+            Err(e @ PublishAliasError::RequiresUnicast) => {
                 log::warn!(
                     "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
                      skipping this iteration"

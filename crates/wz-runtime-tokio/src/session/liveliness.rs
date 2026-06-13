@@ -249,7 +249,13 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
                 /*reliable=*/ true,
                 /*express=*/ false,
             );
-            self.session.actions().prune_token_declaration(self.id);
+            // B5b-2b — best-effort teardown (mirrors the ignored
+            // send_network_message above): a multicast session has no unicast
+            // token-declaration registry to prune, so skip honestly when
+            // actions() is not unicast.
+            if let Ok(actions) = self.session.actions() {
+                actions.prune_token_declaration(self.id);
+            }
         }
         // R311mw — a transport-unicast build without `declare-undeclare`
         // cannot emit an UndeclToken (the seam block above is cfg'd out) and
@@ -325,6 +331,13 @@ pub enum LivelinessAliasError {
     /// DECLARE was not emitted; re-declare after the session
     /// re-establishes (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
     TransportUnavailable,
+    /// B5b-2b (R311nc) — a liveliness-token declare was attempted on a
+    /// session whose transport is not unicast. The declare family needs
+    /// the per-peer `SessionLinkActions` handshake bundle, which a
+    /// multicast session has no analogue of; the send seam rejects with
+    /// `SendWireError::UnsupportedVariant`, projected here. No wire bytes
+    /// were emitted.
+    RequiresUnicast,
 }
 
 impl std::fmt::Display for LivelinessAliasError {
@@ -356,6 +369,12 @@ impl std::fmt::Display for LivelinessAliasError {
                  or reconnecting); the DECLARE was not emitted — re-declare \
                  after the session re-establishes"
             ),
+            LivelinessAliasError::RequiresUnicast => write!(
+                f,
+                "LivelinessAliasError: liveliness-token declare requires a \
+                 unicast transport; this session holds a multicast transport \
+                 (no declare handshake bundle); the DECLARE was not emitted"
+            ),
         }
     }
 }
@@ -367,7 +386,8 @@ impl std::error::Error for LivelinessAliasError {
             LivelinessAliasError::UnknownMapping(_)
             | LivelinessAliasError::FeatureDisabled
             | LivelinessAliasError::ExceedsCapacity
-            | LivelinessAliasError::TransportUnavailable => None,
+            | LivelinessAliasError::TransportUnavailable
+            | LivelinessAliasError::RequiresUnicast => None,
         }
     }
 }
@@ -675,7 +695,13 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
                 /*reliable=*/ true,
                 /*express=*/ false,
             );
-            self.session.actions().prune_interest(self.interest_id);
+            // B5b-2b — best-effort teardown (mirrors the ignored
+            // send_network_message above): a multicast session has no unicast
+            // interest registry to prune, so skip honestly when actions() is
+            // not unicast.
+            if let Ok(actions) = self.session.actions() {
+                actions.prune_interest(self.interest_id);
+            }
         }
         // R311mx — when `declare-interest` is off (⟹ `liveliness-subscriber`
         // off, so the block above is also cfg'd out) nothing else reads
@@ -768,6 +794,16 @@ pub enum LivelinessSubscriberAliasError {
     /// wire bytes were emitted. Semantic projection of the codec-layer
     /// reject.
     ExceedsCapacity,
+    /// B5b-2b (R311nc) — an aliased liveliness-subscriber declare was
+    /// attempted on a session whose transport is not unicast. The interest
+    /// declare path needs the per-peer `SessionLinkActions` handshake
+    /// bundle (and the outbound mapping table the alias resolves against),
+    /// which a multicast session has no analogue of; the
+    /// `Session::actions()` projection rejects with
+    /// `SendWireError::UnsupportedVariant`. Distinct from `NotEstablished`
+    /// (a unicast session still mid-handshake — that one resolves; this
+    /// one never will on multicast). No wire bytes were emitted.
+    RequiresUnicast,
 }
 
 impl std::fmt::Display for LivelinessSubscriberAliasError {
@@ -795,6 +831,13 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                 "LivelinessSubscriberAliasError: keyexpr exceeded the declared codec \
                  capacity (MAX_KEYEXPR_BYTES); the Interest was not emitted"
             ),
+            LivelinessSubscriberAliasError::RequiresUnicast => write!(
+                f,
+                "LivelinessSubscriberAliasError: aliased liveliness-subscriber declare \
+                 requires a unicast transport; this session holds a multicast transport \
+                 (no interest handshake bundle / outbound mapping table); the Interest \
+                 was not emitted"
+            ),
         }
     }
 }
@@ -809,6 +852,7 @@ impl From<SendWireError> for LivelinessSubscriberAliasError {
             // F2 — the reconnect window IS a not-yet-(re)Established
             // session; the existing variant names the same contract.
             SendWireError::TransportUnavailable => LivelinessSubscriberAliasError::NotEstablished,
+            SendWireError::UnsupportedVariant => LivelinessSubscriberAliasError::RequiresUnicast,
         }
     }
 }

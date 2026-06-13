@@ -224,6 +224,11 @@ pub enum SubscribeAliasError {
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_subscriber_aliased call).
     UnknownMapping(u64),
+    /// B5b-2b (R311nc) — the aliased subscribe resolves the unicast
+    /// outbound keyexpr-mapping table, which a multicast session has no
+    /// analogue of; the `Session::actions()` projection rejects. No
+    /// subscriber was declared.
+    RequiresUnicast,
 }
 
 impl std::fmt::Display for SubscribeAliasError {
@@ -233,6 +238,12 @@ impl std::fmt::Display for SubscribeAliasError {
                 f,
                 "SubscribeAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+            SubscribeAliasError::RequiresUnicast => write!(
+                f,
+                "SubscribeAliasError: aliased subscribe requires a unicast transport; \
+                 this session holds a multicast transport (no outbound keyexpr-mapping \
+                 table); no subscriber was declared"
             ),
         }
     }
