@@ -35874,6 +35874,50 @@
         "B3 covers literal Put publish. Open Level B carries: B4 (multicast declare/subscribe - handle types become transport-agnostic + local loopback) and B5 (both-build unification: drop not(transport-unicast), runtime-transport-match operations, retire the standalone loop as the public API). Multicast publish Del/aliased/metadata/reliability options are incremental follow-ons."
       ]
     },
+    "Round 311mp": {
+      "decision_summary": "B4 (Level B): the multicast Session gains its subscriber surface - lift Session::declare_subscriber + deferred_sample_sink into the ungated transport-agnostic block, and add the multicast Session::publish local-loopback leg (pubsub-allow-loop) that mirrors the unicast publish loopback and returns the fire count.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: lifted declare_subscriber (non-aliased) from the transport-unicast-gated impl block into the ungated transport-agnostic block - it reads only self.fires (via deferred_sample_sink) + the observer subscriber registry, never self.actions(), so a multicast-only Session now declares subscribers through the same surface. declare_subscriber_aliased stays unicast (it resolves through the unicast outbound mapping table, which a connectionless multicast session has no analogue of).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: added the multicast Session::publish local-loopback leg (pubsub-allow-loop-gated, inside all(transport-multicast, not(transport-unicast), codec-push)) - after enqueuing the remote MulticastTxItem::Push it builds a Put loopback Sample (Sample::new_put), local_publishes to in-process subscribers, and drains the deferred-fire queue on the caller thread (R311lh/R311lj discipline). Return type changed Result<(), CodecError> -> Result<usize, CodecError> (the loopback fire count, unicast publish parity).",
+        "crates/wz-runtime-tokio/src/session/subscriber.rs: ungated the deferred_sample_sink impl block (was transport-unicast) - its only caller declare_subscriber is now transport-agnostic, and the helper touches only self.fires + crate::sample::Sample::from_view (both unconditional), so it compiles in every transport configuration. The Subscriber handle type was already transport-agnostic (no transport payload).",
+        "crates/wz-runtime-tokio-multicast-tests/: added the B4 loopback test (declare_subscriber on a multicast Session + publish fires the local subscriber via loopback, returns the count, while the remote leg still enqueues the Put) and pubsub-allow-loop to the dev-dep features."
+      ],
+      "verification_bullets": [
+        "4-config build OK: unicast-only (default), multicast-join-only (bare transport-multicast), multicast-data (transport-multicast,codec-push,pubsub-put - exercises the #[cfg(not(pubsub-allow-loop))] Ok(0) arm), multicast-udp-deploy. Facade builds for all 3 C4e multicast-without-unicast subsets pass.",
+        "clippy --all-targets -D warnings clean on default-unicast + all C4e subsets + the isolated multicast test crate; fmt clean.",
+        "Layer C1s isolated multicast test crate: 2 tests pass (B3 enqueue + the new B4 loopback). cargo test -p wz-runtime-tokio: lib 257 + all integration binaries pass, 0 failed (declare_subscriber move regression-free).",
+        "Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B4 covers declare_subscriber transport-agnostic + multicast publish local loopback. Open Level B carry: B5 (both-build unification - drop the not(transport-unicast) gate on the Multicast variant + the multicast publish, make Session operations runtime-transport-match, share the drive loop observer with the Session + drain its fires after dispatch so multicast WIRE-RX reaches Session-declared deferred subscribers, and retire the standalone drive_multicast_session loop as the public API = actions() dismantling).",
+        "Incremental multicast publish follow-ons (mirroring how the unicast publish grew at R229+): PublishOptions (Locality/kind/reliability), at which point build_loopback_sample moves transport-agnostic and is shared; Del; aliased; metadata fields."
+      ],
+      "publishable_decision_summary": "B4 (Level B): the multicast Session gains its subscriber surface - lift Session::declare_subscriber + deferred_sample_sink into the ungated transport-agnostic block, and add the multicast Session::publish local-loopback leg (pubsub-allow-loop) that mirrors the unicast publish loopback and returns the fire count.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: lifted declare_subscriber (non-aliased) from the transport-unicast-gated impl block into the ungated transport-agnostic block - it reads only self.fires (via deferred_sample_sink) + the observer subscriber registry, never self.actions(), so a multicast-only Session now declares subscribers through the same surface. declare_subscriber_aliased stays unicast (it resolves through the unicast outbound mapping table, which a connectionless multicast session has no analogue of).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: added the multicast Session::publish local-loopback leg (pubsub-allow-loop-gated, inside all(transport-multicast, not(transport-unicast), codec-push)) - after enqueuing the remote MulticastTxItem::Push it builds a Put loopback Sample (Sample::new_put), local_publishes to in-process subscribers, and drains the deferred-fire queue on the caller thread (R311lh/R311lj discipline). Return type changed Result<(), CodecError> -> Result<usize, CodecError> (the loopback fire count, unicast publish parity).",
+        "crates/wz-runtime-tokio/src/session/subscriber.rs: ungated the deferred_sample_sink impl block (was transport-unicast) - its only caller declare_subscriber is now transport-agnostic, and the helper touches only self.fires + crate::sample::Sample::from_view (both unconditional), so it compiles in every transport configuration. The Subscriber handle type was already transport-agnostic (no transport payload).",
+        "crates/wz-runtime-tokio-multicast-tests/: added the B4 loopback test (declare_subscriber on a multicast Session + publish fires the local subscriber via loopback, returns the count, while the remote leg still enqueues the Put) and pubsub-allow-loop to the dev-dep features."
+      ],
+      "publishable_verification_bullets": [
+        "4-config build OK: unicast-only (default), multicast-join-only (bare transport-multicast), multicast-data (transport-multicast,codec-push,pubsub-put - exercises the #[cfg(not(pubsub-allow-loop))] Ok(0) arm), multicast-udp-deploy. Facade builds for all 3 C4e multicast-without-unicast subsets pass.",
+        "clippy --all-targets -D warnings clean on default-unicast + all C4e subsets + the isolated multicast test crate; fmt clean.",
+        "Layer C1s isolated multicast test crate: 2 tests pass (B3 enqueue + the new B4 loopback). cargo test -p wz-runtime-tokio: lib 257 + all integration binaries pass, 0 failed (declare_subscriber move regression-free).",
+        "Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B4 covers declare_subscriber transport-agnostic + multicast publish local loopback. Open Level B carry: B5 (both-build unification - drop the not(transport-unicast) gate on the Multicast variant + the multicast publish, make Session operations runtime-transport-match, share the drive loop observer with the Session + drain its fires after dispatch so multicast WIRE-RX reaches Session-declared deferred subscribers, and retire the standalone drive_multicast_session loop as the public API = actions() dismantling).",
+        "Incremental multicast publish follow-ons (mirroring how the unicast publish grew at R229+): PublishOptions (Locality/kind/reliability), at which point build_loopback_sample moves transport-agnostic and is shared; Del; aliased; metadata fields."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
@@ -42202,5 +42246,5 @@
   "entities": {},
   "predicates": {},
   "narrative_facts": {},
-  "schema_version": 20
+  "schema_version": 21
 }
