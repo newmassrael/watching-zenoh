@@ -559,8 +559,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     ///
     /// Origination on the unicast arm is Push (publish) + Request (z_get, added
     /// R311mu / B5b-2b-2) + Declare (liveliness-token declare/undeclare, added
-    /// R311mw / B5b-2b-3); the remaining outbound variants (Response /
-    /// Interest) migrate as their operations move onto the seam. The multicast
+    /// R311mw / B5b-2b-3) + Interest (liveliness subscriber/get/final, added
+    /// R311mx / B5b-2b-4); the remaining outbound variant (Response) migrates
+    /// as its operations move onto the seam. The multicast
     /// arm stays Push-only and exposes only
     /// `publish` (the reply messages are emitted by the drive-loop
     /// [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink), not
@@ -588,7 +589,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             any(
                 feature = "codec-push",
                 feature = "codec-request",
-                feature = "codec-declare"
+                feature = "codec-declare",
+                feature = "declare-interest"
             )
         ),
         all(
@@ -2716,18 +2718,48 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // suppression order as `undeclare`), drop the orphaned slot,
             // and surface the error. No Interest(Final) wire retract —
             // nothing was ever declared to the peer.
-            if let Err(e) = self.actions().send_interest_liveliness_subscriber(
+            // R311mx (B5b-2b-4) — build the liveliness subscriber Interest and
+            // route the emit through the [`Self::send_network_message`] send
+            // seam instead of
+            // `self.actions().send_interest_liveliness_subscriber` — the
+            // Interest family lifted onto the seam after the Push / Request /
+            // Declare families. The interest-id alloc + slot register (above) +
+            // the Finding-B rollback (below) + the reconnect-replay cache stay
+            // session-level; the seam emits the wire Interest only. reliable=true
+            // / express=false match the prior wrapper (dispatch_interest
+            // reliable, no flush); the builder's CodecError maps to
+            // SendWireError::Codec, and both fold into the same
+            // `SendWireError -> LivelinessSubscriberAliasError` projection the
+            // prior `.into()` used.
+            let emit = wz_session_core::interest_build::build_interest_liveliness_subscriber(
                 interest_id,
                 options.history,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
-            ) {
+            )
+            .map_err(SendWireError::Codec)
+            .and_then(|interest| {
+                self.send_network_message(
+                    wz_session_core::network_message::NetworkMessage::Interest(interest),
+                    /*reliable=*/ true,
+                    /*express=*/ false,
+                )
+            });
+            if let Err(e) = emit {
                 cell.kill();
                 R::with_mutex_mut(&self.observer, |observer| {
                     observer.liveliness_subscribers.unregister(interest_id);
                 });
                 return Err(e.into());
             }
+            // A4 — record for post-reconnect replay; session-state bookkeeping
+            // AROUND the seam emit.
+            self.actions().cache_subscriber_interest(
+                interest_id,
+                options.history,
+                /*keyexpr_mapping_id=*/ 0,
+                Some(&keyexpr_string),
+            );
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -2871,18 +2903,40 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // not survive as an orphan. Kill the cell (suppress a sample
             // staged in the register->send window), drop the slot, surface
             // the error; no Interest(Final) retract (nothing was declared).
-            if let Err(e) = self.actions().send_interest_liveliness_subscriber(
+            // R311mx (B5b-2b-4) — aliased liveliness subscriber Interest onto
+            // the send seam; same shape as `declare_liveliness_subscriber`,
+            // routed by (mapping_id, inline_suffix) instead of (0, literal). The
+            // wire frame carries the alias form; the slot register + rollback +
+            // reconnect-replay cache stay session-level.
+            let emit = wz_session_core::interest_build::build_interest_liveliness_subscriber(
                 interest_id,
                 options.history,
                 mapping_id,
                 inline_suffix,
-            ) {
+            )
+            .map_err(SendWireError::Codec)
+            .and_then(|interest| {
+                self.send_network_message(
+                    wz_session_core::network_message::NetworkMessage::Interest(interest),
+                    /*reliable=*/ true,
+                    /*express=*/ false,
+                )
+            });
+            if let Err(e) = emit {
                 cell.kill();
                 R::with_mutex_mut(&self.observer, |observer| {
                     observer.liveliness_subscribers.unregister(interest_id);
                 });
                 return Err(e.into());
             }
+            // A4 — record for post-reconnect replay; session-state bookkeeping
+            // AROUND the seam emit.
+            self.actions().cache_subscriber_interest(
+                interest_id,
+                options.history,
+                mapping_id,
+                inline_suffix,
+            );
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -2990,16 +3044,39 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // deferred sink's cell). Without this the orphaned entry leaks
             // — or, with a deadline, fires a spurious sweep on_final for a
             // get the caller got no success from.
-            if let Err(e) = self.actions().send_interest_liveliness_get(
+            // R311mx (B5b-2b-4) — build the one-shot CURRENT liveliness get
+            // Interest and route the emit through the
+            // [`Self::send_network_message`] send seam instead of
+            // `self.actions().send_interest_liveliness_get`. The interest-id
+            // alloc + pending-get register (above) + the unregister-only
+            // rollback (below) + the reconnect-replay cache stay session-level;
+            // the seam emits the wire Interest only.
+            let emit = wz_session_core::interest_build::build_interest_liveliness_get(
                 interest_id,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
-            ) {
+            )
+            .map_err(SendWireError::Codec)
+            .and_then(|interest| {
+                self.send_network_message(
+                    wz_session_core::network_message::NetworkMessage::Interest(interest),
+                    /*reliable=*/ true,
+                    /*express=*/ false,
+                )
+            });
+            if let Err(e) = emit {
                 R::with_mutex_mut(&self.observer, |observer| {
                     observer.liveliness_gets.unregister(interest_id);
                 });
                 return Err(e.into());
             }
+            // A4 — record for post-reconnect replay; session-state bookkeeping
+            // AROUND the seam emit.
+            self.actions().cache_get_interest(
+                interest_id,
+                /*keyexpr_mapping_id=*/ 0,
+                Some(&keyexpr_string),
+            );
             Ok(())
         }
         #[cfg(not(feature = "liveliness-get"))]

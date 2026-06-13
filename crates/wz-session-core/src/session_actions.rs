@@ -1459,17 +1459,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (B5b-2b-2) added the Request arm (the z_get initiator path; a Query
     /// carries no express window). R311mw (B5b-2b-3) added the Declare arm (the
     /// liveliness-token declare / undeclare path; a Declare carries no express
-    /// window either). The remaining outbound variants (Response / Interest)
-    /// migrate as their operations move onto the seam; an inbound-only or
-    /// not-yet-migrated variant returns [`SendWireError::FeatureDisabled`] (an
-    /// honest no-emit reject, never a panic) — symmetric with the multicast
-    /// arm. The fn gate widens to `any(codec-push, codec-request, codec-declare)`
-    /// so a query-only (codec-request without codec-push) or liveliness-only
-    /// (codec-declare without either) build still carries the seam.
+    /// window either). R311mx (B5b-2b-4) added the Interest arm (the liveliness
+    /// subscriber / get / final path; an Interest carries no express window
+    /// either). The remaining outbound variant (Response) migrates as its
+    /// operations move onto the seam; an inbound-only or not-yet-migrated
+    /// variant returns [`SendWireError::FeatureDisabled`] (an honest no-emit
+    /// reject, never a panic) — symmetric with the multicast arm. The fn gate
+    /// widens to `any(codec-push, codec-request, codec-declare, declare-interest)`
+    /// so a query-only (codec-request without codec-push), liveliness-token-only
+    /// (codec-declare without either), or interest-only (declare-interest
+    /// without any codec-*) build still carries the seam. NOTE: Interest is the
+    /// unconditional `NetworkMessage` variant (no `codec-interest` feature
+    /// exists), so the Interest arm + this gate disjunct key off
+    /// `declare-interest`, not a `codec-*` feature.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
-        feature = "codec-declare"
+        feature = "codec-declare",
+        feature = "declare-interest"
     ))]
     pub fn send_network_message(
         &self,
@@ -1508,22 +1515,54 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // window — `dispatch_declare` mints the SN, frames, and
             // batch-absorbs reliably, parity with the prior
             // `send_declare_token` / `send_undeclare_token` (which dispatched
-            // reliable with no flush).
-            #[cfg(feature = "codec-declare")]
+            // reliable with no flush). R311mx — gated on the SAME declare-*
+            // origination union as `dispatch_declare` (not bare `codec-declare`):
+            // the arm exists exactly where it can dispatch, so a build that turns
+            // `codec-declare` on with no origination feature routes a Declare to
+            // the no-emit catch arm instead of referencing an absent dispatch.
+            #[cfg(any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-final",
+                feature = "liveliness-token"
+            ))]
             NetworkMessage::Declare(declare) => {
                 let _ = express;
                 self.dispatch_declare(*declare, reliable)
             }
-            // Not yet routed through the seam (or inbound-only). Honest no-emit
-            // reject, never a panic — symmetric with the multicast arm.
-            _ => {
+            // Interest arm (R311mx, B5b-2b-4): the liveliness subscriber /
+            // get / final path. An Interest carries no express batch window —
+            // `dispatch_interest` mints the SN, frames, and batch-absorbs
+            // reliably, parity with the prior `send_interest_liveliness_*` /
+            // `send_interest_final` (which dispatched reliable with no flush).
+            // Interest is the unconditional `NetworkMessage` variant, so this
+            // arm gates on `declare-interest` (the feature that authors the
+            // liveliness interest path), not a `codec-*` feature.
+            #[cfg(feature = "declare-interest")]
+            NetworkMessage::Interest(interest) => {
                 let _ = express;
+                self.dispatch_interest(interest, reliable)
+            }
+            // Not yet routed through the seam (or inbound-only). Honest no-emit
+            // reject, never a panic — symmetric with the multicast arm. The
+            // `reliable` discard keeps the param used when this is the only arm
+            // present (e.g. a `codec-declare`-on build with no origination
+            // feature, where every typed arm is cfg'd out).
+            _ => {
+                let _ = (express, reliable);
                 Err(SendWireError::FeatureDisabled)
             }
         }
     }
 
-    /// See [`Self::dispatch_push`].
+    /// See [`Self::dispatch_push`]. Gated on the declare-* origination union
+    /// (the features whose senders actually emit a `Declare`); the R311mx
+    /// send-seam Declare arm carries the SAME gate so the arm exists exactly
+    /// where `dispatch_declare` does (a build that turns `codec-declare` on
+    /// without any origination feature — e.g. `declare-interest` alone — emits
+    /// no `Declare`, so the seam routes it to the no-emit catch arm instead).
     #[cfg(any(
         feature = "declare-keyexpr",
         feature = "declare-subscriber",
@@ -2625,13 +2664,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A4 — record for post-reconnect replay (pico caches the
             // liveliness Interest via `_z_send_declare`,
             // `net/liveliness.c:209`).
-            #[cfg(feature = "session-reconnect")]
-            self.cache_declaration(CachedDeclaration::LivelinessSubscriberInterest {
+            self.cache_subscriber_interest(
                 interest_id,
                 history,
-                mapping_id: keyexpr_mapping_id,
-                suffix: keyexpr_suffix.map(ToString::to_string),
-            });
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            );
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -2639,6 +2677,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = (interest_id, history, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendWireError::FeatureDisabled)
         }
+    }
+
+    /// R311mw/R311mx — append the post-emit reconnect-replay cache entry for a
+    /// liveliness subscriber Interest. The session-level counterpart to the
+    /// `Session::declare_liveliness_subscriber` seam emit — shared by the
+    /// `send_interest_liveliness_subscriber` wrapper and the seam-routed
+    /// declare so the cache is authored once. Signature-stable: a no-op without
+    /// `session-reconnect` per R311g1, mirroring
+    /// [`Self::cache_token_declaration`].
+    #[cfg(feature = "declare-interest")]
+    pub fn cache_subscriber_interest(
+        &self,
+        interest_id: u64,
+        history: bool,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        #[cfg(feature = "session-reconnect")]
+        self.cache_declaration(CachedDeclaration::LivelinessSubscriberInterest {
+            interest_id,
+            history,
+            mapping_id: keyexpr_mapping_id,
+            suffix: keyexpr_suffix.map(ToString::to_string),
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = (interest_id, history, keyexpr_mapping_id, keyexpr_suffix);
     }
 
     /// liveliness-get — encode + dispatch a one-shot CURRENT liveliness
@@ -2676,12 +2740,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // `net/liveliness.c:355`; never pruned there either — the
             // post-reconnect replay is a harmless re-snapshot whose
             // replies find no pending query).
-            #[cfg(feature = "session-reconnect")]
-            self.cache_declaration(CachedDeclaration::LivelinessGetInterest {
-                interest_id,
-                mapping_id: keyexpr_mapping_id,
-                suffix: keyexpr_suffix.map(ToString::to_string),
-            });
+            self.cache_get_interest(interest_id, keyexpr_mapping_id, keyexpr_suffix);
             Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
@@ -2689,6 +2748,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = (interest_id, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendWireError::FeatureDisabled)
         }
+    }
+
+    /// R311mw/R311mx — append the post-emit reconnect-replay cache entry for a
+    /// one-shot CURRENT liveliness get Interest. The session-level counterpart
+    /// to the `Session::liveliness_get` seam emit — shared by the
+    /// `send_interest_liveliness_get` wrapper and the seam-routed get.
+    /// Signature-stable: a no-op without `session-reconnect` per R311g1,
+    /// mirroring [`Self::cache_token_declaration`]. The matching drop is
+    /// [`Self::prune_liveliness_get_interest`] (registry-fed at get
+    /// termination), NOT an undeclare-emit prune.
+    #[cfg(feature = "declare-interest")]
+    pub fn cache_get_interest(
+        &self,
+        interest_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        #[cfg(feature = "session-reconnect")]
+        self.cache_declaration(CachedDeclaration::LivelinessGetInterest {
+            interest_id,
+            mapping_id: keyexpr_mapping_id,
+            suffix: keyexpr_suffix.map(ToString::to_string),
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = (interest_id, keyexpr_mapping_id, keyexpr_suffix);
     }
 
     /// R279 — encode + dispatch an `Interest(Final)` (no C, no F)
@@ -2720,14 +2804,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // F2 — this surface has no error channel; a transport-down
             // reject drops the emit exactly as the dead link would.
             let _ = self.dispatch_interest(interest, /*reliable=*/ true);
-            // A4 — drop the matching replay entry. pico's interest prune
-            // filter matches any cached `_Z_N_INTEREST` by `_id`
-            // (`_z_cache_declaration_undeclare_filter_interest`), so both
-            // the subscriber and get Interest forms prune here.
-            #[cfg(feature = "session-reconnect")]
-            self.prune_declaration(|entry| entry.interest_id() == Some(interest_id));
+            // A4 — drop the matching replay entry.
+            self.prune_interest(interest_id);
         }
         #[cfg(not(feature = "declare-interest"))]
+        let _ = interest_id;
+    }
+
+    /// R311mx — drop the post-emit reconnect-replay cache entry for a
+    /// terminated liveliness Interest (first-match; pico's interest prune
+    /// filter matches any cached `_Z_N_INTEREST` by `_id` —
+    /// `_z_cache_declaration_undeclare_filter_interest` — so both the
+    /// subscriber and get Interest forms prune here). The session-level
+    /// counterpart to the `LivelinessSubscriber` teardown seam emit — shared
+    /// by the `send_interest_final` wrapper and the seam-routed teardown.
+    /// Signature-stable: a no-op without `session-reconnect` per R311g1,
+    /// mirroring [`Self::prune_token_declaration`].
+    #[cfg(feature = "declare-interest")]
+    pub fn prune_interest(&self, interest_id: u64) {
+        #[cfg(feature = "session-reconnect")]
+        self.prune_declaration(|entry| entry.interest_id() == Some(interest_id));
+        #[cfg(not(feature = "session-reconnect"))]
         let _ = interest_id;
     }
 

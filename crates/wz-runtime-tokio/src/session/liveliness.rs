@@ -607,7 +607,34 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
                 observer.liveliness_subscribers.unregister(self.interest_id);
             });
         }
-        self.session.actions().send_interest_final(self.interest_id);
+        // R311mx (B5b-2b-4) — route the `Interest(Final)` emit through the
+        // [`Session::send_network_message`] send seam (build_interest_final +
+        // the Interest arm) instead of
+        // `self.session.actions().send_interest_final`, then prune the
+        // reconnect-replay cache session-side. F2 — no error channel; a
+        // transport-down reject drops the emit exactly as the dead link would.
+        // Gated `declare-interest` (the gate the prior `send_interest_final`
+        // body used): the liveliness module is `transport-unicast`-gated but
+        // NOT liveliness-subscriber-gated, so a transport-unicast build without
+        // `declare-interest` still compiles this teardown.
+        #[cfg(feature = "declare-interest")]
+        {
+            let interest = wz_session_core::interest_build::build_interest_final(self.interest_id);
+            let _ = self.session.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Interest(interest),
+                /*reliable=*/ true,
+                /*express=*/ false,
+            );
+            self.session.actions().prune_interest(self.interest_id);
+        }
+        // R311mx — when `declare-interest` is off (⟹ `liveliness-subscriber`
+        // off, so the block above is also cfg'd out) nothing else reads
+        // `self.session` in such a build; mark the handle intentionally-unused
+        // so the dead-field lint stays quiet (the LivelinessSubscriber struct
+        // still compiles there even though it can never be constructed — same
+        // shape as the LivelinessToken teardown, R311mw).
+        #[cfg(not(feature = "declare-interest"))]
+        let _ = &self.session;
     }
 }
 
