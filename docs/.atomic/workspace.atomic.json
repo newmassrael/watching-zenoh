@@ -36752,6 +36752,46 @@
         "UNPUSHED: R311nb~ng 전부 로컬; origin/main=c84ba75. push=명시동의 필요."
       ]
     },
+    "Round 311nh": {
+      "decision_summary": "R311nh: latent send-seam gate-skew 닫기 — `send_network_message`의 4 match arm을 full-qualify해 `use NetworkMessage` alias 제거(unused-import 클래스 표현불가) + 전용 C1h 회귀가드 lane.",
+      "changes_bullets": [
+        "wz-session-core/src/session_actions.rs: `send_network_message`의 `use crate::network_message::NetworkMessage;` alias 제거, 4 match arm(Push/Request/Declare/Interest)을 전부 full-qualify(`crate::network_message::NetworkMessage::...`). 근본: fn-gate=`any(codec-push, codec-request, codec-declare, declare-interest)`가 typed-arm union(Declare arm은 bare codec-declare가 아닌 declare-* 6-union)보다 넓어, `codec-declare`만 켜고 origination/push/request/interest 전부 끄면 `_ =>` catch arm만 남아 alias가 unused→clippy -D warnings reject. full-qualify로 import-사용이 arm 켜짐 여부와 무관해져 skew가 unused-import으로 표출되는 클래스 자체 소멸(signature-stability 유지: catch arm이 FeatureDisabled 반환).",
+        "scripts/run-ci.sh: C1h 매트릭스에 전용 회귀가드 lane 추가 — `cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,codec-declare --all-targets -- -D warnings` (subset 6c). R311my의 6b 주석이 'codec-declare-with-zero-consumers는 coherent하지 않아 pin 안 함'이라 명시했던 바로 그 간극을 닫음. 주석 갱신(stale NOTE 제거 + 6c 근거 기록)."
+      ],
+      "verification_bullets": [
+        "재현 확인: fix 전 `cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,codec-declare -- -D warnings` = `error: unused import: crate::network_message::NetworkMessage` (EXIT=101). 메모리가 말한 '직접 codec-declare는 통과'는 session-unicast 누락으로 fn 미컴파일이 원인이었음(masking).",
+        "fix 후 동일 조합 EXIT=0; full origination union(push+request+declare-token+interest) EXIT=0 — 정상 경로 무손상 확인.",
+        "full host run-ci EXIT=0 (신규 6c 가드 lane 포함): 'all required layers pass'."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "R311nh로 standing carry(latent unused-import gate-skew) CLOSED — 메모리가 느슨하게 'R311o'로 표기했던 그 건. 2글자 레저 컨벤션(ng→nh) 준수.",
+        "기반 굳히기 다음 단계: proof-gap 닫기 — unicast TX fragmentation e2e(impl wired at session_actions.rs:1338, oversize 실송 테스트 부재), 그 다음 wz↔pico multicast/핸드셰이크 라이브 interop e2e.",
+        "PUSHED: R311nb~ng origin/main; R311nh는 로컬(이 라운드). push=명시동의 필요."
+      ],
+      "publishable_decision_summary": "R311nh: latent send-seam gate-skew 닫기 — `send_network_message`의 4 match arm을 full-qualify해 `use NetworkMessage` alias 제거(unused-import 클래스 표현불가) + 전용 C1h 회귀가드 lane.",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/session_actions.rs: `send_network_message`의 `use crate::network_message::NetworkMessage;` alias 제거, 4 match arm(Push/Request/Declare/Interest)을 전부 full-qualify(`crate::network_message::NetworkMessage::...`). 근본: fn-gate=`any(codec-push, codec-request, codec-declare, declare-interest)`가 typed-arm union(Declare arm은 bare codec-declare가 아닌 declare-* 6-union)보다 넓어, `codec-declare`만 켜고 origination/push/request/interest 전부 끄면 `_ =>` catch arm만 남아 alias가 unused→clippy -D warnings reject. full-qualify로 import-사용이 arm 켜짐 여부와 무관해져 skew가 unused-import으로 표출되는 클래스 자체 소멸(signature-stability 유지: catch arm이 FeatureDisabled 반환).",
+        "scripts/run-ci.sh: C1h 매트릭스에 전용 회귀가드 lane 추가 — `cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,codec-declare --all-targets -- -D warnings` (subset 6c). R311my의 6b 주석이 'codec-declare-with-zero-consumers는 coherent하지 않아 pin 안 함'이라 명시했던 바로 그 간극을 닫음. 주석 갱신(stale NOTE 제거 + 6c 근거 기록)."
+      ],
+      "publishable_verification_bullets": [
+        "재현 확인: fix 전 `cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,codec-declare -- -D warnings` = `error: unused import: crate::network_message::NetworkMessage` (EXIT=101). 메모리가 말한 '직접 codec-declare는 통과'는 session-unicast 누락으로 fn 미컴파일이 원인이었음(masking).",
+        "fix 후 동일 조합 EXIT=0; full origination union(push+request+declare-token+interest) EXIT=0 — 정상 경로 무손상 확인.",
+        "full host run-ci EXIT=0 (신규 6c 가드 lane 포함): 'all required layers pass'."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nh로 standing carry(latent unused-import gate-skew) CLOSED — 메모리가 느슨하게 'R311o'로 표기했던 그 건. 2글자 레저 컨벤션(ng→nh) 준수.",
+        "기반 굳히기 다음 단계: proof-gap 닫기 — unicast TX fragmentation e2e(impl wired at session_actions.rs:1338, oversize 실송 테스트 부재), 그 다음 wz↔pico multicast/핸드셰이크 라이브 interop e2e.",
+        "PUSHED: R311nb~ng origin/main; R311nh는 로컬(이 라운드). push=명시동의 필요."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
