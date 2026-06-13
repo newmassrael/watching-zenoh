@@ -1001,6 +1001,17 @@ layer_c1o_keyexpr_gating_behavior() {
 # wire split + parse round-trip) and the `send_push_literal`
 # fragment-and-reassemble e2e (session_glue `fragment_tx_tests`).
 #
+# R311ni: the `--features transport-fragmentation` wz-runtime-tokio run also
+# picks up the new `tests/layer3_reassembly_tx.rs` integration test (gated
+# `#![cfg(feature = "transport-fragmentation")]`) — the unicast TX-split
+# PRODUCTION-path e2e over a real loopback TCP link: an oversize
+# `Session::publish` (200 bytes past a 64-byte negotiated batch MTU) leaves
+# the publisher as a fragment chain and the subscriber node's continuous
+# drive loop reassembles it into one byte-exact Sample. Closes the session-
+# review gap where unicast TX fragmentation had only codec + RX-ingest
+# coverage, never an oversize real-socket send (multicast had its sibling in
+# multicast_pubsub_loopback).
+#
 # R311jp: the transport-fragmentation invocation also carries the batching
 # x fragmentation interplay test (session_glue `batch_tx_tests::
 # oversize_publish_drains_open_frame_then_fragments`) — default features
