@@ -36704,6 +36704,54 @@
         "B5b-4 DONE (this round): Session typestate closes the North Star structural goal for Level B. Remaining open (defensible, not regressions): `actions()` on Unicast returns `SendWireError::UnsupportedVariant` for non-Push multicast-send; doc narrowed to this sole meaning (R311nf). Pre-existing latent (not introduced by R311nf): `transport-unicast+transport-multicast+codec-declare` (no codec-push) unused-import at `wz-session-core/session_actions.rs:1487`; run-ci does not cover this combo — note here, fix in a later round. UNPUSHED: R311nf 2 commits local; origin/main still at R311ne tip. Push requires explicit consent."
       ]
     },
+    "Round 311ng": {
+      "decision_summary": "R311ng: R311nf 세션리뷰 보정 — 두 no-codec send arm의 #3b conflation(UnsupportedVariant→FeatureDisabled) 수정 + dead QueryableAliasError::RequiresUnicast 제거 + stale doc 6건 정정.",
+      "changes_bullets": [
+        "transport.rs: `TransportState::send_network_message`의 두 no-codec arm이 feature-off 조건에 `UnsupportedVariant`를 반환하던 #3b conflation 수정 → `FeatureDisabled`. (1) Unicast no-codec arm(`not(any(codec-push/request/declare/declare-interest))`); (2) Multicast no-codec-push arm. 둘 다 forwarder 게이트 밖이라 unreachable이나, 에러변종의 SSOT 의미가 거짓이었음. trait method doc도 `Err(UnsupportedVariant)`→`Err(FeatureDisabled)`로 정정.",
+        "send_wire_error.rs: `UnsupportedVariant` Display string에서 부정확한 '모든 비-Push 변종은 multicast에서 compile-time-excluded' 표현 제거 → '비-Push가 multicast send arm에 도달=런타임 reject; reply-plane 변종은 MulticastReplySink가 방출하므로 여기로 라우팅 안 됨; feature-off 빌드는 FeatureDisabled 반환'으로 정밀화. (doc body는 R311nf대로 정확—arm 수정 후 narrowed 의미가 비로소 참.)",
+        "mod.rs send_network_message seam doc: 'non-Push reaching either arm returns FeatureDisabled'(stale, R311nd 이전 표현)→'non-Push가 MULTICAST arm 도달=UnsupportedVariant; no-codec 빌드=FeatureDisabled'로 코드와 일치시킴.",
+        "queryable.rs: dead `QueryableAliasError::RequiresUnicast` 제거(변종+Display arm+doc). producer 0개 확인—`declare_queryable`은 R311nf 이후 infallible `actions().clone()`만 호출하고 `From<SendWireError> for QueryableAliasError`도 없음(SubscribeAliasthere::RequiresUnicast 쌍둥이는 R311nf서 이미 삭제됐으나 queryable 누락). `deferred_query_sink` doc을 retired runtime-projection 서술에서 typestate 구조 보장 서술로 교체.",
+        "stale doc 4건 정정(코드 무변경): mod.rs `mod transport;` 헤더('per-session transport sum / SessionTransport pub(crate)'→typestate); mod.rs liveliness_get R311ne transport-first reject 순서 주석(이제 무의미—multicast=컴파일에러); mod.rs declare_token_aliased GATE-SHADOWED 주석(`.map_err(...)?` front-run 없어짐→unicast-typed로 unreachable); mod.rs declare_queryable API-boundary 주석; tasks.rs publisher_task let-else 가드 주석(이제 TokioSession 타입으로 unreachable); multicast_glue.rs both_build 테스트 doc(SessionTransport::Multicast/actions()-Err 단언 참조 제거)."
+      ],
+      "verification_bullets": [
+        "독립 리뷰어 2명(general-purpose) 병렬 투입—cfg-gating 축 완전성 + SSOT/anti-pattern 렌즈—이 #3b conflation을 둘 다 HIGH로 독립 확인, dead variant + stale doc 6건 추가 발견. 내 정독과 교차 수렴.",
+        "clippy 3축 -D warnings EXIT=0: (a) unicast-only default, (b) --features transport-multicast both-build, (c) wz-runtime-tokio-multicast-tests multicast-only.",
+        "QueryableAliasError::RequiresUnicast workspace-wide grep=NONE; `.actions()?` fallible-call grep=NONE; live SessionTransport-enum 참조=NONE(historical 'was the' 만 잔류).",
+        "full host run-ci EXIT=0(redirect+$?, 파이프 없음): 'all required layers pass'."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "R311nf+ng로 Level B North Star(Session transport typestate) 구조적 완결. UnsupportedVariant은 이제 정확히 하나의 의미=multicast send arm에 도달한 non-Push 변종; FeatureDisabled=codec-off; 둘의 #3b 구분 코드+doc 일치.",
+        "pre-existing latent(내 회귀 아님): `transport-unicast+transport-multicast+codec-declare`(no codec-push)→wz-session-core `session_actions.rs:1487` unused-import 실패; run-ci 미커버 콤보. 1줄 cfg+전용 lane으로 닫는 게 다음 자연스러운 후속.",
+        "UNPUSHED: R311nb~ng 전부 로컬; origin/main=c84ba75. push=명시동의 필요."
+      ],
+      "publishable_decision_summary": "R311ng: R311nf 세션리뷰 보정 — 두 no-codec send arm의 #3b conflation(UnsupportedVariant→FeatureDisabled) 수정 + dead QueryableAliasError::RequiresUnicast 제거 + stale doc 6건 정정.",
+      "publishable_changes_bullets": [
+        "transport.rs: `TransportState::send_network_message`의 두 no-codec arm이 feature-off 조건에 `UnsupportedVariant`를 반환하던 #3b conflation 수정 → `FeatureDisabled`. (1) Unicast no-codec arm(`not(any(codec-push/request/declare/declare-interest))`); (2) Multicast no-codec-push arm. 둘 다 forwarder 게이트 밖이라 unreachable이나, 에러변종의 SSOT 의미가 거짓이었음. trait method doc도 `Err(UnsupportedVariant)`→`Err(FeatureDisabled)`로 정정.",
+        "send_wire_error.rs: `UnsupportedVariant` Display string에서 부정확한 '모든 비-Push 변종은 multicast에서 compile-time-excluded' 표현 제거 → '비-Push가 multicast send arm에 도달=런타임 reject; reply-plane 변종은 MulticastReplySink가 방출하므로 여기로 라우팅 안 됨; feature-off 빌드는 FeatureDisabled 반환'으로 정밀화. (doc body는 R311nf대로 정확—arm 수정 후 narrowed 의미가 비로소 참.)",
+        "mod.rs send_network_message seam doc: 'non-Push reaching either arm returns FeatureDisabled'(stale, R311nd 이전 표현)→'non-Push가 MULTICAST arm 도달=UnsupportedVariant; no-codec 빌드=FeatureDisabled'로 코드와 일치시킴.",
+        "queryable.rs: dead `QueryableAliasError::RequiresUnicast` 제거(변종+Display arm+doc). producer 0개 확인—`declare_queryable`은 R311nf 이후 infallible `actions().clone()`만 호출하고 `From<SendWireError> for QueryableAliasError`도 없음(SubscribeAliasthere::RequiresUnicast 쌍둥이는 R311nf서 이미 삭제됐으나 queryable 누락). `deferred_query_sink` doc을 retired runtime-projection 서술에서 typestate 구조 보장 서술로 교체.",
+        "stale doc 4건 정정(코드 무변경): mod.rs `mod transport;` 헤더('per-session transport sum / SessionTransport pub(crate)'→typestate); mod.rs liveliness_get R311ne transport-first reject 순서 주석(이제 무의미—multicast=컴파일에러); mod.rs declare_token_aliased GATE-SHADOWED 주석(`.map_err(...)?` front-run 없어짐→unicast-typed로 unreachable); mod.rs declare_queryable API-boundary 주석; tasks.rs publisher_task let-else 가드 주석(이제 TokioSession 타입으로 unreachable); multicast_glue.rs both_build 테스트 doc(SessionTransport::Multicast/actions()-Err 단언 참조 제거)."
+      ],
+      "publishable_verification_bullets": [
+        "독립 리뷰어 2명(general-purpose) 병렬 투입—cfg-gating 축 완전성 + SSOT/anti-pattern 렌즈—이 #3b conflation을 둘 다 HIGH로 독립 확인, dead variant + stale doc 6건 추가 발견. 내 정독과 교차 수렴.",
+        "clippy 3축 -D warnings EXIT=0: (a) unicast-only default, (b) --features transport-multicast both-build, (c) wz-runtime-tokio-multicast-tests multicast-only.",
+        "QueryableAliasError::RequiresUnicast workspace-wide grep=NONE; `.actions()?` fallible-call grep=NONE; live SessionTransport-enum 참조=NONE(historical 'was the' 만 잔류).",
+        "full host run-ci EXIT=0(redirect+$?, 파이프 없음): 'all required layers pass'."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nf+ng로 Level B North Star(Session transport typestate) 구조적 완결. UnsupportedVariant은 이제 정확히 하나의 의미=multicast send arm에 도달한 non-Push 변종; FeatureDisabled=codec-off; 둘의 #3b 구분 코드+doc 일치.",
+        "pre-existing latent(내 회귀 아님): `transport-unicast+transport-multicast+codec-declare`(no codec-push)→wz-session-core `session_actions.rs:1487` unused-import 실패; run-ci 미커버 콤보. 1줄 cfg+전용 lane으로 닫는 게 다음 자연스러운 후속.",
+        "UNPUSHED: R311nb~ng 전부 로컬; origin/main=c84ba75. push=명시동의 필요."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
