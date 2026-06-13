@@ -95,10 +95,15 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// the drive-loop channel.
     ///
     /// A build whose transport has no wire codec (no caller can construct a
-    /// `NetworkMessage` to send) keeps an honest `Err(UnsupportedVariant)`
-    /// body — the method is required so the agnostic
+    /// `NetworkMessage` to send) keeps an honest `Err(FeatureDisabled)` body —
+    /// the cause is the elided codec, NOT a transport-variant mismatch, so it
+    /// is `FeatureDisabled` (build-time codec off), never `UnsupportedVariant`
+    /// (which means the orthogonal "non-Push reached the multicast arm"; the
+    /// #3b distinction must not be conflated). The method is required so the
+    /// agnostic
     /// [`Session::send_network_message`](super::Session::send_network_message)
-    /// forwarder can name it uniformly, but it is never reached there.
+    /// forwarder can name it uniformly, but it is never reached there (the
+    /// forwarder is gated to exactly the builds with a codec + a caller).
     fn send_network_message(
         payload: &Self::Payload,
         msg: wz_session_core::network_message::NetworkMessage,
@@ -149,6 +154,11 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
         {
             payload.send_network_message(msg, reliable, express)
         }
+        // No wire codec: the transport IS unicast and matches — the cause is
+        // the build-time codec elision, so this is `FeatureDisabled`, NOT
+        // `UnsupportedVariant` (a transport-variant mismatch). Conflating the
+        // two is the #3b anti-pattern. Unreachable (the agnostic forwarder is
+        // gated to require a codec), but the honest variant still matters.
         #[cfg(not(any(
             feature = "codec-push",
             feature = "codec-request",
@@ -157,7 +167,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
         )))]
         {
             let _ = (payload, msg, reliable, express);
-            Err(SendWireError::UnsupportedVariant)
+            Err(SendWireError::FeatureDisabled)
         }
     }
 }
@@ -211,11 +221,15 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
         }
         // No `codec-push`: the payload has no `tx` and there is no
         // `MulticastTxItem` to build, so a multicast Session cannot originate
-        // any wire message. Honest reject.
+        // any wire message. The cause is the elided `codec-push`, so this is
+        // `FeatureDisabled` (build-time codec off), NOT `UnsupportedVariant`
+        // (the non-Push transport-variant mismatch the codec-push arm above
+        // returns) — symmetric with the unicast no-codec arm; #3b distinction.
+        // Unreachable (the forwarder requires `codec-push`), but honest.
         #[cfg(not(feature = "codec-push"))]
         {
             let _ = (payload, msg, reliable);
-            Err(SendWireError::UnsupportedVariant)
+            Err(SendWireError::FeatureDisabled)
         }
     }
 }

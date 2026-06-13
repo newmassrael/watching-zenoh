@@ -103,9 +103,10 @@ impl fmt::Display for SendWireError {
             ),
             Self::UnsupportedVariant => f.write_str(
                 "send_wire: non-Push NetworkMessage reached the multicast \
-                 send arm — multicast originates only Push; all other \
-                 message variants are compile-time-excluded from multicast \
-                 sessions (R311nf typestate) — no bytes emitted",
+                 send arm — a multicast session originates only Push (the \
+                 reply-plane variants are emitted by the drive-loop \
+                 MulticastReplySink, never routed here) — no bytes emitted; \
+                 a feature-off build returns FeatureDisabled instead",
             ),
         }
     }

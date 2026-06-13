@@ -121,15 +121,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// the same pass). The handler signature is unchanged — deferral
     /// is invisible at the type level.
     ///
-    /// B5b-2b — the wire-reply leg of the sink emits through the UNICAST
-    /// action bundle (`actions.send_response`), which a multicast session has
-    /// no analogue of. Rather than make the return type fallible (an
-    /// `impl FnMut`-in-`Result` trips `clippy::type_complexity`), the resolved
-    /// unicast `actions` is threaded in by the caller: `declare_queryable`
-    /// projects `Session::actions()`'s `SendWireError::UnsupportedVariant` into
-    /// `QueryableAliasError::RequiresUnicast` BEFORE calling this, so the sink
-    /// is only ever built on a unicast transport. Keeps the honest fallibility
-    /// at the API boundary without a panic form here.
+    /// B5b-2b / R311nf — the wire-reply leg of the sink emits through the
+    /// UNICAST action bundle (`actions.send_response`), which a multicast
+    /// session has no analogue of. The resolved unicast `actions` is threaded
+    /// in by the caller rather than projected from a fallible `actions()` (an
+    /// `impl FnMut`-in-`Result` would trip `clippy::type_complexity`). The
+    /// unicast guarantee is now STRUCTURAL, not a runtime reject: this helper
+    /// lives on the `impl Session<R, T, Unicast>` block, so it can only ever be
+    /// reached on a unicast transport (a `Session<R, T, Multicast>` does not
+    /// have it — a compile error, not an `UnsupportedVariant` projection). The
+    /// `actions` argument is therefore the infallible `self.actions().clone()`.
     #[cfg(feature = "query-queryable")]
     pub(super) fn deferred_query_sink(
         &self,
@@ -348,11 +349,6 @@ pub enum QueryableAliasError {
     /// stub handle were constructed because the registry-side
     /// dispatch is gated on the same feature.
     FeatureDisabled,
-    /// B5b-2b (R311nc) — the aliased queryable declare resolves the
-    /// unicast outbound keyexpr-mapping table, which a multicast session
-    /// has no analogue of; the `Session::actions()` projection rejects.
-    /// No queryable was declared.
-    RequiresUnicast,
 }
 
 impl std::fmt::Display for QueryableAliasError {
@@ -362,12 +358,6 @@ impl std::fmt::Display for QueryableAliasError {
                 f,
                 "QueryableAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
-            ),
-            QueryableAliasError::RequiresUnicast => write!(
-                f,
-                "QueryableAliasError: aliased queryable declare requires a unicast \
-                 transport; this session holds a multicast transport (no outbound \
-                 keyexpr-mapping table); no queryable was declared"
             ),
             QueryableAliasError::FeatureDisabled => write!(
                 f,

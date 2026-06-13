@@ -1556,23 +1556,22 @@ mod tests {
         assert_eq!(dispatcher.active_peers(), 0, "own JOIN must not self-admit");
     }
 
-    /// R311nd (B5b-2b tail) — the FIRST live both-build multicast `Session`
-    /// caller. With the `not(transport-unicast)` gate dropped this round, a
-    /// build carrying BOTH transports can construct a multicast `Session`
-    /// (alongside the unicast `Session::new`): `publish` routes through the
-    /// send seam's LIVE multicast arm onto the TX channel, and
-    /// `Session::actions()` honestly rejects with `UnsupportedVariant`. This
-    /// proves the new `SessionTransport::Multicast` arm is runtime-LIVE in a
-    /// both-build, not runtime-dead — the R311na #3b "design the projection
-    /// WITH a real caller" requirement, and why the gate-drop lands in the same
-    /// commit as this test.
+    /// R311nd / R311nf (B5b-2b tail) — a both-build multicast `Session`. With
+    /// the `not(transport-unicast)` gate dropped at R311nd, a build carrying
+    /// BOTH transports constructs a `TokioMulticastSession` (the R311nf
+    /// typestate alias for `Session<_,_,Multicast>`) alongside the unicast
+    /// `TokioSession`: `publish` routes through the send seam's LIVE multicast
+    /// arm onto the TX channel. R311nf turned the transport mismatch into a
+    /// TYPE-LEVEL guarantee — `actions()` does not exist on
+    /// `TokioMulticastSession`, so the prior R311nd
+    /// `assert_eq!(session.actions(), Err(UnsupportedVariant))` assertion is
+    /// gone (it would now be a compile error to even write). The test proves
+    /// the two transport surfaces coexist disjointly in one build.
     ///
     /// Gated `all(transport-unicast, transport-multicast, codec-push)` so it
     /// runs under the EXISTING Layer C1q (`cargo test -p wz-runtime-tokio
     /// --features transport-multicast --lib multicast_glue`, a both-build
     /// because the crate default carries `transport-unicast` + `codec-push`).
-    /// The complementary unicast `actions()`-is-`Ok` path is covered by the
-    /// default-build (C1) unicast `Session` suite.
     #[cfg(all(
         feature = "transport-unicast",
         feature = "transport-multicast",

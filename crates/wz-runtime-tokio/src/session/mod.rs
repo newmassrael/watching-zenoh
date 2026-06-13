@@ -318,8 +318,8 @@ mod querier;
 #[cfg(feature = "transport-unicast")]
 mod queryable;
 mod subscriber;
-// R311mm (Level B, B1) — the per-session transport sum; internal-only
-// (`SessionTransport` is `pub(crate)`), so it gets no `pub use` re-export.
+// R311nf — the per-session transport TYPESTATE (was the R311mm `SessionTransport`
+// runtime sum). Internal module; the public surface is re-exported below.
 mod transport;
 // R311nf — the transport typestate (was the `SessionTransport` runtime sum).
 // `TransportState` is the ungated trait surface (struct bound + agnostic impl
@@ -647,10 +647,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// arm stays Push-only and exposes only
     /// `publish` (the reply messages are emitted by the drive-loop
     /// [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink), not
-    /// this seam). A non-`Push` reaching either arm returns
-    /// [`SendWireError::FeatureDisabled`](wz_session_core::send_wire_error::SendWireError)
-    /// — an honest no-emit reject, never a panic. `SendWireError` is the SAME
-    /// error the unicast `dispatch_*` family returns and lives ungated in
+    /// this seam). A non-`Push` reaching the MULTICAST arm returns
+    /// [`SendWireError::UnsupportedVariant`](wz_session_core::send_wire_error::SendWireError)
+    /// — the one transport-variant mismatch the seam reports (a multicast
+    /// session originates only Push); a build whose transport has no wire codec
+    /// returns [`SendWireError::FeatureDisabled`] instead (the build-time codec
+    /// elision, kept distinct from the variant mismatch per #3b). Both are
+    /// honest no-emit rejects, never a panic. `SendWireError` is the SAME error
+    /// the unicast `dispatch_*` family returns and lives ungated in
     /// `wz_session_core` (the `transport-unicast`-gated `session_glue` re-export
     /// is just a path), so the seam's `Result` is already transport-uniform.
     // R311nf — the send seam is now a thin forwarder to the typestate's
@@ -2202,9 +2206,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // re-enter any observer-locking session API, and its
             // replies precede the matching ResponseFinal on the wire
             // (the dispatch SSOT emits finals after the drain).
-            // B5b-2b — gate unicast at the API boundary (a multicast session
-            // has no SessionLinkActions for the wire-reply leg), then thread
-            // the resolved bundle into the sink builder.
+            // R311nf — this method lives on `impl Session<R, T, Unicast>`, so
+            // the unicast guarantee is structural: `actions()` is the
+            // infallible bundle borrow (a multicast session has no
+            // SessionLinkActions for the wire-reply leg, and no
+            // `declare_queryable` — a compile error, not a runtime reject).
+            // Thread the resolved bundle into the sink builder.
             let actions = self.actions().clone();
             let (cell, sink) = self.deferred_query_sink(actions, callback);
             // R311df — observer access via R::with_mutex_mut closure form.
@@ -2487,12 +2494,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // B5b-2b — multicast-session declare reject (the send seam
                     // returns UnsupportedVariant; SendDeclareError::from maps it
                     // to RequiresUnicast), typed through to the declare surface.
-                    // R311ne — GATE-SHADOWED: the `let actions = self.actions()
-                    // .map_err(...)?` bind at the top of this method front-runs
-                    // the seam, so a multicast session returns RequiresUnicast
-                    // there and never reaches here. Kept as an honest typed
-                    // projection (not `unreachable!`) so a future caller that
-                    // reaches the seam directly degrades without a panic.
+                    // R311nf — UNREACHABLE on this method: it lives on `impl
+                    // Session<R, T, Unicast>`, so the seam takes the unicast arm
+                    // (which forwards to the actions bundle and never returns
+                    // RequiresUnicast); a multicast session is a distinct type
+                    // without this method. The exhaustive arm is kept as an
+                    // honest typed projection (not `unreachable!`) so the
+                    // `From<SendDeclareError>` mapping stays total.
                     SendDeclareError::RequiresUnicast => LivelinessAliasError::RequiresUnicast,
                     SendDeclareError::UnknownMappingId(id) => {
                         // Race against a concurrent send_undeclare_kexpr
@@ -2962,13 +2970,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ) -> Result<(), LivelinessGetError> {
         #[cfg(feature = "liveliness-get")]
         {
-            // B5b-2b (R311ne) — project the transport FIRST so a multicast
-            // session honestly rejects with RequiresUnicast (via
-            // From<SendWireError> for LivelinessGetError) instead of the
-            // misleading NotEstablished gate below: is_established() reads
-            // `false` on a non-unicast transport, and "retry after the session
-            // re-establishes" is futile on multicast. The transport check must
-            // front-run the establishment gate, not the other way around.
+            // R311nf — `liveliness_get` lives on `impl Session<R, T, Unicast>`,
+            // so `actions()` is the infallible unicast bundle borrow and the
+            // establishment gate is the sole precondition. The R311ne
+            // transport-first reject ordering (which front-ran a multicast
+            // `RequiresUnicast` projection ahead of the misleading
+            // NotEstablished gate) is retired: a multicast session is a
+            // distinct type with no `liveliness_get` method, so the transport
+            // mismatch is a compile error, not a runtime reject to order.
             let actions = self.actions();
             if !actions.is_established() {
                 return Err(LivelinessGetError::NotEstablished);

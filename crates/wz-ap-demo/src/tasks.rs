@@ -559,10 +559,11 @@ pub(crate) async fn publisher_task<T>(
                      skipping this iteration"
                 );
             }
-            // B5b-2b — an aliased publish on a non-unicast transport rejects
-            // typed. publisher_task guards unicast at its top (the let-else
-            // on session.actions()), so this is defensively unreachable here;
-            // logged + skipped uniformly with the other reject arms.
+            // B5b-2b / R311nf — an aliased publish on a non-unicast transport
+            // rejects typed. `publisher_task` takes a `TokioSession` (=
+            // `Session<_,_,Unicast>`), so a multicast transport is excluded at
+            // the type level and this arm is unreachable in the demo; the
+            // exhaustive match keeps it, logged + skipped uniformly.
             Err(e @ PublishAliasError::RequiresUnicast) => {
                 log::warn!(
                     "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
