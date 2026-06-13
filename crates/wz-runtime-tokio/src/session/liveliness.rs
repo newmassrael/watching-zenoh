@@ -179,7 +179,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
             return;
         }
         self.armed = false;
-        self.session.actions.send_undeclare_token(self.id);
+        self.session.actions().send_undeclare_token(self.id);
         #[cfg(feature = "liveliness-token")]
         R::with_mutex_mut(&self.session.observer, |obs| {
             obs.local_tokens.unregister(self.id);
@@ -576,7 +576,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
                 observer.liveliness_subscribers.unregister(self.interest_id);
             });
         }
-        self.session.actions.send_interest_final(self.interest_id);
+        self.session.actions().send_interest_final(self.interest_id);
     }
 }
 

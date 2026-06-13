@@ -154,8 +154,9 @@
 #              --no-default-features + incomplete coherent consumer
 #              subsets — handshake-only / pubsub-only / queryable-only /
 #              zget-reply-only / declare-observer — the runtime-crate
-#              analog of C1h / C4b. transport-unicast pinned ON
-#              (FOUNDATIONAL: sole session FSM, like keyexpr-canon). The
+#              analog of C1h / C4b. transport-unicast pinned ON (these
+#              subsets exercise the unicast Session FSM; the orthogonal
+#              multicast-without-unicast axis is Layer C4e — R311mk). The
 #              BUILD half; C1j is the BEHAVIOUR twin over the same SSOT
 #              subset list, so the two matrices cannot drift.)
 #   Layer C4d — wz-runtime-tokio arbitrary-subset CLIPPY matrix (R311fi;
@@ -638,10 +639,15 @@ layer_c1_cargo_test() {
     # R311mi — wz-mcu-multicast-e2e (the MCU multicast e2e SSOT) depends on the
     # same facade session-lwip funnel, so it carries the same hazard; excluded
     # here and tested ISOLATED in C1r.
+    # R311mo — wz-runtime-tokio-multicast-tests reaches the multicast-only
+    # Session API (gated `not(transport-unicast)`), which the workspace's
+    # transport-unicast feature unification would gate out; excluded here and
+    # tested ISOLATED in C1s.
     (cd crates && cargo test --workspace \
         --exclude wz-session-lwip \
         --exclude wz-mcu-session-acceptor \
-        --exclude wz-mcu-multicast-e2e --quiet)
+        --exclude wz-mcu-multicast-e2e \
+        --exclude wz-runtime-tokio-multicast-tests --quiet)
 }
 
 # ─── Layer C1b — cargo test -p wz-runtime-core --features alloc ────
@@ -1175,6 +1181,27 @@ layer_c1r_mcu_multicast_e2e() {
         && cargo clippy -p wz-mcu-multicast-e2e --all-targets --quiet -- -D warnings)
 }
 
+# ─── Layer C1s — wz-runtime-tokio-multicast-tests isolated test + clippy ─
+#
+# R311mo (Level B). The multicast-only Session API (Session::new_multicast /
+# the multicast Session::publish, both gated `not(transport-unicast)`) is
+# unreachable from wz-runtime-tokio's OWN `cargo test`: its
+# wz-runtime-tokio-test-support dev-dependency forces transport-unicast ON via
+# feature unification, gating the multicast-only items out.
+# wz-runtime-tokio-multicast-tests pulls wz-runtime-tokio with ONLY
+# transport-multicast,codec-push (no test-support, no unicast), so — built
+# ISOLATED here via `-p`, excluded from the C1/C2 `--workspace` unification —
+# the multicast Session surface is reachable. The test is the RUNTIME PROOF
+# that the multicast Session::publish builds a Put and enqueues exactly one
+# MulticastTxItem::Push onto the TX seam; the drive loop's framing of that
+# queued item is covered by C1p/C1q (drive_loop_frames_queued_push). The crate
+# has a single fixed feature config, so one test + one clippy pass cover it.
+layer_c1s_runtime_tokio_multicast_tests() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio-multicast-tests --quiet \
+        && cargo clippy -p wz-runtime-tokio-multicast-tests --all-targets --quiet -- -D warnings)
+}
+
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
 #
 # R311bo: mirror the gate to deploy/mcu-qemu-demo (standalone
@@ -1193,11 +1220,14 @@ layer_c2_cargo_clippy() {
     # is in Layer C1m). Stage 5 — exclude wz-mcu-session-acceptor for the
     # same reason (isolated clippy in C1n). R311mi — exclude
     # wz-mcu-multicast-e2e for the same reason (isolated clippy in C1r).
-    # Same rationale as the C1 exclude.
+    # R311mo — wz-runtime-tokio-multicast-tests for the transport-unicast
+    # feature-unification reason (isolated clippy in C1s). Same rationale as
+    # the C1 exclude.
     (cd crates && cargo clippy --workspace --all-targets \
         --exclude wz-session-lwip \
         --exclude wz-mcu-session-acceptor \
-        --exclude wz-mcu-multicast-e2e --quiet -- -D warnings) || return 1
+        --exclude wz-mcu-multicast-e2e \
+        --exclude wz-runtime-tokio-multicast-tests --quiet -- -D warnings) || return 1
 
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
@@ -1328,8 +1358,11 @@ layer_c4_preset_matrix() {
 # terminating Final.
 #
 # handshake-only = empty extras (bare session core, no consumer plane).
-# transport-unicast / keyexpr-canon are FOUNDATIONAL and live in each
-# lane's base, not here (a subset that drops them does not type-check).
+# keyexpr-canon is FOUNDATIONAL and lives in each lane's base, not here
+# (a subset dropping it does not type-check). transport-unicast is also
+# pinned in each base — not as FOUNDATIONAL (R311mk made transport-
+# multicast independently composable) but because these consumer-plane
+# subsets exercise the unicast Session handle.
 _wz_consumer_plane_subsets() {
     printf '%s\t%s\n' "handshake-only"        ""
     printf '%s\t%s\n' "pubsub-only"           "codec-push,pubsub-put,pubsub-delete"
@@ -2596,6 +2629,7 @@ run_layer C1l layer_c1l_reassembly || overall=1
 run_layer C1m layer_c1m_session_lwip || overall=1
 run_layer C1n layer_c1n_mcu_session_acceptor || overall=1
 run_layer C1r layer_c1r_mcu_multicast_e2e || overall=1
+run_layer C1s layer_c1s_runtime_tokio_multicast_tests || overall=1
 run_layer C1o layer_c1o_keyexpr_gating_behavior || overall=1
 run_layer C1p layer_c1p_multicast || overall=1
 run_layer C1q layer_c1q_multicast_glue || overall=1

@@ -46,6 +46,12 @@ members = [
     "wz-integration-tests",
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
+    # R311mo (Level B) — isolated multicast-only test crate for the tokio
+    # Session API. Like the wz-mcu-* crates it CANNOT join the `--workspace`
+    # unification (the workspace pulls transport-unicast in from siblings,
+    # gating out the multicast-only Session it tests), so C1/C2 `--exclude`
+    # it and a dedicated isolated lane (C1s) runs it via `-p`.
+    "wz-runtime-tokio-multicast-tests",
     "wz-ap-demo",
     "wz-e2e-harness",
     "wz-e2e-pubsub",

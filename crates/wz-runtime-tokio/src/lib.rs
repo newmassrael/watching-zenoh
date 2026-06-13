@@ -287,7 +287,16 @@ pub mod observer;
 /// [`observer::ApplicationLayerObserver`] instead of a `Session` handle.
 /// Unifying multicast under the `Session` handle (the zenoh-cpp
 /// transport-agnostic-session shape) is a separate north-star cascade.
-#[cfg(feature = "transport-unicast")]
+///
+/// R311mn (Level B, B2) — gate loosened from `transport-unicast` to
+/// `any(transport-unicast, transport-multicast)`: the module now also
+/// compiles in a multicast-ONLY build, where `Session` exposes only the
+/// transport-agnostic surface (observer / clock / drain_deferred_fires /
+/// zid) plus the `Session::new_multicast` constructor. The full unicast
+/// publish / query / declare surface inside the module stays
+/// `transport-unicast`-gated (it names `session_glue` types); the
+/// `session_glue` module itself remains `transport-unicast`.
+#[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod session;
 
 /// R311y — per-runtime synchronization primitive aliases (`Mutex<T>`,
@@ -334,6 +343,19 @@ pub mod runtime_impl;
 /// transport-multicast (reserved) introduces an alternate FSM; default-on
 /// keeps the AP path compiling and gives the future multicast cascade a
 /// single edit point.
+///
+/// R311ml — the R311cb "cfg-off is intentionally not buildable" clause is
+/// SUPERSEDED. R311mk structurally decoupled transport-multicast from
+/// transport-unicast, so a transport-multicast-only build (transport-unicast
+/// OFF) now compiles and drives multicast via
+/// [`multicast_glue::drive_multicast_session`] — it simply never names the
+/// unicast FSM. `transport-unicast` still gates this re-export + `session_glue`
+/// because they name the `SessionFsmUnicast` types, but it is no longer
+/// FOUNDATIONAL-as-in-unconditional: transport-multicast is an
+/// independently-composable catalog atom (guarded by Layer C4e). Unifying
+/// multicast under the [`session::Session`] handle (so a multicast-only build
+/// also yields a `Session`, not just the standalone drive loop) is the Level B
+/// north-star cascade.
 #[cfg(feature = "transport-unicast")]
 pub use wz_session_core::session_fsm_unicast;
 

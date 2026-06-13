@@ -105,6 +105,14 @@ pub(super) type BoxedSampleCallback = Box<dyn FnMut(&dyn SampleView) + Send + 's
 pub(super) type SampleCell<R> =
     wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedSampleCallback>;
 
+// R311mn (Level B, B2) — `deferred_sample_sink` is the helper the
+// `transport-unicast`-gated `declare_subscriber{_aliased}` methods install;
+// with those methods gated out in a multicast-only build the helper has no
+// caller, so the `impl` block carries the same `transport-unicast` gate to
+// avoid a dead-code error there. (Multicast subscriber declaration is a
+// later Level B round; until then a multicast `Session` has no
+// `declare_subscriber` surface.)
+#[cfg(feature = "transport-unicast")]
 impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// R311lh — build the deferred cell + the staging sink one
     /// `declare_subscriber{_aliased}` call installs in the registry:

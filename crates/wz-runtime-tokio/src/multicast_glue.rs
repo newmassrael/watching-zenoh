@@ -427,12 +427,31 @@ mod tests {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::collections::VecDeque;
 
+    // R311mn (B2) — the inbound frame-parse helpers are consumed only by the
+    // wire-codec-gated round-trip tests (the queryable-reply, liveliness-token,
+    // queued-push, and fragment tests). A bare `transport-multicast` test build
+    // (no `codec-push` / reply / token plane) compiles none of those, so gate
+    // the imports to the union of feature subsets that actually use them to
+    // keep that subset unused-import clean.
+    #[cfg(any(
+        feature = "codec-push",
+        all(feature = "query-queryable", feature = "codec-response-final"),
+        feature = "liveliness-token"
+    ))]
     use wz_session_core::inbound::{parse_inbound, InboundFrame};
     use wz_session_core::link::{LostCause, RxFrame};
     use wz_session_core::multicast_dispatch::MulticastConfig;
+    // `decode_join` is asserted only in the `codec-push`-gated next-SN test and
+    // the fragment-TX block (which also requires `codec-push`).
+    #[cfg(feature = "codec-push")]
     use wz_session_core::multicast_join::decode_join;
     use wz_session_core::multicast_params::MulticastParams;
     use wz_session_core::multicast_peer::MulticastPeerState;
+    #[cfg(any(
+        feature = "codec-push",
+        all(feature = "query-queryable", feature = "codec-response-final"),
+        feature = "liveliness-token"
+    ))]
     use wz_session_core::network_message::parse_frame_payload;
     use wz_session_core::wire_const;
 

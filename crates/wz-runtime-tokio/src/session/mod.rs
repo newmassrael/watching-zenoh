@@ -132,11 +132,20 @@ use crate::runtime_impl::TokioTime;
 // gate; the split prevents an `unused import` lint on the feature-OFF build.
 #[cfg(feature = "liveliness-subscriber")]
 use crate::declare::BoxedLivelinessSampleSink;
+// R311mn (B2) — `LivelinessSample` is the callback parameter type of the
+// `transport-unicast`-gated `declare_liveliness_subscriber{_aliased}`
+// methods (and is re-exported into the gated `liveliness` submodule); gate
+// the import so a multicast-only build does not flag it unused.
+#[cfg(feature = "transport-unicast")]
 use crate::declare::LivelinessSample;
 // R311o — `OutboundKeyexprError` is wrapped by
 // `LivelinessAliasError::InvalidKeyexpr` which is itself unconditional
 // after the R311o type-ungating cascade; the import must therefore be
 // unconditional too.
+// R311mn (B2) — `LivelinessAliasError` lives in the `transport-unicast`-
+// gated `liveliness` submodule, the sole consumer of this import, so it now
+// follows the same gate.
+#[cfg(feature = "transport-unicast")]
 use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
@@ -151,6 +160,11 @@ use crate::sink::SampleView;
 // `all(query-get, query-queryable)` to match the sole call site.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 use crate::query::QueryReply;
+// R311mn (B2) — `QueryableId` names a queryable-plane id used only by the
+// `transport-unicast`-gated `queryable` submodule (via `use super::*`) and
+// the gated query loopback; gate it so the multicast-only build does not see
+// an unused import.
+#[cfg(feature = "transport-unicast")]
 use crate::query::QueryableId;
 // R311gb-3b — the queryable callback signature dispatches through the
 // model-B query seam contracts (`QueryView` inbound accessor +
@@ -161,6 +175,11 @@ use crate::query::QueryableId;
 // accumulator `QueryResponder` impls `ReplyOut` directly, and the
 // dispatch builds a `BorrowedQuery` for the `QueryView` —
 // R311gb-3b-cleanup).
+// R311mn (B2) — the `QueryView` / `ReplyOut` seam traits are named only by
+// the `transport-unicast`-gated `declare_queryable{_aliased}` signatures
+// (and the gated `queryable` submodule via `use super::*`); gate so the
+// multicast-only build is unused-import clean.
+#[cfg(feature = "transport-unicast")]
 use crate::query_sink::{QueryView, ReplyOut};
 // R311s — `crate::reply` is type-ungated; `ReplyHandle` is the inner
 // success value of [`Session::query`]'s `Result<ReplyHandle, ...>` and is
@@ -180,8 +199,21 @@ use crate::query_sink::{QueryView, ReplyOut};
 // `any(query-get, liveliness-get)`.
 #[cfg(any(feature = "query-get", feature = "liveliness-get"))]
 use crate::reply::InboundReply;
+// R311mn (B2) — `ReplyHandle` is the success value of the
+// `transport-unicast`-gated `query{,_aliased,_aliased_auto}` methods (and is
+// re-exported into the gated `querier` submodule); `ReplyView` is the z_get
+// reply seam those same gated methods + `liveliness_get` consume. Both are
+// unused in a multicast-only build, so they follow `transport-unicast`.
+#[cfg(feature = "transport-unicast")]
 use crate::reply::ReplyHandle;
+#[cfg(feature = "transport-unicast")]
 use crate::reply_sink::ReplyView;
+// R311mn (B2) — the `Sample` metadata-hint enums feed the
+// `transport-unicast`-gated publish path + `build_loopback_sample` (in the
+// gated `publisher` submodule) + the `query`/`queryable` metadata builders;
+// none are named by the agnostic surface, so gate the import on
+// `transport-unicast` to keep the multicast-only build unused-import clean.
+#[cfg(feature = "transport-unicast")]
 use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
 // R311gb-2b — `declare_subscriber` no longer names `Sample` (it now
 // takes `impl FnMut(&dyn SampleView)`), so the only remaining uses of
@@ -190,13 +222,22 @@ use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo,
 // match, keeping a feature-restricted lib build warning-clean.
 #[cfg(any(test, feature = "pubsub-allow-loop"))]
 use crate::sample::Sample;
-#[cfg(feature = "liveliness-token")]
+// R311mn (B2) — every `session_glue` import gains a `transport-unicast`
+// conjunct: `session_glue` is `#[cfg(feature = "transport-unicast")]`, so
+// in a multicast-only build the module (and these types) do not exist.
+// The consumers (the gated unicast `Session` methods + the gated
+// submodules) all carry the same `transport-unicast` gate, so ANDing it in
+// here is a no-op in a unicast-on build and elides a dangling import in a
+// multicast-only build.
+#[cfg(all(feature = "liveliness-token", feature = "transport-unicast"))]
 use crate::session_glue::SendDeclareError;
+#[cfg(feature = "transport-unicast")]
 use crate::session_glue::SendWireError;
+#[cfg(feature = "transport-unicast")]
 use crate::session_glue::SessionLinkActions;
 // W3 — PushMetadata is consumed only by the `codec-push`-gated
 // `PublishOptions::push_metadata`, so the import carries the same gate.
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", feature = "transport-unicast"))]
 use crate::session_glue::PushMetadata;
 // R311o — `QueryTarget` / `ConsolidationMode` are referenced from
 // the now-unconditional `QueryOptions` struct fields + builder
@@ -204,28 +245,53 @@ use crate::session_glue::PushMetadata;
 // returned by the private `query_metadata` helper which stays gated
 // on `query-get` (the helper is dead-code under the lower gate), so
 // its import follows the same gate.
-#[cfg(feature = "query-get")]
+#[cfg(all(feature = "query-get", feature = "transport-unicast"))]
 use crate::session_glue::QueryMetadata;
+#[cfg(feature = "transport-unicast")]
 use crate::session_glue::{ConsolidationMode, QueryTarget};
 
 // Per-cluster handle submodules split out of this file (pure refactor).
 // Each holds one responsibility cluster (its options + handle + error
 // types and their impls); `pub use <mod>::*` preserves the public
 // `wz_runtime_tokio::session::<Type>` paths unchanged.
+//
+// R311mn (Level B, B2) — the four UNICAST clusters (publisher / querier /
+// queryable / liveliness) are gated `transport-unicast`: each names a
+// `session_glue` type (`SendWireError` / `PushMetadata` / `QueryMetadata` /
+// `QueryTarget` / `ConsolidationMode`) or projects the unicast transport
+// variant (`self.actions()`), so they do not compile in a multicast-only
+// build. The three remaining clusters (subscriber / decl_listener /
+// matching_listener) touch only the transport-AGNOSTIC observer surface
+// (`self.session.observer()` / `deferred_sample_sink`), so they stay
+// ungated and compile in every transport configuration. Each `mod X;` is
+// gated together with its `pub use X::*;` so the re-export disappears in
+// lockstep with the module.
 mod decl_listener;
+#[cfg(feature = "transport-unicast")]
 mod liveliness;
 mod matching_listener;
+#[cfg(feature = "transport-unicast")]
 mod publisher;
+#[cfg(feature = "transport-unicast")]
 mod querier;
+#[cfg(feature = "transport-unicast")]
 mod queryable;
 mod subscriber;
+// R311mm (Level B, B1) — the per-session transport sum; internal-only
+// (`SessionTransport` is `pub(crate)`), so it gets no `pub use` re-export.
+mod transport;
 pub use decl_listener::*;
+#[cfg(feature = "transport-unicast")]
 pub use liveliness::*;
 pub use matching_listener::*;
+#[cfg(feature = "transport-unicast")]
 pub use publisher::*;
+#[cfg(feature = "transport-unicast")]
 pub use querier::*;
+#[cfg(feature = "transport-unicast")]
 pub use queryable::*;
 pub use subscriber::*;
+use transport::SessionTransport;
 
 /// Application-level session bundle. Owns the outbound action handle
 /// plus a shared reference to the inbound observer so a single call
@@ -254,7 +320,13 @@ pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
     /// invariant ("single Session value owns the monotonic epoch
     /// its background sweep + per-call deadlines share") now extends
     /// to the action bundle by type.
-    actions: Arc<SessionLinkActions<R, T>>,
+    ///
+    /// R311mm (Level B, B1) — the field is now the [`SessionTransport`] sum
+    /// (B1 inhabits only `Unicast`, wrapping the same
+    /// `Arc<SessionLinkActions<R, T>>`); the [`Self::actions`] accessor
+    /// projects the unicast handle. See `session::transport` for why a sum
+    /// type, not a trait object.
+    transport: SessionTransport<R, T>,
     /// Inbound observer wrapped in the per-runtime mutex alias
     /// (`R::Mutex<...>` — R311ar GAT) so [`Session::publish`]'s
     /// loopback branch can borrow the subscriber registry through
@@ -314,7 +386,7 @@ pub struct Session<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
 impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
     fn clone(&self) -> Self {
         Self {
-            actions: self.actions.clone(),
+            transport: self.transport.clone(),
             observer: self.observer.clone(),
             fires: self.fires.clone(),
             clock: self.clock.clone(),
@@ -337,103 +409,80 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Session<R, T> {
 /// Session<R, T> shape reads literally at the alias site.
 pub type TokioSession = Session<TokioRuntime, TokioTime>;
 
-// R311cy — pure-accessor method generic lift. The three accessors
-// below (`actions` / `observer` / `is_established`) and the
-// R311cy-added `clock` accessor read fields directly without acquiring
-// any per-runtime lock, so their bodies compile identically for any
-// `R: Runtime` impl. Moving them to a dedicated `impl<R: Runtime, T:
-// TimeSource> Session<R, T>` block is the first concrete step of the
-// multi-round method generic lift cascade (R311cv carry #4): the
-// 100+ AP-bound methods that DO call `self.observer.lock().expect()`
-// stay on the `impl<T: TimeSource> Session<TokioRuntime, T>` block
-// until follow-up rounds migrate them to the `R::with_mutex_mut`
-// closure form (R311ct API). The `observer()` return type lifts
-// from the per-runtime alias `&Arc<Mutex<...>>` to the trait-
-// projected `&Arc<<R as Runtime>::Mutex<...>>`; for the AP profile
-// this resolves to the same `std::sync::Mutex<...>` concrete type so
-// every existing `session.observer().lock()` call site keeps
-// compiling under `R = TokioRuntime` (no breaking change to consumers).
+// R311mn (Level B, B2) — the TRANSPORT-AGNOSTIC `Session` surface. These
+// methods read the transport-independent fields (`observer` / `fires` /
+// `clock`) without ever projecting the transport sum's unicast variant
+// (no `self.actions()`, no `session_glue` type), so they compile in EVERY
+// transport configuration — unicast-only, both, AND the new
+// multicast-only build. They are split out of the (now `transport-unicast`-
+// gated) big impl block below precisely so a multicast-only `Session` still
+// exposes observer / clock / deferred-fire-drain / zid-dedup. The unicast
+// publish / query / declare surface stays in the gated block.
 impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
-    /// Construct a new session bundle from existing handles.
-    /// `actions` typically comes from
-    /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
-    /// `observer` is a freshly-wrapped
-    /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new)
-    /// inside the per-runtime mutex alias (`R::Mutex<...>`);
-    /// `clock` is the shared `Arc<T>` monotonic source the session
-    /// uses to compute reply-pending deadlines from
-    /// [`QueryOptions::timeout_ms`] (R311cw fold-in — previously
-    /// passed per-call to each `query` / `get` invocation).
-    ///
-    /// ## R236 — auto-wire self-echo dedup from `SessionInitParams.zid`
-    ///
-    /// When `actions.params.zid` carries a valid 1..=16 byte zid
-    /// (the wire-form `_z_id_t` range), this constructor forwards it
-    /// into the inbound subscriber registry via
-    /// [`Session::set_own_zid`] so the application is shielded by the
-    /// R231 self-echo dedup guard without writing an explicit hook
-    /// against a future FSM `Established` event. Mirrors
-    /// zenoh-pico's `_z_session_init` which stamps the local zid
-    /// into `_z_session_t._local_zid` at session creation —
-    /// `vendor/zenoh-pico/src/session/session.c` (`_z_session_init`
-    /// initializes `_local_zid` before any RX/TX driver runs).
-    ///
-    /// Silent skip on `zid.is_empty()` so test fixtures that
-    /// construct a Session with a placeholder `SessionInitParams`
-    /// (no zid declared) are not affected; the registry's `own_zid`
-    /// stays `None`, dedup remains disabled, and every wire-arrived
-    /// Push fires its matching subscribers (the pre-R231 default).
-    /// Silent skip also on `zid.len() > 16` for the same reason —
-    /// `set_own_zid`'s range check rejects the install and returns
-    /// `false`; no panic, no diagnostic noise during construction.
-    /// An application that wants to override or re-install the
-    /// dedup zid after construction still has the explicit
-    /// `set_own_zid` / `clear_own_zid` surface available.
-    ///
-    /// R311da — constructor lifts from the AP-bound impl<T>
-    /// Session<TokioRuntime, T> block to the R-generic impl<R, T>
-    /// Session<R, T> block. The observer parameter type lifts from
-    /// the per-runtime alias `Arc<Mutex<...>>` (resolved to
-    /// std::sync::Mutex on AP) to the trait-projected `Arc<<R as
-    /// Runtime>::Mutex<...>>`; for R = TokioRuntime the resolved
-    /// concrete type is identical so existing call sites
-    /// (`Arc::new(Mutex::new(...))` where `Mutex` is the
-    /// `crate::sync` alias) compile unchanged. The internal
-    /// `set_own_zid` call composes generically over R because
-    /// R311cz lifted that method too. Closes the R311cz carry.
-    pub fn new(
-        actions: Arc<SessionLinkActions<R, T>>,
+    /// R311mn (Level B, B2) — construct a multicast `Session` from the shared
+    /// observer + clock (the handshake-free multicast transport has no
+    /// `SessionLinkActions` bundle). R311mo (B3) adds the `codec-push`-gated
+    /// `tx` argument: the sender half of the channel
+    /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
+    /// drains, so [`Self::publish`] can enqueue onto it (a bare multicast
+    /// build with no data plane omits `tx` and gets an RX-only session).
+    /// Gated `all(transport-multicast, not(transport-unicast))` to mirror the
+    /// `SessionTransport::Multicast` variant gate (see `session::transport`).
+    #[cfg(all(feature = "transport-multicast", not(feature = "transport-unicast")))]
+    pub fn new_multicast(
         observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
+        #[cfg(feature = "codec-push")] tx: tokio::sync::mpsc::UnboundedSender<
+            wz_session_core::multicast_tx::MulticastTxItem,
+        >,
     ) -> Self {
-        let session = Self {
-            actions,
+        Self {
+            transport: SessionTransport::Multicast {
+                #[cfg(feature = "codec-push")]
+                tx,
+                _marker: core::marker::PhantomData,
+            },
             observer,
-            // R311kz — fresh deferred-fire queue per logical session;
-            // every deferred sink (matching, decl listeners, data
-            // planes) clones a handle out of it at registration.
-            // R311lh — unconditional, see the field doc.
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
-        };
-        // R236 — forward the local zid from SessionInitParams into
-        // the subscriber registry so wire-arrived self-echo Pushes
-        // are dedup'd from session creation onward. The `1..=16`
-        // range check inside `set_own_zid` quietly rejects an
-        // out-of-range value (returns `false`); empty zid skipped
-        // here so the registry stays in its pre-R231 default state
-        // for test fixtures that don't supply a zid.
-        if !session.actions.params.zid.is_empty() {
-            let _ = session.set_own_zid(session.actions.params.zid.clone());
         }
-        session
     }
 
-    /// Borrow the outbound action handle. Useful when the caller
-    /// needs to invoke non-publish methods like `send_declare_*` or
-    /// `send_request_query` directly on the actions surface.
-    pub fn actions(&self) -> &Arc<SessionLinkActions<R, T>> {
-        &self.actions
+    /// R311mo (Level B, B3) — publish a literal-keyexpr Put over the multicast
+    /// transport. Mirrors the unicast [`Session::publish`] remote leg, but the
+    /// wire send is an ENQUEUE onto the multicast TX seam: the
+    /// `MulticastTxItem::Push` built by
+    /// [`multicast_put_literal`](wz_session_core::multicast_tx::multicast_put_literal)
+    /// is pushed onto the channel
+    /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
+    /// drains, which mints the per-channel SN, frames it, and multicasts to
+    /// the group (the A1c TX seam). Fire-and-forget — like the unicast wire
+    /// leg — so a closed channel (the drive loop dropped its receiver) is
+    /// silently ignored; the session is defunct at that point.
+    ///
+    /// B3 scope: literal Put, REMOTE-only. No local loopback yet (a multicast
+    /// `Session` gains its subscriber surface in B4) and no Del / aliased /
+    /// metadata / reliability options (the unicast `publish` grew those
+    /// incrementally too — R229+). Gated on `codec-push` (the Put data plane)
+    /// AND `all(transport-multicast, not(transport-unicast))` so it never
+    /// collides with the unicast `publish` in a both-transports build.
+    #[cfg(all(
+        feature = "transport-multicast",
+        not(feature = "transport-unicast"),
+        feature = "codec-push"
+    ))]
+    pub fn publish(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+        let item = wz_session_core::multicast_tx::multicast_put_literal(keyexpr, payload)?;
+        match &self.transport {
+            SessionTransport::Multicast { tx, .. } => {
+                let _ = tx.send(item);
+            }
+        }
+        Ok(())
     }
 
     /// Borrow the observer handle. Application code registers
@@ -498,78 +547,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         self.fires.drain(&self.observer)
     }
 
-    /// R311ld — the dispatch SSOT (session-review minor F closure):
-    /// fan one drive-loop [`IterationEvent`](crate::session_glue::IterationEvent)
-    /// into the observer under its lock, then drain the deferred-fire
-    /// queue AFTER the lock drops — the lock/dispatch/drain pairing the
-    /// F-6 contract requires, mechanized in one method so a dispatch
-    /// site cannot forget the drain. The canonical drive-loop closure
-    /// is now:
-    ///
-    /// ```text
-    /// |event: IterationEvent<'_>| session.dispatch_iteration_event(event)
-    /// ```
-    ///
-    /// Uses the session's own actions handle as the flush sink (the
-    /// same `Arc` the dispatch closures previously threaded by hand —
-    /// [`Session::new`] receives it from the same bundle). A site that
-    /// needs extra work under the same lock scope (e.g. the wz-ap-demo
-    /// switchboard fan) uses
-    /// [`Self::dispatch_iteration_event_with`]; a site that bypasses
-    /// both and locks the observer directly retains the documented
-    /// obligation to pair every dispatch with
-    /// [`Self::drain_deferred_fires`].
-    pub fn dispatch_iteration_event(&self, event: crate::session_glue::IterationEvent<'_>)
-    where
-        SessionLinkActions<R, T>: Send + Sync + 'static,
-    {
-        self.dispatch_iteration_event_with(event, |_obs| {});
-    }
-
-    /// R311ld — [`Self::dispatch_iteration_event`] with an
-    /// `under_lock` extension hook that runs INSIDE the same observer
-    /// lock scope, after the registry fan + pending flush. The hook
-    /// receives the locked observer; it carries the R311kj inline
-    /// constraint (no observer-locking session API re-entry from inside
-    /// it). The deferred-fire drain still runs after the lock drops,
-    /// covering fires staged by the hook too.
-    ///
-    /// R311li — each queryable-matched request's ResponseFinal is
-    /// staged as a deferred-fire JOB, contiguous (same observer lock
-    /// window) with the handler jobs the registry fan just staged. A
-    /// drainer takes the whole staged batch and runs it sequentially,
-    /// so each rid's deferred handler replies precede its
-    /// ResponseFinal on the wire EVEN when an auxiliary drainer (a
-    /// query/publish tail, the sweep task) steals the batch — the
-    /// ordering is structural, not drainer-identity-dependent. Inline
-    /// (raw-registry) handler replies flush under the lock, before any
-    /// staged job runs. The `SessionLinkActions: Send + Sync` bound is
-    /// the deferred wire-emit capability: the tokio profile satisfies
-    /// it (`Arc` + `Send + Sync` link sink); the MCU profile drives
-    /// registries directly and never constructs these jobs.
-    pub fn dispatch_iteration_event_with(
-        &self,
-        event: crate::session_glue::IterationEvent<'_>,
-        under_lock: impl FnOnce(&mut ApplicationLayerObserver),
-    ) where
-        SessionLinkActions<R, T>: Send + Sync + 'static,
-    {
-        R::with_mutex_mut(&self.observer, |obs| {
-            obs.dispatch_event(event);
-            obs.flush_pending_replies(self.actions.as_ref());
-            under_lock(obs);
-            #[cfg(feature = "query-queryable")]
-            for rid in obs.take_pending_final_rids() {
-                let actions = self.actions.clone();
-                self.fires.stage(Box::new(move || {
-                    use wz_session_core::response_sink::ResponseSink as _;
-                    actions.send_response_final(rid);
-                }));
-            }
-        });
-        self.drain_deferred_fires();
-    }
-
     /// R311cy — borrow the Session-owned clock (R311cw fold-in
     /// stored `clock: Arc<T>`). Callers that need to thread the same
     /// monotonic epoch into a peer task (sweep_task,
@@ -578,56 +555,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// fresh epoch.
     pub fn clock(&self) -> &Arc<T> {
         &self.clock
-    }
-
-    /// R283 — `true` once the session-FSM has entered `Established`.
-    /// Thin proxy over
-    /// [`crate::session_glue::SessionLinkActions::is_established`];
-    /// see that method's doc-comment for the underlying mechanism
-    /// (the `record_established_at` Lua action wired to
-    /// `Established.onentry` in `session_fsm_unicast.scxml`).
-    ///
-    /// Callers that emit Interest / declare wire frames pre-Established
-    /// risk silent peer-side discard: the peer's `remote-interests`
-    /// table is empty until handshake completes, so a pre-Established
-    /// Interest never lands. The R283 gate on
-    /// [`Self::declare_liveliness_subscriber_aliased`] enforces this
-    /// invariant at the declare API boundary; callers wanting to time
-    /// their declares against the FSM directly can poll this
-    /// predicate. The non-aliased
-    /// [`Self::declare_liveliness_subscriber`] remains best-effort —
-    /// see its doc-comment for the asymmetric-gate carry.
-    pub fn is_established(&self) -> bool {
-        self.actions.is_established()
-    }
-
-    /// R311jp — zenoh-pico `zp_batch_start` parity: open a TX batching
-    /// window. Subsequent network-message sends on this session (puts /
-    /// queries / declares / replies) accumulate into one outbound
-    /// transport frame — up to the negotiated `batch_size` byte budget —
-    /// instead of flushing per message, until [`Self::batch_flush`] /
-    /// [`Self::batch_stop`] drains the window (an overflow or an
-    /// express-flagged publish drains it implicitly, mirroring pico).
-    /// Idempotent on an already-open window.
-    ///
-    /// Errors with `SendWireError::FeatureDisabled` when the
-    /// `transport-batching` feature is off (R311g signature stability).
-    pub fn batch_start(&self) -> Result<(), SendWireError> {
-        self.actions.batch_start()
-    }
-
-    /// R311jp — zenoh-pico `zp_batch_flush` parity: send the currently
-    /// batched messages now, keeping the batching window open. No-op when
-    /// nothing is batched.
-    pub fn batch_flush(&self) -> Result<(), SendWireError> {
-        self.actions.batch_flush()
-    }
-
-    /// R311jp — zenoh-pico `zp_batch_stop` parity: close the batching
-    /// window and send the currently batched messages. Sends after this
-    /// call flush per message again.
-    pub fn batch_stop(&self) -> Result<(), SendWireError> {
-        self.actions.batch_stop()
     }
 
     /// R231 — forward this session's own zid (1..=16 bytes) to the
@@ -688,6 +615,248 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             observer.subscribers.clear_own_zid();
         });
     }
+}
+
+// R311cy — pure-accessor method generic lift. The three accessors
+// below (`actions` / `observer` / `is_established`) and the
+// R311cy-added `clock` accessor read fields directly without acquiring
+// any per-runtime lock, so their bodies compile identically for any
+// `R: Runtime` impl. Moving them to a dedicated `impl<R: Runtime, T:
+// TimeSource> Session<R, T>` block is the first concrete step of the
+// multi-round method generic lift cascade (R311cv carry #4): the
+// 100+ AP-bound methods that DO call `self.observer.lock().expect()`
+// stay on the `impl<T: TimeSource> Session<TokioRuntime, T>` block
+// until follow-up rounds migrate them to the `R::with_mutex_mut`
+// closure form (R311ct API). The `observer()` return type lifts
+// from the per-runtime alias `&Arc<Mutex<...>>` to the trait-
+// projected `&Arc<<R as Runtime>::Mutex<...>>`; for the AP profile
+// this resolves to the same `std::sync::Mutex<...>` concrete type so
+// every existing `session.observer().lock()` call site keeps
+// compiling under `R = TokioRuntime` (no breaking change to consumers).
+//
+// R311mn (Level B, B2) — gated `transport-unicast`: every method in this
+// block projects the unicast transport variant (`self.actions()`) or names
+// a `session_glue` type, so the whole block is the unicast `Session`
+// surface. The five transport-agnostic methods (observer / clock /
+// drain_deferred_fires / set_own_zid / clear_own_zid) were lifted into the
+// ungated block above; this block now compiles only when
+// `transport-unicast` is on.
+#[cfg(feature = "transport-unicast")]
+impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
+    /// Construct a new session bundle from existing handles.
+    /// `actions` typically comes from
+    /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
+    /// `observer` is a freshly-wrapped
+    /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new)
+    /// inside the per-runtime mutex alias (`R::Mutex<...>`);
+    /// `clock` is the shared `Arc<T>` monotonic source the session
+    /// uses to compute reply-pending deadlines from
+    /// [`QueryOptions::timeout_ms`] (R311cw fold-in — previously
+    /// passed per-call to each `query` / `get` invocation).
+    ///
+    /// ## R236 — auto-wire self-echo dedup from `SessionInitParams.zid`
+    ///
+    /// When `actions.params.zid` carries a valid 1..=16 byte zid
+    /// (the wire-form `_z_id_t` range), this constructor forwards it
+    /// into the inbound subscriber registry via
+    /// [`Session::set_own_zid`] so the application is shielded by the
+    /// R231 self-echo dedup guard without writing an explicit hook
+    /// against a future FSM `Established` event. Mirrors
+    /// zenoh-pico's `_z_session_init` which stamps the local zid
+    /// into `_z_session_t._local_zid` at session creation —
+    /// `vendor/zenoh-pico/src/session/session.c` (`_z_session_init`
+    /// initializes `_local_zid` before any RX/TX driver runs).
+    ///
+    /// Silent skip on `zid.is_empty()` so test fixtures that
+    /// construct a Session with a placeholder `SessionInitParams`
+    /// (no zid declared) are not affected; the registry's `own_zid`
+    /// stays `None`, dedup remains disabled, and every wire-arrived
+    /// Push fires its matching subscribers (the pre-R231 default).
+    /// Silent skip also on `zid.len() > 16` for the same reason —
+    /// `set_own_zid`'s range check rejects the install and returns
+    /// `false`; no panic, no diagnostic noise during construction.
+    /// An application that wants to override or re-install the
+    /// dedup zid after construction still has the explicit
+    /// `set_own_zid` / `clear_own_zid` surface available.
+    ///
+    /// R311da — constructor lifts from the AP-bound impl<T>
+    /// Session<TokioRuntime, T> block to the R-generic impl<R, T>
+    /// Session<R, T> block. The observer parameter type lifts from
+    /// the per-runtime alias `Arc<Mutex<...>>` (resolved to
+    /// std::sync::Mutex on AP) to the trait-projected `Arc<<R as
+    /// Runtime>::Mutex<...>>`; for R = TokioRuntime the resolved
+    /// concrete type is identical so existing call sites
+    /// (`Arc::new(Mutex::new(...))` where `Mutex` is the
+    /// `crate::sync` alias) compile unchanged. The internal
+    /// `set_own_zid` call composes generically over R because
+    /// R311cz lifted that method too. Closes the R311cz carry.
+    pub fn new(
+        actions: Arc<SessionLinkActions<R, T>>,
+        observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+        clock: Arc<T>,
+    ) -> Self {
+        let session = Self {
+            transport: SessionTransport::Unicast(actions),
+            observer,
+            // R311kz — fresh deferred-fire queue per logical session;
+            // every deferred sink (matching, decl listeners, data
+            // planes) clones a handle out of it at registration.
+            // R311lh — unconditional, see the field doc.
+            fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
+            clock,
+        };
+        // R236 — forward the local zid from SessionInitParams into
+        // the subscriber registry so wire-arrived self-echo Pushes
+        // are dedup'd from session creation onward. The `1..=16`
+        // range check inside `set_own_zid` quietly rejects an
+        // out-of-range value (returns `false`); empty zid skipped
+        // here so the registry stays in its pre-R231 default state
+        // for test fixtures that don't supply a zid.
+        if !session.actions().params.zid.is_empty() {
+            let _ = session.set_own_zid(session.actions().params.zid.clone());
+        }
+        session
+    }
+
+    /// Borrow the outbound action handle. Useful when the caller
+    /// needs to invoke non-publish methods like `send_declare_*` or
+    /// `send_request_query` directly on the actions surface.
+    pub fn actions(&self) -> &Arc<SessionLinkActions<R, T>> {
+        match &self.transport {
+            SessionTransport::Unicast(actions) => actions,
+        }
+    }
+
+    // R311mn (B2) — `observer` / `drain_deferred_fires` are
+    // transport-agnostic and now live in the ungated impl block above.
+
+    /// R311ld — the dispatch SSOT (session-review minor F closure):
+    /// fan one drive-loop [`IterationEvent`](crate::session_glue::IterationEvent)
+    /// into the observer under its lock, then drain the deferred-fire
+    /// queue AFTER the lock drops — the lock/dispatch/drain pairing the
+    /// F-6 contract requires, mechanized in one method so a dispatch
+    /// site cannot forget the drain. The canonical drive-loop closure
+    /// is now:
+    ///
+    /// ```text
+    /// |event: IterationEvent<'_>| session.dispatch_iteration_event(event)
+    /// ```
+    ///
+    /// Uses the session's own actions handle as the flush sink (the
+    /// same `Arc` the dispatch closures previously threaded by hand —
+    /// [`Session::new`] receives it from the same bundle). A site that
+    /// needs extra work under the same lock scope (e.g. the wz-ap-demo
+    /// switchboard fan) uses
+    /// [`Self::dispatch_iteration_event_with`]; a site that bypasses
+    /// both and locks the observer directly retains the documented
+    /// obligation to pair every dispatch with
+    /// [`Self::drain_deferred_fires`].
+    pub fn dispatch_iteration_event(&self, event: crate::session_glue::IterationEvent<'_>)
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        self.dispatch_iteration_event_with(event, |_obs| {});
+    }
+
+    /// R311ld — [`Self::dispatch_iteration_event`] with an
+    /// `under_lock` extension hook that runs INSIDE the same observer
+    /// lock scope, after the registry fan + pending flush. The hook
+    /// receives the locked observer; it carries the R311kj inline
+    /// constraint (no observer-locking session API re-entry from inside
+    /// it). The deferred-fire drain still runs after the lock drops,
+    /// covering fires staged by the hook too.
+    ///
+    /// R311li — each queryable-matched request's ResponseFinal is
+    /// staged as a deferred-fire JOB, contiguous (same observer lock
+    /// window) with the handler jobs the registry fan just staged. A
+    /// drainer takes the whole staged batch and runs it sequentially,
+    /// so each rid's deferred handler replies precede its
+    /// ResponseFinal on the wire EVEN when an auxiliary drainer (a
+    /// query/publish tail, the sweep task) steals the batch — the
+    /// ordering is structural, not drainer-identity-dependent. Inline
+    /// (raw-registry) handler replies flush under the lock, before any
+    /// staged job runs. The `SessionLinkActions: Send + Sync` bound is
+    /// the deferred wire-emit capability: the tokio profile satisfies
+    /// it (`Arc` + `Send + Sync` link sink); the MCU profile drives
+    /// registries directly and never constructs these jobs.
+    pub fn dispatch_iteration_event_with(
+        &self,
+        event: crate::session_glue::IterationEvent<'_>,
+        under_lock: impl FnOnce(&mut ApplicationLayerObserver),
+    ) where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        R::with_mutex_mut(&self.observer, |obs| {
+            obs.dispatch_event(event);
+            obs.flush_pending_replies(self.actions().as_ref());
+            under_lock(obs);
+            #[cfg(feature = "query-queryable")]
+            for rid in obs.take_pending_final_rids() {
+                let actions = self.actions().clone();
+                self.fires.stage(Box::new(move || {
+                    use wz_session_core::response_sink::ResponseSink as _;
+                    actions.send_response_final(rid);
+                }));
+            }
+        });
+        self.drain_deferred_fires();
+    }
+
+    // R311mn (B2) — `clock` is transport-agnostic and now lives in the
+    // ungated impl block above.
+
+    /// R283 — `true` once the session-FSM has entered `Established`.
+    /// Thin proxy over
+    /// [`crate::session_glue::SessionLinkActions::is_established`];
+    /// see that method's doc-comment for the underlying mechanism
+    /// (the `record_established_at` Lua action wired to
+    /// `Established.onentry` in `session_fsm_unicast.scxml`).
+    ///
+    /// Callers that emit Interest / declare wire frames pre-Established
+    /// risk silent peer-side discard: the peer's `remote-interests`
+    /// table is empty until handshake completes, so a pre-Established
+    /// Interest never lands. The R283 gate on
+    /// [`Self::declare_liveliness_subscriber_aliased`] enforces this
+    /// invariant at the declare API boundary; callers wanting to time
+    /// their declares against the FSM directly can poll this
+    /// predicate. The non-aliased
+    /// [`Self::declare_liveliness_subscriber`] remains best-effort —
+    /// see its doc-comment for the asymmetric-gate carry.
+    pub fn is_established(&self) -> bool {
+        self.actions().is_established()
+    }
+
+    /// R311jp — zenoh-pico `zp_batch_start` parity: open a TX batching
+    /// window. Subsequent network-message sends on this session (puts /
+    /// queries / declares / replies) accumulate into one outbound
+    /// transport frame — up to the negotiated `batch_size` byte budget —
+    /// instead of flushing per message, until [`Self::batch_flush`] /
+    /// [`Self::batch_stop`] drains the window (an overflow or an
+    /// express-flagged publish drains it implicitly, mirroring pico).
+    /// Idempotent on an already-open window.
+    ///
+    /// Errors with `SendWireError::FeatureDisabled` when the
+    /// `transport-batching` feature is off (R311g signature stability).
+    pub fn batch_start(&self) -> Result<(), SendWireError> {
+        self.actions().batch_start()
+    }
+
+    /// R311jp — zenoh-pico `zp_batch_flush` parity: send the currently
+    /// batched messages now, keeping the batching window open. No-op when
+    /// nothing is batched.
+    pub fn batch_flush(&self) -> Result<(), SendWireError> {
+        self.actions().batch_flush()
+    }
+
+    /// R311jp — zenoh-pico `zp_batch_stop` parity: close the batching
+    /// window and send the currently batched messages. Sends after this
+    /// call flush per message again.
+    pub fn batch_stop(&self) -> Result<(), SendWireError> {
+        self.actions().batch_stop()
+    }
+
+    // R311mn (B2) — `set_own_zid` / `clear_own_zid` are transport-agnostic
+    // and now live in the ungated impl block above.
 
     /// Publish a literal-keyexpr Sample. Routes both branches per
     /// `opts.allowed_destination`:
@@ -750,11 +919,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             let meta = opts.push_metadata();
             match opts.kind {
                 SampleKind::Put => {
-                    self.actions
+                    self.actions()
                         .send_push_with_meta_literal(keyexpr, payload, reliable, &meta)?;
                 }
                 SampleKind::Del => {
-                    self.actions
+                    self.actions()
                         .send_push_del_with_meta_literal(keyexpr, reliable, &meta)?;
                 }
             }
@@ -864,7 +1033,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             let meta = opts.push_metadata();
             match opts.kind {
                 SampleKind::Put => {
-                    self.actions.send_push_with_meta_aliased(
+                    self.actions().send_push_with_meta_aliased(
                         mapping_id,
                         inline_suffix,
                         payload,
@@ -873,7 +1042,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     )?;
                 }
                 SampleKind::Del => {
-                    self.actions.send_push_del_with_meta_aliased(
+                    self.actions().send_push_del_with_meta_aliased(
                         mapping_id,
                         inline_suffix,
                         reliable,
@@ -941,7 +1110,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         opts: PublishOptions,
     ) -> Result<usize, PublishAliasError> {
         let base = self
-            .actions
+            .actions()
             .resolve_outbound_mapping(mapping_id)
             .ok_or(PublishAliasError::UnknownMapping(mapping_id))?;
         let loopback_keyexpr = match inline_suffix {
@@ -1117,7 +1286,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
         #[cfg(feature = "query-get")]
         {
-            let rid = self.actions.alloc_next_request_id();
+            let rid = self.actions().alloc_next_request_id();
             let expected_finals = opts.expected_finals();
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
@@ -1191,9 +1360,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 // callers that pass `QueryOptions::default()`.
                 let meta = opts.query_metadata();
                 let emit = if meta.is_empty() {
-                    self.actions.send_request_query(rid, 0, Some(keyexpr))
+                    self.actions().send_request_query(rid, 0, Some(keyexpr))
                 } else {
-                    self.actions
+                    self.actions()
                         .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta)
                 };
                 // R311ln — roll the pending entry back on a failed wire
@@ -1339,7 +1508,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
         #[cfg(feature = "query-get")]
         {
-            let rid = self.actions.alloc_next_request_id();
+            let rid = self.actions().alloc_next_request_id();
             let expected_finals = opts.expected_finals();
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
@@ -1375,11 +1544,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             if allows_remote {
                 let meta = opts.query_metadata();
                 let emit = if meta.is_empty() {
-                    self.actions
+                    self.actions()
                         .send_request_query(rid, mapping_id, inline_suffix)
                 } else {
-                    self.actions
-                        .send_request_query_with_meta(rid, mapping_id, inline_suffix, &meta)
+                    self.actions().send_request_query_with_meta(
+                        rid,
+                        mapping_id,
+                        inline_suffix,
+                        &meta,
+                    )
                 };
                 if let Err(e) = emit {
                     R::with_mutex_mut(&self.observer, |observer| {
@@ -1482,7 +1655,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "query-get")]
         {
             let base = self
-                .actions
+                .actions()
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(QueryAliasError::UnknownMapping(mapping_id))?;
             let loopback_keyexpr = match inline_suffix {
@@ -1703,7 +1876,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
     ) -> Result<Subscriber<R, T>, SubscribeAliasError> {
         let base = self
-            .actions
+            .actions()
             .resolve_outbound_mapping(mapping_id)
             .ok_or(SubscribeAliasError::UnknownMapping(mapping_id))?;
         let resolved = match inline_suffix {
@@ -1815,7 +1988,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "query-queryable")]
         {
             let base = self
-                .actions
+                .actions()
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(QueryableAliasError::UnknownMapping(mapping_id))?;
             let resolved = match inline_suffix {
@@ -1903,8 +2076,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "liveliness-token")]
         {
             let keyexpr_string = keyexpr.into();
-            let token_id = self.actions.alloc_next_token_id();
-            self.actions
+            let token_id = self.actions().alloc_next_token_id();
+            self.actions()
                 .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
                 .map_err(|e| match e {
                     SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
@@ -1986,7 +2159,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "liveliness-token")]
         {
             let base = self
-                .actions
+                .actions()
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(LivelinessAliasError::UnknownMapping(mapping_id))?;
             let resolved = match inline_suffix {
@@ -1997,8 +2170,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     composed
                 }
             };
-            let token_id = self.actions.alloc_next_token_id();
-            self.actions
+            let token_id = self.actions().alloc_next_token_id();
+            self.actions()
                 .send_declare_token(token_id, mapping_id, inline_suffix)
                 .map_err(|e| match e {
                     SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
@@ -2143,7 +2316,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             let keyexpr_string = keyexpr.into();
-            let interest_id = self.actions.alloc_next_interest_id();
+            let interest_id = self.actions().alloc_next_interest_id();
             // R311lg — DEFERRED FIRE (the R311lf lock-free callback
             // invariant on the liveliness-sample plane): the registry
             // stores a staging sink that copies each matched sample out
@@ -2179,7 +2352,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // suppression order as `undeclare`), drop the orphaned slot,
             // and surface the error. No Interest(Final) wire retract —
             // nothing was ever declared to the peer.
-            if let Err(e) = self.actions.send_interest_liveliness_subscriber(
+            if let Err(e) = self.actions().send_interest_liveliness_subscriber(
                 interest_id,
                 options.history,
                 /*keyexpr_mapping_id=*/ 0,
@@ -2288,14 +2461,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // bug-class error (caller forgot send_declare_keyexpr) before
             // the state-dependent retry loop. R282 + R283 ordering rule.
             let base = self
-                .actions
+                .actions()
                 .resolve_outbound_mapping(mapping_id)
                 .ok_or(LivelinessSubscriberAliasError::UnknownMapping(mapping_id))?;
             // R283 Established gate. Done after mapping resolution so a
             // pre-Established call with a bad mapping surfaces the bad
             // mapping (the bug) rather than the transient state. No
             // interest-id is burned on the early-return path.
-            if !self.actions.is_established() {
+            if !self.actions().is_established() {
                 return Err(LivelinessSubscriberAliasError::NotEstablished);
             }
             let resolved = match inline_suffix {
@@ -2306,7 +2479,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     composed
                 }
             };
-            let interest_id = self.actions.alloc_next_interest_id();
+            let interest_id = self.actions().alloc_next_interest_id();
             // R311lg — deferred staging sink; same lock-free callback
             // contract as `declare_liveliness_subscriber`.
             let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
@@ -2334,7 +2507,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // not survive as an orphan. Kill the cell (suppress a sample
             // staged in the register->send window), drop the slot, surface
             // the error; no Interest(Final) retract (nothing was declared).
-            if let Err(e) = self.actions.send_interest_liveliness_subscriber(
+            if let Err(e) = self.actions().send_interest_liveliness_subscriber(
                 interest_id,
                 options.history,
                 mapping_id,
@@ -2412,7 +2585,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 return Err(LivelinessGetError::NotEstablished);
             }
             let keyexpr_string = keyexpr.into();
-            let interest_id = self.actions.alloc_next_interest_id();
+            let interest_id = self.actions().alloc_next_interest_id();
             // R262 — absolute monotonic-ms deadline (same epoch contract
             // as `Session::query`: the application threads one `Arc<T>`
             // clock through both `Session::new` and
@@ -2453,7 +2626,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // deferred sink's cell). Without this the orphaned entry leaks
             // — or, with a deadline, fires a spurious sweep on_final for a
             // get the caller got no success from.
-            if let Err(e) = self.actions.send_interest_liveliness_get(
+            if let Err(e) = self.actions().send_interest_liveliness_get(
                 interest_id,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),

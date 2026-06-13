@@ -137,7 +137,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         let queue = self.fires.clone();
         let cell_for_sink = cell.clone();
         let observer = self.observer.clone();
-        let actions = self.actions.clone();
+        let actions = self.actions().clone();
         let sink = move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
             // The registry-provided responder (`_out`, bound to the
             // observer's pending_replies) is deliberately unused: the

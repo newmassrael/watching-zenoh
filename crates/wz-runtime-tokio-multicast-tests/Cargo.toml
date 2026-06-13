@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-tokio-multicast-tests — R311mo (Level B) isolated, multicast-only
+# runtime test crate for the tokio profile.
+#
+# Why a separate crate: wz-runtime-tokio's OWN `cargo test` cannot reach the
+# multicast-only Session API (Session::new_multicast / the multicast
+# Session::publish, both gated `not(transport-unicast)`). Its
+# wz-runtime-tokio-test-support dev-dependency depends on wz-runtime-tokio with
+# `transport-unicast`, so cargo's feature unification forces transport-unicast
+# ON during `cargo test` and the multicast-only items are `cfg`'d out. This
+# crate depends on wz-runtime-tokio (as a dev-dependency) with ONLY
+# `transport-multicast,codec-push` — no test-support, no unicast — so, built
+# ISOLATED via `cargo test -p` (Layer C1s), the multicast Session surface is
+# reachable and runtime-testable. It is excluded from the C1/C2 `--workspace`
+# unification (the same feature-leak hazard the wz-mcu-* crates carry), since
+# the workspace pulls transport-unicast in from sibling crates.
+
+[package]
+name = "wz-runtime-tokio-multicast-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Isolated multicast-only runtime tests for wz-runtime-tokio's Session API (R311mo Level B)."
+publish = false
+
+# The library target is intentionally empty — the proof lives in the
+# `#[cfg(test)]` module, which pulls wz-runtime-tokio (multicast-only) as a
+# dev-dependency so the production crate carries zero test-only code paths
+# (the R71 sibling-crate discipline).
+[dependencies]
+
+[dev-dependencies]
+wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
+    "transport-multicast",
+    "codec-push",
+] }
+tokio = { version = "1", features = ["sync"] }
+
+[lints]
+workspace = true
