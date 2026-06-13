@@ -5,11 +5,12 @@
 //! profile's `Session` API.
 //!
 //! `wz-runtime-tokio`'s own `cargo test` cannot reach the multicast-only
-//! `Session` API ([`Session::new_multicast`] / the multicast
-//! `Session::publish`, both gated `not(transport-unicast)`): its
-//! `wz-runtime-tokio-test-support` dev-dependency depends on `wz-runtime-tokio`
-//! with `transport-unicast`, so `cargo test`'s feature unification forces
-//! `transport-unicast` ON and the multicast-only items are `cfg`'d out. This
+//! `Session` API ([`Session::new_multicast`], gated `not(transport-unicast)`;
+//! and the now-unified transport-agnostic `Session::publish` exercised against
+//! a multicast transport): its `wz-runtime-tokio-test-support` dev-dependency
+//! depends on `wz-runtime-tokio` with `transport-unicast`, so `cargo test`'s
+//! feature unification forces `transport-unicast` ON and the multicast-only
+//! constructor is `cfg`'d out. This
 //! crate pulls `wz-runtime-tokio` with ONLY `transport-multicast,codec-push`
 //! (no test-support, no unicast) as a dev-dependency, so — built ISOLATED via
 //! `cargo test -p` (Layer C1s; excluded from the C1/C2 `--workspace`
@@ -25,7 +26,7 @@ mod tests {
     use wz_runtime_tokio::multicast_glue::MulticastTxItem;
     use wz_runtime_tokio::observer::ApplicationLayerObserver;
     use wz_runtime_tokio::runtime_impl::TokioTime;
-    use wz_runtime_tokio::session::Session;
+    use wz_runtime_tokio::session::{PublishOptions, Session};
 
     /// A multicast `Session::publish` builds a `MulticastTxItem::Push` (Put)
     /// and enqueues exactly one onto the TX seam the drive loop drains — the
@@ -49,7 +50,7 @@ mod tests {
         );
 
         session
-            .publish("demo/mc", b"hello-multicast")
+            .publish("demo/mc", b"hello-multicast", PublishOptions::put())
             .expect("multicast Put builds within codec capacity");
 
         let item = rx.try_recv().expect("publish enqueued one tx item");
@@ -96,7 +97,7 @@ mod tests {
         };
 
         let delivered = session
-            .publish("demo/mc", b"loop-me")
+            .publish("demo/mc", b"loop-me", PublishOptions::put())
             .expect("multicast Put builds within codec capacity");
 
         // Loopback leg: exactly one local subscriber callback fired.
@@ -115,7 +116,9 @@ mod tests {
         );
 
         // A non-matching keyexpr fires no local subscriber.
-        let none = session.publish("other/key", b"nope").expect("Put builds");
+        let none = session
+            .publish("other/key", b"nope", PublishOptions::put())
+            .expect("Put builds");
         assert_eq!(none, 0, "no subscriber matches other/key");
 
         drop(sub);

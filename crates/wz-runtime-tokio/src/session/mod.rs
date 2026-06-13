@@ -208,19 +208,47 @@ use crate::reply::InboundReply;
 use crate::reply::ReplyHandle;
 #[cfg(feature = "transport-unicast")]
 use crate::reply_sink::ReplyView;
-// R311mn (B2) — the `Sample` metadata-hint enums feed the
-// `transport-unicast`-gated publish path + `build_loopback_sample` (in the
-// gated `publisher` submodule) + the `query`/`queryable` metadata builders;
-// none are named by the agnostic surface, so gate the import on
-// `transport-unicast` to keep the multicast-only build unused-import clean.
+// R311nb (Level B, B5b-2b tail) — import each `Sample` metadata-hint enum to
+// exactly where it has a consumer so every feature subset stays unused-import
+// clean after the publish convergence:
+//   * `SampleKind` — the Put/Del discriminator the now-AGNOSTIC
+//     `Session::publish` remote leg matches (codec-push) and the
+//     `transport-unicast` `Publisher` / `publish_aliased` set (via `super::*`);
+//     gated on either so a multicast-only + codec-push build still sees it.
+//   * `EncodingHint` / `SourceInfo` — named by the `transport-unicast`
+//     `querier` / `queryable` `QueryOptions` struct fields (unconditional in a
+//     `transport-unicast` build, consumed via `super::*`).
+//   * `Reliability` / `TimestampHint` / `QosLevel` — named only by the
+//     `cfg(test)` module now (their former lib consumer `PublishOptions` moved
+//     to `publish_common`, which carries its own imports). `Reliability` rides
+//     the always-compiled option tests; `TimestampHint` / `QosLevel` ride only
+//     the feature-gated `with_timestamp` / `with_qos` loopback tests, so each
+//     ANDs in the populator's own feature gate to stay subset-clean.
+#[cfg(all(
+    test,
+    any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    )
+))]
+use crate::sample::QosLevel;
+#[cfg(test)]
+use crate::sample::Reliability;
+#[cfg(any(feature = "transport-unicast", feature = "codec-push"))]
+use crate::sample::SampleKind;
+#[cfg(all(test, feature = "pubsub-timestamp"))]
+use crate::sample::TimestampHint;
 #[cfg(feature = "transport-unicast")]
-use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
-// R311gb-2b — `declare_subscriber` no longer names `Sample` (it now
-// takes `impl FnMut(&dyn SampleView)`), so the only remaining uses of
-// the owned `Sample` type are the `pubsub-allow-loop` loopback assembly
-// (`build_loopback_sample`) and the test module. Gate the import to
-// match, keeping a feature-restricted lib build warning-clean.
-#[cfg(any(test, feature = "pubsub-allow-loop"))]
+use crate::sample::{EncodingHint, SourceInfo};
+// R311gb-2b / R311nb — `declare_subscriber` takes `impl FnMut(&dyn
+// SampleView)` and the `pubsub-allow-loop` loopback assembly
+// (`build_loopback_sample`) moved to `publish_common` (importing `Sample`
+// itself), so the only remaining mod.rs consumer of the owned `Sample` type
+// is the `cfg(test)` module (via `super::*`); `subscriber.rs` names it by the
+// full `crate::sample::Sample` path. Gate the import to `test` to keep every
+// non-test lib build unused-import clean.
+#[cfg(test)]
 use crate::sample::Sample;
 // R311mn (B2) — every `session_glue` import gains a `transport-unicast`
 // conjunct: `session_glue` is `#[cfg(feature = "transport-unicast")]`, so
@@ -235,10 +263,11 @@ use crate::session_glue::SendDeclareError;
 use crate::session_glue::SendWireError;
 #[cfg(feature = "transport-unicast")]
 use crate::session_glue::SessionLinkActions;
-// W3 — PushMetadata is consumed only by the `codec-push`-gated
-// `PublishOptions::push_metadata`, so the import carries the same gate.
-#[cfg(all(feature = "codec-push", feature = "transport-unicast"))]
-use crate::session_glue::PushMetadata;
+// R311nb — the `PushMetadata` import is retired here: its sole mod.rs
+// consumer was `PublishOptions::push_metadata`, which moved to
+// `publish_common` (importing `PushMetadata` from its ungated real home
+// `wz_session_core::metadata`). `Session::publish` only handles the *value*
+// `opts.push_metadata()` returns, never naming the type.
 // R311o — `QueryTarget` / `ConsolidationMode` are referenced from
 // the now-unconditional `QueryOptions` struct fields + builder
 // bodies, so they import unconditionally. `QueryMetadata` is only
@@ -270,6 +299,12 @@ mod decl_listener;
 #[cfg(feature = "transport-unicast")]
 mod liveliness;
 mod matching_listener;
+// R311nb (Level B, B5b-2b tail) — the transport-AGNOSTIC publish value
+// surface (`PublishOptions` / `PublishError` / `build_loopback_sample`),
+// ungated so the unified `Session::publish` reaches it on every transport.
+// The `transport-unicast` `publisher` cluster (handles + aliased path) is
+// split below.
+mod publish_common;
 #[cfg(feature = "transport-unicast")]
 mod publisher;
 #[cfg(feature = "transport-unicast")]
@@ -284,6 +319,7 @@ pub use decl_listener::*;
 #[cfg(feature = "transport-unicast")]
 pub use liveliness::*;
 pub use matching_listener::*;
+pub use publish_common::*;
 #[cfg(feature = "transport-unicast")]
 pub use publisher::*;
 #[cfg(feature = "transport-unicast")]
@@ -448,84 +484,121 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
     }
 
-    /// R311mo (Level B, B3) / R311mp (Level B, B4) — publish a literal-keyexpr
-    /// Put over the multicast transport. Two legs, mirroring the unicast
-    /// [`Session::publish`]:
+    /// R311nb (Level B, B5b-2b tail) — publish a literal-keyexpr Sample. The
+    /// single, TRANSPORT-AGNOSTIC publish SSOT: it supersedes BOTH the prior
+    /// `transport-unicast` `publish` and the multicast-only
+    /// `publish(keyexpr, payload)` (R311mo/mp), because neither leg needs to
+    /// know the transport.
     ///
-    /// * **Remote leg** (B3; R311mr routed through the send seam): builds the
-    ///   Put as a `NetworkMessage::Push` and hands it to
-    ///   [`Self::send_network_message`] (the `_z_send_n_msg`-analogue transport
-    ///   dispatch), which on the multicast transport wraps it as a
-    ///   `MulticastTxItem::Push` and enqueues onto the channel
+    /// * **Remote leg** (`codec-push`-gated): builds the Put / Del as a
+    ///   transport-agnostic `NetworkMessage::Push` and hands it to
+    ///   [`Self::send_network_message`] (the `_z_send_n_msg`-analogue send
+    ///   seam), which runtime-dispatches to the owned transport — the unicast
+    ///   `SessionLinkActions` `dispatch_push` + express batch-flush, or the
+    ///   multicast TX channel the
     ///   [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
-    ///   drains, which mints the per-channel SN, frames it, and multicasts to
-    ///   the group (the A1c TX seam). Fire-and-forget — like the unicast wire
-    ///   leg — so a closed channel (the drive loop dropped its receiver) is
-    ///   silently ignored; the session is defunct at that point.
-    /// * **Local loopback leg** (B4, `pubsub-allow-loop`-gated): the same Put
-    ///   is delivered in-process to this session's matching subscribers via
-    ///   [`crate::pubsub::SubscriberRegistry::local_publish`], then the
-    ///   deferred-fire queue is drained so the subscriber callbacks run on the
-    ///   caller thread OUTSIDE the observer lock — byte-for-byte the unicast
-    ///   loopback leg's discipline (R227+ / R311lh / R311lj). Returns the
-    ///   number of local subscriber callbacks the loopback fired (0 when
-    ///   `pubsub-allow-loop` is off, exactly like the unicast `publish`).
+    ///   loop drains. Fire-and-forget (the seam swallows a dead unicast link /
+    ///   a closed multicast receiver). Routed only when
+    ///   `opts.allowed_destination` allows remote; a build without `codec-push`
+    ///   elides the leg entirely (loopback still runs) rather than `?`-aborting
+    ///   on a `FeatureDisabled` reject.
+    /// * **Local loopback leg** (`pubsub-allow-loop`-gated): builds the Sample
+    ///   via [`build_loopback_sample`] (threading every `opts` metadata field —
+    ///   timestamp / encoding / source_info / attachment / qos, R232), delivers
+    ///   it in-process through
+    ///   [`crate::pubsub::SubscriberRegistry::local_publish`], then drains the
+    ///   deferred-fire queue so the subscriber callbacks run on the caller
+    ///   thread OUTSIDE the observer lock (R227+ / R311lh / R311lj). Routed only
+    ///   when `opts.allowed_destination` allows local. A
+    ///   `Locality::SessionLocal`/`Any` subscriber fires; a `Remote`-only one
+    ///   is suppressed.
     ///
-    /// A `Locality::SessionLocal`/`Any` subscriber declared through
-    /// [`Self::declare_subscriber`] (B4, now transport-agnostic) fires on this
-    /// loopback; a `Locality::Remote`-only one is suppressed
-    /// (`local_publish` passes `is_remote = false`). The loopback Sample is a
-    /// plain Put — B4 carries no `PublishOptions`, so there are no metadata
-    /// fields to thread (the unicast `build_loopback_sample` machinery becomes
-    /// shared only once multicast `publish` grows opts, a follow-on like the
-    /// Del / aliased / reliability surface the unicast `publish` grew at R229+).
+    /// Returns the number of loopback subscriber callbacks fired (0 when
+    /// `allows_local()` is false, no subscriber matches, or `pubsub-allow-loop`
+    /// is off). Wire-leg outcomes are fire-and-forget, not reported here.
     ///
-    /// Gated on `codec-push` (the Put data plane) AND
-    /// `all(transport-multicast, not(transport-unicast))` so it never collides
-    /// with the unicast `publish` in a both-transports build.
-    #[cfg(all(
-        feature = "transport-multicast",
-        not(feature = "transport-unicast"),
-        feature = "codec-push"
-    ))]
+    /// Mirrors zenoh-pico's `_z_write` (`vendor/zenoh-pico/src/net/primitives.c`
+    /// 170-205): wire branch under `allows_remote()`, loopback under
+    /// `allows_local()`, both under the `Locality::Any` default. The transport
+    /// split lives in [`Self::send_network_message`], NOT at this API boundary —
+    /// the north-star pico shape (build a `NetworkMessage`, call the one seam).
     pub fn publish(
         &self,
         keyexpr: &str,
         payload: &[u8],
-    ) -> Result<usize, wz_session_core::send_wire_error::SendWireError> {
-        use wz_session_core::send_wire_error::SendWireError;
-        // Remote leg (B3 / R311mr B5b-1): build the Put as a `NetworkMessage`
-        // (the transport-agnostic outbound currency — pico's
-        // `_z_network_message_t`) and hand it to the `send_network_message`
-        // transport-dispatch seam (the `_z_send_n_msg` analogue), which routes
-        // it to this session's multicast TX channel. A capacity overflow fails
-        // the whole publish before the loopback runs (the unicast remote leg
-        // `?`s for the same reason).
-        let push = wz_session_core::push_build::build_push_literal(keyexpr, payload)
+        opts: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        // W3 — the remote wire leg is `codec-push`-gated (symmetric with the
+        // `pubsub-allow-loop` loopback gate below). On a build without
+        // `codec-push` the Push codec is statically absent, so the remote leg
+        // is elided entirely and the loopback leg still runs. With `codec-push`
+        // on, the only runtime reject is a payload/keyexpr that overflows the
+        // declared codec capacity (`PublishError::ExceedsCapacity`).
+        #[cfg(feature = "codec-push")]
+        if opts.allowed_destination.allows_remote() {
+            // R311nb — `SendWireError` imported locally from its ungated real
+            // home: the module-level import is `transport-unicast`-gated, absent
+            // in a multicast-only build where this agnostic leg still compiles.
+            use wz_session_core::send_wire_error::SendWireError;
+            let reliable = opts.reliable_bool();
+            let meta = opts.push_metadata();
+            // R311mv (session review) — `express` is the SSOT projection on
+            // `PushMetadata` (`meta.is_express()`); the seam gates its *effect*
+            // on `transport-batching` (the unicast arm drains the open batch
+            // window after an express send; the multicast arm ignores it — UDP
+            // multicast has no batch window).
+            let express = meta.is_express();
+            // R311ms / R311nb — build the Put / Del as a `NetworkMessage::Push`
+            // (the transport-agnostic outbound currency) and route it through
+            // the [`Self::send_network_message`] seam, which runtime-dispatches
+            // to the owned transport. The builder's `CodecError` maps to
+            // `SendWireError::Codec` -> `ExceedsCapacity` via
+            // `From<SendWireError> for PublishError`.
+            let push = match opts.kind {
+                SampleKind::Put => wz_session_core::push_build::build_push_literal_with_meta(
+                    keyexpr, payload, &meta,
+                ),
+                SampleKind::Del => {
+                    wz_session_core::push_build::build_push_del_literal_with_meta(keyexpr, &meta)
+                }
+            }
             .map_err(SendWireError::Codec)?;
-        self.send_network_message(
-            wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
-            /*reliable=*/ true,
-            /*express=*/ false,
-        )?;
-        // Local loopback leg (B4): deliver to in-process subscribers + drain
-        // the staged fires on the caller thread, mirroring the unicast publish
-        // loopback. cfg-off short-circuits to 0 (remote-only).
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+                reliable,
+                express,
+            )?;
+        }
+        // R311cc — pubsub-allow-loop gates the local_publish loopback branch.
+        // cfg-off short-circuits to 0 (only remote dispatch fires; the
+        // `Locality::Any` default becomes effectively Remote-only). R311db —
+        // observer access via the R::with_mutex_mut closure form (R311ct API).
         #[cfg(feature = "pubsub-allow-loop")]
         {
-            let sample = Sample::new_put(keyexpr, payload.to_vec());
-            let delivered = R::with_mutex_mut(&self.observer, |observer| {
-                observer.subscribers.local_publish(&sample)
-            });
-            // R311lh / R311lj — run the loopback subscriber callbacks
-            // synchronously, outside the observer lock, before `publish`
-            // returns (the observer-serialized batch take keeps a concurrent
-            // drive-loop batch atomic).
-            self.drain_deferred_fires();
+            let delivered = if opts.allowed_destination.allows_local() {
+                let sample = build_loopback_sample(keyexpr, payload, &opts);
+                let delivered = R::with_mutex_mut(&self.observer, |observer| {
+                    observer.subscribers.local_publish(&sample)
+                });
+                // R311lh / R311lj — drain the fires THIS publish staged (the
+                // loopback `local_publish`) so the local subscriber callbacks
+                // run synchronously on the caller thread, outside the observer
+                // lock, before `publish` returns. Gated on the local-delivery
+                // path (a Remote-only publish stages nothing). The
+                // observer-serialized take keeps a concurrent drive-loop batch
+                // atomic (R311lj).
+                self.drain_deferred_fires();
+                delivered
+            } else {
+                0
+            };
             Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
-        Ok(0)
+        {
+            let _ = (keyexpr, payload, opts);
+            Ok(0)
+        }
     }
 
     /// R311mr (B5b-1) / R311ms (B5b-2) — the transport-dispatch SEND SEAM, the
@@ -1117,142 +1190,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
 
     // R311mn (B2) — `set_own_zid` / `clear_own_zid` are transport-agnostic
     // and now live in the ungated impl block above.
-
-    /// Publish a literal-keyexpr Sample. Routes both branches per
-    /// `opts.allowed_destination`:
-    ///
-    /// * [`Locality::allows_remote`] → wire send via
-    ///   [`SessionLinkActions::send_push_literal`] (Put) or
-    ///   [`SessionLinkActions::send_push_del_literal`] (Del). The
-    ///   `payload` is ignored on Del kind.
-    /// * [`Locality::allows_local`] → loopback dispatch via
-    ///   [`crate::pubsub::SubscriberRegistry::local_publish`] with a
-    ///   newly-built [`Sample`] carrying `keyexpr` / `payload` /
-    ///   `opts.kind` / `opts.reliability` plus every metadata field
-    ///   the caller attached via `opts.with_*` (R232 — timestamp /
-    ///   encoding / source_info / attachment / qos).
-    ///
-    /// Returns the number of subscriber callbacks the loopback branch
-    /// fired (0 if `allows_local()` is false OR no subscribers match
-    /// the keyexpr). Wire-branch outcomes are not reported through
-    /// this return value — fire-and-forget per
-    /// [`SessionLinkActions::send_push_literal`]'s shape.
-    ///
-    /// ## R233 — wire-side metadata parity
-    ///
-    /// The wire branch routes through
-    /// [`SessionLinkActions::send_push_with_meta_literal`] /
-    /// [`SessionLinkActions::send_push_del_with_meta_literal`],
-    /// threading every caller-set [`PublishOptions`] metadata field
-    /// (timestamp, encoding, source_info, attachment, qos) onto the
-    /// outbound `MsgPut`/`MsgDel` so the peer's
-    /// `_z_trigger_subscriptions_impl` projects the same
-    /// `_z_sample_t` shape the loopback branch projects in-process.
-    /// Encoding is dropped silently for Del kind (mirrors
-    /// `_z_msg_del_t`'s missing encoding slot); the loopback path
-    /// applies the same projection in
-    /// [`build_loopback_sample`].
-    ///
-    /// Mirrors zenoh-pico's `_z_write` `vendor/zenoh-pico/src/net/primitives.c`
-    /// 170-205: wire branch under `allows_remote()`, loopback branch
-    /// under `allows_local()`. Both branches run when
-    /// `Locality::Any` (the default) and the publisher's intent is
-    /// "fan to every receiver, in-process and remote".
-    pub fn publish(
-        &self,
-        keyexpr: &str,
-        payload: &[u8],
-        opts: PublishOptions,
-    ) -> Result<usize, PublishError> {
-        // W3 — the remote wire leg is `codec-push`-gated (symmetric with
-        // the `pubsub-allow-loop` loopback gate below). On a build
-        // without `codec-push` the Push codec is statically absent, so
-        // the remote leg is elided entirely and the loopback leg still
-        // runs — rather than `?`-aborting on a `FeatureDisabled` reject,
-        // which would break in-process pub/sub for codec-push-less
-        // deploys. With `codec-push` on, the only runtime reject is a
-        // payload/keyexpr that overflows the declared codec capacity
-        // (`PublishError::ExceedsCapacity`).
-        #[cfg(feature = "codec-push")]
-        if opts.allowed_destination.allows_remote() {
-            let reliable = opts.reliable_bool();
-            let meta = opts.push_metadata();
-            // R311ms (B5b-2) — express batch-flush hint for the send seam's
-            // unicast arm (drains the open batch window after an express send,
-            // the `flush_batch_if_express` parity). Moot without
-            // `transport-batching`.
-            // R311mv (session review) — `express` is the SSOT projection on
-            // `PushMetadata` (`meta.is_express()`); the seam gates its *effect*
-            // on `transport-batching`, so this site no longer forks on the
-            // feature (the flag is always computable, only its batch-flush
-            // effect is batching-gated). The prior inline derivation was
-            // duplicated across `publish` (R311ms) and `publish_aliased`
-            // (R311mt).
-            let express = meta.is_express();
-            // R311ms (B5b-2) — build the Put / Del as a `NetworkMessage::Push`
-            // (the transport-agnostic outbound currency) and route it through
-            // the [`Self::send_network_message`] send seam, NOT
-            // `self.actions().send_push_*` — the first data-plane op lifted off
-            // the unicast action bundle and onto the seam (a step toward the
-            // B5b-2b `actions()` dismantling). The build's `CodecError` maps to
-            // `SendWireError::Codec` (the same path the prior
-            // `send_push_with_meta_literal` took: Codec -> ExceedsCapacity via
-            // `From<SendWireError> for PublishError`).
-            let push = match opts.kind {
-                SampleKind::Put => wz_session_core::push_build::build_push_literal_with_meta(
-                    keyexpr, payload, &meta,
-                ),
-                SampleKind::Del => {
-                    wz_session_core::push_build::build_push_del_literal_with_meta(keyexpr, &meta)
-                }
-            }
-            .map_err(SendWireError::Codec)?;
-            self.send_network_message(
-                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
-                reliable,
-                express,
-            )?;
-        }
-        // R311cc — pubsub-allow-loop gates the local_publish loopback
-        // branch of Session::publish. cfg-off short-circuits to 0
-        // (only remote dispatch fires); the Locality::Any default
-        // becomes effectively Locality::Remote_Only.
-        //
-        // R311db — observer access migrates from
-        // `self.observer.lock().expect(...).subscribers.local_publish(&sample)`
-        // to the R::with_mutex_mut closure form (R311ct API) so this
-        // method composes generically across the runtime profile.
-        #[cfg(feature = "pubsub-allow-loop")]
-        {
-            let delivered = if opts.allowed_destination.allows_local() {
-                let sample = build_loopback_sample(keyexpr, payload, &opts);
-                let delivered = R::with_mutex_mut(&self.observer, |observer| {
-                    observer.subscribers.local_publish(&sample)
-                });
-                // R311lh / R311lj — drain the fires THIS publish staged
-                // (the loopback `local_publish`) so local subscriber
-                // callbacks run synchronously on the caller thread,
-                // outside the observer lock, before `publish` returns
-                // (pico fires subscription callbacks outside the session
-                // mutex on the delivering thread). Drain is gated on the
-                // local-delivery path: a Remote-only publish stages
-                // nothing, so draining there would be gratuitous (it
-                // would run drive-loop-staged callbacks on the publish
-                // thread). The observer-serialized take keeps a
-                // concurrent drive-loop batch atomic (R311lj).
-                self.drain_deferred_fires();
-                delivered
-            } else {
-                0
-            };
-            Ok(delivered)
-        }
-        #[cfg(not(feature = "pubsub-allow-loop"))]
-        {
-            let _ = (keyexpr, payload, opts);
-            Ok(0)
-        }
-    }
 
     /// R229 — aliased-keyexpr counterpart of [`Session::publish`].
     /// Routes the wire branch through

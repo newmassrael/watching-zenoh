@@ -1200,11 +1200,12 @@ layer_c1r_mcu_multicast_e2e() {
 
 # ─── Layer C1s — wz-runtime-tokio-multicast-tests isolated test + clippy ─
 #
-# R311mo (Level B). The multicast-only Session API (Session::new_multicast /
-# the multicast Session::publish, both gated `not(transport-unicast)`) is
-# unreachable from wz-runtime-tokio's OWN `cargo test`: its
-# wz-runtime-tokio-test-support dev-dependency forces transport-unicast ON via
-# feature unification, gating the multicast-only items out.
+# R311mo (Level B). The multicast-only Session API (Session::new_multicast,
+# gated `not(transport-unicast)`; and the R311nb-unified transport-agnostic
+# Session::publish exercised against a multicast transport) is unreachable from
+# wz-runtime-tokio's OWN `cargo test`: its wz-runtime-tokio-test-support
+# dev-dependency forces transport-unicast ON via feature unification, gating
+# the multicast-only constructor out.
 # wz-runtime-tokio-multicast-tests pulls wz-runtime-tokio with ONLY
 # transport-multicast,codec-push (no test-support, no unicast), so — built
 # ISOLATED here via `-p`, excluded from the C1/C2 `--workspace` unification —
