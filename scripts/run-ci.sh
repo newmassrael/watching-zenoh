@@ -844,6 +844,22 @@ layer_c1g_cargo_test_observer() {
 #   5. declare-observer  +codec-declare +declare/liveliness  (peer-declare + liveliness observer, NO query/reply
 #                                                      — builds the observer with the queryables slot elided)
 #   6. codec-declare-bare +codec-declare             (registries present, zero consumer features)
+#   6b. seam-skew (clippy) +session-unicast +declare-interest  (R311my — the
+#       send-seam gate-skew guard. session-unicast ON compiles the
+#       SessionLinkActions seam; declare-interest ON pulls codec-declare + the
+#       Interest arm but NO Declare-origination feature (the 6-union
+#       declare-keyexpr/-subscriber/-queryable/-token/-final/liveliness-token),
+#       so the seam's Declare arm is cfg'd OUT. R311mw shipped a skew where that
+#       arm was codec-declare-gated while dispatch_declare is union-gated —
+#       absent dispatch, hard compile error — and EVERY other codec-declare lane
+#       pins a 6-union member, masking it. This is the only lane that compiles
+#       the seam with codec-declare on but no Declare origination. clippy
+#       -D warnings (the seam lives in lib) so a future seam-arm gate that
+#       outruns its dispatch_* helper, or a dropped catch-arm param discard,
+#       fails here. NOTE: the `_ => let _ = (express, reliable)` catch arm's
+#       `use NetworkMessage` is exercised by the Interest arm here; the purely
+#       degenerate `codec-declare`-with-zero-consumers build is not a coherent
+#       profile and is not pinned.)
 #   7. transport-batching +transport-batching        (R311kl: the gate covers ONLY the BatchTx coalescing
 #                                                      machinery now — negotiation is core; guards the
 #                                                      gate-ON arm that the alloc-only subset #1 leaves OFF)
@@ -871,6 +887,7 @@ layer_c1h_arbitrary_subset_matrix() {
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet \
+        && cargo clippy -p wz-session-core --no-default-features --features alloc,session-unicast,declare-interest,codec-frame --all-targets --quiet -- -D warnings \
         && cargo build -p wz-session-core --no-default-features --features alloc,transport-batching --quiet \
         && cargo build -p wz-session-core --no-default-features --quiet \
         && cargo build -p wz-session-core --no-default-features --features codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
