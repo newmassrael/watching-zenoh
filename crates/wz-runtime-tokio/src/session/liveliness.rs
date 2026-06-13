@@ -179,7 +179,38 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
             return;
         }
         self.armed = false;
-        self.session.actions().send_undeclare_token(self.id);
+        // R311mw (B5b-2b-3) — route the `Declare(UndeclToken)` emit through the
+        // [`Session::send_network_message`] send seam (build_undeclare_token +
+        // the Declare arm) instead of
+        // `self.session.actions().send_undeclare_token`, then prune the
+        // reconnect-replay cache session-side. F2 — no error channel; a
+        // transport-down reject drops the emit exactly as the dead link would.
+        // Gated `all(declare-token, declare-undeclare)` (the same gate the
+        // prior `send_undeclare_token` body used): the liveliness module is
+        // `transport-unicast`-gated but NOT liveliness-token-gated, so a
+        // transport-unicast build without `declare-undeclare` still compiles
+        // this teardown. declare-token ⟹ codec-declare, so the seam's Declare
+        // arm is present whenever this block is.
+        #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+        {
+            let declare = wz_session_core::declare_build::build_undeclare_token(self.id);
+            let _ = self.session.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+                /*reliable=*/ true,
+                /*express=*/ false,
+            );
+            self.session.actions().prune_token_declaration(self.id);
+        }
+        // R311mw — a transport-unicast build without `declare-undeclare`
+        // cannot emit an UndeclToken (the seam block above is cfg'd out) and
+        // is not `liveliness-token` (the observer read below is cfg'd out), so
+        // nothing else reads `self.session` in such a build. `liveliness-token`
+        // implies both `declare-token` + `declare-undeclare`, so this discard
+        // only fires when no LivelinessToken can actually be constructed — the
+        // struct still compiles there, and the prior signature-stable
+        // `send_undeclare_token` likewise read `self.session` unconditionally.
+        #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
+        let _ = &self.session;
         #[cfg(feature = "liveliness-token")]
         R::with_mutex_mut(&self.session.observer, |obs| {
             obs.local_tokens.unregister(self.id);

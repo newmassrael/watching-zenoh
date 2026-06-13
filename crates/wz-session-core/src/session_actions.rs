@@ -1457,14 +1457,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// so a publish that routes through the seam stays transport-agnostic — it
     /// no longer reaches into the unicast action bundle for the flush). R311mu
     /// (B5b-2b-2) added the Request arm (the z_get initiator path; a Query
-    /// carries no express window). The remaining outbound variants (Response /
-    /// Declare / Interest) migrate as their operations move onto the seam; an
-    /// inbound-only or not-yet-migrated variant returns
-    /// [`SendWireError::FeatureDisabled`] (an honest no-emit reject, never a
-    /// panic) — symmetric with the multicast arm. The fn gate widens to
-    /// `any(codec-push, codec-request)` so a query-only build (codec-request
-    /// without codec-push) still carries the seam.
-    #[cfg(any(feature = "codec-push", feature = "codec-request"))]
+    /// carries no express window). R311mw (B5b-2b-3) added the Declare arm (the
+    /// liveliness-token declare / undeclare path; a Declare carries no express
+    /// window either). The remaining outbound variants (Response / Interest)
+    /// migrate as their operations move onto the seam; an inbound-only or
+    /// not-yet-migrated variant returns [`SendWireError::FeatureDisabled`] (an
+    /// honest no-emit reject, never a panic) — symmetric with the multicast
+    /// arm. The fn gate widens to `any(codec-push, codec-request, codec-declare)`
+    /// so a query-only (codec-request without codec-push) or liveliness-only
+    /// (codec-declare without either) build still carries the seam.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-declare"
+    ))]
     pub fn send_network_message(
         &self,
         msg: crate::network_message::NetworkMessage,
@@ -1496,6 +1502,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             NetworkMessage::Request(request) => {
                 let _ = express;
                 self.dispatch_request(*request, reliable)
+            }
+            // Declare arm (R311mw, B5b-2b-3): the liveliness-token declare /
+            // undeclare origination path. A Declare carries no express batch
+            // window — `dispatch_declare` mints the SN, frames, and
+            // batch-absorbs reliably, parity with the prior
+            // `send_declare_token` / `send_undeclare_token` (which dispatched
+            // reliable with no flush).
+            #[cfg(feature = "codec-declare")]
+            NetworkMessage::Declare(declare) => {
+                let _ = express;
+                self.dispatch_declare(*declare, reliable)
             }
             // Not yet routed through the seam (or inbound-only). Honest no-emit
             // reject, never a panic — symmetric with the multicast arm.
@@ -2121,6 +2138,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// R311g1 — signature-stability: body cfg, signature stable.
     /// `Err(FeatureDisabled)` when `declare-token` off.
+    ///
+    /// R311mw (Level B, B5b-2b-3) — the build half (resolve + R300 gate +
+    /// envelope assembly) is now [`Self::prepare_declare_token`]; this wrapper
+    /// keeps the dispatch + reconnect-cache half. The seam-routed
+    /// `Session::declare_token` shares the same `prepare_declare_token` SSOT
+    /// and routes the emit through the transport send seam instead, so the two
+    /// paths cannot diverge on the pico-safety gate. The wrapper survives for
+    /// its byte-stable-wire-shape callers (the session_glue tests + the
+    /// wz-ap-demo task).
     pub fn send_declare_token(
         &self,
         token_id: u64,
@@ -2129,21 +2155,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendDeclareError> {
         #[cfg(feature = "declare-token")]
         {
-            // R300 — same gate shape as `send_declare_subscriber`.
-            let reconstructed =
-                self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-            check_outbound_keyexpr_pico_safe(&reconstructed)?;
-            let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare =
+                self.prepare_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_declare(declare, /*reliable=*/ true)
                 .map_err(SendDeclareError::from)?;
             // A4 — record for post-reconnect replay (pico
             // `_z_cache_declaration` on `_Z_RES_OK`).
-            #[cfg(feature = "session-reconnect")]
-            self.cache_declaration(CachedDeclaration::Token {
-                token_id,
-                mapping_id: keyexpr_mapping_id,
-                suffix: keyexpr_suffix.map(ToString::to_string),
-            });
+            self.cache_token_declaration(token_id, keyexpr_mapping_id, keyexpr_suffix);
             Ok(())
         }
         #[cfg(not(feature = "declare-token"))]
@@ -2151,6 +2169,65 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = (token_id, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendDeclareError::FeatureDisabled)
         }
+    }
+
+    /// R311mw (Level B, B5b-2b-3) — the BUILD half of
+    /// [`Self::send_declare_token`]: resolve the keyexpr from
+    /// `(keyexpr_mapping_id, keyexpr_suffix)`, run the R300 outbound
+    /// pico-safety gate, and assemble the `Declare(DeclToken)` envelope.
+    /// Returns the built [`DeclareOwned`] for the caller to hand to the
+    /// transport send seam
+    /// ([`Session::send_network_message`](../../wz_runtime_tokio/session/struct.Session.html)),
+    /// mirroring how `request_build::build_request_query_with_meta` is the
+    /// build half the seam-routed z_get shares with `send_request_query`. The
+    /// pico-safety gate stays SSOT here — both the seam-routed
+    /// `Session::declare_token` and the `send_declare_token` wrapper call this,
+    /// so the validation is authored exactly once.
+    #[cfg(feature = "declare-token")]
+    pub fn prepare_declare_token(
+        &self,
+        token_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) -> Result<wz_codecs::declare::DeclareOwned, SendDeclareError> {
+        // R300 — same gate shape as `send_declare_subscriber`. The full path
+        // to `DeclareOwned` mirrors `dispatch_declare` — the module-level
+        // `use` is `liveliness-token`-gated but this build half is reachable
+        // under bare `declare-token` (the `send_declare_token` wrapper path).
+        let reconstructed =
+            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        Ok(build_declare_token(
+            token_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+        )?)
+    }
+
+    /// R311mw — append the post-emit reconnect-replay cache entry for a
+    /// declared liveliness token. The session-level counterpart to the
+    /// `Session::declare_token` seam emit: pico caches the declaration on
+    /// `_Z_RES_OK` from `_z_send_n_msg`, so the cache is session-state
+    /// bookkeeping AROUND the wire emit, not part of the transport seam (the
+    /// same reason the z_get reply-pending register stays session-level in
+    /// R311mu). Signature-stable: a no-op without `session-reconnect` (no cache
+    /// storage exists) per R311g1, mirroring
+    /// [`Self::prune_liveliness_get_interest`].
+    #[cfg(feature = "declare-token")]
+    pub fn cache_token_declaration(
+        &self,
+        token_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        #[cfg(feature = "session-reconnect")]
+        self.cache_declaration(CachedDeclaration::Token {
+            token_id,
+            mapping_id: keyexpr_mapping_id,
+            suffix: keyexpr_suffix.map(ToString::to_string),
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = (token_id, keyexpr_mapping_id, keyexpr_suffix);
     }
 
     /// R283 — encode + dispatch a pre-built `Declare(...)` envelope on
@@ -2429,12 +2506,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = self.dispatch_declare(declare, /*reliable=*/ true);
             // A4 — drop the matching replay entry (pico
             // `_z_prune_declaration` undeclare-filter on `_id`).
-            #[cfg(feature = "session-reconnect")]
-            self.prune_declaration(|entry| {
-                matches!(entry, CachedDeclaration::Token { token_id: t, .. } if *t == token_id)
-            });
+            self.prune_token_declaration(token_id);
         }
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
+        let _ = token_id;
+    }
+
+    /// R311mw — drop the post-emit reconnect-replay cache entry for an
+    /// undeclared liveliness token (first-match, pico `_z_prune_declaration`
+    /// filter semantics). The session-level counterpart to the
+    /// `LivelinessToken` teardown seam emit — shared by the
+    /// `send_undeclare_token` wrapper and the seam-routed teardown so the
+    /// prune is authored once. Signature-stable: a no-op without
+    /// `session-reconnect` per R311g1, mirroring
+    /// [`Self::prune_liveliness_get_interest`].
+    #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+    pub fn prune_token_declaration(&self, token_id: u64) {
+        #[cfg(feature = "session-reconnect")]
+        self.prune_declaration(
+            |entry| matches!(entry, CachedDeclaration::Token { token_id: t, .. } if *t == token_id),
+        );
+        #[cfg(not(feature = "session-reconnect"))]
         let _ = token_id;
     }
 

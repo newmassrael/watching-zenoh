@@ -558,7 +558,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// (publish having moved here).
     ///
     /// Origination on the unicast arm is Push (publish) + Request (z_get, added
-    /// R311mu / B5b-2b-2); the remaining outbound variants (Response / Declare /
+    /// R311mu / B5b-2b-2) + Declare (liveliness-token declare/undeclare, added
+    /// R311mw / B5b-2b-3); the remaining outbound variants (Response /
     /// Interest) migrate as their operations move onto the seam. The multicast
     /// arm stays Push-only and exposes only
     /// `publish` (the reply messages are emitted by the drive-loop
@@ -569,21 +570,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// error the unicast `dispatch_*` family returns and lives ungated in
     /// `wz_session_core` (the `transport-unicast`-gated `session_glue` re-export
     /// is just a path), so the seam's `Result` is already transport-uniform.
-    // R311mu (B5b-2b-2) — gate widened from `codec-push` to admit the
-    // query-only build: the seam now carries Request (z_get), which is
-    // `codec-request`-gated and does NOT imply `codec-push`
-    // (`query-get = [query-reply, codec-request]`). The disjuncts gate the
-    // fn to exactly where it has a caller — `all(transport-unicast,
-    // any(codec-push, codec-request))` for the unicast publish + query
-    // surface, and `all(transport-multicast, not(transport-unicast),
-    // codec-push)` for the multicast publish — so the multicast arm (which
-    // references the `codec-push`-gated `tx` / `MulticastTxItem`) only
-    // compiles where `codec-push` is on, and a multicast-only build with
-    // `codec-request` but no `codec-push` simply has no seam (no caller).
+    // R311mu (B5b-2b-2) / R311mw (B5b-2b-3) — gate widened from `codec-push`
+    // to admit the query-only and liveliness-only builds: the seam now carries
+    // Request (z_get, `codec-request`-gated) and Declare (liveliness-token
+    // declare/undeclare, `codec-declare`-gated), neither of which implies
+    // `codec-push`. The disjuncts gate the fn to exactly where it has a
+    // caller — `all(transport-unicast, any(codec-push, codec-request,
+    // codec-declare))` for the unicast publish + query + liveliness surface,
+    // and `all(transport-multicast, not(transport-unicast), codec-push)` for
+    // the multicast publish — so the multicast arm (which references the
+    // `codec-push`-gated `tx` / `MulticastTxItem`) only compiles where
+    // `codec-push` is on, and a multicast-only build with `codec-request` /
+    // `codec-declare` but no `codec-push` simply has no seam (no caller).
     #[cfg(any(
         all(
             feature = "transport-unicast",
-            any(feature = "codec-push", feature = "codec-request")
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-declare"
+            )
         ),
         all(
             feature = "transport-multicast",
@@ -2385,31 +2391,61 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         {
             let keyexpr_string = keyexpr.into();
             let token_id = self.actions().alloc_next_token_id();
-            self.actions()
-                .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
-                .map_err(|e| match e {
+            // declare_token always builds in literal mode (mapping_id = 0,
+            // suffix = Some(_)), so the alias-resolution reject variants
+            // cannot fire; the `unreachable!()` guards future refactors that
+            // change the call shape. The seam's `SendWireError` folds into the
+            // same `SendDeclareError` projection via `From`, so the error
+            // mapping is shared (and unchanged) across the build + emit halves.
+            fn map_decl_err(e: SendDeclareError) -> LivelinessAliasError {
+                match e {
                     SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
                     // W3 — a literal keyexpr longer than MAX_KEYEXPR_BYTES
                     // is a reachable caller-data condition (not a
                     // protocol invariant), so it projects to the typed
                     // public reject rather than the unreachable guard.
                     SendDeclareError::Codec(_) => LivelinessAliasError::ExceedsCapacity,
-                    // declare_token always calls send_declare_token in
-                    // literal mode (mapping_id = 0, suffix = Some(_)),
-                    // so the protocol-invariant variants cannot fire.
-                    // The unreachable!() guards future refactors that
-                    // change the call shape.
                     other => unreachable!(
-                        "declare_token literal-mode send_declare_token returned \
+                        "declare_token literal-mode prepare/seam returned \
                          {other:?} unexpectedly"
                     ),
-                })?;
+                }
+            }
+            // R311mw (B5b-2b-3) — build the `Declare(DeclToken)` via the
+            // prepare SSOT (resolve + R300 pico-safety gate + envelope) and
+            // route the emit through the [`Self::send_network_message`] send
+            // seam instead of `self.actions().send_declare_token` — the Declare
+            // family lifted onto the seam (after the Push + Request families,
+            // R311ms/mt/mu). The token-id alloc (above) + the reconnect-replay
+            // cache + the declarer-side registry register (below) stay
+            // session-level: the seam emits the wire Declare only, mirroring
+            // zenoh-pico keeping `_z_cache_declaration` / the liveliness
+            // registration outside `_z_send_n_msg`. reliable=true / express=false
+            // match the prior `send_declare_token` (dispatch_declare reliable,
+            // no flush — a Declare carries no express window).
+            let declare = self
+                .actions()
+                .prepare_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
+                .map_err(map_decl_err)?;
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+                /*reliable=*/ true,
+                /*express=*/ false,
+            )
+            .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
+            // A4 — record for post-reconnect replay (pico `_z_cache_declaration`
+            // on `_Z_RES_OK`); session-state bookkeeping AROUND the seam emit.
+            self.actions().cache_token_declaration(
+                token_id,
+                /*mapping_id=*/ 0,
+                Some(&keyexpr_string),
+            );
             // R283 — register the held token in the declarer-side registry
             // so an inbound non-final liveliness Interest can reply with
-            // it. The proactive send_declare_token above covers peers
-            // already subscribed; this registration is the CURRENT-replay
-            // state that lets a peer which subscribes LATER still learn the
-            // token via its Interest. Removed by LivelinessToken::Drop.
+            // it. The proactive declare emit above covers peers already
+            // subscribed; this registration is the CURRENT-replay state that
+            // lets a peer which subscribes LATER still learn the token via its
+            // Interest. Removed by LivelinessToken::Drop.
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .local_tokens
@@ -2479,9 +2515,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 }
             };
             let token_id = self.actions().alloc_next_token_id();
-            self.actions()
-                .send_declare_token(token_id, mapping_id, inline_suffix)
-                .map_err(|e| match e {
+            // R311mw (B5b-2b-3) — aliased Declare onto the send seam; same
+            // shape as `Session::declare_token`, routed by (mapping_id,
+            // inline_suffix) instead of (0, literal). The seam's
+            // `SendWireError` folds into the same `SendDeclareError` projection
+            // via `From` so the error mapping is shared across the build + emit
+            // halves and unchanged from the prior `send_declare_token` path.
+            fn map_decl_err(e: SendDeclareError) -> LivelinessAliasError {
+                match e {
                     SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
                     // W3 — reconstructed keyexpr over MAX_KEYEXPR_BYTES is a
                     // reachable caller-data condition projecting to the
@@ -2494,12 +2535,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     SendDeclareError::UnknownMappingId(id) => {
                         // Race against a concurrent send_undeclare_kexpr
                         // between the pre-check resolve_outbound_mapping
-                        // above and this send_declare_token call.
+                        // above and the prepare reconstruct below.
                         LivelinessAliasError::UnknownMapping(id)
                     }
                     SendDeclareError::ReservedMappingIdZero | SendDeclareError::MissingKeyexpr => {
                         unreachable!(
-                            "declare_token_aliased aliased-mode send_declare_token \
+                            "declare_token_aliased aliased-mode prepare/seam \
                          returned {e:?} unexpectedly"
                         )
                     }
@@ -2514,10 +2555,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                     SendDeclareError::FeatureDisabled => unreachable!(
                         "declare-token feature must be ON whenever \
                          liveliness-token is ON (Cargo implication chain); \
-                         send_declare_token returned FeatureDisabled despite \
+                         prepare_declare_token returned FeatureDisabled despite \
                          liveliness-token-gated caller"
                     ),
-                })?;
+                }
+            }
+            let declare = self
+                .actions()
+                .prepare_declare_token(token_id, mapping_id, inline_suffix)
+                .map_err(map_decl_err)?;
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+                /*reliable=*/ true,
+                /*express=*/ false,
+            )
+            .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
+            // A4 — record for post-reconnect replay (pico `_z_cache_declaration`
+            // on `_Z_RES_OK`); session-state bookkeeping AROUND the seam emit.
+            self.actions()
+                .cache_token_declaration(token_id, mapping_id, inline_suffix);
             Ok(LivelinessToken {
                 session: self.clone(),
                 id: token_id,
