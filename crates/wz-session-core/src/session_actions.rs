@@ -1484,13 +1484,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         express: bool,
     ) -> Result<(), SendWireError> {
-        use crate::network_message::NetworkMessage;
+        // R311nh — the match patterns are FULLY-QUALIFIED (no `use NetworkMessage`
+        // alias). The fn-gate above is `any(codec-push, codec-request,
+        // codec-declare, declare-interest)`, but each typed arm keys off its own
+        // narrower origination gate (the Declare arm on the declare-* union, not
+        // bare `codec-declare`). That makes the fn-gate WIDER than the arm union:
+        // a `codec-declare`-only build (no origination feature) compiles the fn
+        // with ONLY the `_ =>` catch arm, so a local `use` alias would go unused
+        // (clippy `-D warnings` reject — the latent gate-skew). Fully-qualifying
+        // each pattern removes the alias entirely, so import-usage no longer
+        // depends on which arms compile: the unused-import failure class is
+        // unrepresentable here regardless of the fn-gate / arm-gate skew.
         match msg {
             // Push data-plane arm (B5b-2): mint SN + frame + batch-absorb,
             // then `express` drains the open batch window (the
             // flush_batch_if_express parity).
             #[cfg(feature = "codec-push")]
-            NetworkMessage::Push(push) => {
+            crate::network_message::NetworkMessage::Push(push) => {
                 self.dispatch_push(*push, reliable)?;
                 #[cfg(feature = "transport-batching")]
                 if express {
@@ -1506,7 +1516,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // the prior `send_request_query` (which dispatched reliable with
             // no flush).
             #[cfg(feature = "codec-request")]
-            NetworkMessage::Request(request) => {
+            crate::network_message::NetworkMessage::Request(request) => {
                 let _ = express;
                 self.dispatch_request(*request, reliable)
             }
@@ -1528,7 +1538,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 feature = "declare-final",
                 feature = "liveliness-token"
             ))]
-            NetworkMessage::Declare(declare) => {
+            crate::network_message::NetworkMessage::Declare(declare) => {
                 let _ = express;
                 self.dispatch_declare(*declare, reliable)
             }
@@ -1541,7 +1551,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // arm gates on `declare-interest` (the feature that authors the
             // liveliness interest path), not a `codec-*` feature.
             #[cfg(feature = "declare-interest")]
-            NetworkMessage::Interest(interest) => {
+            crate::network_message::NetworkMessage::Interest(interest) => {
                 let _ = express;
                 self.dispatch_interest(interest, reliable)
             }
