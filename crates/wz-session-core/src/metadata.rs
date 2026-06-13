@@ -55,6 +55,22 @@ impl PushMetadata {
             && self.attachment.is_none()
             && self.qos.is_none()
     }
+
+    /// `true` when the QoS layer requests express delivery (the
+    /// [`QosLevel::is_express`] projection of the optional `qos` slot).
+    /// The single source for the "is this Push express" derivation the
+    /// publish paths feed to the send seam's `express` arm (the
+    /// `flush_batch_if_express` batch-window drain). R311mv (session
+    /// review) — both [`Session::publish`] and
+    /// [`Session::publish_aliased`] consulted an inline copy of this
+    /// derivation (introduced at R311ms / R311mt); centralised here so
+    /// the projection has one home. The `transport-batching` gate stays
+    /// at the seam (the flag is always computable; only its *effect* is
+    /// batching-gated), so the publish call sites no longer fork on the
+    /// feature.
+    pub fn is_express(&self) -> bool {
+        self.qos.as_ref().is_some_and(QosLevel::is_express)
+    }
 }
 
 /// R240 — Query-side counterpart of [`PushMetadata`]. Bundles the

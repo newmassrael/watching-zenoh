@@ -1173,13 +1173,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // unicast arm (drains the open batch window after an express send,
             // the `flush_batch_if_express` parity). Moot without
             // `transport-batching`.
-            #[cfg(feature = "transport-batching")]
-            let express = meta
-                .qos
-                .as_ref()
-                .is_some_and(crate::sample::QosLevel::is_express);
-            #[cfg(not(feature = "transport-batching"))]
-            let express = false;
+            // R311mv (session review) — `express` is the SSOT projection on
+            // `PushMetadata` (`meta.is_express()`); the seam gates its *effect*
+            // on `transport-batching`, so this site no longer forks on the
+            // feature (the flag is always computable, only its batch-flush
+            // effect is batching-gated). The prior inline derivation was
+            // duplicated across `publish` (R311ms) and `publish_aliased`
+            // (R311mt).
+            let express = meta.is_express();
             // R311ms (B5b-2) — build the Put / Del as a `NetworkMessage::Push`
             // (the transport-agnostic outbound currency) and route it through
             // the [`Self::send_network_message`] send seam, NOT
@@ -1314,13 +1315,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
             // after an express-flagged send). Moot without
             // `transport-batching`. Derivation byte-identical to the literal
             // `publish` (R311ms).
-            #[cfg(feature = "transport-batching")]
-            let express = meta
-                .qos
-                .as_ref()
-                .is_some_and(crate::sample::QosLevel::is_express);
-            #[cfg(not(feature = "transport-batching"))]
-            let express = false;
+            // R311mv (session review) — `express` is the SSOT projection on
+            // `PushMetadata` (`meta.is_express()`); the seam gates its *effect*
+            // on `transport-batching`, so this site no longer forks on the
+            // feature (the flag is always computable, only its batch-flush
+            // effect is batching-gated). The prior inline derivation was
+            // duplicated across `publish` (R311ms) and `publish_aliased`
+            // (R311mt).
+            let express = meta.is_express();
             // R311mt (B5b-2b-1) — build the aliased Put / Del as a
             // `NetworkMessage::Push` and route it through the
             // [`Self::send_network_message`] send seam instead of
