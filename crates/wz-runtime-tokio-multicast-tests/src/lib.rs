@@ -62,4 +62,62 @@ mod tests {
             "publish enqueued exactly one item (no duplicate)"
         );
     }
+
+    /// R311mp (B4) — a multicast `Session` declares a subscriber through the
+    /// now-transport-agnostic `Session::declare_subscriber`, and a
+    /// `Session::publish` delivers the Put to that local subscriber via the
+    /// loopback leg (`pubsub-allow-loop`) — exactly the unicast publish
+    /// loopback contract, proving the multicast `Session` gained the subscriber
+    /// surface (the B4 north star) while the remote leg still enqueues onto the
+    /// TX seam. The callback fires on the caller thread (deferred-fire drain
+    /// inside `publish`), so the count is observable synchronously.
+    #[test]
+    fn multicast_session_publish_loops_back_to_declared_subscriber() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wz_runtime_tokio::session::SubscribeOptions;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+        let session: Session = Session::new_multicast(
+            Arc::new(wz_runtime_tokio::sync::Mutex::new(
+                ApplicationLayerObserver::new(),
+            )),
+            Arc::new(TokioTime::new()),
+            tx,
+        );
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let sub = {
+            let fired = fired.clone();
+            session.declare_subscriber("demo/mc", SubscribeOptions::new(), move |sample| {
+                assert_eq!(sample.keyexpr(), "demo/mc");
+                assert_eq!(sample.payload(), b"loop-me");
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        let delivered = session
+            .publish("demo/mc", b"loop-me")
+            .expect("multicast Put builds within codec capacity");
+
+        // Loopback leg: exactly one local subscriber callback fired.
+        assert_eq!(delivered, 1, "one local subscriber fired via loopback");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "the deferred callback ran synchronously inside publish"
+        );
+
+        // Remote leg still enqueued the Put onto the TX seam (both legs run).
+        let item = rx.try_recv().expect("remote leg enqueued the Put");
+        assert!(
+            matches!(item, MulticastTxItem::Push { .. }),
+            "the enqueued multicast item is a Put Push"
+        );
+
+        // A non-matching keyexpr fires no local subscriber.
+        let none = session.publish("other/key", b"nope").expect("Put builds");
+        assert_eq!(none, 0, "no subscriber matches other/key");
+
+        drop(sub);
+    }
 }

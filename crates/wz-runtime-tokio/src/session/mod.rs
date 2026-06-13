@@ -448,24 +448,40 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
     }
 
-    /// R311mo (Level B, B3) — publish a literal-keyexpr Put over the multicast
-    /// transport. Mirrors the unicast [`Session::publish`] remote leg, but the
-    /// wire send is an ENQUEUE onto the multicast TX seam: the
-    /// `MulticastTxItem::Push` built by
-    /// [`multicast_put_literal`](wz_session_core::multicast_tx::multicast_put_literal)
-    /// is pushed onto the channel
-    /// [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
-    /// drains, which mints the per-channel SN, frames it, and multicasts to
-    /// the group (the A1c TX seam). Fire-and-forget — like the unicast wire
-    /// leg — so a closed channel (the drive loop dropped its receiver) is
-    /// silently ignored; the session is defunct at that point.
+    /// R311mo (Level B, B3) / R311mp (Level B, B4) — publish a literal-keyexpr
+    /// Put over the multicast transport. Two legs, mirroring the unicast
+    /// [`Session::publish`]:
     ///
-    /// B3 scope: literal Put, REMOTE-only. No local loopback yet (a multicast
-    /// `Session` gains its subscriber surface in B4) and no Del / aliased /
-    /// metadata / reliability options (the unicast `publish` grew those
-    /// incrementally too — R229+). Gated on `codec-push` (the Put data plane)
-    /// AND `all(transport-multicast, not(transport-unicast))` so it never
-    /// collides with the unicast `publish` in a both-transports build.
+    /// * **Remote leg** (B3): the wire send is an ENQUEUE onto the multicast
+    ///   TX seam — the `MulticastTxItem::Push` built by
+    ///   [`multicast_put_literal`](wz_session_core::multicast_tx::multicast_put_literal)
+    ///   is pushed onto the channel
+    ///   [`drive_multicast_session`](crate::multicast_glue::drive_multicast_session)
+    ///   drains, which mints the per-channel SN, frames it, and multicasts to
+    ///   the group (the A1c TX seam). Fire-and-forget — like the unicast wire
+    ///   leg — so a closed channel (the drive loop dropped its receiver) is
+    ///   silently ignored; the session is defunct at that point.
+    /// * **Local loopback leg** (B4, `pubsub-allow-loop`-gated): the same Put
+    ///   is delivered in-process to this session's matching subscribers via
+    ///   [`crate::pubsub::SubscriberRegistry::local_publish`], then the
+    ///   deferred-fire queue is drained so the subscriber callbacks run on the
+    ///   caller thread OUTSIDE the observer lock — byte-for-byte the unicast
+    ///   loopback leg's discipline (R227+ / R311lh / R311lj). Returns the
+    ///   number of local subscriber callbacks the loopback fired (0 when
+    ///   `pubsub-allow-loop` is off, exactly like the unicast `publish`).
+    ///
+    /// A `Locality::SessionLocal`/`Any` subscriber declared through
+    /// [`Self::declare_subscriber`] (B4, now transport-agnostic) fires on this
+    /// loopback; a `Locality::Remote`-only one is suppressed
+    /// (`local_publish` passes `is_remote = false`). The loopback Sample is a
+    /// plain Put — B4 carries no `PublishOptions`, so there are no metadata
+    /// fields to thread (the unicast `build_loopback_sample` machinery becomes
+    /// shared only once multicast `publish` grows opts, a follow-on like the
+    /// Del / aliased / reliability surface the unicast `publish` grew at R229+).
+    ///
+    /// Gated on `codec-push` (the Put data plane) AND
+    /// `all(transport-multicast, not(transport-unicast))` so it never collides
+    /// with the unicast `publish` in a both-transports build.
     #[cfg(all(
         feature = "transport-multicast",
         not(feature = "transport-unicast"),
@@ -475,14 +491,34 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         &self,
         keyexpr: &str,
         payload: &[u8],
-    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+    ) -> Result<usize, sce_forge_runtime::codec::CodecError> {
+        // Remote leg (B3): mint nothing here — enqueue onto the TX seam the
+        // drive loop drains. A capacity overflow fails the whole publish before
+        // the loopback runs (the unicast remote leg `?`s for the same reason).
         let item = wz_session_core::multicast_tx::multicast_put_literal(keyexpr, payload)?;
         match &self.transport {
             SessionTransport::Multicast { tx, .. } => {
                 let _ = tx.send(item);
             }
         }
-        Ok(())
+        // Local loopback leg (B4): deliver to in-process subscribers + drain
+        // the staged fires on the caller thread, mirroring the unicast publish
+        // loopback. cfg-off short-circuits to 0 (remote-only).
+        #[cfg(feature = "pubsub-allow-loop")]
+        {
+            let sample = Sample::new_put(keyexpr, payload.to_vec());
+            let delivered = R::with_mutex_mut(&self.observer, |observer| {
+                observer.subscribers.local_publish(&sample)
+            });
+            // R311lh / R311lj — run the loopback subscriber callbacks
+            // synchronously, outside the observer lock, before `publish`
+            // returns (the observer-serialized batch take keeps a concurrent
+            // drive-loop batch atomic).
+            self.drain_deferred_fires();
+            Ok(delivered)
+        }
+        #[cfg(not(feature = "pubsub-allow-loop"))]
+        Ok(0)
     }
 
     /// Borrow the observer handle. Application code registers
@@ -614,6 +650,72 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         R::with_mutex_mut(&self.observer, |observer| {
             observer.subscribers.clear_own_zid();
         });
+    }
+
+    /// R245 — declare a [`Subscriber`] for `keyexpr` + `options`
+    /// that fires `callback` on every matching inbound `Sample`.
+    /// Returns a [`Subscriber`] handle whose `Drop` auto-unregisters
+    /// the subscription from the underlying
+    /// [`crate::pubsub::SubscriberRegistry`] (RAII).
+    ///
+    /// Mirrors zenoh-pico's `z_declare_subscriber` shape: caller
+    /// supplies the keyexpr pattern + options + callback at declare
+    /// time; the runtime fires the callback synchronously inside
+    /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] (wire
+    /// arrival) and
+    /// [`crate::pubsub::SubscriberRegistry::local_publish`]
+    /// (loopback, R227+). No wire frame is emitted at declare time —
+    /// `Declare(DeclareSubscriber)` is a router-mode feature wz
+    /// elides today (peer-only) per the same router-less rationale
+    /// as [`Self::declare_publisher`].
+    ///
+    /// R311mp (Level B, B4) — TRANSPORT-AGNOSTIC: this method reads only
+    /// `self.fires` (via `deferred_sample_sink`) + the observer's
+    /// subscriber registry, never `self.actions()`, so it was lifted out
+    /// of the (now `transport-unicast`-gated) big impl block into this
+    /// ungated one. A multicast-only `Session` therefore declares
+    /// subscribers through the same surface — the handle type
+    /// [`Subscriber`] is already transport-agnostic (it owns only the
+    /// `SubscriptionId` + the deferred cell + a `Session` clone, no
+    /// transport payload). The multicast LOOPBACK leg of
+    /// [`Self::publish`] fires these subscribers in-process; the
+    /// multicast WIRE-RX leg reaches them once the drive loop shares this
+    /// session's observer + drains its `fires` after dispatch (the B5
+    /// both-build unification — until then the multicast drive loop
+    /// dispatches into a standalone observer with raw `register`).
+    pub fn declare_subscriber(
+        &self,
+        keyexpr: impl Into<String>,
+        options: SubscribeOptions,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> Subscriber<R, T> {
+        let keyexpr_string = keyexpr.into();
+        // R311lh — DEFERRED FIRE (the R311lf lock-free callback
+        // invariant on the subscriber-sample plane): the registry
+        // stores a staging sink that copies each matched sample to the
+        // owned retention form and stages it on the deferred-fire
+        // queue; `callback` runs at a drain site OUTSIDE the observer
+        // lock and may re-enter any observer-locking session API —
+        // publish with local loopback, queries, declares, handle Drop,
+        // even its own handle's `undeclare`.
+        let (cell, sink) = self.deferred_sample_sink(callback);
+        // R311de — observer access via R::with_mutex_mut closure form.
+        let id = R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.register_with_locality(
+                keyexpr_string.clone(),
+                options.allowed_origin,
+                sink,
+            )
+        });
+        Subscriber {
+            session: self.clone(),
+            id,
+            keyexpr: keyexpr_string,
+            options,
+            cell,
+            // R311lo — armed: Drop/undeclare teardown frees this handle.
+            armed: true,
+        }
     }
 }
 
@@ -1796,56 +1898,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         }
     }
 
-    /// R245 — declare a [`Subscriber`] for `keyexpr` + `options`
-    /// that fires `callback` on every matching inbound `Sample`.
-    /// Returns a [`Subscriber`] handle whose `Drop` auto-unregisters
-    /// the subscription from the underlying
-    /// [`crate::pubsub::SubscriberRegistry`] (RAII).
-    ///
-    /// Mirrors zenoh-pico's `z_declare_subscriber` shape: caller
-    /// supplies the keyexpr pattern + options + callback at declare
-    /// time; the runtime fires the callback synchronously inside
-    /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] (wire
-    /// arrival) and
-    /// [`crate::pubsub::SubscriberRegistry::local_publish`]
-    /// (loopback, R227+). No wire frame is emitted at declare time —
-    /// `Declare(DeclareSubscriber)` is a router-mode feature wz
-    /// elides today (peer-only) per the same router-less rationale
-    /// as [`Self::declare_publisher`].
-    pub fn declare_subscriber(
-        &self,
-        keyexpr: impl Into<String>,
-        options: SubscribeOptions,
-        callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> Subscriber<R, T> {
-        let keyexpr_string = keyexpr.into();
-        // R311lh — DEFERRED FIRE (the R311lf lock-free callback
-        // invariant on the subscriber-sample plane): the registry
-        // stores a staging sink that copies each matched sample to the
-        // owned retention form and stages it on the deferred-fire
-        // queue; `callback` runs at a drain site OUTSIDE the observer
-        // lock and may re-enter any observer-locking session API —
-        // publish with local loopback, queries, declares, handle Drop,
-        // even its own handle's `undeclare`.
-        let (cell, sink) = self.deferred_sample_sink(callback);
-        // R311de — observer access via R::with_mutex_mut closure form.
-        let id = R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.register_with_locality(
-                keyexpr_string.clone(),
-                options.allowed_origin,
-                sink,
-            )
-        });
-        Subscriber {
-            session: self.clone(),
-            id,
-            keyexpr: keyexpr_string,
-            options,
-            cell,
-            // R311lo — armed: Drop/undeclare teardown frees this handle.
-            armed: true,
-        }
-    }
+    // R311mp (B4) — `declare_subscriber` (non-aliased) is TRANSPORT-AGNOSTIC
+    // (it touches only `self.fires` via `deferred_sample_sink` + the
+    // observer's subscriber registry, never `self.actions()`), so it was
+    // lifted into the ungated impl block above so a multicast-only `Session`
+    // can declare subscribers too. The aliased `declare_subscriber_aliased`
+    // below STAYS here: it resolves through the unicast outbound mapping
+    // table (`self.actions().resolve_outbound_mapping`), which a
+    // connectionless multicast session has no analogue of.
 
     /// R245 — aliased-keyexpr counterpart of
     /// [`Self::declare_subscriber`]. Resolves `mapping_id` +

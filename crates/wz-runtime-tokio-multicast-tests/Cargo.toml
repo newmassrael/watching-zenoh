@@ -34,9 +34,13 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
+# R311mp (B4) — `pubsub-allow-loop` enables the multicast `Session::publish`
+# local-loopback leg + lets `declare_subscriber` deliver in-process, so the B4
+# loopback test compiles against the multicast-only surface.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
     "transport-multicast",
     "codec-push",
+    "pubsub-allow-loop",
 ] }
 tokio = { version = "1", features = ["sync"] }
 
