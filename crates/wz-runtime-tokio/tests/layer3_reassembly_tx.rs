@@ -12,18 +12,25 @@
 //! subscriber node's steady-state drive loop reassembles it
 //! (`report_outcome_reassembling`) back into one delivered Sample.
 //!
-//! The gap this closes (session review, R311nf): the multicast TX split is
-//! proven by `multicast_pubsub_loopback::oversize_put_fragments_and_reassembles_across_nodes`,
-//! but the UNICAST TX split had no end-to-end proof — only codec round-trip
-//! (`frame_encode`) plus the RX-ingest half. This is the missing oversize
-//! real-socket send.
+//! The gap this closes (session review, R311nf): the UNICAST TX split had no
+//! end-to-end proof — only codec round-trip (`frame_encode`) plus the
+//! RX-ingest half (`layer3_reassembly_rx`). Its multicast counterpart is
+//! `multicast_pubsub_loopback::oversize_put_fragments_and_reassembles_across_nodes`
+//! (which forces a small MTU by setting `MulticastParams.batch_size` directly
+//! — no handshake negotiation). This is the missing oversize real-socket
+//! UNICAST send, where the MTU is NEGOTIATED, so the fragmentation
+//! precondition is asserted explicitly (see `negotiated_batch_mtu` below)
+//! rather than merely trusted.
 //!
 //! "Oversize" = a frame past a SMALL negotiated batch budget: both peers
-//! advertise `batch_size = 64` in their InitSyn/InitAck, so the negotiated
-//! MTU is 64 and a 200-byte Put fragments (the same shrink-the-mtu technique
-//! the multicast fixtures use). Both sessions are driven with `max_iters =
-//! None` (continuous) so the RX reassembly pool persists across the fragment
-//! chain's arrivals — a chunked drive would reset it between fragments.
+//! advertise `batch_size = 64` in their InitSyn/InitAck, the negotiated MTU
+//! is `min(own, peer) = 64`, and a 200-byte Put's frame far exceeds it. The
+//! test ASSERTS the negotiated MTU is 64 before publishing (R311nj) so the
+//! split is guaranteed by construction — a regression that broke negotiation
+//! would fail the assert, not silently pass with a single un-fragmented
+//! frame. Both sessions are driven with `max_iters = None` (continuous) so
+//! the RX reassembly pool persists across the fragment chain's arrivals — a
+//! chunked drive would reset it between fragments.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -93,6 +100,29 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
         .expect("initiator reaches Established")
     };
     let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+
+    // ── Fragmentation precondition, asserted BY CONSTRUCTION (R311nj). The
+    //    TX split in `emit_frame_or_fragments` branches on `frame.len() >
+    //    mtu`, where `mtu = negotiated_batch_mtu() = min(own, peer)`. Pin the
+    //    negotiated MTU to the tiny budget here: with MTU == 64 and a 200-byte
+    //    payload (a Put frame far past 64), the publisher's `Session::publish`
+    //    is FORCED through the fragment branch — without this assert the test
+    //    would still pass if negotiation silently regressed to the 65535
+    //    default (the 200-byte payload fits one frame within the msg_put 256-
+    //    byte codec bound and would deliver as a single un-fragmented Sample,
+    //    a false positive). The publisher side is the load-bearing one (it
+    //    decides the split); the acceptor is asserted too for negotiation
+    //    symmetry. Read before the bundles are borrowed by the drive loops.
+    assert_eq!(
+        opened_init.actions.negotiated_batch_mtu(),
+        BATCH_SIZE as usize,
+        "publisher negotiated MTU must be the tiny budget so the 200-byte Put fragments"
+    );
+    assert_eq!(
+        opened_acc.actions.negotiated_batch_mtu(),
+        BATCH_SIZE as usize,
+        "acceptor negotiated the same tiny budget (symmetry)"
+    );
 
     // ── Subscriber on the acceptor's observer.
     let fired = Arc::new(AtomicUsize::new(0));
