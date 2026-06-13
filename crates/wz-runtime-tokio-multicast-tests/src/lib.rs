@@ -180,4 +180,36 @@ mod tests {
         );
         drop(sub);
     }
+
+    /// R311mr (B5b-1) — the transport-dispatch send seam
+    /// (`Session::send_network_message`, the `_z_send_n_msg` analogue) routes a
+    /// built `NetworkMessage::Push` to the multicast TX channel directly. This
+    /// is the path `Session::publish` now sends through; testing the seam in
+    /// isolation pins the public send entry point independent of `publish`.
+    #[test]
+    fn multicast_send_network_message_routes_push_to_channel() {
+        use wz_session_core::network_message::NetworkMessage;
+        use wz_session_core::push_build::build_push_literal;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<MulticastTxItem>();
+        let session: Session = Session::new_multicast(
+            Arc::new(wz_runtime_tokio::sync::Mutex::new(
+                ApplicationLayerObserver::new(),
+            )),
+            Arc::new(TokioTime::new()),
+            tx,
+        );
+
+        let push = build_push_literal("demo/mc", b"via-seam").expect("push fixture");
+        session
+            .send_network_message(NetworkMessage::Push(Box::new(push)), true)
+            .expect("the seam routes a Push to the multicast channel");
+
+        let item = rx.try_recv().expect("seam enqueued the Push");
+        assert!(
+            matches!(item, MulticastTxItem::Push { .. }),
+            "the enqueued item is a Put Push"
+        );
+        assert!(rx.try_recv().is_err(), "exactly one item enqueued");
+    }
 }
