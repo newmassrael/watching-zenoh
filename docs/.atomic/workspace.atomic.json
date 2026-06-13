@@ -35962,6 +35962,52 @@
         "Incremental multicast publish follow-ons (PublishOptions -> shared build_loopback_sample, Del, aliased, metadata) unchanged."
       ]
     },
+    "Round 311mr": {
+      "decision_summary": "B5b-1 (Level B): the transport-dispatch send seam. Add Session::send_network_message (the _z_send_n_msg analogue) routing a built NetworkMessage to the owned transport send path; B5b-1 inhabits the multicast arm (Push-only, gated not(transport-unicast)) and migrates the multicast publish remote leg through it. The unicast arm + gate-drop + actions() dismantling is B5b-2.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: added Session::send_network_message (gated all(transport-multicast, not(transport-unicast), codec-push)) - the wz analogue of zenoh-pico _z_send_n_msg (src/transport/transport.c:29 switch over the transport tag, called by every put/get/declare primitive in src/net/primitives.c). Takes a built NetworkMessage (the transport-agnostic outbound currency = pico _z_network_message_t) and routes Push -> MulticastTxItem::Push -> the drive-loop TX channel. A non-Push reaching it (unreachable: a multicast Session originates only Push) returns SendWireError::FeatureDisabled, never a panic. The application API stays transport-agnostic; the transport split lives in the seam (pico shape), not a fallible actions() exposed at every call site (the Option-A design I rejected).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: migrated the multicast Session::publish remote leg through the seam - builds NetworkMessage::Push via build_push_literal then send_network_message, replacing the inline multicast_put_literal enqueue. Return type Result<(), CodecError> -> Result<usize, SendWireError>. SendWireError is the SAME error the unicast dispatch_* family returns, so B5b-2's unicast arm needs no error unification; it lives ungated in wz_session_core::send_wire_error, reachable in a multicast-only build that the transport-unicast-gated session_glue re-export is not.",
+        "crates/wz-runtime-tokio-multicast-tests/: added the seam-direct test (send_network_message routes a built Push to the channel) alongside the B3 enqueue / B4 loopback / B5a wire-RX tests."
+      ],
+      "verification_bullets": [
+        "C1s isolated multicast test crate: 4 tests pass (B3 enqueue, B4 loopback, B5a wire-RX, the new B5b-1 seam-direct). The publish enqueue + loopback tests still pass through the seam (behaviour-preserving migration).",
+        "clippy --all-targets -D warnings clean on C1s + the C4e subsets (join-only / multicast-data / udp; the seam is codec-push-gated so absent in the no-codec-push subsets) + default unicast (seam cfg'd out, no impact); fmt clean.",
+        "Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "B5b-1 lands the send seam's multicast arm + NetworkMessage as the outbound send currency; the multicast publish now sends through it. Remaining B5b: the UNICAST arm (route a NetworkMessage to the SessionLinkActions dispatch_* family - those take a closure-encoded body via dispatch_network_message, not a NetworkMessage value, so the arm matches the variant and calls the matching dispatch_*), then drop the not(transport-unicast) gate so a both-transports build runtime-matches the transport - which forces actions() (33 call sites, all in transport-unicast-gated methods) to become transport-aware = the actions() dismantling.",
+        "The seam's error type (SendWireError) is already transport-uniform, so the unicast arm needs no error unification.",
+        "Multicast Session origination stays Push-only until a multicast query/declare API exists (a new-feature follow-on); the reply messages are emitted by the drive-loop MulticastReplySink, not this seam.",
+        "The unicast publish still sends via send_push_with_meta_literal (not yet migrated to the seam); it migrates when the unicast arm lands (B5b-2).",
+        "Design note: Option A (fallible actions() exposed at every call site) was rejected for the send-seam structure after reading zenoh-pico (transport.c:29 + primitives.c all route through _z_send_n_msg); the application API must stay transport-agnostic with the split hidden in the seam."
+      ],
+      "publishable_decision_summary": "B5b-1 (Level B): the transport-dispatch send seam. Add Session::send_network_message (the _z_send_n_msg analogue) routing a built NetworkMessage to the owned transport send path; B5b-1 inhabits the multicast arm (Push-only, gated not(transport-unicast)) and migrates the multicast publish remote leg through it. The unicast arm + gate-drop + actions() dismantling is B5b-2.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: added Session::send_network_message (gated all(transport-multicast, not(transport-unicast), codec-push)) - the wz analogue of zenoh-pico _z_send_n_msg (src/transport/transport.c:29 switch over the transport tag, called by every put/get/declare primitive in src/net/primitives.c). Takes a built NetworkMessage (the transport-agnostic outbound currency = pico _z_network_message_t) and routes Push -> MulticastTxItem::Push -> the drive-loop TX channel. A non-Push reaching it (unreachable: a multicast Session originates only Push) returns SendWireError::FeatureDisabled, never a panic. The application API stays transport-agnostic; the transport split lives in the seam (pico shape), not a fallible actions() exposed at every call site (the Option-A design I rejected).",
+        "crates/wz-runtime-tokio/src/session/mod.rs: migrated the multicast Session::publish remote leg through the seam - builds NetworkMessage::Push via build_push_literal then send_network_message, replacing the inline multicast_put_literal enqueue. Return type Result<(), CodecError> -> Result<usize, SendWireError>. SendWireError is the SAME error the unicast dispatch_* family returns, so B5b-2's unicast arm needs no error unification; it lives ungated in wz_session_core::send_wire_error, reachable in a multicast-only build that the transport-unicast-gated session_glue re-export is not.",
+        "crates/wz-runtime-tokio-multicast-tests/: added the seam-direct test (send_network_message routes a built Push to the channel) alongside the B3 enqueue / B4 loopback / B5a wire-RX tests."
+      ],
+      "publishable_verification_bullets": [
+        "C1s isolated multicast test crate: 4 tests pass (B3 enqueue, B4 loopback, B5a wire-RX, the new B5b-1 seam-direct). The publish enqueue + loopback tests still pass through the seam (behaviour-preserving migration).",
+        "clippy --all-targets -D warnings clean on C1s + the C4e subsets (join-only / multicast-data / udp; the seam is codec-push-gated so absent in the no-codec-push subsets) + default unicast (seam cfg'd out, no impact); fmt clean.",
+        "Full host run-ci RUNCI_EXIT=0, all required layers pass (0 FAIL)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B5b-1 lands the send seam's multicast arm + NetworkMessage as the outbound send currency; the multicast publish now sends through it. Remaining B5b: the UNICAST arm (route a NetworkMessage to the SessionLinkActions dispatch_* family - those take a closure-encoded body via dispatch_network_message, not a NetworkMessage value, so the arm matches the variant and calls the matching dispatch_*), then drop the not(transport-unicast) gate so a both-transports build runtime-matches the transport - which forces actions() (33 call sites, all in transport-unicast-gated methods) to become transport-aware = the actions() dismantling.",
+        "The seam's error type (SendWireError) is already transport-uniform, so the unicast arm needs no error unification.",
+        "Multicast Session origination stays Push-only until a multicast query/declare API exists (a new-feature follow-on); the reply messages are emitted by the drive-loop MulticastReplySink, not this seam.",
+        "The unicast publish still sends via send_push_with_meta_literal (not yet migrated to the seam); it migrates when the unicast arm lands (B5b-2).",
+        "Design note: Option A (fallible actions() exposed at every call site) was rejected for the send-seam structure after reading zenoh-pico (transport.c:29 + primitives.c all route through _z_send_n_msg); the application API must stay transport-agnostic with the split hidden in the seam."
+      ]
+    },
     "Round 311n": {
       "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
       "changes_bullets": [
