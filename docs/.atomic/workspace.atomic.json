@@ -36610,6 +36610,54 @@
         "UNPUSHED: R311nb (68875cc + bb9ce5f), R311nc (83faa1b + 7dc9e0f), and this R311nd (code + ledger). origin/main = c84ba75. Push needs explicit user consent."
       ]
     },
+    "Round 311ne": {
+      "decision_summary": "R311ne (review fixes): liveliness_get does actions()? BEFORE the is_established gate so multicast honestly rejects RequiresUnicast not the misleading NotEstablished; new ctor reads zid before move; gate-shadowed arm noted.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs liveliness_get (Session-review Finding 1, the real defect): bind `let actions = self.actions()?` at the TOP of the method, BEFORE the `if !is_established()` gate, and reuse it for alloc_next_interest_id + cache_get_interest. On a multicast session, is_established() reads `false` (the R311nc is_established() -> unwrap_or(false) projection), so the establishment gate front-ran the transport check and returned LivelinessGetError::NotEstablished (\"retry after the session re-establishes\" - futile on multicast) instead of the honest RequiresUnicast the `actions()?` one line later would have produced. Reordering makes the transport projection win; the unicast path is byte-identical (actions() is always Ok there, then the same is_established gate runs).",
+        "crates/wz-runtime-tokio/src/session/mod.rs Session::new: read `actions.params.zid.clone()` from the constructor PARAMETER before moving `actions` into SessionTransport::Unicast, dropping the R311nc defensive `if let Ok(actions) = session.actions()` that re-projected a value this ctor builds as Unicast by construction. No behavior change; removes a known-Ok re-ask.",
+        "crates/wz-runtime-tokio/src/session/mod.rs declare_token_aliased map_decl_err: comment-only - mark the SendDeclareError::RequiresUnicast arm GATE-SHADOWED (the top `let actions = self.actions().map_err(...)?` front-runs the seam, so a multicast session returns RequiresUnicast there and never reaches this arm). Kept as an honest typed projection, not unreachable!, per the no-panic principle."
+      ],
+      "verification_bullets": [
+        "Full host run-ci RUNCI_EXIT=0 captured by redirect + $? (no pipe-mask): \"run-ci: all required layers pass\", 0 FAIL across Layer 0 (fmt --check), C1, C1h / C1j subset matrices, C1q, C1s, C2, C4, C4e, E/E2. Layer G/Q/M opt-in SKIP.",
+        "default + both-transport (--features transport-multicast) clippy --all-targets -D warnings clean; fmt clean. liveliness_get unicast behaviour byte-identical: the reorder only moves the always-Ok actions() projection ahead of the is_established gate, so a unicast session runs the same gate then the same alloc/register/emit; only a multicast session's reject changes from the misleading NotEstablished to the honest RequiresUnicast (liveliness-get is exercised on unicast sessions in the existing suite).",
+        "new ctor change is a pure refactor (read zid from the parameter before move) with no behaviour change; the gate-shadowed-arm edit is comment-only."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Session review (2 independent adversarial reviewers + self-verify) outcomes:",
+        "FIXED here (R311ne): Finding 1 liveliness_get gate ordering (the one real defect - multicast got a misleading NotEstablished instead of RequiresUnicast); the new-ctor defensive if-let cleanup; the gate-shadowed-arm honesty comment.",
+        "REJECTED (false positive, like R311my+mz H1): split SendWireError::UnsupportedVariant into RequiresUnicast + MulticastNonPush. Splitting would add MulticastNonPush with NO real caller (the seam non-Push arm is a defensive guard; query/declare fail earlier at actions()), reviving the exact #3b \"no-caller variant\" anti-pattern the deferral warned against. The current single-variant unification earns its keep via the actions() projection and is reused for the defensive seam catch - more #3b-aligned than splitting. Do not reopen.",
+        "DEFERRED to B5b-4 (the proper holistic fix, NOT a piecemeal hack): dispatch_iteration_event{,_with} silently no-op on a multicast session = illegal-state-representable (Reviewer 2's deepest finding). The textbook fix is to make unicast-drive uncallable on a multicast Session at the type level, which is exactly what B5b-4 does (route multicast through dispatch_multicast_iteration_event, retire the standalone drive_multicast_session free-loop). This is the north-star structural completion and the recommended next major round.",
+        "OPEN (marginal, optional): actions() returns SendWireError (wire-emit vocabulary on a pure accessor); a dedicated TransportMismatch accessor error is marginally more separation-of-concerns. Reviewer verdict: defensible, not a defect. Defer unless maximal purity is explicitly wanted.",
+        "OPEN (build hygiene): the pre-existing transport-unicast+transport-multicast+codec-declare (no codec-push) wz-session-core unused-import (session_actions.rs:1487). This round blessed both-builds, so the natural close is a 1-line cfg gate on the import + a run-ci lane covering the combo; deferred to a follow-up.",
+        "UNPUSHED: R311nb, R311nc, R311nd, R311ne (each code + ledger). origin/main = c84ba75. Push needs explicit user consent."
+      ],
+      "publishable_decision_summary": "R311ne (review fixes): liveliness_get does actions()? BEFORE the is_established gate so multicast honestly rejects RequiresUnicast not the misleading NotEstablished; new ctor reads zid before move; gate-shadowed arm noted.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs liveliness_get (Session-review Finding 1, the real defect): bind `let actions = self.actions()?` at the TOP of the method, BEFORE the `if !is_established()` gate, and reuse it for alloc_next_interest_id + cache_get_interest. On a multicast session, is_established() reads `false` (the R311nc is_established() -> unwrap_or(false) projection), so the establishment gate front-ran the transport check and returned LivelinessGetError::NotEstablished (\"retry after the session re-establishes\" - futile on multicast) instead of the honest RequiresUnicast the `actions()?` one line later would have produced. Reordering makes the transport projection win; the unicast path is byte-identical (actions() is always Ok there, then the same is_established gate runs).",
+        "crates/wz-runtime-tokio/src/session/mod.rs Session::new: read `actions.params.zid.clone()` from the constructor PARAMETER before moving `actions` into SessionTransport::Unicast, dropping the R311nc defensive `if let Ok(actions) = session.actions()` that re-projected a value this ctor builds as Unicast by construction. No behavior change; removes a known-Ok re-ask.",
+        "crates/wz-runtime-tokio/src/session/mod.rs declare_token_aliased map_decl_err: comment-only - mark the SendDeclareError::RequiresUnicast arm GATE-SHADOWED (the top `let actions = self.actions().map_err(...)?` front-runs the seam, so a multicast session returns RequiresUnicast there and never reaches this arm). Kept as an honest typed projection, not unreachable!, per the no-panic principle."
+      ],
+      "publishable_verification_bullets": [
+        "Full host run-ci RUNCI_EXIT=0 captured by redirect + $? (no pipe-mask): \"run-ci: all required layers pass\", 0 FAIL across Layer 0 (fmt --check), C1, C1h / C1j subset matrices, C1q, C1s, C2, C4, C4e, E/E2. Layer G/Q/M opt-in SKIP.",
+        "default + both-transport (--features transport-multicast) clippy --all-targets -D warnings clean; fmt clean. liveliness_get unicast behaviour byte-identical: the reorder only moves the always-Ok actions() projection ahead of the is_established gate, so a unicast session runs the same gate then the same alloc/register/emit; only a multicast session's reject changes from the misleading NotEstablished to the honest RequiresUnicast (liveliness-get is exercised on unicast sessions in the existing suite).",
+        "new ctor change is a pure refactor (read zid from the parameter before move) with no behaviour change; the gate-shadowed-arm edit is comment-only."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Session review (2 independent adversarial reviewers + self-verify) outcomes:",
+        "FIXED here (R311ne): Finding 1 liveliness_get gate ordering (the one real defect - multicast got a misleading NotEstablished instead of RequiresUnicast); the new-ctor defensive if-let cleanup; the gate-shadowed-arm honesty comment.",
+        "REJECTED (false positive, like R311my+mz H1): split SendWireError::UnsupportedVariant into RequiresUnicast + MulticastNonPush. Splitting would add MulticastNonPush with NO real caller (the seam non-Push arm is a defensive guard; query/declare fail earlier at actions()), reviving the exact #3b \"no-caller variant\" anti-pattern the deferral warned against. The current single-variant unification earns its keep via the actions() projection and is reused for the defensive seam catch - more #3b-aligned than splitting. Do not reopen.",
+        "DEFERRED to B5b-4 (the proper holistic fix, NOT a piecemeal hack): dispatch_iteration_event{,_with} silently no-op on a multicast session = illegal-state-representable (Reviewer 2's deepest finding). The textbook fix is to make unicast-drive uncallable on a multicast Session at the type level, which is exactly what B5b-4 does (route multicast through dispatch_multicast_iteration_event, retire the standalone drive_multicast_session free-loop). This is the north-star structural completion and the recommended next major round.",
+        "OPEN (marginal, optional): actions() returns SendWireError (wire-emit vocabulary on a pure accessor); a dedicated TransportMismatch accessor error is marginally more separation-of-concerns. Reviewer verdict: defensible, not a defect. Defer unless maximal purity is explicitly wanted.",
+        "OPEN (build hygiene): the pre-existing transport-unicast+transport-multicast+codec-declare (no codec-push) wz-session-core unused-import (session_actions.rs:1487). This round blessed both-builds, so the natural close is a 1-line cfg gate on the import + a run-ci lane covering the combo; deferred to a follow-up.",
+        "UNPUSHED: R311nb, R311nc, R311nd, R311ne (each code + ledger). origin/main = c84ba75. Push needs explicit user consent."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
