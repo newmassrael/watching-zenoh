@@ -1288,25 +1288,53 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
         if opts.allowed_destination.allows_remote() {
             let reliable = opts.reliable_bool();
             let meta = opts.push_metadata();
-            match opts.kind {
-                SampleKind::Put => {
-                    self.actions().send_push_with_meta_aliased(
-                        mapping_id,
-                        inline_suffix,
-                        payload,
-                        reliable,
-                        &meta,
-                    )?;
-                }
-                SampleKind::Del => {
-                    self.actions().send_push_del_with_meta_aliased(
-                        mapping_id,
-                        inline_suffix,
-                        reliable,
-                        &meta,
-                    )?;
-                }
+            // R311mt (B5b-2b-1) — express batch-flush hint for the send
+            // seam's unicast arm: the `flush_batch_if_express(meta)` parity
+            // the prior `send_push_*_with_meta_aliased` carried inline now
+            // rides the seam's `express` arm (drains the open batch window
+            // after an express-flagged send). Moot without
+            // `transport-batching`. Derivation byte-identical to the literal
+            // `publish` (R311ms).
+            #[cfg(feature = "transport-batching")]
+            let express = meta
+                .qos
+                .as_ref()
+                .is_some_and(crate::sample::QosLevel::is_express);
+            #[cfg(not(feature = "transport-batching"))]
+            let express = false;
+            // R311mt (B5b-2b-1) — build the aliased Put / Del as a
+            // `NetworkMessage::Push` and route it through the
+            // [`Self::send_network_message`] send seam instead of
+            // `self.actions().send_push_*_with_meta_aliased` — the SECOND
+            // data-plane op lifted off the unicast action bundle and onto the
+            // seam (after the literal `publish`, R311ms), a further step
+            // toward the B5b-2b `actions()` dismantling. Behaviour-preserving:
+            // the seam's unicast arm runs the same `dispatch_push` + express
+            // flush the `send_push_*_with_meta_aliased` pair did, and the
+            // builder's `CodecError` maps to `SendWireError::Codec` exactly as
+            // before (`From<SendWireError> for PublishError`). The
+            // `resolve_outbound_mapping` lookup in `publish_aliased_auto`
+            // stays on `actions()` — it is unicast keyexpr-table bookkeeping,
+            // not a wire send.
+            let push = match opts.kind {
+                SampleKind::Put => wz_session_core::push_build::build_push_aliased_with_meta(
+                    mapping_id,
+                    inline_suffix,
+                    payload,
+                    &meta,
+                ),
+                SampleKind::Del => wz_session_core::push_build::build_push_del_aliased_with_meta(
+                    mapping_id,
+                    inline_suffix,
+                    &meta,
+                ),
             }
+            .map_err(SendWireError::Codec)?;
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+                reliable,
+                express,
+            )?;
         }
         #[cfg(not(feature = "codec-push"))]
         let _ = (mapping_id, inline_suffix);
