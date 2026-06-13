@@ -1455,12 +1455,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// mints the SN, frames, and batch-absorbs; then `express` drains the open
     /// batch window (the [`Self::flush_batch_if_express`] parity, lifted here
     /// so a publish that routes through the seam stays transport-agnostic — it
-    /// no longer reaches into the unicast action bundle for the flush). The
-    /// other outbound variants (Request / Response / Declare / Interest) migrate
-    /// as their operations move onto the seam; an inbound-only or
-    /// not-yet-migrated variant returns [`SendWireError::FeatureDisabled`] (an
-    /// honest no-emit reject, never a panic) — symmetric with the multicast arm.
-    #[cfg(feature = "codec-push")]
+    /// no longer reaches into the unicast action bundle for the flush). R311mu
+    /// (B5b-2b-2) added the Request arm (the z_get initiator path; a Query
+    /// carries no express window). The remaining outbound variants (Response /
+    /// Declare / Interest) migrate as their operations move onto the seam; an
+    /// inbound-only or not-yet-migrated variant returns
+    /// [`SendWireError::FeatureDisabled`] (an honest no-emit reject, never a
+    /// panic) — symmetric with the multicast arm. The fn gate widens to
+    /// `any(codec-push, codec-request)` so a query-only build (codec-request
+    /// without codec-push) still carries the seam.
+    #[cfg(any(feature = "codec-push", feature = "codec-request"))]
     pub fn send_network_message(
         &self,
         msg: crate::network_message::NetworkMessage,
@@ -1469,6 +1473,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendWireError> {
         use crate::network_message::NetworkMessage;
         match msg {
+            // Push data-plane arm (B5b-2): mint SN + frame + batch-absorb,
+            // then `express` drains the open batch window (the
+            // flush_batch_if_express parity).
+            #[cfg(feature = "codec-push")]
             NetworkMessage::Push(push) => {
                 self.dispatch_push(*push, reliable)?;
                 #[cfg(feature = "transport-batching")]
@@ -1478,6 +1486,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(not(feature = "transport-batching"))]
                 let _ = express;
                 Ok(())
+            }
+            // Request arm (R311mu, B5b-2b-2): the z_get initiator path. A
+            // Query carries no express batch window — `dispatch_request`
+            // mints the SN, frames, and batch-absorbs reliably, parity with
+            // the prior `send_request_query` (which dispatched reliable with
+            // no flush).
+            #[cfg(feature = "codec-request")]
+            NetworkMessage::Request(request) => {
+                let _ = express;
+                self.dispatch_request(*request, reliable)
             }
             // Not yet routed through the seam (or inbound-only). Honest no-emit
             // reject, never a panic — symmetric with the multicast arm.
@@ -2700,42 +2718,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-request")]
         {
-            let mut builder = RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix);
-            if let Some(target) = meta.target {
-                builder = builder.request_target(target);
-            }
-            if let Some(consolidation) = meta.consolidation {
-                builder = builder.consolidation(consolidation);
-            }
-            // Query source-info ext threading — gated on
-            // `query-source-info` (the builder's `query_source_info`
-            // setter gates with it). Ordered before attachment in the
-            // builder; `build()` emits them in zenoh-pico Query body
-            // order (source_info 0x01 → attachment 0x05) regardless of
-            // setter call order.
-            #[cfg(feature = "query-source-info")]
-            if let Some(ref source_info) = meta.source_info {
-                builder = builder.query_source_info(source_info.clone());
-            }
-            // Query attachment ext threading — gated on `query-attachment`
-            // (the builder's `query_attachment` setter gates with it).
-            #[cfg(feature = "query-attachment")]
-            if let Some(attachment) = meta.attachment.as_deref() {
-                // RequestQueryBuilder::query_attachment panics on
-                // empty input (zenoh-pico's
-                // `_z_n_msg_query_needed_exts` clears the ext on
-                // len=0). The QueryMetadata caller's contract is
-                // "attachment = Some(empty) means clear the ext";
-                // honour that here without panicking by skipping
-                // the attach call when the inner slice is empty.
-                if !attachment.is_empty() {
-                    builder = builder.query_attachment(attachment);
-                }
-            }
-            if meta.timeout_ms != 0 {
-                builder = builder.request_timeout_ms(meta.timeout_ms as u64);
-            }
-            let request = builder.build()?;
+            // R311mu (B5b-2b-2) — the RequestQueryBuilder assembly moved to
+            // request_build::build_request_query_with_meta (the build/dispatch
+            // split), so the seam-routed z_get path and this send_* wrapper
+            // share one builder SSOT. This method keeps the dispatch half
+            // (reliable, no batch flush — a Query carries no express window).
+            let request =
+                build_request_query_with_meta(rid, keyexpr_mapping_id, keyexpr_suffix, meta)?;
             self.dispatch_request(request, /*reliable=*/ true)?;
             Ok(())
         }

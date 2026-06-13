@@ -134,6 +134,57 @@ pub fn build_request_query(
     })
 }
 
+/// R311mu (Level B, B5b-2b-2) — metadata-bearing `Request(Query)`
+/// builder: the build half of the prior
+/// `SessionLinkActions::send_request_query_with_meta` (dispatch stays on
+/// the action bundle). Extracted so the `z_get` initiator path can route
+/// the Query through the transport send seam
+/// (`Session::send_network_message`) as a `NetworkMessage::Request` value
+/// — the same build/dispatch split [`build_push_aliased_with_meta`] &
+/// kin already give the publish path. Threads each set
+/// [`QueryMetadata`](crate::metadata::QueryMetadata) slot onto the fluent
+/// [`RequestQueryBuilder`]; `build()` emits the Query exts in zenoh-pico
+/// body order (source_info 0x01 -> attachment 0x05) regardless of the
+/// setter call order.
+#[cfg(feature = "codec-request")]
+pub fn build_request_query_with_meta(
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+    meta: &crate::metadata::QueryMetadata,
+) -> Result<RequestOwned, CodecError> {
+    let mut builder = RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix);
+    if let Some(target) = meta.target {
+        builder = builder.request_target(target);
+    }
+    if let Some(consolidation) = meta.consolidation {
+        builder = builder.consolidation(consolidation);
+    }
+    // Query source-info ext threading — gated `query-source-info` (the
+    // builder's `query_source_info` setter gates with it). Ordered before
+    // attachment; `build()` emits them in zenoh-pico Query body order
+    // (source_info 0x01 -> attachment 0x05) regardless of setter order.
+    #[cfg(feature = "query-source-info")]
+    if let Some(ref source_info) = meta.source_info {
+        builder = builder.query_source_info(source_info.clone());
+    }
+    // Query attachment ext threading — gated `query-attachment`. The
+    // builder's `query_attachment` setter panics on empty input
+    // (zenoh-pico's `_z_n_msg_query_needed_exts` clears the ext on len=0);
+    // the QueryMetadata contract "attachment = Some(empty) means clear the
+    // ext" is honoured by skipping the call when the inner slice is empty.
+    #[cfg(feature = "query-attachment")]
+    if let Some(attachment) = meta.attachment.as_deref() {
+        if !attachment.is_empty() {
+            builder = builder.query_attachment(attachment);
+        }
+    }
+    if meta.timeout_ms != 0 {
+        builder = builder.request_timeout_ms(meta.timeout_ms as u64);
+    }
+    builder.build()
+}
+
 /// R121j-2a — fluent builder for `Request(Query)` that composes the
 /// layered options exposed individually by R121j-1a/1b/1c/1d/1e
 /// (consolidation / parameters / Query-attachment / Request-timeout

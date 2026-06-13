@@ -557,9 +557,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// round also dismantles [`Self::actions`] across its remaining call sites
     /// (publish having moved here).
     ///
-    /// Origination is Push-only on both arms today: the unicast arm migrates the
-    /// other outbound variants (Request / Response / Declare / Interest) as
-    /// their operations move onto the seam; the multicast arm exposes only
+    /// Origination on the unicast arm is Push (publish) + Request (z_get, added
+    /// R311mu / B5b-2b-2); the remaining outbound variants (Response / Declare /
+    /// Interest) migrate as their operations move onto the seam. The multicast
+    /// arm stays Push-only and exposes only
     /// `publish` (the reply messages are emitted by the drive-loop
     /// [`MulticastReplySink`](crate::multicast_glue::MulticastReplySink), not
     /// this seam). A non-`Push` reaching either arm returns
@@ -568,9 +569,27 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
     /// error the unicast `dispatch_*` family returns and lives ungated in
     /// `wz_session_core` (the `transport-unicast`-gated `session_glue` re-export
     /// is just a path), so the seam's `Result` is already transport-uniform.
-    #[cfg(all(
-        feature = "codec-push",
-        any(feature = "transport-unicast", feature = "transport-multicast")
+    // R311mu (B5b-2b-2) — gate widened from `codec-push` to admit the
+    // query-only build: the seam now carries Request (z_get), which is
+    // `codec-request`-gated and does NOT imply `codec-push`
+    // (`query-get = [query-reply, codec-request]`). The disjuncts gate the
+    // fn to exactly where it has a caller — `all(transport-unicast,
+    // any(codec-push, codec-request))` for the unicast publish + query
+    // surface, and `all(transport-multicast, not(transport-unicast),
+    // codec-push)` for the multicast publish — so the multicast arm (which
+    // references the `codec-push`-gated `tx` / `MulticastTxItem`) only
+    // compiles where `codec-push` is on, and a multicast-only build with
+    // `codec-request` but no `codec-push` simply has no seam (no caller).
+    #[cfg(any(
+        all(
+            feature = "transport-unicast",
+            any(feature = "codec-push", feature = "codec-request")
+        ),
+        all(
+            feature = "transport-multicast",
+            not(feature = "transport-unicast"),
+            feature = "codec-push"
+        )
     ))]
     pub fn send_network_message(
         &self,
@@ -1644,12 +1663,38 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
                 // `send_request_query` wire shape stays unchanged for
                 // callers that pass `QueryOptions::default()`.
                 let meta = opts.query_metadata();
+                // R311mu (B5b-2b-2) — build the Query as a
+                // `NetworkMessage::Request` and route through the
+                // [`Self::send_network_message`] send seam instead of
+                // `self.actions().send_request_query[_with_meta]` — the Request
+                // family lifted onto the seam (after the Push family,
+                // R311ms/mt). The rid alloc + reply-pending register (above) +
+                // the unregister-only rollback (below) stay session-level: the
+                // seam emits the wire Query only, mirroring zenoh-pico keeping
+                // `_z_register_pending_query` outside `_z_send_n_msg`.
+                // reliable=true / express=false match the prior
+                // `send_request_query` (dispatch_request reliable, no flush);
+                // the builder's `CodecError` maps to `SendWireError::Codec`.
                 let emit = if meta.is_empty() {
-                    self.actions().send_request_query(rid, 0, Some(keyexpr))
+                    wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
                 } else {
-                    self.actions()
-                        .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta)
-                };
+                    wz_session_core::request_build::build_request_query_with_meta(
+                        rid,
+                        0,
+                        Some(keyexpr),
+                        &meta,
+                    )
+                }
+                .map_err(SendWireError::Codec)
+                .and_then(|request| {
+                    self.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Request(Box::new(
+                            request,
+                        )),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                });
                 // R311ln — roll the pending entry back on a failed wire
                 // emit (unregister-only; see the header comment).
                 if let Err(e) = emit {
@@ -1828,17 +1873,35 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T> {
 
             if allows_remote {
                 let meta = opts.query_metadata();
+                // R311mu (B5b-2b-2) — aliased Query onto the send seam; same
+                // shape as `Session::query`, routed by (mapping_id,
+                // inline_suffix) instead of (0, literal). The seam emits the
+                // wire Query only; the unregister-only rollback below stays
+                // session-level.
                 let emit = if meta.is_empty() {
-                    self.actions()
-                        .send_request_query(rid, mapping_id, inline_suffix)
+                    wz_session_core::request_build::build_request_query(
+                        rid,
+                        mapping_id,
+                        inline_suffix,
+                    )
                 } else {
-                    self.actions().send_request_query_with_meta(
+                    wz_session_core::request_build::build_request_query_with_meta(
                         rid,
                         mapping_id,
                         inline_suffix,
                         &meta,
                     )
-                };
+                }
+                .map_err(SendWireError::Codec)
+                .and_then(|request| {
+                    self.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Request(Box::new(
+                            request,
+                        )),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                });
                 if let Err(e) = emit {
                     R::with_mutex_mut(&self.observer, |observer| {
                         observer.replies.unregister(rid);
