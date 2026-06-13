@@ -36792,6 +36792,46 @@
         "PUSHED: R311nb~ng origin/main; R311nh는 로컬(이 라운드). push=명시동의 필요."
       ]
     },
+    "Round 311ni": {
+      "decision_summary": "R311ni: proof-gap 닫기 — unicast TX fragmentation 프로덕션경로 e2e 신규(실 TCP wz↔wz oversize publish→fragment→reassemble→byte-exact Sample).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/layer3_reassembly_tx.rs (NEW): unicast TX-split 프로덕션경로 e2e. 실 루프백 TCP로 wz↔wz 두 세션 open(accept_and_open_session + connect_and_open_session), 양쪽 batch_size=64 접수 → negotiated MTU 64. publisher가 200B `Session::publish`(=프로덕션 publish경로: send_network_message seam→dispatch_network_message→emit_frame_or_fragments@session_actions.rs:1325) → oversize Put가 T_MID_FRAGMENT 체인으로 나감. subscriber 노드가 연속 드라이브(max_iters=None)로 report_outcome_reassembling 재조립 → 단일 byte-exact Sample 발화 assert. layer3_reassembly_rx.rs(손수로 만든 fragment를 dispatcher에 먹임)의 보완—TX 분할 자체를 증명.",
+        "scripts/run-ci.sh: Layer C1l 주석에 R311ni 항목 추가. 신규 테스트는 `#![cfg(feature = \"transport-fragmentation\")]` gated라 기존 C1l lane(`cargo test -p wz-runtime-tokio --features transport-fragmentation`)이 자동 수집—전용 lane 불필요(확인: `test unicast_oversize_put... ok`)."
+      ],
+      "verification_bullets": [
+        "신규 테스트 통과: `cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx` EXIT=0.",
+        "fragmentation 실제 경유 증거: 초기 chunked-drive(Some(1)) 버전은 fired=0 실패(매 호출이 reassembly pool 재생성→fragment 미누적) → continuous-drive(None)로 수정 후 통과. 단일 프레임이면 chunked로도 발화했을 터—다이터레이션 reassembly 필요성이 fragment 경로 증명.",
+        "flaky 아님: 10/10 연속 통과([[feedback-no-flaky-ever]]).",
+        "C1l lane이 실제 수집 확인: `Running tests/layer3_reassembly_tx.rs ... test unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx ... ok`.",
+        "full host run-ci EXIT=0: 'all required layers pass'."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "기반 굳히기 Step2 DONE: unicast TX fragmentation 프로덕션 e2e 공백 닫힘. 다음 proof-gap: wz↔zenoh-pico 라이브 multicast/핸드셰이크 interop e2e(현재 codec 바이트패리티+host 루프백만; 실소켓 교차구현 미검증).",
+        "UNPUSHED 누적: R311nh(2)+R311ni(이번) 로컬. origin/main=520293e. 사용자가 'Step2까지 모아서 push' 선택—이제 push 시점. 명시동의 대기."
+      ],
+      "publishable_decision_summary": "R311ni: proof-gap 닫기 — unicast TX fragmentation 프로덕션경로 e2e 신규(실 TCP wz↔wz oversize publish→fragment→reassemble→byte-exact Sample).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/layer3_reassembly_tx.rs (NEW): unicast TX-split 프로덕션경로 e2e. 실 루프백 TCP로 wz↔wz 두 세션 open(accept_and_open_session + connect_and_open_session), 양쪽 batch_size=64 접수 → negotiated MTU 64. publisher가 200B `Session::publish`(=프로덕션 publish경로: send_network_message seam→dispatch_network_message→emit_frame_or_fragments@session_actions.rs:1325) → oversize Put가 T_MID_FRAGMENT 체인으로 나감. subscriber 노드가 연속 드라이브(max_iters=None)로 report_outcome_reassembling 재조립 → 단일 byte-exact Sample 발화 assert. layer3_reassembly_rx.rs(손수로 만든 fragment를 dispatcher에 먹임)의 보완—TX 분할 자체를 증명.",
+        "scripts/run-ci.sh: Layer C1l 주석에 R311ni 항목 추가. 신규 테스트는 `#![cfg(feature = \"transport-fragmentation\")]` gated라 기존 C1l lane(`cargo test -p wz-runtime-tokio --features transport-fragmentation`)이 자동 수집—전용 lane 불필요(확인: `test unicast_oversize_put... ok`)."
+      ],
+      "publishable_verification_bullets": [
+        "신규 테스트 통과: `cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx` EXIT=0.",
+        "fragmentation 실제 경유 증거: 초기 chunked-drive(Some(1)) 버전은 fired=0 실패(매 호출이 reassembly pool 재생성→fragment 미누적) → continuous-drive(None)로 수정 후 통과. 단일 프레임이면 chunked로도 발화했을 터—다이터레이션 reassembly 필요성이 fragment 경로 증명.",
+        "flaky 아님: 10/10 연속 통과([[feedback-no-flaky-ever]]).",
+        "C1l lane이 실제 수집 확인: `Running tests/layer3_reassembly_tx.rs ... test unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx ... ok`.",
+        "full host run-ci EXIT=0: 'all required layers pass'."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "기반 굳히기 Step2 DONE: unicast TX fragmentation 프로덕션 e2e 공백 닫힘. 다음 proof-gap: wz↔zenoh-pico 라이브 multicast/핸드셰이크 interop e2e(현재 codec 바이트패리티+host 루프백만; 실소켓 교차구현 미검증).",
+        "UNPUSHED 누적: R311nh(2)+R311ni(이번) 로컬. origin/main=520293e. 사용자가 'Step2까지 모아서 push' 선택—이제 push 시점. 명시동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
