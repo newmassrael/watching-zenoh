@@ -33,7 +33,12 @@ use sce_forge_runtime::codec::{CodecError, SceBytes, SceString};
 /// [`CodecError::TooManyElements`] if longer than `N`).
 #[allow(dead_code)] // used by codec-gated builders; unused in no-codec subsets
 pub fn owned_bytes<const N: usize>(b: &[u8]) -> Result<SceBytes<N>, CodecError> {
-    SceBytes::<N>::from_slice(b)
+    // SCE 1d439ea07 moved SceBytes to the shared `sce-portable-bytes` crate,
+    // whose `from_slice` returns `Err(CapacityExceeded)`; the `?` maps it to
+    // `CodecError` via the SCE-provided `From` impl (codec.rs:144) — the same
+    // pattern the generated codecs use. `SceString` still lives in
+    // `sce_forge_runtime::codec` and returns `CodecError` directly.
+    Ok(SceBytes::<N>::from_slice(b)?)
 }
 
 /// Copy a string slice into the profile-aware `SceString<N>` owned carrier
