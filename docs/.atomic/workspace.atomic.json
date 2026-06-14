@@ -37006,6 +37006,44 @@
         "UNPUSHED: R311nm 로컬(test + Cargo.toml + run-ci.sh + 이 ledger). R311nk/nl는 이미 push됨(origin/main=a95338c). push=사용자 명시 동의 대기."
       ]
     },
+    "Round 311nn": {
+      "decision_summary": "R311nn: R311nm 세션리뷰(독립리뷰어+자가검증) — 핵심주장 2개 소스확정(pico Frame가 미admit peer drop=transitive JOIN 증명 rx.c:182; resolver-2 multicast 격리 cargo tree 실측), F6 magic number를 pico-source 명명상수로 anchor. 행동변화 없음.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_publisher_to_pico_multicast_zsub.rs: F6 개선 — `wz_mc_params()`의 magic number(version 0x09 / batch 2048 / seq_num+req_id res 0x02)를 명명 상수 PICO_PROTO_VERSION / PICO_SN_RESOLUTION / PICO_BATCH_MULTICAST_SIZE로 anchor(vendored pico 소스 file 인용). 핵심 NOTE: 이 값들은 pico CONFIG 값이지 wz PROTOCOL default가 아님 — wz PROTOCOL_DEFAULT_BATCH_SIZE=8192이면 pico가 reject하므로 wz 상수로 치환 금지. pico pin bump가 이 값을 바꾸면 명명 상수 사이트에서 명시적 edit으로 표면화(현재 bare literal은 silent admission-rejection으로만 표출). 행동 변화 없음(동일 값), 테스트 15/15 no-flaky 유지.",
+        "세션 리뷰 자체는 코드 변경 아님(독립 general-purpose 리뷰어 + 자가 소스검증). R311nm 커밋 b6572ca+e3c2e73 대상."
+      ],
+      "verification_bullets": [
+        "load-bearing 주장 2개를 소스/실측으로 자가 확정(리뷰어 주장 독립 재검증): (J) pico `vendor/zenoh-pico/src/transport/multicast/rx.c:182-186` `_z_multicast_handle_frame`이 entry==NULL(미admit peer)이면 'Dropping _Z_FRAME from unknown peer'로 drop — entry는 src addr 조회로 호환 JOIN admit(rx.c:378-396) 시에만 생성. 따라서 z_sub의 Push 수신 = wz JOIN을 pico가 admit한 transitive 증명, 성립. (C) `cargo tree -e features -p wz-runtime-tokio` 실측: default workspace resolution에 transport-multicast/transport-fragmentation/reassembly 미포함(codec-*/transport-unicast/batching/keepalive/link-* 만). resolver=2가 wz-integration-tests dev-dep의 transport-multicast를 wz-runtime-tokio 자체 C1 빌드에서 격리 — Cargo.toml 주석+ledger 주장 정확 확정.",
+        "리뷰어 findings triage: F6(MED, magic number)=REAL→적용(이 라운드). F1(SSOT 하니스 중복)=FALSE POSITIVE(dev-dep cycle hazard가 test-support 추출 차단, [[feedback-test-support-dev-dep-cycle]]; 2-site YAGNI). F2(republish loop)=올바른 no-flaky 패턴(외부 receiver admission in-process 미관측). F5(방향 wz->pico)=정당 scope(SO_REUSEADDR 부재는 lib.rs:794-800에 이미 문서화된 프로덕션 경계; carry로 추적). F3/F4/F7=LOW/false-positive. HIGH 없음, hack/SSOT 위반/숨은-갭-우회 없음.",
+        "검증: fmt+clippy clean, 테스트 15/15 no-flaky(F6 빌드), Layer M EXIT=0(3 sub-step), full host run-ci EXIT=0 'all required layers pass'. atomic ledger entries=722, orphan delta=0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311nm(wz->pico 멀티캐스트 JOIN+Push interop) 세션리뷰 종결: 교과서 검증 통과. 핵심 가치 주장(transitive JOIN 증명, resolver-2 격리)이 pico 소스 + cargo tree로 확정됨. 유일 실효 개선 F6(pico-config 상수 anchor) 적용.",
+        "NEXT 후보(R311nm carry 유지): ① pico->wz 멀티캐스트 dial-in — wz `bind_multicast_v4`에 SO_REUSEADDR/REUSEPORT 추가 필요(tokio UdpSocket 미지원 → socket2 진입; lib.rs:794-800이 multi-listener=socket2 진입점이라 이미 명시). 동일 host 동일 group port co-bind 가능해야 pico mcast peer(REUSE 설정)와 양립. ② 멀티캐스트 양방향 JOIN assertion — wz가 pico JOIN을 admit하는 역방향(pico JOIN interval Z_JOIN_INTERVAL 2.5s라 test 윈도우>2.5s 또는 interval 단축 필요). ③ 큰메시지>256B 멀티캐스트(wz MsgPut payload bound 256 확장 선결, 별건; R311nl negative test가 unicast로 pin).",
+        "UNPUSHED 누적: R311nm(b6572ca+e3c2e73) + R311nn(67c5ac3 + 이 ledger) = origin/main(a95338c) 대비 ahead 4. push=사용자 명시 동의 대기."
+      ],
+      "publishable_decision_summary": "R311nn: R311nm 세션리뷰(독립리뷰어+자가검증) — 핵심주장 2개 소스확정(pico Frame가 미admit peer drop=transitive JOIN 증명 rx.c:182; resolver-2 multicast 격리 cargo tree 실측), F6 magic number를 pico-source 명명상수로 anchor. 행동변화 없음.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_publisher_to_pico_multicast_zsub.rs: F6 개선 — `wz_mc_params()`의 magic number(version 0x09 / batch 2048 / seq_num+req_id res 0x02)를 명명 상수 PICO_PROTO_VERSION / PICO_SN_RESOLUTION / PICO_BATCH_MULTICAST_SIZE로 anchor(vendored pico 소스 file 인용). 핵심 NOTE: 이 값들은 pico CONFIG 값이지 wz PROTOCOL default가 아님 — wz PROTOCOL_DEFAULT_BATCH_SIZE=8192이면 pico가 reject하므로 wz 상수로 치환 금지. pico pin bump가 이 값을 바꾸면 명명 상수 사이트에서 명시적 edit으로 표면화(현재 bare literal은 silent admission-rejection으로만 표출). 행동 변화 없음(동일 값), 테스트 15/15 no-flaky 유지.",
+        "세션 리뷰 자체는 코드 변경 아님(독립 general-purpose 리뷰어 + 자가 소스검증). R311nm 커밋 b6572ca+e3c2e73 대상."
+      ],
+      "publishable_verification_bullets": [
+        "load-bearing 주장 2개를 소스/실측으로 자가 확정(리뷰어 주장 독립 재검증): (J) pico `vendor/zenoh-pico/src/transport/multicast/rx.c:182-186` `_z_multicast_handle_frame`이 entry==NULL(미admit peer)이면 'Dropping _Z_FRAME from unknown peer'로 drop — entry는 src addr 조회로 호환 JOIN admit(rx.c:378-396) 시에만 생성. 따라서 z_sub의 Push 수신 = wz JOIN을 pico가 admit한 transitive 증명, 성립. (C) `cargo tree -e features -p wz-runtime-tokio` 실측: default workspace resolution에 transport-multicast/transport-fragmentation/reassembly 미포함(codec-*/transport-unicast/batching/keepalive/link-* 만). resolver=2가 wz-integration-tests dev-dep의 transport-multicast를 wz-runtime-tokio 자체 C1 빌드에서 격리 — Cargo.toml 주석+ledger 주장 정확 확정.",
+        "리뷰어 findings triage: F6(MED, magic number)=REAL→적용(이 라운드). F1(SSOT 하니스 중복)=FALSE POSITIVE(dev-dep cycle hazard가 test-support 추출 차단, [[feedback-test-support-dev-dep-cycle]]; 2-site YAGNI). F2(republish loop)=올바른 no-flaky 패턴(외부 receiver admission in-process 미관측). F5(방향 wz->pico)=정당 scope(SO_REUSEADDR 부재는 lib.rs:794-800에 이미 문서화된 프로덕션 경계; carry로 추적). F3/F4/F7=LOW/false-positive. HIGH 없음, hack/SSOT 위반/숨은-갭-우회 없음.",
+        "검증: fmt+clippy clean, 테스트 15/15 no-flaky(F6 빌드), Layer M EXIT=0(3 sub-step), full host run-ci EXIT=0 'all required layers pass'. atomic ledger entries=722, orphan delta=0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nm(wz->pico 멀티캐스트 JOIN+Push interop) 세션리뷰 종결: 교과서 검증 통과. 핵심 가치 주장(transitive JOIN 증명, resolver-2 격리)이 pico 소스 + cargo tree로 확정됨. 유일 실효 개선 F6(pico-config 상수 anchor) 적용.",
+        "NEXT 후보(R311nm carry 유지): ① pico->wz 멀티캐스트 dial-in — wz `bind_multicast_v4`에 SO_REUSEADDR/REUSEPORT 추가 필요(tokio UdpSocket 미지원 → socket2 진입; lib.rs:794-800이 multi-listener=socket2 진입점이라 이미 명시). 동일 host 동일 group port co-bind 가능해야 pico mcast peer(REUSE 설정)와 양립. ② 멀티캐스트 양방향 JOIN assertion — wz가 pico JOIN을 admit하는 역방향(pico JOIN interval Z_JOIN_INTERVAL 2.5s라 test 윈도우>2.5s 또는 interval 단축 필요). ③ 큰메시지>256B 멀티캐스트(wz MsgPut payload bound 256 확장 선결, 별건; R311nl negative test가 unicast로 pin).",
+        "UNPUSHED 누적: R311nm(b6572ca+e3c2e73) + R311nn(67c5ac3 + 이 ledger) = origin/main(a95338c) 대비 ahead 4. push=사용자 명시 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
