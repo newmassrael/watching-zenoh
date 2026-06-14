@@ -94,19 +94,33 @@ const SUB_KEY: &str = "demo/mc/**";
 // line only if the reassembled Push delivered byte-exact.
 const PAYLOAD: &str = "WZ-MCAST-JOIN-INTEROP-R311nm";
 
-/// wz multicast self-advertisement params pinned to zenoh-pico's config
-/// constants (`Z_PROTO_VERSION` 0x09 / `Z_SN_RESOLUTION` 0x02 /
-/// `Z_BATCH_MULTICAST_SIZE` 2048) so pico admits the wz peer from its JOIN.
+// zenoh-pico's shipped CONFIG constants. pico's multicast JOIN-admission
+// gate (`vendor/zenoh-pico/src/transport/multicast/rx.c:373-396`) rejects a
+// peer whose JOIN does not match these EXACTLY, so wz must advertise them to
+// be admitted (and pico's _Z_FRAME handler drops a Frame from any un-admitted
+// peer, rx.c:182-186 — which is why z_sub firing transitively proves the
+// JOIN was accepted). Pinned to the VENDORED pico tree; a submodule pin bump
+// that shifts any of these surfaces here as an obvious edit rather than a
+// silent admission rejection. NOTE: these are pico CONFIG values, NOT wz
+// PROTOCOL defaults — wz's `PROTOCOL_DEFAULT_BATCH_SIZE` is 8192
+// (wz-session-core multicast_params.rs), which pico would reject; the
+// controlling requirement is pico-config-match, not wz-protocol-default.
+const PICO_PROTO_VERSION: u8 = 0x09; // config.h.in Z_PROTO_VERSION
+const PICO_SN_RESOLUTION: u8 = 0x02; // config.h.in Z_SN_RESOLUTION / Z_REQ_RESOLUTION
+const PICO_BATCH_MULTICAST_SIZE: u16 = 2_048; // CMakeLists.txt BATCH_MULTICAST_SIZE
+
+/// wz multicast self-advertisement params pinned to zenoh-pico's CONFIG
+/// constants above so pico admits the wz peer from its JOIN beacon.
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
-        version: 0x09,
-        whatami: 0x01, // PEER (wire form)
+        version: PICO_PROTO_VERSION,
+        whatami: 0x01, // PEER (wire form; pico stores it, does not reject on it)
         zid: vec![0x77; 4],
         lease_ms: 5_000,
         join_interval_ms: 50,
-        seq_num_res: 0x02,
-        req_id_res: 0x02,
-        batch_size: 2_048,
+        seq_num_res: PICO_SN_RESOLUTION,
+        req_id_res: PICO_SN_RESOLUTION,
+        batch_size: PICO_BATCH_MULTICAST_SIZE,
     }
 }
 
