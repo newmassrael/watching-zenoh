@@ -2667,6 +2667,16 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     fi
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_publisher_to_pico_multicast_zsub -- --ignored --quiet) || return 1
+    # R311no — pico -> wz multicast dial-in (the reverse of the lane
+    # above): an external zenoh-pico `z_pub -m peer` multicast publisher's
+    # JOIN beacon + framed Push are admitted (dispatcher active_peers==1,
+    # a DIRECT in-process observation) and decoded byte-exact by a wz
+    # in-library multicast subscriber that co-binds the group port — made
+    # possible by the SO_REUSEADDR/SO_REUSEPORT bind added to
+    # `UdpDriver::bind_multicast_v4` this round. Needs the pico `z_pub` CLI
+    # (the z_sub check above covers it — the same build script emits both).
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────
