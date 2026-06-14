@@ -46,7 +46,14 @@
          bytes  : payload_len (VLE u64) + payload (bytes max=256;
                               upstream is unbounded zbuf — caller-
                               supplied length-prefix per
-                              `_z_bytes_encode` convention).
+                              `_z_bytes_encode` convention. R311nq: since
+                              SCE pin 5769510d8 the SceBytes<256> owned
+                              projection makes `sce:max-size` the no-alloc
+                              inline capacity + advisory, NOT an on-wire
+                              ceiling — alloc owned is unbounded Vec,
+                              matching the unbounded upstream zbuf; no-alloc
+                              keeps the 256 heapless cap. Uniform across
+                              every sce:max-size scalar field).
 
      Composition: B1-γ flags (header) + B1-δ present-if-on-fields
      (T / E gates) + Y3 atomic 2a present-if-on-tlv-chain (header.Z

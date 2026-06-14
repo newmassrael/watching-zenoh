@@ -8,12 +8,19 @@
 //! - [`wz_acceptor_reassembles_pico_fragmented_put`] (positive): a 200-byte
 //!   Put (within wz's MsgPut payload bound) fragments at the negotiated MTU 64
 //!   and reassembles into one byte-exact Sample.
-//! - [`wz_acceptor_rejects_pico_put_over_payload_bound`] (negative): a
-//!   257-byte Put (one past wz's 256-byte bound) reassembles but is rejected
-//!   at re-parse with `TooManyElements`. This pins a real wz<->pico PARITY
-//!   divergence — zenoh-pico has NO msg_put payload bound, so it can send
-//!   payloads over 256B that wz structurally cannot accept (msg_put.scxml:111
-//!   `sce:max-size="256"`, an MCU bounded-collection invariant).
+//! - [`wz_acceptor_accepts_pico_put_over_legacy_256_bound`] (R311nq): a
+//!   257-byte Put (one past wz's FORMER 256-byte bound) reassembles AND
+//!   re-parses into a delivered Sample on the alloc (AP) tier. Since the SCE
+//!   5769510d8 newtype bump, alloc owned bytes are an unbounded `Vec<u8>`
+//!   (`SceBytes<256>` is `Vec` under alloc), closing the wz<->pico
+//!   payload-bound divergence on AP. This test exercises ONLY the alloc
+//!   tier; the no-alloc rejection is NOT re-asserted here because it is a
+//!   type guarantee, not a runtime behaviour: under no-alloc `SceBytes<256>`
+//!   wraps `heapless::Vec<u8,256>`, so an over-256 payload is UNREPRESENTABLE
+//!   (the constructor cannot build it — `TooManyElements`). msg_put.scxml:111
+//!   `sce:max-size="256"` is that no-alloc inline capacity + advisory. The
+//!   same alloc-unbounded / no-alloc-capped split holds for EVERY
+//!   `sce:max-size` scalar field; this 257B case is its representative proof.
 //!
 //! The static byte-parity (layer3_fragment.rs) and the wz<->wz reassembly
 //! (wz-runtime-tokio/tests/layer3_reassembly_tx.rs) left the
@@ -26,9 +33,9 @@
 //! `vendor/zenoh-pico/src/transport/unicast/transport.c:135-136,232-234`). wz
 //! advertises 64, pico's default is 2048, so the negotiated MTU is
 //! `min(64,2048)=64` and any Put >64B leaves the wire as a fragment chain.
-//! Sending a multi-kilobyte payload on the default batch instead is NOT a
-//! valid alternative — the 256-byte payload bound rejects it regardless of
-//! MTU; that path is exactly the negative case below.
+//! Sending a multi-kilobyte payload on the default batch is a separate axis
+//! (no fragmentation); the over-legacy-bound case below keeps the small MTU so
+//! BOTH fragmentation AND the now-unbounded owned re-parse are exercised.
 //!
 //! ## Fragmentation is PROVEN, not inferred (R311nj/R311nl lesson)
 //!
@@ -38,8 +45,9 @@
 //! un-fragmented frame would also be received), so `negotiated_batch_mtu()`
 //! alone only proves pico's fragmentation INPUT, not that pico actually
 //! fragmented. Counting the Fragment outcomes proves the chain reached the RX
-//! path. The positive case additionally asserts byte-exact payload; the
-//! negative case asserts the re-parse rejection + zero delivery.
+//! path. Both cases assert byte-exact payload + exactly one delivery; the
+//! 257B case additionally proves the over-legacy-bound owned re-parse is now
+//! lossless on the alloc tier.
 
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -109,26 +117,33 @@ async fn wz_acceptor_reassembles_pico_fragmented_put() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "binary-dep e2e (zenoh-pico CLI z_put); Layer E runs via --ignored"]
-async fn wz_acceptor_rejects_pico_put_over_payload_bound() {
-    // 257 = one past wz's MsgPut 256-byte payload bound (msg_put.scxml:111).
-    // pico (no such bound) fragments + sends it; wz reassembles the full chain
-    // then rejects at re-parse with TooManyElements and closes. Pins the
-    // wz<->pico PARITY divergence as a mechanical boundary guard.
+async fn wz_acceptor_accepts_pico_put_over_legacy_256_bound() {
+    // 257 = one past wz's FORMER MsgPut 256-byte payload bound. Since the SCE
+    // 5769510d8 newtype bump, wz's alloc (AP) build stores owned bytes as an
+    // unbounded `Vec<u8>` (`SceBytes<256>` is `Vec` under alloc, the 256 now
+    // advisory), so a 257B payload reassembles AND re-parses into a delivered
+    // Sample — the wz<->pico payload-bound divergence is CLOSED on the alloc
+    // tier (no-alloc/MCU still caps at `heapless<256>`). pico has no bound, so
+    // this is full unbounded-PUT parity on AP.
     let payload = shell_safe_payload(257);
-    let o = run_pico_put_against_wz_acceptor(&payload, false).await;
+    let o = run_pico_put_against_wz_acceptor(&payload, true).await;
 
     assert!(
         o.fragment_chunks >= 2,
-        "pico's 257B Put fragments and wz reassembles the chain (saw {}) before the bound rejects it",
+        "pico's 257B Put fragments and wz reassembles the chain (saw {})",
         o.fragment_chunks
     );
+    assert_eq!(
+        o.parse_errors, 0,
+        "the reassembled 257B payload re-parses cleanly under alloc unbounded owned bytes"
+    );
     assert!(
-        o.parse_errors >= 1,
-        "the reassembled 257B payload exceeds wz's 256B MsgPut bound and is rejected at re-parse"
+        o.byte_exact,
+        "the 257B payload (over the legacy 256B bound) is delivered byte-exact"
     );
     assert_eq!(
-        o.deliveries, 0,
-        "no Sample is delivered: the over-bound payload never reaches the subscriber"
+        o.deliveries, 1,
+        "exactly one delivery: the over-legacy-bound payload reaches the subscriber on AP"
     );
 }
 
