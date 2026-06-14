@@ -36958,6 +36958,54 @@
         "UNPUSHED: R311nk(37199bc+0fd73a8) + R311nl(이번). push=명시동의 대기."
       ]
     },
+    "Round 311nm": {
+      "decision_summary": "R311nm: wz->pico multicast JOIN+Push interop e2e 신규 — wz in-library mcast publisher의 JOIN+Push를 외부 pico z_sub -m peer가 admit+decode(byte-exact, 실 UDP). Layer M opt-in, Layer E 제외.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_publisher_to_pico_multicast_zsub.rs (NEW): wz in-library 멀티캐스트 publisher(ephemeral TX-only `UdpDriver::from_socket` + `drive_multicast_session` + `multicast_put_literal`; mc_params version 0x09 / batch 2048 / sn-req-res 0x02 = vendored pico config 정확히 일치)가 JOIN beacon + framed Push를 실 UDP group(224.0.0.224:7457)에 송신 → 외부 `z_sub -m peer -l udp/...#iface=<default-route-dev>`가 admit + decode → stdout `>> [Subscriber] Received ('demo/mc/interop': '...')` byte-exact. 방향=wz->pico (pico->wz는 wz `bind_multicast_v4`가 SO_REUSEADDR 미설정이라 동일 host 동일 group port co-bind 시 EADDRINUSE; carry). JOIN admission은 transitive 증명: pico rx.c:373-396이 version/seq_num_res/req_id_res/batch_size 불일치 peer의 Frame을 admit 전 drop하므로 z_sub의 Received 발화 자체가 wz JOIN을 pico가 파싱·admit했다는 증거. JOIN-admission 윈도우 레이스는 100ms republish loop로 제거([[feedback-no-flaky-ever]]). default-route iface는 `ip route show default`로 런타임 발견(wz INADDR_ANY mcast egress가 고르는 그 iface) → 양 peer 동일 링크. stdbuf -oL로 z_sub stdout line-buffer.",
+        "crates/wz-integration-tests/Cargo.toml: wz-runtime-tokio dev-dep features에 transport-multicast 추가(transport-fragmentation 옆, 멀티캐스트 publisher 컴파일용). resolver=2가 C1 region 누수 격리 — frag pin과 동일 근거(C1 `cargo test --workspace`에서 multicast-gated test 실행 0).",
+        "scripts/run-ci.sh: Layer E 기본 스윕에 `--skip multicast` 추가 — env-dependent 멀티캐스트 interop을 필수 게이트에서 제외(wz_e2e_ 컨벤션과 동일 substring 패턴). Layer M(opt-in)에 wz->pico interop을 3번째 sub-step으로 추가(pico-CLI graceful SKIP 가드; 기존 `&&` 체인을 `|| return 1` 시퀀스로 정리해 sub-step별 독립 실행)."
+      ],
+      "verification_bullets": [
+        "신규 test 15/15 no-flaky([[feedback-no-flaky-ever]]); cargo test 0.35s, fmt+clippy clean. 주의: raw 테스트 바이너리 직접 실행은 CARGO_MANIFEST_DIR 미설정으로 project_root() panic(0.00s 즉시 실패) — 내 반복 루프의 아티팩트이지 실제 flake 아님; env 세팅 후 15/15 통과로 확정.",
+        "falsify-first(R311nl 메타교훈 적용): Rust 작성 전 순수 바이너리로 환경 검증 — (1) wz↔wz multicast_pubsub_loopback이 이 호스트에서 EXIT=0(lo에 MULTICAST 플래그 없으나 wz INADDR_ANY membership이 default-route wlp0s20f3 선택). (2) pico↔pico(z_sub + z_put -m peer -l udp/224..#iface=wlp0s20f3)가 '>> Received' 루프백 성립 — 환경·SO_REUSE co-bind·#iface 전부 확인 후 테스트 설계.",
+        "wire-compat 교차검증: vendored pico(pin 3b3ab65c) 빌드값 Z_BATCH_MULTICAST_SIZE=2048 / Z_PROTO_VERSION=0x09 / Z_SN_RESOLUTION=0x02 = wz mc_params 정확히 일치. pico rx.c:381,432가 batch 불일치 JOIN을 reject(대칭 검증)하므로 wz가 2048 광고 필수.",
+        "Layer M EXIT=0: scouting_multicast_loopback + multicast_pubsub_loopback + 신규 wz->pico interop 3 sub-step 전부 pass. Layer E EXIT=0 & 신규 멀티캐스트 test 0회 실행(--skip multicast 제외 검증).",
+        "full host run-ci EXIT=0 'all required layers pass'(전체 host 레인). atomic ledger entries=721, orphan delta=0, T3 warn 미증가."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "proof-gap 닫힘: wz->zenoh-pico 멀티캐스트 JOIN+Push interop(실 UDP group, byte-exact) 신규. R311nl이 정정한 '멀티캐스트 interop reachable, router 불필요(pico -l locator JOIN 경로)'를 실측으로 확정 — JOIN 필드 호환 + Frame decode + 전달까지 검증. codec 바이트패리티 + wz↔wz 루프백 + (R311nk) unicast frag interop에 이어 멀티캐스트 교차구현 송신을 닫음.",
+        "pico->wz 멀티캐스트 dial-in 미검증: wz `bind_multicast_v4`가 SO_REUSEADDR/REUSEPORT 미설정이라 pico mcast peer(둘 다 설정)와 동일 host 동일 group port co-bind 시 EADDRINUSE. 당기려면 wz 멀티캐스트 bind에 SO_REUSEADDR 추가 필요(현재 tokio UdpSocket로는 미지원 → socket2 진입; lib.rs 주석이 'multi-listener=socket2 진입점'이라 이미 명시) — 별건 프로덕션 변경. NEXT 후보 1.",
+        "양방향 JOIN assertion 미완: 이 test는 pico측 수신만 확증(=pico가 wz JOIN admit, transitive). wz가 pico JOIN을 admit하는 역방향은 pico JOIN interval=Z_JOIN_INTERVAL 2.5s라 빠른 종료(첫 Push 수신 즉시) 전 미수신 → wz active_peers 단언 시 env-flaky 위험으로 생략. 추가하려면 test 윈도우>2.5s 또는 pico join interval 단축 설정.",
+        "큰메시지(>256B) 멀티캐스트 interop은 unicast와 동일하게 wz MsgPut payload bound 256(msg_put.scxml:111) 확장 선결(별건; R311nl negative test가 unicast로 이미 pin).",
+        "UNPUSHED: R311nm 로컬(test + Cargo.toml + run-ci.sh + 이 ledger). R311nk/nl는 이미 push됨(origin/main=a95338c). push=사용자 명시 동의 대기."
+      ],
+      "publishable_decision_summary": "R311nm: wz->pico multicast JOIN+Push interop e2e 신규 — wz in-library mcast publisher의 JOIN+Push를 외부 pico z_sub -m peer가 admit+decode(byte-exact, 실 UDP). Layer M opt-in, Layer E 제외.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_publisher_to_pico_multicast_zsub.rs (NEW): wz in-library 멀티캐스트 publisher(ephemeral TX-only `UdpDriver::from_socket` + `drive_multicast_session` + `multicast_put_literal`; mc_params version 0x09 / batch 2048 / sn-req-res 0x02 = vendored pico config 정확히 일치)가 JOIN beacon + framed Push를 실 UDP group(224.0.0.224:7457)에 송신 → 외부 `z_sub -m peer -l udp/...#iface=<default-route-dev>`가 admit + decode → stdout `>> [Subscriber] Received ('demo/mc/interop': '...')` byte-exact. 방향=wz->pico (pico->wz는 wz `bind_multicast_v4`가 SO_REUSEADDR 미설정이라 동일 host 동일 group port co-bind 시 EADDRINUSE; carry). JOIN admission은 transitive 증명: pico rx.c:373-396이 version/seq_num_res/req_id_res/batch_size 불일치 peer의 Frame을 admit 전 drop하므로 z_sub의 Received 발화 자체가 wz JOIN을 pico가 파싱·admit했다는 증거. JOIN-admission 윈도우 레이스는 100ms republish loop로 제거([[feedback-no-flaky-ever]]). default-route iface는 `ip route show default`로 런타임 발견(wz INADDR_ANY mcast egress가 고르는 그 iface) → 양 peer 동일 링크. stdbuf -oL로 z_sub stdout line-buffer.",
+        "crates/wz-integration-tests/Cargo.toml: wz-runtime-tokio dev-dep features에 transport-multicast 추가(transport-fragmentation 옆, 멀티캐스트 publisher 컴파일용). resolver=2가 C1 region 누수 격리 — frag pin과 동일 근거(C1 `cargo test --workspace`에서 multicast-gated test 실행 0).",
+        "scripts/run-ci.sh: Layer E 기본 스윕에 `--skip multicast` 추가 — env-dependent 멀티캐스트 interop을 필수 게이트에서 제외(wz_e2e_ 컨벤션과 동일 substring 패턴). Layer M(opt-in)에 wz->pico interop을 3번째 sub-step으로 추가(pico-CLI graceful SKIP 가드; 기존 `&&` 체인을 `|| return 1` 시퀀스로 정리해 sub-step별 독립 실행)."
+      ],
+      "publishable_verification_bullets": [
+        "신규 test 15/15 no-flaky([[feedback-no-flaky-ever]]); cargo test 0.35s, fmt+clippy clean. 주의: raw 테스트 바이너리 직접 실행은 CARGO_MANIFEST_DIR 미설정으로 project_root() panic(0.00s 즉시 실패) — 내 반복 루프의 아티팩트이지 실제 flake 아님; env 세팅 후 15/15 통과로 확정.",
+        "falsify-first(R311nl 메타교훈 적용): Rust 작성 전 순수 바이너리로 환경 검증 — (1) wz↔wz multicast_pubsub_loopback이 이 호스트에서 EXIT=0(lo에 MULTICAST 플래그 없으나 wz INADDR_ANY membership이 default-route wlp0s20f3 선택). (2) pico↔pico(z_sub + z_put -m peer -l udp/224..#iface=wlp0s20f3)가 '>> Received' 루프백 성립 — 환경·SO_REUSE co-bind·#iface 전부 확인 후 테스트 설계.",
+        "wire-compat 교차검증: vendored pico(pin 3b3ab65c) 빌드값 Z_BATCH_MULTICAST_SIZE=2048 / Z_PROTO_VERSION=0x09 / Z_SN_RESOLUTION=0x02 = wz mc_params 정확히 일치. pico rx.c:381,432가 batch 불일치 JOIN을 reject(대칭 검증)하므로 wz가 2048 광고 필수.",
+        "Layer M EXIT=0: scouting_multicast_loopback + multicast_pubsub_loopback + 신규 wz->pico interop 3 sub-step 전부 pass. Layer E EXIT=0 & 신규 멀티캐스트 test 0회 실행(--skip multicast 제외 검증).",
+        "full host run-ci EXIT=0 'all required layers pass'(전체 host 레인). atomic ledger entries=721, orphan delta=0, T3 warn 미증가."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "proof-gap 닫힘: wz->zenoh-pico 멀티캐스트 JOIN+Push interop(실 UDP group, byte-exact) 신규. R311nl이 정정한 '멀티캐스트 interop reachable, router 불필요(pico -l locator JOIN 경로)'를 실측으로 확정 — JOIN 필드 호환 + Frame decode + 전달까지 검증. codec 바이트패리티 + wz↔wz 루프백 + (R311nk) unicast frag interop에 이어 멀티캐스트 교차구현 송신을 닫음.",
+        "pico->wz 멀티캐스트 dial-in 미검증: wz `bind_multicast_v4`가 SO_REUSEADDR/REUSEPORT 미설정이라 pico mcast peer(둘 다 설정)와 동일 host 동일 group port co-bind 시 EADDRINUSE. 당기려면 wz 멀티캐스트 bind에 SO_REUSEADDR 추가 필요(현재 tokio UdpSocket로는 미지원 → socket2 진입; lib.rs 주석이 'multi-listener=socket2 진입점'이라 이미 명시) — 별건 프로덕션 변경. NEXT 후보 1.",
+        "양방향 JOIN assertion 미완: 이 test는 pico측 수신만 확증(=pico가 wz JOIN admit, transitive). wz가 pico JOIN을 admit하는 역방향은 pico JOIN interval=Z_JOIN_INTERVAL 2.5s라 빠른 종료(첫 Push 수신 즉시) 전 미수신 → wz active_peers 단언 시 env-flaky 위험으로 생략. 추가하려면 test 윈도우>2.5s 또는 pico join interval 단축 설정.",
+        "큰메시지(>256B) 멀티캐스트 interop은 unicast와 동일하게 wz MsgPut payload bound 256(msg_put.scxml:111) 확장 선결(별건; R311nl negative test가 unicast로 이미 pin).",
+        "UNPUSHED: R311nm 로컬(test + Cargo.toml + run-ci.sh + 이 ledger). R311nk/nl는 이미 push됨(origin/main=a95338c). push=사용자 명시 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
@@ -43220,5 +43268,6 @@
   "entities": {},
   "predicates": {},
   "narrative_facts": {},
-  "schema_version": 21
+  "disclosure_plans": {},
+  "schema_version": 22
 }
