@@ -36914,6 +36914,50 @@
         "UNPUSHED: R311nk 로컬(테스트+Cargo.toml). origin/main=302b2bd. commit/push=사용자 명시 동의 대기."
       ]
     },
+    "Round 311nl": {
+      "decision_summary": "R311nl: R311nk 세션리뷰 보정 — (f) 멀티캐스트 deferral 정당화 사실오류 정정(pico mcast는 -l locator로 JOIN 경로·router 불필요·reachable), (d) fragment chunk 직접 assert, (e) 257B parity negative test, (c) non-repeating payload.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_reassembles_pico_fragment_tx.rs 재작성(공통 setup helper run_pico_put_against_wz_acceptor + 2 test): (d) `DriverLoopOutcome::Fragment` 카운트로 fragment chain을 직접 assert(>=2) — wz RX read는 negotiated batch로 안 bounded라 `negotiated_batch_mtu()==64`만으론 단일프레임도 수신 가능, 즉 fragment 발생을 증명 못 했음(리뷰 d). (e) 257B negative test 신규 `wz_acceptor_rejects_pico_put_over_payload_bound`: pico(payload bound 없음)가 257B fragment 송신 → wz reassemble → re-parse `TooManyElements` → deliveries==0; wz MsgPut 256 bound(msg_put.scxml:111 sce:max-size) vs pico 무제한 = parity divergence를 mechanically pin(리뷰 e). (c) payload 반복 \"0123456789\"*20 → 62-char alphabet × coprime stride 7(주기 62, 64 MTU와 서로소); z_put -v 가 C-string이라 sibling layer3_reassembly_tx 의 raw (i*13) 불가 → shell-safe alphanumeric(리뷰 c).",
+        "crates/wz-integration-tests/Cargo.toml: header doc 갱신(byte-compare only → binary-dep e2e + in-library socket e2e 호스트 명시; 리뷰 b의 stale doc) + frag dev-dep pin에 resolver-2 누수-격리 근거 주석(리뷰 a)."
+      ],
+      "verification_bullets": [
+        "두 test 15/15 no-flaky([[feedback-no-flaky-ever]]). positive: fragment_chunks>=2 + parse_errors==0 + byte-exact + deliveries==1. negative: fragment_chunks>=2 + parse_errors>=1 + deliveries==0.",
+        "독립 리뷰어(general-purpose) + 자가검증으로 R311nk 세션리뷰: (a) frag dev-dep 누수는 resolver=2로 wz-integration-tests 빌드에 격리됨 — C1 region에서 frag-gated 테스트 실행 0 실측, 리뷰어 HIGH→MED 정정(별도 크레이트는 over-engineering, 현행+문서화가 교과서적). (b) 테스트 위치는 false-positive(wz-integration-tests가 binary-dep infra+Layer C0 scan+spawn helper home). (c)(d)(e) REAL→fix. (f) REAL→carry 정정.",
+        "fmt + clippy(-D warnings) clean: doc_lazy_continuation('>256B'가 markdown blockquote로 오인 → 'over 256B'로 수정).",
+        "full host run-ci 재실행 EXIT=0 'all required layers pass'. Layer E(--ignored --skip wz_e2e_)가 두 신규 test 자동수집."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311nk carry 사실오류 정정(frozen-ledger 새 entry): \"멀티캐스트 wz↔pico interop은 router(Phase D+) 선결\"은 틀림. pico 소스 검증: mcast peer는 `-l <mcast-locator>`로 `_z_open_inner` locator 경로(session.c:174) → `_z_multicast_open_peer`가 곧바로 Z_JOIN 송신(transport.c:130 `_z_t_msg_make_join`), scout/Hello/router 불필요. mcast discovery는 JOIN 기반(rx.c:371). 이전 'Unable to open session'은 `-l` 없이 띄워 scout 브랜치(len=0)로 빠진 것. G-SCT-2(unsolicited Hello broadcaster)는 mcast와 무관(Z_JOIN이 announcer role 처리)이라 deferral 사유가 misdirected였음.",
+        "멀티캐스트 wz↔pico interop은 reachable: wz가 JOIN 머신(multicast_join/tx/rx, bind_multicast_v4)을 이미 보유. 필드값 호환만 필요(batch_size==Z_BATCH_MULTICAST_SIZE, SN/req-id resolution; rx.c:380). **NEXT 1순위 복원 = 멀티캐스트 wz↔pico JOIN interop e2e(실 UDP loopback)**. 실측 미완 — 다음 세션 falsify-first.",
+        "256 payload-bound parity divergence는 이제 negative test로 pin됨; 큰메시지 interop은 wz MsgPut bound 확장이 선결(별건, 유효).",
+        "pico→wz unicast dial-in(Gap6) 여전히 미검증(pico peer-listener 무응답, zenoh router 의존).",
+        "UNPUSHED: R311nk(37199bc+0fd73a8) + R311nl(이번). push=명시동의 대기."
+      ],
+      "publishable_decision_summary": "R311nl: R311nk 세션리뷰 보정 — (f) 멀티캐스트 deferral 정당화 사실오류 정정(pico mcast는 -l locator로 JOIN 경로·router 불필요·reachable), (d) fragment chunk 직접 assert, (e) 257B parity negative test, (c) non-repeating payload.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_reassembles_pico_fragment_tx.rs 재작성(공통 setup helper run_pico_put_against_wz_acceptor + 2 test): (d) `DriverLoopOutcome::Fragment` 카운트로 fragment chain을 직접 assert(>=2) — wz RX read는 negotiated batch로 안 bounded라 `negotiated_batch_mtu()==64`만으론 단일프레임도 수신 가능, 즉 fragment 발생을 증명 못 했음(리뷰 d). (e) 257B negative test 신규 `wz_acceptor_rejects_pico_put_over_payload_bound`: pico(payload bound 없음)가 257B fragment 송신 → wz reassemble → re-parse `TooManyElements` → deliveries==0; wz MsgPut 256 bound(msg_put.scxml:111 sce:max-size) vs pico 무제한 = parity divergence를 mechanically pin(리뷰 e). (c) payload 반복 \"0123456789\"*20 → 62-char alphabet × coprime stride 7(주기 62, 64 MTU와 서로소); z_put -v 가 C-string이라 sibling layer3_reassembly_tx 의 raw (i*13) 불가 → shell-safe alphanumeric(리뷰 c).",
+        "crates/wz-integration-tests/Cargo.toml: header doc 갱신(byte-compare only → binary-dep e2e + in-library socket e2e 호스트 명시; 리뷰 b의 stale doc) + frag dev-dep pin에 resolver-2 누수-격리 근거 주석(리뷰 a)."
+      ],
+      "publishable_verification_bullets": [
+        "두 test 15/15 no-flaky([[feedback-no-flaky-ever]]). positive: fragment_chunks>=2 + parse_errors==0 + byte-exact + deliveries==1. negative: fragment_chunks>=2 + parse_errors>=1 + deliveries==0.",
+        "독립 리뷰어(general-purpose) + 자가검증으로 R311nk 세션리뷰: (a) frag dev-dep 누수는 resolver=2로 wz-integration-tests 빌드에 격리됨 — C1 region에서 frag-gated 테스트 실행 0 실측, 리뷰어 HIGH→MED 정정(별도 크레이트는 over-engineering, 현행+문서화가 교과서적). (b) 테스트 위치는 false-positive(wz-integration-tests가 binary-dep infra+Layer C0 scan+spawn helper home). (c)(d)(e) REAL→fix. (f) REAL→carry 정정.",
+        "fmt + clippy(-D warnings) clean: doc_lazy_continuation('>256B'가 markdown blockquote로 오인 → 'over 256B'로 수정).",
+        "full host run-ci 재실행 EXIT=0 'all required layers pass'. Layer E(--ignored --skip wz_e2e_)가 두 신규 test 자동수집."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nk carry 사실오류 정정(frozen-ledger 새 entry): \"멀티캐스트 wz↔pico interop은 router(Phase D+) 선결\"은 틀림. pico 소스 검증: mcast peer는 `-l <mcast-locator>`로 `_z_open_inner` locator 경로(session.c:174) → `_z_multicast_open_peer`가 곧바로 Z_JOIN 송신(transport.c:130 `_z_t_msg_make_join`), scout/Hello/router 불필요. mcast discovery는 JOIN 기반(rx.c:371). 이전 'Unable to open session'은 `-l` 없이 띄워 scout 브랜치(len=0)로 빠진 것. G-SCT-2(unsolicited Hello broadcaster)는 mcast와 무관(Z_JOIN이 announcer role 처리)이라 deferral 사유가 misdirected였음.",
+        "멀티캐스트 wz↔pico interop은 reachable: wz가 JOIN 머신(multicast_join/tx/rx, bind_multicast_v4)을 이미 보유. 필드값 호환만 필요(batch_size==Z_BATCH_MULTICAST_SIZE, SN/req-id resolution; rx.c:380). **NEXT 1순위 복원 = 멀티캐스트 wz↔pico JOIN interop e2e(실 UDP loopback)**. 실측 미완 — 다음 세션 falsify-first.",
+        "256 payload-bound parity divergence는 이제 negative test로 pin됨; 큰메시지 interop은 wz MsgPut bound 확장이 선결(별건, 유효).",
+        "pico→wz unicast dial-in(Gap6) 여전히 미검증(pico peer-listener 무응답, zenoh router 의존).",
+        "UNPUSHED: R311nk(37199bc+0fd73a8) + R311nl(이번). push=명시동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
