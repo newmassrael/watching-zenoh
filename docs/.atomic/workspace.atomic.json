@@ -37130,6 +37130,56 @@
         "UNPUSHED: R311np 청산 커밋. push=사용자 동의 대기."
       ]
     },
+    "Round 311nq": {
+      "decision_summary": "R311nq: SCE 2-round newtype 수령으로 ① 큰메시지 owned bound 제거(alloc unbounded=pico parity, no-alloc heapless<N>). codec_owned rename(bounded->owned 18파일). R311nl test positive 정정+257B owned 실측. 세션리뷰 HIGH1/MED3 전수정+MCU cross 갭 청산.",
+      "changes_bullets": [
+        "vendor/sce: submodule 4ec1aa6426 -> 5769510d8 (34-commit clean FF). 2-round SCE 왕복: 1차 19cfda7b0이 owned bytes/string을 alloc서 unbounded로 만들었으나 SceBytes를 type alias로 둬 alloc에서 N이 phantom -> downstream hand-assemble builder의 N 추론 깸(E0284 41건); wz 2차 리포트(newtype 제안) -> 5769510d8이 SceBytes/SceString을 N-preserving newtype(struct + PhantomData<[u8;N]>)으로 N 보존.",
+        "crates/wz-session-core/src/codec_owned.rs(구 codec_bound.rs, R311nq rename): bounded_bytes/bounded_string -> owned_bytes/owned_string, 모듈 codec_bound -> codec_owned(세션리뷰 M1: alloc tier에서 carrier가 unbounded라 'bounded' 이름 misnomer). 본체를 SCE 연관함수 SceBytes::<N>::from_slice / SceString::<N>::from_view에 위임. owned bytes/string이 alloc=Vec/String unbounded(N advisory), no-alloc=heapless<N>. 18 파일 일괄 rename(호출 52곳: bytes 25/string 27 + wz-runtime-tokio scouting_glue + test). newtype N보존이 호출부 N추론 살림(호출부 turbofish 불필요). BoundedString(별개 bounded 모듈, 레지스트리)은 단어경계로 미수정.",
+        "crates/wz-integration-tests/tests/wz_reassembles_pico_fragment_tx.rs: R311nl negative(257B reject) -> positive(wz_acceptor_accepts_pico_put_over_legacy_256_bound, 257B alloc owned 통과 byte_exact deliveries==1) 실측 통과. 세션리뷰 H1: no-alloc reject를 단정하던 주석을 'unrepresentable 타입 보장(heapless<256>이 257B 표현불가, 별도 런타임 assert 불필요)'로 정직화([[feedback-unrepresentable-over-test]]). M3: msg_put 특수 서사를 '전 sce:max-size scalar codec 일관, 257B는 대표 실증'으로.",
+        "sources/codecs/msg_put.scxml: 세션리뷰 M2 - payload 주석에 profile-split 명기(sce:max-size=256은 on-wire 천장 아니라 no-alloc 인라인 용량+advisory; alloc owned unbounded Vec, 무제한 upstream zbuf와 일치). sce:max-size 값 무변경(골든 동일)."
+      ],
+      "verification_bullets": [
+        "세션리뷰(독립 general-purpose 리뷰어 + 자가검증). 리뷰어: HIGH 1(H1 no-alloc reject 미검증 비대칭) + MED 3(M1 bounded 네이밍 misnomer, M2 scxml 주석 stale, M3 서사 msg_put 특수화) + false-positive 2(vendor 34커밋 CLEAN 와이어무영향, 북극성 정당). hack/숨은갭우회/SSOT파괴 0.",
+        "자가검증 추가 발견+청산: full run-ci(host) green이나 Layer G(MCU cross thumbv8m) opt-in SKIP = SCE codegen 변경 라운드인데 MCU cross newtype 미검증. Layer G 실행: thumbv8m codec 재생성(SceBytes<256> newtype) + cross-compile green(riscv32만 toolchain 미설치 SKIP). newtype이 host(alloc) + host no_std(C1m) + MCU cross(thumbv8m) 전부 컴파일 검증.",
+        "triage 전부 수정(비용무관 교과서): H1=unrepresentable 주석 정직화([[feedback-unrepresentable-over-test]]; no-alloc reject는 heapless<N> 타입 구조보장이라 테스트 불필요-격상). M1=owned_* rename 18파일 일괄. M2=scxml profile-split 주석. M3=전codec 일관 서사.",
+        "검증: AP check E-errors 0(E0308 41 -> 1차 alias E0284 41 -> newtype+API위임 0), clippy clean, fragmentation 2 test 통과(257B owned 실측), fmt clean. Layer B(codegen verify) pass = scxml 주석변경 골든 안정. full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'all required layers pass'(Layer B/G/M pass, 컴파일 error[/panicked 0). atomic ledger entries 724->725, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "① 큰메시지 owned bound 제거 완료 + 세션리뷰 통과. SCE 2-round newtype 수령으로 alloc owned bytes/string=unbounded Vec/String=zenoh-pico parity, no-alloc=heapless<N> 유지. unicast 257B fragment+owned e2e 실측 + MCU cross(thumbv8m) newtype 컴파일 검증.",
+        "멀티캐스트 큰메시지 deferral 유지: pico z_pub.c가 char buf[256]라 >256B 멀티캐스트 publish 불가; owned codec은 transport 무관이라 unicast 실증으로 codec-level 충분.",
+        "세션리뷰(독립 리뷰어+자가검증) 통과: HIGH 1(H1 no-alloc reject 미검증 비대칭->unrepresentable 정직화) + MED 3(M1 bounded->owned rename, M2 scxml profile-split 주석, M3 전codec 일관 서사) 전부 수정; false-positive 2(vendor 34커밋 CLEAN, 북극성 정당). hack/숨은갭우회/SSOT파괴 0. 자가검증 추가: full run-ci(host) green이나 Layer G(MCU cross) opt-in SKIP=newtype MCU 미검증 갭 발견->Layer G 실행 청산.",
+        "메타: 2-round SCE 왕복(alias N-phantom -> newtype N-preserving). wz 우회(turbofish 하드코딩=N SSOT중복) 회피하고 SCE 재보고가 교과서적([[feedback-sce-codegen-issue-stop-first]]). bounded->owned rename으로 네이밍 정직성(비용무관 교과서).",
+        "NEXT: ② breadth(serial 링크/gossip scouting 실소켓 interop) 또는 멀티캐스트 양방향 JOIN assertion.",
+        "UNPUSHED: R311nq(vendor bump + codec_owned rename 18파일 + test 정정 + 세션리뷰 정직화 + ledger). push=사용자 동의 대기."
+      ],
+      "publishable_decision_summary": "R311nq: SCE 2-round newtype 수령으로 ① 큰메시지 owned bound 제거(alloc unbounded=pico parity, no-alloc heapless<N>). codec_owned rename(bounded->owned 18파일). R311nl test positive 정정+257B owned 실측. 세션리뷰 HIGH1/MED3 전수정+MCU cross 갭 청산.",
+      "publishable_changes_bullets": [
+        "vendor/sce: submodule 4ec1aa6426 -> 5769510d8 (34-commit clean FF). 2-round SCE 왕복: 1차 19cfda7b0이 owned bytes/string을 alloc서 unbounded로 만들었으나 SceBytes를 type alias로 둬 alloc에서 N이 phantom -> downstream hand-assemble builder의 N 추론 깸(E0284 41건); wz 2차 리포트(newtype 제안) -> 5769510d8이 SceBytes/SceString을 N-preserving newtype(struct + PhantomData<[u8;N]>)으로 N 보존.",
+        "crates/wz-session-core/src/codec_owned.rs(구 codec_bound.rs, R311nq rename): bounded_bytes/bounded_string -> owned_bytes/owned_string, 모듈 codec_bound -> codec_owned(세션리뷰 M1: alloc tier에서 carrier가 unbounded라 'bounded' 이름 misnomer). 본체를 SCE 연관함수 SceBytes::<N>::from_slice / SceString::<N>::from_view에 위임. owned bytes/string이 alloc=Vec/String unbounded(N advisory), no-alloc=heapless<N>. 18 파일 일괄 rename(호출 52곳: bytes 25/string 27 + wz-runtime-tokio scouting_glue + test). newtype N보존이 호출부 N추론 살림(호출부 turbofish 불필요). BoundedString(별개 bounded 모듈, 레지스트리)은 단어경계로 미수정.",
+        "crates/wz-integration-tests/tests/wz_reassembles_pico_fragment_tx.rs: R311nl negative(257B reject) -> positive(wz_acceptor_accepts_pico_put_over_legacy_256_bound, 257B alloc owned 통과 byte_exact deliveries==1) 실측 통과. 세션리뷰 H1: no-alloc reject를 단정하던 주석을 'unrepresentable 타입 보장(heapless<256>이 257B 표현불가, 별도 런타임 assert 불필요)'로 정직화([[feedback-unrepresentable-over-test]]). M3: msg_put 특수 서사를 '전 sce:max-size scalar codec 일관, 257B는 대표 실증'으로.",
+        "sources/codecs/msg_put.scxml: 세션리뷰 M2 - payload 주석에 profile-split 명기(sce:max-size=256은 on-wire 천장 아니라 no-alloc 인라인 용량+advisory; alloc owned unbounded Vec, 무제한 upstream zbuf와 일치). sce:max-size 값 무변경(골든 동일)."
+      ],
+      "publishable_verification_bullets": [
+        "세션리뷰(독립 general-purpose 리뷰어 + 자가검증). 리뷰어: HIGH 1(H1 no-alloc reject 미검증 비대칭) + MED 3(M1 bounded 네이밍 misnomer, M2 scxml 주석 stale, M3 서사 msg_put 특수화) + false-positive 2(vendor 34커밋 CLEAN 와이어무영향, 북극성 정당). hack/숨은갭우회/SSOT파괴 0.",
+        "자가검증 추가 발견+청산: full run-ci(host) green이나 Layer G(MCU cross thumbv8m) opt-in SKIP = SCE codegen 변경 라운드인데 MCU cross newtype 미검증. Layer G 실행: thumbv8m codec 재생성(SceBytes<256> newtype) + cross-compile green(riscv32만 toolchain 미설치 SKIP). newtype이 host(alloc) + host no_std(C1m) + MCU cross(thumbv8m) 전부 컴파일 검증.",
+        "triage 전부 수정(비용무관 교과서): H1=unrepresentable 주석 정직화([[feedback-unrepresentable-over-test]]; no-alloc reject는 heapless<N> 타입 구조보장이라 테스트 불필요-격상). M1=owned_* rename 18파일 일괄. M2=scxml profile-split 주석. M3=전codec 일관 서사.",
+        "검증: AP check E-errors 0(E0308 41 -> 1차 alias E0284 41 -> newtype+API위임 0), clippy clean, fragmentation 2 test 통과(257B owned 실측), fmt clean. Layer B(codegen verify) pass = scxml 주석변경 골든 안정. full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'all required layers pass'(Layer B/G/M pass, 컴파일 error[/panicked 0). atomic ledger entries 724->725, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "① 큰메시지 owned bound 제거 완료 + 세션리뷰 통과. SCE 2-round newtype 수령으로 alloc owned bytes/string=unbounded Vec/String=zenoh-pico parity, no-alloc=heapless<N> 유지. unicast 257B fragment+owned e2e 실측 + MCU cross(thumbv8m) newtype 컴파일 검증.",
+        "멀티캐스트 큰메시지 deferral 유지: pico z_pub.c가 char buf[256]라 >256B 멀티캐스트 publish 불가; owned codec은 transport 무관이라 unicast 실증으로 codec-level 충분.",
+        "세션리뷰(독립 리뷰어+자가검증) 통과: HIGH 1(H1 no-alloc reject 미검증 비대칭->unrepresentable 정직화) + MED 3(M1 bounded->owned rename, M2 scxml profile-split 주석, M3 전codec 일관 서사) 전부 수정; false-positive 2(vendor 34커밋 CLEAN, 북극성 정당). hack/숨은갭우회/SSOT파괴 0. 자가검증 추가: full run-ci(host) green이나 Layer G(MCU cross) opt-in SKIP=newtype MCU 미검증 갭 발견->Layer G 실행 청산.",
+        "메타: 2-round SCE 왕복(alias N-phantom -> newtype N-preserving). wz 우회(turbofish 하드코딩=N SSOT중복) 회피하고 SCE 재보고가 교과서적([[feedback-sce-codegen-issue-stop-first]]). bounded->owned rename으로 네이밍 정직성(비용무관 교과서).",
+        "NEXT: ② breadth(serial 링크/gossip scouting 실소켓 interop) 또는 멀티캐스트 양방향 JOIN assertion.",
+        "UNPUSHED: R311nq(vendor bump + codec_owned rename 18파일 + test 정정 + 세션리뷰 정직화 + ledger). push=사용자 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
