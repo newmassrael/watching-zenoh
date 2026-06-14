@@ -37180,6 +37180,46 @@
         "UNPUSHED: R311nq(vendor bump + codec_owned rename 18파일 + test 정정 + 세션리뷰 정직화 + ledger). push=사용자 동의 대기."
       ]
     },
+    "Round 311nr": {
+      "decision_summary": "R311nr: SCE 최신 1d439ea07 수령(SceBytes를 공유 crate sce-portable-bytes의 N-preserving newtype unify, from_slice fallible 명시). wz 적응: codec_owned from_slice ?, switchboard-codegen .into()->fallible from_slice pre-conversion(SCE 방향 올바름=no-alloc N초과 silent 변환 금지).",
+      "changes_bullets": [
+        "vendor/sce: submodule 5769510d8 -> 1d439ea07 (2-commit clean FF). SceBytes/SceString을 codec.rs newtype에서 공유 crate sce-portable-bytes로 unify; sce_rust_runtime::SceBytes(이전 type alias =Vec<u8>/heapless로 N을 erase)와 sce_forge_runtime::codec::SceBytes가 동일 N-preserving newtype 재export. from_slice가 자체 error CapacityExceeded 반환(범용 carrier가 codec CodecError 비의존; From<CapacityExceeded> for CodecError로 흡수). 5769510d8의 'Infallible' 오기 주석을 CapacityExceeded 타입으로 fallibility 명시.",
+        "crates/wz-session-core/src/codec_owned.rs: owned_bytes를 SceBytes::<N>::from_slice(b)? 로(CapacityExceeded->CodecError From 변환; SCE 생성 codec try_into_owned과 동일 패턴). SceString은 codec.rs 잔류라 owned_string 무변경.",
+        "crates/wz-switchboard-codegen/src/lib.rs: native event payload의 bytes 필드가 sce_rust_runtime::SceBytes<N>(이제 N-preserving newtype, 이전 alias=Vec). &[u8] 디코드뷰->owned 변환을 infallible .into()에서 fallible from_slice pre-conversion으로(let id=match from_slice{Ok=>v,Err=>return false}; decode-miss와 동일 graceful, 디코드가 max-size N 검증해 by-construction 성공이나 panic 금지). string은 SceString alias라 .into() 유지. owned_field_move bytes arm 제거 + field-init shorthand(redundant_field_names 회피). codegen 22 unit test 갱신(from_slice/return false/shorthand assert)."
+      ],
+      "verification_bullets": [
+        "SCE 1d439ea07 방향 평가(diff 증거): SceBytes를 N-preserving newtype으로(이전 sce-rust-runtime SceBytes는 type alias=Vec<u8>로 N erase) + from_slice fallible를 CapacityExceeded 타입으로 명시(5769510d8 'Infallible' 오기 정정) + 범용 carrier가 codec CodecError 비의존(의존성 분리, From<CapacityExceeded> 흡수) = 타입안전성 교과서. wz의 infallible .into()(no-alloc N초과 silent 변환)가 잠복 결함이었고 SCE가 표면화 -> wz가 fallible 따라감(우회 아닌 수령, [[feedback-sce-codegen-issue-stop-first]] 정신).",
+        "검증: AP-path E-errors 0(codec_owned from_slice ? + switchboard fallible pre-conversion). switchboard-example 빌드 green(생성: let raw=match SceBytes::from_slice{Ok=>v, Err=>return false}; field-init shorthand). codegen 22 unit test pass(fallible/return-false/shorthand assert). clippy clean(redundant_field_names->shorthand). fmt clean. full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'all required layers pass'(Layer B codegen골든+G MCU cross+M 멀티캐스트 pass, error[/panicked 0). atomic ledger entries 725->726, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "SCE 최신 1d439ea07 수령 완료(SceBytes를 공유 sce-portable-bytes crate의 N-preserving newtype으로 unify + from_slice fallible 명시). wz 2곳 적응: codec_owned(from_slice ?), wz-switchboard-codegen(.into()->fallible from_slice pre-conversion).",
+        "SCE 방향 평가=올바름(diff 증거): SceBytes를 N-preserving newtype으로(이전 sce-rust-runtime type alias=Vec<u8>가 N erase) + fallibility를 CapacityExceeded 타입으로 명시(5769510d8 'Infallible' 오기 정정) + 범용 carrier가 codec error 비의존(의존성 분리) = 타입안전성 교과서. wz의 infallible .into()(no-alloc N초과 silent)가 잠복 결함이었고 SCE가 표면화 -> wz가 fallible 따라감(우회 아닌 수령, [[feedback-sce-codegen-issue-stop-first]]).",
+        "NEXT: ②breadth(serial 링크/gossip scouting 실소켓 interop) 또는 멀티캐스트 양방향 JOIN assertion.",
+        "UNPUSHED: R311nr(vendor bump + codec_owned ? + switchboard-codegen fallible + ledger). push=사용자 동의 대기."
+      ],
+      "publishable_decision_summary": "R311nr: SCE 최신 1d439ea07 수령(SceBytes를 공유 crate sce-portable-bytes의 N-preserving newtype unify, from_slice fallible 명시). wz 적응: codec_owned from_slice ?, switchboard-codegen .into()->fallible from_slice pre-conversion(SCE 방향 올바름=no-alloc N초과 silent 변환 금지).",
+      "publishable_changes_bullets": [
+        "vendor/sce: submodule 5769510d8 -> 1d439ea07 (2-commit clean FF). SceBytes/SceString을 codec.rs newtype에서 공유 crate sce-portable-bytes로 unify; sce_rust_runtime::SceBytes(이전 type alias =Vec<u8>/heapless로 N을 erase)와 sce_forge_runtime::codec::SceBytes가 동일 N-preserving newtype 재export. from_slice가 자체 error CapacityExceeded 반환(범용 carrier가 codec CodecError 비의존; From<CapacityExceeded> for CodecError로 흡수). 5769510d8의 'Infallible' 오기 주석을 CapacityExceeded 타입으로 fallibility 명시.",
+        "crates/wz-session-core/src/codec_owned.rs: owned_bytes를 SceBytes::<N>::from_slice(b)? 로(CapacityExceeded->CodecError From 변환; SCE 생성 codec try_into_owned과 동일 패턴). SceString은 codec.rs 잔류라 owned_string 무변경.",
+        "crates/wz-switchboard-codegen/src/lib.rs: native event payload의 bytes 필드가 sce_rust_runtime::SceBytes<N>(이제 N-preserving newtype, 이전 alias=Vec). &[u8] 디코드뷰->owned 변환을 infallible .into()에서 fallible from_slice pre-conversion으로(let id=match from_slice{Ok=>v,Err=>return false}; decode-miss와 동일 graceful, 디코드가 max-size N 검증해 by-construction 성공이나 panic 금지). string은 SceString alias라 .into() 유지. owned_field_move bytes arm 제거 + field-init shorthand(redundant_field_names 회피). codegen 22 unit test 갱신(from_slice/return false/shorthand assert)."
+      ],
+      "publishable_verification_bullets": [
+        "SCE 1d439ea07 방향 평가(diff 증거): SceBytes를 N-preserving newtype으로(이전 sce-rust-runtime SceBytes는 type alias=Vec<u8>로 N erase) + from_slice fallible를 CapacityExceeded 타입으로 명시(5769510d8 'Infallible' 오기 정정) + 범용 carrier가 codec CodecError 비의존(의존성 분리, From<CapacityExceeded> 흡수) = 타입안전성 교과서. wz의 infallible .into()(no-alloc N초과 silent 변환)가 잠복 결함이었고 SCE가 표면화 -> wz가 fallible 따라감(우회 아닌 수령, [[feedback-sce-codegen-issue-stop-first]] 정신).",
+        "검증: AP-path E-errors 0(codec_owned from_slice ? + switchboard fallible pre-conversion). switchboard-example 빌드 green(생성: let raw=match SceBytes::from_slice{Ok=>v, Err=>return false}; field-init shorthand). codegen 22 unit test pass(fallible/return-false/shorthand assert). clippy clean(redundant_field_names->shorthand). fmt clean. full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'all required layers pass'(Layer B codegen골든+G MCU cross+M 멀티캐스트 pass, error[/panicked 0). atomic ledger entries 725->726, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "SCE 최신 1d439ea07 수령 완료(SceBytes를 공유 sce-portable-bytes crate의 N-preserving newtype으로 unify + from_slice fallible 명시). wz 2곳 적응: codec_owned(from_slice ?), wz-switchboard-codegen(.into()->fallible from_slice pre-conversion).",
+        "SCE 방향 평가=올바름(diff 증거): SceBytes를 N-preserving newtype으로(이전 sce-rust-runtime type alias=Vec<u8>가 N erase) + fallibility를 CapacityExceeded 타입으로 명시(5769510d8 'Infallible' 오기 정정) + 범용 carrier가 codec error 비의존(의존성 분리) = 타입안전성 교과서. wz의 infallible .into()(no-alloc N초과 silent)가 잠복 결함이었고 SCE가 표면화 -> wz가 fallible 따라감(우회 아닌 수령, [[feedback-sce-codegen-issue-stop-first]]).",
+        "NEXT: ②breadth(serial 링크/gossip scouting 실소켓 interop) 또는 멀티캐스트 양방향 JOIN assertion.",
+        "UNPUSHED: R311nr(vendor bump + codec_owned ? + switchboard-codegen fallible + ledger). push=사용자 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
