@@ -37090,6 +37090,46 @@
         "UNPUSHED 누적: R311nm(b6572ca+e3c2e73) + R311nn(67c5ac3+5e79be9) + R311no(이 라운드) = origin/main(a95338c) 대비. push=사용자 명시 동의 대기."
       ]
     },
+    "Round 311np": {
+      "decision_summary": "R311np: R311no가 들인 테스트 SSOT 위반 청산 — GROUP/pico CONFIG(0x09/0x02/2048)/default_route_iface가 두 멀티캐스트 interop 테스트에 byte-identical 복제됐던 것을 wz-integration-tests::common 단일소스로. 빌더는 MulticastParams dev-dep 경계로 잔류.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs (common 모듈): 멀티캐스트 interop SSOT 추가 — ZENOH_MULTICAST_GROUP(224.0.0.224) + PICO_PROTO_VERSION/SN_RESOLUTION/BATCH_MULTICAST_SIZE(pico CONFIG 0x09/0x02/2048, vendored pin 참조 주석) + default_route_iface(). 두 멀티캐스트 interop 테스트가 byte-identical 복제하던 값/인프라의 단일 소스. pin bump 시 한 곳만 surfacing.",
+        "crates/wz-integration-tests/tests/wz_publisher_to_pico_multicast_zsub.rs + wz_subscriber_from_pico_multicast.rs: GROUP을 common::ZENOH_MULTICAST_GROUP alias로, PICO_* 상수 + default_route_iface 로컬 정의 제거 → common import. wz_mc_params 빌더는 MulticastParams(wz-session-core dev-dep) 타입 경계로 각 테스트에 잔류하되 common::PICO_* 참조(값 drift 제거). wz-session-core를 lib dep로 승격하면 resolver-2 dev-dep 격리(R311nm/nl)를 위협하므로 회피 — 빌더 2-site는 dev-dep 경계상 정당."
+      ],
+      "verification_bullets": [
+        "R311nn F1(\"publisher 하니스 SSOT 중복=FALSE POSITIVE, dev-dep cycle hazard\")을 부분정정: sibling crate(wz-runtime-tokio-test-support) 추출은 cycle hazard 맞으나, 같은 크레이트 common 모듈(src/lib.rs) 추출은 cycle-free SSOT였음 — 그 옵션을 놓쳤음. MulticastParams가 dev-dep라 빌더만 잔류하는 부분 청산이 dev-dep 경계 존중하는 교과서 최선.",
+        "clippy -p wz-integration-tests --all-targets EXIT=0(unused import 0, fmt 자동정렬). 두 멀티캐스트 interop 테스트 각 10/10 no-flaky(동작 보존; 순수 값-SSOT 리팩터). full host run-ci(WZ_RUN_LAYER_M=1) EXIT=0 'all required layers pass'(컴파일 error[/panicked 0). atomic ledger entries 723->724, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변.",
+        "multicast_pubsub_loopback.rs(wz-runtime-tokio crate)의 동일 값 복제는 cross-crate라 wz-integration-tests::common 사용 불가 — R311nn sibling-crate hazard 유효, 별개 유지(정직한 범위 한정)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311no 도입 부채(테스트 헬퍼 SSOT 위반) 청산 완료 — 멀티캐스트 interop의 값(pico CONFIG)·인프라(default_route_iface)·group이 wz-integration-tests::common 단일 소스. R311nn F1(\"SSOT 중복=FALSE POSITIVE, dev-dep cycle hazard\")을 부분정정: sibling crate 추출은 cycle hazard 맞으나 같은 크레이트 common 모듈 추출은 cycle-free였음(그 옵션을 놓쳤음).",
+        "잔여(의도된 구조): wz_mc_params 빌더 2-site는 MulticastParams=wz-session-core dev-dep 경계. multicast_pubsub_loopback의 동일 값(wz-runtime-tokio crate)은 cross-crate라 common 사용 불가(R311nn sibling-crate hazard 유효). 둘 다 dev-dep 경계상 구조적 정당.",
+        "NEXT(R311no carry 유지): ① 큰메시지>256B 멀티캐스트 — msg_put payload bound 256(msg_put.scxml:111) 확장은 비자명: SCE codegen max-size semantics(owned decode-reject vs MCU 고정버퍼) + MCU 메모리 trade-off + R311nl 257B negative test 의미변경 + query/ext_zbuf 256 일관성. ② breadth: serial 링크/gossip scouting 실소켓 interop.",
+        "UNPUSHED: R311np 청산 커밋. push=사용자 동의 대기."
+      ],
+      "publishable_decision_summary": "R311np: R311no가 들인 테스트 SSOT 위반 청산 — GROUP/pico CONFIG(0x09/0x02/2048)/default_route_iface가 두 멀티캐스트 interop 테스트에 byte-identical 복제됐던 것을 wz-integration-tests::common 단일소스로. 빌더는 MulticastParams dev-dep 경계로 잔류.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs (common 모듈): 멀티캐스트 interop SSOT 추가 — ZENOH_MULTICAST_GROUP(224.0.0.224) + PICO_PROTO_VERSION/SN_RESOLUTION/BATCH_MULTICAST_SIZE(pico CONFIG 0x09/0x02/2048, vendored pin 참조 주석) + default_route_iface(). 두 멀티캐스트 interop 테스트가 byte-identical 복제하던 값/인프라의 단일 소스. pin bump 시 한 곳만 surfacing.",
+        "crates/wz-integration-tests/tests/wz_publisher_to_pico_multicast_zsub.rs + wz_subscriber_from_pico_multicast.rs: GROUP을 common::ZENOH_MULTICAST_GROUP alias로, PICO_* 상수 + default_route_iface 로컬 정의 제거 → common import. wz_mc_params 빌더는 MulticastParams(wz-session-core dev-dep) 타입 경계로 각 테스트에 잔류하되 common::PICO_* 참조(값 drift 제거). wz-session-core를 lib dep로 승격하면 resolver-2 dev-dep 격리(R311nm/nl)를 위협하므로 회피 — 빌더 2-site는 dev-dep 경계상 정당."
+      ],
+      "publishable_verification_bullets": [
+        "R311nn F1(\"publisher 하니스 SSOT 중복=FALSE POSITIVE, dev-dep cycle hazard\")을 부분정정: sibling crate(wz-runtime-tokio-test-support) 추출은 cycle hazard 맞으나, 같은 크레이트 common 모듈(src/lib.rs) 추출은 cycle-free SSOT였음 — 그 옵션을 놓쳤음. MulticastParams가 dev-dep라 빌더만 잔류하는 부분 청산이 dev-dep 경계 존중하는 교과서 최선.",
+        "clippy -p wz-integration-tests --all-targets EXIT=0(unused import 0, fmt 자동정렬). 두 멀티캐스트 interop 테스트 각 10/10 no-flaky(동작 보존; 순수 값-SSOT 리팩터). full host run-ci(WZ_RUN_LAYER_M=1) EXIT=0 'all required layers pass'(컴파일 error[/panicked 0). atomic ledger entries 723->724, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변.",
+        "multicast_pubsub_loopback.rs(wz-runtime-tokio crate)의 동일 값 복제는 cross-crate라 wz-integration-tests::common 사용 불가 — R311nn sibling-crate hazard 유효, 별개 유지(정직한 범위 한정)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311no 도입 부채(테스트 헬퍼 SSOT 위반) 청산 완료 — 멀티캐스트 interop의 값(pico CONFIG)·인프라(default_route_iface)·group이 wz-integration-tests::common 단일 소스. R311nn F1(\"SSOT 중복=FALSE POSITIVE, dev-dep cycle hazard\")을 부분정정: sibling crate 추출은 cycle hazard 맞으나 같은 크레이트 common 모듈 추출은 cycle-free였음(그 옵션을 놓쳤음).",
+        "잔여(의도된 구조): wz_mc_params 빌더 2-site는 MulticastParams=wz-session-core dev-dep 경계. multicast_pubsub_loopback의 동일 값(wz-runtime-tokio crate)은 cross-crate라 common 사용 불가(R311nn sibling-crate hazard 유효). 둘 다 dev-dep 경계상 구조적 정당.",
+        "NEXT(R311no carry 유지): ① 큰메시지>256B 멀티캐스트 — msg_put payload bound 256(msg_put.scxml:111) 확장은 비자명: SCE codegen max-size semantics(owned decode-reject vs MCU 고정버퍼) + MCU 메모리 trade-off + R311nl 257B negative test 의미변경 + query/ext_zbuf 256 일관성. ② breadth: serial 링크/gossip scouting 실소켓 interop.",
+        "UNPUSHED: R311np 청산 커밋. push=사용자 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
