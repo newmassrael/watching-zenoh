@@ -65,7 +65,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_integration_tests::common::{read_captured, zenoh_pico_cli_binary, ChildGuard};
+use wz_integration_tests::common::{
+    default_route_iface, read_captured, zenoh_pico_cli_binary, ChildGuard,
+    PICO_BATCH_MULTICAST_SIZE, PICO_PROTO_VERSION, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
+};
 use wz_runtime_tokio::multicast_glue::{drive_multicast_session, MulticastDriveConfig};
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::UdpDriver;
@@ -73,10 +76,10 @@ use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::observer::ApplicationLayerObserver;
 
-// zenoh's well-known multicast group; distinct PORT from every other
-// multicast lane (scouting 7446/7448, pubsub-loopback 7449/7450, wz->pico
-// 7457) so the `--ignored` lane never contends on the same multicast bind.
-const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
+// Distinct PORT from every other multicast lane (scouting 7446/7448,
+// pubsub-loopback 7449/7450, wz->pico 7457) so the `--ignored` lanes never
+// contend on the same bind; GROUP is the shared zenoh group SSOT (common).
+const GROUP: Ipv4Addr = ZENOH_MULTICAST_GROUP;
 const PORT: u16 = 7458;
 // wz subscribes to the exact literal key pico's z_pub publishes (the
 // multicast subscriber registry matches by keyexpr).
@@ -84,18 +87,6 @@ const KEY: &str = "demo/mc/dialin";
 // Distinctive value: pico's z_pub wraps it as `[%4d] <value>` (z_pub.c), so
 // the decoded Push payload is byte-exact iff this tail survives intact.
 const VALUE: &str = "WZ-MCAST-DIALIN-R311no";
-
-// zenoh-pico's shipped CONFIG constants. wz's `ingest_join` rejects a peer
-// whose JOIN version / seq_num_res / batch_size does not match the wz params
-// (multicast_dispatch.rs §3.2 rejection rules), so wz must advertise exactly
-// these to admit pico. Pinned to the VENDORED pico tree; a submodule pin
-// bump that shifts any of these surfaces here as an obvious edit rather than
-// a silent admission rejection. NOTE: these are pico CONFIG values, NOT wz
-// PROTOCOL defaults — wz's `PROTOCOL_DEFAULT_BATCH_SIZE` is 8192, which pico
-// would reject; the controlling requirement is pico-config-match.
-const PICO_PROTO_VERSION: u8 = 0x09; // config.h.in Z_PROTO_VERSION
-const PICO_SN_RESOLUTION: u8 = 0x02; // config.h.in Z_SN_RESOLUTION / Z_REQ_RESOLUTION
-const PICO_BATCH_MULTICAST_SIZE: u16 = 2_048; // CMakeLists.txt BATCH_MULTICAST_SIZE
 
 /// wz multicast self-advertisement params pinned to zenoh-pico's CONFIG
 /// constants so wz admits the pico peer from its JOIN beacon (symmetric
@@ -111,31 +102,6 @@ fn wz_mc_params() -> MulticastParams {
         req_id_res: PICO_SN_RESOLUTION,
         batch_size: PICO_BATCH_MULTICAST_SIZE,
     }
-}
-
-/// The default-route interface name, e.g. `wlp0s20f3` — the interface wz's
-/// `INADDR_ANY` multicast join selects, so pinning pico's `#iface=` to it
-/// makes both peers share the link.
-fn default_route_iface() -> String {
-    let out = Command::new("ip")
-        .args(["route", "show", "default"])
-        .output()
-        .expect("run `ip route show default`");
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let mut toks = line.split_whitespace();
-        while let Some(tok) = toks.next() {
-            if tok == "dev" {
-                if let Some(dev) = toks.next() {
-                    return dev.to_string();
-                }
-            }
-        }
-    }
-    panic!(
-        "no default-route interface from `ip route show default`; this \
-         environment-dependent multicast interop test needs one (Layer M)"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

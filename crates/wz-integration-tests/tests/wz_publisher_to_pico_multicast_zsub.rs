@@ -70,7 +70,9 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard, Z_SUB_INIT_TIMEOUT,
+    default_route_iface, read_captured, wait_for_substring, zenoh_pico_cli_binary, ChildGuard,
+    PICO_BATCH_MULTICAST_SIZE, PICO_PROTO_VERSION, PICO_SN_RESOLUTION, ZENOH_MULTICAST_GROUP,
+    Z_SUB_INIT_TIMEOUT,
 };
 use wz_runtime_tokio::multicast_glue::{
     drive_multicast_session, multicast_put_literal, MulticastDriveConfig,
@@ -80,11 +82,10 @@ use wz_runtime_tokio::UdpDriver;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 
-// Group shared with the wz<->wz multicast lane (zenoh's well-known
-// `224.0.0.224`), distinct PORT from every other multicast test
-// (scouting 7446/7448, pubsub-loopback 7449) so the `--ignored` lane
-// never contends on the same multicast bind.
-const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
+// Distinct PORT from every other multicast test (scouting 7446/7448,
+// pubsub-loopback 7449) so the `--ignored` lane never contends on the same
+// multicast bind; GROUP is the shared zenoh group SSOT (common).
+const GROUP: Ipv4Addr = ZENOH_MULTICAST_GROUP;
 const PORT: u16 = 7457;
 const PUBLISH_KEY: &str = "demo/mc/interop";
 // z_sub subscribes to a wildcard so pico's local matcher accepts the
@@ -93,21 +94,6 @@ const SUB_KEY: &str = "demo/mc/**";
 // Distinctive shell-safe payload: appears in z_sub's `Received (... : '...')`
 // line only if the reassembled Push delivered byte-exact.
 const PAYLOAD: &str = "WZ-MCAST-JOIN-INTEROP-R311nm";
-
-// zenoh-pico's shipped CONFIG constants. pico's multicast JOIN-admission
-// gate (`vendor/zenoh-pico/src/transport/multicast/rx.c:373-396`) rejects a
-// peer whose JOIN does not match these EXACTLY, so wz must advertise them to
-// be admitted (and pico's _Z_FRAME handler drops a Frame from any un-admitted
-// peer, rx.c:182-186 — which is why z_sub firing transitively proves the
-// JOIN was accepted). Pinned to the VENDORED pico tree; a submodule pin bump
-// that shifts any of these surfaces here as an obvious edit rather than a
-// silent admission rejection. NOTE: these are pico CONFIG values, NOT wz
-// PROTOCOL defaults — wz's `PROTOCOL_DEFAULT_BATCH_SIZE` is 8192
-// (wz-session-core multicast_params.rs), which pico would reject; the
-// controlling requirement is pico-config-match, not wz-protocol-default.
-const PICO_PROTO_VERSION: u8 = 0x09; // config.h.in Z_PROTO_VERSION
-const PICO_SN_RESOLUTION: u8 = 0x02; // config.h.in Z_SN_RESOLUTION / Z_REQ_RESOLUTION
-const PICO_BATCH_MULTICAST_SIZE: u16 = 2_048; // CMakeLists.txt BATCH_MULTICAST_SIZE
 
 /// wz multicast self-advertisement params pinned to zenoh-pico's CONFIG
 /// constants above so pico admits the wz peer from its JOIN beacon.
@@ -122,32 +108,6 @@ fn wz_mc_params() -> MulticastParams {
         req_id_res: PICO_SN_RESOLUTION,
         batch_size: PICO_BATCH_MULTICAST_SIZE,
     }
-}
-
-/// The default-route interface name, e.g. `wlp0s20f3`. This is the
-/// interface wz's `INADDR_ANY` multicast egress selects (no explicit
-/// `224.0.0.0/4` route → kernel uses the default route), so pinning pico's
-/// `#iface=` to it makes both peers share the link.
-fn default_route_iface() -> String {
-    let out = Command::new("ip")
-        .args(["route", "show", "default"])
-        .output()
-        .expect("run `ip route show default`");
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let mut toks = line.split_whitespace();
-        while let Some(tok) = toks.next() {
-            if tok == "dev" {
-                if let Some(dev) = toks.next() {
-                    return dev.to_string();
-                }
-            }
-        }
-    }
-    panic!(
-        "no default-route interface from `ip route show default`; this \
-         environment-dependent multicast interop test needs one (Layer M)"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

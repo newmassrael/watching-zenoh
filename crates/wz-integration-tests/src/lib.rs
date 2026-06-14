@@ -20,7 +20,7 @@ pub mod common {
 
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
-    use std::net::TcpListener;
+    use std::net::{Ipv4Addr, TcpListener};
     use std::path::PathBuf;
     use std::process::Child;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -455,6 +455,61 @@ pub mod common {
         // fall back to SIGKILL so the test does not hang.
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    // ── multicast interop SSOT (shared by the wz<->pico multicast lanes) ──
+
+    /// zenoh's well-known IPv4 multicast group (`Z_CONFIG_MULTICAST_
+    /// LOCATOR_DEFAULT` host part). Both multicast interop lanes
+    /// (`wz_publisher_to_pico_multicast_zsub`,
+    /// `wz_subscriber_from_pico_multicast`) join this group; each picks
+    /// its own distinct PORT so the `--ignored` lanes never contend on a
+    /// single bind.
+    pub const ZENOH_MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
+
+    /// zenoh-pico's shipped CONFIG constants, pinned to the VENDORED pico
+    /// tree. wz's multicast JOIN params must advertise exactly these for
+    /// pico's admission (and wz's own `ingest_join` §3.2 check) to admit
+    /// the peer in EITHER direction; a submodule pin bump that shifts any
+    /// of them surfaces here as an obvious edit, not a silent admission
+    /// rejection. NOTE: these are pico CONFIG values, NOT wz PROTOCOL
+    /// defaults — wz's `PROTOCOL_DEFAULT_BATCH_SIZE` is 8192, which pico
+    /// would reject; the controlling requirement is pico-config-match.
+    /// The `MulticastParams` builder that consumes them stays in each test
+    /// (the type is a dev-dependency of this crate, unusable from the lib
+    /// body); pinning the VALUES here removes the cross-lane drift risk
+    /// without dragging wz-session-core into the lib's dependency graph
+    /// (which would defeat the resolver-2 dev-dep isolation, R311nm/nl).
+    pub const PICO_PROTO_VERSION: u8 = 0x09; // config.h.in Z_PROTO_VERSION
+    pub const PICO_SN_RESOLUTION: u8 = 0x02; // config.h.in Z_SN_RESOLUTION / Z_REQ_RESOLUTION
+    pub const PICO_BATCH_MULTICAST_SIZE: u16 = 2_048; // CMakeLists.txt BATCH_MULTICAST_SIZE
+
+    /// The default-route interface name, e.g. `wlp0s20f3`. This is the
+    /// interface wz's `INADDR_ANY` multicast egress/join selects (no
+    /// explicit `224.0.0.0/4` route → kernel uses the default route), so
+    /// pinning pico's `#iface=` to it makes both peers share the link.
+    /// Panics if there is no default route (the env-dependent multicast
+    /// Layer M lanes require one).
+    pub fn default_route_iface() -> String {
+        let out = std::process::Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+            .expect("run `ip route show default`");
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let mut toks = line.split_whitespace();
+            while let Some(tok) = toks.next() {
+                if tok == "dev" {
+                    if let Some(dev) = toks.next() {
+                        return dev.to_string();
+                    }
+                }
+            }
+        }
+        panic!(
+            "no default-route interface from `ip route show default`; the \
+             environment-dependent multicast interop lanes need one (Layer M)"
+        );
     }
 }
 
