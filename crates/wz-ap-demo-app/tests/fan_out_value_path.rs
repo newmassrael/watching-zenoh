@@ -49,7 +49,7 @@ fn put_push(keyexpr: &str, payload: &[u8]) -> PushOwned {
     .unwrap();
     if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
         put.payload_len = payload.len() as u64;
-        put.payload = wz_session_core::codec_bound::bounded_bytes(payload).unwrap();
+        put.payload = wz_session_core::codec_owned::owned_bytes(payload).unwrap();
     }
     push
 }

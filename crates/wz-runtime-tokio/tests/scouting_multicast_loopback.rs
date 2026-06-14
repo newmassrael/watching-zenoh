@@ -47,11 +47,11 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
     let body = HelloOwned {
         version: 0x09,
         cbyte,
-        zid: wz_session_core::codec_bound::bounded_bytes(&zid).unwrap(),
+        zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
         num_locators: Some(1),
         locators: Some(vec![LocatorOwned {
             locator_len: locator.len() as u64,
-            locator: wz_session_core::codec_bound::bounded_string(locator).unwrap(),
+            locator: wz_session_core::codec_owned::owned_string(locator).unwrap(),
         }]),
     }
     .try_as_borrowed()

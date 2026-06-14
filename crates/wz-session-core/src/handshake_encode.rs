@@ -94,7 +94,7 @@ pub fn encode_init(
         // zid is the protocol-bounded peer id (1..=16); init_cbyte
         // above already encodes its length, so the bounded copy is an
         // invariant leaf (`.expect`), mirroring request_build.rs.
-        zid: crate::codec_bound::bounded_bytes(&params.zid).expect("zid length asserted in 1..=16"),
+        zid: crate::codec_owned::owned_bytes(&params.zid).expect("zid length asserted in 1..=16"),
         sn_res: Some(pack_sn_res(params.seq_num_res, params.req_id_res)),
         // R311kj — the wire NEVER carries the internal 0 = "unset"
         // sentinel (a pico peer would adopt it and size a 0-byte TX
@@ -103,7 +103,7 @@ pub fn encode_init(
         cookie_len: cookie_bytes.as_ref().map(|c| c.len() as u64),
         cookie: cookie_bytes
             .as_deref()
-            .map(crate::codec_bound::bounded_bytes)
+            .map(crate::codec_owned::owned_bytes)
             .transpose()?,
     };
 
@@ -171,7 +171,7 @@ pub fn encode_open(
             None
         },
         cookie: if !is_ack {
-            Some(crate::codec_bound::bounded_bytes(cookie_bytes)?)
+            Some(crate::codec_owned::owned_bytes(cookie_bytes)?)
         } else {
             None
         },

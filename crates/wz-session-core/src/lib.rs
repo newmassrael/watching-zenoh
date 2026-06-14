@@ -83,13 +83,13 @@ pub mod bounded;
 /// const-vs-type-parameter rationale.
 pub mod caps;
 
-/// W3 bounded owned-mirror adapters (`bounded_bytes` / `bounded_string`) for
+/// W3 bounded owned-mirror adapters (`owned_bytes` / `owned_string`) for
 /// the builders that copy caller data into SCE's no-alloc bounded codec
 /// owned fields (SCE pin 7a94d084a). Public so the AP runtime
 /// (`wz-runtime-tokio` `session_glue`) hand-assembling the same `*Owned`
 /// wire mirrors reuses the single SSOT adapter rather than duplicating the
 /// bound/error mapping.
-pub mod codec_bound;
+pub mod codec_owned;
 
 /// R311gb (Track 2) — shared `RegisterError` taxonomy for the bounded
 /// application-layer registries (the SSOT for "a registration was

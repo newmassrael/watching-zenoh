@@ -747,7 +747,7 @@ mod tests {
         let codec = wz_codecs::timestamp::TimestampOwned {
             time: 0xDEAD_BEEF,
             zid_len: 4,
-            zid: crate::codec_bound::bounded_bytes(&[1, 2, 3, 4]).unwrap(),
+            zid: crate::codec_owned::owned_bytes(&[1, 2, 3, 4]).unwrap(),
         };
         let hint = TimestampHint::from_codec(&codec);
         assert_eq!(hint.time, 0xDEAD_BEEF);
@@ -759,7 +759,7 @@ mod tests {
         let codec = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x1234,
             schema_len: Some(4),
-            schema: Some(crate::codec_bound::bounded_string("text").unwrap()),
+            schema: Some(crate::codec_owned::owned_string("text").unwrap()),
         };
         let hint = EncodingHint::from_codec(&codec);
         assert_eq!(hint.packed_id, 0x1234);

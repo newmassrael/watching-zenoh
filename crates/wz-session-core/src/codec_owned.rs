@@ -1,37 +1,45 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! W3 (SCE pin 7a94d084a) bounded owned-mirror adapters.
+//! R311nq (SCE pin 5769510d8) owned-projection byte/string adapters.
 //!
-//! SCE's codec owned projection now stores declared-`max-size` `String` /
-//! `Bytes` fields as no-alloc bounded inline (`heapless::String<N>` /
-//! `heapless::Vec<u8, N>`) rather than alloc `String` / `Vec<u8>`. The wz
-//! builders that hand-assemble a `*Owned` value from caller-supplied data
-//! must therefore copy that data into the bounded carrier, which is fallible
-//! when the input exceeds the field's declared capacity `N` — the same bound
-//! and error (`CodecError::TooManyElements`) the decode path enforces, so a
-//! builder propagating this is symmetric with decode rejecting an over-bound
-//! wire value.
+//! SCE's codec owned projection stores declared-`max-size` `String` / `Bytes`
+//! fields via the profile-aware, N-preserving newtypes `SceString<N>` /
+//! `SceBytes<N>` (`vendor/sce/sce-forge-runtime/rust/src/codec.rs`): under
+//! `alloc` they wrap an UNBOUNDED `String` / `Vec<u8>` (the `N` is advisory —
+//! the heap backs the carrier), under no-alloc they wrap `heapless::String<N>`
+//! / `heapless::Vec<u8, N>`, where an over-`N` input is UNREPRESENTABLE and
+//! the constructor returns `CodecError::TooManyElements`. This split is
+//! uniform across EVERY `sce:max-size` scalar field in the workspace (msg_put
+//! / query / err / init_body / encoding / ...), not special to one codec.
 //!
-//! These two helpers centralise that copy so each construction site stays a
-//! one-liner (`bounded_bytes(x)?` / `bounded_string(x)?`); `N` is inferred
-//! from the target field type at the call site.
+//! These wrappers re-export SCE's associated constructors
+//! `SceBytes::<N>::from_slice` / `SceString::<N>::from_view` so each
+//! construction site stays a one-liner (`owned_bytes(x)?` / `owned_string(x)?`);
+//! `N` is inferred from the target field type (the newtype preserves it).
+//!
+//! Tier symmetry: alloc is lossless — the unbounded-PUT parity with zenoh-pico,
+//! exercised end-to-end by the 257B
+//! `wz_acceptor_accepts_pico_put_over_legacy_256_bound`. no-alloc over-`N` is a
+//! structural `TooManyElements` guaranteed by the `heapless<N>` TYPE, not a
+//! runtime assert — unrepresentable, so no separate wz test re-checks what the
+//! type already forbids. The module/fn names are `owned_*` (not `bounded_*`,
+//! R311nq rename) precisely because the alloc carrier is unbounded.
 
-use sce_forge_runtime::codec::CodecError;
-use sce_forge_runtime::heapless;
+use sce_forge_runtime::codec::{CodecError, SceBytes, SceString};
 
-/// Copy a byte slice into a bounded `heapless::Vec<u8, N>`. Returns
-/// [`CodecError::TooManyElements`] if the slice is longer than the field's
-/// declared capacity `N` (the same bound decode enforces).
+/// Copy a byte slice into the profile-aware `SceBytes<N>` owned carrier
+/// (alloc: unbounded `Vec<u8>`; no-alloc: `heapless::Vec<u8, N>` with
+/// [`CodecError::TooManyElements`] if longer than `N`).
 #[allow(dead_code)] // used by codec-gated builders; unused in no-codec subsets
-pub fn bounded_bytes<const N: usize>(b: &[u8]) -> Result<heapless::Vec<u8, N>, CodecError> {
-    heapless::Vec::from_slice(b).map_err(|_| CodecError::TooManyElements)
+pub fn owned_bytes<const N: usize>(b: &[u8]) -> Result<SceBytes<N>, CodecError> {
+    SceBytes::<N>::from_slice(b)
 }
 
-/// Copy a string slice into a bounded `heapless::String<N>`. Returns
-/// [`CodecError::TooManyElements`] if the string is longer than the field's
-/// declared capacity `N` (the same bound decode enforces).
+/// Copy a string slice into the profile-aware `SceString<N>` owned carrier
+/// (alloc: unbounded `String`; no-alloc: `heapless::String<N>` with
+/// [`CodecError::TooManyElements`] if longer than `N`).
 #[allow(dead_code)] // used by codec-gated builders; unused in no-codec subsets
-pub fn bounded_string<const N: usize>(s: &str) -> Result<heapless::String<N>, CodecError> {
-    heapless::String::try_from(s).map_err(|_| CodecError::TooManyElements)
+pub fn owned_string<const N: usize>(s: &str) -> Result<SceString<N>, CodecError> {
+    SceString::<N>::from_view(s)
 }

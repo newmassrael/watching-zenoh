@@ -598,7 +598,7 @@ mod tests {
                     body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                         id: 0,
                         suffix_len: Some(9),
-                        suffix: Some(crate::codec_bound::bounded_string("group1/**").unwrap()),
+                        suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
                     }),
                 }),
             }),
@@ -653,7 +653,7 @@ mod tests {
                     body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                         id: 0,
                         suffix_len: Some(9),
-                        suffix: Some(crate::codec_bound::bounded_string("group1/**").unwrap()),
+                        suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
                     }),
                 }),
             }),

@@ -116,7 +116,7 @@ fn layer3_hello_l1_empty_locator_array() {
     let wz = HelloOwned {
         version,
         cbyte,
-        zid: wz_session_core::codec_bound::bounded_bytes(&zid).unwrap(),
+        zid: wz_session_core::codec_owned::owned_bytes(&zid).unwrap(),
         num_locators: Some(0),
         locators: Some(vec![]),
     }

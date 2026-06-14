@@ -22,7 +22,7 @@
 //! the catalog primitive the `pubsub-attachment` / `query-attachment`
 //! consumer features select.
 
-use crate::codec_bound::bounded_bytes;
+use crate::codec_owned::owned_bytes;
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
@@ -52,7 +52,7 @@ pub fn encode_attachment_ext(ext_id: u8, payload: &[u8]) -> Result<ExtEntryOwned
         header: ATTACHMENT_EXT_HEADER_ENC_ZBUF | ext_id,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: payload.len() as u64,
-            value: bounded_bytes(payload)?,
+            value: owned_bytes(payload)?,
         }),
     })
 }

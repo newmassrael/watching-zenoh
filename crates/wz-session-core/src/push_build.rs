@@ -105,7 +105,7 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwne
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(suffix_len),
-                suffix: Some(crate::codec_bound::bounded_string(keyexpr_suffix)?),
+                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
             }),
         },
         extensions: None,
@@ -115,7 +115,7 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwne
             encoding: None,
             extensions: None,
             payload_len,
-            payload: crate::codec_bound::bounded_bytes(value)?,
+            payload: crate::codec_owned::owned_bytes(value)?,
         }),
     })
 }
@@ -158,7 +158,7 @@ pub fn build_push_aliased(
         "build_push_aliased requires a non-zero mapping id; use build_push_literal for id=0",
     );
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_bound::bounded_string).transpose()?;
+    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
     let payload_len = value.len() as u64;
     // Push.header.N (bit 5, 0x20) is the "suffix carrier present"
     // flag: set when the WireexprLocal carries a non-None suffix,
@@ -186,7 +186,7 @@ pub fn build_push_aliased(
             encoding: None,
             extensions: None,
             payload_len,
-            payload: crate::codec_bound::bounded_bytes(value)?,
+            payload: crate::codec_owned::owned_bytes(value)?,
         }),
     })
 }
@@ -228,7 +228,7 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> Result<PushOwned, CodecEr
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(suffix_len),
-                suffix: Some(crate::codec_bound::bounded_string(keyexpr_suffix)?),
+                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
             }),
         },
         extensions: None,
@@ -259,7 +259,7 @@ pub fn build_push_del_aliased(
         "build_push_del_aliased requires a non-zero mapping id; use build_push_del_literal for id=0",
     );
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_bound::bounded_string).transpose()?;
+    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
     // Same N-flag derivation as build_push_aliased: bit 5 set when
     // a per-Push suffix tail is present, cleared for the
     // pure-aliased shape. The flag has identical decoder semantics
@@ -317,7 +317,7 @@ fn build_body_extensions(
                 header: 0x40 | 0x01,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: body_bytes.len() as u64,
-                    value: crate::codec_bound::bounded_bytes(&body_bytes)?,
+                    value: crate::codec_owned::owned_bytes(&body_bytes)?,
                 }),
             });
         }
@@ -478,7 +478,7 @@ fn build_msg_put_with_meta(
         encoding: gated_encoding_field(encoding)?,
         extensions,
         payload_len,
-        payload: crate::codec_bound::bounded_bytes(payload)?,
+        payload: crate::codec_owned::owned_bytes(payload)?,
     };
     // `MsgPutOwned` is read-only (no `set_*` write accessors —
     // those live on the borrowed view per the owned-encode-omitted
@@ -544,7 +544,7 @@ pub fn build_push_literal_with_meta(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(crate::codec_bound::bounded_string(keyexpr_suffix)?),
+                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
             }),
         },
         extensions: outer_exts,
@@ -573,7 +573,7 @@ pub fn build_push_aliased_with_meta(
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_bound::bounded_string).transpose()?;
+    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,
@@ -611,7 +611,7 @@ pub fn build_push_del_literal_with_meta(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(crate::codec_bound::bounded_string(keyexpr_suffix)?),
+                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
             }),
         },
         extensions: outer_exts,
@@ -637,7 +637,7 @@ pub fn build_push_del_aliased_with_meta(
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
-    let suffix_string = suffix.map(crate::codec_bound::bounded_string).transpose()?;
+    let suffix_string = suffix.map(crate::codec_owned::owned_string).transpose()?;
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,

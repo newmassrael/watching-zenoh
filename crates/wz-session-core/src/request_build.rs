@@ -38,7 +38,7 @@ use wz_codecs::timestamp::TimestampOwned;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
-use crate::codec_bound::{bounded_bytes, bounded_string};
+use crate::codec_owned::{owned_bytes, owned_string};
 use crate::qos::{CongestionControl, Priority};
 use crate::query_mode::{ConsolidationMode, QueryTarget};
 use sce_forge_runtime::codec::CodecError;
@@ -117,7 +117,7 @@ pub fn build_request_query(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: keyexpr_mapping_id,
                 suffix_len,
-                suffix: keyexpr_suffix.map(bounded_string).transpose()?,
+                suffix: keyexpr_suffix.map(owned_string).transpose()?,
             }),
         },
         extensions: None,
@@ -357,7 +357,7 @@ impl RequestQueryBuilder {
             zid_len: zid.len() as u64,
             // W3: zid owned mirror is bounded Vec<u8, 16>; the asserts above
             // guarantee 1..=16, so the bounded copy cannot overflow.
-            zid: bounded_bytes(zid).expect("zid length asserted in 1..=16"),
+            zid: owned_bytes(zid).expect("zid length asserted in 1..=16"),
         });
         self
     }
@@ -483,7 +483,7 @@ impl RequestQueryBuilder {
             if let Some(params) = self.parameters {
                 query.header |= 0x40;
                 query.parameters_len = Some(params.len() as u64);
-                query.parameters = Some(bounded_bytes(&params)?);
+                query.parameters = Some(owned_bytes(&params)?);
             }
             // Query body ext chain in zenoh-pico encode order:
             // source_info (0x01) → attachment (0x05) (message.c:438-448).
@@ -505,7 +505,7 @@ impl RequestQueryBuilder {
                     header: 0x40 | 0x01,
                     body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                         value_len: body_bytes.len() as u64,
-                        value: bounded_bytes(&body_bytes)?,
+                        value: owned_bytes(&body_bytes)?,
                     }),
                 });
             }
@@ -569,7 +569,7 @@ impl RequestQueryBuilder {
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: body_bytes.len() as u64,
                     // W3: ext_zbuf value owned mirror is bounded Vec<u8, 32>.
-                    value: bounded_bytes(&body_bytes)?,
+                    value: owned_bytes(&body_bytes)?,
                 }),
             });
         }

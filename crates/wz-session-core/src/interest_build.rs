@@ -147,7 +147,7 @@ fn build_liveliness_token_interest(
 ) -> Result<InterestOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
-        .map(crate::codec_bound::bounded_string)
+        .map(crate::codec_owned::owned_string)
         .transpose()?;
 
     // Outer header: MID 0x19 | (current ? C) | (future ? F). Z stays

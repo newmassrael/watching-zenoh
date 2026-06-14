@@ -34,7 +34,7 @@ use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
-use crate::codec_bound::{bounded_bytes, bounded_string};
+use crate::codec_owned::{owned_bytes, owned_string};
 use crate::query_mode::ConsolidationMode;
 use sce_forge_runtime::codec::CodecError;
 // R311ek — the source_info ext encoder + the shared VLE primitive moved
@@ -108,7 +108,7 @@ pub fn build_response_reply_literal(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len,
-                suffix: Some(bounded_string(keyexpr_suffix)?),
+                suffix: Some(owned_string(keyexpr_suffix)?),
             }),
         },
         extensions: None,
@@ -124,7 +124,7 @@ pub fn build_response_reply_literal(
                 encoding: None,
                 extensions: None,
                 payload_len: payload.len() as u64,
-                payload: bounded_bytes(payload)?,
+                payload: owned_bytes(payload)?,
             }),
         }),
     })
@@ -166,7 +166,7 @@ pub fn build_response_reply_aliased(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
-                suffix: suffix.map(bounded_string).transpose()?,
+                suffix: suffix.map(owned_string).transpose()?,
             }),
         },
         extensions: None,
@@ -180,7 +180,7 @@ pub fn build_response_reply_aliased(
                 encoding: None,
                 extensions: None,
                 payload_len: payload.len() as u64,
-                payload: bounded_bytes(payload)?,
+                payload: owned_bytes(payload)?,
             }),
         }),
     })
@@ -239,7 +239,7 @@ pub fn build_response_err_literal(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len,
-                suffix: Some(bounded_string(keyexpr_suffix)?),
+                suffix: Some(owned_string(keyexpr_suffix)?),
             }),
         },
         extensions: None,
@@ -249,7 +249,7 @@ pub fn build_response_err_literal(
             encoding: None,
             extensions: None,
             payload_len: payload.len() as u64,
-            payload: bounded_bytes(payload)?,
+            payload: owned_bytes(payload)?,
         }),
     })
 }
@@ -281,7 +281,7 @@ pub fn build_response_err_aliased(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
-                suffix: suffix.map(bounded_string).transpose()?,
+                suffix: suffix.map(owned_string).transpose()?,
             }),
         },
         extensions: None,
@@ -290,7 +290,7 @@ pub fn build_response_err_aliased(
             encoding: None,
             extensions: None,
             payload_len: payload.len() as u64,
-            payload: bounded_bytes(payload)?,
+            payload: owned_bytes(payload)?,
         }),
     })
 }
@@ -478,7 +478,7 @@ impl ResponseReplyBuilder {
                 header: 0x40 | 0x03,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: value.len() as u64,
-                    value: bounded_bytes(&value)?,
+                    value: owned_bytes(&value)?,
                 }),
             }]);
         }
@@ -636,7 +636,7 @@ impl ResponseErrBuilder {
                 err.encoding = Some(EncodingOwned {
                     packed_id: packed,
                     schema_len: schema.as_ref().map(|s| s.len() as u64),
-                    schema: schema.as_deref().map(bounded_string).transpose()?,
+                    schema: schema.as_deref().map(owned_string).transpose()?,
                 });
             }
             if let Some((zid, eid, sn)) = self.source_info {
@@ -654,7 +654,7 @@ impl ResponseErrBuilder {
                     header: 0x40 | 0x01,
                     body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                         value_len: value.len() as u64,
-                        value: bounded_bytes(&value)?,
+                        value: owned_bytes(&value)?,
                     }),
                 }]);
             }
@@ -675,7 +675,7 @@ impl ResponseErrBuilder {
                 header: 0x40 | 0x03,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: value.len() as u64,
-                    value: bounded_bytes(&value)?,
+                    value: owned_bytes(&value)?,
                 }),
             }]);
         }

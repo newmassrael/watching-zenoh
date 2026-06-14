@@ -106,7 +106,7 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: 0,
                     suffix_len,
-                    suffix: Some(crate::codec_bound::bounded_string(suffix)?),
+                    suffix: Some(crate::codec_owned::owned_string(suffix)?),
                 }),
             },
         }),
@@ -164,7 +164,7 @@ pub fn build_declare_subscriber(
 ) -> Result<DeclareOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
-        .map(crate::codec_bound::bounded_string)
+        .map(crate::codec_owned::owned_string)
         .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
@@ -243,7 +243,7 @@ pub fn build_declare_queryable(
 ) -> Result<DeclareOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
-        .map(crate::codec_bound::bounded_string)
+        .map(crate::codec_owned::owned_string)
         .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
@@ -310,7 +310,7 @@ pub fn build_declare_token(
 ) -> Result<DeclareOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
-        .map(crate::codec_bound::bounded_string)
+        .map(crate::codec_owned::owned_string)
         .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
@@ -422,7 +422,7 @@ pub fn build_declare_subscriber_nonlocal(
     );
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
-        .map(crate::codec_bound::bounded_string)
+        .map(crate::codec_owned::owned_string)
         .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
@@ -467,7 +467,7 @@ pub fn build_declare_queryable_nonlocal(
     );
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
-        .map(crate::codec_bound::bounded_string)
+        .map(crate::codec_owned::owned_string)
         .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
@@ -509,7 +509,7 @@ pub fn build_declare_token_nonlocal(
     );
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
-        .map(crate::codec_bound::bounded_string)
+        .map(crate::codec_owned::owned_string)
         .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8

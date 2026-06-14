@@ -563,7 +563,7 @@ mod tests {
         .unwrap();
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
             put.payload_len = payload.len() as u64;
-            put.payload = crate::codec_bound::bounded_bytes(payload).unwrap();
+            put.payload = crate::codec_owned::owned_bytes(payload).unwrap();
         }
         push
     }
