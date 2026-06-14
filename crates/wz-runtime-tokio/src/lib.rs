@@ -773,31 +773,42 @@ impl UdpDriver {
     /// default zenoh scout group is `224.0.0.224:7446`
     /// (`Z_CONFIG_MULTICAST_LOCATOR_DEFAULT`).
     ///
-    /// The three setup steps must stay consistent, which is why they are
+    /// The four setup steps must stay consistent, which is why they are
     /// folded into one constructor rather than left to the caller as
     /// `from_socket` does:
-    ///   1. bind `0.0.0.0:port` (INADDR_ANY) — a socket bound to a
+    ///   1. SO_REUSEADDR + SO_REUSEPORT before bind — a multicast group
+    ///      port is inherently multi-listener: every zenoh peer on the
+    ///      host binds the SAME `0.0.0.0:port` to receive the group.
+    ///      Without both reuse options the second binder fails with
+    ///      `EADDRINUSE`, so co-locating a wz multicast receiver with a
+    ///      foreign zenoh-pico peer (the `pico -> wz` dial-in) is
+    ///      impossible.
+    ///   2. bind `0.0.0.0:port` (INADDR_ANY) — a socket bound to a
     ///      unicast address cannot receive datagrams addressed to the
     ///      group.
-    ///   2. `join_multicast_v4(group, INADDR_ANY)` — subscribe on the
+    ///   3. `join_multicast_v4(group, INADDR_ANY)` — subscribe on the
     ///      default interface; without the join the kernel drops group
     ///      datagrams even with the matching bind port.
-    ///   3. `set_multicast_loop_v4(true)` — let a same-host peer (and
+    ///   4. `set_multicast_loop_v4(true)` — let a same-host peer (and
     ///      the loopback smoke test) observe the traffic; off by default
     ///      on some platforms.
     ///
     /// `peer` is set to `group:port` so `LinkDriver::send` writes the
     /// Scout datagram to the group.
     ///
-    /// `tokio::net::UdpSocket` exposes the multicast setsockopt wrappers
-    /// directly (it wraps `std::net::UdpSocket`), so no `socket2`
-    /// dependency is pulled. SO_REUSEADDR is intentionally NOT set here:
-    /// the single-receiver scouting deploy does not need multiple
-    /// binders on the group port, and adding it would require dropping
-    /// to `socket2`. Multi-listener support (if a future deploy needs
-    /// two scouting consumers on one host) is the point where socket2
-    /// would enter — flagged here so that decision is explicit, not
-    /// silent.
+    /// R311no — the reuse options require a pre-bind setsockopt, which
+    /// `tokio::net::UdpSocket` does not expose (it only adopts an already
+    /// bound std socket), so the socket is built through `socket2`
+    /// (Socket -> `std::net::UdpSocket` -> tokio `from_std`). This
+    /// matches zenoh-pico, which sets SO_REUSEADDR + SO_REUSEPORT
+    /// unconditionally on its multicast listener before binding
+    /// `0.0.0.0:port`
+    /// (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c`
+    /// :180 / :185 / :196). The earlier single-receiver scouting design
+    /// deliberately avoided socket2; the `pico -> wz` multicast interop
+    /// requirement is exactly the multi-listener case that decision
+    /// anticipated, so socket2 now enters as a feature-gated production
+    /// dep (scouting-active / transport-multicast).
     // Round C — generalised from `scouting-active`-only to also serve the
     // multicast TRANSPORT (`transport-multicast`): the bind + join + loop
     // setup is identical for the scout group and the multicast session
@@ -806,7 +817,21 @@ impl UdpDriver {
     // driver and the multicast session driver.
     #[cfg(any(feature = "scouting-active", feature = "transport-multicast"))]
     pub async fn bind_multicast_v4(group: std::net::Ipv4Addr, port: u16) -> io::Result<Self> {
-        let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+        use socket2::{Domain, Protocol, Socket, Type};
+
+        // Step 1: REUSEADDR + REUSEPORT must be set before bind, and
+        // tokio's UdpSocket exposes no pre-bind setsockopt hook, so the
+        // socket is built through socket2 and adopted by tokio post-bind.
+        let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        raw.set_reuse_address(true)?;
+        raw.set_reuse_port(true)?;
+        // tokio requires the std socket to be non-blocking before adoption.
+        raw.set_nonblocking(true)?;
+        let bind_addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
+        raw.bind(&bind_addr.into())?;
+
+        // Step 2 done by the bind above; steps 3-4 use tokio's wrappers.
+        let socket = UdpSocket::from_std(raw.into())?;
         socket.join_multicast_v4(group, std::net::Ipv4Addr::UNSPECIFIED)?;
         socket.set_multicast_loop_v4(true)?;
         let peer = SocketAddr::from((group, port));

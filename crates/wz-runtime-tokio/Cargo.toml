@@ -386,7 +386,7 @@ transport-unicast = ["wz-session-core/session-unicast"]
 # import did not resolve in a `transport-multicast`-without-default build
 # (the facade composability gap). A multicast transport that cannot process
 # a peer's Close is incomplete, so codec-close is a select, not optional.
-transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec-frame", "codec-close"]
+transport-multicast = ["wz-session-core/session-multicast", "codec-join", "codec-frame", "codec-close", "dep:socket2"]
 # chunk-5 — forward to the wz-session-core same-named gate so the migrated
 # start/stop_keepalive_worker action bodies compile under the keepalive axis.
 transport-keepalive = ["wz-session-core/transport-keepalive"]
@@ -591,6 +591,7 @@ scouting-active = [
     "transport-link-udp",
     "codec-scout",
     "codec-hello",
+    "dep:socket2",
 ]
 
 # R311if — static scouting mode wire-up. Forwards to
@@ -679,6 +680,22 @@ hashbrown = "0.15"
 # routes through this crate so the eventual extraction to wz-session-core
 # (no_std) sees a single dep surface across both runtime profiles.
 portable-atomic = "1"
+# R311no — wz's multicast bind joins a group port that every other zenoh
+# peer on the same host also binds (a multicast group port is inherently
+# multi-listener). zenoh-pico sets SO_REUSEADDR + SO_REUSEPORT
+# unconditionally on its multicast listener before binding `0.0.0.0:port`
+# (vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c
+# :180 / :185 / :196), so a wz multicast receiver co-located with a pico
+# peer (`pico -> wz` dial-in) must do the same or fail `EADDRINUSE`.
+# tokio's `UdpSocket` exposes no pre-bind setsockopt hook, so the
+# REUSE-then-bind sequence drops to socket2 (Socket -> std UdpSocket ->
+# tokio `from_std`). Gated on the two features that activate
+# `bind_multicast_v4` (scouting-active / transport-multicast) so a
+# unicast-only build never compiles it. `features = ["all"]` unlocks
+# `set_reuse_port` (SO_REUSEADDR is base API; SO_REUSEPORT sits behind
+# socket2's `all`). Distinct from the dev-dependencies socket2 below,
+# which serves a bind-without-listen test shim; Cargo unifies the two.
+socket2 = { version = "0.6", features = ["all"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
