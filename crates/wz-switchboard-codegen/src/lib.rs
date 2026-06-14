@@ -361,15 +361,16 @@ pub enum SceType {
 /// `(Rust, Bytes) => "&'a [u8]"`). The native-lowered payload struct, by
 /// contrast, holds the field **owned** — `String` / `Vec<u8>`, no lifetime: it
 /// derives `Clone + Default` and the engine queues it past the buffer's life.
-/// `.into()` bridges the two (`<&str as Into<String>>` /
-/// `<&[u8] as Into<Vec<u8>>>`), the target inferred from the struct field's
-/// known type — so no `alloc` / `std` path is named and the one shared helper
-/// compiles on both the AP (std) and the MCU (`no_std` + `alloc`) tiers. A
+/// For `string`, `.into()` bridges `<&str as Into<SceString<N>>>` — `SceString`
+/// is still a type alias, so the infallible `From` holds. `bytes` is NOT handled
+/// here: since SCE 1d439ea07 `SceBytes<N>` is an N-preserving newtype with only a
+/// fallible `from_slice` (no `From<&[u8]>`), so the caller threads a pre-conversion
+/// (`match SceBytes::from_slice(..) { .. Err => return false }`) instead. A
 /// primitive (`Copy`) field needs no conversion and moves verbatim, keeping the
 /// primitive-only golden byte-identical.
 fn owned_field_move(sce_type: &SceType, expr: &str) -> String {
     match sce_type {
-        SceType::Primitive(p) if p == "string" || p == "bytes" => format!("{expr}.into()"),
+        SceType::Primitive(p) if p == "string" => format!("{expr}.into()"),
         _ => expr.to_string(),
     }
 }
@@ -755,12 +756,30 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                     // `&[u8]`) but the payload struct holds it owned (`String` /
                     // `Vec<u8>`), so `owned_field_move` threads the `.into()`;
                     // primitive fields move verbatim.
+                    // `bytes` fields hold the N-preserving `SceBytes<N>` newtype
+                    // (SCE 1d439ea07): `&[u8]` -> owned is the FALLIBLE
+                    // `from_slice`, not an infallible `.into()`. Convert before
+                    // the struct literal and bail like a decode miss on the
+                    // (by-construction unreachable) capacity error — never panic.
+                    let mut pre_conversions = String::new();
                     let field_moves = schema
                         .fields
                         .iter()
-                        .map(|f| {
-                            let mv = owned_field_move(&f.sce_type, &format!("decoded.{}", f.id));
-                            format!("\n            {id}: {mv},", id = f.id, mv = mv)
+                        .map(|f| match &f.sce_type {
+                            SceType::Primitive(p) if p == "bytes" => {
+                                pre_conversions.push_str(&format!(
+                                    "\n        let {id} = match ::sce_rust_runtime::SceBytes::from_slice(decoded.{id}) {{\n            \
+                                     Ok(_v) => _v,\n            Err(_) => return false,\n        }};",
+                                    id = f.id
+                                ));
+                                // field-init shorthand: the pre-conversion binds
+                                // a local of the same name (avoids redundant_field_names).
+                                format!("\n            {id},", id = f.id)
+                            }
+                            _ => {
+                                let mv = owned_field_move(&f.sce_type, &format!("decoded.{}", f.id));
+                                format!("\n            {id}: {mv},", id = f.id, mv = mv)
+                            }
                         })
                         .collect::<String>();
                     value_helpers.push_str(&format!(
@@ -774,7 +793,7 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                          engine: &mut ::sce_rust_runtime::Engine<{machine_module}::{machine_pascal}Policy>,\n\
                          ) -> bool {{\n    \
                          let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);\n    \
-                         if let Ok(decoded) = {codec_struct}::decode(&mut cursor) {{\n        \
+                         if let Ok(decoded) = {codec_struct}::decode(&mut cursor) {{{pre_conversions}\n        \
                          engine.{method}({machine_module}::{machine_pascal}{variant}Payload {{{field_moves}\n        \
                          }});\n        \
                          true\n    \
@@ -791,6 +810,7 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                         variant = variant,
                         codec_struct = codec_struct,
                         field_moves = field_moves,
+                        pre_conversions = pre_conversions,
                     ));
                     injector_value_arms.push_str(&format!(
                         "            {event} => {helper}(payload, self.engine),\n",
@@ -1565,10 +1585,18 @@ pub fn dispatch_switchboard(
 
         // Primitive moves verbatim (Copy out of the borrowed struct).
         assert!(out.contains("celsius_centi: decoded.celsius_centi,"));
-        // Borrowed string/bytes views are deep-copied into the owned payload
-        // fields via `.into()` (`&str -> String`, `&[u8] -> Vec<u8>`).
+        // Borrowed string view is deep-copied via `.into()` (`&str -> SceString`,
+        // still a type alias so the infallible `From` holds).
         assert!(out.contains("sensor_id: decoded.sensor_id.into(),"));
-        assert!(out.contains("raw: decoded.raw.into(),"));
+        // Borrowed bytes view goes through the FALLIBLE `SceBytes::from_slice`
+        // (N-preserving newtype since SCE 1d439ea07) in a pre-conversion that
+        // bails like a decode miss — never `.into()`, never a panic.
+        assert!(
+            out.contains("let raw = match ::sce_rust_runtime::SceBytes::from_slice(decoded.raw) {")
+        );
+        assert!(out.contains("Err(_) => return false,"));
+        assert!(out.contains("\n            raw,"));
+        assert!(!out.contains("raw: decoded.raw.into(),"));
         // No `.into()` is sprayed onto the primitive (would trip
         // clippy::useless_conversion and drift the primitive golden).
         assert!(!out.contains("celsius_centi: decoded.celsius_centi.into(),"));
