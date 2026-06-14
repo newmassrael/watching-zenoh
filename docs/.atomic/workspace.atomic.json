@@ -36868,6 +36868,52 @@
         "NEXT proof-gap: wz↔zenoh-pico 라이브 interop e2e. UNPUSHED: R311nj(이번) 로컬; origin/main=b3d13ef. push=명시동의."
       ]
     },
+    "Round 311nk": {
+      "decision_summary": "R311nk: wz<-zenoh-pico unicast TX fragmentation 교차구현 e2e 신규(실 TCP; pico z_put 200B가 batch=64 협상으로 fragment chain 송신 후 wz reassemble, byte-exact). 멀티캐스트 interop은 router(Phase D+) 선결이라 unicast로 scope.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_reassembles_pico_fragment_tx.rs (NEW): in-test wz acceptor(accept_and_open_session, batch_size=64 advertise) + 외부 zenoh-pico `z_put -m client`(200B distinctive payload) spawn. pico가 min(64, pico-default 2048)=64 협상 → 200B Put을 T_MID_FRAGMENT chain으로 송신 → wz `drive_session_until_terminal`이 reassemble → byte-exact subscriber 발화. `negotiated_batch_mtu()==64` 단언으로 fragment를 구조적 보장([[feedback-no-flaky-ever]] 인접 R311nj 교훈: 행동 assert만으론 false-positive). drive를 terminal까지 await 후 fired==1 단언 — pico z_put one-shot(put→close)의 near-instant loopback close와 polling이 만들던 레이스 제거.",
+        "crates/wz-integration-tests/Cargo.toml: dev-dep `wz-runtime-tokio`에 features=[\"transport-fragmentation\"](AP reassembly RX 경로) + `tokio` dev-dep(net/rt-multi-thread/macros/time) 추가."
+      ],
+      "verification_bullets": [
+        "신규 test 15/15 no-flaky([[feedback-no-flaky-ever]]); drive-terminal vs poll 레이스 fix 전 8/10(iter 2/3/8/11/12 'acceptor drive loop ended before delivery') → mechanical root-cause(drive await + 사후 fired assert) 후 15/15.",
+        "fragment wire 발생 확증: pico가 200B를 sn:1(more:true)+sn:2(more:false) chain으로 송신(RUST_LOG=debug Poll(Fragment)), wz reassembly slot Receiving->Complete. 200B > negotiated MTU 64 이고 wz zbuf=64라 단일프레임 수신이 구조적 불가 — byte-exact 200B 수신 자체가 fragment+reassemble 증명.",
+        "full host run-ci EXIT=0 'all required layers pass'(재실행; fmt + clippy doc_lazy_continuation 3건 fix 후). Layer E(`cargo test -p wz-integration-tests -- --ignored --skip wz_e2e_`)가 신규 테스트 자동수집(0.07s 1 passed).",
+        "C1(`cargo test --workspace`)에서 wz-integration-tests의 frag dev-dep feature unification 누수가 다른 lane을 깨지 않음 확인.",
+        "interop scope 발견: pico가 3000B(>256) 보내면 wz reassemble은 Complete까지 가나 재파싱 `Codec(TooManyElements)` — wz MsgPut payload codec bound=256(msg_put.scxml:111). 작은 MTU + ≤256B payload만 interop-valid."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "proof-gap 닫힘: unicast TX fragmentation 교차구현(zenoh-pico z_put → wz reassemble) e2e 신규. codec 바이트패리티(layer3_fragment) + wz↔wz loopback(layer3_reassembly_tx)에 이어 실 소켓 외부구현 송신을 검증.",
+        "멀티캐스트 wz↔pico interop은 scout-reply Hello responder(=router discovery role)가 선결 — ARCHITECTURE.md:92 router mode=Phase D+, docs scouting-fsm.md §8.1 G-SCT-2가 speculative deferral. 당기려면 ARCHITECTURE phase 재배치를 audit-trace하는 별도 결정 필요. pico 멀티캐스트 peer는 scout-then-open이라 Hello 공급자(router) 없이 세션 못 엶(z_sub -m peer 단독 'Unable to open session' 실측).",
+        "pico→wz unicast dial-in(Gap 6) 여전히 미검증: pico peer-listener가 Client InitSyn에 무응답, zenoh router 의존.",
+        "큰메시지(>256B) interop은 wz MsgPut payload bound 확장이 선결(별건).",
+        "UNPUSHED: R311nk 로컬(테스트+Cargo.toml). origin/main=302b2bd. commit/push=사용자 명시 동의 대기."
+      ],
+      "publishable_decision_summary": "R311nk: wz<-zenoh-pico unicast TX fragmentation 교차구현 e2e 신규(실 TCP; pico z_put 200B가 batch=64 협상으로 fragment chain 송신 후 wz reassemble, byte-exact). 멀티캐스트 interop은 router(Phase D+) 선결이라 unicast로 scope.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_reassembles_pico_fragment_tx.rs (NEW): in-test wz acceptor(accept_and_open_session, batch_size=64 advertise) + 외부 zenoh-pico `z_put -m client`(200B distinctive payload) spawn. pico가 min(64, pico-default 2048)=64 협상 → 200B Put을 T_MID_FRAGMENT chain으로 송신 → wz `drive_session_until_terminal`이 reassemble → byte-exact subscriber 발화. `negotiated_batch_mtu()==64` 단언으로 fragment를 구조적 보장([[feedback-no-flaky-ever]] 인접 R311nj 교훈: 행동 assert만으론 false-positive). drive를 terminal까지 await 후 fired==1 단언 — pico z_put one-shot(put→close)의 near-instant loopback close와 polling이 만들던 레이스 제거.",
+        "crates/wz-integration-tests/Cargo.toml: dev-dep `wz-runtime-tokio`에 features=[\"transport-fragmentation\"](AP reassembly RX 경로) + `tokio` dev-dep(net/rt-multi-thread/macros/time) 추가."
+      ],
+      "publishable_verification_bullets": [
+        "신규 test 15/15 no-flaky([[feedback-no-flaky-ever]]); drive-terminal vs poll 레이스 fix 전 8/10(iter 2/3/8/11/12 'acceptor drive loop ended before delivery') → mechanical root-cause(drive await + 사후 fired assert) 후 15/15.",
+        "fragment wire 발생 확증: pico가 200B를 sn:1(more:true)+sn:2(more:false) chain으로 송신(RUST_LOG=debug Poll(Fragment)), wz reassembly slot Receiving->Complete. 200B > negotiated MTU 64 이고 wz zbuf=64라 단일프레임 수신이 구조적 불가 — byte-exact 200B 수신 자체가 fragment+reassemble 증명.",
+        "full host run-ci EXIT=0 'all required layers pass'(재실행; fmt + clippy doc_lazy_continuation 3건 fix 후). Layer E(`cargo test -p wz-integration-tests -- --ignored --skip wz_e2e_`)가 신규 테스트 자동수집(0.07s 1 passed).",
+        "C1(`cargo test --workspace`)에서 wz-integration-tests의 frag dev-dep feature unification 누수가 다른 lane을 깨지 않음 확인.",
+        "interop scope 발견: pico가 3000B(>256) 보내면 wz reassemble은 Complete까지 가나 재파싱 `Codec(TooManyElements)` — wz MsgPut payload codec bound=256(msg_put.scxml:111). 작은 MTU + ≤256B payload만 interop-valid."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "proof-gap 닫힘: unicast TX fragmentation 교차구현(zenoh-pico z_put → wz reassemble) e2e 신규. codec 바이트패리티(layer3_fragment) + wz↔wz loopback(layer3_reassembly_tx)에 이어 실 소켓 외부구현 송신을 검증.",
+        "멀티캐스트 wz↔pico interop은 scout-reply Hello responder(=router discovery role)가 선결 — ARCHITECTURE.md:92 router mode=Phase D+, docs scouting-fsm.md §8.1 G-SCT-2가 speculative deferral. 당기려면 ARCHITECTURE phase 재배치를 audit-trace하는 별도 결정 필요. pico 멀티캐스트 peer는 scout-then-open이라 Hello 공급자(router) 없이 세션 못 엶(z_sub -m peer 단독 'Unable to open session' 실측).",
+        "pico→wz unicast dial-in(Gap 6) 여전히 미검증: pico peer-listener가 Client InitSyn에 무응답, zenoh router 의존.",
+        "큰메시지(>256B) interop은 wz MsgPut payload bound 확장이 선결(별건).",
+        "UNPUSHED: R311nk 로컬(테스트+Cargo.toml). origin/main=302b2bd. commit/push=사용자 명시 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
