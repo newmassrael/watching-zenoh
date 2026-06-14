@@ -16,10 +16,12 @@
 # are both internal-consistency gates that cannot catch a
 # spec-vs-reality mismatch.
 #
-# Crate type: integration-tests-only (no library). All test logic
-# lives in `tests/layer3_*.rs` files so `cargo test -p
-# wz-integration-tests` is the single command that exercises the
-# Layer 3 lane.
+# Crate type: integration-tests-only (no library). Beyond the
+# `tests/layer3_*.rs` byte-compare lane, this crate also hosts the
+# binary-dep e2e family (ap_demo_round_trip, wz_*_to_z*, the wz_e2e_*
+# subset binaries) and an in-library-node socket e2e
+# (wz_reassembles_pico_fragment_tx — R311nk/nl frag interop), all
+# `#[ignore]`d and collected by Layer E via `--ignored`.
 
 [package]
 name = "wz-integration-tests"
@@ -55,6 +57,13 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 # session_glue (`parse_inbound`, `InboundFrame`, `SessionLinkActions::
 # handle_inbound`) to verify the reverse direction: zenoh-pico encode
 # → wz parse → SessionInitParams.cookie populate.
+# R311nk/nl — `transport-fragmentation` pinned so the frag-interop e2e
+# (tests/wz_reassembles_pico_fragment_tx.rs) compiles the AP reassembly
+# RX path. resolver=2 keeps this dev-dep feature from unifying into
+# wz-runtime-tokio's OWN lib/test build under Layer C1 (`cargo test
+# --workspace`) — verified: no frag-gated test runs in the C1 region —
+# so frag-OFF default composition stays owned by C1 and the frag-ON
+# wz-runtime-tokio build stays owned by C1l.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["transport-fragmentation"] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
