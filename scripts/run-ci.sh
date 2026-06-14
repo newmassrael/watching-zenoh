@@ -1779,7 +1779,15 @@ layer_e_ap_demo_round_trip() {
     # preset-ap-client wz-ap-demo this lane drives. The `--skip` is a
     # test-name substring filter, so the `wz_e2e_` prefix convention
     # keeps every future subset e2e out of this sweep with one pattern.
-    (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored --skip wz_e2e_)
+    # R311nm — also exclude any `multicast` test: the wz->pico multicast
+    # JOIN+Push interop (wz_publisher_to_pico_multicast_zsub) is real-UDP
+    # multicast and environment-dependent (no multicast route → dropped
+    # IGMP join → env-flaky), so it is a required-gate hazard. It runs in
+    # the opt-in Layer M instead, alongside the wz<->wz multicast lanes.
+    # The `multicast` substring keeps every future multicast interop test
+    # out of this default sweep with one pattern (the wz_e2e_ analogue).
+    (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
+        --skip wz_e2e_ --skip multicast)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -2640,10 +2648,25 @@ layer_m_scouting_multicast() {
         return 0
     fi
     (cd crates && cargo test -p wz-runtime-tokio --features scouting-active \
-        --test scouting_multicast_loopback -- --ignored --quiet) \
-        && (cd crates && cargo test -p wz-runtime-tokio \
-            --features transport-multicast,transport-fragmentation \
-            --test multicast_pubsub_loopback -- --ignored --quiet)
+        --test scouting_multicast_loopback -- --ignored --quiet) || return 1
+    (cd crates && cargo test -p wz-runtime-tokio \
+        --features transport-multicast,transport-fragmentation \
+        --test multicast_pubsub_loopback -- --ignored --quiet) || return 1
+    # R311nm — wz->pico multicast JOIN+Push interop e2e: a wz in-library
+    # multicast publisher's JOIN beacon + framed Push are admitted and
+    # decoded by an external zenoh-pico `z_sub -m peer` over a real UDP
+    # group. Binary-dep (needs the pico CLI built) AND environment-
+    # dependent (multicast routing), so it lives here in the opt-in Layer
+    # M, never the default Layer E sweep. Graceful SKIP when the pico CLI
+    # is absent mirrors Layer E's prereq discipline so `--layer M` without
+    # pico-CLI prep does not hard-fail.
+    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+        echo "Layer M SKIP wz->pico multicast interop (zenoh-pico CLI not built; \
+run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_publisher_to_pico_multicast_zsub -- --ignored --quiet) || return 1
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────
