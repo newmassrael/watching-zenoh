@@ -55,7 +55,7 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 # session_glue (`parse_inbound`, `InboundFrame`, `SessionLinkActions::
 # handle_inbound`) to verify the reverse direction: zenoh-pico encode
 # → wz parse → SessionInitParams.cookie populate.
-wz-runtime-tokio = { path = "../wz-runtime-tokio" }
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["transport-fragmentation"] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the
 # `_test_support` Cargo feature used through R70.
@@ -71,6 +71,10 @@ tempfile = "3"
 # (1..=2 `$*` runs); the property asserts wz/zenoh-pico byte-equal
 # on forward + reverse + symmetry for every shrunken case.
 proptest = "1"
+# R311nk — the wz<-pico fragmentation interop e2e is a `#[tokio::test]`:
+# it binds an in-test TcpListener acceptor and drives the wz session loop
+# async while an external zenoh-pico z_put client fragments a Put.
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time"] }
 
 [lints]
 workspace = true
