@@ -37044,6 +37044,52 @@
         "UNPUSHED 누적: R311nm(b6572ca+e3c2e73) + R311nn(67c5ac3 + 이 ledger) = origin/main(a95338c) 대비 ahead 4. push=사용자 명시 동의 대기."
       ]
     },
+    "Round 311no": {
+      "decision_summary": "R311no: 멀티캐스트 pico->wz dial-in 완성(양방향 interop). wz bind_multicast_v4에 REUSEADDR/REUSEPORT 추가(socket2, pico parity)로 group port co-bind. 외부 pico z_pub JOIN을 wz admit(active_peers==1 직접단언)+Push byte-exact.",
+      "changes_bullets": [
+        "scripts/build-zenoh-pico-cli.sh: TARGETS에 z_pub 추가(주기 publish CLI). pico->wz 멀티캐스트 publisher로 필요 — z_put one-shot은 JOIN-admission 윈도우를 레이스하므로 주기 publisher(z_pub -n)가 no-flaky 전제. 동일 스크립트가 7 binaries 빌드(z_sub 체크가 z_pub 커버).",
+        "crates/wz-runtime-tokio: socket2를 optional 프로덕션 dep로 승격(version 0.6, features=[\"all\"]로 set_reuse_port 잠금해제, dep:socket2 게이트=scouting-active/transport-multicast). UdpDriver::bind_multicast_v4를 socket2 경유 재작성 — SO_REUSEADDR+SO_REUSEPORT를 bind 전 설정(Socket->std UdpSocket->tokio from_std; tokio는 pre-bind setsockopt 훅 없음). zenoh-pico parity(udp_multicast_posix.c:180/185 무조건 REUSE, INADDR_ANY:port bind line196). lib.rs 주석의 'single-receiver, socket2 회피' 결정을 multi-listener pico-interop 요구로 supersede — 그 주석이 명시적으로 예고한 socket2 진입 지점.",
+        "crates/wz-integration-tests/tests/wz_subscriber_from_pico_multicast.rs: 신규 e2e — 외부 pico z_pub -m peer 멀티캐스트 publisher의 JOIN beacon+framed Push를 wz in-library mcast subscriber가 group port co-bind + admit + byte-exact decode. dispatcher.active_peers()==1 직접 단언(R311nm transitive 증명과 대비 — wz가 in-process admitter). wz mc_params를 pico CONFIG(version 0x09/seq_num_res 0x02/batch 2048)에 핀해 ingest_join §3.2 admit. payload byte-exact는 pico [%4d]<value> 템플릿(z_pub.c) 재구성으로 full 단언(idx는 pico 내부 카운터라 비결정적).",
+        "scripts/run-ci.sh: Layer M(opt-in, env-dependent)에 4번째 sub-step(wz_subscriber_from_pico_multicast) 등록. 기존 z_sub 존재 체크가 z_pub도 graceful-SKIP 커버."
+      ],
+      "verification_bullets": [
+        "Phase 0 falsify: z_pub 빌드(7 binaries) 후 pico z_pub -m peer -> pico z_sub -m peer 같은 host co-bind '>> Received' 5/5 — OS 멀티캐스트 라우팅 + REUSE co-bind 동작을 wz 프로덕션 변경 전 사전 확인. 멀티캐스트 listener는 양쪽 INADDR_ANY:port + REUSEADDR+REUSEPORT라 SO_REUSEPORT 필수(socket2 features=[\"all\"]로 잠금해제).",
+        "Phase 1 회귀: REUSE 추가 후 기존 Layer M scouting_multicast_loopback 2/2 + multicast_pubsub_loopback 2/2 통과(단일 binder에 REUSE 무해). cargo check --features transport-multicast,scouting-active EXIT=0(socket2 path 컴파일).",
+        "Phase 2: 신규 pico->wz e2e 15/15 연속 no-flaky. Layer M 전체 4 sub-step EXIT=0. keyexpr matching + cross-impl JOIN admission(active_peers==1 직접) + Push byte-exact 실측 통과.",
+        "Phase 3: full host run-ci(WZ_RUN_LAYER_M=1) EXIT=0 'all required layers pass'(파이프 없는 exit code 직접 캡처; 컴파일 error[/panicked 0, 589 매치는 전부 '0 failed' 노이즈). atomic ledger entries 722->723, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변. resolver=2가 socket2 dev-dep 누수를 C1 격리(default workspace 빌드 무영향)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311no로 멀티캐스트 wz<->pico 양방향 interop 완성: wz->pico(R311nm) + pico->wz(R311no) 모두 실소켓 JOIN admit + Push byte-exact. wz가 admitter인 역방향은 active_peers()==1로 JOIN admission을 직접 관측(R311nm은 pico Frame-drop 정책으로 transitive 증명만 가능했음).",
+        "NEXT 후보: ① 멀티캐스트 큰메시지 >256B — wz MsgPut payload codec bound 256(msg_put.scxml:111) 확장 선결(별건; R311nl negative test가 unicast로 pin). ② breadth: serial 링크 / gossip scouting interop 실소켓. ③ 양방향 동시(wz+pico 동일 group 양쪽 publish)는 reachable하나 YAGNI.",
+        "설계 메모: socket2가 wz-runtime-tokio 프로덕션 dep로 진입(feature-gated). pico parity(멀티캐스트 group port=multi-listener, REUSE 무조건)가 근거 — 테스트 워크어라운드가 아니라 실 프로덕션 interop 갭 청산. lib.rs 주석이 예고한 진입 지점이었음.",
+        "UNPUSHED 누적: R311nm(b6572ca+e3c2e73) + R311nn(67c5ac3+5e79be9) + R311no(이 라운드) = origin/main(a95338c) 대비. push=사용자 명시 동의 대기."
+      ],
+      "publishable_decision_summary": "R311no: 멀티캐스트 pico->wz dial-in 완성(양방향 interop). wz bind_multicast_v4에 REUSEADDR/REUSEPORT 추가(socket2, pico parity)로 group port co-bind. 외부 pico z_pub JOIN을 wz admit(active_peers==1 직접단언)+Push byte-exact.",
+      "publishable_changes_bullets": [
+        "scripts/build-zenoh-pico-cli.sh: TARGETS에 z_pub 추가(주기 publish CLI). pico->wz 멀티캐스트 publisher로 필요 — z_put one-shot은 JOIN-admission 윈도우를 레이스하므로 주기 publisher(z_pub -n)가 no-flaky 전제. 동일 스크립트가 7 binaries 빌드(z_sub 체크가 z_pub 커버).",
+        "crates/wz-runtime-tokio: socket2를 optional 프로덕션 dep로 승격(version 0.6, features=[\"all\"]로 set_reuse_port 잠금해제, dep:socket2 게이트=scouting-active/transport-multicast). UdpDriver::bind_multicast_v4를 socket2 경유 재작성 — SO_REUSEADDR+SO_REUSEPORT를 bind 전 설정(Socket->std UdpSocket->tokio from_std; tokio는 pre-bind setsockopt 훅 없음). zenoh-pico parity(udp_multicast_posix.c:180/185 무조건 REUSE, INADDR_ANY:port bind line196). lib.rs 주석의 'single-receiver, socket2 회피' 결정을 multi-listener pico-interop 요구로 supersede — 그 주석이 명시적으로 예고한 socket2 진입 지점.",
+        "crates/wz-integration-tests/tests/wz_subscriber_from_pico_multicast.rs: 신규 e2e — 외부 pico z_pub -m peer 멀티캐스트 publisher의 JOIN beacon+framed Push를 wz in-library mcast subscriber가 group port co-bind + admit + byte-exact decode. dispatcher.active_peers()==1 직접 단언(R311nm transitive 증명과 대비 — wz가 in-process admitter). wz mc_params를 pico CONFIG(version 0x09/seq_num_res 0x02/batch 2048)에 핀해 ingest_join §3.2 admit. payload byte-exact는 pico [%4d]<value> 템플릿(z_pub.c) 재구성으로 full 단언(idx는 pico 내부 카운터라 비결정적).",
+        "scripts/run-ci.sh: Layer M(opt-in, env-dependent)에 4번째 sub-step(wz_subscriber_from_pico_multicast) 등록. 기존 z_sub 존재 체크가 z_pub도 graceful-SKIP 커버."
+      ],
+      "publishable_verification_bullets": [
+        "Phase 0 falsify: z_pub 빌드(7 binaries) 후 pico z_pub -m peer -> pico z_sub -m peer 같은 host co-bind '>> Received' 5/5 — OS 멀티캐스트 라우팅 + REUSE co-bind 동작을 wz 프로덕션 변경 전 사전 확인. 멀티캐스트 listener는 양쪽 INADDR_ANY:port + REUSEADDR+REUSEPORT라 SO_REUSEPORT 필수(socket2 features=[\"all\"]로 잠금해제).",
+        "Phase 1 회귀: REUSE 추가 후 기존 Layer M scouting_multicast_loopback 2/2 + multicast_pubsub_loopback 2/2 통과(단일 binder에 REUSE 무해). cargo check --features transport-multicast,scouting-active EXIT=0(socket2 path 컴파일).",
+        "Phase 2: 신규 pico->wz e2e 15/15 연속 no-flaky. Layer M 전체 4 sub-step EXIT=0. keyexpr matching + cross-impl JOIN admission(active_peers==1 직접) + Push byte-exact 실측 통과.",
+        "Phase 3: full host run-ci(WZ_RUN_LAYER_M=1) EXIT=0 'all required layers pass'(파이프 없는 exit code 직접 캡처; 컴파일 error[/panicked 0, 589 매치는 전부 '0 failed' 노이즈). atomic ledger entries 722->723, orphan delta=0(T1 new=+0 유지), T3 warn 4 불변. resolver=2가 socket2 dev-dep 누수를 C1 격리(default workspace 빌드 무영향)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311no로 멀티캐스트 wz<->pico 양방향 interop 완성: wz->pico(R311nm) + pico->wz(R311no) 모두 실소켓 JOIN admit + Push byte-exact. wz가 admitter인 역방향은 active_peers()==1로 JOIN admission을 직접 관측(R311nm은 pico Frame-drop 정책으로 transitive 증명만 가능했음).",
+        "NEXT 후보: ① 멀티캐스트 큰메시지 >256B — wz MsgPut payload codec bound 256(msg_put.scxml:111) 확장 선결(별건; R311nl negative test가 unicast로 pin). ② breadth: serial 링크 / gossip scouting interop 실소켓. ③ 양방향 동시(wz+pico 동일 group 양쪽 publish)는 reachable하나 YAGNI.",
+        "설계 메모: socket2가 wz-runtime-tokio 프로덕션 dep로 진입(feature-gated). pico parity(멀티캐스트 group port=multi-listener, REUSE 무조건)가 근거 — 테스트 워크어라운드가 아니라 실 프로덕션 interop 갭 청산. lib.rs 주석이 예고한 진입 지점이었음.",
+        "UNPUSHED 누적: R311nm(b6572ca+e3c2e73) + R311nn(67c5ac3+5e79be9) + R311no(이 라운드) = origin/main(a95338c) 대비. push=사용자 명시 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
