@@ -37274,6 +37274,58 @@
         "UNPUSHED: R311ns(vendor/sce bump + 4 SCXML + serial_framing test + build.rs/Cargo.toml/lib.rs/Cargo.lock + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311nt": {
+      "decision_summary": "R311nt: SERIAL link logic layer(transport-agnostic no_std serial_link): frame encode/decode+CRC+SerialFrameReader+handshake(Initiator/Responder)+locator parse. 25 byte-parity test, run-ci EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/serial_link.rs (신규, #[cfg(feature=\"transport-link-serial\")]): transport-agnostic SERIAL upper protocol 로직(no I/O; AP tty + MCU UART HAL 양쪽 컴파일). pico src/link/transport/upper/serial_protocol.c + src/protocol/codec/serial.c 미러. 상수 MTU=1500/MFS=1507/MAX_COBS_BUF=1516, header flags INIT=0x01/ACK=0x02/RESET=0x04, EOP=0x00.",
+        "encode_frame(header,payload)=[header|len(2LE)|payload|crc32(4LE)]->cobs_encode->+0x00 EOP (= _z_serial_msg_serialize serial.c:28-68); decode_frame=cobs_decode->SerialEnvelope::decode->crc verify, CRC mismatch reject (= _z_serial_msg_deserialize serial.c:70-118, serial.c:114 discard). R311ns serial codec(serial_envelope/cobs/crc32) 직접 소비.",
+        "SerialFrameReader: 0x00 EOP까지 byte 누적 스트리밍(push/feed), SERIAL_MAX_COBS_BUF overflow->reset (= _z_read_serial_internal serial_protocol.c:145-177). SerialHandshake(SerialRole Initiator/Responder): initiator INIT 송신->INIT|ACK=Connected / RESET=Throttle (= _z_connect_serial serial_protocol.c:255-280); responder는 INIT 수신->INIT|ACK emit dual(pico listen측 responder 없음=peer/router 담당, wz는 wz<->wz용 양역할).",
+        "parse_serial_locator: serial//dev/ttyUSB0#baudrate=N (device) / serial/TX.RX#baudrate=N (pins); '.' 휴리스틱 dev-vs-pins (= _z_serial_endpoint_parse serial_protocol.c:79-131). baudrate 필수, 값 검증은 tty backend(R311nu) 책임이라 parse는 u32만.",
+        "wiring: lib.rs pub mod serial_link 게이트(transport-link-serial); Cargo.toml transport-link-serial=[\"wz-codecs/codec-serial\",\"alloc\"](AP/alloc 프로파일, transport-fragmentation/session-reconnect 선례); scripts/run-ci.sh Layer C1t(default + --no-default-features 2 invocation). inventory transport-link-serial status reserved->active(set_inventory_status; Layer A3 catalog truthfulness audit가 실제 cfg 게이트=active 요구)."
+      ],
+      "verification_bullets": [
+        "25 byte-parity unit test(serial_link::tests): encode_frame data/INIT/INIT|ACK on-wire pin([01 02 03 08 AB CD EF 77 20 A7 FB 00] / [02 01*7 00] / [02 03 01*6 00]), decode round-trip + EOP tolerance + CRC-mismatch reject + MTU boundary, SerialFrameReader EOP split + bad-frame resync, handshake 양역할 cross-drive(INIT->ACK->Connected), locator device/pins + error 5종. 전부 통과.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'run-ci: all required layers pass'(전 레이어 0/A/A2/A3/B/C0/C1/C1t/C2/C3/C4/D/E/E2/F/G/Q/M pass; error[ / panicked 0). 1차 run에서 Layer A3 FAIL(transport-link-serial이 reserved인데 cfg 게이트=stale drift) 발견 -> set_inventory_status active 청산 후 재run EXIT=0.",
+        "clippy clean(transport-link-serial --all-targets), fmt clean, --no-default-features --features transport-link-serial 합성(default keyexpr 기능 없이) 컴파일+테스트 통과. Layer G MCU cross 무영향(transport-link-serial은 alloc 프로파일, MCU 기본 미포함).",
+        "atomic: inventory active 66->67(transport-link-serial), ledger entries 727->728, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311nt = SERIAL 링크 2-레이어 분해 중 1층(framing+handshake+locator 로직) 완료. transport-agnostic no_std(AP tty + MCU UART HAL 공용), R311ns serial codec 직접 연장. pico serial_protocol.c + codec/serial.c byte-parity.",
+        "설계 결정(사용자 승인): framing/handshake 로직은 transport-agnostic(MCU serial=UART HAL != tty), tty backend는 host 전용 -> 2-레이어 분리. encode_frame/decode_frame/SerialFrameReader/SerialHandshake(Initiator+Responder)/parse_serial_locator 전부 I/O 없는 순수 로직(no_std+alloc).",
+        "pico 핸드셰이크 사실: serial은 zenoh transport INIT 이전 자체 링크 핸드셰이크(_z_connect_serial: initiator INIT->INIT|ACK, RESET->throttle 재시도). pico listen측은 responder 없음(peer=zenoh router 담당) -> wz는 wz<->wz PTY e2e 위해 Responder(INIT 수신->INIT|ACK) dual까지 모델링.",
+        "NEXT 라운드 R311nu(2층, tty backend): tokio-serial 의존 + SerialDriver impl LinkDriver(open=handshake 구동, send=encode_frame, poll_event=SerialFrameReader 구동) + DialedLink/InboundLink/dial_locator 배선(ParsedLocator를 IP|Serial sum type로 일반화) + PTY 페어 loopback e2e(wz<->wz handshake+Push byte-exact). PTY 양단 즉시 ready라 handshake 재시도 없음=non-flaky 기대.",
+        "UNPUSHED: R311nt(serial_link.rs + lib.rs/Cargo.toml/run-ci.sh + inventory active flip + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]]; 직전 'push 하고 다음 라운드' 동의는 R311ns용이었음)."
+      ],
+      "publishable_decision_summary": "R311nt: SERIAL link logic layer(transport-agnostic no_std serial_link): frame encode/decode+CRC+SerialFrameReader+handshake(Initiator/Responder)+locator parse. 25 byte-parity test, run-ci EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/serial_link.rs (신규, #[cfg(feature=\"transport-link-serial\")]): transport-agnostic SERIAL upper protocol 로직(no I/O; AP tty + MCU UART HAL 양쪽 컴파일). pico src/link/transport/upper/serial_protocol.c + src/protocol/codec/serial.c 미러. 상수 MTU=1500/MFS=1507/MAX_COBS_BUF=1516, header flags INIT=0x01/ACK=0x02/RESET=0x04, EOP=0x00.",
+        "encode_frame(header,payload)=[header|len(2LE)|payload|crc32(4LE)]->cobs_encode->+0x00 EOP (= _z_serial_msg_serialize serial.c:28-68); decode_frame=cobs_decode->SerialEnvelope::decode->crc verify, CRC mismatch reject (= _z_serial_msg_deserialize serial.c:70-118, serial.c:114 discard). R311ns serial codec(serial_envelope/cobs/crc32) 직접 소비.",
+        "SerialFrameReader: 0x00 EOP까지 byte 누적 스트리밍(push/feed), SERIAL_MAX_COBS_BUF overflow->reset (= _z_read_serial_internal serial_protocol.c:145-177). SerialHandshake(SerialRole Initiator/Responder): initiator INIT 송신->INIT|ACK=Connected / RESET=Throttle (= _z_connect_serial serial_protocol.c:255-280); responder는 INIT 수신->INIT|ACK emit dual(pico listen측 responder 없음=peer/router 담당, wz는 wz<->wz용 양역할).",
+        "parse_serial_locator: serial//dev/ttyUSB0#baudrate=N (device) / serial/TX.RX#baudrate=N (pins); '.' 휴리스틱 dev-vs-pins (= _z_serial_endpoint_parse serial_protocol.c:79-131). baudrate 필수, 값 검증은 tty backend(R311nu) 책임이라 parse는 u32만.",
+        "wiring: lib.rs pub mod serial_link 게이트(transport-link-serial); Cargo.toml transport-link-serial=[\"wz-codecs/codec-serial\",\"alloc\"](AP/alloc 프로파일, transport-fragmentation/session-reconnect 선례); scripts/run-ci.sh Layer C1t(default + --no-default-features 2 invocation). inventory transport-link-serial status reserved->active(set_inventory_status; Layer A3 catalog truthfulness audit가 실제 cfg 게이트=active 요구)."
+      ],
+      "publishable_verification_bullets": [
+        "25 byte-parity unit test(serial_link::tests): encode_frame data/INIT/INIT|ACK on-wire pin([01 02 03 08 AB CD EF 77 20 A7 FB 00] / [02 01*7 00] / [02 03 01*6 00]), decode round-trip + EOP tolerance + CRC-mismatch reject + MTU boundary, SerialFrameReader EOP split + bad-frame resync, handshake 양역할 cross-drive(INIT->ACK->Connected), locator device/pins + error 5종. 전부 통과.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'run-ci: all required layers pass'(전 레이어 0/A/A2/A3/B/C0/C1/C1t/C2/C3/C4/D/E/E2/F/G/Q/M pass; error[ / panicked 0). 1차 run에서 Layer A3 FAIL(transport-link-serial이 reserved인데 cfg 게이트=stale drift) 발견 -> set_inventory_status active 청산 후 재run EXIT=0.",
+        "clippy clean(transport-link-serial --all-targets), fmt clean, --no-default-features --features transport-link-serial 합성(default keyexpr 기능 없이) 컴파일+테스트 통과. Layer G MCU cross 무영향(transport-link-serial은 alloc 프로파일, MCU 기본 미포함).",
+        "atomic: inventory active 66->67(transport-link-serial), ledger entries 727->728, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nt = SERIAL 링크 2-레이어 분해 중 1층(framing+handshake+locator 로직) 완료. transport-agnostic no_std(AP tty + MCU UART HAL 공용), R311ns serial codec 직접 연장. pico serial_protocol.c + codec/serial.c byte-parity.",
+        "설계 결정(사용자 승인): framing/handshake 로직은 transport-agnostic(MCU serial=UART HAL != tty), tty backend는 host 전용 -> 2-레이어 분리. encode_frame/decode_frame/SerialFrameReader/SerialHandshake(Initiator+Responder)/parse_serial_locator 전부 I/O 없는 순수 로직(no_std+alloc).",
+        "pico 핸드셰이크 사실: serial은 zenoh transport INIT 이전 자체 링크 핸드셰이크(_z_connect_serial: initiator INIT->INIT|ACK, RESET->throttle 재시도). pico listen측은 responder 없음(peer=zenoh router 담당) -> wz는 wz<->wz PTY e2e 위해 Responder(INIT 수신->INIT|ACK) dual까지 모델링.",
+        "NEXT 라운드 R311nu(2층, tty backend): tokio-serial 의존 + SerialDriver impl LinkDriver(open=handshake 구동, send=encode_frame, poll_event=SerialFrameReader 구동) + DialedLink/InboundLink/dial_locator 배선(ParsedLocator를 IP|Serial sum type로 일반화) + PTY 페어 loopback e2e(wz<->wz handshake+Push byte-exact). PTY 양단 즉시 ready라 handshake 재시도 없음=non-flaky 기대.",
+        "UNPUSHED: R311nt(serial_link.rs + lib.rs/Cargo.toml/run-ci.sh + inventory active flip + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]]; 직전 'push 하고 다음 라운드' 동의는 R311ns용이었음)."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
@@ -43464,10 +43516,10 @@
       "reason": "F=est quinn crate; P=zenoh-link-quic; C=standalone link kind"
     },
     "transport-link-serial": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-pico serial link",
-      "reason": "F=est UART driver; P=zenoh-pico serial transport; C=independent MCU link kind"
+      "reason": "R311nt serial_link module (framing+handshake+locator logic) gates it"
     },
     "transport-link-tcp": {
       "status": "active",
