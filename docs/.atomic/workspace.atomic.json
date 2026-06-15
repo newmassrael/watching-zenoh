@@ -37894,6 +37894,56 @@
         "NEXT: wss(seam 위 + 카탈로그 검증 후) / scouting->TLS thin wiring / TLS-reconnect / mTLS+PEM / pico parity % 재계산. UNPUSHED: R311oc(feat + docs/atomic) = 2 commits. origin/main=49379dd=R311ob. push=명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311od": {
+      "decision_summary": "R311od: active 스카우팅 -> TLS thin wiring. multicast로 발견한 tls/ locator를 open_session_at + DialConfig(cert)로 R311oc seam(dial_locator tls arm -> dial_tls) 통해 Established(scouting reaches TLS 피어를 실소켓 e2e로 실증; 프로덕션 코드 무변경, 검증 라운드). round2(tcp)의 TLS 아날로그. 곁들여 wss 트랙 CLOSED — zenoh 정본 소스(rev 49c8a53) 직접 read로 zenoh-link-wss 부재 + ws=평문 ws-over-TCP 확인, 카탈로그 부재로 종결.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/scouting_multicast_loopback.rs: 신규 round3_tls 모듈(#[cfg(all(transport-link-tls, transport-unicast))]; 파일은 이미 #![cfg(scouting-active)]) — round2(tcp)의 TLS 아날로그. multicast SCOUT/HELLO가 tls/{addr} 발견 -> open_session_at(&discovered, params, &DialConfig{tls:Some(TlsDialConfig{client_config,server_name})}) -> dial_locator tls arm -> dial_tls -> Established(inline accept_tls + accept_and_open_session acceptor와 tokio::join!). loopback_tls_configs는 tls_e2e fixture 미러(모듈-로컬, 이 파일의 craft_hello_datagram 중복 패턴 따름). #[ignore], GROUP 224.0.0.224 PORT 7449(discovery 7446 / round2 7448과 분리).",
+        "scripts/run-ci.sh: Layer M 첫 scouting invocation에 transport-link-tls 추가(--features scouting-active,transport-link-tls). 없으면 round3_tls 모듈이 빈 컴파일 = scouted-side TLS dial 미검증(gate-skew). defaults가 tcp/udp/unicast 보유라 round2(tcp)/discovery 무영향(tls는 additive).",
+        "프로덕션 코드 무변경: open_session_at은 R311oc에서 이미 &DialConfig를 connect_and_open_session으로 thread하므로 scouting->TLS는 구조적으로 이미 존재. 이 라운드는 multicast-discovered locator가 그 seam을 끝까지(cert material 포함) 운반함을 실증하는 e2e 검증 라운드."
+      ],
+      "verification_bullets": [
+        "새 테스트 active_scout_then_open_over_tls_reaches_established 통과: scout가 tls/{addr} resolve -> 양단 tokio::join!(acceptor accept_tls+accept_and_open_session, initiator open_session_at+DialConfig{tls}) -> 양쪽 record_established_at>=1. 12/12 non-flaky 연속 통과([[feedback-no-flaky-ever]]).",
+        "Layer M에서 scouting_multicast_loopback 3 passed(discovery + round2 tcp + round3 tls; 직전 2 passed에서 +1). 컴파일 clean(--features scouting-active,transport-link-tls), clippy --all-targets -D warnings exit 0, fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass' — Layer 0/A/A2/A3/B/C0/C1.../C1u/C1v/.../G/M 전부 pass, FAILED/error[/panicked 0. Layer F/Q는 opt-in SKIP(M+G 바 = R311oc 동일).",
+        "wss CLOSED 근거(정본 직접 read): zenoh-rust 정본 소스(rev 49c8a53)를 bare git db archive로 재확보 후 io/zenoh-links/에 zenoh-link-wss crate 부재 확인; zenoh-link-ws는 WS_LOCATOR_PREFIX=\"ws\"만 등록 + Cargo.toml에 rustls/tls feature 없음(MaybeTlsStream::Rustls arm은 주석처리된 죽은 코드). zenoh-pico endpoint.h도 tcp/udp/bt/serial/ws/tls만, wss schema 없음.",
+        "atomic: ledger entries 737->738, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(검증 라운드)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311od = active 스카우팅 -> TLS thin wiring(R311oc seam이 연 'scouting이 tls 미도달' 구조 호 완성). multicast-discovered tls/ locator가 open_session_at + DialConfig(cert)로 dial_locator tls arm -> dial_tls -> Established. 프로덕션 코드 무변경(seam이 R311oc에서 이미 cfg-thread); multicast-discovered 경로가 그 seam을 끝까지 운반함을 실증하는 e2e 검증 라운드. round2(tcp)의 TLS 아날로그.",
+        "wss CLOSED(option b로 이 carry에 묶음): zenoh 정본 소스(rev 49c8a53) 직접 read 결과 zenoh-link-wss crate 부재 + ws 링크는 평문 ws-over-TCP만(WS_LOCATOR_PREFIX=\"ws\", TLS backend 미링크). pico도 wss schema 없음. wss는 ws+tls 합성으로 기술적 가능하나 zenoh 카탈로그에 없어 구현하면 north-star(카탈로그 충실성) 위반 = 트랙 종결, NEXT 후보에서 제외. zenoh secure transport는 tls/quic이고 wz는 tls 보유; WebSocket 암호화는 zenoh 모델상 TLS-terminating proxy 책임.",
+        "메타: zenoh-rust 체크아웃은 비어있었으나(carry 'empty' 정확) bare git db(/home/coin/.cargo/git/db/zenoh-9c599d5ef3e0480e, 21M)는 온전 -> git archive로 정본 checkout(.cargo/git/checkouts/zenoh-*/49c8a53/) 복원 = 오프라인 재확보. 이후 zenoh 카탈로그 검증은 직접 read 즉시 가능([[feedback-diagnose-before-carry]] — blocker 맹종 않고 가장 싼 validate로 falsify).",
+        "미완(정직, 후속): TLS-reconnect(reconnect.rs가 &DialConfig::default() 재다이얼; DialConfig 보존 필요) / mTLS(client cert를 ClientConfig에; 미테스트) / cert PEM 로딩 헬퍼 / scouting->TLS 프로덕션 composer(현재 합성은 test-level; open_session_at이 seam이라 호출자 합성이 설계대로 = 정직한 비대칭).",
+        "NEXT: TLS-reconnect / mTLS+PEM / pico parity % 재계산. UNPUSHED 예정: R311od(feat + docs/atomic) = 2 commits. push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311od: active 스카우팅 -> TLS thin wiring. multicast로 발견한 tls/ locator를 open_session_at + DialConfig(cert)로 R311oc seam(dial_locator tls arm -> dial_tls) 통해 Established(scouting reaches TLS 피어를 실소켓 e2e로 실증; 프로덕션 코드 무변경, 검증 라운드). round2(tcp)의 TLS 아날로그. 곁들여 wss 트랙 CLOSED — zenoh 정본 소스(rev 49c8a53) 직접 read로 zenoh-link-wss 부재 + ws=평문 ws-over-TCP 확인, 카탈로그 부재로 종결.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/scouting_multicast_loopback.rs: 신규 round3_tls 모듈(#[cfg(all(transport-link-tls, transport-unicast))]; 파일은 이미 #![cfg(scouting-active)]) — round2(tcp)의 TLS 아날로그. multicast SCOUT/HELLO가 tls/{addr} 발견 -> open_session_at(&discovered, params, &DialConfig{tls:Some(TlsDialConfig{client_config,server_name})}) -> dial_locator tls arm -> dial_tls -> Established(inline accept_tls + accept_and_open_session acceptor와 tokio::join!). loopback_tls_configs는 tls_e2e fixture 미러(모듈-로컬, 이 파일의 craft_hello_datagram 중복 패턴 따름). #[ignore], GROUP 224.0.0.224 PORT 7449(discovery 7446 / round2 7448과 분리).",
+        "scripts/run-ci.sh: Layer M 첫 scouting invocation에 transport-link-tls 추가(--features scouting-active,transport-link-tls). 없으면 round3_tls 모듈이 빈 컴파일 = scouted-side TLS dial 미검증(gate-skew). defaults가 tcp/udp/unicast 보유라 round2(tcp)/discovery 무영향(tls는 additive).",
+        "프로덕션 코드 무변경: open_session_at은 R311oc에서 이미 &DialConfig를 connect_and_open_session으로 thread하므로 scouting->TLS는 구조적으로 이미 존재. 이 라운드는 multicast-discovered locator가 그 seam을 끝까지(cert material 포함) 운반함을 실증하는 e2e 검증 라운드."
+      ],
+      "publishable_verification_bullets": [
+        "새 테스트 active_scout_then_open_over_tls_reaches_established 통과: scout가 tls/{addr} resolve -> 양단 tokio::join!(acceptor accept_tls+accept_and_open_session, initiator open_session_at+DialConfig{tls}) -> 양쪽 record_established_at>=1. 12/12 non-flaky 연속 통과([[feedback-no-flaky-ever]]).",
+        "Layer M에서 scouting_multicast_loopback 3 passed(discovery + round2 tcp + round3 tls; 직전 2 passed에서 +1). 컴파일 clean(--features scouting-active,transport-link-tls), clippy --all-targets -D warnings exit 0, fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass' — Layer 0/A/A2/A3/B/C0/C1.../C1u/C1v/.../G/M 전부 pass, FAILED/error[/panicked 0. Layer F/Q는 opt-in SKIP(M+G 바 = R311oc 동일).",
+        "wss CLOSED 근거(정본 직접 read): zenoh-rust 정본 소스(rev 49c8a53)를 bare git db archive로 재확보 후 io/zenoh-links/에 zenoh-link-wss crate 부재 확인; zenoh-link-ws는 WS_LOCATOR_PREFIX=\"ws\"만 등록 + Cargo.toml에 rustls/tls feature 없음(MaybeTlsStream::Rustls arm은 주석처리된 죽은 코드). zenoh-pico endpoint.h도 tcp/udp/bt/serial/ws/tls만, wss schema 없음.",
+        "atomic: ledger entries 737->738, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(검증 라운드)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311od = active 스카우팅 -> TLS thin wiring(R311oc seam이 연 'scouting이 tls 미도달' 구조 호 완성). multicast-discovered tls/ locator가 open_session_at + DialConfig(cert)로 dial_locator tls arm -> dial_tls -> Established. 프로덕션 코드 무변경(seam이 R311oc에서 이미 cfg-thread); multicast-discovered 경로가 그 seam을 끝까지 운반함을 실증하는 e2e 검증 라운드. round2(tcp)의 TLS 아날로그.",
+        "wss CLOSED(option b로 이 carry에 묶음): zenoh 정본 소스(rev 49c8a53) 직접 read 결과 zenoh-link-wss crate 부재 + ws 링크는 평문 ws-over-TCP만(WS_LOCATOR_PREFIX=\"ws\", TLS backend 미링크). pico도 wss schema 없음. wss는 ws+tls 합성으로 기술적 가능하나 zenoh 카탈로그에 없어 구현하면 north-star(카탈로그 충실성) 위반 = 트랙 종결, NEXT 후보에서 제외. zenoh secure transport는 tls/quic이고 wz는 tls 보유; WebSocket 암호화는 zenoh 모델상 TLS-terminating proxy 책임.",
+        "메타: zenoh-rust 체크아웃은 비어있었으나(carry 'empty' 정확) bare git db(/home/coin/.cargo/git/db/zenoh-9c599d5ef3e0480e, 21M)는 온전 -> git archive로 정본 checkout(.cargo/git/checkouts/zenoh-*/49c8a53/) 복원 = 오프라인 재확보. 이후 zenoh 카탈로그 검증은 직접 read 즉시 가능([[feedback-diagnose-before-carry]] — blocker 맹종 않고 가장 싼 validate로 falsify).",
+        "미완(정직, 후속): TLS-reconnect(reconnect.rs가 &DialConfig::default() 재다이얼; DialConfig 보존 필요) / mTLS(client cert를 ClientConfig에; 미테스트) / cert PEM 로딩 헬퍼 / scouting->TLS 프로덕션 composer(현재 합성은 test-level; open_session_at이 seam이라 호출자 합성이 설계대로 = 정직한 비대칭).",
+        "NEXT: TLS-reconnect / mTLS+PEM / pico parity % 재계산. UNPUSHED 예정: R311od(feat + docs/atomic) = 2 commits. push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
