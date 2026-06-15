@@ -29,7 +29,9 @@ use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, DriverLoopOutcome,
 };
-use wz_runtime_tokio::session_open::{connect_and_open_session, OpenError, DEFAULT_OPEN_TICK_MS};
+use wz_runtime_tokio::session_open::{
+    connect_and_open_session, DialConfig, OpenError, DEFAULT_OPEN_TICK_MS,
+};
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
 
@@ -85,9 +87,13 @@ async fn connect_and_open_reaches_established_against_wz_acceptor() {
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
     params.zid = vec![0x01; 4];
+    // The dial future is held across `join!`, so bind the cert-free config to
+    // a `let` to outlive the `&` borrow (idiomatic borrow-across-await).
+    let cfg = DialConfig::default();
     let initiator_fut = connect_and_open_session(
         locator,
         params,
+        &cfg,
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
@@ -133,6 +139,7 @@ async fn silent_peer_surfaces_handshake_timeout() {
     let result = connect_and_open_session(
         locator,
         params,
+        &DialConfig::default(),
         TokioTime::new(),
         None, // production wall-clock path: no iteration cap
         DEFAULT_OPEN_TICK_MS,
@@ -188,6 +195,7 @@ async fn enlarging_init_ack_surfaces_caps_rejected() {
     let result = connect_and_open_session(
         locator,
         fixture_session_init_params(),
+        &DialConfig::default(),
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,

@@ -46,7 +46,9 @@ use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, poll_and_dispatch_one, DriverLoopOutcome,
     SessionInitParams,
 };
-use wz_runtime_tokio::session_open::{open_session_at, OpenError, DEFAULT_OPEN_TICK_MS};
+use wz_runtime_tokio::session_open::{
+    open_session_at, DialConfig, OpenError, DEFAULT_OPEN_TICK_MS,
+};
 // R311if — the static-mode open path is gated on `scouting-static`; the
 // mode-agnostic `open_session_at` tests stay in the default run.
 #[cfg(feature = "scouting-static")]
@@ -136,9 +138,12 @@ async fn open_session_at_tcp_reaches_established() {
     let addr = listener.local_addr().expect("addr");
     let acceptor = drive_acceptor_to_established(listener);
     let loc = format!("tcp/{addr}");
+    // Held across `join!` -> bind the cert-free config to outlive the borrow.
+    let cfg = DialConfig::default();
     let initiator = open_session_at(
         &loc,
         initiator_params(),
+        &cfg,
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
@@ -211,9 +216,12 @@ async fn open_session_at_udp_reaches_established() {
     let addr = acc_socket.local_addr().expect("acceptor addr");
     let acceptor = drive_udp_acceptor_to_established(acc_socket);
     let loc = format!("udp/{addr}");
+    // Held across `join!` -> bind the cert-free config to outlive the borrow.
+    let cfg = DialConfig::default();
     let initiator = open_session_at(
         &loc,
         initiator_params(),
+        &cfg,
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
@@ -236,6 +244,7 @@ async fn open_session_at_malformed_is_bad_locator() {
     let result = open_session_at(
         "not-a-locator",
         initiator_params(),
+        &DialConfig::default(),
         TokioTime::new(),
         Some(4),
         DEFAULT_OPEN_TICK_MS,
@@ -262,9 +271,12 @@ async fn open_session_static_skips_unreachable_to_first_reachable() {
     let acceptor = drive_acceptor_to_established(good_listener);
 
     let connect = vec![format!("tcp/{dead}"), format!("tcp/{good}")];
+    // Held across `join!` -> bind the cert-free config to outlive the borrow.
+    let cfg = DialConfig::default();
     let initiator = open_session_static(
         &connect,
         initiator_params(),
+        &cfg,
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,
@@ -289,6 +301,7 @@ async fn open_session_static_empty_is_no_reachable() {
     let result = open_session_static(
         &[],
         initiator_params(),
+        &DialConfig::default(),
         TokioTime::new(),
         Some(4),
         DEFAULT_OPEN_TICK_MS,
@@ -317,6 +330,7 @@ async fn open_session_static_all_unreachable_is_no_reachable() {
     let result = open_session_static(
         &connect,
         initiator_params(),
+        &DialConfig::default(),
         TokioTime::new(),
         Some(4),
         DEFAULT_OPEN_TICK_MS,

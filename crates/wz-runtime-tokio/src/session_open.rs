@@ -67,7 +67,11 @@ use tokio_serial::SerialStream;
 // rustls `TlsStream<TcpStream>` produced by `tls_pipeline::dial_tls`/
 // `accept_tls`; `dial_locator` never builds it (no cert config in a locator).
 #[cfg(feature = "transport-link-tls")]
-use crate::tls_pipeline::{wire_tls_stream, TlsReadDriver};
+use crate::tls_pipeline::{dial_tls, wire_tls_stream, TlsReadDriver};
+#[cfg(feature = "transport-link-tls")]
+use tokio_rustls::rustls::pki_types::ServerName;
+#[cfg(feature = "transport-link-tls")]
+use tokio_rustls::rustls::ClientConfig;
 #[cfg(feature = "transport-link-tls")]
 use tokio_rustls::TlsStream;
 
@@ -91,6 +95,48 @@ use tokio_tungstenite::WebSocketStream;
 /// accurate to <3% while the inbound `poll_event` races the tick so a frame
 /// still resolves the instant it arrives.
 pub const DEFAULT_OPEN_TICK_MS: u64 = 50;
+
+/// Host-tier dial configuration threaded through the locator dial seam — the
+/// wz analogue of zenoh-pico's `session_cfg`, which `_z_new_link_tls` reads at
+/// link creation (`src/link/unicast/tls.c`). It carries the out-of-band
+/// material a locator string cannot: today the TLS client config + server name
+/// a `tls/...` dial needs. This is what makes the dial seam the SINGLE seam for
+/// EVERY transport (R311oc) — `tls` is no longer special-cased to an explicit
+/// path; it dials from a locator like `tcp`/`udp`/`ws`, just parameterised by
+/// this config (exactly as pico threads `session_cfg`).
+///
+/// Signature-stable across feature toggles ([[feedback-signature-stability]]):
+/// the struct is ALWAYS present, only its fields are cfg-gated, so the dial
+/// seam's signature never shifts when `transport-link-tls` flips. Cert-free
+/// transports (tcp/udp/ws/serial) ignore it — they take [`DialConfig::default`].
+///
+/// Taken BY REFERENCE by the dial seam, mirroring pico's
+/// `const _z_config_t *session_cfg` (the config is session-scoped and shared:
+/// a static-locator list or a reconnect re-reads the SAME config across many
+/// dials, so borrowing expresses that — by-value would clone a shared thing
+/// per attempt). The TLS material is cloned ONCE, lazily, only when a TLS dial
+/// actually happens ([`dial_locator`]'s tls arm). A caller that holds the dial
+/// future across a `join!` binds the config to a `let` so it outlives the
+/// borrow — the idiomatic Rust handling of a borrow-across-await.
+#[derive(Default)]
+pub struct DialConfig {
+    /// TLS client material for a `tls/...` dial. `None` (the default) => a
+    /// `tls/...` locator dials to a typed `Unsupported` error (no certs to
+    /// verify the peer with), so a TLS dial is opt-in by supplying this.
+    #[cfg(feature = "transport-link-tls")]
+    pub tls: Option<TlsDialConfig>,
+}
+
+/// The TLS material a `tls/...` dial needs beyond the locator's addr: the
+/// rustls [`ClientConfig`] (root trust / optional client cert for mTLS) and the
+/// [`ServerName`] to verify (SNI / cert-name). Mirrors the connect side of
+/// pico's TLS `session_cfg` keys (`TLS_CONFIG_ROOT_CA_CERTIFICATE` /
+/// `CONNECT_CERTIFICATE` / `VERIFY_NAME_ON_CONNECT`, `tls.c`).
+#[cfg(feature = "transport-link-tls")]
+pub struct TlsDialConfig {
+    pub client_config: Arc<ClientConfig>,
+    pub server_name: ServerName<'static>,
+}
 
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
 /// spanning every link transport (R311ez TCP/UDP; R311nv serial).
@@ -119,9 +165,11 @@ pub enum DialedLink {
     /// TLS handshake) has ALREADY run by the time the stream is wrapped:
     /// [`crate::tls_pipeline::dial_tls`] (client) / [`crate::tls_pipeline::accept_tls`]
     /// (server) drive it before returning, so the steady-state split stays
-    /// uniform with TCP. NOT produced by [`dial_locator`] — a `tls/...` locator
-    /// carries no cert config, so a caller builds this explicitly and hands it
-    /// to `initiate_and_open_session` / `accept_and_open_session`.
+    /// uniform with TCP. Produced by [`dial_locator`] when its [`DialConfig`]
+    /// carries the TLS client config (R311oc — TLS now dials from a `tls/...`
+    /// locator like every other transport), or by an explicit
+    /// [`crate::tls_pipeline::dial_tls`] caller; either feeds
+    /// `initiate_and_open_session` / `accept_and_open_session`.
     ///
     /// `Box`ed: a handshaked `TlsStream` carries the full rustls session
     /// state (buffers + crypto), so an unboxed variant would bloat every
@@ -161,7 +209,18 @@ pub enum DialedLink {
 /// stream — the one transport that handshakes at dial time, so the steady
 /// state stays uniform. A `serial/...` string only reaches this arm when the
 /// feature is on; otherwise it never parses to [`AnyLocator::Serial`].
-pub async fn dial_locator(locator: AnyLocator) -> io::Result<DialedLink> {
+///
+/// `cfg` (R311oc) supplies out-of-band dial material a locator string cannot
+/// carry — today the TLS client config a `tls/...` dial needs. Cert-free
+/// transports (tcp/udp/ws/serial) ignore it; `tls` reads `cfg.tls` (absent =>
+/// typed `Unsupported`). This is what lets the dial seam handle EVERY transport
+/// uniformly — pico threads the same material via `session_cfg`.
+pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<DialedLink> {
+    // `cfg` is consumed only by the tls arm; discard it loudly in builds
+    // without that backend so the always-present seam signature carries no
+    // dead-param warning.
+    #[cfg(not(feature = "transport-link-tls"))]
+    let _ = cfg;
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
             Proto::Tcp => Ok(DialedLink::Tcp(dial_tcp(ip.addr).await?)),
@@ -175,17 +234,29 @@ pub async fn dial_locator(locator: AnyLocator) -> io::Result<DialedLink> {
                 io::ErrorKind::Unsupported,
                 "udp session-open requires the transport-link-udp feature",
             )),
-            // R311oa — `tls/...` parses to `Proto::Tls` unconditionally, but
-            // the generic locator dial cannot supply the rustls cert config a
-            // TLS handshake needs, so it is ALWAYS Unsupported here regardless
-            // of `transport-link-tls`. A TLS session dials through
-            // `tls_pipeline::dial_tls` (with an explicit ClientConfig) +
-            // `initiate_and_open_session` — the honest split that keeps TLS
-            // POLICY (roots, client cert) in the application, not a locator.
+            // R311oc — `tls/...` dials from the locator when `cfg.tls` supplies
+            // the rustls client config + server name (pico parity: the dial
+            // seam reads `session_cfg`). Absent config => typed `Unsupported`
+            // (no certs to verify the peer), so a TLS dial is opt-in via the
+            // config. `dial_tls` stays the primitive; this arm orchestrates it.
+            #[cfg(feature = "transport-link-tls")]
+            Proto::Tls => match &cfg.tls {
+                // Clone the TLS material here, lazily — only when a TLS dial
+                // actually happens (dial_tls owns its rustls config + name).
+                Some(t) => Ok(DialedLink::Tls(Box::new(
+                    dial_tls(ip.addr, t.client_config.clone(), t.server_name.clone()).await?,
+                ))),
+                None => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "tls dial requires DialConfig.tls (rustls client config + server name)",
+                )),
+            },
+            // With the backend feature off, the same `Unsupported` shape as the
+            // udp arm — `tls/...` still parses, only its dial is absent.
+            #[cfg(not(feature = "transport-link-tls"))]
             Proto::Tls => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "tls session-open dials through tls_pipeline::dial_tls with \
-                 explicit cert config, not the generic dial_locator",
+                "tls session-open requires the transport-link-tls feature",
             )),
             // R311ob — UNLIKE tls, a `ws/...` locator dials directly here: WS
             // needs no cert config, so `dial_ws` (TCP connect + RFC6455 client
@@ -592,11 +663,12 @@ pub(crate) async fn drive_open_loop(
 pub async fn connect_and_open_session(
     locator: AnyLocator,
     params: SessionInitParams,
+    cfg: &DialConfig,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let dialed = dial_locator(locator).await.map_err(OpenError::Dial)?;
+    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
     initiate_and_open_session(dialed, params, clock, max_iters, tick_interval_ms).await
 }
 
@@ -739,12 +811,13 @@ pub async fn accept_and_open_session(
 pub async fn open_session_at(
     locator: &str,
     params: SessionInitParams,
+    cfg: &DialConfig,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let parsed = parse_any_locator(locator).map_err(OpenError::BadLocator)?;
-    connect_and_open_session(parsed, params, clock, max_iters, tick_interval_ms).await
+    connect_and_open_session(parsed, params, cfg, clock, max_iters, tick_interval_ms).await
 }
 
 /// Open a session to the first reachable peer in a static `deploy.connect[]`
@@ -769,6 +842,7 @@ pub async fn open_session_at(
 pub async fn open_session_static(
     connect: &[String],
     params: SessionInitParams,
+    cfg: &DialConfig,
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -784,6 +858,7 @@ pub async fn open_session_static(
         match open_session_at(
             locator.as_str(),
             params.clone(),
+            cfg,
             clock,
             max_iters,
             tick_interval_ms,

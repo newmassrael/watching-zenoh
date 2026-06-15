@@ -56,7 +56,7 @@ use crate::session_glue::{
     SessionLinkActions,
 };
 use crate::session_open::{
-    dial_locator, initiator_open, wire_dialed_link, OpenError, OpenedSession,
+    dial_locator, initiator_open, wire_dialed_link, DialConfig, OpenError, OpenedSession,
 };
 
 /// Reconnect retry policy. The defaults are the pico literals:
@@ -149,7 +149,10 @@ impl ReconnectingSession {
     /// open handshake loop. The wz body of pico's `_z_open` re-run inside
     /// `_z_client_reopen_task_fn`.
     async fn open_attempt(&self, clock: TokioTime) -> Result<OpenedSession, OpenError> {
-        let dialed = dial_locator(AnyLocator::Ip(self.locator))
+        // Reconnect re-dials IP (tcp/udp) only — no TLS material is retained
+        // across a reconnect yet (TLS-reconnect would store the DialConfig;
+        // a documented follow-up), so the default (cert-free) config suffices.
+        let dialed = dial_locator(AnyLocator::Ip(self.locator), &DialConfig::default())
             .await
             .map_err(OpenError::Dial)?;
         let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
@@ -313,7 +316,7 @@ pub async fn open_session_with_reconnect(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<ReconnectingSession, OpenError> {
-    let dialed = dial_locator(AnyLocator::Ip(locator))
+    let dialed = dial_locator(AnyLocator::Ip(locator), &DialConfig::default())
         .await
         .map_err(OpenError::Dial)?;
     let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);

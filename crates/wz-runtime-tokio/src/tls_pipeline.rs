@@ -15,24 +15,23 @@
 //! stream default (zenoh-pico's `_z_get_link_mtu_tls` = 65535, the TCP
 //! ceiling), so — like TCP — the write driver overrides nothing.
 //!
-//! ## Cert config lives at the call site, not in the locator
+//! ## Cert config is threaded through the dial seam (not the locator string)
 //!
 //! zenoh-pico reads TLS cert material from the session config
 //! (`_z_new_link_tls(zl, endpoint, session_cfg)`, `src/link/unicast/tls.c`).
-//! wz supplies it at the explicit [`dial_tls`] / [`accept_tls`] call site —
-//! the rustls [`ClientConfig`] / [`ServerConfig`] — NOT through the generic
-//! `dial_locator` (a `tls/...` locator string carries no cert material, so
-//! `dial_locator` returns `Unsupported` for it). A caller dials its own TLS
-//! stream and hands the resulting [`crate::session_open::DialedLink::Tls`] to
-//! `initiate_and_open_session` / `accept_and_open_session`, exactly as
-//! wz-ap-demo dials its own `TcpStream` and calls `initiate_and_open_session`
-//! directly. This keeps the TLS POLICY (which roots to trust, which cert to
-//! present) in the application, not baked into a transport string.
+//! wz mirrors this (R311oc): a `tls/...` locator dials through the generic
+//! [`crate::session_open::dial_locator`] like every other transport, with the
+//! rustls [`ClientConfig`] + server name supplied out-of-band via the threaded
+//! [`crate::session_open::DialConfig`]`.tls`. A locator with no such config
+//! dials to a typed `Unsupported` (no certs to verify the peer), so a TLS dial
+//! is opt-in. This keeps the TLS POLICY (which roots to trust, which cert to
+//! present) in the application — passed as config, not baked into a transport
+//! string — while making the dial seam the single path for ALL transports.
 //!
-//! Threading an ambient transport-cert-config seam THROUGH `dial_locator` (so
-//! a discovered `tls/...` locator dials with session-supplied certs, matching
-//! pico's `session_cfg`) is the next structural step on this track; today's
-//! explicit-dial path is the bounded first layer.
+//! [`dial_tls`] / [`accept_tls`] are the PRIMITIVES `dial_locator` (and any
+//! explicit caller, e.g. an acceptor that owns its `TcpListener::accept`) build
+//! on; they produce a [`crate::session_open::DialedLink::Tls`] for
+//! `initiate_and_open_session` / `accept_and_open_session`.
 
 use std::io;
 use std::net::SocketAddr;
@@ -61,8 +60,9 @@ pub type TlsReadDriver = StreamReadDriver<ReadHalf<TlsStream<TcpStream>>>;
 /// client handshake against `server_name` (SNI + cert-name verification)
 /// using `config`. Returns the handshaked [`TlsStream`] ready for
 /// [`wire_tls_stream`]. The trust policy is the caller's `config` (a
-/// [`ClientConfig`] whose root store trusts the peer's cert); `dial_locator`
-/// cannot supply it, so a `tls/...` session dials HERE, not there.
+/// [`ClientConfig`] whose root store trusts the peer's cert). The primitive
+/// `dial_locator` calls when a `tls/...` locator carries a
+/// [`crate::session_open::DialConfig`]`.tls` (R311oc); also callable directly.
 pub async fn dial_tls(
     addr: SocketAddr,
     config: Arc<ClientConfig>,

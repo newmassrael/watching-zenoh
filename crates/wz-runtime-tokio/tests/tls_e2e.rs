@@ -47,11 +47,13 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, initiate_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, TlsDialConfig,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
-use wz_runtime_tokio::tls_pipeline::{accept_tls, dial_tls};
+use wz_runtime_tokio::tls_pipeline::accept_tls;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
@@ -118,21 +120,32 @@ async fn wz_to_wz_over_tls_reaches_established_and_delivers_put() {
         .expect("acceptor reaches Established over tls")
     };
     let init_open = async {
+        // R311oc — dial TLS FROM THE LOCATOR via the config-threaded seam: a
+        // `tls/...` locator + a DialConfig carrying the rustls client config +
+        // server name flows through connect_and_open_session -> dial_locator ->
+        // dial_tls. This proves the SEAM (pico `session_cfg` parity), not a
+        // bespoke explicit dial — TLS now dials from a locator like every other
+        // transport.
+        let locator = parse_any_locator(&format!("tls/{addr}")).expect("parse tls locator");
         let server_name = ServerName::try_from("localhost").expect("server name");
-        let tls = dial_tls(addr, client_config, server_name)
-            .await
-            .expect("client tls handshake");
+        let cfg = DialConfig {
+            tls: Some(TlsDialConfig {
+                client_config,
+                server_name,
+            }),
+        };
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
-        initiate_and_open_session(
-            DialedLink::Tls(Box::new(tls)),
+        connect_and_open_session(
+            locator,
             params,
+            &cfg,
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,
         )
         .await
-        .expect("initiator reaches Established over tls")
+        .expect("initiator reaches Established over tls via locator")
     };
     let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
 
@@ -218,5 +231,24 @@ async fn wz_to_wz_over_tls_reaches_established_and_delivers_put() {
         fired.load(Ordering::SeqCst),
         1,
         "exactly one delivery from the Put over the tls link"
+    );
+}
+
+/// R311oc contract (negative): a `tls/...` locator with NO TLS config dials to
+/// a typed `Unsupported` error — a TLS dial is opt-in via `DialConfig.tls`
+/// (the seam cannot verify a peer with no certs). The positive direction
+/// (config present -> dials -> Established) is the main test above.
+#[tokio::test]
+async fn dial_locator_tls_without_config_is_unsupported() {
+    use wz_runtime_tokio::session_open::dial_locator;
+    let locator = parse_any_locator("tls/127.0.0.1:9").expect("parse tls locator");
+    // `DialedLink` is not `Debug`, so destructure rather than `expect_err`.
+    let Err(err) = dial_locator(locator, &DialConfig::default()).await else {
+        panic!("tls dial without config must error, got Ok");
+    };
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::Unsupported,
+        "tls dial without DialConfig.tls is Unsupported"
     );
 }

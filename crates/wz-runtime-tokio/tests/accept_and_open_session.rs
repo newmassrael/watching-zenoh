@@ -22,8 +22,8 @@ use tokio::net::{TcpListener, TcpStream};
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, initiate_and_open_session, DialedLink,
-    OpenError, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, connect_and_open_session, initiate_and_open_session, DialConfig,
+    DialedLink, OpenError, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_any_locator;
@@ -57,9 +57,13 @@ async fn accept_and_open_reaches_established_against_wz_initiator() {
     let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
     params.zid = vec![0x01; 4];
+    // The dial future is held across `join!`, so bind the cert-free config to
+    // a `let` to outlive the `&` borrow (idiomatic borrow-across-await).
+    let cfg = DialConfig::default();
     let initiator_fut = connect_and_open_session(
         locator,
         params,
+        &cfg,
         TokioTime::new(),
         Some(ITER_CAP),
         DEFAULT_OPEN_TICK_MS,

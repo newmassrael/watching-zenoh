@@ -38,7 +38,7 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, DialedLink, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::ws_pipeline::accept_ws;
@@ -85,6 +85,7 @@ async fn wz_to_wz_over_ws_reaches_established_and_delivers_put() {
         connect_and_open_session(
             locator,
             params,
+            &DialConfig::default(),
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,
