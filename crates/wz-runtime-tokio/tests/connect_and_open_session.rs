@@ -31,7 +31,7 @@ use wz_runtime_tokio::session_glue::{
 };
 use wz_runtime_tokio::session_open::{connect_and_open_session, OpenError, DEFAULT_OPEN_TICK_MS};
 use wz_runtime_tokio_test_support::fixture_session_init_params;
-use wz_session_core::locator::parse_locator;
+use wz_session_core::locator::parse_any_locator;
 
 const ITER_CAP: usize = 64;
 
@@ -82,7 +82,7 @@ async fn connect_and_open_reaches_established_against_wz_acceptor() {
     };
 
     // ── Initiator side: the lib open path under test.
-    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
     params.zid = vec![0x01; 4];
     let initiator_fut = connect_and_open_session(
@@ -128,7 +128,7 @@ async fn silent_peer_surfaces_handshake_timeout() {
         drop(stream);
     });
 
-    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let params = fixture_session_init_params();
     let result = connect_and_open_session(
         locator,
@@ -184,7 +184,7 @@ async fn enlarging_init_ack_surfaces_caps_rejected() {
         drop(stream);
     });
 
-    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let result = connect_and_open_session(
         locator,
         fixture_session_init_params(),

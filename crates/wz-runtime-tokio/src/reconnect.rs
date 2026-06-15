@@ -40,7 +40,12 @@ use std::sync::Arc;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
-use wz_session_core::locator::ParsedLocator;
+// R311nv — reconnect stays IP-only (`ParsedLocator`): pico's
+// `Z_FEATURE_AUTO_RECONNECT` is a client TCP/UDP re-dial path, and serial is
+// a point-to-point tty without that reopen-task model. The retained locator
+// is wrapped `AnyLocator::Ip` at the (now `AnyLocator`-typed) `dial_locator`
+// call sites.
+use wz_session_core::locator::{AnyLocator, ParsedLocator};
 use wz_session_core::reconnect::{ReplayDeclarationsError, SwappableLink};
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -144,7 +149,9 @@ impl ReconnectingSession {
     /// open handshake loop. The wz body of pico's `_z_open` re-run inside
     /// `_z_client_reopen_task_fn`.
     async fn open_attempt(&self, clock: TokioTime) -> Result<OpenedSession, OpenError> {
-        let dialed = dial_locator(self.locator).await.map_err(OpenError::Dial)?;
+        let dialed = dial_locator(AnyLocator::Ip(self.locator))
+            .await
+            .map_err(OpenError::Dial)?;
         let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
         let old = self.swappable.swap(outbound);
         drop(old);
@@ -306,7 +313,9 @@ pub async fn open_session_with_reconnect(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<ReconnectingSession, OpenError> {
-    let dialed = dial_locator(locator).await.map_err(OpenError::Dial)?;
+    let dialed = dial_locator(AnyLocator::Ip(locator))
+        .await
+        .map_err(OpenError::Dial)?;
     let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
     let swappable = Arc::new(SwappableLink::<TokioRuntime>::new(outbound));
     let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = swappable.clone();

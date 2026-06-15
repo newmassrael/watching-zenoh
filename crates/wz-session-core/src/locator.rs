@@ -89,6 +89,74 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     Ok(ParsedLocator { proto, addr })
 }
 
+// ─── unified locator (IP | Serial) ───
+//
+// R311nv — the SERIAL link backend (`wz-runtime-tokio::serial_pipeline`)
+// needs a `serial/...` locator to reach a dial seam alongside the IP
+// `tcp`/`udp` endpoints. A `serial/...` target is NOT a numeric
+// [`SocketAddr`] (it is a device path or a GPIO pin pair, with a baud
+// rate), so it cannot be a [`Proto`] variant on [`ParsedLocator`]; it is a
+// genuinely different endpoint shape. The textbook composition (the
+// serial_link B7 seam note) is a sum type over the per-scheme leaves, NOT
+// a third combined parser: [`AnyLocator`] holds the leaf output, and
+// [`parse_any_locator`] is a thin scheme-dispatcher delegating to
+// [`parse_locator`] (IP) or [`crate::serial_link::parse_serial_locator`]
+// (serial). Each leaf keeps its own scheme re-check, so a mis-routed
+// string still errors in-leaf.
+
+/// A locator parsed into its transport endpoint, across every link
+/// transport. The scheme-dispatch sum type whose arms are the outputs of
+/// the per-scheme parse leaves; [`parse_any_locator`] builds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnyLocator {
+    /// An IP endpoint (`tcp/...` / `udp/...`) — see [`ParsedLocator`].
+    Ip(ParsedLocator),
+    /// A serial endpoint (`serial/...`) — see
+    /// [`crate::serial_link::SerialEndpoint`]. Present only when the host
+    /// can carry serial (the `transport-link-serial` feature gates the
+    /// whole `serial_link` leaf); without it a `serial/...` string surfaces
+    /// as [`LocatorParseError::UnknownProto`] through the IP leaf.
+    #[cfg(feature = "transport-link-serial")]
+    Serial(crate::serial_link::SerialEndpoint),
+}
+
+/// Why a locator string did not parse into an [`AnyLocator`] — the
+/// composed error over the per-scheme leaf errors (serial_link B7 seam
+/// note: `enum { Ip(LocatorParseError), Serial(SerialLocatorError) }`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnyLocatorError {
+    /// The IP leaf ([`parse_locator`]) rejected the string. Also the home
+    /// of an unknown scheme (e.g. `serial/...` with the serial leaf not
+    /// compiled in) via [`LocatorParseError::UnknownProto`].
+    Ip(LocatorParseError),
+    /// The serial leaf ([`crate::serial_link::parse_serial_locator`])
+    /// rejected a `serial/...` string.
+    #[cfg(feature = "transport-link-serial")]
+    Serial(crate::serial_link::SerialLocatorError),
+}
+
+/// Parse any zenoh locator string into an [`AnyLocator`], dispatching on
+/// the scheme (the substring before the first `/`) to the matching leaf.
+///
+/// `serial/...` routes to [`crate::serial_link::parse_serial_locator`] when
+/// the `transport-link-serial` feature is on; everything else (and, with
+/// the feature off, `serial/...` too) routes to the IP leaf
+/// [`parse_locator`], which reports an unknown scheme as
+/// [`LocatorParseError::UnknownProto`]. This is the single seam through
+/// which the session-open path turns a discovered / configured locator into
+/// a dialable endpoint, regardless of transport.
+pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
+    #[cfg(feature = "transport-link-serial")]
+    if matches!(locator.split_once('/'), Some(("serial", _))) {
+        return crate::serial_link::parse_serial_locator(locator)
+            .map(AnyLocator::Serial)
+            .map_err(AnyLocatorError::Serial);
+    }
+    parse_locator(locator)
+        .map(AnyLocator::Ip)
+        .map_err(AnyLocatorError::Ip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +225,60 @@ mod tests {
         assert_eq!(
             parse_locator("tcp/1.2.3.4:99999"),
             Err(LocatorParseError::BadAddress("1.2.3.4:99999".to_string()))
+        );
+    }
+
+    // ─── unified scheme-dispatcher ───
+
+    #[test]
+    fn parse_any_routes_ip_to_the_ip_leaf() {
+        let any = parse_any_locator("tcp/192.168.1.10:7447").expect("ip locator");
+        assert_eq!(
+            any,
+            AnyLocator::Ip(parse_locator("tcp/192.168.1.10:7447").unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_any_propagates_ip_leaf_error() {
+        // A malformed IP address surfaces the IP leaf error verbatim,
+        // wrapped in the AnyLocator composition.
+        assert_eq!(
+            parse_any_locator("tcp/example.org:7447"),
+            Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(
+                "example.org:7447".to_string()
+            )))
+        );
+    }
+
+    #[cfg(feature = "transport-link-serial")]
+    #[test]
+    fn parse_any_routes_serial_to_the_serial_leaf() {
+        use crate::serial_link::{parse_serial_locator, SerialLocatorError};
+        let any = parse_any_locator("serial//dev/ttyUSB0#baudrate=115200").expect("serial locator");
+        assert_eq!(
+            any,
+            AnyLocator::Serial(
+                parse_serial_locator("serial//dev/ttyUSB0#baudrate=115200").unwrap()
+            )
+        );
+        // And the serial leaf error composes through too.
+        assert_eq!(
+            parse_any_locator("serial//dev/ttyUSB0"),
+            Err(AnyLocatorError::Serial(SerialLocatorError::MissingBaudrate))
+        );
+    }
+
+    #[cfg(not(feature = "transport-link-serial"))]
+    #[test]
+    fn parse_any_serial_without_feature_is_unknown_proto() {
+        // With the serial leaf not compiled in, a serial/... string falls to
+        // the IP leaf, which reports it as an unknown scheme.
+        assert_eq!(
+            parse_any_locator("serial//dev/ttyUSB0#baudrate=115200"),
+            Err(AnyLocatorError::Ip(LocatorParseError::UnknownProto(
+                "serial".to_string()
+            )))
         );
     }
 }

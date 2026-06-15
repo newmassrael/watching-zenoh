@@ -422,12 +422,24 @@ pub mod link_pipeline;
 #[cfg(feature = "transport-link-udp")]
 pub mod udp_pipeline;
 
+/// R311nv — host tty backend for the SERIAL link (the 2nd layer of the
+/// R311nt 2-layer split; the transport-agnostic framing/handshake logic is
+/// [`wz_session_core::serial_link`]). `dial_serial`/`accept_serial` open the
+/// tty ([`tokio_serial`]) + drive the link handshake; `wire_serial_stream`
+/// splits the connected stream into the read/write-driver + writer-task
+/// triple the session FSM consumes, COBS-framing each payload via the R311ns
+/// serial codec. Gated `transport-link-serial` only — the drivers compile
+/// standalone; the `session_open` DialedLink::Serial integration rides the
+/// `transport-link-tcp`-gated session-open module as an additive serial arm.
+#[cfg(feature = "transport-link-serial")]
+pub mod serial_pipeline;
+
 /// R311eu — mode-agnostic session-open orchestration over the R311et
-/// [`link_pipeline`]. `dial_locator` dispatches a `ParsedLocator`'s protocol
-/// to a raw transport; `connect_and_open_session` dials, splits into the
-/// pipeline, wires the Initiator FSM, and drives the handshake to
-/// Established. Gated on `transport-unicast` too because it drives the
-/// `session_fsm_unicast` FSM.
+/// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
+/// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`
+/// dials, splits into the pipeline, wires the Initiator FSM, and drives the
+/// handshake to Established. Gated on `transport-unicast` too because it
+/// drives the `session_fsm_unicast` FSM.
 #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
 pub mod session_open;
 

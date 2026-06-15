@@ -682,7 +682,7 @@ layer_c1c_cargo_test_codec_declare() {
     (cd crates && cargo test -p wz-session-core --features codec-declare --quiet)
 }
 
-# ─── Layer C1t — cargo test -p wz-session-core --features transport-link-serial ─
+# ─── Layer C1t — SERIAL link: wz-session-core logic + wz-runtime-tokio tty ─
 #
 # R311nt: same shape as C1c. The `serial_link` module (SERIAL upper
 # protocol: framing + handshake + locator logic) and its byte-parity
@@ -693,10 +693,24 @@ layer_c1c_cargo_test_codec_declare() {
 # invocation drops the default keyexpr matcher features to prove the
 # serial logic composes standalone (the feature pulls only alloc +
 # codec-serial, no keyexpr dependency).
+#
+# R311nv: the lane now ALSO covers the host tty BACKEND
+# (`wz-runtime-tokio::serial_pipeline`, the 2nd layer of the SERIAL split):
+# the `serial_pipeline` lib unit tests (PTY-pair handshake + data-frame
+# round-trip), the `serial_pty_e2e` integration test (wz<->wz over an
+# openpty serial pair: link handshake -> zenoh transport Established ->
+# Push byte-exact), and a clippy gate on the `transport-link-serial` cfg
+# (NOT in default features, so the global clippy lane does not reach it).
+# Both serial test files gate `#![cfg(feature = "transport-link-serial")]`,
+# so Layer C1's `cargo test --workspace` skips them — this lane is where
+# the runtime serial backend is exercised.
 layer_c1t_cargo_test_serial() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-link-serial --quiet \
-        && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet)
+        && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings)
 }
 
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──

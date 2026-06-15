@@ -348,11 +348,25 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 #                            batch_size negotiation is CORE (ungated)
 #                            since R311kl — pico negotiates outside its
 #                            batching gate (unicast/transport.c:135-140).
-# 11 reserved (link-tls/quic/ws/unixsock/vsock/serial, multicast,
-# fragmentation, compression, shm, lowlatency) stay declaration-only
-# at the wz facade Cargo.toml level; this crate does not own them.
+# reserved (link-tls/quic/ws/unixsock/vsock, compression, shm,
+# lowlatency) stay declaration-only at the wz facade Cargo.toml level;
+# this crate does not own them.
 transport-link-tcp = []
 transport-link-udp = []
+# R311nv — host tty backend for the SERIAL link. Forwards the
+# wz-session-core `transport-link-serial` gate (the R311nt
+# transport-agnostic `serial_link` framing/handshake/locator logic +
+# the R311ns `codec-serial` framing codecs) and pulls the optional
+# `tokio-serial` dep that `serial_pipeline` opens the tty / drives the
+# async byte I/O over. Like `transport-link-udp`, the session-open
+# integration (DialedLink::Serial / dial_locator serial arm) lives in
+# the `transport-link-tcp`-gated `session_open` module as an additive
+# `#[cfg(transport-link-serial)]` arm, so a serial session-open build
+# also carries tcp (the "session_open is available" gate) exactly as a
+# udp session-open build does. The `serial_pipeline` drivers themselves
+# compile standalone under this feature alone. NOT in the default set —
+# zenoh-pico ships serial default-OFF (optional Z_FEATURE_LINK_SERIAL).
+transport-link-serial = ["wz-session-core/transport-link-serial", "dep:tokio-serial"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
@@ -612,6 +626,18 @@ wz-codegen-build = { path = "../wz-codegen-build" }
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
+# R311nv — host tty backend for the SERIAL link, behind the optional
+# `transport-link-serial` feature (`dep:tokio-serial`). `SerialStream`
+# is `AsyncRead + AsyncWrite` (a `tokio::io::unix::AsyncFd` over the tty
+# fd), so `serial_pipeline` splits + frames it exactly as the TCP
+# pipeline does a `TcpStream`, and `SerialStream::pair()` (openpty) gives
+# the wz<->wz PTY-loopback e2e its two connected ends. `default-features
+# = false`: tokio-serial's only default is the `libudev` port-enumeration
+# backend (mio-serial -> serialport), which we never call (we open a path
+# / pair, not enumerate) and which would add a libudev system-lib build
+# dep. With it off, serialport is pulled `default-features = false` (no
+# libudev) all the way down — no system dependency.
+tokio-serial = { version = "5.4", default-features = false, optional = true }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec
 # emit/include of every codec-* is governed strictly by the matching
 # `codec-*` forward above. Without disabling defaults the codec

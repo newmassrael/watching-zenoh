@@ -26,7 +26,7 @@ use wz_runtime_tokio::session_open::{
     OpenError, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
-use wz_session_core::locator::parse_locator;
+use wz_session_core::locator::parse_any_locator;
 
 const ITER_CAP: usize = 64;
 
@@ -54,7 +54,7 @@ async fn accept_and_open_reaches_established_against_wz_initiator() {
     };
 
     // ── Initiator side: the established dial-side helper.
-    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
     let mut params = fixture_session_init_params();
     params.zid = vec![0x01; 4];
     let initiator_fut = connect_and_open_session(

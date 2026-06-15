@@ -4,7 +4,7 @@
 //! R311eu — mode-agnostic session-open orchestration over the R311et link
 //! pipeline.
 //!
-//! [`dial_locator`] dispatches a [`ParsedLocator`]'s protocol to a raw
+//! [`dial_locator`] dispatches an [`AnyLocator`]'s scheme to a raw
 //! transport (the mode-agnostic seam: a discovered locator is dialed the
 //! same way regardless of how scouting found it).
 //! [`connect_and_open_session`] dials, splits the connection into the
@@ -16,9 +16,13 @@
 //! This is the reusable lib form of the open path wz-ap-demo's `runner.rs`
 //! assembles inline; R311ev makes the demo consume it (removing the
 //! duplication). R311ew wired the static scouting -> parse -> dial -> open
-//! seam; R311ez generalises the dial to a transport union so a `udp/...`
+//! seam; R311ez generalised the dial to a transport union so a `udp/...`
 //! locator opens a datagram session ([`crate::udp_pipeline`]) the same way
-//! a `tcp/...` locator opens a stream session.
+//! a `tcp/...` locator opens a stream session. R311nv extends the union to
+//! the serial tty backend ([`crate::serial_pipeline`]): a `serial/...`
+//! locator dials through the link handshake into the same split path, with
+//! the `AnyLocator` sum type ([`wz_session_core::locator`]) the scheme
+//! dispatcher consumes.
 
 use std::io;
 use std::sync::Arc;
@@ -27,7 +31,7 @@ use sce_rust_runtime::Engine;
 use tokio::net::TcpStream;
 
 use wz_runtime_core::TimeSource;
-use wz_session_core::locator::{parse_locator, LocatorParseError, ParsedLocator, Proto};
+use wz_session_core::locator::{parse_any_locator, AnyLocator, AnyLocatorError, Proto};
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::synth_static_locators;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
@@ -48,6 +52,15 @@ use std::net::SocketAddr;
 #[cfg(feature = "transport-link-udp")]
 use tokio::net::UdpSocket;
 
+// R311nv — the serial arm rides this tcp+unicast-gated module as an
+// additive transport (like the udp arm above): a serial session-open build
+// also carries tcp, so the SERIAL pieces are guarded only by the
+// transport-link-serial feature here.
+#[cfg(feature = "transport-link-serial")]
+use crate::serial_pipeline::{dial_serial, wire_serial_stream, SerialReadDriver};
+#[cfg(feature = "transport-link-serial")]
+use tokio_serial::SerialStream;
+
 /// Default cadence at which [`connect_and_open_session`] sweeps the host
 /// handshake deadline (R311il — the engine-free FSM arms no `<send delay>`,
 /// so there is no SCE scheduler to pump) while waiting on the handshake. It
@@ -61,11 +74,12 @@ use tokio::net::UdpSocket;
 pub const DEFAULT_OPEN_TICK_MS: u64 = 50;
 
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
-/// spanning both protocols (R311ez). [`wire_dialed_link`] consumes it into
-/// the uniform `(InboundLink, Arc<dyn BoxedLinkDriver>, writer-handle)`
-/// triple regardless of which arm it carries, so [`connect_and_open_session`]
-/// drives a TCP stream session and a UDP datagram session through one code
-/// path.
+/// spanning every link transport (R311ez TCP/UDP; R311nv serial).
+/// [`wire_dialed_link`] consumes it into the uniform
+/// `(InboundLink, Arc<dyn BoxedLinkDriver>, writer-handle)` triple regardless
+/// of which arm it carries, so [`connect_and_open_session`] drives a TCP
+/// stream session, a UDP datagram session, and a serial tty session through
+/// one code path.
 pub enum DialedLink {
     /// A connected stream, split downstream via [`wire_tcp_stream`].
     Tcp(TcpStream),
@@ -73,33 +87,58 @@ pub enum DialedLink {
     /// [`wire_udp_socket`].
     #[cfg(feature = "transport-link-udp")]
     Udp { socket: UdpSocket, peer: SocketAddr },
+    /// A connected + link-handshaked serial tty, split downstream via
+    /// [`wire_serial_stream`] (R311nv). Unlike TCP/UDP, the serial link
+    /// handshake (INIT/INIT|ACK) has ALREADY run by the time the stream is
+    /// wrapped here — [`dial_serial`] (Initiator) / `accept_serial`
+    /// (Responder) drive it before returning, so the steady-state split
+    /// path is uniform with the other transports.
+    #[cfg(feature = "transport-link-serial")]
+    Serial(SerialStream),
 }
 
-/// Dial a parsed locator to its raw transport — the mode-agnostic dial seam.
+/// Dial a parsed [`AnyLocator`] to its raw transport — the mode-agnostic dial
+/// seam, dispatching on the locator's scheme.
 ///
-/// `Proto::Tcp` returns a connected [`TcpStream`] (split downstream by
+/// `Ip(Proto::Tcp)` returns a connected [`TcpStream`] (split downstream by
 /// [`wire_dialed_link`] via [`wire_tcp_stream`], per the R311et raw-dial
 /// decision: the stream is dialed once and the split shape is chosen by the
 /// consumer, not buried inside a unified driver).
 ///
-/// `Proto::Udp` binds an ephemeral local socket targeting the locator's peer
-/// ([`dial_udp`]) when the `transport-link-udp` feature is compiled in;
+/// `Ip(Proto::Udp)` binds an ephemeral local socket targeting the locator's
+/// peer ([`dial_udp`]) when the `transport-link-udp` feature is compiled in;
 /// downstream [`wire_udp_socket`] shares it into the read/write drivers. With
 /// the feature off, a `udp/...` locator surfaces a typed `Unsupported` error
 /// rather than silently mis-dialing.
-pub async fn dial_locator(locator: ParsedLocator) -> io::Result<DialedLink> {
-    match locator.proto {
-        Proto::Tcp => Ok(DialedLink::Tcp(dial_tcp(locator.addr).await?)),
-        #[cfg(feature = "transport-link-udp")]
-        Proto::Udp => Ok(DialedLink::Udp {
-            socket: dial_udp(locator.addr).await?,
-            peer: locator.addr,
-        }),
-        #[cfg(not(feature = "transport-link-udp"))]
-        Proto::Udp => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "udp session-open requires the transport-link-udp feature",
-        )),
+///
+/// `Serial` (R311nv, `transport-link-serial`) opens the tty and drives the
+/// serial-link handshake to Connected ([`dial_serial`]) before wrapping the
+/// stream — the one transport that handshakes at dial time, so the steady
+/// state stays uniform. A `serial/...` string only reaches this arm when the
+/// feature is on; otherwise it never parses to [`AnyLocator::Serial`].
+pub async fn dial_locator(locator: AnyLocator) -> io::Result<DialedLink> {
+    match locator {
+        AnyLocator::Ip(ip) => match ip.proto {
+            Proto::Tcp => Ok(DialedLink::Tcp(dial_tcp(ip.addr).await?)),
+            #[cfg(feature = "transport-link-udp")]
+            Proto::Udp => Ok(DialedLink::Udp {
+                socket: dial_udp(ip.addr).await?,
+                peer: ip.addr,
+            }),
+            #[cfg(not(feature = "transport-link-udp"))]
+            Proto::Udp => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "udp session-open requires the transport-link-udp feature",
+            )),
+        },
+        // R311nv — a `serial/...` endpoint dials through the tty backend:
+        // `dial_serial` opens the device AND drives the serial-link
+        // handshake (INIT -> INIT|ACK) to Connected before returning, so the
+        // wrapped stream is ready for the uniform steady-state split. The
+        // Initiator role is correct here: `dial_locator` is the dial (Initiator)
+        // seam; the Responder side comes up via `accept_serial`.
+        #[cfg(feature = "transport-link-serial")]
+        AnyLocator::Serial(ep) => Ok(DialedLink::Serial(dial_serial(&ep).await?)),
     }
 }
 
@@ -114,6 +153,8 @@ pub enum InboundLink {
     Tcp(TcpReadDriver),
     #[cfg(feature = "transport-link-udp")]
     Udp(UdpReadDriver),
+    #[cfg(feature = "transport-link-serial")]
+    Serial(SerialReadDriver),
 }
 
 impl LinkDriver for InboundLink {
@@ -122,6 +163,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Tcp(d) => d.open().await,
             #[cfg(feature = "transport-link-udp")]
             InboundLink::Udp(d) => d.open().await,
+            #[cfg(feature = "transport-link-serial")]
+            InboundLink::Serial(d) => d.open().await,
         }
     }
 
@@ -130,6 +173,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Tcp(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-udp")]
             InboundLink::Udp(d) => d.send(frame, reliability).await,
+            #[cfg(feature = "transport-link-serial")]
+            InboundLink::Serial(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -138,6 +183,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Tcp(d) => d.close().await,
             #[cfg(feature = "transport-link-udp")]
             InboundLink::Udp(d) => d.close().await,
+            #[cfg(feature = "transport-link-serial")]
+            InboundLink::Serial(d) => d.close().await,
         }
     }
 
@@ -146,6 +193,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Tcp(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-udp")]
             InboundLink::Udp(d) => d.poll_event().await,
+            #[cfg(feature = "transport-link-serial")]
+            InboundLink::Serial(d) => d.poll_event().await,
         }
     }
 }
@@ -173,6 +222,11 @@ pub fn wire_dialed_link(
             let (inbound, outbound, handle) = wire_udp_socket(socket, peer);
             (InboundLink::Udp(inbound), outbound, handle)
         }
+        #[cfg(feature = "transport-link-serial")]
+        DialedLink::Serial(stream) => {
+            let (inbound, outbound, handle) = wire_serial_stream(stream);
+            (InboundLink::Serial(inbound), outbound, handle)
+        }
     }
 }
 
@@ -198,7 +252,7 @@ pub enum OpenError {
     /// The locator string did not parse into a typed endpoint (R311ew —
     /// surfaced by [`open_session_at`] / [`open_session_static`] when a
     /// scouting-supplied or configured locator is malformed).
-    BadLocator(LocatorParseError),
+    BadLocator(AnyLocatorError),
     /// Dial failed (TCP connect refused, socket bind error), or the locator
     /// protocol is not compiled in (a `udp/...` locator with the
     /// `transport-link-udp` feature off surfaces a typed `Unsupported` here).
@@ -425,7 +479,7 @@ pub(crate) async fn drive_open_loop(
 /// above. `tick_interval_ms` is the SCE-scheduler pump cadence
 /// ([`DEFAULT_OPEN_TICK_MS`] for production).
 pub async fn connect_and_open_session(
-    locator: ParsedLocator,
+    locator: AnyLocator,
     params: SessionInitParams,
     clock: TokioTime,
     max_iters: Option<usize>,
@@ -578,7 +632,7 @@ pub async fn open_session_at(
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
-    let parsed = parse_locator(locator).map_err(OpenError::BadLocator)?;
+    let parsed = parse_any_locator(locator).map_err(OpenError::BadLocator)?;
     connect_and_open_session(parsed, params, clock, max_iters, tick_interval_ms).await
 }
 

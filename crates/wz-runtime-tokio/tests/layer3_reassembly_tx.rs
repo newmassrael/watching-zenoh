@@ -47,7 +47,7 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
-use wz_session_core::locator::parse_locator;
+use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
@@ -85,7 +85,7 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
         .expect("acceptor reaches Established")
     };
     let init_open = async {
-        let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
         params.batch_size = BATCH_SIZE;
