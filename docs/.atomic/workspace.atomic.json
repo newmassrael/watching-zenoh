@@ -37786,6 +37786,60 @@
         "NEXT 후보: WS backend / TLS mTLS+PEM 로딩 / cert-config locator seam threading / pico parity % 재계산(TLS 반영). UNPUSHED: R311nz(2) + R311oa(feat + docs/atomic) = 4 commits. origin/main=b67b3af=R311ny. push=명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311ob": {
+      "decision_summary": "R311ob: WebSocket-over-TCP 링크 백엔드(WS/TLS breadth 트랙 2라운드=마지막). 모델 정정: WS는 flow=DATAGRAM(pico ws.c)이라 UDP sibling — 길이 접두/커스텀 codec 불요(메모의 'serial형 codec' 폐기), 각 batch=WS BINARY 메시지. Proto::Ws parse-always + ws_pipeline(tungstenite RFC6455 dial_ws/accept_ws + datagram WsReadDriver + futures split) + DialedLink/InboundLink Ws. cert 불요라 dial_locator Ws=dialable(udp형). deps tokio-tungstenite(default-off)+futures-util. loopback e2e: initiator가 ws/ locator로 connect→Established+Put byte-exact, 20/20. transport-link-ws active. full run-ci(M+G) RUNCI_EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/locator.rs: Proto::Ws variant + parse_locator 'ws' arm(ungated parse-always — tcp 동일 numeric host:port grammar). rejects_unknown_proto 예시를 ws->quic으로(ws는 이제 known proto). 모듈/parse doc 갱신(ws를 IP leaf에 추가). parses_ws_ipv4 + parse_any_routes_ws_to_the_ip_leaf 테스트.",
+        "crates/wz-runtime-tokio/src/ws_pipeline.rs(신규, transport-link-ws 게이트): WS는 flow=DATAGRAM(pico ws.c _z_new_link_ws = Z_LINK_CAP_FLOW_DATAGRAM)이라 UDP sibling — 길이 접두/커스텀 codec 불요, 각 zenoh batch가 WS BINARY 메시지 1개. dial_ws(TcpStream::connect + tungstenite client_async ws://addr/) / accept_ws(accept_async) / wire_ws_stream(futures StreamExt::split). WsReadDriver(SplitStream; Message::Binary->RxFrame::new, Close/None->Lost{PeerClosed}, 제어/텍스트 프레임 skip; udp_pipeline 구조). WsWriteDriver+ws_writer_task(SplitSink; payload->Message::Binary, envelope 없음). MTU=DEFAULT 65535(pico _z_get_link_mtu_ws ws.c:86, override 없음). lib.rs pub mod ws_pipeline.",
+        "모델 근거(pico 직접 검증, CLAUDE.md verify-by-read): __unsafe_z_prepare_wbuf/__unsafe_z_finalize_wbuf(src/transport/common/tx.c:344-382)가 FLOW_STREAM에만 2바이트 LE 길이 접두 reserve/backfill; FLOW_DATAGRAM(udp/ws)은 접두 없음. 따라서 WS는 stream_link(StreamEnvelope)도 codec(serial COBS)도 재사용 안 함 — WebSocket 메시지 경계가 framing(=UDP 모델). 메모의 'WS=serial형 별도 codec' 가정 폐기.",
+        "crates/wz-runtime-tokio/src/session_open.rs: DialedLink::Ws(Box<WebSocketStream<TcpStream>>, large_enum_variant 회피 boxing) + InboundLink::Ws(WsReadDriver) 게이트 variant + 4 LinkDriver arm + wire_dialed_link Ws arm. dial_locator Proto::Ws -> #[cfg(ws)] dial_ws | #[cfg(not)] Unsupported = udp 패턴(cert 불요라 locator에서 직접 dialable — tls의 무조건 Unsupported와 핵심 차이).",
+        "crates/wz-runtime-tokio/Cargo.toml: transport-link-ws=['dep:tokio-tungstenite','dep:futures-util'](tcp forward 없음=udp형, datagram이라 StreamEnvelope 불요) + tokio-tungstenite 0.24(default-off, features handshake — wss용 TLS connector 회피) + futures-util 0.3(default-off, sink — StreamExt::split + SinkExt::send). wz facade transport-link-ws->wz-runtime-tokio?/transport-link-ws(종전 빈 placeholder=백엔드 미점화 -> active truthful). scripts/run-ci.sh Layer C1v(locator + ws_e2e + clippy ws all-targets + no-default lib standalone). inventory transport-link-ws reserved->active.",
+        "crates/wz-runtime-tokio/tests/ws_e2e.rs(신규, cfg all(transport-link-ws, transport-unicast)): TcpListener loopback. acceptor=accept_ws(서버 핸드셰이크). initiator=connect_and_open_session(parse_any_locator(\"ws/{addr}\")) -> dial_locator Ws arm -> dial_ws(WS dialable 특성을 locator 경로로 검증, tls e2e가 explicit dial_tls였던 것과 대비). 양단 Established 단언 + Put byte-exact 전달(remote leg, WS BINARY 메시지)."
+      ],
+      "verification_bullets": [
+        "모델 정정 근거(pico 직접 검증): tx.c:347 FLOW_STREAM만 길이 접두, ws.c _z_new_link_ws=FLOW_DATAGRAM -> WS=UDP sibling(메모의 serial형 codec 가정 폐기, evidence>assumptions). WsReadDriver/WsWriteDriver는 udp_pipeline 구조(메시지 경계=프레임, envelope 없음), tungstenite가 RFC6455 메시지 프레이밍 담당.",
+        "dial_locator Proto::Ws = dialable(udp 패턴 #[cfg] split: 켜짐=dial_ws, 꺼짐=typed Unsupported) — tls의 무조건 Unsupported와 다름(WS는 cert 불요). feature 무관 exhaustive(skew 불가, R311ny 교훈).",
+        "ws_e2e 통과 + 20/20 반복 non-flaky(loopback TCP under WS = in-order 무손실 HTTP-Upgrade handshake + 소량 segment; initiator가 ws/ locator dial 경로 사용). locator 23/23(parses_ws_ipv4 + parse_any_routes_ws 신규, rejects_unknown_proto는 quic으로 이전). clippy 3레인(default / ws all-targets / no-default lib standalone) -D warnings exit 0, fmt clean. standalone: --no-default-features --features transport-link-ws 빌드+clippy clean(ws_pipeline은 tcp forward 불요 — datagram이라 stream_link 의존 없음).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 확인, 파이프 없음) 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C1t/C1u/C1v/.../G/Q/M 전부; FAIL/error[/panicked 0). A3 catalog truthfulness가 transport-link-ws 실제 cfg 게이트=active 정당 확인.",
+        "atomic: ledger entries 735->736, inventory transport-link-ws reserved->active, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311ob = WebSocket-over-TCP 백엔드(WS/TLS breadth 트랙 2라운드=마지막). WS=DATAGRAM flow(UDP sibling): tungstenite RFC6455 핸드셰이크 -> Established -> Put byte-exact, 각 batch=WS BINARY 메시지(길이 접두/codec 없음). dial_locator dialable(udp형, cert 불요). 트랙 완성: TLS(R311oa, stream/StreamEnvelope 재사용) + WS(R311ob, datagram/WS 메시지) — 두 P2 transport 추가.",
+        "메타: 메모/이전 carry의 'WS=serial형 codec' 가정을 pico tx.c(FLOW_STREAM만 길이 접두) 직접 검증으로 폐기. evidence>assumptions가 이 트랙에서 2번 가정 교정: TLS(carry 65507 -> pico 실측이 link MTU 무관) + WS(serial형 codec -> 실은 datagram/UDP형). 소스가 메모를 이김.",
+        "미완(정직): wss(WS-over-TLS=ws+tls 조합, tokio-tungstenite TLS feature + rustls connector) / WS ping-pong keepalive(현재 제어프레임 skip + tungstenite auto-pong 의존) / production 앱 WS·TLS wiring(현재 e2e만) / cross-impl pico<->wz WS interop(pico WS=플랫폼 전용 핸드셰이크, path/subprotocol parity 별도) / TLS 잔여(mTLS, PEM 로딩, cert-config를 locator dial seam에 thread) / MCU serial backend.",
+        "NEXT 후보: wss 조합(ws+tls) / TLS mTLS+PEM / cert-config locator seam threading / MCU no_std serial backend / pico parity % 재계산(serial breadth+frag+cross-impl + UDP frag + TLS + WS 반영 = breadth 대폭 상승). UNPUSHED: R311ob(feat + docs/atomic) = 2 commits. origin/main=2f887f0=R311oa. push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311ob: WebSocket-over-TCP 링크 백엔드(WS/TLS breadth 트랙 2라운드=마지막). 모델 정정: WS는 flow=DATAGRAM(pico ws.c)이라 UDP sibling — 길이 접두/커스텀 codec 불요(메모의 'serial형 codec' 폐기), 각 batch=WS BINARY 메시지. Proto::Ws parse-always + ws_pipeline(tungstenite RFC6455 dial_ws/accept_ws + datagram WsReadDriver + futures split) + DialedLink/InboundLink Ws. cert 불요라 dial_locator Ws=dialable(udp형). deps tokio-tungstenite(default-off)+futures-util. loopback e2e: initiator가 ws/ locator로 connect→Established+Put byte-exact, 20/20. transport-link-ws active. full run-ci(M+G) RUNCI_EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/locator.rs: Proto::Ws variant + parse_locator 'ws' arm(ungated parse-always — tcp 동일 numeric host:port grammar). rejects_unknown_proto 예시를 ws->quic으로(ws는 이제 known proto). 모듈/parse doc 갱신(ws를 IP leaf에 추가). parses_ws_ipv4 + parse_any_routes_ws_to_the_ip_leaf 테스트.",
+        "crates/wz-runtime-tokio/src/ws_pipeline.rs(신규, transport-link-ws 게이트): WS는 flow=DATAGRAM(pico ws.c _z_new_link_ws = Z_LINK_CAP_FLOW_DATAGRAM)이라 UDP sibling — 길이 접두/커스텀 codec 불요, 각 zenoh batch가 WS BINARY 메시지 1개. dial_ws(TcpStream::connect + tungstenite client_async ws://addr/) / accept_ws(accept_async) / wire_ws_stream(futures StreamExt::split). WsReadDriver(SplitStream; Message::Binary->RxFrame::new, Close/None->Lost{PeerClosed}, 제어/텍스트 프레임 skip; udp_pipeline 구조). WsWriteDriver+ws_writer_task(SplitSink; payload->Message::Binary, envelope 없음). MTU=DEFAULT 65535(pico _z_get_link_mtu_ws ws.c:86, override 없음). lib.rs pub mod ws_pipeline.",
+        "모델 근거(pico 직접 검증, CLAUDE.md verify-by-read): __unsafe_z_prepare_wbuf/__unsafe_z_finalize_wbuf(src/transport/common/tx.c:344-382)가 FLOW_STREAM에만 2바이트 LE 길이 접두 reserve/backfill; FLOW_DATAGRAM(udp/ws)은 접두 없음. 따라서 WS는 stream_link(StreamEnvelope)도 codec(serial COBS)도 재사용 안 함 — WebSocket 메시지 경계가 framing(=UDP 모델). 메모의 'WS=serial형 별도 codec' 가정 폐기.",
+        "crates/wz-runtime-tokio/src/session_open.rs: DialedLink::Ws(Box<WebSocketStream<TcpStream>>, large_enum_variant 회피 boxing) + InboundLink::Ws(WsReadDriver) 게이트 variant + 4 LinkDriver arm + wire_dialed_link Ws arm. dial_locator Proto::Ws -> #[cfg(ws)] dial_ws | #[cfg(not)] Unsupported = udp 패턴(cert 불요라 locator에서 직접 dialable — tls의 무조건 Unsupported와 핵심 차이).",
+        "crates/wz-runtime-tokio/Cargo.toml: transport-link-ws=['dep:tokio-tungstenite','dep:futures-util'](tcp forward 없음=udp형, datagram이라 StreamEnvelope 불요) + tokio-tungstenite 0.24(default-off, features handshake — wss용 TLS connector 회피) + futures-util 0.3(default-off, sink — StreamExt::split + SinkExt::send). wz facade transport-link-ws->wz-runtime-tokio?/transport-link-ws(종전 빈 placeholder=백엔드 미점화 -> active truthful). scripts/run-ci.sh Layer C1v(locator + ws_e2e + clippy ws all-targets + no-default lib standalone). inventory transport-link-ws reserved->active.",
+        "crates/wz-runtime-tokio/tests/ws_e2e.rs(신규, cfg all(transport-link-ws, transport-unicast)): TcpListener loopback. acceptor=accept_ws(서버 핸드셰이크). initiator=connect_and_open_session(parse_any_locator(\"ws/{addr}\")) -> dial_locator Ws arm -> dial_ws(WS dialable 특성을 locator 경로로 검증, tls e2e가 explicit dial_tls였던 것과 대비). 양단 Established 단언 + Put byte-exact 전달(remote leg, WS BINARY 메시지)."
+      ],
+      "publishable_verification_bullets": [
+        "모델 정정 근거(pico 직접 검증): tx.c:347 FLOW_STREAM만 길이 접두, ws.c _z_new_link_ws=FLOW_DATAGRAM -> WS=UDP sibling(메모의 serial형 codec 가정 폐기, evidence>assumptions). WsReadDriver/WsWriteDriver는 udp_pipeline 구조(메시지 경계=프레임, envelope 없음), tungstenite가 RFC6455 메시지 프레이밍 담당.",
+        "dial_locator Proto::Ws = dialable(udp 패턴 #[cfg] split: 켜짐=dial_ws, 꺼짐=typed Unsupported) — tls의 무조건 Unsupported와 다름(WS는 cert 불요). feature 무관 exhaustive(skew 불가, R311ny 교훈).",
+        "ws_e2e 통과 + 20/20 반복 non-flaky(loopback TCP under WS = in-order 무손실 HTTP-Upgrade handshake + 소량 segment; initiator가 ws/ locator dial 경로 사용). locator 23/23(parses_ws_ipv4 + parse_any_routes_ws 신규, rejects_unknown_proto는 quic으로 이전). clippy 3레인(default / ws all-targets / no-default lib standalone) -D warnings exit 0, fmt clean. standalone: --no-default-features --features transport-link-ws 빌드+clippy clean(ws_pipeline은 tcp forward 불요 — datagram이라 stream_link 의존 없음).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 확인, 파이프 없음) 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C1t/C1u/C1v/.../G/Q/M 전부; FAIL/error[/panicked 0). A3 catalog truthfulness가 transport-link-ws 실제 cfg 게이트=active 정당 확인.",
+        "atomic: ledger entries 735->736, inventory transport-link-ws reserved->active, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ob = WebSocket-over-TCP 백엔드(WS/TLS breadth 트랙 2라운드=마지막). WS=DATAGRAM flow(UDP sibling): tungstenite RFC6455 핸드셰이크 -> Established -> Put byte-exact, 각 batch=WS BINARY 메시지(길이 접두/codec 없음). dial_locator dialable(udp형, cert 불요). 트랙 완성: TLS(R311oa, stream/StreamEnvelope 재사용) + WS(R311ob, datagram/WS 메시지) — 두 P2 transport 추가.",
+        "메타: 메모/이전 carry의 'WS=serial형 codec' 가정을 pico tx.c(FLOW_STREAM만 길이 접두) 직접 검증으로 폐기. evidence>assumptions가 이 트랙에서 2번 가정 교정: TLS(carry 65507 -> pico 실측이 link MTU 무관) + WS(serial형 codec -> 실은 datagram/UDP형). 소스가 메모를 이김.",
+        "미완(정직): wss(WS-over-TLS=ws+tls 조합, tokio-tungstenite TLS feature + rustls connector) / WS ping-pong keepalive(현재 제어프레임 skip + tungstenite auto-pong 의존) / production 앱 WS·TLS wiring(현재 e2e만) / cross-impl pico<->wz WS interop(pico WS=플랫폼 전용 핸드셰이크, path/subprotocol parity 별도) / TLS 잔여(mTLS, PEM 로딩, cert-config를 locator dial seam에 thread) / MCU serial backend.",
+        "NEXT 후보: wss 조합(ws+tls) / TLS mTLS+PEM / cert-config locator seam threading / MCU no_std serial backend / pico parity % 재계산(serial breadth+frag+cross-impl + UDP frag + TLS + WS 반영 = breadth 대폭 상승). UNPUSHED: R311ob(feat + docs/atomic) = 2 commits. origin/main=2f887f0=R311oa. push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
@@ -43946,10 +44000,10 @@
       "reason": "F=est vsock crate; P=zenoh-link-vsock; C=independent VM host link"
     },
     "transport-link-ws": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-link-ws crate",
-      "reason": "F=est tungstenite wrap; P=zenoh-link-ws; C=independent"
+      "reason": "R311ob: ws_pipeline backend (dial_ws/accept_ws RFC6455 handshake + datagram WsReadDriver over tungstenite) lands; transport-link-ws now a real cfg gate, facade forwards wz-runtime-tokio/transport-link-ws"
     },
     "transport-lowlatency": {
       "status": "reserved",
