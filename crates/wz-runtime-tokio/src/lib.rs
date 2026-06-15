@@ -456,6 +456,20 @@ pub mod serial_pipeline;
 #[cfg(feature = "transport-link-tls")]
 pub mod tls_pipeline;
 
+/// R311ob — WebSocket-over-TCP backend for the WS link. The DATAGRAM-flow
+/// sibling of [`udp_pipeline`], NOT of TCP/TLS: zenoh-pico classes `ws` as
+/// `Z_LINK_CAP_FLOW_DATAGRAM`, so each batch rides one WebSocket BINARY
+/// message with no length prefix (the message boundary delimits the frame).
+/// `dial_ws`/`accept_ws` run the RFC6455 handshake ([`tokio_tungstenite`]);
+/// `wire_ws_stream` splits the `WebSocketStream` (Sink+Stream) via
+/// `futures_util` into the read-driver + writer-task halves. Reuses neither
+/// `stream_link` (no StreamEnvelope) nor a codec; the WS protocol layer IS the
+/// framing. Gated `transport-link-ws`; the `session_open` DialedLink::Ws
+/// integration rides the `transport-link-tcp`-gated session-open module as an
+/// additive WS arm, like udp (and — no cert — dials from a `ws/...` locator).
+#[cfg(feature = "transport-link-ws")]
+pub mod ws_pipeline;
+
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
 /// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`

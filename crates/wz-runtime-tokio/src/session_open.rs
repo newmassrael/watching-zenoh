@@ -71,6 +71,15 @@ use crate::tls_pipeline::{wire_tls_stream, TlsReadDriver};
 #[cfg(feature = "transport-link-tls")]
 use tokio_rustls::TlsStream;
 
+// R311ob — the WS arm, like udp, rides this tcp+unicast-gated module as an
+// additive DATAGRAM transport. The stream type is the RFC6455
+// `WebSocketStream<TcpStream>` produced by `ws_pipeline::dial_ws`/`accept_ws`.
+// UNLIKE tls, `dial_locator` DOES build it (a `ws/...` locator needs no cert).
+#[cfg(feature = "transport-link-ws")]
+use crate::ws_pipeline::{dial_ws, wire_ws_stream, WsReadDriver};
+#[cfg(feature = "transport-link-ws")]
+use tokio_tungstenite::WebSocketStream;
+
 /// Default cadence at which [`connect_and_open_session`] sweeps the host
 /// handshake deadline (R311il — the engine-free FSM arms no `<send delay>`,
 /// so there is no SCE scheduler to pump) while waiting on the handshake. It
@@ -120,6 +129,17 @@ pub enum DialedLink {
     /// stack — boxing keeps the union compact (clippy `large_enum_variant`).
     #[cfg(feature = "transport-link-tls")]
     Tls(Box<TlsStream<TcpStream>>),
+    /// A connected + WebSocket-handshaked stream, split downstream via
+    /// [`wire_ws_stream`] (R311ob). DATAGRAM flow (each batch = one WS BINARY
+    /// message), so the steady state is uniform with UDP, not TCP/TLS. UNLIKE
+    /// TLS, a `ws/...` locator DOES dial through [`dial_locator`] (no cert
+    /// config), so this is produced both there and by an explicit caller.
+    ///
+    /// `Box`ed: a `WebSocketStream` carries the RFC6455 protocol buffers, so
+    /// an unboxed variant would bloat every `DialedLink` value on the stack
+    /// (clippy `large_enum_variant`).
+    #[cfg(feature = "transport-link-ws")]
+    Ws(Box<WebSocketStream<TcpStream>>),
 }
 
 /// Dial a parsed [`AnyLocator`] to its raw transport — the mode-agnostic dial
@@ -167,6 +187,18 @@ pub async fn dial_locator(locator: AnyLocator) -> io::Result<DialedLink> {
                 "tls session-open dials through tls_pipeline::dial_tls with \
                  explicit cert config, not the generic dial_locator",
             )),
+            // R311ob — UNLIKE tls, a `ws/...` locator dials directly here: WS
+            // needs no cert config, so `dial_ws` (TCP connect + RFC6455 client
+            // handshake) builds the link from the addr alone, exactly as `udp`
+            // does. With the backend feature off, a typed `Unsupported` (same
+            // shape as the udp arm), keeping the match exhaustive.
+            #[cfg(feature = "transport-link-ws")]
+            Proto::Ws => Ok(DialedLink::Ws(Box::new(dial_ws(ip.addr).await?))),
+            #[cfg(not(feature = "transport-link-ws"))]
+            Proto::Ws => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "ws session-open requires the transport-link-ws feature",
+            )),
         },
         // R311nv — a `serial/...` endpoint dials through the tty backend:
         // `dial_serial` opens the device AND drives the serial-link
@@ -206,6 +238,8 @@ pub enum InboundLink {
     Serial(SerialReadDriver),
     #[cfg(feature = "transport-link-tls")]
     Tls(TlsReadDriver),
+    #[cfg(feature = "transport-link-ws")]
+    Ws(WsReadDriver),
 }
 
 impl LinkDriver for InboundLink {
@@ -218,6 +252,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Serial(d) => d.open().await,
             #[cfg(feature = "transport-link-tls")]
             InboundLink::Tls(d) => d.open().await,
+            #[cfg(feature = "transport-link-ws")]
+            InboundLink::Ws(d) => d.open().await,
         }
     }
 
@@ -230,6 +266,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Serial(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-tls")]
             InboundLink::Tls(d) => d.send(frame, reliability).await,
+            #[cfg(feature = "transport-link-ws")]
+            InboundLink::Ws(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -242,6 +280,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Serial(d) => d.close().await,
             #[cfg(feature = "transport-link-tls")]
             InboundLink::Tls(d) => d.close().await,
+            #[cfg(feature = "transport-link-ws")]
+            InboundLink::Ws(d) => d.close().await,
         }
     }
 
@@ -254,6 +294,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Serial(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-tls")]
             InboundLink::Tls(d) => d.poll_event().await,
+            #[cfg(feature = "transport-link-ws")]
+            InboundLink::Ws(d) => d.poll_event().await,
         }
     }
 }
@@ -290,6 +332,11 @@ pub fn wire_dialed_link(
         DialedLink::Tls(stream) => {
             let (inbound, outbound, handle) = wire_tls_stream(*stream);
             (InboundLink::Tls(inbound), outbound, handle)
+        }
+        #[cfg(feature = "transport-link-ws")]
+        DialedLink::Ws(stream) => {
+            let (inbound, outbound, handle) = wire_ws_stream(*stream);
+            (InboundLink::Ws(inbound), outbound, handle)
         }
     }
 }

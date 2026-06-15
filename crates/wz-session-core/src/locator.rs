@@ -28,10 +28,11 @@
 //!
 //! Two leaves, dispatched by scheme through [`parse_any_locator`] into the
 //! [`AnyLocator`] sum type:
-//! - the IP leaf [`parse_locator`] — `tcp` / `udp` / `tls` over a numeric
-//!   [`SocketAddr`] (IPv4 `1.2.3.4:7447` or IPv6 `[::1]:7447`); `tls` shares
-//!   the `tcp` grammar (TLS wraps the same stream), parsing unconditionally
-//!   while only its dial backend is `transport-link-tls`-gated;
+//! - the IP leaf [`parse_locator`] — `tcp` / `udp` / `tls` / `ws` over a
+//!   numeric [`SocketAddr`] (IPv4 `1.2.3.4:7447` or IPv6 `[::1]:7447`); `tls`
+//!   and `ws` share the `tcp` grammar (both ride a TCP connection), parsing
+//!   unconditionally while only their dial backends are
+//!   `transport-link-{tls,ws}`-gated;
 //! - the serial leaf [`parse_serial_locator`] — `serial/...` device or
 //!   pin endpoints (relocated here from `serial_link` in R311ny so the
 //!   [`AnyLocator::Serial`] variant is unconditional; see that leaf's
@@ -43,7 +44,7 @@
 //! - IP locator metadata suffixes (`udp/1.2.3.4:7447#iface=eth0`) — the
 //!   `#`-delimited config tail is not split by the IP leaf (the serial
 //!   leaf DOES read its `#baudrate=` tail);
-//! - other transports not yet wired (`unixsock-stream/...`, `ws/...`).
+//! - other transports not yet wired (`unixsock-stream/...`, `bt/...`).
 
 use alloc::string::{String, ToString};
 use core::net::SocketAddr;
@@ -66,6 +67,16 @@ pub enum Proto {
     /// `wz-runtime-tokio::tls_pipeline`'s explicit `dial_tls`/`accept_tls`,
     /// not the generic `dial_locator`.
     Tls,
+    /// `ws/...` — WebSocket-over-TCP DATAGRAM transport: the same numeric
+    /// `host:port` grammar as `tcp`, but each zenoh batch rides one WebSocket
+    /// BINARY message — pico's `ws/` scheme sets `Z_LINK_CAP_FLOW_DATAGRAM`
+    /// (`_z_get_link_mtu_ws` = 65535), so the message boundary delimits a
+    /// frame with no length prefix, exactly like UDP (NOT the TCP/TLS
+    /// StreamEnvelope). Parses unconditionally; the BACKEND dial is gated
+    /// (`transport-link-ws`) and — UNLIKE `tls` — needs no cert config, so a
+    /// `ws/...` locator dials directly through `dial_locator` (like `udp`),
+    /// via `wz-runtime-tokio::ws_pipeline`.
+    Ws,
 }
 
 /// A locator parsed into its transport protocol and numeric endpoint.
@@ -93,7 +104,7 @@ pub enum LocatorParseError {
 ///
 /// The protocol is the substring before the first `/`; everything after
 /// it is parsed as a [`SocketAddr`]. See the module doc for the MVP
-/// scope (numeric tcp/udp/tls endpoints; DNS / metadata / other transports
+/// scope (numeric tcp/udp/tls/ws endpoints; DNS / metadata / other transports
 /// are reported as errors, not silently accepted).
 pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> {
     let (proto_str, addr_str) = locator
@@ -103,6 +114,7 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         "tcp" => Proto::Tcp,
         "udp" => Proto::Udp,
         "tls" => Proto::Tls,
+        "ws" => Proto::Ws,
         other => return Err(LocatorParseError::UnknownProto(other.to_string())),
     };
     let addr = SocketAddr::from_str(addr_str)
@@ -332,6 +344,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_ws_ipv4() {
+        // `ws` shares the `tcp` numeric grammar (WebSocket rides TCP);
+        // parsing is unconditional, only the dial backend is feature-gated.
+        let p = parse_locator("ws/192.168.1.10:7447").expect("valid ws locator");
+        assert_eq!(p.proto, Proto::Ws);
+        assert_eq!(p.addr, "192.168.1.10:7447".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn parse_any_routes_ws_to_the_ip_leaf() {
+        // A `ws/...` locator parses through the IP leaf (numeric host:port),
+        // landing as `AnyLocator::Ip(Proto::Ws)` whether or not the WS backend
+        // is compiled — the dial step decides reachability.
+        let any = parse_any_locator("ws/127.0.0.1:7447").expect("ws locator");
+        assert_eq!(
+            any,
+            AnyLocator::Ip(parse_locator("ws/127.0.0.1:7447").unwrap())
+        );
+    }
+
+    #[test]
     fn parse_any_routes_tls_to_the_ip_leaf() {
         // A `tls/...` locator parses through the IP leaf (numeric host:port),
         // landing as `AnyLocator::Ip(Proto::Tls)` whether or not the TLS
@@ -360,9 +393,11 @@ mod tests {
 
     #[test]
     fn rejects_unknown_proto() {
+        // `quic` is a not-yet-wired transport — `ws` is now a known proto
+        // (R311ob), so the unknown-proto example moved to one still absent.
         assert_eq!(
-            parse_locator("ws/127.0.0.1:7447"),
-            Err(LocatorParseError::UnknownProto("ws".to_string()))
+            parse_locator("quic/127.0.0.1:7447"),
+            Err(LocatorParseError::UnknownProto("quic".to_string()))
         );
     }
 

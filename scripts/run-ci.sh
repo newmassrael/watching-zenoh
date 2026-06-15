@@ -749,6 +749,30 @@ layer_c1u_cargo_test_tls() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-tls --quiet -- -D warnings)
 }
 
+# ─── Layer C1v — WS link: locator parse + wz-runtime-tokio ws backend ─
+#
+# R311ob: same shape as C1u (tls). The WS backend (`ws_pipeline`: dial_ws/
+# accept_ws RFC6455 handshake + the datagram WsReadDriver over a tungstenite
+# WebSocketStream) gates on `transport-link-ws`, OFF in the default set, so
+# Layer C1's `cargo test --workspace` never reaches it. This lane:
+#   1. runs the locator tests (the `Proto::Ws` parse is ungated parse-always);
+#   2. runs the `ws_e2e` integration test (gated
+#      `all(transport-link-ws, transport-unicast)`: two nodes complete the WS
+#      handshake over loopback — the initiator via a `ws/...` LOCATOR, since WS
+#      dials from dial_locator unlike tls — reach Established, and a Put is
+#      delivered byte-exact through WS BINARY messages);
+#   3. clippy-gates the `transport-link-ws` cfg (`--all-targets`);
+#   4. clippy-gates the LIB under `--no-default-features --features
+#      transport-link-ws` to prove `ws_pipeline` composes standalone (it needs
+#      no `transport-link-tcp` — WS is datagram-flow, not StreamEnvelope).
+layer_c1v_cargo_test_ws() {
+    (cd crates \
+        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-ws --quiet -- -D warnings)
+}
+
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
 #
 # R311du: same shape as C1c. The pubsub SubscriberRegistry test module
@@ -2759,6 +2783,7 @@ run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1t layer_c1t_cargo_test_serial || overall=1
 run_layer C1u layer_c1u_cargo_test_tls || overall=1
+run_layer C1v layer_c1v_cargo_test_ws || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
