@@ -266,6 +266,15 @@ pub mod scout_static;
 #[cfg(feature = "alloc")]
 pub mod locator;
 
+/// R311nt — transport-agnostic SERIAL-link framing, handshake, and
+/// locator logic (the `Z_FEATURE_LINK_SERIAL` upper protocol). Mirrors
+/// zenoh-pico serial_protocol.c + protocol/codec/serial.c, holding NO
+/// I/O so it compiles on both the AP (tty) and MCU (UART HAL) profiles.
+/// Consumes the R311ns serial framing codecs (serial_envelope / cobs /
+/// crc32). Gated on `transport-link-serial` (forwards `codec-serial`).
+#[cfg(feature = "transport-link-serial")]
+pub mod serial_link;
+
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_body` decoder). Pure no_std +
 /// no_alloc; unconditional AND feature-independent (R311kl removed the

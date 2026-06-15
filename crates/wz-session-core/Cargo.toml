@@ -173,6 +173,17 @@ codec-close = ["wz-codecs/codec-close"]
 # MulticastParams Vec zid).
 codec-join = ["wz-codecs/codec-join"]
 
+# R311nt — SERIAL link upper protocol (the `Z_FEATURE_LINK_SERIAL`
+# framing + handshake + locator logic, `serial_link` module). Forwards
+# `wz-codecs/codec-serial` (the serial_envelope / cobs / crc32 framing
+# codecs landed R311ns) and pulls `alloc` for the frame `Vec<u8>` buffers
+# and the device-path `String` — the AP/alloc profile, matching the
+# transport-fragmentation / session-reconnect staging (a bounded
+# no-alloc MCU serial profile is a follow-up). This is the
+# transport-agnostic logic only; the host tty backend (tokio-serial) and
+# the `LinkDriver` impl that drives it live in wz-runtime-tokio.
+transport-link-serial = ["wz-codecs/codec-serial", "alloc"]
+
 # attachment domain primitive: gates the `attachment` SSOT module (the
 # one attachment-ext encode/decode pair). Selected by the
 # `pubsub-attachment` / `query-attachment` consumer features below — a

@@ -682,6 +682,23 @@ layer_c1c_cargo_test_codec_declare() {
     (cd crates && cargo test -p wz-session-core --features codec-declare --quiet)
 }
 
+# ─── Layer C1t — cargo test -p wz-session-core --features transport-link-serial ─
+#
+# R311nt: same shape as C1c. The `serial_link` module (SERIAL upper
+# protocol: framing + handshake + locator logic) and its byte-parity
+# test module gate on `transport-link-serial`, which is OFF in
+# wz-session-core's default features. Layer C1's `cargo test --workspace`
+# does NOT reach it (no default-features crate enables it transitively),
+# so this lane runs the serial_link tests explicitly. The second
+# invocation drops the default keyexpr matcher features to prove the
+# serial logic composes standalone (the feature pulls only alloc +
+# codec-serial, no keyexpr dependency).
+layer_c1t_cargo_test_serial() {
+    (cd crates \
+        && cargo test -p wz-session-core --features transport-link-serial --quiet \
+        && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet)
+}
+
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
 #
 # R311du: same shape as C1c. The pubsub SubscriberRegistry test module
@@ -2690,6 +2707,7 @@ run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
+run_layer C1t layer_c1t_cargo_test_serial || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
