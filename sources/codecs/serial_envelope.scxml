@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: zenoh-pico SERIAL-link frame envelope
+     (pre-COBS assembly). The framing that wraps every transport
+     message on a Z_FEATURE_LINK_SERIAL byte-stream link before the
+     COBS byte-stuffing and 0x00 EOP delimiter are applied.
+
+     Wire shape (little-endian; pico size_bytes/crc_bytes are
+     LSB-first), fields in order:
+       header   : 1 byte
+       len      : 2 bytes (u16)
+       payload  : len bytes
+       crc32    : 4 bytes (u32)
+
+     Mirrors zenoh-pico _z_serial_msg_serialize
+     (vendor/zenoh-pico/src/protocol/codec/serial.c:28-68): it lays out
+     tmp_buf = [header][size_bytes(2 LE)][src payload][crc_bytes(4 LE)]
+     (total = N + KIND_FIELD_LEN(1) + LEN_FIELD_LEN(2) + CRC32_LEN(4)
+     = N + 7), then _z_cobs_encode of that buffer and appends a 0x00
+     EOP. This codec owns the inner N+7 assembly only; the COBS plus
+     EOP on-wire transform is the cobs.scxml algorithm.
+
+     This is the first wz codec with a fixed-size field (crc32) AFTER a
+     length-ref field (payload) and no present-if/vle/repeat/tlv to
+     force the cursor path; it requires SCE's positional-validity codec
+     path selection (SCE 57e06f1e9: "select codec path by
+     positional-validity allowlist, not denylist") so the trailing
+     crc32 reads at offset 3+len rather than a fixed offset.
+
+     Field semantics (serial.c + protocol/definitions/serial.h):
+       header: flag byte. INIT=0x01 / ACK=0x02 / RESET=0x04
+         (serial.h:53-55); data frames carry 0x00. The codec is
+         agnostic to the flag meaning, it round-trips the raw byte.
+       len: payload byte count as u16 LE (serial.c:40-41
+         wire_size = (uint16_t)src_len). The MTU ceiling is
+         _Z_SERIAL_MTU_SIZE = 1500 (serial_protocol.h:31), hence
+         max-size="1500".
+       payload: exactly len bytes (serial.c:51 memcpy).
+       crc32: _z_crc32 of the payload only, as u32 LE (serial.c:36-38).
+         The value is supplied by the caller (via the crc32 algorithm
+         codec) and recomputed on decode for corruption detection
+         (serial.c:108-115). This codec carries the field verbatim;
+         CRC verification is the link-driver's responsibility,
+         mirroring how stream_envelope carries payload_len without
+         re-deriving it.
+
+     Wire round-trip oracles (computed from _z_serial_msg_serialize
+     pre-COBS, i.e. tmp_buf before _z_cobs_encode):
+       header=0x00 payload=[0xAB,0xCD,0xEF]
+         gives 00 0300 abcdef 7720a7fb     (10 bytes; crc 0xFBA72077)
+       header=0x01 payload=[]   (INIT)
+         gives 01 0000 00000000            ( 7 bytes; crc 0x00000000)
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="little" name="serial_envelope">
+  <datamodel>
+    <sce:field id="header"      sce:type="uint8"  sce:byte="0" sce:bit-size="8"/>
+    <sce:field id="payload_len" sce:type="uint16" sce:byte="1" sce:bit-size="16"/>
+    <sce:field id="payload"     sce:type="bytes"  sce:byte="3" sce:bit-size="length-ref"
+               sce:length-field="payload_len" sce:max-size="1500"/>
+    <sce:field id="crc32"       sce:type="uint32" sce:byte="4" sce:bit-size="32"/>
+  </datamodel>
+</scxml>

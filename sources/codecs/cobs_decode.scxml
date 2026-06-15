@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: zenoh-pico SERIAL-link COBS decode.
+
+     The inverse of cobs_encode: a runtime, data-dependent bytes ->
+     bytes transform that destuffs a COBS frame back to the original
+     bytes (which may contain 0x00). Uses SCE's byte-buffer-build
+     primitives (bounded output, forward-only append, fallible bytes
+     return); requires SCE 9c0356a41.
+
+     Mirrors zenoh-pico _z_cobs_decode
+     (vendor/zenoh-pico/src/utils/encoding.c:49-76). Input may or may
+     not include the trailing 0x00 EOP delimiter: a 0x00 code byte
+     terminates decoding (serial.c reads up to the EOP and pico's
+     decoder breaks on a 0x00 code), and end-of-input terminates it
+     otherwise; both yield identical output.
+
+     Append-only formulation (pico decrements its write pointer to
+     drop a just-emitted implicit zero when it discovers the EOP;
+     SCE byte-buffer-build is forward-only with no index writes, so
+     instead the implicit zero is emitted lazily — only AFTER the next
+     group's code byte is read and confirmed non-zero — which never
+     emits a spurious trailing zero):
+
+       prev = 0xFF                 # sentinel: no previous group
+       i = 0
+       while i < n and not done:
+         code = data[i]; i += 1
+         if code == 0: done = true            # EOP: stop, emit nothing
+         else:
+           if prev != 0xFF: append 0          # zero terminating the
+                                              # previous group
+           copy (code - 1) bytes verbatim
+           prev = code
+
+     `prev == 0xFF` suppresses the implicit zero in two cases that
+     coincide correctly: the very first group (no predecessor) and a
+     full 254-byte group (code 0xFF carries no implicit trailing zero).
+
+     Output bound: the destuffed frame is at most pico
+     _Z_SERIAL_MFS_SIZE = 1507 (serial_protocol.h:32).
+
+     Reference vectors (inverse of cobs_encode; verified round-trip):
+       01            -> (empty)
+       01 01         -> 00
+       03 11 22 02 33 -> 11 22 00 33
+       02 11 01 01   -> 11 00 00
+       04 11 22 33   -> 11 22 33
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm" name="cobs_decode"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="data" type="bytes"/>
+    <sce:return type="bytes" returns-max-size="1507"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="n" type="uint16" init="len(data)"/>
+    <sce:var name="out" type="bytes" capacity="1507"/>
+    <sce:var name="i" type="uint16" init="0"/>
+    <sce:var name="prev" type="uint16" init="255"/>
+    <sce:var name="done" type="bool" init="false"/>
+    <sce:while cond="(i &lt; n) &amp;&amp; (done === false)">
+      <sce:var name="code" type="uint16" init="data[i]"/>
+      <sce:assign target="i" expr="i + 1"/>
+      <sce:if cond="code === 0">
+        <sce:assign target="done" expr="true"/>
+        <sce:else>
+          <sce:if cond="prev !== 255">
+            <sce:var name="z" type="uint8" init="0"/>
+            <sce:append target="out" expr="z"/>
+          </sce:if>
+          <sce:var name="j" type="uint16" init="1"/>
+          <sce:while cond="j &lt; code">
+            <sce:append target="out" expr="data[i]"/>
+            <sce:assign target="i" expr="i + 1"/>
+            <sce:assign target="j" expr="j + 1"/>
+          </sce:while>
+          <sce:assign target="prev" expr="code"/>
+        </sce:else>
+      </sce:if>
+    </sce:while>
+    <sce:return expr="out"/>
+  </sce:body>
+</scxml>

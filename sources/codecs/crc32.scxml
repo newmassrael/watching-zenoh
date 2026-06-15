@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: zenoh-pico SERIAL-link frame CRC32.
+
+     Byte-stream checksum over the serial frame payload. This is the
+     exact algorithm zenoh-pico runs on the `Z_FEATURE_LINK_SERIAL`
+     path before COBS-stuffing each frame; the serial_envelope codec
+     carries the resulting 4-byte little-endian value as its `crc32`
+     field, and the deserialize half recomputes it over the decoded
+     payload to detect corruption.
+
+     Mirrors zenoh-pico's `_z_crc32` reference exactly
+     (vendor/zenoh-pico/src/utils/checksum.c:19-28):
+
+       uint32_t _z_crc32(const uint8_t *message, size_t len) {
+           uint32_t crc = 0xFFFFFFFF;
+           for (size_t i = 0; i < len; i++) {
+               crc = crc ^ (uint32_t)message[i];
+               for (uint8_t j = 0; j < 8; j++) {
+                   crc = (crc >> 1) ^
+                       (0x04C11DB7 & (uint32_t)(-(int32_t)(crc & 1)));
+               }
+           }
+           return ~crc;
+       }
+
+     This is a NON-standard CRC-32: it pairs the forward polynomial
+     `0x04C11DB7` (checksum.c:17) with a right-shift (reflected-style)
+     reduction, so it does NOT equal CRC-32/ISO-HDLC. Reference
+     vectors must be taken from this exact algorithm, not a canonical
+     CRC-32 table. The `crc & 1` LSB test maps to the
+     `(crc >> 1) ^ poly` / `crc >> 1` branch; `~crc` (final one's
+     complement) is expressed here as `crc ^ 0xFFFFFFFF` (identical
+     result, no dependency on a `~` expr operator). The per-byte XOR
+     folds the byte into the LOW byte of `crc` (no `<< N` alignment),
+     matching the right-shift form — contrast the left-shift
+     CRC16-CCITT-FALSE template (`algorithm_crc16`) which XORs the
+     byte into the HIGH byte via `b << 8`.
+
+     Wire-value oracles (computed from `_z_crc32` directly):
+       data = []                        -> 0x00000000  (~0xFFFFFFFF)
+       data = [0xAB, 0xCD, 0xEF]        -> 0xFBA72077
+       data = "123456789"               -> 0xFC4F2BE9
+                (313233343536373839)        (NOT 0xCBF43926 std CRC-32)
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm" name="crc32"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="data" type="bytes"/>
+    <sce:return type="uint32"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="crc" type="uint32" init="0xFFFFFFFF"/>
+    <sce:foreach item="b" in="data">
+      <sce:var name="bb" type="uint32" init="b"/>
+      <sce:assign target="crc" expr="crc ^ bb"/>
+      <sce:var name="i" type="uint8" init="0"/>
+      <sce:while cond="i &lt; 8" max-iter="8">
+        <sce:if cond="(crc &amp; 1) !== 0">
+          <sce:assign target="crc" expr="(crc &gt;&gt; 1) ^ 0x04C11DB7"/>
+          <sce:else>
+            <sce:assign target="crc" expr="crc &gt;&gt; 1"/>
+          </sce:else>
+        </sce:if>
+        <sce:assign target="i" expr="i + 1"/>
+      </sce:while>
+    </sce:foreach>
+    <sce:return expr="crc ^ 0xFFFFFFFF"/>
+  </sce:body>
+  <!--
+    Canonical reference vector pinned inline (zenoh-pico `_z_crc32` of
+    ASCII "123456789"). Coexists with the wz-codecs byte-parity test
+    (crates/wz-codecs/tests) which exercises the empty / ABCDEF /
+    257-byte vectors against the same generated function body.
+  -->
+  <sce:test-vector hex="313233343536373839" value="0xFC4F2BE9"/>
+</scxml>

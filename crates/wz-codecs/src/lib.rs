@@ -124,6 +124,41 @@ pub mod ext_zbuf {
     include!(concat!(env!("OUT_DIR"), "/ext_zbuf.rs"));
 }
 
+// R311ns — zenoh-pico SERIAL-link frame CRC32 (algorithm kind). The
+// `crc32` SCXML emits a free function (not a codec struct); the
+// `serial_envelope` codec carries its 4-byte LE result as a field.
+#[cfg(feature = "codec-serial")]
+pub mod crc32 {
+    codec_alloc_prelude!();
+    include!(concat!(env!("OUT_DIR"), "/crc32.rs"));
+}
+
+// R311ns — serial-link pre-COBS frame envelope (codec kind):
+// [header|len(2 LE)|payload(len)|crc32(4 LE)]. First wz codec with a
+// fixed field after a length-ref field; requires SCE positional-
+// validity codec path selection (SCE 57e06f1e9).
+#[cfg(feature = "codec-serial")]
+pub mod serial_envelope {
+    codec_alloc_prelude!();
+    include!(concat!(env!("OUT_DIR"), "/serial_envelope.rs"));
+}
+
+// R311ns — serial-link COBS stuffing/destuffing (algorithm kind,
+// byte-buffer-build). `cobs_encode`/`cobs_decode` are free functions
+// returning `Result<SceBytes<N>, CapacityExceeded>`. Mirrors pico
+// _z_cobs_encode / _z_cobs_decode (encoding.c).
+#[cfg(feature = "codec-serial")]
+pub mod cobs_encode {
+    codec_alloc_prelude!();
+    include!(concat!(env!("OUT_DIR"), "/cobs_encode.rs"));
+}
+
+#[cfg(feature = "codec-serial")]
+pub mod cobs_decode {
+    codec_alloc_prelude!();
+    include!(concat!(env!("OUT_DIR"), "/cobs_decode.rs"));
+}
+
 pub mod stream_envelope {
     codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/stream_envelope.rs"));

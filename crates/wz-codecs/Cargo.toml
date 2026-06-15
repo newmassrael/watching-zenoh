@@ -47,8 +47,8 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push", "codec-declare", "codec-request", "codec-response"]
-alloc = ["sce-forge-runtime/alloc"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push", "codec-declare", "codec-request", "codec-response", "codec-serial"]
+alloc = ["sce-forge-runtime/alloc", "sce-portable-bytes/alloc"]
 codec-init-body = []
 codec-open-body = []
 # R311c — `codec-close` gates the SCXML codegen + `pub mod close` and
@@ -169,6 +169,31 @@ codec-request = []
 # OFF, materialising the handshake-only deploy contract
 # (Init / Open / Close + KeepAlive only).
 codec-response = []
+# R311ns — `codec-serial` gates the zenoh-pico SERIAL-link frame
+# checksum: the `crc32` algorithm-kind SCXML (`_z_crc32`, the
+# per-payload checksum the serial frame carries). Gates both the
+# build.rs codegen pass and the `pub mod crc32` include in lib.rs.
+#
+# The other two serial-framing pieces are SCE-blocked and NOT shipped
+# here (stop-first; no wz hand-roll / workaround):
+#   - serial_envelope codec `[header|len|payload|crc32]`: SCE's codec
+#     "simple path" (generator.rs:4179) assumes the variable field is
+#     last, so a fixed-size field (crc32) after a length-ref field
+#     (payload) mis-generates (encode writes crc32 before payload;
+#     decode reads crc32 at a fixed offset). Every other wz codec with
+#     a non-last variable field escapes this via a present-if/vle/
+#     repeat/tlv trailing field forcing the cursor path; serial_envelope
+#     is the first clean [fixed][len-ref][fixed] shape and has no such
+#     trigger. Fix belongs in SCE (select the cursor path whenever any
+#     field follows a length-ref/tail field).
+#   - COBS byte-stuffing + 0x00 EOP transform: a runtime data-dependent
+#     bytes->bytes transform is beyond SCE's current SCXML model
+#     (algorithm bodies return scalars; the codec writer sink builds
+#     only structural field layouts).
+# Both are tracked as cross-repo (SCE) capabilities, same pattern as
+# the R311nq big-message owned-bound (wz reports, SCE delivers, wz
+# adopts). transport-link-serial stays reserved / unforwarded.
+codec-serial = []
 
 
 [dependencies]
@@ -176,6 +201,12 @@ codec-response = []
 # runtime primitives that the generated codec code references
 # (e.g., `use sce_forge_runtime::codec::{CodecError, SceCursor};`).
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
+# R311ns — algorithm-kind byte-buffer-build codegen (cobs_encode /
+# cobs_decode) imports `sce_portable_bytes::{SceBytes, CapacityExceeded}`
+# directly (codec-kind output reaches SceBytes via the sce-forge-runtime
+# re-export; algorithm-kind emits the crate path). `alloc` is forwarded
+# so the owned bytes form is unbounded Vec on AP and heapless<N> on MCU.
+sce-portable-bytes = { path = "../../vendor/sce/sce-portable-bytes", default-features = false }
 
 [build-dependencies]
 # Build-time codegen via SCE's in-process compile entry point. The

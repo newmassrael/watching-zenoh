@@ -33,21 +33,25 @@ const CODECS: &[&str] = &[
     "ext_unit",
     "ext_zint",
     "ext_zbuf",
-    "stream_envelope", // §4.0 streamed-link wire envelope (u16 LE len + payload) — R121h
-    "close",           // §4.1 session-close, 1-byte reason — R42 Layer 3 ✓
-    "frame",           // §4.2 data-carrying VLE sn + tail payload — R43 Layer 3 ✓
-    "fragment",        // §4.2 same shape as frame, distinct MID — R43 ✓
-    "scout",           // §3 scouting — cbyte multi-bit pack — R44 Layer 3 ✓
-    "init_body",       // §4.1 Init body — parent.S + parent.A gates — R44 ✓
-    "open_body",       // §4.1 Open body — parent.A NEGATION gate — R44 ✓
-    "join",            // §4.1 Join body — parent.S + multi-VLE — R44 ✓
-    "locator",         // §3 hello locator element — R45 (hello dep)
-    "keep_alive",      // §4.1 empty body (transport keepalive) — R47 trivial
-    "decl_final",      // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
-    "undecl_kexpr",    // §5 undecl kexpr leaf — header + id VLE, MID 0x01 — R110b
+    "crc32",             // serial-link frame CRC32 (algorithm kind) — R311ns
+    "serial_envelope",   // serial-link pre-COBS frame [hdr|len|payload|crc] — R311ns
+    "cobs_encode",       // serial-link COBS stuffing (byte-buffer-build) — R311ns
+    "cobs_decode",       // serial-link COBS destuffing (byte-buffer-build) — R311ns
+    "stream_envelope",   // §4.0 streamed-link wire envelope (u16 LE len + payload) — R121h
+    "close",             // §4.1 session-close, 1-byte reason — R42 Layer 3 ✓
+    "frame",             // §4.2 data-carrying VLE sn + tail payload — R43 Layer 3 ✓
+    "fragment",          // §4.2 same shape as frame, distinct MID — R43 ✓
+    "scout",             // §3 scouting — cbyte multi-bit pack — R44 Layer 3 ✓
+    "init_body",         // §4.1 Init body — parent.S + parent.A gates — R44 ✓
+    "open_body",         // §4.1 Open body — parent.A NEGATION gate — R44 ✓
+    "join",              // §4.1 Join body — parent.S + multi-VLE — R44 ✓
+    "locator",           // §3 hello locator element — R45 (hello dep)
+    "keep_alive",        // §4.1 empty body (transport keepalive) — R47 trivial
+    "decl_final",        // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
+    "undecl_kexpr",      // §5 undecl kexpr leaf — header + id VLE, MID 0x01 — R110b
     "undecl_subscriber", // §5 undecl subscriber leaf — header + id VLE, MID 0x03 — R110d
-    "undecl_queryable", // §5 undecl queryable leaf — header + id VLE, MID 0x05 — R110d
-    "undecl_token",    // §5 undecl token leaf — header + id VLE, MID 0x07 — R110d
+    "undecl_queryable",  // §5 undecl queryable leaf — header + id VLE, MID 0x05 — R110d
+    "undecl_token",      // §5 undecl token leaf — header + id VLE, MID 0x07 — R110d
     // Composing codecs
     "hello",             // §3 Hello body — parent.L + repeat<locator> — R45
     "ext_entry",         // imports ext_unit / ext_zint / ext_zbuf
@@ -102,6 +106,13 @@ fn is_codec_enabled(stem: &str) -> bool {
         "request" | "query" => std::env::var_os("CARGO_FEATURE_CODEC_REQUEST").is_some(),
         // R311k — response envelope + reply + err inner bodies share codec-response.
         "response" | "reply" | "err" => std::env::var_os("CARGO_FEATURE_CODEC_RESPONSE").is_some(),
+        // R311ns — serial-link framing family gated on codec-serial:
+        // crc32 (algorithm), serial_envelope (codec, pre-COBS frame),
+        // and cobs_encode/cobs_decode (algorithm byte-buffer-build
+        // stuffing/destuffing).
+        "crc32" | "serial_envelope" | "cobs_encode" | "cobs_decode" => {
+            std::env::var_os("CARGO_FEATURE_CODEC_SERIAL").is_some()
+        }
         _ => true,
     }
 }
@@ -133,6 +144,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_DECLARE");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_REQUEST");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_RESPONSE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_SERIAL");
 
     let options = ForgeCompileOptions::default();
 
