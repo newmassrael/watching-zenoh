@@ -60,8 +60,33 @@ use wz_session_core::link::BoxedLinkDriver;
 
 /// Maximum UDP payload (65535 IP datagram - 20 IPv4 header - 8 UDP header).
 /// A larger frame is a wz-side encoder bug; the driver drops it loud rather
-/// than handing `send_to` a buffer the kernel will reject.
+/// than handing `send_to` a buffer the kernel will reject. This is the OS
+/// datagram ceiling, NOT the fragmentation budget — see [`UDP_LINK_MTU`].
 const MAX_UDP_PAYLOAD: usize = 65507;
+
+/// The UDP link MTU — the per-datagram frame budget the transport fragments
+/// to, the wz analogue of zenoh-pico's `zl->_mtu` for a UDP link. pico's
+/// `_z_get_link_mtu_udp_unicast` returns this exact `1450`
+/// (`src/link/unicast/udp.c:97`; the multicast sibling `udp.c:106` matches,
+/// though that path uses its own TX seam, not this driver), a payload that
+/// fits inside one standard 1500-byte Ethernet frame so a zenoh fragment
+/// never triggers kernel IP-layer fragmentation — best-effort UDP loses a
+/// whole datagram if any one IP fragment drops, so the zenoh transport caps
+/// the frame here rather than hand the kernel a 64 KB datagram to shred.
+///
+/// [`UdpWriteDriver::link_mtu`] reports this; `negotiated_batch_mtu` mins it
+/// against the negotiated batch (`min(link mtu, batch)`, the wbuf size pico
+/// computes at `transport/unicast/transport.c:47`), so a >1450 message
+/// fragments into emittable datagrams. It binds BELOW the unbounded stream
+/// `DEFAULT_LINK_MTU` (65535) the default would otherwise inherit — the same
+/// way serial's `SERIAL_MTU` (1500) does — and below [`MAX_UDP_PAYLOAD`], so
+/// frames reaching [`UdpWriteDriver::send_blocking`] are pre-fragmented well
+/// under the drop guard, leaving that guard a pure defensive backstop.
+///
+/// `pub` so the link-MTU-driven fragmentation e2e (`tests/udp_frag_e2e`) can
+/// assert `negotiated_batch_mtu() == UDP_LINK_MTU` against the named constant
+/// rather than a magic `1450`, the same way serial's e2e pins `SERIAL_MTU`.
+pub const UDP_LINK_MTU: usize = 1450;
 
 /// Bind an outbound UDP socket targeting `peer` — the raw-dial primitive for
 /// the datagram transport. Returns the bound [`UdpSocket`] unwrapped so the
@@ -179,8 +204,14 @@ impl UdpWriteDriver {
 impl BoxedLinkDriver for UdpWriteDriver {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         // UDP link layer is best-effort by definition; the Reliability hint
-        // is the session FSM's concern. Oversize is a wz-side encoder bug —
-        // drop loud rather than enqueue a datagram send_to will reject.
+        // is the session FSM's concern. The transport TX path now caps its
+        // fragment budget to THIS link's MTU ([`Self::link_mtu`] feeds
+        // `SessionLinkActions::negotiated_batch_mtu`, which mins it against
+        // the negotiated batch), so a well-formed session fragments an
+        // oversize message to <= UDP_LINK_MTU datagrams before reaching this
+        // seam. The MAX_UDP_PAYLOAD guard stays as a loud defensive backstop:
+        // a caller that bypassed the negotiated budget drops here rather than
+        // hand `send_to` a datagram the kernel will reject.
         if bytes.len() > MAX_UDP_PAYLOAD {
             log::warn!(
                 "wz-runtime-tokio: outbound datagram {} bytes > {MAX_UDP_PAYLOAD}; dropping",
@@ -202,6 +233,18 @@ impl BoxedLinkDriver for UdpWriteDriver {
         // owning scope releases the Arc). Letting the receiver-drop signal
         // terminate the task is the textbook channel idiom (mirrors
         // TcpWriteDriver::close_blocking).
+    }
+
+    fn link_mtu(&self) -> usize {
+        // The UDP link's per-datagram frame budget — zenoh-pico's
+        // `_z_get_link_mtu_udp_unicast` returns this same `1450`
+        // (`src/link/unicast/udp.c:97`). The transport reads it through
+        // `negotiated_batch_mtu` to bound its TX fragment budget
+        // (`min(link mtu, negotiated batch)`, transport/unicast/transport.c:47),
+        // so a >1450 message splits into datagrams that each fit one Ethernet
+        // frame instead of relying on kernel IP fragmentation. TCP inherits
+        // the unbounded `DEFAULT_LINK_MTU`; serial caps at SERIAL_MTU (1500).
+        UDP_LINK_MTU
     }
 }
 
@@ -251,6 +294,29 @@ mod tests {
         driver.send_blocking(b"ok", Reliability::BestEffort);
         // Only the in-range datagram reached the channel.
         assert_eq!(rx.recv().await.as_deref(), Some(b"ok".as_slice()));
+    }
+
+    /// The UDP write driver reports the UDP link MTU (not the unbounded
+    /// `DEFAULT_LINK_MTU` a stream link inherits), so the transport's
+    /// `negotiated_batch_mtu` mins its TX fragment budget down to a datagram
+    /// that fits one Ethernet frame — matching zenoh-pico's
+    /// `_z_get_link_mtu_udp_unicast` (1450). This is the link-side half of
+    /// the >MTU fragmentation wiring; the transport-agnostic split +
+    /// reassembly is proved end-to-end by `layer3_reassembly_tx` (TCP) /
+    /// `serial_pty_e2e`.
+    #[test]
+    fn udp_write_driver_reports_udp_link_mtu() {
+        // Static invariants: the UDP cap must bind BELOW the unbounded stream
+        // default (else the `negotiated_batch_mtu` min term is inert and UDP
+        // never fragments) AND below the `MAX_UDP_PAYLOAD` drop guard (so
+        // frames arrive pre-fragmented and the guard is a pure backstop).
+        // Const assertions so a constant regression fails the build.
+        const _: () = assert!(UDP_LINK_MTU < wz_session_core::link::DEFAULT_LINK_MTU);
+        const _: () = assert!(UDP_LINK_MTU < MAX_UDP_PAYLOAD);
+
+        let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let driver = UdpWriteDriver::new(tx);
+        assert_eq!(driver.link_mtu(), UDP_LINK_MTU);
     }
 
     /// Two wired sockets exchange a raw datagram end to end: the writer task
