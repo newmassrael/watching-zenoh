@@ -9,12 +9,17 @@
 //! / [`wz_codecs::cobs_decode`] / [`wz_codecs::crc32`], landed R311ns)
 //! and the byte I/O transport. It mirrors zenoh-pico's
 //! `src/link/transport/upper/serial_protocol.c` +
-//! `src/protocol/codec/serial.c`, but holds NO I/O: it transforms
-//! bytes, so it compiles on both the AP (tty) and MCU (UART HAL)
-//! profiles. The host tty backend (`tokio-serial`) and the
-//! `LinkDriver` impl that drives this logic are a separate concern
-//! (the runtime-tokio side), exactly as `TcpDriver` / `UdpDriver`
-//! sit above the stream/datagram codecs.
+//! `src/protocol/codec/serial.c`, but holds NO I/O — it only transforms
+//! bytes, so the SAME logic is reusable by both the AP (tty) and MCU
+//! (UART HAL) link drivers. The current form takes `alloc` (owned `Vec`
+//! frame buffers + a growable reader accumulator) — the AP staging,
+//! matching `transport-fragmentation` / `session-reconnect`; a bounded
+//! no-alloc variant for the heap-less MCU profile is a follow-up (it
+//! needs a no-alloc `serial_envelope` encode, which the codec does not
+//! expose yet — only `encode_to_vec`). The host tty backend
+//! (`tokio-serial`) and the `LinkDriver` impl that drives this logic are
+//! a separate concern (the runtime-tokio side), exactly as `TcpDriver` /
+//! `UdpDriver` sit above the stream/datagram codecs.
 //!
 //! ## On-wire frame
 //!
@@ -62,13 +67,27 @@ use wz_codecs::serial_envelope::SerialEnvelope;
 /// frame carries — `_Z_SERIAL_MTU_SIZE`.
 pub const SERIAL_MTU: usize = 1500;
 /// Maximum pre-COBS frame size — `_Z_SERIAL_MFS_SIZE`
-/// (MTU + 1 header + 2 len + 4 crc32 = 1507).
+/// (MTU + 1 header + 2 len + 4 crc32 = 1507). MUST equal the generated
+/// `wz_codecs::cobs_decode` bound (it returns `SceBytes<1507>`): a
+/// destuffed frame cannot exceed it. No compile-time link to that `N`
+/// exists (the codegen does not emit a companion const), so the value is
+/// kept in sync by the pico header + the R311ns byte-parity tests.
 pub const SERIAL_MFS: usize = SERIAL_MTU + 1 + 2 + 4;
 /// Maximum on-the-wire (post-COBS, incl. EOP) buffer size —
 /// `_Z_SERIAL_MAX_COBS_BUF_SIZE` (1516). Bounds the read accumulator.
+/// MUST equal the generated `wz_codecs::cobs_encode` bound (it returns
+/// `SceBytes<1516>`); same hand-sync caveat as [`SERIAL_MFS`].
 pub const SERIAL_MAX_COBS_BUF: usize = 1516;
 
 // ─── header flags (definitions/serial.h:53-55) ───
+//
+// Link-layer handshake flags, NOT zenoh transport/network wire bytes.
+// They live here with the handshake FSM that consumes them, deliberately
+// NOT in `wz_codecs::wire_const` (the codec wire-shape SSOT): the
+// `serial_envelope` codec treats `header` as an opaque `u8`, and these
+// flags belong to the serial link protocol that runs BELOW and BEFORE
+// the zenoh transport. Co-locating them with their FSM is the correct
+// separation — a future "consolidate to wire_const" pass would be wrong.
 
 /// `_Z_FLAG_SERIAL_INIT` — connection-initiate flag.
 pub const SERIAL_FLAG_INIT: u8 = 0x01;
@@ -144,7 +163,13 @@ pub fn decode_frame(wire: &[u8]) -> Result<DecodedFrame, SerialFrameError> {
     }
     let mut cursor = SceCursor::new(frame);
     let env = SerialEnvelope::decode(&mut cursor).map_err(|_| SerialFrameError::Malformed)?;
-    if env.payload_len as usize != env.payload.len() {
+    // pico rejects a frame whose destuffed length disagrees with the
+    // declared field sizes (`expected_size != decoded_size`, serial.c:92).
+    // The codec consumes exactly [header|len|payload(len)|crc32]; any
+    // leftover bytes after that are trailing garbage -> malformed. (The
+    // codec already guarantees `payload.len() == payload_len`, so the
+    // only residual divergence from pico's check is surplus bytes.)
+    if cursor.remaining() != 0 {
         return Err(SerialFrameError::Malformed);
     }
     if env.crc32 != crc32(env.payload) {
@@ -185,8 +210,11 @@ impl SerialFrameReader {
             return result.map(Some);
         }
         if self.buf.len() >= SERIAL_MAX_COBS_BUF {
-            // A frame that never terminates within the on-wire bound is a
-            // desync; drop the partial accumulation and report the error.
+            // The COBS body did not terminate within the on-wire bound.
+            // `buf` excludes the 0x00 EOP, so this caps the body at
+            // SERIAL_MAX_COBS_BUF; pico's `rb` counts the EOP too, one
+            // byte tighter — both reject well past any valid frame (max
+            // on-wire ~1514). Desync: drop the partial accumulation.
             self.buf.clear();
             return Err(SerialFrameError::TooLarge);
         }
@@ -225,8 +253,12 @@ pub enum SerialRole {
 /// received header (or starting the handshake).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeStep {
-    /// Write these on-wire bytes (an INIT or INIT|ACK frame).
-    Emit(Vec<u8>),
+    /// Write these on-wire bytes (the responder's INIT|ACK reply) and
+    /// treat the link as established in the same step — after
+    /// acknowledging the peer's INIT the responder has nothing further to
+    /// exchange. The connected transition is explicit (not implied by a
+    /// bare `Emit`), so the driver does not infer link state from role.
+    EmitAndConnect(Vec<u8>),
     /// The link handshake completed; the transport layer may proceed.
     Connected,
     /// The peer sent RESET — back off (`SERIAL_CONNECT_THROTTLE_TIME_MS`
@@ -270,13 +302,17 @@ impl SerialHandshake {
     /// The opening frame to emit, if any. The initiator emits a bare
     /// INIT frame (`_z_connect_serial` line 257-259); the responder
     /// emits nothing until it observes the peer's INIT. Also the
-    /// re-drive entry point after a [`HandshakeStep::Throttle`].
+    /// re-drive entry point after a [`HandshakeStep::Throttle`]. The
+    /// `Option` expresses ONLY that role asymmetry — encoding an INIT of
+    /// empty payload is infallible (well within MTU), so it is `.expect`-ed
+    /// rather than folded into `None` (which would alias an impossible
+    /// encode failure with "responder is silent").
     pub fn open(&self) -> Option<Vec<u8>> {
         match self.role {
-            // INIT frame: header=INIT, empty payload. Infallible (empty
-            // payload is within bound), but surfaced as Option for the
-            // role asymmetry, not for encode failure.
-            SerialRole::Initiator => encode_frame(SERIAL_FLAG_INIT, &[]).ok(),
+            SerialRole::Initiator => Some(
+                encode_frame(SERIAL_FLAG_INIT, &[])
+                    .expect("INIT frame (empty payload) is always within MTU"),
+            ),
             SerialRole::Responder => None,
         }
     }
@@ -286,10 +322,10 @@ impl SerialHandshake {
     /// - Initiator: INIT|ACK -> [`Connected`](HandshakeStep::Connected);
     ///   RESET -> [`Throttle`](HandshakeStep::Throttle); else
     ///   [`Failed`](HandshakeStep::Failed) (serial_protocol.c:266-276).
-    /// - Responder: INIT (without ACK) -> emit INIT|ACK and
-    ///   [`Connected`](HandshakeStep::Connected) — modelled as a single
-    ///   `Emit` step (the caller treats reaching it as connected); any
-    ///   other header -> [`Failed`](HandshakeStep::Failed).
+    /// - Responder: INIT (without ACK) ->
+    ///   [`EmitAndConnect`](HandshakeStep::EmitAndConnect) carrying the
+    ///   INIT|ACK reply (the connected transition is explicit); any other
+    ///   header -> [`Failed`](HandshakeStep::Failed).
     pub fn on_header(&self, header: u8) -> HandshakeStep {
         match self.role {
             SerialRole::Initiator => {
@@ -303,10 +339,11 @@ impl SerialHandshake {
             }
             SerialRole::Responder => {
                 if has_flag(header, SERIAL_FLAG_INIT) && !has_flag(header, SERIAL_FLAG_ACK) {
-                    match encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]) {
-                        Ok(ack) => HandshakeStep::Emit(ack),
-                        Err(_) => HandshakeStep::Failed,
-                    }
+                    // INIT|ACK of empty payload is infallible (within MTU),
+                    // same as the initiator's INIT in `open`.
+                    let ack = encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[])
+                        .expect("INIT|ACK frame (empty payload) is always within MTU");
+                    HandshakeStep::EmitAndConnect(ack)
                 } else {
                     HandshakeStep::Failed
                 }
@@ -372,6 +409,12 @@ const SERIAL_BAUDRATE_KEY: &str = "baudrate";
 /// required). An address containing `.` is read as a `TX.RX` pin pair,
 /// otherwise as a device path — the same `.`-heuristic pico uses
 /// (serial_protocol.c:109).
+///
+/// Distinct from [`crate::locator::parse_locator`] (the IP `tcp`/`udp`
+/// leaf): the planned unified `Locator` sum type (IP | Serial) will be a
+/// thin scheme-dispatcher delegating to this and that leaf — NOT a third
+/// parser; both stay the per-scheme leaves, with errors composed as
+/// `enum { Ip(LocatorParseError), Serial(SerialLocatorError) }`.
 pub fn parse_serial_locator(locator: &str) -> Result<SerialEndpoint, SerialLocatorError> {
     let (scheme, rest) = locator
         .split_once('/')
@@ -417,9 +460,15 @@ fn parse_baudrate(config: &str) -> Result<u32, SerialLocatorError> {
     Err(SerialLocatorError::MissingBaudrate)
 }
 
+/// Parse a positive `u32` config value (baud rate or pin). Pico's
+/// `_z_serial_parse_u32` (serial_protocol.c:62) rejects zero — a `0` baud
+/// rate or pin number is invalid — so `0` is a `BadNumber` here too, for
+/// parity.
 fn parse_u32(s: &str) -> Result<u32, SerialLocatorError> {
-    s.parse::<u32>()
-        .map_err(|_| SerialLocatorError::BadNumber(s.to_string()))
+    match s.parse::<u32>() {
+        Ok(v) if v != 0 => Ok(v),
+        _ => Err(SerialLocatorError::BadNumber(s.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -500,6 +549,26 @@ mod tests {
         // byte index 4 is the first payload byte (0xAB) inside COBS.
         wire[4] ^= 0xFF;
         assert_eq!(decode_frame(&wire), Err(SerialFrameError::CrcMismatch));
+    }
+
+    #[test]
+    fn decode_frame_rejects_trailing_bytes() {
+        // pico rejects a destuffed frame longer than its declared fields
+        // (`expected_size != decoded_size`, serial.c:92). Build a valid
+        // frame's pre-COBS bytes, append one extra byte, re-COBS: the
+        // envelope still decodes but the leftover byte must be rejected.
+        let env = SerialEnvelope {
+            header: 0x00,
+            payload_len: 3,
+            payload: &[0xAB, 0xCD, 0xEF],
+            crc32: crc32(&[0xAB, 0xCD, 0xEF]),
+        };
+        let mut pre_cobs = env.encode_to_vec();
+        pre_cobs.push(0x99); // trailing garbage after crc32
+        let cobs = cobs_encode(&pre_cobs).expect("cobs");
+        let mut wire = cobs.as_slice().to_vec();
+        wire.push(SERIAL_EOP);
+        assert_eq!(decode_frame(&wire), Err(SerialFrameError::Malformed));
     }
 
     #[test]
@@ -609,13 +678,13 @@ mod tests {
     fn responder_acks_init() {
         let hs = SerialHandshake::responder();
         match hs.on_header(SERIAL_FLAG_INIT) {
-            HandshakeStep::Emit(ack) => {
+            HandshakeStep::EmitAndConnect(ack) => {
                 assert_eq!(
                     ack,
                     encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).unwrap()
                 );
             }
-            other => panic!("responder must emit INIT|ACK, got {other:?}"),
+            other => panic!("responder must emit INIT|ACK and connect, got {other:?}"),
         }
     }
 
@@ -630,8 +699,8 @@ mod tests {
         let init_hdr = decode_frame(&init_wire).expect("decode INIT").header;
 
         let ack_wire = match responder.on_header(init_hdr) {
-            HandshakeStep::Emit(bytes) => bytes,
-            other => panic!("expected ACK emit, got {other:?}"),
+            HandshakeStep::EmitAndConnect(bytes) => bytes,
+            other => panic!("expected ACK emit + connect, got {other:?}"),
         };
         let ack_hdr = decode_frame(&ack_wire).expect("decode ACK").header;
 
@@ -691,6 +760,23 @@ mod tests {
         assert_eq!(
             parse_serial_locator("serial//dev/ttyUSB0#baudrate=fast"),
             Err(SerialLocatorError::BadNumber("fast".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_zero_baudrate_like_pico() {
+        // pico's `_z_serial_parse_u32` rejects 0 (serial_protocol.c:62).
+        assert_eq!(
+            parse_serial_locator("serial//dev/ttyUSB0#baudrate=0"),
+            Err(SerialLocatorError::BadNumber("0".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_zero_pin_like_pico() {
+        assert_eq!(
+            parse_serial_locator("serial/0.13#baudrate=9600"),
+            Err(SerialLocatorError::BadNumber("0".to_string()))
         );
     }
 }
