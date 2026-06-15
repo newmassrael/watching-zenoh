@@ -837,11 +837,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // (own: effective_batch_size, the same value the InitSyn wire
         // carried; peer: the from_init_body projection), so the min is
         // a plain min — no sentinel arms here.
+        //
+        // R311nw — the LINK MTU joins the min as a third bound. A
+        // frame-bounded link (serial: `SERIAL_MTU` 1500) caps the TX
+        // budget below the negotiated batch so an oversize message
+        // fragments to chunks the link can actually emit — exactly how
+        // zenoh-pico sizes its TX wbuf `min(zl->_mtu, batch_size)`
+        // (transport/unicast/transport.c:47). The advertised batch is
+        // NOT itself reduced (pico does not either — the peer's RX
+        // budget stays the full advertisement); only this TX-side budget
+        // is link-capped. For an unbounded stream link the term is
+        // [`BoxedLinkDriver::link_mtu`]'s `DEFAULT_LINK_MTU` (65535),
+        // inert against the `u16` batch advertisements, so TCP / UDP are
+        // unchanged.
         let own = self.params.effective_batch_size() as usize;
+        let link = self.link_driver().link_mtu();
         let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
         match peer {
-            Some(p) => own.min(p.batch_size as usize),
-            None => own,
+            Some(p) => own.min(p.batch_size as usize).min(link),
+            None => own.min(link),
         }
     }
 

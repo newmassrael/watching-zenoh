@@ -704,13 +704,23 @@ layer_c1c_cargo_test_codec_declare() {
 # Both serial test files gate `#![cfg(feature = "transport-link-serial")]`,
 # so Layer C1's `cargo test --workspace` skips them — this lane is where
 # the runtime serial backend is exercised.
+#
+# R311nw: the lane gains a SECOND `serial_pty_e2e` invocation adding
+# `transport-fragmentation`, which unlocks the `#[cfg(transport-fragmentation)]`
+# oversize-Put test (a > SERIAL_MTU payload fragments at the transport
+# layer to chunks the serial frame can carry, then reassembles byte-exact).
+# The frag-OFF invocation stays — it proves the serial backend composes in
+# a minimal build with no reassembly subsystem. A matching frag-ON clippy
+# gate lints the otherwise cfg'd-out fragmentation test.
 layer_c1t_cargo_test_serial() {
     (cd crates \
         && cargo test -p wz-session-core --features transport-link-serial --quiet \
         && cargo test -p wz-session-core --no-default-features --features transport-link-serial --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --lib serial_pipeline --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-serial --test serial_pty_e2e --quiet \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings)
+        && cargo test -p wz-runtime-tokio --features transport-link-serial,transport-fragmentation --test serial_pty_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)
 }
 
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──

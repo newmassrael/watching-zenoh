@@ -348,10 +348,15 @@ impl SerialWriteDriver {
 impl BoxedLinkDriver for SerialWriteDriver {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
         // A single serial frame carries at most SERIAL_MTU payload bytes
-        // (encode_frame rejects past it). An oversize payload is a wz-side
-        // bug — the session layer fragments to the negotiated MTU before
-        // this seam — so drop loud rather than enqueue a frame the writer
-        // task can only fail to encode.
+        // (encode_frame rejects past it). The transport TX path now caps
+        // its fragment budget to THIS link's MTU — [`Self::link_mtu`]
+        // feeds `SessionLinkActions::negotiated_batch_mtu`, which mins it
+        // against the negotiated batch (R311nw) — so a well-formed session
+        // fragments an oversize message to <= SERIAL_MTU chunks before it
+        // ever reaches this seam. The guard stays as a loud defensive
+        // backstop: a caller that bypassed the negotiated budget drops
+        // here rather than enqueue a frame the writer can only fail to
+        // encode.
         if bytes.len() > SERIAL_MTU {
             log::warn!(
                 "wz-runtime-tokio: outbound serial frame {} bytes > {SERIAL_MTU}; dropping",
@@ -372,6 +377,18 @@ impl BoxedLinkDriver for SerialWriteDriver {
         // The writer task exits when every sender clone drops (the owning
         // scope releases the Arc). Letting the receiver-drop signal terminate
         // the task is the textbook channel idiom (mirrors TcpWriteDriver).
+    }
+
+    fn link_mtu(&self) -> usize {
+        // The serial link's fixed frame cap — zenoh-pico's
+        // `_z_get_link_mtu_serial` returns `_Z_SERIAL_MTU_SIZE`
+        // (`src/link/unicast/serial.c:62`), the same 1500. The transport
+        // reads this through `negotiated_batch_mtu` to bound its TX
+        // fragment budget (`min(link mtu, negotiated batch)`,
+        // transport/unicast/transport.c:47), so a >MTU message splits into
+        // emittable frames instead of tripping the `send_blocking` drop
+        // guard. TCP / UDP inherit the unbounded `DEFAULT_LINK_MTU`.
+        SERIAL_MTU
     }
 }
 
@@ -414,6 +431,25 @@ pub async fn serial_writer_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The serial write driver reports the serial link MTU (not the
+    /// unbounded `DEFAULT_LINK_MTU` a stream link inherits), so the
+    /// transport's `negotiated_batch_mtu` mins its TX fragment budget down
+    /// to a frame the serial link can actually emit. This is the link-side
+    /// half of the >MTU fragmentation wiring; the end-to-end split is
+    /// proved in `serial_pty_e2e`.
+    #[test]
+    fn serial_write_driver_reports_serial_link_mtu() {
+        // Static invariant: the serial cap must bind BELOW the unbounded
+        // stream default, else the `negotiated_batch_mtu` min term would be
+        // inert and serial would never fragment. A const assertion so a
+        // constant regression fails the build, not a runtime check.
+        const _: () = assert!(SERIAL_MTU < wz_session_core::link::DEFAULT_LINK_MTU);
+
+        let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let driver = SerialWriteDriver::new(tx);
+        assert_eq!(driver.link_mtu(), SERIAL_MTU);
+    }
 
     /// A PTY pair handshakes end to end: the Initiator end sends INIT, the
     /// Responder end replies INIT|ACK, both `drive_serial_handshake` futures

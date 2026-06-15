@@ -50,10 +50,37 @@ use wz_runtime_core::TimeSource;
 /// Sync` onto the trait would force that `unsafe` hack onto the MCU
 /// impl; keeping the trait pure lets each profile's `LinkSink` carry
 /// the auto-traits its concurrency model actually needs.
+/// The link MTU a [`BoxedLinkDriver`] reports when it has no fixed
+/// frame-size bound of its own — zenoh-pico's `_z_get_link_mtu_tcp`
+/// (`src/link/unicast/tcp.c:86`) returns the identical `65535`, the
+/// u16 ceiling a stream link never exceeds. A driver whose link DOES
+/// cap the frame (serial = `_Z_SERIAL_MTU_SIZE` 1500) overrides
+/// [`BoxedLinkDriver::link_mtu`]; everything else inherits this and the
+/// `min` against it is therefore a no-op (own / peer `batch_size` are
+/// `u16`, so they never exceed it).
+pub const DEFAULT_LINK_MTU: usize = 65_535;
+
 pub trait BoxedLinkDriver {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability);
     fn open_blocking(&self);
     fn close_blocking(&self);
+
+    /// The largest single frame this link can carry, in bytes — the wz
+    /// analogue of zenoh-pico's per-link `zl->_mtu` (set by the link's
+    /// `_z_get_link_mtu_*` at open, `tcp.c:111` / `serial.c:71`). The
+    /// transport TX path bounds its outbound budget by it:
+    /// `min(link mtu, negotiated batch)` is the wbuf size pico computes
+    /// at `transport/unicast/transport.c:47`, so a message past the
+    /// budget fragments to chunks the link can actually emit rather than
+    /// being handed a frame the driver can only drop.
+    ///
+    /// Defaults to [`DEFAULT_LINK_MTU`] (a stream link with no fixed
+    /// frame cap — TCP / UDP / the lwIP MCU socket). A frame-bounded
+    /// link (serial) overrides this with its real cap; the default's
+    /// `min` term is then inert for every unbounded link.
+    fn link_mtu(&self) -> usize {
+        DEFAULT_LINK_MTU
+    }
 }
 
 /// Runtime-tier extension that owns the per-profile *storage* of a
