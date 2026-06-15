@@ -37220,6 +37220,60 @@
         "UNPUSHED: R311nr(vendor bump + codec_owned ? + switchboard-codegen fallible + ledger). push=사용자 동의 대기."
       ]
     },
+    "Round 311ns": {
+      "decision_summary": "R311ns: serial framing codec layer SCXML SSOT(crc32+serial_envelope+cobs_encode+cobs_decode 4 SCXML + 6 byte-parity test). SCE 1d439ea07->57e06f1e9 bump. full run-ci EXIT=0.",
+      "changes_bullets": [
+        "vendor/sce: submodule 1d439ea07 -> 57e06f1e9 (4-commit clean FF). e0f6c5420 Issue#1 fix = codec path 선택을 positional-validity allowlist로(denylist 아님; serial_envelope이 wz 최초 fixed-after-variable codec여서 old simple-path가 [header|len|crc32|payload]를 잘못 생성). 9c0356a41 Issue#2 fix = byte-buffer-build primitives(<sce:var type=\"bytes\" capacity=\"N\"> + <sce:append target expr> + <sce:return type=\"bytes\" returns-max-size=\"N\">) for algorithm-kind. c9a560fe0 encode_multibyte_unified SSOT refactor. 57e06f1e9 Kotlin .toInt() coercion fix. Issue#1+#2 = wz가 리포트, SCE author가 세션 중 4커밋 수정(5번째 'AI reported, user fixed SCE' 사례; 우회 없이 수령).",
+        "sources/codecs/crc32.scxml (신규, algorithm-kind): zenoh-pico _z_crc32 right-shift(reflected) poly 0x04C11DB7 미러(checksum.c:17; ISO-HDLC 아님). 오라클 \"123456789\"->0xFC4F2BE9.",
+        "sources/codecs/serial_envelope.scxml (신규, codec-kind): LE [header:u8 | payload_len:u16 | payload:bytes | crc32:u32]. wz 최초 fixed-after-variable codec(SCE e0f6c5420 allowlist codec-path 요구).",
+        "sources/codecs/cobs_encode.scxml (신규, algorithm-kind): byte-buffer-build, capacity/returns-max-size=1516 (=pico _Z_SERIAL_MAX_COBS_BUF_SIZE). SCE 9c0356a41 byte-buffer-build primitives 요구.",
+        "sources/codecs/cobs_decode.scxml (신규, algorithm-kind): capacity/returns-max-size=1507 (=pico _Z_SERIAL_MFS_SIZE, serial_protocol.h:32). prev=0xFF sentinel로 append-only lazy implicit-zero(retraction 없음).",
+        "crates/wz-codecs/tests/serial_framing.rs (신규, 6 byte-parity test): crc32 5벡터 + ISO-HDLC variant guard(오인 차단), serial_envelope data/INIT 프레임, cobs_encode 5 canonical 벡터, cobs_decode round-trip+EOP(trailing 0x00) tolerance, full pipeline round-trip(envelope 프레임 00 03 00 ABCDEF 7720A7FB = header|len_le|payload|crc32_le pin).",
+        "wiring: build.rs 4 stem(crc32/serial_envelope/cobs_encode/cobs_decode) + is_codec_enabled codec-serial arm; Cargo.toml codec-serial=[] feature(defaults 포함) + sce-portable-bytes{path=vendor/sce/sce-portable-bytes, default-features=false} dep + alloc=sce-portable-bytes/alloc forward; lib.rs 4 pub mod under #[cfg(feature=\"codec-serial\")]; Cargo.lock 갱신."
+      ],
+      "verification_bullets": [
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'run-ci: all required layers pass'. 전 레이어 pass(0/A/A2/A3/B/C0/C1/C2/C3/C4/D/E/E2/F/G/Q/M); error[ / panicked / 종료됨 0건. R311ns 직전 2회 kill(세션종료 1 + 사용자거절 1)로 미검증이던 게이트를 이번 세션 완주로 청산. 파이프 없이 로그 리다이렉트 후 exit code로만 판정([[feedback-runci-verdict-exit-code-only]]).",
+        "6 byte-parity test 통과(파일 실측): crc32 poly 0x04C11DB7 + 오라클 0xFC4F2BE9(pico right-shift 미러, ISO-HDLC variant guard로 오인 차단), serial_envelope LE 프레이밍, cobs_encode/decode canonical 벡터, full pipeline envelope 프레임 pin round-trip. Layer B codegen 골든(4 신규 SCXML 5-lang emit) 안정.",
+        "Layer G(MCU cross thumbv8m) pass = no_std codec-serial 크로스컴파일 검증(SCE 신규 byte-buffer-build primitive가 MCU 대상서도 컴파일; riscv32 toolchain 미설치 SKIP). Layer M(멀티캐스트 host) pass.",
+        "atomic ledger entries 726->727, T1 orphan new=+0(ledger 13 불변), T3 warn 4 / T4 info 4 불변. fmt + clippy clean(메모리 기록, run-ci Layer C1/C2가 재확인)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "②breadth serial framing codec layer 완료: 4 SCXML(crc32 algorithm + serial_envelope codec[wz 최초 fixed-after-variable] + cobs_encode/decode algorithm)이 zenoh-pico SERIAL-link framing을 byte-parity로 미러. SCE 1d439ea07->57e06f1e9 bump 동반.",
+        "SCE Issue#1(codec path를 positional-validity allowlist로; fixed-after-variable codec가 denylist를 우회해 오생성) + Issue#2(algorithm-kind byte-buffer-build primitives) = wz 리포트 -> SCE author 세션 중 4커밋 수정. wz 우회(SCXML 손수 조립) 없이 SCE 수령(5번째 사례, [[feedback-sce-codegen-issue-stop-first]]).",
+        "full run-ci EXIT=0(Layer M+G 포함)로 R311ns 이전 미검증 게이트 청산. Layer G가 no_std MCU cross에서 codec-serial(SCE byte-buffer-build primitive 포함) 컴파일까지 검증.",
+        "NEXT: ②breadth 후속(P2 WS/TLS 링크 또는 gossip scouting 실소켓 interop) 또는 멀티캐스트 양방향 JOIN assertion / pico->wz unicast dial-in(router 의존).",
+        "UNPUSHED: R311ns(vendor/sce bump + 4 SCXML + serial_framing test + build.rs/Cargo.toml/lib.rs/Cargo.lock + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311ns: serial framing codec layer SCXML SSOT(crc32+serial_envelope+cobs_encode+cobs_decode 4 SCXML + 6 byte-parity test). SCE 1d439ea07->57e06f1e9 bump. full run-ci EXIT=0.",
+      "publishable_changes_bullets": [
+        "vendor/sce: submodule 1d439ea07 -> 57e06f1e9 (4-commit clean FF). e0f6c5420 Issue#1 fix = codec path 선택을 positional-validity allowlist로(denylist 아님; serial_envelope이 wz 최초 fixed-after-variable codec여서 old simple-path가 [header|len|crc32|payload]를 잘못 생성). 9c0356a41 Issue#2 fix = byte-buffer-build primitives(<sce:var type=\"bytes\" capacity=\"N\"> + <sce:append target expr> + <sce:return type=\"bytes\" returns-max-size=\"N\">) for algorithm-kind. c9a560fe0 encode_multibyte_unified SSOT refactor. 57e06f1e9 Kotlin .toInt() coercion fix. Issue#1+#2 = wz가 리포트, SCE author가 세션 중 4커밋 수정(5번째 'AI reported, user fixed SCE' 사례; 우회 없이 수령).",
+        "sources/codecs/crc32.scxml (신규, algorithm-kind): zenoh-pico _z_crc32 right-shift(reflected) poly 0x04C11DB7 미러(checksum.c:17; ISO-HDLC 아님). 오라클 \"123456789\"->0xFC4F2BE9.",
+        "sources/codecs/serial_envelope.scxml (신규, codec-kind): LE [header:u8 | payload_len:u16 | payload:bytes | crc32:u32]. wz 최초 fixed-after-variable codec(SCE e0f6c5420 allowlist codec-path 요구).",
+        "sources/codecs/cobs_encode.scxml (신규, algorithm-kind): byte-buffer-build, capacity/returns-max-size=1516 (=pico _Z_SERIAL_MAX_COBS_BUF_SIZE). SCE 9c0356a41 byte-buffer-build primitives 요구.",
+        "sources/codecs/cobs_decode.scxml (신규, algorithm-kind): capacity/returns-max-size=1507 (=pico _Z_SERIAL_MFS_SIZE, serial_protocol.h:32). prev=0xFF sentinel로 append-only lazy implicit-zero(retraction 없음).",
+        "crates/wz-codecs/tests/serial_framing.rs (신규, 6 byte-parity test): crc32 5벡터 + ISO-HDLC variant guard(오인 차단), serial_envelope data/INIT 프레임, cobs_encode 5 canonical 벡터, cobs_decode round-trip+EOP(trailing 0x00) tolerance, full pipeline round-trip(envelope 프레임 00 03 00 ABCDEF 7720A7FB = header|len_le|payload|crc32_le pin).",
+        "wiring: build.rs 4 stem(crc32/serial_envelope/cobs_encode/cobs_decode) + is_codec_enabled codec-serial arm; Cargo.toml codec-serial=[] feature(defaults 포함) + sce-portable-bytes{path=vendor/sce/sce-portable-bytes, default-features=false} dep + alloc=sce-portable-bytes/alloc forward; lib.rs 4 pub mod under #[cfg(feature=\"codec-serial\")]; Cargo.lock 갱신."
+      ],
+      "publishable_verification_bullets": [
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'run-ci: all required layers pass'. 전 레이어 pass(0/A/A2/A3/B/C0/C1/C2/C3/C4/D/E/E2/F/G/Q/M); error[ / panicked / 종료됨 0건. R311ns 직전 2회 kill(세션종료 1 + 사용자거절 1)로 미검증이던 게이트를 이번 세션 완주로 청산. 파이프 없이 로그 리다이렉트 후 exit code로만 판정([[feedback-runci-verdict-exit-code-only]]).",
+        "6 byte-parity test 통과(파일 실측): crc32 poly 0x04C11DB7 + 오라클 0xFC4F2BE9(pico right-shift 미러, ISO-HDLC variant guard로 오인 차단), serial_envelope LE 프레이밍, cobs_encode/decode canonical 벡터, full pipeline envelope 프레임 pin round-trip. Layer B codegen 골든(4 신규 SCXML 5-lang emit) 안정.",
+        "Layer G(MCU cross thumbv8m) pass = no_std codec-serial 크로스컴파일 검증(SCE 신규 byte-buffer-build primitive가 MCU 대상서도 컴파일; riscv32 toolchain 미설치 SKIP). Layer M(멀티캐스트 host) pass.",
+        "atomic ledger entries 726->727, T1 orphan new=+0(ledger 13 불변), T3 warn 4 / T4 info 4 불변. fmt + clippy clean(메모리 기록, run-ci Layer C1/C2가 재확인)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "②breadth serial framing codec layer 완료: 4 SCXML(crc32 algorithm + serial_envelope codec[wz 최초 fixed-after-variable] + cobs_encode/decode algorithm)이 zenoh-pico SERIAL-link framing을 byte-parity로 미러. SCE 1d439ea07->57e06f1e9 bump 동반.",
+        "SCE Issue#1(codec path를 positional-validity allowlist로; fixed-after-variable codec가 denylist를 우회해 오생성) + Issue#2(algorithm-kind byte-buffer-build primitives) = wz 리포트 -> SCE author 세션 중 4커밋 수정. wz 우회(SCXML 손수 조립) 없이 SCE 수령(5번째 사례, [[feedback-sce-codegen-issue-stop-first]]).",
+        "full run-ci EXIT=0(Layer M+G 포함)로 R311ns 이전 미검증 게이트 청산. Layer G가 no_std MCU cross에서 codec-serial(SCE byte-buffer-build primitive 포함) 컴파일까지 검증.",
+        "NEXT: ②breadth 후속(P2 WS/TLS 링크 또는 gossip scouting 실소켓 interop) 또는 멀티캐스트 양방향 JOIN assertion / pico->wz unicast dial-in(router 의존).",
+        "UNPUSHED: R311ns(vendor/sce bump + 4 SCXML + serial_framing test + build.rs/Cargo.toml/lib.rs/Cargo.lock + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
@@ -43483,5 +43537,5 @@
   "predicates": {},
   "narrative_facts": {},
   "disclosure_plans": {},
-  "schema_version": 22
+  "schema_version": 23
 }
