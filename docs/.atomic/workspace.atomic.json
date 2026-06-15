@@ -37610,6 +37610,56 @@
         "UNPUSHED: 누적 6 commits — R311nw(bb58001 feat + b2b4c80 ledger), R311nx(1c560d2 fix + 8d5b306 test + b72314c ledger), R311ny(본 라운드, refactor + ledger). origin/main=f24e284=R311nv. push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311nz": {
+      "decision_summary": "R311nz: UDP unicast >MTU fragmentation 패리티 — UdpWriteDriver::link_mtu()를 pico _z_get_link_mtu_udp_unicast(udp.c:97)와 동일한 1450으로 override해 negotiated_batch_mtu min term이 65535 default 아래로 binding, >1450 메시지가 datagram chain으로 fragment. R311nw serial 패턴 재사용. carry가 가정한 65507(=OS datagram max, 이미 MAX_UDP_PAYLOAD 드롭가드)이 아니라 pico 실측 1450 채택(evidence>assumptions). full run-ci(M+G) EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/udp_pipeline.rs: UdpWriteDriver에 link_mtu() override 추가 = UDP_LINK_MTU(pub const 1450). pico _z_get_link_mtu_udp_unicast(src/link/unicast/udp.c:97) 실측값; multicast udp.c:106도 1450이나 멀티캐스트는 별도 TX seam이라 무관. DEFAULT_LINK_MTU(65535) 상속 대신 1450 보고 -> SessionLinkActions::negotiated_batch_mtu의 min(own,peer,link) 3번째 항이 65535 default 아래로 binding. send_blocking 주석 갱신: MAX_UDP_PAYLOAD(65507) 드롭가드는 transport가 1450으로 pre-fragment하므로 이제 defensive backstop. R311nw serial link_mtu 패턴 동형(serial=1500).",
+        "유닛 테스트 udp_write_driver_reports_udp_link_mtu(udp_pipeline.rs): const assertion UDP_LINK_MTU < DEFAULT_LINK_MTU && < MAX_UDP_PAYLOAD(회귀를 빌드 실패화) + driver.link_mtu()==1450. serial_write_driver_reports_serial_link_mtu 동형.",
+        "crates/wz-runtime-tokio/tests/udp_frag_e2e.rs(신규, cfg all(transport-fragmentation, transport-link-udp)): link-MTU-driven UDP fragmentation e2e. acceptor가 peek_from(MSG_PEEK)로 initiator src 학습 후 DialedLink::Udp{socket,peer}로 accept_and_open_session; 양단 default 65535 batch 광고 -> negotiated_batch_mtu()==1450(by-construction 단언). 4096B Put이 ~3 datagram으로 fragment, peer가 reassemble byte-exact. serial_pty_e2e의 UDP sibling / layer3_reassembly_tx(TCP stream)의 datagram complement -- 각 Fragment=별도 datagram(스트림 프레이밍 없는 reassembly across datagrams)은 두 sibling 미커버 UDP-specific 경로.",
+        "값 결정: carry note(R311nx/ny)가 가정한 65507은 OS datagram max(이미 MAX_UDP_PAYLOAD 드롭가드로 존재)이고 link MTU(fragmentation 예산)가 아님. pico 소스 직접 검증으로 unicast/udp.c:97 + multicast/udp.c:106 둘 다 1450 확인 -> pico-faithful 1450 채택(evidence>assumptions, 사용자 confirm). run-ci 수정 불필요: layer_c1l_reassembly가 cargo test -p wz-runtime-tokio --features transport-fragmentation(default의 transport-link-udp 유지)로 e2e 자동 실행(layer3_reassembly_tx와 동일 메커니즘)."
+      ],
+      "verification_bullets": [
+        "scope: link_mtu()는 unicast 경로 전용(SessionLinkActions::negotiated_batch_mtu에만 피드). multicast는 별도 LinkDriver::send 경로(R311ko 자체 fragmentation)라 UdpWriteDriver override 무관 -- multicast_glue가 BoxedLinkDriver::link_mtu 미사용 확인.",
+        "유닛 테스트 4/4 통과(신규 udp_write_driver_reports_udp_link_mtu 포함). e2e udp_frag_e2e 통과 + 20/20 반복 non-flaky(loopback ~3 sub-1450 datagram + 소량 핸드셰이크 datagram << recv buffer = 무손실; 핸드셰이크는 static_scout_open::open_session_at_udp_reaches_established 선례로 안정).",
+        "clippy default + transport-fragmentation 2 레인 -D warnings exit 0(doc_lazy_continuation 1건=유닛테스트 doc의 줄-시작 '>' -> 줄바꿈 조정), cargo fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C1l/.../G/Q/M 전부; FAIL/error[/panicked 0). Layer C1l(transport-fragmentation, default udp 유지)이 udp_frag_e2e + 유닛테스트 실행, Layer M pass.",
+        "atomic: ledger entries 733->734, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(transport-link-udp 이미 active)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311nz = UDP unicast >MTU fragmentation 패리티 완료(R311nw serial 패턴 재사용). UdpWriteDriver link_mtu()=1450(pico udp.c:97)으로 negotiated_batch_mtu가 65535 default 아래로 binding -> UDP가 pico와 동일하게 1450에서 fragment(이전엔 65535까지 단일 datagram=발산). serial(1500)/UDP(1450) 둘 다 link-bounded; TCP는 unbounded DEFAULT_LINK_MTU 유지.",
+        "메타: carry 가정값(65507)이 pico 실측(1450)과 불일치 -- 65507은 OS datagram max(MAX_UDP_PAYLOAD 드롭가드)이고 link MTU 아님. pico 소스 직접 검증으로 정정, 사용자 confirm. evidence>assumptions + verify-by-direct-read 원칙의 구체적 사례.",
+        "behavior change(의도): UDP unicast >1450 메시지가 이제 transport-layer fragment(이전 65535까지 단일 datagram=kernel IP-frag 의존, best-effort UDP 취약). pico-faithful + 망 정확성. multicast는 불변(별도 TX 경로).",
+        "미구현(정직): UDP link_mtu는 플랫폼 독립 1450 고정(pico도 @TODO platform-dependent). Pins MCU UART serial backend / MCU no_std serial backend(no-alloc serial_envelope encode 선결, SCE 의존) / serial reconnect IP-only 여전히 미구현.",
+        "NEXT 후보: (a) WS/TLS breadth(P2, R311ny parse-always/backend-conditional 패턴), (b) MCU no_std serial backend, (c) pico parity % 재계산(serial breadth+frag+cross-impl + UDP frag 반영). UNPUSHED: 누적 R311nw/nx/ny(7) + R311nz(b3f8711 feat + 본 ledger) = 9 commits. origin/main=f24e284=R311nv. push=명시 동의 대기."
+      ],
+      "publishable_decision_summary": "R311nz: UDP unicast >MTU fragmentation 패리티 — UdpWriteDriver::link_mtu()를 pico _z_get_link_mtu_udp_unicast(udp.c:97)와 동일한 1450으로 override해 negotiated_batch_mtu min term이 65535 default 아래로 binding, >1450 메시지가 datagram chain으로 fragment. R311nw serial 패턴 재사용. carry가 가정한 65507(=OS datagram max, 이미 MAX_UDP_PAYLOAD 드롭가드)이 아니라 pico 실측 1450 채택(evidence>assumptions). full run-ci(M+G) EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/udp_pipeline.rs: UdpWriteDriver에 link_mtu() override 추가 = UDP_LINK_MTU(pub const 1450). pico _z_get_link_mtu_udp_unicast(src/link/unicast/udp.c:97) 실측값; multicast udp.c:106도 1450이나 멀티캐스트는 별도 TX seam이라 무관. DEFAULT_LINK_MTU(65535) 상속 대신 1450 보고 -> SessionLinkActions::negotiated_batch_mtu의 min(own,peer,link) 3번째 항이 65535 default 아래로 binding. send_blocking 주석 갱신: MAX_UDP_PAYLOAD(65507) 드롭가드는 transport가 1450으로 pre-fragment하므로 이제 defensive backstop. R311nw serial link_mtu 패턴 동형(serial=1500).",
+        "유닛 테스트 udp_write_driver_reports_udp_link_mtu(udp_pipeline.rs): const assertion UDP_LINK_MTU < DEFAULT_LINK_MTU && < MAX_UDP_PAYLOAD(회귀를 빌드 실패화) + driver.link_mtu()==1450. serial_write_driver_reports_serial_link_mtu 동형.",
+        "crates/wz-runtime-tokio/tests/udp_frag_e2e.rs(신규, cfg all(transport-fragmentation, transport-link-udp)): link-MTU-driven UDP fragmentation e2e. acceptor가 peek_from(MSG_PEEK)로 initiator src 학습 후 DialedLink::Udp{socket,peer}로 accept_and_open_session; 양단 default 65535 batch 광고 -> negotiated_batch_mtu()==1450(by-construction 단언). 4096B Put이 ~3 datagram으로 fragment, peer가 reassemble byte-exact. serial_pty_e2e의 UDP sibling / layer3_reassembly_tx(TCP stream)의 datagram complement -- 각 Fragment=별도 datagram(스트림 프레이밍 없는 reassembly across datagrams)은 두 sibling 미커버 UDP-specific 경로.",
+        "값 결정: carry note(R311nx/ny)가 가정한 65507은 OS datagram max(이미 MAX_UDP_PAYLOAD 드롭가드로 존재)이고 link MTU(fragmentation 예산)가 아님. pico 소스 직접 검증으로 unicast/udp.c:97 + multicast/udp.c:106 둘 다 1450 확인 -> pico-faithful 1450 채택(evidence>assumptions, 사용자 confirm). run-ci 수정 불필요: layer_c1l_reassembly가 cargo test -p wz-runtime-tokio --features transport-fragmentation(default의 transport-link-udp 유지)로 e2e 자동 실행(layer3_reassembly_tx와 동일 메커니즘)."
+      ],
+      "publishable_verification_bullets": [
+        "scope: link_mtu()는 unicast 경로 전용(SessionLinkActions::negotiated_batch_mtu에만 피드). multicast는 별도 LinkDriver::send 경로(R311ko 자체 fragmentation)라 UdpWriteDriver override 무관 -- multicast_glue가 BoxedLinkDriver::link_mtu 미사용 확인.",
+        "유닛 테스트 4/4 통과(신규 udp_write_driver_reports_udp_link_mtu 포함). e2e udp_frag_e2e 통과 + 20/20 반복 non-flaky(loopback ~3 sub-1450 datagram + 소량 핸드셰이크 datagram << recv buffer = 무손실; 핸드셰이크는 static_scout_open::open_session_at_udp_reaches_established 선례로 안정).",
+        "clippy default + transport-fragmentation 2 레인 -D warnings exit 0(doc_lazy_continuation 1건=유닛테스트 doc의 줄-시작 '>' -> 줄바꿈 조정), cargo fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C1l/.../G/Q/M 전부; FAIL/error[/panicked 0). Layer C1l(transport-fragmentation, default udp 유지)이 udp_frag_e2e + 유닛테스트 실행, Layer M pass.",
+        "atomic: ledger entries 733->734, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(transport-link-udp 이미 active)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nz = UDP unicast >MTU fragmentation 패리티 완료(R311nw serial 패턴 재사용). UdpWriteDriver link_mtu()=1450(pico udp.c:97)으로 negotiated_batch_mtu가 65535 default 아래로 binding -> UDP가 pico와 동일하게 1450에서 fragment(이전엔 65535까지 단일 datagram=발산). serial(1500)/UDP(1450) 둘 다 link-bounded; TCP는 unbounded DEFAULT_LINK_MTU 유지.",
+        "메타: carry 가정값(65507)이 pico 실측(1450)과 불일치 -- 65507은 OS datagram max(MAX_UDP_PAYLOAD 드롭가드)이고 link MTU 아님. pico 소스 직접 검증으로 정정, 사용자 confirm. evidence>assumptions + verify-by-direct-read 원칙의 구체적 사례.",
+        "behavior change(의도): UDP unicast >1450 메시지가 이제 transport-layer fragment(이전 65535까지 단일 datagram=kernel IP-frag 의존, best-effort UDP 취약). pico-faithful + 망 정확성. multicast는 불변(별도 TX 경로).",
+        "미구현(정직): UDP link_mtu는 플랫폼 독립 1450 고정(pico도 @TODO platform-dependent). Pins MCU UART serial backend / MCU no_std serial backend(no-alloc serial_envelope encode 선결, SCE 의존) / serial reconnect IP-only 여전히 미구현.",
+        "NEXT 후보: (a) WS/TLS breadth(P2, R311ny parse-always/backend-conditional 패턴), (b) MCU no_std serial backend, (c) pico parity % 재계산(serial breadth+frag+cross-impl + UDP frag 반영). UNPUSHED: 누적 R311nw/nx/ny(7) + R311nz(b3f8711 feat + 본 ledger) = 9 commits. origin/main=f24e284=R311nv. push=명시 동의 대기."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
