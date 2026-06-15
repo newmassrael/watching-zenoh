@@ -79,18 +79,17 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 # runs in the C1 region — so the feature-OFF default composition stays
 # owned by C1 and the feature-ON wz-runtime-tokio build stays owned by the
 # C1l (frag) / Layer M (multicast) lanes.
-# R311nx — `transport-link-serial` pinned here TOO (not only on
-# wz-session-core above): the `AnyLocator::Serial` variant is gated on
-# wz-session-core's feature, but wz-runtime-tokio's `session_open.rs`
-# match arm for it is gated on wz-runtime-tokio's OWN feature. In normal
-# builds the two are coupled (wz-runtime-tokio's feature forwards to
-# wz-session-core's), but enabling only wz-session-core's via a sibling
-# dev-dep decouples them and makes the match non-exhaustive. Keeping the
-# pins together preserves that coupling.
+# R311ny — the R311nx `transport-link-serial` pin here is GONE. It was a
+# workaround for a now-eliminated skew: `AnyLocator::Serial` used to be
+# gated on wz-session-core's feature while wz-runtime-tokio's dial match
+# arm was gated on its OWN, so enabling only session-core's (the pin above)
+# made the match non-exhaustive. R311ny relocated the serial locator leaf
+# to the ungated `wz_session_core::locator`, so the variant is ALWAYS
+# present and the runtime's `dial_locator` handles it (dial-or-typed-error)
+# regardless of its serial backend — no coupling pin needed here anymore.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "transport-fragmentation",
     "transport-multicast",
-    "transport-link-serial",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the

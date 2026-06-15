@@ -67,9 +67,10 @@ use wz_runtime_core::Runtime;
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::locator::{SerialEndpoint, SerialTarget};
 use wz_session_core::serial_link::{
-    encode_frame, DecodedFrame, HandshakeStep, SerialEndpoint, SerialFrameReader, SerialHandshake,
-    SerialRole, SerialTarget, SERIAL_MAX_COBS_BUF, SERIAL_MTU,
+    encode_frame, DecodedFrame, HandshakeStep, SerialFrameReader, SerialHandshake, SerialRole,
+    SERIAL_MAX_COBS_BUF, SERIAL_MTU,
 };
 
 /// Steady-state data-frame header — no handshake flag set. The receiver

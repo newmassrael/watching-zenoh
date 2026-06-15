@@ -139,6 +139,18 @@ pub async fn dial_locator(locator: AnyLocator) -> io::Result<DialedLink> {
         // seam; the Responder side comes up via `accept_serial`.
         #[cfg(feature = "transport-link-serial")]
         AnyLocator::Serial(ep) => Ok(DialedLink::Serial(dial_serial(&ep).await?)),
+        // R311ny — `AnyLocator::Serial` is an ALWAYS-present variant (the
+        // serial locator leaf is ungated in wz-session-core), so this arm
+        // must exist whatever this crate's features are. Without the serial
+        // BACKEND feature it dials to a typed `Unsupported`, exactly as
+        // `udp` does without `transport-link-udp` — keeping the match
+        // exhaustive in every feature combination (no cross-crate skew: the
+        // variant's gate and this arm's gate can no longer disagree).
+        #[cfg(not(feature = "transport-link-serial"))]
+        AnyLocator::Serial(_ep) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "serial session-open requires the transport-link-serial feature",
+        )),
     }
 }
 

@@ -52,7 +52,6 @@
 //! initiator and its responder dual (receive INIT, reply INIT|ACK) so a
 //! wz peer can take either role over a point-to-point link.
 
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::SceCursor;
@@ -357,119 +356,11 @@ fn has_flag(header: u8, flag: u8) -> bool {
     header & flag != 0
 }
 
-// ─── locator parsing ───
-
-/// The connection target of a serial endpoint: a host device path
-/// (`/dev/ttyUSB0`) or a GPIO TX/RX pin pair (MCU). Mirrors pico's
-/// `_z_serial_endpoint_cfg_t` dev-vs-pins split (serial_protocol.c:79-131).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SerialTarget {
-    /// A device path opened by the host tty backend.
-    Device(String),
-    /// A TX/RX GPIO pin pair (MCU UART HAL).
-    Pins { tx: u32, rx: u32 },
-}
-
-/// A parsed `serial/...` locator: its connection target and baud rate.
-/// The baud-rate *value* is carried verbatim (any `u32`); validating it
-/// against a supported speed table is the tty backend's concern, not the
-/// parser's (pico parses the `u32` here and validates at tty-open,
-/// tty_posix.c:27-56).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SerialEndpoint {
-    pub target: SerialTarget,
-    pub baudrate: u32,
-}
-
-/// Why a `serial/...` locator string did not parse.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SerialLocatorError {
-    /// The locator does not begin with the `serial/` scheme.
-    NotSerialScheme,
-    /// The address (between the scheme and the `#config`) is empty.
-    EmptyAddress,
-    /// The required `baudrate=<u32>` config key is absent.
-    MissingBaudrate,
-    /// A config value (the baud rate, or a pin) is not a valid `u32`.
-    BadNumber(String),
-}
-
-const SERIAL_SCHEME: &str = "serial";
-const SERIAL_BAUDRATE_KEY: &str = "baudrate";
-
-/// Parse a zenoh serial locator into a [`SerialEndpoint`].
-///
-/// Accepted forms (mirror of `_z_serial_endpoint_parse`,
-/// serial_protocol.c:79-131):
-/// - device: `serial//dev/ttyUSB0#baudrate=115200`
-/// - pins:   `serial/12.13#baudrate=115200`
-///
-/// The scheme is the substring before the first `/`; the remainder is
-/// `<address>#<config>` (config optional in shape, but `baudrate` is
-/// required). An address containing `.` is read as a `TX.RX` pin pair,
-/// otherwise as a device path — the same `.`-heuristic pico uses
-/// (serial_protocol.c:109).
-///
-/// Distinct from [`crate::locator::parse_locator`] (the IP `tcp`/`udp`
-/// leaf): the planned unified `Locator` sum type (IP | Serial) will be a
-/// thin scheme-dispatcher delegating to this and that leaf — NOT a third
-/// parser; both stay the per-scheme leaves, with errors composed as
-/// `enum { Ip(LocatorParseError), Serial(SerialLocatorError) }`.
-pub fn parse_serial_locator(locator: &str) -> Result<SerialEndpoint, SerialLocatorError> {
-    let (scheme, rest) = locator
-        .split_once('/')
-        .ok_or(SerialLocatorError::NotSerialScheme)?;
-    if scheme != SERIAL_SCHEME {
-        return Err(SerialLocatorError::NotSerialScheme);
-    }
-
-    let (address, config) = match rest.split_once('#') {
-        Some((addr, cfg)) => (addr, cfg),
-        None => (rest, ""),
-    };
-    if address.is_empty() {
-        return Err(SerialLocatorError::EmptyAddress);
-    }
-
-    let baudrate = parse_baudrate(config)?;
-
-    let target = match address.split_once('.') {
-        Some((tx_str, rx_str)) => {
-            let tx = parse_u32(tx_str)?;
-            let rx = parse_u32(rx_str)?;
-            SerialTarget::Pins { tx, rx }
-        }
-        None => SerialTarget::Device(address.to_string()),
-    };
-
-    Ok(SerialEndpoint { target, baudrate })
-}
-
-/// Extract the required `baudrate=<u32>` from the `#`-delimited config
-/// tail (`key=value` pairs separated by `;`). Only `baudrate` is
-/// recognised — pico's serial config map has exactly one key
-/// (config/serial.h:29-52).
-fn parse_baudrate(config: &str) -> Result<u32, SerialLocatorError> {
-    for pair in config.split(';') {
-        if let Some((key, value)) = pair.split_once('=') {
-            if key == SERIAL_BAUDRATE_KEY {
-                return parse_u32(value);
-            }
-        }
-    }
-    Err(SerialLocatorError::MissingBaudrate)
-}
-
-/// Parse a positive `u32` config value (baud rate or pin). Pico's
-/// `_z_serial_parse_u32` (serial_protocol.c:62) rejects zero — a `0` baud
-/// rate or pin number is invalid — so `0` is a `BadNumber` here too, for
-/// parity.
-fn parse_u32(s: &str) -> Result<u32, SerialLocatorError> {
-    match s.parse::<u32>() {
-        Ok(v) if v != 0 => Ok(v),
-        _ => Err(SerialLocatorError::BadNumber(s.to_string())),
-    }
-}
+// R311ny — the serial LOCATOR leaf (SerialEndpoint / SerialTarget /
+// SerialLocatorError / parse_serial_locator) moved to the ungated
+// `crate::locator` module so `AnyLocator::Serial` is an always-present
+// variant (eliminating the cross-crate match-exhaustiveness skew). Only
+// the FRAMING + HANDSHAKE below stays behind `transport-link-serial`.
 
 #[cfg(test)]
 mod tests {
@@ -707,76 +598,6 @@ mod tests {
         assert_eq!(initiator.on_header(ack_hdr), HandshakeStep::Connected);
     }
 
-    // ─── locator parsing ───
-
-    #[test]
-    fn parses_device_locator() {
-        let ep = parse_serial_locator("serial//dev/ttyUSB0#baudrate=115200").expect("device");
-        assert_eq!(ep.target, SerialTarget::Device("/dev/ttyUSB0".to_string()));
-        assert_eq!(ep.baudrate, 115200);
-    }
-
-    #[test]
-    fn parses_pins_locator() {
-        let ep = parse_serial_locator("serial/12.13#baudrate=9600").expect("pins");
-        assert_eq!(ep.target, SerialTarget::Pins { tx: 12, rx: 13 });
-        assert_eq!(ep.baudrate, 9600);
-    }
-
-    #[test]
-    fn rejects_non_serial_scheme() {
-        assert_eq!(
-            parse_serial_locator("tcp/127.0.0.1:7447"),
-            Err(SerialLocatorError::NotSerialScheme)
-        );
-    }
-
-    #[test]
-    fn rejects_missing_separator() {
-        assert_eq!(
-            parse_serial_locator("serial"),
-            Err(SerialLocatorError::NotSerialScheme)
-        );
-    }
-
-    #[test]
-    fn rejects_empty_address() {
-        assert_eq!(
-            parse_serial_locator("serial/#baudrate=115200"),
-            Err(SerialLocatorError::EmptyAddress)
-        );
-    }
-
-    #[test]
-    fn rejects_missing_baudrate() {
-        assert_eq!(
-            parse_serial_locator("serial//dev/ttyUSB0"),
-            Err(SerialLocatorError::MissingBaudrate)
-        );
-    }
-
-    #[test]
-    fn rejects_bad_baudrate() {
-        assert_eq!(
-            parse_serial_locator("serial//dev/ttyUSB0#baudrate=fast"),
-            Err(SerialLocatorError::BadNumber("fast".to_string()))
-        );
-    }
-
-    #[test]
-    fn rejects_zero_baudrate_like_pico() {
-        // pico's `_z_serial_parse_u32` rejects 0 (serial_protocol.c:62).
-        assert_eq!(
-            parse_serial_locator("serial//dev/ttyUSB0#baudrate=0"),
-            Err(SerialLocatorError::BadNumber("0".to_string()))
-        );
-    }
-
-    #[test]
-    fn rejects_zero_pin_like_pico() {
-        assert_eq!(
-            parse_serial_locator("serial/0.13#baudrate=9600"),
-            Err(SerialLocatorError::BadNumber("0".to_string()))
-        );
-    }
+    // R311ny — serial-locator parse tests moved with their leaf to
+    // `crate::locator` (the framing / handshake tests above stay here).
 }
