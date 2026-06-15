@@ -37556,6 +37556,60 @@
         "NEXT 후보: (a) WS/TLS breadth(P2), (b) UDP link_mtu()=65507 override(R311nw 패턴 재사용), (c) MCU no_std serial backend(no-alloc serial_envelope encode 선결, SCE 의존), (d) pico parity % 재계산(serial breadth+frag+cross-impl 반영). UNPUSHED: R311nx(zenoh-pico-sys FFI + layer3_serial_framing + Cargo + cobs_encode.scxml + 본 ledger). push=명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311ny": {
+      "decision_summary": "R311ny: R311nx에서 발견한 AnyLocator coupling fragility 구조적 청산 — serial locator leaf(SerialEndpoint/parse_serial_locator 등)를 게이트된 serial_link에서 ungated locator.rs로 이전해 AnyLocator::Serial을 무조건 존재 variant로 만듦(IP udp Proto::Udp 패턴: parse 항상, backend 조건부). dial_locator가 variant를 항상 처리(dial 또는 typed Unsupported). R311nx coupling workaround 핀 제거. 세션 리뷰: locator.rs 모듈 doc drift 1건 수정. full run-ci(M+G) EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/locator.rs: serial locator leaf(SerialTarget/SerialEndpoint/SerialLocatorError/SERIAL_SCHEME/SERIAL_BAUDRATE_KEY/parse_serial_locator/parse_baudrate/parse_u32)를 serial_link.rs(transport-link-serial 게이트)에서 여기(#[cfg(alloc)], IP leaf 옆)로 이전. AnyLocator::Serial + AnyLocatorError::Serial variant에서 #[cfg] 제거(무조건 존재), parse_any_locator serial 라우트 ungate(항상 serial 파싱). 이전된 leaf 테스트 8개 + parse_any serial 테스트 ungate. 세션리뷰: 모듈 doc(MVP scope)가 serial을 'deferred/non-IP, parse error'로 나열하던 drift -> '두 leaf(IP/serial) scheme-dispatch' 구조로 갱신 + 제목 broaden.",
+        "crates/wz-session-core/src/serial_link.rs: locator 섹션(타입+parse fn) + 그 테스트를 제거(locator.rs로 이동). 더 이상 안 쓰는 `use alloc::string::{String, ToString}` import 제거(Vec는 framing이 사용 유지). framing/handshake(encode_frame/decode_frame/SerialFrameReader/SerialHandshake) 불변 — transport-link-serial 게이트 유지.",
+        "crates/wz-runtime-tokio/src/session_open.rs: dial_locator가 AnyLocator::Serial을 항상 처리 — #[cfg(transport-link-serial)] dial_serial 아니면 #[cfg(not)] typed Unsupported Err(udp Proto::Udp의 dial-or-error 패턴 동형). variant가 항상 존재하므로 모든 feature 조합에서 match exhaustive. serial_pipeline.rs: SerialEndpoint/SerialTarget를 wz_session_core::locator에서 import(이전 반영).",
+        "crates/wz-integration-tests/Cargo.toml: R311nx가 추가했던 wz-runtime-tokio transport-link-serial 핀(coupling workaround) 제거 — R311ny가 skew를 없애 불필요. wz-session-core/transport-link-serial + wz-codecs/codec-serial 핀은 유지(layer3_serial_framing의 framing 도달용)."
+      ],
+      "verification_bullets": [
+        "root cause: AnyLocator::Serial variant는 wz-session-core/transport-link-serial 게이트, 소비자 wz-runtime-tokio session_open match arm은 wz-runtime-tokio/transport-link-serial 게이트 — sibling이 session-core feature만 켜면 decouple되어 non-exhaustive(E0004). 수정: variant를 무조건화(udp Proto::Udp 모델 — parse 항상, backend 조건부). 소비자가 관측 못하는 feature에 variant 존재가 의존하지 않게 됨.",
+        "6 build 조합 전부 EXIT=0: wz-session-core(default / +serial / no-default+serial), wz-runtime-tokio(default / +serial / **DECOUPLED: --features wz-session-core/transport-link-serial = 원래 E0004**). decoupled이 이제 컴파일. wz-integration-tests는 R311nx workaround 핀 제거 후에도 빌드+통과(실세계 decoupled 증명).",
+        "테스트: locator 19(이전 serial leaf + parse_any ungated), serial_link framing 19, serial_pipeline 3, layer3_serial_framing 4 통과. clippy default/serial/decoupled 전부 clean(not-serial arm _ep, unused import 제거 포함). 테스트 커버리지 보존: serial-locator 9 케이스(rejects_non_serial_scheme이 tcp+serial 2케이스 통합).",
+        "세션 리뷰(적대적 자검): finding 1 = locator.rs 모듈 doc가 serial을 deferred로 나열(drift) -> 수정. clean 확인: serial->UnknownProto stale 테스트 0, AnyLocatorError exhaustive match 소비자 0, 커버리지 손실 0. behavior change(의도): serial-backend-off가 serial/...를 parse-time UnknownProto(R311nv)가 아닌 dial-time Unsupported로 거부(udp 일관 + 더 정확한 에러).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'all required layers pass' ×2(코드, 그다음 doc 수정 포함 재실행). Layer 0/A/.../C1/C1t/G/Q/M 전부 pass; error[ / panicked 0. C1의 cargo test --workspace가 layer3_serial_framing + locator serial 테스트 실행.",
+        "atomic: ledger entries 732->733, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311ny = R311nx가 발견한 AnyLocator coupling fragility 구조적 청산. 원칙: variant의 존재(EXISTENCE)가 소비자가 관측 못하는 다른 크레잇 feature에 의존하면 안 됨 — serial locator leaf를 ungated locator.rs로 이전해 AnyLocator::Serial을 무조건화(udp Proto::Udp와 동형). cross-crate feature skew 구조적 불가능.",
+        "R311nx coupling workaround(wz-integration-tests의 wz-runtime-tokio transport-link-serial 핀) 제거 = 부채 청산(우회로 남기지 않고 근본 해결). serial parse가 모든 alloc 빌드에 항상 컴파일되는 비용은 IP udp와 동일 = unconditional variant의 정당한 대가(비용 무관 교과서 기준 충족).",
+        "세션리뷰 판정: 교과적 — hack/smell 없는 근본 수정, SSOT 보존(타입 정의 단일 위치 locator.rs, serial_link은 framing만=관심사 분리), UDP 패턴 일관, 부채 청산. 잔여 cosmetic(not-serial arm _ep, shared module private parse_u32 이름)은 정당—청산 불필요.",
+        "향후 transport(WS/TLS)도 동일 패턴(parse 항상 ungated leaf, backend 조건부 dial arm) 적용 — 일관된 성장 경로. NEXT 후보: WS/TLS breadth, UDP link_mtu()=65507 override(R311nw 패턴), MCU no_std serial backend(no-alloc serial_envelope encode 선결), pico parity % 재계산.",
+        "UNPUSHED: 누적 6 commits — R311nw(bb58001 feat + b2b4c80 ledger), R311nx(1c560d2 fix + 8d5b306 test + b72314c ledger), R311ny(본 라운드, refactor + ledger). origin/main=f24e284=R311nv. push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311ny: R311nx에서 발견한 AnyLocator coupling fragility 구조적 청산 — serial locator leaf(SerialEndpoint/parse_serial_locator 등)를 게이트된 serial_link에서 ungated locator.rs로 이전해 AnyLocator::Serial을 무조건 존재 variant로 만듦(IP udp Proto::Udp 패턴: parse 항상, backend 조건부). dial_locator가 variant를 항상 처리(dial 또는 typed Unsupported). R311nx coupling workaround 핀 제거. 세션 리뷰: locator.rs 모듈 doc drift 1건 수정. full run-ci(M+G) EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/locator.rs: serial locator leaf(SerialTarget/SerialEndpoint/SerialLocatorError/SERIAL_SCHEME/SERIAL_BAUDRATE_KEY/parse_serial_locator/parse_baudrate/parse_u32)를 serial_link.rs(transport-link-serial 게이트)에서 여기(#[cfg(alloc)], IP leaf 옆)로 이전. AnyLocator::Serial + AnyLocatorError::Serial variant에서 #[cfg] 제거(무조건 존재), parse_any_locator serial 라우트 ungate(항상 serial 파싱). 이전된 leaf 테스트 8개 + parse_any serial 테스트 ungate. 세션리뷰: 모듈 doc(MVP scope)가 serial을 'deferred/non-IP, parse error'로 나열하던 drift -> '두 leaf(IP/serial) scheme-dispatch' 구조로 갱신 + 제목 broaden.",
+        "crates/wz-session-core/src/serial_link.rs: locator 섹션(타입+parse fn) + 그 테스트를 제거(locator.rs로 이동). 더 이상 안 쓰는 `use alloc::string::{String, ToString}` import 제거(Vec는 framing이 사용 유지). framing/handshake(encode_frame/decode_frame/SerialFrameReader/SerialHandshake) 불변 — transport-link-serial 게이트 유지.",
+        "crates/wz-runtime-tokio/src/session_open.rs: dial_locator가 AnyLocator::Serial을 항상 처리 — #[cfg(transport-link-serial)] dial_serial 아니면 #[cfg(not)] typed Unsupported Err(udp Proto::Udp의 dial-or-error 패턴 동형). variant가 항상 존재하므로 모든 feature 조합에서 match exhaustive. serial_pipeline.rs: SerialEndpoint/SerialTarget를 wz_session_core::locator에서 import(이전 반영).",
+        "crates/wz-integration-tests/Cargo.toml: R311nx가 추가했던 wz-runtime-tokio transport-link-serial 핀(coupling workaround) 제거 — R311ny가 skew를 없애 불필요. wz-session-core/transport-link-serial + wz-codecs/codec-serial 핀은 유지(layer3_serial_framing의 framing 도달용)."
+      ],
+      "publishable_verification_bullets": [
+        "root cause: AnyLocator::Serial variant는 wz-session-core/transport-link-serial 게이트, 소비자 wz-runtime-tokio session_open match arm은 wz-runtime-tokio/transport-link-serial 게이트 — sibling이 session-core feature만 켜면 decouple되어 non-exhaustive(E0004). 수정: variant를 무조건화(udp Proto::Udp 모델 — parse 항상, backend 조건부). 소비자가 관측 못하는 feature에 variant 존재가 의존하지 않게 됨.",
+        "6 build 조합 전부 EXIT=0: wz-session-core(default / +serial / no-default+serial), wz-runtime-tokio(default / +serial / **DECOUPLED: --features wz-session-core/transport-link-serial = 원래 E0004**). decoupled이 이제 컴파일. wz-integration-tests는 R311nx workaround 핀 제거 후에도 빌드+통과(실세계 decoupled 증명).",
+        "테스트: locator 19(이전 serial leaf + parse_any ungated), serial_link framing 19, serial_pipeline 3, layer3_serial_framing 4 통과. clippy default/serial/decoupled 전부 clean(not-serial arm _ep, unused import 제거 포함). 테스트 커버리지 보존: serial-locator 9 케이스(rejects_non_serial_scheme이 tcp+serial 2케이스 통합).",
+        "세션 리뷰(적대적 자검): finding 1 = locator.rs 모듈 doc가 serial을 deferred로 나열(drift) -> 수정. clean 확인: serial->UnknownProto stale 테스트 0, AnyLocatorError exhaustive match 소비자 0, 커버리지 손실 0. behavior change(의도): serial-backend-off가 serial/...를 parse-time UnknownProto(R311nv)가 아닌 dial-time Unsupported로 거부(udp 일관 + 더 정확한 에러).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'all required layers pass' ×2(코드, 그다음 doc 수정 포함 재실행). Layer 0/A/.../C1/C1t/G/Q/M 전부 pass; error[ / panicked 0. C1의 cargo test --workspace가 layer3_serial_framing + locator serial 테스트 실행.",
+        "atomic: ledger entries 732->733, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ny = R311nx가 발견한 AnyLocator coupling fragility 구조적 청산. 원칙: variant의 존재(EXISTENCE)가 소비자가 관측 못하는 다른 크레잇 feature에 의존하면 안 됨 — serial locator leaf를 ungated locator.rs로 이전해 AnyLocator::Serial을 무조건화(udp Proto::Udp와 동형). cross-crate feature skew 구조적 불가능.",
+        "R311nx coupling workaround(wz-integration-tests의 wz-runtime-tokio transport-link-serial 핀) 제거 = 부채 청산(우회로 남기지 않고 근본 해결). serial parse가 모든 alloc 빌드에 항상 컴파일되는 비용은 IP udp와 동일 = unconditional variant의 정당한 대가(비용 무관 교과서 기준 충족).",
+        "세션리뷰 판정: 교과적 — hack/smell 없는 근본 수정, SSOT 보존(타입 정의 단일 위치 locator.rs, serial_link은 framing만=관심사 분리), UDP 패턴 일관, 부채 청산. 잔여 cosmetic(not-serial arm _ep, shared module private parse_u32 이름)은 정당—청산 불필요.",
+        "향후 transport(WS/TLS)도 동일 패턴(parse 항상 ungated leaf, backend 조건부 dial arm) 적용 — 일관된 성장 경로. NEXT 후보: WS/TLS breadth, UDP link_mtu()=65507 override(R311nw 패턴), MCU no_std serial backend(no-alloc serial_envelope encode 선결), pico parity % 재계산.",
+        "UNPUSHED: 누적 6 commits — R311nw(bb58001 feat + b2b4c80 ledger), R311nx(1c560d2 fix + 8d5b306 test + b72314c ledger), R311ny(본 라운드, refactor + ledger). origin/main=f24e284=R311nv. push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
