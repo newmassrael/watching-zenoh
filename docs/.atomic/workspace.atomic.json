@@ -37504,6 +37504,58 @@
         "UNPUSHED: R311nw(link.rs/session_actions.rs/serial_pipeline.rs/serial_pty_e2e.rs/run-ci.sh + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311nx": {
+      "decision_summary": "R311nx: pico↔wz SERIAL 프레이밍 cross-impl interop = wz encode_frame/decode_frame를 실제 컴파일된 zenoh-pico C serial 코덱(_z_serial_msg_serialize/deserialize, cobs, crc32)과 FFI byte-parity 비교. 이 테스트가 R311ns 손수-vector가 놓친 실제 COBS 발산 발견·수정: wz cobs_encode가 254-바이트(최대 그룹)-at-EOF에서 trailing 0x01을 누락(pico encoding.c:44는 emit) → cobs_encode.scxml에 pico-parity guard 추가. full run-ci(M+G) EXIT=0.",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/wrapper.h + build.rs: pico serial 코덱 5 함수를 FFI 노출(allowlist). wrapper.h에 protocol/codec/serial.h + utils/encoding.h + utils/checksum.h include; build.rs allowlist_function _z_serial_msg_serialize / _z_serial_msg_deserialize / _z_cobs_encode / _z_cobs_decode / _z_crc32. 이 함수들은 Z_FEATURE_LINK_SERIAL 게이트 없는 플랫폼독립 codec/util라 libzenohpico.a에 존재(pico serial LINK 백엔드는 MCU 전용, unix 없음). 5 심볼 모두 bindings 생성 + nm으로 lib 정의(T) 확인.",
+        "crates/wz-integration-tests/tests/layer3_serial_framing.rs (신규, ungated): layer3_* byte-parity family에 합류. 4 test — (1) wz encode_frame 프레임 전체가 pico _z_serial_msg_serialize와 byte-identical(EOP 포함), (2) pico 프레임을 wz decode_frame + SerialFrameReader(byte-by-byte)가 수용, (3) wz 프레임을 pico _z_serial_msg_deserialize가 수용(rb=EOP포함, _z_read_serial_internal 미러), (4) cobs encode/decode + crc32 기본기 parity. corpus: empty/single/embedded-zero/0..255/300/254/MTU1500, header 0x00/INIT/INIT|ACK/RESET/0xFF.",
+        "crates/wz-integration-tests/Cargo.toml: dev-dep feature 핀 — wz-codecs codec-serial + wz-session-core transport-link-serial(테스트가 serial_link + cobs/crc32 도달) + wz-runtime-tokio transport-link-serial. 마지막은 COUPLING 필수: AnyLocator::Serial variant는 wz-session-core feature 게이트이고 wz-runtime-tokio session_open.rs의 해당 match arm은 wz-runtime-tokio feature 게이트—둘을 따로 켜면 match non-exhaustive(E0004). 세 핀을 함께 두어 의도된 coupling(wz-runtime-tokio feature->wz-session-core forward) 유지. resolver=2가 C1 워크스페이스 빌드로의 누수 차단.",
+        "sources/codecs/cobs_encode.scxml (pico parity 버그수정): 최대 254-바이트 그룹(code 0xFF)이 EOF에 정확히 끝날 때 trailing 0x01 empty group을 emit. 종전 q>=n 분기가 즉시 done=true라 trailing 0x01 누락 → 254-non-zero 입력에서 wz=[0xFF,254 data](255B) vs pico=[0xFF,254 data,0x01](256B, encoding.c:33-44). q>=n 분기 후 독립 guard `(done && run>=254) -> append 0x01`로 수정(q>=n의 sce:else 페어링을 건드리지 않는 구조). algorithm 주석 + reference 설명 갱신."
+      ],
+      "verification_bullets": [
+        "layer3_serial_framing 4 test 통과(deterministic byte-compare라 flaky 불가). full-frame byte-identity는 corpus 전체(254-payload→261-envelope, 256, 300, MTU1500 포함)에서 wz==pico. cobs+crc32 기본기 parity는 수정 전 254-입력에서 FAIL했다가(발견) 수정 후 PASS.",
+        "발견된 COBS 버그의 증거: wz cobs_encode(254×0x01)=255B, pico _z_cobs_encode=256B(trailing 0x01). pico _z_cobs_encode trace(encoding.c:33-44)로 0xFF flush 후 pos 전진 + loop 종료 후 *codep=code(=1) 확인. full-frame이 통과했던 이유: corpus envelope가 254-경계에 안 닿음. 실제 페이로드의 envelope가 254-run으로 끝나면 wz<->pico 프레임 1B 차이=interop 깨짐 → 수정 필요.",
+        "회귀 없음: cobs_encode.scxml 수정은 254-at-EOF에만 추가(다른 케이스 불변). wz-codecs serial_framing.rs R311ns 손수-vector 6개 통과. cobs_decode는 이미 trailing 0x01 처리(기본기 decode parity + full-frame decode 통과). no-alloc/MCU도 동일 SCE 재생성(Layer G), 1516 bound이 trailing 0x01 수용(254-multiple 최대 입력 1270→1276<1516).",
+        "직접 확인: bindgen 생성 시그니처(*mut u8/*const u8/usize/u8 -> usize/u32), libzenohpico.a nm에 5 심볼 T(정의)로 존재 → 링크 안전. AnyLocator coupling: 1차 build에서 E0004(non-exhaustive) 적발→wz-runtime-tokio에 transport-link-serial 추가로 해소.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C2/C3/C4/D/E/E2/F/G/Q/M 전부 pass; layer3_serial_framing은 C1 cargo test --workspace에서 실행; error[ / panicked 0). 1차는 Layer 0 fmt만 FAIL→cargo fmt 후 재실행 clean.",
+        "atomic: ledger entries 731→732, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(신규 atom 없음 — serial codec 이미 active)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311nx = pico↔wz SERIAL cross-impl 검증 완료(코덱 레벨). wz serial 프레임 코덱이 이제 실제 pico C 코덱과 byte-exact(FFI 대조), R311ns 전사본-vector 단계에서 증거-기반 실코드-대조로 격상. serial은 마지막 전사본-only link 코덱이었고 이제 나머지(fragment/init/open/...)와 동일 등급.",
+        "메타 성과: 이 interop 테스트가 실제 COBS 버그(254-at-EOF trailing 0x01 누락)를 잡아 수정. Option 1(실제 pico C 대조=증거>가정)을 고른 정당성의 구체적 증거 — 손수-vector는 이 발산을 못 잡았음.",
+        "live 외부 pico 프로세스 over serial(Grade 2)은 구조적 불가: pico는 unix serial LINK 백엔드가 없음(_z_open_serial_*가 RPi Pico/esp-idf/zephyr MCU 전용). FFI 코덱 parity가 달성 가능한+교과서적 cross-impl 증명(transport 핸드셰이크 interop은 이미 TCP로 증명; serial은 link framing만 교체=본 테스트가 검증).",
+        "feature coupling 주의(잠복 fragility): AnyLocator::Serial variant는 wz-session-core/transport-link-serial 게이트, wz-runtime-tokio session_open match arm은 wz-runtime-tokio/transport-link-serial 게이트. 둘을 decouple하면 match non-exhaustive. 정상 빌드는 forward로 coupled이나 sibling이 session-core feature만 켜면 노출됨. 향후 source에서 match arm을 wz-session-core feature(variant의 gate)로 게이팅하면 구조적 강건화 가능(범위 밖, 메모만).",
+        "NEXT 후보: (a) WS/TLS breadth(P2), (b) UDP link_mtu()=65507 override(R311nw 패턴 재사용), (c) MCU no_std serial backend(no-alloc serial_envelope encode 선결, SCE 의존), (d) pico parity % 재계산(serial breadth+frag+cross-impl 반영). UNPUSHED: R311nx(zenoh-pico-sys FFI + layer3_serial_framing + Cargo + cobs_encode.scxml + 본 ledger). push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311nx: pico↔wz SERIAL 프레이밍 cross-impl interop = wz encode_frame/decode_frame를 실제 컴파일된 zenoh-pico C serial 코덱(_z_serial_msg_serialize/deserialize, cobs, crc32)과 FFI byte-parity 비교. 이 테스트가 R311ns 손수-vector가 놓친 실제 COBS 발산 발견·수정: wz cobs_encode가 254-바이트(최대 그룹)-at-EOF에서 trailing 0x01을 누락(pico encoding.c:44는 emit) → cobs_encode.scxml에 pico-parity guard 추가. full run-ci(M+G) EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/wrapper.h + build.rs: pico serial 코덱 5 함수를 FFI 노출(allowlist). wrapper.h에 protocol/codec/serial.h + utils/encoding.h + utils/checksum.h include; build.rs allowlist_function _z_serial_msg_serialize / _z_serial_msg_deserialize / _z_cobs_encode / _z_cobs_decode / _z_crc32. 이 함수들은 Z_FEATURE_LINK_SERIAL 게이트 없는 플랫폼독립 codec/util라 libzenohpico.a에 존재(pico serial LINK 백엔드는 MCU 전용, unix 없음). 5 심볼 모두 bindings 생성 + nm으로 lib 정의(T) 확인.",
+        "crates/wz-integration-tests/tests/layer3_serial_framing.rs (신규, ungated): layer3_* byte-parity family에 합류. 4 test — (1) wz encode_frame 프레임 전체가 pico _z_serial_msg_serialize와 byte-identical(EOP 포함), (2) pico 프레임을 wz decode_frame + SerialFrameReader(byte-by-byte)가 수용, (3) wz 프레임을 pico _z_serial_msg_deserialize가 수용(rb=EOP포함, _z_read_serial_internal 미러), (4) cobs encode/decode + crc32 기본기 parity. corpus: empty/single/embedded-zero/0..255/300/254/MTU1500, header 0x00/INIT/INIT|ACK/RESET/0xFF.",
+        "crates/wz-integration-tests/Cargo.toml: dev-dep feature 핀 — wz-codecs codec-serial + wz-session-core transport-link-serial(테스트가 serial_link + cobs/crc32 도달) + wz-runtime-tokio transport-link-serial. 마지막은 COUPLING 필수: AnyLocator::Serial variant는 wz-session-core feature 게이트이고 wz-runtime-tokio session_open.rs의 해당 match arm은 wz-runtime-tokio feature 게이트—둘을 따로 켜면 match non-exhaustive(E0004). 세 핀을 함께 두어 의도된 coupling(wz-runtime-tokio feature->wz-session-core forward) 유지. resolver=2가 C1 워크스페이스 빌드로의 누수 차단.",
+        "sources/codecs/cobs_encode.scxml (pico parity 버그수정): 최대 254-바이트 그룹(code 0xFF)이 EOF에 정확히 끝날 때 trailing 0x01 empty group을 emit. 종전 q>=n 분기가 즉시 done=true라 trailing 0x01 누락 → 254-non-zero 입력에서 wz=[0xFF,254 data](255B) vs pico=[0xFF,254 data,0x01](256B, encoding.c:33-44). q>=n 분기 후 독립 guard `(done && run>=254) -> append 0x01`로 수정(q>=n의 sce:else 페어링을 건드리지 않는 구조). algorithm 주석 + reference 설명 갱신."
+      ],
+      "publishable_verification_bullets": [
+        "layer3_serial_framing 4 test 통과(deterministic byte-compare라 flaky 불가). full-frame byte-identity는 corpus 전체(254-payload→261-envelope, 256, 300, MTU1500 포함)에서 wz==pico. cobs+crc32 기본기 parity는 수정 전 254-입력에서 FAIL했다가(발견) 수정 후 PASS.",
+        "발견된 COBS 버그의 증거: wz cobs_encode(254×0x01)=255B, pico _z_cobs_encode=256B(trailing 0x01). pico _z_cobs_encode trace(encoding.c:33-44)로 0xFF flush 후 pos 전진 + loop 종료 후 *codep=code(=1) 확인. full-frame이 통과했던 이유: corpus envelope가 254-경계에 안 닿음. 실제 페이로드의 envelope가 254-run으로 끝나면 wz<->pico 프레임 1B 차이=interop 깨짐 → 수정 필요.",
+        "회귀 없음: cobs_encode.scxml 수정은 254-at-EOF에만 추가(다른 케이스 불변). wz-codecs serial_framing.rs R311ns 손수-vector 6개 통과. cobs_decode는 이미 trailing 0x01 처리(기본기 decode parity + full-frame decode 통과). no-alloc/MCU도 동일 SCE 재생성(Layer G), 1516 bound이 trailing 0x01 수용(254-multiple 최대 입력 1270→1276<1516).",
+        "직접 확인: bindgen 생성 시그니처(*mut u8/*const u8/usize/u8 -> usize/u32), libzenohpico.a nm에 5 심볼 T(정의)로 존재 → 링크 안전. AnyLocator coupling: 1차 build에서 E0004(non-exhaustive) 적발→wz-runtime-tokio에 transport-link-serial 추가로 해소.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C2/C3/C4/D/E/E2/F/G/Q/M 전부 pass; layer3_serial_framing은 C1 cargo test --workspace에서 실행; error[ / panicked 0). 1차는 Layer 0 fmt만 FAIL→cargo fmt 후 재실행 clean.",
+        "atomic: ledger entries 731→732, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(신규 atom 없음 — serial codec 이미 active)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nx = pico↔wz SERIAL cross-impl 검증 완료(코덱 레벨). wz serial 프레임 코덱이 이제 실제 pico C 코덱과 byte-exact(FFI 대조), R311ns 전사본-vector 단계에서 증거-기반 실코드-대조로 격상. serial은 마지막 전사본-only link 코덱이었고 이제 나머지(fragment/init/open/...)와 동일 등급.",
+        "메타 성과: 이 interop 테스트가 실제 COBS 버그(254-at-EOF trailing 0x01 누락)를 잡아 수정. Option 1(실제 pico C 대조=증거>가정)을 고른 정당성의 구체적 증거 — 손수-vector는 이 발산을 못 잡았음.",
+        "live 외부 pico 프로세스 over serial(Grade 2)은 구조적 불가: pico는 unix serial LINK 백엔드가 없음(_z_open_serial_*가 RPi Pico/esp-idf/zephyr MCU 전용). FFI 코덱 parity가 달성 가능한+교과서적 cross-impl 증명(transport 핸드셰이크 interop은 이미 TCP로 증명; serial은 link framing만 교체=본 테스트가 검증).",
+        "feature coupling 주의(잠복 fragility): AnyLocator::Serial variant는 wz-session-core/transport-link-serial 게이트, wz-runtime-tokio session_open match arm은 wz-runtime-tokio/transport-link-serial 게이트. 둘을 decouple하면 match non-exhaustive. 정상 빌드는 forward로 coupled이나 sibling이 session-core feature만 켜면 노출됨. 향후 source에서 match arm을 wz-session-core feature(variant의 gate)로 게이팅하면 구조적 강건화 가능(범위 밖, 메모만).",
+        "NEXT 후보: (a) WS/TLS breadth(P2), (b) UDP link_mtu()=65507 override(R311nw 패턴 재사용), (c) MCU no_std serial backend(no-alloc serial_envelope encode 선결, SCE 의존), (d) pico parity % 재계산(serial breadth+frag+cross-impl 반영). UNPUSHED: R311nx(zenoh-pico-sys FFI + layer3_serial_framing + Cargo + cobs_encode.scxml + 본 ledger). push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
