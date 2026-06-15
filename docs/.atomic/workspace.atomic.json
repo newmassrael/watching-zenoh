@@ -37326,6 +37326,60 @@
         "UNPUSHED: R311nt(serial_link.rs + lib.rs/Cargo.toml/run-ci.sh + inventory active flip + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]]; 직전 'push 하고 다음 라운드' 동의는 R311ns용이었음)."
       ]
     },
+    "Round 311nu": {
+      "decision_summary": "R311nu: R311nt 세션리뷰(독립 리뷰어 2+자가) 6 fix - decode trailing-byte reject, u32 reject 0, .expect 일관, HandshakeStep EmitAndConnect, doc 정직화, capacity SSOT cross-ref. 회귀 3 test, run-ci EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/serial_link.rs (R311nt 세션리뷰 6 fix): decode_frame — pico expected_size!=decoded_size(serial.c:92) 누락 보강. dead `payload_len != payload.len()` 체크(codec이 이미 보장) 제거하고 `cursor.remaining()!=0`->Malformed로 trailing-garbage reject(A1+A2).",
+        "parse_u32 — baudrate=0 / pin=0를 수용하던 것을 거부(pico _z_serial_parse_u32 serial_protocol.c:62 = 0 reject parity)(A5).",
+        "open() Initiator가 `.ok()`로 encode 실패를 responder-None과 혼동(doc-around-hack)하던 것 -> `.expect(\"INIT within MTU\")`; responder on_header도 dead `Err=>Failed` arm 제거하고 동일 `.expect`로 일관화(A4/B5b; 같은 infallible encode를 두 곳에서 다르게 처리하던 불일치 해소).",
+        "HandshakeStep: 실제로 미사용이던 `Emit(Vec)` variant 제거, responder의 connected 전이를 명시하는 `EmitAndConnect(Vec)`로 교체(A8/B5; caller가 role로 link state 추론 불필요하게).",
+        "doc/SSOT 정직화: 모듈 doc \"MCU에서 컴파일된다\" 현재형 과장을 alloc staging 현실로(B4; no-alloc은 serial_envelope이 encode_to_vec(alloc)만 노출해 보류=손수조립 SSOT위반 회피, codebase transport-fragmentation/session-reconnect 선례 일관); SERIAL_MFS/MAX_COBS_BUF가 cobs SceBytes<1507/1516> 바운드와 일치 의무 cross-ref(B1 SSOT gap); serial flags가 link-layer라 wire_const 아님 명시(B2); parse_serial_locator에 IP|Serial sum-type seam forward-note(B7); reader overflow body-vs-EOP 주석(A7).",
+        "신규 회귀 test 3: decode_frame_rejects_trailing_bytes / rejects_zero_baudrate_like_pico / rejects_zero_pin_like_pico. 기존 responder_acks_init / handshake_roles_drive_each_other를 EmitAndConnect로 갱신. serial_link test 25->28."
+      ],
+      "verification_bullets": [
+        "세션리뷰: 독립 적대적 리뷰어 2명(correctness/byte-parity 렌즈 + SSOT/layering/smell 렌즈) + 자가검증. 실제 수정 6(A1+A2 trailing-byte reject + dead-code, A5 u32 zero, A4/B5b .expect 일관, A8 EmitAndConnect, B4 doc 정직화, B1 capacity SSOT cross-ref) + LOW 주석 3(A7 reader overflow, B2 flags-not-wire_const, B7 locator seam). false-positive 4 확인(crate 배치 session-core=정답, flags link-layer라 wire_const 아님, Copy stateless FSM, 분리 error enum).",
+        "cargo test -p wz-session-core --features transport-link-serial: serial_link 28 test 통과(신규 3 포함). --no-default-features --features transport-link-serial 합성 통과. clippy clean(--all-targets), fmt clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'run-ci: all required layers pass'(C1t 포함 전 레이어 0/A/A2/A3/B/C0/C1/C1t/.../G/Q/M; error[ / panicked 0).",
+        "atomic ledger entries 728->729, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변. inventory 무변경(transport-link-serial 이미 R311nt에서 active)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311nt(SERIAL 링크 1층 framing+handshake+locator 로직) 세션리뷰 통과 + 6 fix 적용. R311nt 엔트리는 프로즌-레저라 불변 유지, 수정은 본 R311nu 신규 엔트리로 기록(corrections arrive as new entries).",
+        "수정 핵심: pico parity 2(decode trailing-byte reject serial.c:92 + u32 zero reject serial_protocol.c:62), smell 2(open .ok() doc-around-hack -> .expect 일관 + HandshakeStep dead Emit -> 명시 EmitAndConnect), 정직성/SSOT 2(모듈 doc alloc staging 현실화 + capacity가 cobs SceBytes<N> 바운드와 일치 cross-ref).",
+        "보류(정당): no-alloc serial framing은 serial_envelope codec이 encode_to_vec(alloc)만 노출 -> 손수 조립=SSOT 위반, SCE read-only. alloc staging은 transport-fragmentation/session-reconnect 선례와 일관 -> doc 정직화로 처리. false-positive 4 확인(crate 배치/flags 위치/Copy FSM/error enum 전부 구조 옳음).",
+        "NEXT 라운드 R311nv(2층, 종전 'nu' 계획): tty backend(tokio-serial) + SerialDriver impl LinkDriver(open=handshake 구동, send=encode_frame, poll_event=SerialFrameReader 구동) + DialedLink/InboundLink/dial_locator 배선(ParsedLocator를 IP|Serial sum type로; 리뷰 B7 seam 노트대로 scheme-dispatcher, 두 parse_* leaf 유지) + PTY 페어 wz<->wz loopback e2e.",
+        "UNPUSHED: R311nt(9854a48 feature + 406fd9c ledger) + R311nu(리뷰 fix + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311nu: R311nt 세션리뷰(독립 리뷰어 2+자가) 6 fix - decode trailing-byte reject, u32 reject 0, .expect 일관, HandshakeStep EmitAndConnect, doc 정직화, capacity SSOT cross-ref. 회귀 3 test, run-ci EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/serial_link.rs (R311nt 세션리뷰 6 fix): decode_frame — pico expected_size!=decoded_size(serial.c:92) 누락 보강. dead `payload_len != payload.len()` 체크(codec이 이미 보장) 제거하고 `cursor.remaining()!=0`->Malformed로 trailing-garbage reject(A1+A2).",
+        "parse_u32 — baudrate=0 / pin=0를 수용하던 것을 거부(pico _z_serial_parse_u32 serial_protocol.c:62 = 0 reject parity)(A5).",
+        "open() Initiator가 `.ok()`로 encode 실패를 responder-None과 혼동(doc-around-hack)하던 것 -> `.expect(\"INIT within MTU\")`; responder on_header도 dead `Err=>Failed` arm 제거하고 동일 `.expect`로 일관화(A4/B5b; 같은 infallible encode를 두 곳에서 다르게 처리하던 불일치 해소).",
+        "HandshakeStep: 실제로 미사용이던 `Emit(Vec)` variant 제거, responder의 connected 전이를 명시하는 `EmitAndConnect(Vec)`로 교체(A8/B5; caller가 role로 link state 추론 불필요하게).",
+        "doc/SSOT 정직화: 모듈 doc \"MCU에서 컴파일된다\" 현재형 과장을 alloc staging 현실로(B4; no-alloc은 serial_envelope이 encode_to_vec(alloc)만 노출해 보류=손수조립 SSOT위반 회피, codebase transport-fragmentation/session-reconnect 선례 일관); SERIAL_MFS/MAX_COBS_BUF가 cobs SceBytes<1507/1516> 바운드와 일치 의무 cross-ref(B1 SSOT gap); serial flags가 link-layer라 wire_const 아님 명시(B2); parse_serial_locator에 IP|Serial sum-type seam forward-note(B7); reader overflow body-vs-EOP 주석(A7).",
+        "신규 회귀 test 3: decode_frame_rejects_trailing_bytes / rejects_zero_baudrate_like_pico / rejects_zero_pin_like_pico. 기존 responder_acks_init / handshake_roles_drive_each_other를 EmitAndConnect로 갱신. serial_link test 25->28."
+      ],
+      "publishable_verification_bullets": [
+        "세션리뷰: 독립 적대적 리뷰어 2명(correctness/byte-parity 렌즈 + SSOT/layering/smell 렌즈) + 자가검증. 실제 수정 6(A1+A2 trailing-byte reject + dead-code, A5 u32 zero, A4/B5b .expect 일관, A8 EmitAndConnect, B4 doc 정직화, B1 capacity SSOT cross-ref) + LOW 주석 3(A7 reader overflow, B2 flags-not-wire_const, B7 locator seam). false-positive 4 확인(crate 배치 session-core=정답, flags link-layer라 wire_const 아님, Copy stateless FSM, 분리 error enum).",
+        "cargo test -p wz-session-core --features transport-link-serial: serial_link 28 test 통과(신규 3 포함). --no-default-features --features transport-link-serial 합성 통과. clippy clean(--all-targets), fmt clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) EXIT=0 'run-ci: all required layers pass'(C1t 포함 전 레이어 0/A/A2/A3/B/C0/C1/C1t/.../G/Q/M; error[ / panicked 0).",
+        "atomic ledger entries 728->729, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변. inventory 무변경(transport-link-serial 이미 R311nt에서 active)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nt(SERIAL 링크 1층 framing+handshake+locator 로직) 세션리뷰 통과 + 6 fix 적용. R311nt 엔트리는 프로즌-레저라 불변 유지, 수정은 본 R311nu 신규 엔트리로 기록(corrections arrive as new entries).",
+        "수정 핵심: pico parity 2(decode trailing-byte reject serial.c:92 + u32 zero reject serial_protocol.c:62), smell 2(open .ok() doc-around-hack -> .expect 일관 + HandshakeStep dead Emit -> 명시 EmitAndConnect), 정직성/SSOT 2(모듈 doc alloc staging 현실화 + capacity가 cobs SceBytes<N> 바운드와 일치 cross-ref).",
+        "보류(정당): no-alloc serial framing은 serial_envelope codec이 encode_to_vec(alloc)만 노출 -> 손수 조립=SSOT 위반, SCE read-only. alloc staging은 transport-fragmentation/session-reconnect 선례와 일관 -> doc 정직화로 처리. false-positive 4 확인(crate 배치/flags 위치/Copy FSM/error enum 전부 구조 옳음).",
+        "NEXT 라운드 R311nv(2층, 종전 'nu' 계획): tty backend(tokio-serial) + SerialDriver impl LinkDriver(open=handshake 구동, send=encode_frame, poll_event=SerialFrameReader 구동) + DialedLink/InboundLink/dial_locator 배선(ParsedLocator를 IP|Serial sum type로; 리뷰 B7 seam 노트대로 scheme-dispatcher, 두 parse_* leaf 유지) + PTY 페어 wz<->wz loopback e2e.",
+        "UNPUSHED: R311nt(9854a48 feature + 406fd9c ledger) + R311nu(리뷰 fix + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
