@@ -29,6 +29,12 @@
          without consuming a byte.
        - A zero byte that terminates a group is implicit (consumed, not
          emitted). A trailing zero at end-of-input emits a final 0x01.
+       - A maximal 254-byte group (code 0xFF) that lands exactly at
+         end-of-input ALSO emits a trailing 0x01 empty group: pico
+         flushes the 0xFF block, then writes its pending code=1 after
+         the loop (encoding.c:33-44). e.g. 254 non-zero bytes ->
+         FF <254 bytes> 01 (256 bytes). Missing this trailing byte was
+         the R311nx wz<->pico divergence the FFI parity test caught.
 
      Output bound: pico _Z_SERIAL_MAX_COBS_BUF_SIZE = 1516
      (serial_protocol.h:33-34) covers the worst-case stuffing of a
@@ -89,6 +95,17 @@
             </sce:else>
           </sce:if>
         </sce:else>
+      </sce:if>
+      <!-- pico parity (R311nx FFI interop finding): a maximal 254-byte
+           group at end-of-input still emits a trailing empty group
+           (0x01). zenoh-pico flushes the 0xFF block, then writes the
+           pending code=1 after its loop (encoding.c:33-44). Standalone
+           guard AFTER the q>=n branch (not nested in it) so it cannot
+           capture that branch's `<sce:else>`. Mutually exclusive with
+           the run<254 trailing-zero 0x01 above (here run ==254). -->
+      <sce:if cond="(done === true) &amp;&amp; (run &gt;= 254)">
+        <sce:var name="tail" type="uint8" init="1"/>
+        <sce:append target="out" expr="tail"/>
       </sce:if>
     </sce:while>
     <sce:return expr="out"/>
