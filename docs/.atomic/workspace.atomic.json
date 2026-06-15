@@ -37448,6 +37448,62 @@
         "UNPUSHED: R311nv(serial_pipeline.rs + serial_pty_e2e.rs 신규 + session_open/locator/reconnect/Cargo/run-ci + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311nw": {
+      "decision_summary": "R311nw: SERIAL 큰 메시지(>SERIAL_MTU 1500) fragmentation 배선 - link MTU를 BoxedLinkDriver::link_mtu() 속성(default 65535=pico _z_get_link_mtu_tcp)으로 도입, SerialWriteDriver만 1500 override, negotiated_batch_mtu()=min(own,peer,link_mtu)(pico transport/unicast/transport.c:47 TX wbuf parity). 세션레이어 fragmentation이 serial 프레임 크기로 chunk → wz↔wz PTY e2e가 >1500 byte Put을 fragment→reassemble byte-exact 증명. full run-ci(M+G) EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/link.rs: pico의 per-link zl->_mtu 모델을 BoxedLinkDriver 트레잇으로 도입. 신규 `pub const DEFAULT_LINK_MTU: usize = 65_535`(pico _z_get_link_mtu_tcp tcp.c:86 = 동일 65535) + 신규 default 트레잇 메서드 `fn link_mtu(&self) -> usize { DEFAULT_LINK_MTU }`. 프레임 크기 제한이 없는 stream link(TCP/UDP/lwIP)는 default 상속, 프레임 바운드 link(serial)만 override.",
+        "crates/wz-session-core/src/session_actions.rs: negotiated_batch_mtu()에 link MTU를 세 번째 min 항으로 추가. 종전 min(own, peer)를 min(own, peer, self.link_driver().link_mtu())로. pico가 TX wbuf를 min(zl->_mtu, batch_size)로 sizing하는 것(transport.c:47)과 동일 — advertised batch는 줄이지 않고(pico도 그대로; peer RX 예산=full 광고) TX-side 예산만 link-cap. unbounded link는 항이 65535라 u16 batch 광고에 대해 inert → TCP/UDP 무변경.",
+        "crates/wz-runtime-tokio/src/serial_pipeline.rs: SerialWriteDriver가 link_mtu()를 SERIAL_MTU(1500)로 override(pico _z_get_link_mtu_serial serial.c:62). send_blocking drop-loud 주석을 'session layer가 이제 link MTU로 fragment한다(R311nw)'로 정직화 — 가드는 정당한 방어적 backstop으로 잔류. 신규 유닛 test serial_write_driver_reports_serial_link_mtu(driver.link_mtu()==SERIAL_MTU + SERIAL_MTU<DEFAULT_LINK_MTU 정적 const 단언).",
+        "crates/wz-runtime-tokio/tests/serial_pty_e2e.rs: 신규 #[cfg(feature=transport-fragmentation)] test wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put. PTY 페어로 serial-link 핸드셰이크→transport Established 후 4096 byte Put publish→subscriber byte-exact 1회 수신(fragment chain reassemble). fragmentation 전제를 by-construction 단언: 양단 default 65535 batch 광고에도 negotiated_batch_mtu()==SERIAL_MTU(link cap active, false-positive 가드 — link cap 없으면 65535로 1프레임 drop). layer3_reassembly_tx의 serial 대응.",
+        "scripts/run-ci.sh Layer C1t: serial_pty_e2e를 transport-link-serial,transport-fragmentation 조합으로 한 번 더 실행(frag-OFF 실행은 minimal-build serial 커버리지로 유지) + frag-ON clippy 게이트 추가(otherwise cfg'd-out인 frag test를 lint). R311nw 주석 추가."
+      ],
+      "verification_bullets": [
+        "serial_pty_e2e frag test 12/12 연속 통과(non-flaky). 비-flaky 근거: PTY 양단 cfmakeraw 즉시 ready(RESET throttle/retry 미발생), publish 단발 후 reassembly 결정론적. negotiated_batch_mtu()==SERIAL_MTU를 publish 전에 단언(R311nw link cap이 active해야만 fragment; 회귀로 cap이 빠지면 65535가 되어 assert 실패).",
+        "serial_pipeline 유닛 test 3개(신규 link_mtu 1 + 기존 handshake/data 2) 통과. negotiated_mtu_tests 2개(min-of-own-and-peer / zero-unset-sentinel) 회귀 통과 — recording mock 드라이버가 default link_mtu 65535 상속이라 min 항 무영향, 값 불변(512/1024/65535).",
+        "encode_frame이 payload<=SERIAL_MTU(1500) 수용 직접 확인(serial_link.rs:135) → fragment chunk_size=mtu-FRAG_HEADER_BUDGET(11)=1489, fragment wire<=1500=SERIAL_MTU, serial envelope<=SERIAL_MFS(1507), COBS<=~1513<SERIAL_MAX_COBS_BUF(1516). 상수가 full-MTU fragment를 정확히 수용하도록 이미 설계됨(R311ns).",
+        "alloc owned 경로 직접 확인: sce-portable-bytes from_slice가 alloc에서 Ok(s.to_vec())(N=advisory inline capacity, on-wire 제한 아님; msg_put.scxml:46-55 R311nq 주석) → 4096 byte Put이 host alloc 빌드에서 인코딩됨(>256 bound는 no-alloc heapless 전용).",
+        "C1t 레인 단독 통과(frag-off serial 2 invocation + frag-on serial_pty_e2e + frag-off clippy + frag-on clippy). 1차 frag-on clippy가 assertions-on-constants 적발→const 단언으로 수정 후 통과.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'run-ci: all required layers pass'(Layer A3 active=67 불변 / C1t pass / G pass(MCU 크로스컴파일) / Q pass / M pass; error[ / panicked / test FAILED = 0).",
+        "atomic: ledger entries 730→731, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(신규 atom 없음 — transport-fragmentation + transport-link-serial 둘 다 이미 active, link_mtu는 기존 transport 조합의 행동 보강)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311nw = SERIAL 큰 메시지 fragmentation 완료. R311nv carry (2) 'serial >SERIAL_MTU send_blocking drop loud' 해소. 핵심: pico parity = link MTU가 TX 예산을 bound(transport.c:47 min(zl->_mtu, batch)), advertised batch는 불변. wz는 이를 BoxedLinkDriver::link_mtu() default 메서드(link 속성 = pico zl->_mtu 모델)로 구현 — 생성자/params 시그니처 churn 0, TCP/UDP는 65535 default 상속이라 동작 완전 불변.",
+        "설계 판단: link_mtu를 SessionLinkActions/SessionInitParams 필드나 new_generic 파라미터로 스레딩하지 않고 link-driver 트레잇 메서드로 둠 = pico가 _mtu를 link struct에 두는 것과 동형 + ~25 ctor call site / ~15 params 리터럴 무변경. negotiated_batch_mtu가 이미 self.link_driver()를 reach하므로 추가 배선 불필요.",
+        "미구현(정직): (1) Pins(MCU GPIO UART) backend 여전히 Device-only(host tty), (2) serial reconnect IP-only 유지(pico client-reopen 모델 밖), (3) MCU no_std serial backend는 no-alloc serial_envelope encode(현재 encode_to_vec=alloc만, SCE read-only) 필요로 보류, (4) UDP 65507 datagram cap은 여전히 미강제(UdpWriteDriver가 65535 default 상속 — serial 트랙 범위 밖, link_mtu() override로 후속 라운드에서 동일 패턴 적용 가능, 문서화된 future item).",
+        "NEXT 후보: (a) WS/TLS breadth(P2 transport), (b) pico↔wz serial interop(외부 pico serial peer), (c) MCU no_std serial backend(no-alloc serial_envelope encode 선결), (d) UDP link_mtu()=65507 override(동일 패턴), (e) pico parity % 재계산(serial breadth+frag 반영).",
+        "UNPUSHED: R311nw(link.rs/session_actions.rs/serial_pipeline.rs/serial_pty_e2e.rs/run-ci.sh + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311nw: SERIAL 큰 메시지(>SERIAL_MTU 1500) fragmentation 배선 - link MTU를 BoxedLinkDriver::link_mtu() 속성(default 65535=pico _z_get_link_mtu_tcp)으로 도입, SerialWriteDriver만 1500 override, negotiated_batch_mtu()=min(own,peer,link_mtu)(pico transport/unicast/transport.c:47 TX wbuf parity). 세션레이어 fragmentation이 serial 프레임 크기로 chunk → wz↔wz PTY e2e가 >1500 byte Put을 fragment→reassemble byte-exact 증명. full run-ci(M+G) EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/link.rs: pico의 per-link zl->_mtu 모델을 BoxedLinkDriver 트레잇으로 도입. 신규 `pub const DEFAULT_LINK_MTU: usize = 65_535`(pico _z_get_link_mtu_tcp tcp.c:86 = 동일 65535) + 신규 default 트레잇 메서드 `fn link_mtu(&self) -> usize { DEFAULT_LINK_MTU }`. 프레임 크기 제한이 없는 stream link(TCP/UDP/lwIP)는 default 상속, 프레임 바운드 link(serial)만 override.",
+        "crates/wz-session-core/src/session_actions.rs: negotiated_batch_mtu()에 link MTU를 세 번째 min 항으로 추가. 종전 min(own, peer)를 min(own, peer, self.link_driver().link_mtu())로. pico가 TX wbuf를 min(zl->_mtu, batch_size)로 sizing하는 것(transport.c:47)과 동일 — advertised batch는 줄이지 않고(pico도 그대로; peer RX 예산=full 광고) TX-side 예산만 link-cap. unbounded link는 항이 65535라 u16 batch 광고에 대해 inert → TCP/UDP 무변경.",
+        "crates/wz-runtime-tokio/src/serial_pipeline.rs: SerialWriteDriver가 link_mtu()를 SERIAL_MTU(1500)로 override(pico _z_get_link_mtu_serial serial.c:62). send_blocking drop-loud 주석을 'session layer가 이제 link MTU로 fragment한다(R311nw)'로 정직화 — 가드는 정당한 방어적 backstop으로 잔류. 신규 유닛 test serial_write_driver_reports_serial_link_mtu(driver.link_mtu()==SERIAL_MTU + SERIAL_MTU<DEFAULT_LINK_MTU 정적 const 단언).",
+        "crates/wz-runtime-tokio/tests/serial_pty_e2e.rs: 신규 #[cfg(feature=transport-fragmentation)] test wz_to_wz_over_serial_pty_fragments_and_reassembles_oversize_put. PTY 페어로 serial-link 핸드셰이크→transport Established 후 4096 byte Put publish→subscriber byte-exact 1회 수신(fragment chain reassemble). fragmentation 전제를 by-construction 단언: 양단 default 65535 batch 광고에도 negotiated_batch_mtu()==SERIAL_MTU(link cap active, false-positive 가드 — link cap 없으면 65535로 1프레임 drop). layer3_reassembly_tx의 serial 대응.",
+        "scripts/run-ci.sh Layer C1t: serial_pty_e2e를 transport-link-serial,transport-fragmentation 조합으로 한 번 더 실행(frag-OFF 실행은 minimal-build serial 커버리지로 유지) + frag-ON clippy 게이트 추가(otherwise cfg'd-out인 frag test를 lint). R311nw 주석 추가."
+      ],
+      "publishable_verification_bullets": [
+        "serial_pty_e2e frag test 12/12 연속 통과(non-flaky). 비-flaky 근거: PTY 양단 cfmakeraw 즉시 ready(RESET throttle/retry 미발생), publish 단발 후 reassembly 결정론적. negotiated_batch_mtu()==SERIAL_MTU를 publish 전에 단언(R311nw link cap이 active해야만 fragment; 회귀로 cap이 빠지면 65535가 되어 assert 실패).",
+        "serial_pipeline 유닛 test 3개(신규 link_mtu 1 + 기존 handshake/data 2) 통과. negotiated_mtu_tests 2개(min-of-own-and-peer / zero-unset-sentinel) 회귀 통과 — recording mock 드라이버가 default link_mtu 65535 상속이라 min 항 무영향, 값 불변(512/1024/65535).",
+        "encode_frame이 payload<=SERIAL_MTU(1500) 수용 직접 확인(serial_link.rs:135) → fragment chunk_size=mtu-FRAG_HEADER_BUDGET(11)=1489, fragment wire<=1500=SERIAL_MTU, serial envelope<=SERIAL_MFS(1507), COBS<=~1513<SERIAL_MAX_COBS_BUF(1516). 상수가 full-MTU fragment를 정확히 수용하도록 이미 설계됨(R311ns).",
+        "alloc owned 경로 직접 확인: sce-portable-bytes from_slice가 alloc에서 Ok(s.to_vec())(N=advisory inline capacity, on-wire 제한 아님; msg_put.scxml:46-55 R311nq 주석) → 4096 byte Put이 host alloc 빌드에서 인코딩됨(>256 bound는 no-alloc heapless 전용).",
+        "C1t 레인 단독 통과(frag-off serial 2 invocation + frag-on serial_pty_e2e + frag-off clippy + frag-on clippy). 1차 frag-on clippy가 assertions-on-constants 적발→const 단언으로 수정 후 통과.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0 'run-ci: all required layers pass'(Layer A3 active=67 불변 / C1t pass / G pass(MCU 크로스컴파일) / Q pass / M pass; error[ / panicked / test FAILED = 0).",
+        "atomic: ledger entries 730→731, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(신규 atom 없음 — transport-fragmentation + transport-link-serial 둘 다 이미 active, link_mtu는 기존 transport 조합의 행동 보강)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311nw = SERIAL 큰 메시지 fragmentation 완료. R311nv carry (2) 'serial >SERIAL_MTU send_blocking drop loud' 해소. 핵심: pico parity = link MTU가 TX 예산을 bound(transport.c:47 min(zl->_mtu, batch)), advertised batch는 불변. wz는 이를 BoxedLinkDriver::link_mtu() default 메서드(link 속성 = pico zl->_mtu 모델)로 구현 — 생성자/params 시그니처 churn 0, TCP/UDP는 65535 default 상속이라 동작 완전 불변.",
+        "설계 판단: link_mtu를 SessionLinkActions/SessionInitParams 필드나 new_generic 파라미터로 스레딩하지 않고 link-driver 트레잇 메서드로 둠 = pico가 _mtu를 link struct에 두는 것과 동형 + ~25 ctor call site / ~15 params 리터럴 무변경. negotiated_batch_mtu가 이미 self.link_driver()를 reach하므로 추가 배선 불필요.",
+        "미구현(정직): (1) Pins(MCU GPIO UART) backend 여전히 Device-only(host tty), (2) serial reconnect IP-only 유지(pico client-reopen 모델 밖), (3) MCU no_std serial backend는 no-alloc serial_envelope encode(현재 encode_to_vec=alloc만, SCE read-only) 필요로 보류, (4) UDP 65507 datagram cap은 여전히 미강제(UdpWriteDriver가 65535 default 상속 — serial 트랙 범위 밖, link_mtu() override로 후속 라운드에서 동일 패턴 적용 가능, 문서화된 future item).",
+        "NEXT 후보: (a) WS/TLS breadth(P2 transport), (b) pico↔wz serial interop(외부 pico serial peer), (c) MCU no_std serial backend(no-alloc serial_envelope encode 선결), (d) UDP link_mtu()=65507 override(동일 패턴), (e) pico parity % 재계산(serial breadth+frag 반영).",
+        "UNPUSHED: R311nw(link.rs/session_actions.rs/serial_pipeline.rs/serial_pty_e2e.rs/run-ci.sh + 본 ledger). push=사용자 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311o": {
       "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
       "changes_bullets": [
