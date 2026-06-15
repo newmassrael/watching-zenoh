@@ -2738,7 +2738,13 @@ layer_m_scouting_multicast() {
         echo "Layer M SKIP (opt-in: --layer M or WZ_RUN_LAYER_M=1)"
         return 0
     fi
-    (cd crates && cargo test -p wz-runtime-tokio --features scouting-active \
+    # R311od — `transport-link-tls` is added so the `round3_tls` module
+    # (active scouting -> `tls/...` open over the R311oc config-threaded seam)
+    # compiles and its `#[ignore]` test runs here. Without it that module is
+    # empty and the scouted-side TLS dial path is unexercised (gate-skew). The
+    # default features already carry tcp+udp+unicast, so round2 (tcp) and the
+    # discovery-only test are unaffected — tls is purely additive.
+    (cd crates && cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
         --test scouting_multicast_loopback -- --ignored --quiet) || return 1
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \

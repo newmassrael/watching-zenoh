@@ -285,3 +285,212 @@ mod round2 {
         assert!(acc_est >= 1, "acceptor established");
     }
 }
+
+/// R311od — active scouting reaches a TLS peer. The TLS analogue of `round2`:
+/// a multicast SCOUT/HELLO discovers a peer's *secured* session locator (a
+/// `tls/...` endpoint), then `open_session_at` + a [`DialConfig`] carrying the
+/// rustls client config dials it through the R311oc config-threaded seam
+/// (`open_session_at` -> `connect_and_open_session` -> `dial_locator`'s tls arm
+/// -> `dial_tls`) and drives the Initiator handshake to Established against an
+/// inline wz TLS acceptor. This closes R311oc's structural arc: before the
+/// seam carried cert material, a scouted `tls/...` locator dialed to
+/// `Unsupported`; now the scouting open path threads TLS material end to end
+/// (pico `session_cfg` parity), so "scouting reaches TLS peers" is proven with
+/// a real multicast-discovered locator, not only the explicit-dial `tls_e2e`.
+///
+/// Gated additionally on `transport-link-tls` (which implies
+/// `transport-link-tcp`) + `transport-unicast` since it opens a real TLS
+/// session; the TLS-specific imports + cert fixture live in this gated
+/// submodule so the `--features scouting-active` build (TLS off) stays
+/// warning-clean. The Layer M lane builds this module by adding
+/// `transport-link-tls` to the scouting test invocation (scripts/run-ci.sh) —
+/// without that feature the module is empty and the seam would be unexercised
+/// from the scouted side (gate-skew).
+#[cfg(all(feature = "transport-link-tls", feature = "transport-unicast"))]
+mod round3_tls {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::net::{TcpListener, UdpSocket};
+    use tokio_rustls::rustls::crypto::ring;
+    use tokio_rustls::rustls::pki_types::{
+        CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
+    };
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+
+    use wz_runtime_tokio::runtime_impl::TokioTime;
+    use wz_runtime_tokio::scouting_glue::{
+        drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutingActions,
+    };
+    use wz_runtime_tokio::session_open::{
+        accept_and_open_session, open_session_at, DialConfig, DialedLink, TlsDialConfig,
+        DEFAULT_OPEN_TICK_MS,
+    };
+    use wz_runtime_tokio::tls_pipeline::accept_tls;
+    use wz_runtime_tokio::UdpDriver;
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_core::scout_params::ScoutParams;
+
+    // Distinct group port from the discovery-only test (7446) and round2
+    // (7448) so the three `#[ignore]` tests do not contend on the same
+    // multicast bind when the Layer M lane runs them together under
+    // `--ignored` (cargo's default multi-thread).
+    const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
+    const PORT: u16 = 7449;
+    const ITER_CAP: usize = 4096;
+
+    /// Build the (ServerConfig, ClientConfig) pair sharing one self-signed
+    /// `localhost` cert: the server presents it, the client trusts exactly it.
+    /// Both pin the `ring` provider so no process-default install is needed.
+    /// Mirror of `tests/tls_e2e.rs::loopback_tls_configs` — kept module-local
+    /// (the same per-binary fixture duplication this file already uses for
+    /// `craft_hello_datagram`) since integration-test files are separate
+    /// compilation units and the TLS cert deps (`rcgen` / `tokio-rustls`)
+    /// would otherwise have to migrate into the shared support crate.
+    fn loopback_tls_configs() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
+        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate self-signed localhost cert");
+        let cert_der: CertificateDer<'static> = issued.cert.der().clone();
+        let key_der: PrivateKeyDer<'static> =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(issued.key_pair.serialize_der()));
+
+        let provider = Arc::new(ring::default_provider());
+
+        let server_config = ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("server default protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der)
+            .expect("server single cert");
+
+        let mut roots = RootCertStore::empty();
+        roots.add(cert_der).expect("trust the self-signed cert");
+        let client_config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        (Arc::new(server_config), Arc::new(client_config))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+    async fn active_scout_then_open_over_tls_reaches_established() {
+        let (server_config, client_config) = loopback_tls_configs();
+
+        // Session endpoint: an inline wz TLS acceptor. Its bound TCP address is
+        // what the HELLO advertises as the discovered *secured* session
+        // locator (`tls/...`, not `tcp/...`).
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("tcp bind");
+        let session_addr = listener.local_addr().expect("tcp addr");
+        let session_locator = format!("tls/{session_addr}");
+
+        // Scout side: bind the multicast group port, join, loopback on.
+        let mut driver = UdpDriver::bind_multicast_v4(GROUP, PORT)
+            .await
+            .expect("bind multicast scouting link");
+        let actions = ScoutingActions::new(ScoutParams {
+            version: 0x09,
+            what: 0x03, // ROUTER | PEER
+            zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            timeout_ms: 1000,
+        });
+        let mut engine = new_scouting_engine(&actions);
+
+        // Responder: an ephemeral socket that replies with a Hello carrying
+        // the TLS session locator once the scout is in AwaitingHello.
+        let responder = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind ephemeral responder");
+        let hello = super::craft_hello_datagram(&session_locator);
+        let responder_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            responder
+                .send_to(&hello, (GROUP, PORT))
+                .await
+                .expect("responder send Hello to group");
+        });
+
+        // Resolve the secured peer locator over multicast.
+        let clock = TokioTime::new();
+        let outcome = drive_scouting_until_resolved(
+            &mut driver,
+            &actions,
+            &mut engine,
+            &clock,
+            Some(10_000), // iteration guard so a missing Hello cannot hang CI
+            50,           // scheduler-tick cadence (ms); window itself is SCXML-owned
+        )
+        .await;
+        responder_task.await.expect("responder task");
+        let discovered = match outcome {
+            ScoutOutcome::Discovered(loc) => loc,
+            other => panic!("expected Discovered, got {other:?}"),
+        };
+        assert_eq!(
+            discovered, session_locator,
+            "scout resolved the advertised tls session locator"
+        );
+
+        // ── Open BOTH sessions concurrently (the handshake needs both sides
+        //    progressing). Acceptor: rustls server handshake over the accepted
+        //    TcpStream, then drive to Established. Initiator: dial the SCOUTED
+        //    `tls/...` locator through `open_session_at` with a DialConfig
+        //    carrying the client config — exercising the R311oc seam from the
+        //    scouted side (dial_locator's tls arm -> dial_tls).
+        let acc_open = async {
+            let (tcp, _peer) = listener.accept().await.expect("accept tcp");
+            let tls = accept_tls(tcp, server_config)
+                .await
+                .expect("server tls handshake");
+            let mut params = fixture_session_init_params();
+            params.zid = vec![0x02; 4]; // distinct from the initiator
+            accept_and_open_session(
+                DialedLink::Tls(Box::new(tls)),
+                params,
+                TokioTime::new(),
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("acceptor reaches Established over the scouted tls locator")
+        };
+        let init_open = async {
+            // The cert POLICY (client trust + verified server name) is the
+            // out-of-band material the locator string cannot carry; it rides
+            // the DialConfig, exactly as pico threads `session_cfg`. Built
+            // inside the async block so the borrow stays local to this future.
+            let server_name = ServerName::try_from("localhost").expect("server name");
+            let cfg = DialConfig {
+                tls: Some(TlsDialConfig {
+                    client_config,
+                    server_name,
+                }),
+            };
+            let mut params = fixture_session_init_params();
+            params.zid = vec![0x01; 4];
+            open_session_at(
+                &discovered,
+                params,
+                &cfg,
+                TokioTime::new(),
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("initiator established over tls via the scouted locator")
+        };
+        let (opened_acc, opened_init) = tokio::join!(acc_open, init_open);
+
+        assert!(
+            opened_init.actions.trace_snapshot().record_established_at >= 1,
+            "initiator established over tls via the multicast-discovered locator"
+        );
+        assert!(
+            opened_acc.actions.trace_snapshot().record_established_at >= 1,
+            "acceptor established over tls"
+        );
+    }
+}
