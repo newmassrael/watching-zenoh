@@ -37726,6 +37726,66 @@
         "Layer E 30-trial flake-0 not run this round; type-ungating is runtime-semantics-neutral so existing 761 cargo tests carry the no-regression signal."
       ]
     },
+    "Round 311oa": {
+      "decision_summary": "R311oa: TLS-over-TCP 링크 백엔드(WS/TLS breadth 트랙 1라운드). Proto::Tls parse-always + tls_pipeline(dial_tls/accept_tls rustls handshake) + DialedLink/InboundLink Tls. 세션리뷰서 TlsReadDriver≡TcpReadDriver 중복 발견→전송-중립 stream_link 추출(StreamReadDriver<R>+StreamWriteDriver+writer_task<W>, TCP/TLS는 dial/wire+별칭만=SSOT). cert는 명시 dial_tls 호출부(dial_locator tls Unsupported). tokio-rustls(ring)+rcgen. self-signed loopback e2e Established+Put byte-exact 20/20. transport-link-tls active. full run-ci(M+G) RUNCI_EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/locator.rs: Proto::Tls variant + parse_locator 'tls' arm(ungated parse-always — tcp 동일 numeric host:port grammar, TLS는 stream wrap). 모듈/parse doc 갱신(tls를 IP leaf 지원에 추가, deferred에서 제거). parses_tls_ipv4 + parse_any_routes_tls_to_the_ip_leaf 테스트.",
+        "crates/wz-runtime-tokio/src/stream_link.rs(신규, 세션리뷰 추출): 전송-중립 byte-stream 링크 1차요소 SSOT. StreamReadDriver<R:AsyncRead+Unpin>(framing LinkDriver impl 1회 = poll_framed), StreamWriteDriver(중립명 channel write driver + u16 oversize guard), writer_task<W:AsyncWrite+Unpin>(StreamEnvelope encode). TCP/TLS가 byte-단위 동일 framing이라 read-driver를 1회만 작성(serial은 COBS framing 달라 별도 유지가 정당했으나 TLS는 중복=부당했음).",
+        "crates/wz-runtime-tokio/src/tls_pipeline.rs(신규, transport-link-tls 게이트): dial_tls(TcpStream::connect -> TlsConnector rustls client handshake -> TlsStream::Client) / accept_tls(TlsAcceptor server handshake -> TlsStream::Server) / wire_tls_stream(tokio::io::split + stream_link 1차요소 재사용). TlsReadDriver = StreamReadDriver<ReadHalf<TlsStream<TcpStream>>> 별칭. MTU=DEFAULT 65535(pico _z_get_link_mtu_tls, tls.c:31 — TCP 동류, override 없음).",
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: stream_link 1차요소로 슬림화(dial_tcp + wire_tcp_stream만 유지). TcpReadDriver = StreamReadDriver<OwnedReadHalf> 별칭. 이동한 드라이버 struct/impl + writer_task + oversize test 제거. lib.rs: pub mod stream_link + pub mod tls_pipeline 게이트.",
+        "crates/wz-runtime-tokio/src/session_open.rs: DialedLink::Tls(Box<TlsStream<TcpStream>>, large_enum_variant 회피 boxing) + InboundLink::Tls(TlsReadDriver) 게이트 variant + 4 LinkDriver arm + wire_dialed_link Tls arm. dial_locator Proto::Tls -> 무조건 Unsupported(locator는 cert 없음; TLS는 명시 dial_tls 경로 — wz-ap-demo 자체-dial 패턴 동형).",
+        "crates/wz-runtime-tokio/Cargo.toml: transport-link-tls=['transport-link-tcp','dep:tokio-rustls'] + tokio-rustls 0.26(default-off, features ring/tls12/logging — aws-lc-rs C빌드 회피) optional + rcgen 0.13 dev-dep. crates/wz/Cargo.toml: facade transport-link-tls가 wz-runtime-tokio?/transport-link-tls 포워딩(종전 tcp-only placeholder=백엔드 미점화였음 -> active truthful). scripts/run-ci.sh Layer C1u(locator + tls_e2e + clippy tls all-targets + no-default lib standalone). inventory transport-link-tls reserved->active.",
+        "crates/wz-runtime-tokio/tests/tls_e2e.rs(신규, cfg all(transport-link-tls, transport-unicast)): rcgen self-signed localhost cert -> rustls ServerConfig/ClientConfig(ring provider, builder_with_provider) -> accept_tls/dial_tls loopback handshake -> DialedLink::Tls -> accept/initiate_and_open_session, 양단 Established 단언 + Put byte-exact 전달(remote leg)."
+      ],
+      "verification_bullets": [
+        "세션 리뷰(적대적 자검) 발견·청산 2건(push 전): (1) run-ci 백그라운드 통지 'exit 0'이 래퍼 echo 값이고 로그 실제 RUNCI_EXIT=1(Layer 0 fmt FAIL)이었음 -> cargo fmt 적용 + 래퍼 exit를 run-ci exit에 연동(통지 truthful). (2) TlsReadDriver가 TcpReadDriver와 필드+LinkDriver impl 바이트 동일(SSOT/DRY 위반) -> stream_link 전송-중립 모듈 추출(StreamReadDriver<R> 1회 impl + 별칭).",
+        "framing SSOT: poll_framed<S:AsyncRead> + writer_task<W:AsyncWrite> generic, StreamReadDriver<R> impl 1회. TCP/TLS는 dial/wire + 타입 별칭만(SRP). serial은 COBS framing이라 별도 드라이버 유지(정당 — 동일 로직 아님).",
+        "dial_locator Proto::Tls = 무조건 Unsupported라 feature 조합 무관 exhaustive(skew 불가, R311ny AnyLocator 교훈 적용). DialedLink::Tls=Box(large_enum_variant clippy 청산).",
+        "tls_e2e 통과 + 20/20 반복 non-flaky(loopback TCP under TLS = in-order 무손실 handshake+소량 segment). locator 21/21(parses_tls_ipv4 등 신규 2). clippy 3레인(default / tls all-targets / no-default lib standalone) -D warnings exit 0(OwnedWriteHalf unused + large_enum_variant 청산), fmt clean. standalone: --no-default-features --features transport-link-tls 빌드+clippy clean(tls_pipeline은 forwarded transport-link-tcp만 필요, transport-unicast 불요).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 확인, 파이프 없음) 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C1t/C1u/.../G/Q/M 전부; FAIL/error[/panicked 0). A3 catalog truthfulness가 transport-link-tls 실제 cfg 게이트=active 정당 확인.",
+        "atomic: ledger entries 734->735, inventory transport-link-tls reserved->active, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311oa = WS/TLS breadth 트랙 1라운드(TLS 백엔드). TLS-over-TCP 실동작: rustls handshake -> Established -> Put byte-exact. 세션리뷰로 stream_link 전송-중립 1차요소 추출(read-driver 중복 청산) = TCP/TLS가 byte-stream StreamEnvelope framing을 SSOT로 공유, 각 transport는 dial/split + 별칭만. Proto::Tls parse-always(ungated), backend transport-link-tls 게이트, cert는 명시 호출부.",
+        "설계 결정: cert config를 dial_locator로 안 흘리고 명시 dial_tls(config)+initiate_and_open_session 경로(wz-ap-demo 자체-dial 패턴). pico는 session_cfg에서 cert를 읽지만 wz는 호출부 명시가 TLS POLICY를 앱에 두는 분리. dial_locator는 tls Unsupported(정직).",
+        "메타: 세션리뷰가 (1) 성급한 run-ci PASS 보고 차단(통지≠로그) (2) read-driver 중복 SSOT 위반 청산. 둘 다 push 전. 비용 무관 교과서 기준이 리팩터를 정당화.",
+        "미완(정직, 후속 라운드): (a) transport cert config를 locator dial seam에 thread(pico session_cfg parity 최종형 — 현재는 명시 dial_tls만) / (b) mTLS(현 with_no_client_auth) / (c) cert PEM 파일 로딩 헬퍼 / (d) production 앱 -> 세션 TlsConfig wiring(현재 e2e만 config 빌드) / (e) dial_locator(tls)->Unsupported 계약 단위테스트 / (f) WS backend(트랙 2라운드 — ws/host:port Proto::Ws + WebSocket RFC6455 프레임 codec + handshake; TLS와 달리 자체 framing이라 stream_link 재사용 불가, serial형 별도 codec) / (g) cross-impl pico(mbedtls)<->wz(rustls) TLS interop.",
+        "NEXT 후보: WS backend / TLS mTLS+PEM 로딩 / cert-config locator seam threading / pico parity % 재계산(TLS 반영). UNPUSHED: R311nz(2) + R311oa(feat + docs/atomic) = 4 commits. origin/main=b67b3af=R311ny. push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311oa: TLS-over-TCP 링크 백엔드(WS/TLS breadth 트랙 1라운드). Proto::Tls parse-always + tls_pipeline(dial_tls/accept_tls rustls handshake) + DialedLink/InboundLink Tls. 세션리뷰서 TlsReadDriver≡TcpReadDriver 중복 발견→전송-중립 stream_link 추출(StreamReadDriver<R>+StreamWriteDriver+writer_task<W>, TCP/TLS는 dial/wire+별칭만=SSOT). cert는 명시 dial_tls 호출부(dial_locator tls Unsupported). tokio-rustls(ring)+rcgen. self-signed loopback e2e Established+Put byte-exact 20/20. transport-link-tls active. full run-ci(M+G) RUNCI_EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/locator.rs: Proto::Tls variant + parse_locator 'tls' arm(ungated parse-always — tcp 동일 numeric host:port grammar, TLS는 stream wrap). 모듈/parse doc 갱신(tls를 IP leaf 지원에 추가, deferred에서 제거). parses_tls_ipv4 + parse_any_routes_tls_to_the_ip_leaf 테스트.",
+        "crates/wz-runtime-tokio/src/stream_link.rs(신규, 세션리뷰 추출): 전송-중립 byte-stream 링크 1차요소 SSOT. StreamReadDriver<R:AsyncRead+Unpin>(framing LinkDriver impl 1회 = poll_framed), StreamWriteDriver(중립명 channel write driver + u16 oversize guard), writer_task<W:AsyncWrite+Unpin>(StreamEnvelope encode). TCP/TLS가 byte-단위 동일 framing이라 read-driver를 1회만 작성(serial은 COBS framing 달라 별도 유지가 정당했으나 TLS는 중복=부당했음).",
+        "crates/wz-runtime-tokio/src/tls_pipeline.rs(신규, transport-link-tls 게이트): dial_tls(TcpStream::connect -> TlsConnector rustls client handshake -> TlsStream::Client) / accept_tls(TlsAcceptor server handshake -> TlsStream::Server) / wire_tls_stream(tokio::io::split + stream_link 1차요소 재사용). TlsReadDriver = StreamReadDriver<ReadHalf<TlsStream<TcpStream>>> 별칭. MTU=DEFAULT 65535(pico _z_get_link_mtu_tls, tls.c:31 — TCP 동류, override 없음).",
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: stream_link 1차요소로 슬림화(dial_tcp + wire_tcp_stream만 유지). TcpReadDriver = StreamReadDriver<OwnedReadHalf> 별칭. 이동한 드라이버 struct/impl + writer_task + oversize test 제거. lib.rs: pub mod stream_link + pub mod tls_pipeline 게이트.",
+        "crates/wz-runtime-tokio/src/session_open.rs: DialedLink::Tls(Box<TlsStream<TcpStream>>, large_enum_variant 회피 boxing) + InboundLink::Tls(TlsReadDriver) 게이트 variant + 4 LinkDriver arm + wire_dialed_link Tls arm. dial_locator Proto::Tls -> 무조건 Unsupported(locator는 cert 없음; TLS는 명시 dial_tls 경로 — wz-ap-demo 자체-dial 패턴 동형).",
+        "crates/wz-runtime-tokio/Cargo.toml: transport-link-tls=['transport-link-tcp','dep:tokio-rustls'] + tokio-rustls 0.26(default-off, features ring/tls12/logging — aws-lc-rs C빌드 회피) optional + rcgen 0.13 dev-dep. crates/wz/Cargo.toml: facade transport-link-tls가 wz-runtime-tokio?/transport-link-tls 포워딩(종전 tcp-only placeholder=백엔드 미점화였음 -> active truthful). scripts/run-ci.sh Layer C1u(locator + tls_e2e + clippy tls all-targets + no-default lib standalone). inventory transport-link-tls reserved->active.",
+        "crates/wz-runtime-tokio/tests/tls_e2e.rs(신규, cfg all(transport-link-tls, transport-unicast)): rcgen self-signed localhost cert -> rustls ServerConfig/ClientConfig(ring provider, builder_with_provider) -> accept_tls/dial_tls loopback handshake -> DialedLink::Tls -> accept/initiate_and_open_session, 양단 Established 단언 + Put byte-exact 전달(remote leg)."
+      ],
+      "publishable_verification_bullets": [
+        "세션 리뷰(적대적 자검) 발견·청산 2건(push 전): (1) run-ci 백그라운드 통지 'exit 0'이 래퍼 echo 값이고 로그 실제 RUNCI_EXIT=1(Layer 0 fmt FAIL)이었음 -> cargo fmt 적용 + 래퍼 exit를 run-ci exit에 연동(통지 truthful). (2) TlsReadDriver가 TcpReadDriver와 필드+LinkDriver impl 바이트 동일(SSOT/DRY 위반) -> stream_link 전송-중립 모듈 추출(StreamReadDriver<R> 1회 impl + 별칭).",
+        "framing SSOT: poll_framed<S:AsyncRead> + writer_task<W:AsyncWrite> generic, StreamReadDriver<R> impl 1회. TCP/TLS는 dial/wire + 타입 별칭만(SRP). serial은 COBS framing이라 별도 드라이버 유지(정당 — 동일 로직 아님).",
+        "dial_locator Proto::Tls = 무조건 Unsupported라 feature 조합 무관 exhaustive(skew 불가, R311ny AnyLocator 교훈 적용). DialedLink::Tls=Box(large_enum_variant clippy 청산).",
+        "tls_e2e 통과 + 20/20 반복 non-flaky(loopback TCP under TLS = in-order 무손실 handshake+소량 segment). locator 21/21(parses_tls_ipv4 등 신규 2). clippy 3레인(default / tls all-targets / no-default lib standalone) -D warnings exit 0(OwnedWriteHalf unused + large_enum_variant 청산), fmt clean. standalone: --no-default-features --features transport-link-tls 빌드+clippy clean(tls_pipeline은 forwarded transport-link-tcp만 필요, transport-unicast 불요).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 확인, 파이프 없음) 'all required layers pass'(Layer 0/A/A2/A3/B/C0/C1/C1t/C1u/.../G/Q/M 전부; FAIL/error[/panicked 0). A3 catalog truthfulness가 transport-link-tls 실제 cfg 게이트=active 정당 확인.",
+        "atomic: ledger entries 734->735, inventory transport-link-tls reserved->active, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311oa = WS/TLS breadth 트랙 1라운드(TLS 백엔드). TLS-over-TCP 실동작: rustls handshake -> Established -> Put byte-exact. 세션리뷰로 stream_link 전송-중립 1차요소 추출(read-driver 중복 청산) = TCP/TLS가 byte-stream StreamEnvelope framing을 SSOT로 공유, 각 transport는 dial/split + 별칭만. Proto::Tls parse-always(ungated), backend transport-link-tls 게이트, cert는 명시 호출부.",
+        "설계 결정: cert config를 dial_locator로 안 흘리고 명시 dial_tls(config)+initiate_and_open_session 경로(wz-ap-demo 자체-dial 패턴). pico는 session_cfg에서 cert를 읽지만 wz는 호출부 명시가 TLS POLICY를 앱에 두는 분리. dial_locator는 tls Unsupported(정직).",
+        "메타: 세션리뷰가 (1) 성급한 run-ci PASS 보고 차단(통지≠로그) (2) read-driver 중복 SSOT 위반 청산. 둘 다 push 전. 비용 무관 교과서 기준이 리팩터를 정당화.",
+        "미완(정직, 후속 라운드): (a) transport cert config를 locator dial seam에 thread(pico session_cfg parity 최종형 — 현재는 명시 dial_tls만) / (b) mTLS(현 with_no_client_auth) / (c) cert PEM 파일 로딩 헬퍼 / (d) production 앱 -> 세션 TlsConfig wiring(현재 e2e만 config 빌드) / (e) dial_locator(tls)->Unsupported 계약 단위테스트 / (f) WS backend(트랙 2라운드 — ws/host:port Proto::Ws + WebSocket RFC6455 프레임 codec + handshake; TLS와 달리 자체 framing이라 stream_link 재사용 불가, serial형 별도 codec) / (g) cross-impl pico(mbedtls)<->wz(rustls) TLS interop.",
+        "NEXT 후보: WS backend / TLS mTLS+PEM 로딩 / cert-config locator seam threading / pico parity % 재계산(TLS 반영). UNPUSHED: R311nz(2) + R311oa(feat + docs/atomic) = 4 commits. origin/main=b67b3af=R311ny. push=명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
@@ -43862,10 +43922,10 @@
       "reason": "F=measured wz TcpStream adapter; P=zenoh-pico transport_link_tcp.c; C=independent"
     },
     "transport-link-tls": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-link-tls crate",
-      "reason": "F=est rustls wrap over tcp; P=zenoh-link-tls; C=wraps transport-link-tcp, can disable"
+      "reason": "R311oa: tls_pipeline backend (dial_tls/accept_tls rustls handshake + TlsReadDriver) lands; transport-link-tls now a real cfg gate, facade forwards wz-runtime-tokio/transport-link-tls"
     },
     "transport-link-udp": {
       "status": "active",
