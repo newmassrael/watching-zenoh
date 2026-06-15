@@ -40,6 +40,20 @@
 #include "zenoh-pico/protocol/codec/ext.h"
 #include "zenoh-pico/protocol/ext.h"
 
+/* R311nx — serial-link framing codec + its COBS / CRC32 primitives, for
+ * the wz<->pico serial wire-framing byte-parity test
+ * (wz-integration-tests/tests/layer3_serial_framing.rs). wz's encode_frame
+ * / decode_frame (wz-session-core::serial_link, R311ns-nt) mirror these; the
+ * test compares the wz codec against the REAL pico C functions rather than
+ * the hand-derived vectors of wz-codecs/tests/serial_framing.rs. These are
+ * platform-independent codec/util functions with NO Z_FEATURE_LINK_SERIAL
+ * guard (protocol/codec/serial.c + utils/encoding.c + utils/checksum.c are
+ * GLOB_RECURSE-compiled into libzenohpico.a), so the symbols exist even
+ * though pico's serial LINK backend is MCU-only (unix has none). */
+#include "zenoh-pico/protocol/codec/serial.h"
+#include "zenoh-pico/utils/encoding.h"
+#include "zenoh-pico/utils/checksum.h"
+
 /* Forward declarations for body-codec functions that have C-side
  * implementations in src/protocol/codec/message.c but no header
  * declaration (they are wrapped behind the public

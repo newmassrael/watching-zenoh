@@ -40,11 +40,22 @@ publish = false
 path = "src/lib.rs"
 
 [dev-dependencies]
-wz-codecs = { path = "../wz-codecs" }
+# R311nx — `codec-serial` pinned so tests/layer3_serial_framing.rs can
+# build the wz serial framing primitives (`wz_codecs::{cobs_encode,
+# cobs_decode, crc32, serial_envelope}`) for the byte-parity compare
+# against the real pico C serial codec. Same dev-dep feature-pin model
+# as the wz-runtime-tokio frag/multicast pins below; resolver=2 keeps it
+# from unifying into wz-codecs's OWN default build under Layer C1.
+wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # W3 no-alloc bounded mirror migration — tests build owned-mirror
 # heapless fields via the `codec_bound::bounded_{bytes,string}` helpers
 # (the same idiom production code uses at decode boundaries).
-wz-session-core = { path = "../wz-session-core" }
+# R311nx — `transport-link-serial` pinned so layer3_serial_framing.rs can
+# reach `wz_session_core::serial_link::{encode_frame, decode_frame,
+# SerialFrameReader}` (the wz serial framing logic under test).
+wz-session-core = { path = "../wz-session-core", features = [
+    "transport-link-serial",
+] }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 # R116b — `hal_timer_routing.rs` declares an in-test TimerProbePolicy
@@ -68,9 +79,18 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 # runs in the C1 region — so the feature-OFF default composition stays
 # owned by C1 and the feature-ON wz-runtime-tokio build stays owned by the
 # C1l (frag) / Layer M (multicast) lanes.
+# R311nx — `transport-link-serial` pinned here TOO (not only on
+# wz-session-core above): the `AnyLocator::Serial` variant is gated on
+# wz-session-core's feature, but wz-runtime-tokio's `session_open.rs`
+# match arm for it is gated on wz-runtime-tokio's OWN feature. In normal
+# builds the two are coupled (wz-runtime-tokio's feature forwards to
+# wz-session-core's), but enabling only wz-session-core's via a sibling
+# dev-dep decouples them and makes the match non-exhaustive. Keeping the
+# pins together preserves that coupling.
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "transport-fragmentation",
     "transport-multicast",
+    "transport-link-serial",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the

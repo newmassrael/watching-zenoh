@@ -164,6 +164,18 @@ fn main() {
         .allowlist_function("_z_frame_encode")
         .allowlist_function("_z_fragment_encode")
         .allowlist_function("_z_slice_as_zbuf")
+        // R311nx — serial-link framing codec + its COBS / CRC32 primitives.
+        // The wz serial wire format (encode_frame / decode_frame, R311ns-nt)
+        // mirrors these; layer3_serial_framing.rs byte-compares the wz codec
+        // against the REAL pico C functions (vs the hand-derived vectors in
+        // wz-codecs/tests/serial_framing.rs). serial.c / encoding.c /
+        // checksum.c carry no Z_FEATURE_LINK_SERIAL guard, so the symbols are
+        // in libzenohpico.a even though pico's serial LINK backend is MCU-only.
+        .allowlist_function("_z_serial_msg_serialize")
+        .allowlist_function("_z_serial_msg_deserialize")
+        .allowlist_function("_z_cobs_encode")
+        .allowlist_function("_z_cobs_decode")
+        .allowlist_function("_z_crc32")
         // R44 — handshake bodies Layer 3 (scout + init + open + join).
         // scout exercises cbyte multi-bit packing without parent
         // flags; init/open/join exercise parent.S / parent.A
