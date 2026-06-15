@@ -602,7 +602,12 @@ transport-link-quic = []
 # existed). `locator-serial` (above) selects this.
 transport-link-serial = ["wz-runtime-tokio?/transport-link-serial"]
 transport-link-tcp = ["wz-runtime-tokio?/transport-link-tcp"]
-transport-link-tls = ["transport-link-tcp"]
+# R311oa — now forwards the host TLS backend to wz-runtime-tokio (was a
+# tcp-only placeholder while no TLS backend existed). Keeps transport-link-tcp
+# (TLS is TLS-over-TCP) and adds the runtime forward so the facade catalog
+# feature actually turns on `tls_pipeline` (dial_tls/accept_tls + TlsReadDriver).
+# `locator-tls` (above) selects this.
+transport-link-tls = ["transport-link-tcp", "wz-runtime-tokio?/transport-link-tls"]
 transport-link-udp = ["wz-runtime-tokio?/transport-link-udp"]
 transport-link-unixsock = []
 transport-link-vsock = []

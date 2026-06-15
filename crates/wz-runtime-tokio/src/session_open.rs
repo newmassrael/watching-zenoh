@@ -61,6 +61,16 @@ use crate::serial_pipeline::{dial_serial, wire_serial_stream, SerialReadDriver};
 #[cfg(feature = "transport-link-serial")]
 use tokio_serial::SerialStream;
 
+// R311oa — the TLS arm, like serial, rides this tcp+unicast-gated module as
+// an additive transport (transport-link-tls forwards transport-link-tcp, so
+// this module is always compiled when TLS is). The stream type is the unified
+// rustls `TlsStream<TcpStream>` produced by `tls_pipeline::dial_tls`/
+// `accept_tls`; `dial_locator` never builds it (no cert config in a locator).
+#[cfg(feature = "transport-link-tls")]
+use crate::tls_pipeline::{wire_tls_stream, TlsReadDriver};
+#[cfg(feature = "transport-link-tls")]
+use tokio_rustls::TlsStream;
+
 /// Default cadence at which [`connect_and_open_session`] sweeps the host
 /// handshake deadline (R311il — the engine-free FSM arms no `<send delay>`,
 /// so there is no SCE scheduler to pump) while waiting on the handshake. It
@@ -95,6 +105,21 @@ pub enum DialedLink {
     /// path is uniform with the other transports.
     #[cfg(feature = "transport-link-serial")]
     Serial(SerialStream),
+    /// A connected + rustls-handshaked TLS-over-TCP stream, split downstream
+    /// via [`wire_tls_stream`] (R311oa). Like serial, the handshake (here the
+    /// TLS handshake) has ALREADY run by the time the stream is wrapped:
+    /// [`crate::tls_pipeline::dial_tls`] (client) / [`crate::tls_pipeline::accept_tls`]
+    /// (server) drive it before returning, so the steady-state split stays
+    /// uniform with TCP. NOT produced by [`dial_locator`] — a `tls/...` locator
+    /// carries no cert config, so a caller builds this explicitly and hands it
+    /// to `initiate_and_open_session` / `accept_and_open_session`.
+    ///
+    /// `Box`ed: a handshaked `TlsStream` carries the full rustls session
+    /// state (buffers + crypto), so an unboxed variant would bloat every
+    /// `DialedLink` value (incl. the small `Tcp` arm) to that size on the
+    /// stack — boxing keeps the union compact (clippy `large_enum_variant`).
+    #[cfg(feature = "transport-link-tls")]
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 /// Dial a parsed [`AnyLocator`] to its raw transport — the mode-agnostic dial
@@ -129,6 +154,18 @@ pub async fn dial_locator(locator: AnyLocator) -> io::Result<DialedLink> {
             Proto::Udp => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "udp session-open requires the transport-link-udp feature",
+            )),
+            // R311oa — `tls/...` parses to `Proto::Tls` unconditionally, but
+            // the generic locator dial cannot supply the rustls cert config a
+            // TLS handshake needs, so it is ALWAYS Unsupported here regardless
+            // of `transport-link-tls`. A TLS session dials through
+            // `tls_pipeline::dial_tls` (with an explicit ClientConfig) +
+            // `initiate_and_open_session` — the honest split that keeps TLS
+            // POLICY (roots, client cert) in the application, not a locator.
+            Proto::Tls => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "tls session-open dials through tls_pipeline::dial_tls with \
+                 explicit cert config, not the generic dial_locator",
             )),
         },
         // R311nv — a `serial/...` endpoint dials through the tty backend:
@@ -167,6 +204,8 @@ pub enum InboundLink {
     Udp(UdpReadDriver),
     #[cfg(feature = "transport-link-serial")]
     Serial(SerialReadDriver),
+    #[cfg(feature = "transport-link-tls")]
+    Tls(TlsReadDriver),
 }
 
 impl LinkDriver for InboundLink {
@@ -177,6 +216,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Udp(d) => d.open().await,
             #[cfg(feature = "transport-link-serial")]
             InboundLink::Serial(d) => d.open().await,
+            #[cfg(feature = "transport-link-tls")]
+            InboundLink::Tls(d) => d.open().await,
         }
     }
 
@@ -187,6 +228,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Udp(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-serial")]
             InboundLink::Serial(d) => d.send(frame, reliability).await,
+            #[cfg(feature = "transport-link-tls")]
+            InboundLink::Tls(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -197,6 +240,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Udp(d) => d.close().await,
             #[cfg(feature = "transport-link-serial")]
             InboundLink::Serial(d) => d.close().await,
+            #[cfg(feature = "transport-link-tls")]
+            InboundLink::Tls(d) => d.close().await,
         }
     }
 
@@ -207,6 +252,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Udp(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-serial")]
             InboundLink::Serial(d) => d.poll_event().await,
+            #[cfg(feature = "transport-link-tls")]
+            InboundLink::Tls(d) => d.poll_event().await,
         }
     }
 }
@@ -238,6 +285,11 @@ pub fn wire_dialed_link(
         DialedLink::Serial(stream) => {
             let (inbound, outbound, handle) = wire_serial_stream(stream);
             (InboundLink::Serial(inbound), outbound, handle)
+        }
+        #[cfg(feature = "transport-link-tls")]
+        DialedLink::Tls(stream) => {
+            let (inbound, outbound, handle) = wire_tls_stream(*stream);
+            (InboundLink::Tls(inbound), outbound, handle)
         }
     }
 }

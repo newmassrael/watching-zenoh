@@ -723,6 +723,32 @@ layer_c1t_cargo_test_serial() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-serial,transport-fragmentation --quiet -- -D warnings)
 }
 
+# ─── Layer C1u — TLS link: locator parse + wz-runtime-tokio tls backend ─
+#
+# R311oa: same shape as C1t (serial). The TLS backend (`tls_pipeline`:
+# dial_tls/accept_tls rustls handshake + the TlsReadDriver, reusing the TCP
+# StreamEnvelope framing) gates on `transport-link-tls`, OFF in the default
+# set, so Layer C1's `cargo test --workspace` never reaches it. This lane:
+#   1. runs the locator tests (the `Proto::Tls` parse is ungated parse-always
+#      in wz-session-core, but pin it here so a parse regression is caught
+#      even if the default workspace run's feature set shifts);
+#   2. runs the `tls_e2e` integration test (gated
+#      `all(transport-link-tls, transport-unicast)`: two nodes complete the
+#      rustls handshake over a loopback TCP link, reach Established, and a Put
+#      is delivered byte-exact through the TLS-wrapped stream);
+#   3. clippy-gates the `transport-link-tls` cfg (`--all-targets`, defaults
+#      retained so the e2e + lib both lint);
+#   4. clippy-gates the LIB under `--no-default-features --features
+#      transport-link-tls` to prove `tls_pipeline` composes standalone (it
+#      needs only the forwarded `transport-link-tcp`, not `transport-unicast`).
+layer_c1u_cargo_test_tls() {
+    (cd crates \
+        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-tls --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-tls --quiet -- -D warnings)
+}
+
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
 #
 # R311du: same shape as C1c. The pubsub SubscriberRegistry test module
@@ -2732,6 +2758,7 @@ run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1t layer_c1t_cargo_test_serial || overall=1
+run_layer C1u layer_c1u_cargo_test_tls || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1

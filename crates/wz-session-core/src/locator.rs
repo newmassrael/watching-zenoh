@@ -28,8 +28,10 @@
 //!
 //! Two leaves, dispatched by scheme through [`parse_any_locator`] into the
 //! [`AnyLocator`] sum type:
-//! - the IP leaf [`parse_locator`] — `tcp` / `udp` over a numeric
-//!   [`SocketAddr`] (IPv4 `1.2.3.4:7447` or IPv6 `[::1]:7447`);
+//! - the IP leaf [`parse_locator`] — `tcp` / `udp` / `tls` over a numeric
+//!   [`SocketAddr`] (IPv4 `1.2.3.4:7447` or IPv6 `[::1]:7447`); `tls` shares
+//!   the `tcp` grammar (TLS wraps the same stream), parsing unconditionally
+//!   while only its dial backend is `transport-link-tls`-gated;
 //! - the serial leaf [`parse_serial_locator`] — `serial/...` device or
 //!   pin endpoints (relocated here from `serial_link` in R311ny so the
 //!   [`AnyLocator::Serial`] variant is unconditional; see that leaf's
@@ -41,7 +43,7 @@
 //! - IP locator metadata suffixes (`udp/1.2.3.4:7447#iface=eth0`) — the
 //!   `#`-delimited config tail is not split by the IP leaf (the serial
 //!   leaf DOES read its `#baudrate=` tail);
-//! - other non-IP transports (`unixsock-stream/...`, `ws/...`, `tls/...`).
+//! - other transports not yet wired (`unixsock-stream/...`, `ws/...`).
 
 use alloc::string::{String, ToString};
 use core::net::SocketAddr;
@@ -55,6 +57,15 @@ pub enum Proto {
     Tcp,
     /// `udp/...` — datagram transport (`UdpDriver`).
     Udp,
+    /// `tls/...` — TLS-over-TCP stream transport: the same numeric
+    /// `host:port` grammar as `tcp`, the byte stream wrapped in a rustls
+    /// session (pico's `tls/` scheme, `_z_get_link_mtu_tls` = 65535, the TCP
+    /// stream ceiling). Parses unconditionally like every other proto; the
+    /// BACKEND dial is gated (`transport-link-tls`) and needs cert config the
+    /// locator alone does not carry, so it dials only through
+    /// `wz-runtime-tokio::tls_pipeline`'s explicit `dial_tls`/`accept_tls`,
+    /// not the generic `dial_locator`.
+    Tls,
 }
 
 /// A locator parsed into its transport protocol and numeric endpoint.
@@ -82,7 +93,7 @@ pub enum LocatorParseError {
 ///
 /// The protocol is the substring before the first `/`; everything after
 /// it is parsed as a [`SocketAddr`]. See the module doc for the MVP
-/// scope (numeric tcp/udp endpoints; DNS / metadata / other transports
+/// scope (numeric tcp/udp/tls endpoints; DNS / metadata / other transports
 /// are reported as errors, not silently accepted).
 pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> {
     let (proto_str, addr_str) = locator
@@ -91,6 +102,7 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     let proto = match proto_str {
         "tcp" => Proto::Tcp,
         "udp" => Proto::Udp,
+        "tls" => Proto::Tls,
         other => return Err(LocatorParseError::UnknownProto(other.to_string())),
     };
     let addr = SocketAddr::from_str(addr_str)
@@ -308,6 +320,27 @@ mod tests {
         let p = parse_locator("udp/127.0.0.1:7447").expect("valid udp locator");
         assert_eq!(p.proto, Proto::Udp);
         assert_eq!(p.addr.port(), 7447);
+    }
+
+    #[test]
+    fn parses_tls_ipv4() {
+        // `tls` shares the `tcp` numeric grammar (TLS wraps the same stream);
+        // parsing is unconditional, only the dial backend is feature-gated.
+        let p = parse_locator("tls/192.168.1.10:7447").expect("valid tls locator");
+        assert_eq!(p.proto, Proto::Tls);
+        assert_eq!(p.addr, "192.168.1.10:7447".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn parse_any_routes_tls_to_the_ip_leaf() {
+        // A `tls/...` locator parses through the IP leaf (numeric host:port),
+        // landing as `AnyLocator::Ip(Proto::Tls)` whether or not the TLS
+        // backend is compiled — the dial step decides reachability.
+        let any = parse_any_locator("tls/127.0.0.1:7447").expect("tls locator");
+        assert_eq!(
+            any,
+            AnyLocator::Ip(parse_locator("tls/127.0.0.1:7447").unwrap())
+        );
     }
 
     #[test]

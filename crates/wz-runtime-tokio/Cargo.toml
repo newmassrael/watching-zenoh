@@ -367,6 +367,18 @@ transport-link-udp = []
 # compile standalone under this feature alone. NOT in the default set —
 # zenoh-pico ships serial default-OFF (optional Z_FEATURE_LINK_SERIAL).
 transport-link-serial = ["wz-session-core/transport-link-serial", "dep:tokio-serial"]
+# R311oa — host TLS-over-TCP backend for the TLS link. Forwards
+# `transport-link-tcp` (TLS reuses the ENTIRE TCP stream pipeline — the
+# StreamEnvelope length-prefix framing, the shared `poll_framed` reader, the
+# writer task — over a rustls-wrapped byte stream, so no new codec) and pulls
+# the optional `tokio-rustls` dep that `tls_pipeline` runs the rustls
+# client/server handshake over. The locator PARSE (`Proto::Tls`) is
+# unconditional in wz-session-core (no feature forward); only the
+# dial/accept BACKEND is gated here. Cert material the locator cannot carry
+# is supplied at the explicit `dial_tls`/`accept_tls` call site, so the
+# generic `dial_locator` returns Unsupported for `tls/...`. NOT in the
+# default set — zenoh-pico ships TLS as an optional link (Z_FEATURE_LINK_TLS).
+transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
@@ -638,6 +650,17 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 # dep. With it off, serialport is pulled `default-features = false` (no
 # libudev) all the way down — no system dependency.
 tokio-serial = { version = "5.4", default-features = false, optional = true }
+# R311oa — host TLS link backend, behind the optional `transport-link-tls`
+# feature (`dep:tokio-rustls`). tokio-rustls wraps a `TcpStream` in a rustls
+# session that is `AsyncRead + AsyncWrite`, so `tls_pipeline` splits
+# (`tokio::io::split`) + frames it exactly as the TCP pipeline frames a
+# `TcpStream` (the shared StreamEnvelope codec + `poll_framed`).
+# `default-features = false` + explicit `ring`: rustls 0.23's default crypto
+# provider is `aws-lc-rs` (a C/cmake build); `ring` is the provider with no
+# extra system toolchain, matching the no-system-dep stance the serial
+# `tokio-serial` dep took. `tls12` + `logging` keep the usual handshake
+# surface; the e2e's self-signed cert comes from the `rcgen` dev-dep.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec
 # emit/include of every codec-* is governed strictly by the matching
 # `codec-*` forward above. Without disabling defaults the codec
@@ -731,6 +754,12 @@ tokio = { version = "1", features = ["full"] }
 # way to bind without listening (already in the tree transitively via
 # tokio). Dev-only: never compiled into the lib or the no_std targets.
 socket2 = "0.6"
+# R311oa — generate a self-signed cert + key pair for the TLS loopback e2e
+# (tests/tls_e2e.rs): the acceptor's rustls ServerConfig needs a cert chain +
+# private key, and the dialer's ClientConfig must trust that cert (added to a
+# fresh root store, server name "localhost"). Dev-only — never compiled into
+# the lib or the no_std targets; production cert material comes from the app.
+rcgen = "0.13"
 # R71 — test fixtures + rebind shims moved to a separate sibling crate
 # so the production compile units of this crate carry zero test-only
 # code paths. Previously these helpers lived behind a `_test_support`

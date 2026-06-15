@@ -401,13 +401,22 @@ pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 /// `Arc<dyn BoxedLinkDriver>` for the outbound `send_blocking` fired from
 /// Lua script-action handlers. A single `TcpStream` cannot satisfy both, so
 /// this module splits it into an [`link_pipeline::TcpReadDriver`] (owns the
-/// read half) plus an [`link_pipeline::TcpWriteDriver`] (a non-blocking
-/// channel enqueue) drained by a dedicated [`link_pipeline::writer_task`].
+/// read half) plus an [`stream_link::StreamWriteDriver`] (a non-blocking
+/// channel enqueue) drained by a dedicated [`stream_link::writer_task`].
 /// The channel decouples the sync-action / async-runtime boundary WITHOUT
 /// `Handle::block_on` (the [`session_glue::TokioLinkDriverAdapter`] path
 /// carries a documented current-thread-runtime deadlock hazard and has
 /// never driven a full bidirectional session); this split is the model the
 /// production AP path actually uses.
+///
+/// R311oa — the transport-NEUTRAL byte-stream machinery (the read/write
+/// drivers + the StreamEnvelope `writer_task`) lives once in
+/// [`stream_link`]; `link_pipeline` (TCP) and [`tls_pipeline`] (TLS) carry
+/// only their dial/split and instantiate the shared drivers, so a TLS link
+/// frames identically to a TCP link with no duplicated impl.
+#[cfg(feature = "transport-link-tcp")]
+pub mod stream_link;
+
 #[cfg(feature = "transport-link-tcp")]
 pub mod link_pipeline;
 
@@ -433,6 +442,19 @@ pub mod udp_pipeline;
 /// `transport-link-tcp`-gated session-open module as an additive serial arm.
 #[cfg(feature = "transport-link-serial")]
 pub mod serial_pipeline;
+
+/// R311oa — TLS-over-TCP backend for the TLS link. `dial_tls`/`accept_tls`
+/// run the rustls client/server handshake; `wire_tls_stream` splits the
+/// secured stream into the read/write-driver + writer-task triple the session
+/// FSM consumes, reusing the TCP pipeline's `StreamEnvelope` framing
+/// ([`link_pipeline::writer_task`] + [`poll_framed`]) — a TLS link frames
+/// identically to TCP, differing only in the stream type. Gated
+/// `transport-link-tls` (which forwards `transport-link-tcp`); the
+/// `session_open` DialedLink::Tls integration rides the
+/// `transport-link-tcp`-gated session-open module as an additive TLS arm,
+/// exactly like serial.
+#[cfg(feature = "transport-link-tls")]
+pub mod tls_pipeline;
 
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
