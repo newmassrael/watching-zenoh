@@ -39246,6 +39246,66 @@
         "push 미동의=LOCAL-COMMIT까지만. push 명시 동의 권장([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311pd": {
+      "decision_summary": "R311pd: leg-7 — pico liveliness token → zenohd → wz liveliness-subscribe interop(Layer Z 7번째 leg, leg-5 역할 반전). pico z_liveliness 토큰을 wz가 --liveliness-subscribe observer로 LIVELINESS SAMPLE PUT 관측. zenohd 경유 liveliness 평면 양방향 완결. 프로덕션 코드 변경 없음.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: pico_liveliness_token_visible_via_zenohd_to_wz_subscriber 신설(Layer Z 7번째 leg) = leg-5(wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness)의 역할 반전. zenoh-pico z_liveliness가 liveliness TOKEN 선언(long-lived hold)→zenohd liveliness subsystem 추적→wz가 zenohd CLIENT로 --liveliness-subscribe(고급 Session::declare_liveliness_subscriber, R280)→라우팅된 토큰을 \"LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico'\" 관측. 단언: established(wz session Established 대기로 subscriber Interest가 토큰 선언 전 zenohd 도달=결정적 ordering) + LIVELINESS SAMPLE PUT 도달 + token keyexpr/subscribe filter 둘 다 PUT 라인에 존재. witness가 wz측 단일-writer env_logger stderr라 foreign-stdout capture race 구조적 면역(leg-4와 달리). z_liveliness가 토큰 long-lived hold라 foreign-CLI retry 루프 불필요(leg-5 one-shot z_get_liveliness와 대조).",
+        "모듈 doc 헤더 정정: \"Four legs\"(stale; leg 5/6 추가되며 카운트 미갱신)→\"Seven legs\" + leg 7 항목 추가(leg-5 역할반전 + direct wz_e2e_liveliness_round_trip_against_zenoh_pico_z_liveliness의 zenohd-routed counterpart 명시).",
+        "프로덕션 코드 변경 없음=순수 테스트(+module doc)=wz의 기존 --liveliness-subscribe 인바운드 Declare(Token) consume 경로(production poll loop: drive_session_until_terminal→observer→liveliness registry→callback)가 reference router 경유 동작함을 e2e 회귀 가드. leg-6(R311pa) 동형 패턴(direct wz↔pico 테스트의 zenohd-routed 버전).",
+        "clippy doc_lazy_continuation self-caught+fix: 최초 모듈 doc leg-7 항목의 줄바꿈이 \"+ wz observe\"로 시작→Markdown이 불릿 마커로 해석→후속 줄 lazy continuation 3건(EXIT 101). 줄 시작 +를 \"produce while wz observes\"로 재배치해 해소."
+      ],
+      "verification_bullets": [
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 테스트 구축 전 zenohd + wz-ap-demo(--connect 127.0.0.1:port --liveliness-subscribe group1/**) + pico z_liveliness(-k group1/zenoh-pico -e tcp/127.0.0.1:port -m client) 수동 3-process 실험으로 wz \"wz-ap-demo: LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico' token_id=0\" 관측(RESULT: OBSERVED) 후 회귀 가드화. carry 전제(\"leg-5 대칭, wz=observer\")가 실제 코드 경로(wz --liveliness-subscribe R280 이미 존재=Session::declare_liveliness_subscriber)와 정합 확인.",
+        "신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]): pico z_liveliness 토큰→zenohd→wz --liveliness-subscribe \"LIVELINESS SAMPLE PUT keyexpr='group1/zenoh-pico' filter='group1/**'\". wz의 인바운드 Declare(Token) consume 경로(drive_session_until_terminal→observer→liveliness registry→callback)가 reference router 경유 동작 실증.",
+        "Layer Z 7-leg 직렬(--test-threads=1) 7/7 pass: 신규 leg가 기존 6개(established/publish/subscribe/queryable/wz-query/wz-liveliness-token)과 무간섭.",
+        "clippy doc_lazy_continuation self-caught+fix: 최초 모듈 doc leg-7 항목 줄바꿈이 \"+ wz observe\"로 시작→Markdown 불릿 마커 오인→후속 줄 lazy continuation 3 lint(clippy EXIT 101). 줄 시작 + 제거(\"produce while wz observes\")로 해소, 재실행 clippy EXIT 0. full run-ci 전 적발.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 G=1 Z=1) RUNCI_EXIT=0(파이프 없는 직접 exit 캡처 /tmp/runci_leg7.exit [[feedback-runci-verdict-exit-code-only]]; \"run-ci: all required layers pass\"; test result:FAILED/panicked/Layer FAIL/^error:/error[ 각 0). 전 레인 pass(Layer 0/A/A2/A3/B/C0/C1.../C4/D/E/E2/F/G/Q/M/Z). clippy/fmt clean.",
+        "airtight 실행 증거: Layer Z는 --quiet라 개별 테스트명 미표시이나, 신규 leg 실패 시 Layer Z FAIL→RUNCI_EXIT≠0. RUNCI_EXIT=0 + Layer Z pass=7-leg 직렬에 신규 leg 포함 컴파일+실행+통과.",
+        "프로덕션 코드 변경 0(테스트 1건 + module doc만). atomic: ledger entries 763->764, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pd = leg-7: pico liveliness token → zenohd → wz liveliness-subscribe interop(Layer Z 7번째 leg) = leg-5의 정확한 역할 반전. leg-5는 wz=token producer(--declare-token)→zenohd→pico=observer(z_get_liveliness one-shot); leg-7은 pico=token producer(z_liveliness long-lived)→zenohd→wz=observer(--liveliness-subscribe continuous). 둘이 합쳐 zenohd 경유 liveliness 평면 양방향 완결. 프로덕션 코드 변경 없음=wz 기존 --liveliness-subscribe 인바운드 consume 경로가 reference router 경유 동작 실증.",
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 테스트 전 zenohd+wz(--connect --liveliness-subscribe group1/**)+pico z_liveliness(-k group1/zenoh-pico -e tcp/zenohd -m client) 수동 3-process 실험으로 wz \"LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico' token_id=0\" 동작 확정(RESULT: OBSERVED) 후 회귀 가드화. carry \"leg-5 대칭, wz=observer\" 전제가 실제 코드 경로(wz --liveliness-subscribe R280 이미 존재)와 정합함을 확인.",
+        "설계: z_liveliness가 토큰 long-lived hold라 leg-5 one-shot z_get_liveliness의 retry 루프 불필요. wz Established 대기→subscriber Interest가 토큰 선언 전 zenohd 도달(결정적 ordering)→pico spawn→wz측 witness PUT 대기(10s). leg-7은 direct wz↔pico wz_e2e_liveliness_round_trip_against_zenoh_pico_z_liveliness(Layer E2)의 zenohd-routed 버전(leg-3/4가 direct 테스트의 routed 버전인 패턴 동형).",
+        "clippy doc_lazy_continuation self-caught: 모듈 doc leg-7 줄바꿈 \"+ wz observe\" 시작이 Markdown 불릿으로 오인→3 lint(EXIT 101). 줄 시작 + 제거로 수정(full run-ci 전 적발).",
+        "마일스톤: zenohd(reference router) 경유 cross-impl 데이터 평면 + liveliness 양방향 전부 검증 — publish(leg-2)·wz-subscribe(leg-3)·wz-queryable(leg-4)·wz-query(leg-6)·liveliness wz-produces(leg-5)+wz-observes(leg-7). wz가 producer/consumer/responder/requester/observer 전 역할 cross-impl.",
+        "검증: standalone 20/20 zero-flake([[feedback-no-flaky-ever]]) + Layer Z 7-leg 직렬 7/7(기존 6 무간섭) + full run-ci(M+G+Z) RUNCI_EXIT=0(직접 캡처 [[feedback-runci-verdict-exit-code-only]]) + clippy/fmt clean.",
+        "남은 carry(다음 rung): (1) zenohd 잔여 부채 ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]], 외부 zenohd 의존, opt-in Layer Z 한정). (2) cross-impl 추가 방향은 [[project-pico-parity-status]] 진입점 참조(구현~92%/cross-impl~75%). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/.",
+        "push 미동의=LOCAL-COMMIT까지만. push 명시 동의 권장([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311pd: leg-7 — pico liveliness token → zenohd → wz liveliness-subscribe interop(Layer Z 7번째 leg, leg-5 역할 반전). pico z_liveliness 토큰을 wz가 --liveliness-subscribe observer로 LIVELINESS SAMPLE PUT 관측. zenohd 경유 liveliness 평면 양방향 완결. 프로덕션 코드 변경 없음.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: pico_liveliness_token_visible_via_zenohd_to_wz_subscriber 신설(Layer Z 7번째 leg) = leg-5(wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness)의 역할 반전. zenoh-pico z_liveliness가 liveliness TOKEN 선언(long-lived hold)→zenohd liveliness subsystem 추적→wz가 zenohd CLIENT로 --liveliness-subscribe(고급 Session::declare_liveliness_subscriber, R280)→라우팅된 토큰을 \"LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico'\" 관측. 단언: established(wz session Established 대기로 subscriber Interest가 토큰 선언 전 zenohd 도달=결정적 ordering) + LIVELINESS SAMPLE PUT 도달 + token keyexpr/subscribe filter 둘 다 PUT 라인에 존재. witness가 wz측 단일-writer env_logger stderr라 foreign-stdout capture race 구조적 면역(leg-4와 달리). z_liveliness가 토큰 long-lived hold라 foreign-CLI retry 루프 불필요(leg-5 one-shot z_get_liveliness와 대조).",
+        "모듈 doc 헤더 정정: \"Four legs\"(stale; leg 5/6 추가되며 카운트 미갱신)→\"Seven legs\" + leg 7 항목 추가(leg-5 역할반전 + direct wz_e2e_liveliness_round_trip_against_zenoh_pico_z_liveliness의 zenohd-routed counterpart 명시).",
+        "프로덕션 코드 변경 없음=순수 테스트(+module doc)=wz의 기존 --liveliness-subscribe 인바운드 Declare(Token) consume 경로(production poll loop: drive_session_until_terminal→observer→liveliness registry→callback)가 reference router 경유 동작함을 e2e 회귀 가드. leg-6(R311pa) 동형 패턴(direct wz↔pico 테스트의 zenohd-routed 버전).",
+        "clippy doc_lazy_continuation self-caught+fix: 최초 모듈 doc leg-7 항목의 줄바꿈이 \"+ wz observe\"로 시작→Markdown이 불릿 마커로 해석→후속 줄 lazy continuation 3건(EXIT 101). 줄 시작 +를 \"produce while wz observes\"로 재배치해 해소."
+      ],
+      "publishable_verification_bullets": [
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 테스트 구축 전 zenohd + wz-ap-demo(--connect 127.0.0.1:port --liveliness-subscribe group1/**) + pico z_liveliness(-k group1/zenoh-pico -e tcp/127.0.0.1:port -m client) 수동 3-process 실험으로 wz \"wz-ap-demo: LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico' token_id=0\" 관측(RESULT: OBSERVED) 후 회귀 가드화. carry 전제(\"leg-5 대칭, wz=observer\")가 실제 코드 경로(wz --liveliness-subscribe R280 이미 존재=Session::declare_liveliness_subscriber)와 정합 확인.",
+        "신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]): pico z_liveliness 토큰→zenohd→wz --liveliness-subscribe \"LIVELINESS SAMPLE PUT keyexpr='group1/zenoh-pico' filter='group1/**'\". wz의 인바운드 Declare(Token) consume 경로(drive_session_until_terminal→observer→liveliness registry→callback)가 reference router 경유 동작 실증.",
+        "Layer Z 7-leg 직렬(--test-threads=1) 7/7 pass: 신규 leg가 기존 6개(established/publish/subscribe/queryable/wz-query/wz-liveliness-token)과 무간섭.",
+        "clippy doc_lazy_continuation self-caught+fix: 최초 모듈 doc leg-7 항목 줄바꿈이 \"+ wz observe\"로 시작→Markdown 불릿 마커 오인→후속 줄 lazy continuation 3 lint(clippy EXIT 101). 줄 시작 + 제거(\"produce while wz observes\")로 해소, 재실행 clippy EXIT 0. full run-ci 전 적발.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 G=1 Z=1) RUNCI_EXIT=0(파이프 없는 직접 exit 캡처 /tmp/runci_leg7.exit [[feedback-runci-verdict-exit-code-only]]; \"run-ci: all required layers pass\"; test result:FAILED/panicked/Layer FAIL/^error:/error[ 각 0). 전 레인 pass(Layer 0/A/A2/A3/B/C0/C1.../C4/D/E/E2/F/G/Q/M/Z). clippy/fmt clean.",
+        "airtight 실행 증거: Layer Z는 --quiet라 개별 테스트명 미표시이나, 신규 leg 실패 시 Layer Z FAIL→RUNCI_EXIT≠0. RUNCI_EXIT=0 + Layer Z pass=7-leg 직렬에 신규 leg 포함 컴파일+실행+통과.",
+        "프로덕션 코드 변경 0(테스트 1건 + module doc만). atomic: ledger entries 763->764, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pd = leg-7: pico liveliness token → zenohd → wz liveliness-subscribe interop(Layer Z 7번째 leg) = leg-5의 정확한 역할 반전. leg-5는 wz=token producer(--declare-token)→zenohd→pico=observer(z_get_liveliness one-shot); leg-7은 pico=token producer(z_liveliness long-lived)→zenohd→wz=observer(--liveliness-subscribe continuous). 둘이 합쳐 zenohd 경유 liveliness 평면 양방향 완결. 프로덕션 코드 변경 없음=wz 기존 --liveliness-subscribe 인바운드 consume 경로가 reference router 경유 동작 실증.",
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 테스트 전 zenohd+wz(--connect --liveliness-subscribe group1/**)+pico z_liveliness(-k group1/zenoh-pico -e tcp/zenohd -m client) 수동 3-process 실험으로 wz \"LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico' token_id=0\" 동작 확정(RESULT: OBSERVED) 후 회귀 가드화. carry \"leg-5 대칭, wz=observer\" 전제가 실제 코드 경로(wz --liveliness-subscribe R280 이미 존재)와 정합함을 확인.",
+        "설계: z_liveliness가 토큰 long-lived hold라 leg-5 one-shot z_get_liveliness의 retry 루프 불필요. wz Established 대기→subscriber Interest가 토큰 선언 전 zenohd 도달(결정적 ordering)→pico spawn→wz측 witness PUT 대기(10s). leg-7은 direct wz↔pico wz_e2e_liveliness_round_trip_against_zenoh_pico_z_liveliness(Layer E2)의 zenohd-routed 버전(leg-3/4가 direct 테스트의 routed 버전인 패턴 동형).",
+        "clippy doc_lazy_continuation self-caught: 모듈 doc leg-7 줄바꿈 \"+ wz observe\" 시작이 Markdown 불릿으로 오인→3 lint(EXIT 101). 줄 시작 + 제거로 수정(full run-ci 전 적발).",
+        "마일스톤: zenohd(reference router) 경유 cross-impl 데이터 평면 + liveliness 양방향 전부 검증 — publish(leg-2)·wz-subscribe(leg-3)·wz-queryable(leg-4)·wz-query(leg-6)·liveliness wz-produces(leg-5)+wz-observes(leg-7). wz가 producer/consumer/responder/requester/observer 전 역할 cross-impl.",
+        "검증: standalone 20/20 zero-flake([[feedback-no-flaky-ever]]) + Layer Z 7-leg 직렬 7/7(기존 6 무간섭) + full run-ci(M+G+Z) RUNCI_EXIT=0(직접 캡처 [[feedback-runci-verdict-exit-code-only]]) + clippy/fmt clean.",
+        "남은 carry(다음 rung): (1) zenohd 잔여 부채 ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]], 외부 zenohd 의존, opt-in Layer Z 한정). (2) cross-impl 추가 방향은 [[project-pico-parity-status]] 진입점 참조(구현~92%/cross-impl~75%). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/.",
+        "push 미동의=LOCAL-COMMIT까지만. push 명시 동의 권장([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
