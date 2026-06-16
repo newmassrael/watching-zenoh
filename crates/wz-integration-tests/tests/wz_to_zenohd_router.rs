@@ -13,7 +13,7 @@
 //! `common` harness. No in-process dial, no per-test harness fork, no
 //! version override — wz speaks the reference protocol out of the box.
 //!
-//! Four legs:
+//! Seven legs:
 //!   1. `wz_client_reaches_established_against_zenohd` — wz dials zenohd and
 //!      completes InitSyn/InitAck/OpenSyn/OpenAck to Established (transport
 //!      wire-parity with the canonical implementation). Deterministic: the
@@ -52,6 +52,15 @@
 //!      4 (which had pico query wz's queryable): here wz is the client/requester
 //!      and pico is the responder, so this pins wz's outbound z_get + inbound
 //!      reply-consume path against the reference router.
+//!   7. `pico_liveliness_token_visible_via_zenohd_to_wz_subscriber` — the INVERSE
+//!      of leg 5: a zenoh-pico `z_liveliness` declares a liveliness TOKEN, zenohd
+//!      tracks it, and wz — connected as a CLIENT with `--liveliness-subscribe` —
+//!      observes the routed token as a `LIVELINESS SAMPLE PUT`. leg 5 had wz
+//!      produce while pico observed (one-shot z_get_liveliness); this has pico
+//!      produce while wz observes (continuous subscriber), completing the
+//!      bidirectional liveliness plane through the reference router. The
+//!      zenohd-ROUTED counterpart of the direct Layer E2 test
+//!      `wz_e2e_liveliness_round_trip_against_zenoh_pico_z_liveliness`.
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z) AND binary-dep: zenohd is an external
 //! 1.5.0 build (`scripts/build-zenohd.sh`), not a wz artifact, so it never
@@ -828,5 +837,146 @@ fn wz_query_routed_to_pico_queryable_via_zenohd() {
     assert!(
         wz_captured.contains(query_key),
         "wz received a reply but the query keyexpr '{query_key}' is missing.\n{wz_captured}"
+    );
+}
+
+/// leg 7 (R311pd) — the INVERSE of leg 5
+/// (`wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness`): here a
+/// zenoh-pico `z_liveliness` declares a liveliness TOKEN, zenohd tracks it in
+/// its liveliness subsystem, and wz — connected to zenohd as a CLIENT with
+/// `--liveliness-subscribe` — observes the routed token as a
+/// `LIVELINESS SAMPLE PUT`. leg 5 had wz produce + pico observe (via the
+/// one-shot `z_get_liveliness`); this leg has pico produce + wz observe (via the
+/// continuous liveliness subscriber), so together they pin the liveliness plane
+/// in BOTH directions through the reference router.
+///
+/// The zenohd-ROUTED counterpart of the direct wz<->pico
+/// `wz_e2e_liveliness_round_trip_against_zenoh_pico_z_liveliness` (Layer E2):
+/// there pico dials wz directly and wz is the listener; here both are clients of
+/// zenohd and zenohd routes the liveliness state between them. Production code
+/// is unchanged — this pins, end to end, that wz's existing
+/// `--liveliness-subscribe` (the high-level `Session::declare_liveliness_subscriber`,
+/// R280) consumes a liveliness token routed by the reference router.
+///
+/// No foreign-CLI retry loop (contrast leg 5's one-shot `z_get_liveliness`):
+/// `z_liveliness` HOLDS its token for its lifetime, so once wz is Established
+/// (its subscriber Interest sent to zenohd) a single spawn + a generous wait on
+/// the wz witness covers the declaration-propagation window. The witness is on
+/// the WZ side (its single-writer env_logger stderr), so this leg is
+/// structurally immune to the foreign-stdout capture race leg 4 gated around.
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_liveliness); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
+    let demo = wz_ap_demo_binary();
+    let z_liveliness = zenoh_pico_cli_binary("z_liveliness");
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let token_keyexpr = "group1/zenoh-pico";
+    let subscribe_pattern = "group1/**";
+
+    let mut zenohd = spawn_zenohd(port);
+    drop(port_res);
+
+    // ── wz-ap-demo: a CLIENT of zenohd that declares a liveliness SUBSCRIBER via
+    //    `--liveliness-subscribe`. On Established it emits an Interest(KE|TO|R|F)
+    //    and logs 'LIVELINESS SAMPLE PUT/DELETE' on every matching token sample
+    //    zenohd routes to it. Wait for Established so the subscriber Interest has
+    //    reached zenohd before the token is declared (deterministic ordering, not
+    //    a sleep).
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect zenohd --liveliness-subscribe)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--liveliness-subscribe")
+            .arg(subscribe_pattern)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect zenohd --liveliness-subscribe"),
+    );
+
+    let established = wait_for_substring(
+        &mut demo_stderr_reader,
+        "session Established",
+        Duration::from_secs(10),
+    );
+
+    // ── pico z_liveliness: declares a liveliness TOKEN and HOLDS it (long-lived,
+    //    unlike leg 5's one-shot). zenohd tracks the token and routes the PUT
+    //    sample to wz's liveliness subscriber.
+    let z_stdout = tempfile::tempfile().expect("tempfile for z_liveliness stdout");
+    let z_stdout_writer = z_stdout
+        .try_clone()
+        .expect("dup z_liveliness stdout handle");
+    let mut z_stdout_reader = z_stdout;
+    let mut z_child = ChildGuard::wrap(
+        "z_liveliness client (zenoh-pico)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_liveliness)
+            .args(["-k", token_keyexpr, "-e", &endpoint, "-m", "client"])
+            .stdout(Stdio::from(z_stdout_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn z_liveliness via stdbuf"),
+    );
+
+    // Witness on the WZ side: its liveliness-subscriber callback logs
+    // 'LIVELINESS SAMPLE PUT ...' once z_liveliness's Declare(Token), routed by
+    // zenohd, reaches the subscriber registry through the production poll loop.
+    let put = wait_for_substring(
+        &mut demo_stderr_reader,
+        "LIVELINESS SAMPLE PUT",
+        Duration::from_secs(10),
+    );
+
+    let _ = z_child.child_mut().kill();
+    let _ = z_child.child_mut().wait();
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let z_captured = read_captured(&mut z_stdout_reader);
+    if let Err(c) = &established {
+        panic!(
+            "wz-ap-demo did not log 'session Established' within 10s — the wz client \
+             did not reach Established against zenohd.\n--- captured wz-ap-demo stderr ---\n{c}"
+        );
+    }
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+    eprintln!("--- captured z_liveliness stdout ---\n{z_captured}");
+
+    let put_text = match put {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "wz did not log 'LIVELINESS SAMPLE PUT' within 10s — pico's liveliness token \
+             was not tracked / routed by zenohd to the wz subscriber.\n\
+             --- captured wz-ap-demo stderr at deadline ---\n{c}\n\
+             --- captured z_liveliness stdout ---\n{z_captured}"
+        ),
+    };
+    // The PUT sample line carries the resolved token keyexpr literal + the
+    // configured subscribe filter (runner.rs LIVELINESS SAMPLE format). Assert
+    // both so a regression on inbound Declare(Token) decode or the peer-keyexpr
+    // resolution localises here.
+    assert!(
+        put_text.contains(&format!("keyexpr='{token_keyexpr}'")),
+        "wz logged 'LIVELINESS SAMPLE PUT' but the token keyexpr '{token_keyexpr}' is \
+         missing — the subscriber fired but the routed literal drifted.\n{put_text}"
+    );
+    assert!(
+        put_text.contains(&format!("filter='{subscribe_pattern}'")),
+        "wz logged 'LIVELINESS SAMPLE PUT' but the subscribe filter '{subscribe_pattern}' \
+         is missing.\n{put_text}"
     );
 }
