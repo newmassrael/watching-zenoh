@@ -26,8 +26,6 @@ pub(crate) fn print_usage() {
     eprintln!("               [--delete <keyexpr>]");
     eprintln!("               [--queryable <keyexpr> --reply <text>]");
     eprintln!("               [--query <keyexpr>]");
-    eprintln!("               [--declare-subscriber <keyexpr>]");
-    eprintln!("               [--declare-queryable <keyexpr>]");
     eprintln!("               [--declare-token <keyexpr>]");
     eprintln!("               [--liveliness-subscribe <keyexpr>]");
     eprintln!("               [--on-remote-subscriber-log]");
@@ -53,12 +51,6 @@ pub(crate) fn print_usage() {
     eprintln!("                             (required with --queryable)");
     eprintln!("    --query <keyexpr>        send a single Request(Query) on this keyexpr");
     eprintln!("                             literal once the session reaches Established");
-    eprintln!("    --declare-subscriber <keyexpr>");
-    eprintln!("                             send a single Declare(DeclSubscriber) on this");
-    eprintln!("                             keyexpr literal once the session reaches Established");
-    eprintln!("    --declare-queryable <keyexpr>");
-    eprintln!("                             send a single Declare(DeclQueryable) on this");
-    eprintln!("                             keyexpr literal once the session reaches Established");
     eprintln!("    --declare-token <keyexpr>");
     eprintln!("                             send a single Declare(DeclToken) on this keyexpr");
     eprintln!("                             literal once the session reaches Established");

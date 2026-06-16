@@ -181,9 +181,13 @@ fn main() -> ExitCode {
     // reply + the terminating final. Reply-consuming "get" surface on the
     // declaration plane (sibling of --query on the Request plane).
     let liveliness_get_opt = parse_pair(rest, "--liveliness-get");
-    // R121k-5 — declare emit + remote-declare callback CLI surface.
-    let declare_subscriber_opt = parse_pair(rest, "--declare-subscriber");
-    let declare_queryable_opt = parse_pair(rest, "--declare-queryable");
+    // R121k-5 / R311oy — declare emit + remote-declare callback CLI surface.
+    // The low-level `--declare-subscriber` / `--declare-queryable` raw-emit
+    // hooks were retired: `--key` / `--queryable` now declare a ROUTED
+    // subscriber / queryable through the real `Session::declare_{subscriber,
+    // queryable}` path (R311ou / R311ow), which is the production declare path.
+    // `--declare-token` stays — it IS the high-level `Session::declare_token`
+    // (RAII liveliness token), not a low-level wire-emit hook.
     let declare_token_opt = parse_pair(rest, "--declare-token");
     // R280 — optional `--liveliness-subscribe <keyexpr>` registers a
     // liveliness subscriber on the literal keyexpr pattern. Emits one
@@ -242,8 +246,6 @@ fn main() -> ExitCode {
         && delete_opt.is_none()
         && queryable_opt.is_none()
         && query_opt.is_none()
-        && declare_subscriber_opt.is_none()
-        && declare_queryable_opt.is_none()
         && declare_token_opt.is_none()
         && liveliness_subscribe_opt.is_none()
         && liveliness_get_opt.is_none()
@@ -253,7 +255,7 @@ fn main() -> ExitCode {
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
-             --declare-* / --liveliness-subscribe / --liveliness-get / --on-remote-* must be supplied",
+             --declare-token / --liveliness-subscribe / --liveliness-get / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -393,12 +395,6 @@ fn main() -> ExitCode {
     if let Some(q) = &query_spec {
         log::info!("query   = {q}");
     }
-    if let Some(d) = &declare_subscriber_opt {
-        log::info!("declare-subscriber = {d}");
-    }
-    if let Some(d) = &declare_queryable_opt {
-        log::info!("declare-queryable = {d}");
-    }
     if let Some(d) = &declare_token_opt {
         log::info!("declare-token = {d}");
     }
@@ -463,8 +459,6 @@ fn main() -> ExitCode {
             "--queryable",
             queryable_spec.as_ref().map(|(p, _)| p.as_str()),
         ),
-        ("--declare-subscriber", declare_subscriber_opt.as_deref()),
-        ("--declare-queryable", declare_queryable_opt.as_deref()),
         ("--declare-token", declare_token_opt.as_deref()),
     ] {
         if let Some(keyexpr) = keyexpr_opt {
@@ -479,8 +473,6 @@ fn main() -> ExitCode {
     }
 
     let declare_spec = DeclareEmitSpec {
-        subscriber_keyexpr: declare_subscriber_opt,
-        queryable_keyexpr: declare_queryable_opt,
         token_keyexpr: declare_token_opt,
         liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
     };

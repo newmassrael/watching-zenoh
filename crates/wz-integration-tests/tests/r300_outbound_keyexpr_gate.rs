@@ -18,9 +18,12 @@
 //!   completion required (the fixture uses a deliberately
 //!   unreachable connect target so the binary never reaches the
 //!   driver loop).
-//! * The gate fires uniformly across the three DECLARE-side CLI
-//!   flags (`--declare-subscriber`, `--declare-queryable`,
-//!   `--declare-token`).
+//! * The gate fires uniformly across the DECLARE-side CLI flags that
+//!   carry an outbound keyexpr (`--key`, `--queryable`,
+//!   `--declare-token`). R311oy — `--key` / `--queryable` (the routed
+//!   `Session::declare_subscriber` / `declare_queryable` that R311ou /
+//!   R311ow wired into the same eager gate) replaced the retired
+//!   low-level `--declare-subscriber` / `--declare-queryable` hooks.
 //!
 //! ## Why a separate e2e file (not just a unit test)
 //!
@@ -56,11 +59,39 @@ fn run_demo_with_declare_flag(flag: &str, keyexpr: &str) -> (Option<i32>, String
     )
 }
 
+/// R311oy — `--queryable` requires a paired `--reply`, and the demo validates
+/// that pairing BEFORE the R300 argv gate runs; pass a dummy reply so the bad
+/// keyexpr reaches the gate. The queryable keyexpr only enters the eager gate
+/// when `queryable_spec` is `Some` (both `--queryable` and `--reply` present),
+/// so the reply is mandatory to exercise the gate via this flag.
+fn run_demo_queryable_gate(keyexpr: &str) -> (Option<i32>, String) {
+    let demo = wz_ap_demo_binary();
+    let output = Command::new(&demo)
+        .args([
+            "--connect",
+            "127.0.0.1:1",
+            "--queryable",
+            keyexpr,
+            "--reply",
+            "x",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn wz-ap-demo");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo argv-only); Layer E runs via --ignored"]
-fn r300_argv_gate_rejects_bug_three_via_declare_subscriber() {
+fn r300_argv_gate_rejects_bug_three_via_key() {
+    // R311oy — `--key` (routed subscriber declare) carries an outbound keyexpr
+    // into the eager gate, replacing the retired `--declare-subscriber`.
     for pattern in ["**/c/*", "**/foo/*", "**/a/b/*"] {
-        let (exit, stderr) = run_demo_with_declare_flag("--declare-subscriber", pattern);
+        let (exit, stderr) = run_demo_with_declare_flag("--key", pattern);
         assert_eq!(
             exit,
             Some(2),
@@ -81,15 +112,17 @@ fn r300_argv_gate_rejects_bug_three_via_declare_subscriber() {
 
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo argv-only); Layer E runs via --ignored"]
-fn r300_argv_gate_rejects_bug_three_via_declare_queryable() {
-    let (exit, stderr) = run_demo_with_declare_flag("--declare-queryable", "**/c/*");
+fn r300_argv_gate_rejects_bug_three_via_queryable() {
+    // R311oy — `--queryable` (routed queryable declare) replaced the retired
+    // `--declare-queryable`; the eager gate names the `--queryable` flag.
+    let (exit, stderr) = run_demo_queryable_gate("**/c/*");
     assert_eq!(
         exit,
         Some(2),
         "expected exit 2 (R300 argv reject), got {exit:?}\nstderr={stderr}"
     );
     assert!(
-        stderr.contains("--declare-queryable"),
+        stderr.contains("--queryable"),
         "stderr must name the offending flag\nstderr={stderr}"
     );
     assert!(
@@ -122,8 +155,9 @@ fn r300_argv_gate_rejects_bug_three_via_declare_token() {
 fn r300_argv_gate_rejects_non_canonical_keyexpr() {
     // Grammar-violation arm of `OutboundKeyexprError::NotCanonical`
     // — empty chunk in this case. The same argv path catches the
-    // structural reject in addition to the bug #3 family.
-    let (exit, stderr) = run_demo_with_declare_flag("--declare-subscriber", "home//temp");
+    // structural reject in addition to the bug #3 family. R311oy — via
+    // `--key` (the retired `--declare-subscriber` hook's replacement).
+    let (exit, stderr) = run_demo_with_declare_flag("--key", "home//temp");
     assert_eq!(
         exit,
         Some(2),

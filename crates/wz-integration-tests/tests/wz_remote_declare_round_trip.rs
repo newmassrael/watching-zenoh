@@ -13,13 +13,17 @@
 //! Test flow:
 //!   1. Pick a free TCP port.
 //!   2. Spawn acceptor: `wz-ap-demo --listen <addr> \
-//!         --declare-subscriber demo/sub --declare-queryable demo/q \
-//!         --declare-token demo/token`. The acceptor emits one Decl
-//!      of each kind once Established. Subscriber + Queryable use
-//!      hard-coded ids 1001 / 2001. Token id is auto-allocated by
-//!      `SessionLinkActions::alloc_next_token_id` (R277 migration);
-//!      the first call returns 0 because the per-session counter
-//!      starts at 0 and uses `fetch_add(1, Relaxed)`.
+//!         --key demo/sub --queryable demo/q --reply <text> \
+//!         --declare-token demo/token`. The acceptor declares the
+//!      subscriber + queryable through the REAL production routed declare
+//!      path (`Session::declare_subscriber` / `declare_queryable`, R311ou /
+//!      R311ow) plus a liveliness token, emitting one Decl of each kind once
+//!      Established. Subscriber + Queryable entity ids are auto-allocated and
+//!      parsed from the acceptor log + cross-referenced below (R311oy — the
+//!      retired `--declare-subscriber` / `--declare-queryable` raw-emit hooks
+//!      used hard-coded 1001 / 2001). Token id is auto-allocated by
+//!      `SessionLinkActions::alloc_next_token_id`; the first call returns 0
+//!      (per-session counter, independent of the sub / queryable id spaces).
 //!   3. Wait up to 5s for the acceptor's stderr to contain
 //!      "listening on" — bind succeeded.
 //!   4. Spawn initiator: `wz-ap-demo --connect <addr> \
@@ -29,12 +33,13 @@
 //!   5. Wait up to 5s for the initiator's stderr to contain
 //!      "connected to" — dial succeeded.
 //!   6. Wait up to 10s for the initiator's stderr to contain all three
-//!      lines "REMOTE SUBSCRIBER DECLARED id=1001 keyexpr='demo/sub'",
-//!      "REMOTE QUERYABLE DECLARED id=2001 keyexpr='demo/q'", and
+//!      lines "REMOTE SUBSCRIBER DECLARED id=<auto> keyexpr='demo/sub'",
+//!      "REMOTE QUERYABLE DECLARED id=<auto> keyexpr='demo/q'", and
 //!      "REMOTE TOKEN DECLARED id=0 keyexpr='demo/token'" — proving
 //!      the full path: TCP → stream envelope → Frame →
 //!      parse_frame_payload → NetworkMessage::Declare →
-//!      Remote*Registry → callback.
+//!      Remote*Registry → callback. The <auto> ids are cross-referenced
+//!      against the acceptor's own DECLARED log (R311oy).
 //!   7. Belt-and-suspenders id + keyexpr assertions so a regression
 //!      on any of (id echo, keyexpr resolution, registry routing)
 //!      localises here.
@@ -74,6 +79,9 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     let sub_keyexpr = "demo/sub";
     let q_keyexpr = "demo/q";
     let token_keyexpr = "demo/token";
+    // R311oy — `--queryable` requires `--reply`; the initiator never queries, so
+    // this payload is unused on the wire, but the demo validates the pair.
+    let reply_value = "demo-reply";
 
     // ── wz acceptor (R121d listener + R121k-5 declare emitter) ─
     let acceptor_stderr = tempfile::tempfile().expect("tempfile for acceptor stderr");
@@ -83,21 +91,31 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     let mut acceptor_stderr_reader = acceptor_stderr;
 
     let mut acceptor_child = ChildGuard::wrap(
-        "wz-ap-demo acceptor (--listen --declare-*)",
+        "wz-ap-demo acceptor (--listen --key --queryable --declare-token)",
         Command::new(&demo)
             .arg("--listen")
             .arg(&addr)
-            .arg("--declare-subscriber")
+            // R311oy — declare the subscriber + queryable through the REAL
+            // production declare path (`--key` / `--queryable`, the routed
+            // Session::declare_subscriber / declare_queryable that R311ou /
+            // R311ow wired) instead of the retired low-level `--declare-subscriber`
+            // / `--declare-queryable` raw-emit hooks. The wire `DeclSubscriber` /
+            // `DeclQueryable` the initiator observes is identical; the entity ids
+            // are now auto-allocated (parsed from the acceptor's own log below and
+            // cross-referenced against the initiator echo), not hard-coded.
+            .arg("--key")
             .arg(sub_keyexpr)
-            .arg("--declare-queryable")
+            .arg("--queryable")
             .arg(q_keyexpr)
+            .arg("--reply")
+            .arg(reply_value)
             .arg("--declare-token")
             .arg(token_keyexpr)
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(acceptor_stderr_writer))
             .spawn()
-            .expect("spawn wz-ap-demo --listen --declare-*"),
+            .expect("spawn wz-ap-demo --listen --key --queryable --declare-token"),
     );
 
     let bound = wait_for_substring(
@@ -210,31 +228,57 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     // which — now the token is no longer last — would miss the later arms.)
     let final_text = &initiator_captured;
 
-    // All three Decl arms must surface on the initiator side. The
-    // exact line shape (id literal + keyexpr literal) catches both
-    // id-echo regressions and keyexpr-resolution regressions in one
-    // assertion per arm.
+    // R311oy — the subscriber + queryable entity ids are auto-allocated by the
+    // routed declare path (`--key` / `--queryable`), so parse them from the
+    // acceptor's own DECLARED log and cross-reference the SAME id against the
+    // initiator echo. This asserts the round-trip fidelity ("the id the acceptor
+    // emitted is the id the initiator observed") more faithfully than the prior
+    // hard-coded 1001 / 2001 constants, AND exercises the real production declare
+    // path rather than the retired raw-emit hook. The parse-or-panic doubles as
+    // the acceptor-side "outbound declare fired" gate (it replaces the former
+    // `DECLARED SUBSCRIBER id=1001` / `DECLARED QUERYABLE id=2001` checks).
+    let sub_id = extract_id_after(&acceptor_captured, "DECLARED ROUTED SUBSCRIBER id=")
+        .unwrap_or_else(|| {
+            panic!(
+                "acceptor stderr lacks 'DECLARED ROUTED SUBSCRIBER id=' — \
+                 Session::declare_subscriber (--key) did not emit.\n\
+                 --- acceptor stderr ---\n{acceptor_captured}"
+            )
+        });
+    let q_id = extract_id_after(&acceptor_captured, "DECLARED ROUTED QUERYABLE id=")
+        .unwrap_or_else(|| {
+            panic!(
+                "acceptor stderr lacks 'DECLARED ROUTED QUERYABLE id=' — \
+                 Session::declare_queryable (--queryable) did not emit.\n\
+                 --- acceptor stderr ---\n{acceptor_captured}"
+            )
+        });
+
+    // All three Decl arms must surface on the initiator side. The exact line
+    // shape (id literal + keyexpr literal) catches both id-echo regressions and
+    // keyexpr-resolution regressions in one assertion per arm.
     assert!(
         final_text.contains(&format!(
-            "REMOTE SUBSCRIBER DECLARED id=1001 keyexpr='{sub_keyexpr}'"
+            "REMOTE SUBSCRIBER DECLARED id={sub_id} keyexpr='{sub_keyexpr}'"
         )),
-        "initiator stderr missing REMOTE SUBSCRIBER DECLARED line — \
+        "initiator stderr missing 'REMOTE SUBSCRIBER DECLARED id={sub_id} \
+         keyexpr={sub_keyexpr}' (the id the acceptor emitted) — \
          RemoteSubscriberRegistry dispatch regressed.\n\
          --- initiator stderr ---\n{final_text}"
     );
     assert!(
         final_text.contains(&format!(
-            "REMOTE QUERYABLE DECLARED id=2001 keyexpr='{q_keyexpr}'"
+            "REMOTE QUERYABLE DECLARED id={q_id} keyexpr='{q_keyexpr}'"
         )),
-        "initiator stderr missing REMOTE QUERYABLE DECLARED line — \
+        "initiator stderr missing 'REMOTE QUERYABLE DECLARED id={q_id} \
+         keyexpr={q_keyexpr}' (the id the acceptor emitted) — \
          RemoteQueryableRegistry dispatch regressed.\n\
          --- initiator stderr ---\n{final_text}"
     );
-    // R277 — token id is no longer hard-coded; it comes from
-    // `SessionLinkActions::alloc_next_token_id` (per-session
-    // AtomicU64 counter that starts at 0). First call in the demo
-    // returns 0. If a future round adds a token alloc earlier than
-    // declare_task, this assertion will need to track that.
+    // R277 — token id comes from `SessionLinkActions::alloc_next_token_id`, a
+    // per-session AtomicU64 counter INDEPENDENT of the subscriber / queryable id
+    // spaces, so it stays 0 even though `--key` / `--queryable` now allocate
+    // their own entity ids first (R311oy).
     assert!(
         final_text.contains(&format!(
             "REMOTE TOKEN DECLARED id=0 keyexpr='{token_keyexpr}'"
@@ -244,26 +288,10 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
          --- initiator stderr ---\n{final_text}"
     );
 
-    // Acceptor-side trace: the declare_task logs "DECLARED *" lines
-    // once it observes Established and calls send_declare_*. Asserting
-    // these on the captured acceptor stderr proves the OUTBOUND
-    // Declare path actually fired (the initiator's REMOTE * DECLARED
-    // lines above prove the INBOUND dispatch; both sides land if the
-    // round-trip completed).
-    assert!(
-        acceptor_captured.contains("DECLARED SUBSCRIBER id=1001"),
-        "acceptor stderr lacks 'DECLARED SUBSCRIBER id=1001' — \
-         send_declare_subscriber did not fire.\n\
-         --- acceptor stderr ---\n{acceptor_captured}"
-    );
-    assert!(
-        acceptor_captured.contains("DECLARED QUERYABLE id=2001"),
-        "acceptor stderr lacks 'DECLARED QUERYABLE id=2001' — \
-         send_declare_queryable did not fire.\n\
-         --- acceptor stderr ---\n{acceptor_captured}"
-    );
-    // R277 — token id is auto-allocated; see comment above on the
-    // initiator-side assertion.
+    // Acceptor-side token trace: the demo logs "DECLARED TOKEN id=0" when
+    // `Session::declare_token` fires. (The subscriber / queryable outbound-emit
+    // gate is the parse-or-panic above.) Both sides land iff the round-trip
+    // completed: the initiator REMOTE * DECLARED lines prove the INBOUND dispatch.
     assert!(
         acceptor_captured.contains("DECLARED TOKEN id=0"),
         "acceptor stderr lacks 'DECLARED TOKEN id=0' — \
@@ -302,4 +330,18 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
          R278 LivelinessToken RAII Drop did not fire end-to-end.\n\
          --- initiator stderr ---\n{undecl_text}"
     );
+}
+
+/// R311oy — extract the `u64` immediately following the first occurrence of
+/// `marker` in `haystack` (e.g. the entity id after
+/// `"DECLARED ROUTED SUBSCRIBER id="`). Returns `None` if the marker is absent
+/// or is not followed by an ASCII-digit run. Used to cross-reference the
+/// acceptor's auto-allocated declare ids against the initiator's echo, now that
+/// `--key` / `--queryable` allocate entity ids instead of the retired
+/// hard-coded `--declare-subscriber` / `--declare-queryable` sentinels.
+fn extract_id_after(haystack: &str, marker: &str) -> Option<u64> {
+    let idx = haystack.find(marker)?;
+    let rest = &haystack[idx + marker.len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }

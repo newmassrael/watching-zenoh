@@ -86,14 +86,6 @@ use crate::shutdown::shutdown_signal;
 use crate::tasks::{liveliness_get_task, publisher_task, query_task, QUERY_RID};
 use crate::teardown;
 
-// R311ot — outbound DECLARE ids for the `--declare-subscriber` / `--declare-queryable`
-// e2e (hard-coded so `wz_remote_declare_round_trip` can assert the exact echoed
-// ids). Moved here from `tasks.rs` with the declare-emit logic when the
-// background `declare_task` was retired in favour of synchronous pre-drive
-// declaration in `run_demo`.
-const DECLARE_SUBSCRIBER_ID: u64 = 1001;
-const DECLARE_QUERYABLE_ID: u64 = 2001;
-
 /// RAII keepers for the local Session-level declarations
 /// ([`Subscriber`], [`LivelinessSubscriber`], [`Queryable`]). Held
 /// at `run_demo` scope so each handle's `Drop` fires after the
@@ -636,47 +628,20 @@ pub(crate) async fn run_demo(
         queryable_spec,
     );
 
-    // R311ot — declare ALL outbound state (subscriber -> queryable -> token)
-    // SYNCHRONOUSLY in this pre-drive registration phase, BEFORE
-    // `drive_session_until_terminal` serves any inbound frame. This applies the
-    // R249 register-before-serve rule CONSISTENTLY to every declared kind (not
-    // just the token, as R311os did). It (a) closes the
-    // `wz_liveliness_get_round_trip` ordering race by construction — a peer's
-    // CURRENT liveliness-get always finds the token in the LocalTokenRegistry —
-    // and (b) retires the background `declare_task` entirely: the session is
-    // already Established here, so the task's Established-poll was vestigial and
-    // its `DECLARE_INTER_EMIT_MS` inter-emit sleeps were a timing smell.
-    // Synchronous emission also gives the peer a deterministic declare order.
-    // The token's RAII `LivelinessToken` is held to teardown (its Drop emits
-    // `Declare(UndeclToken)`, ordered ahead of Close by the teardown chain).
-    if let Some(keyexpr) = declare_spec.subscriber_keyexpr.as_deref() {
-        match actions.send_declare_subscriber(
-            DECLARE_SUBSCRIBER_ID,
-            /*mapping_id=*/ 0,
-            Some(keyexpr),
-        ) {
-            Ok(()) => log::info!(
-                "wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'"
-            ),
-            Err(e) => {
-                log::warn!("wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}")
-            }
-        }
-    }
-    if let Some(keyexpr) = declare_spec.queryable_keyexpr.as_deref() {
-        match actions.send_declare_queryable(
-            DECLARE_QUERYABLE_ID,
-            /*mapping_id=*/ 0,
-            Some(keyexpr),
-        ) {
-            Ok(()) => log::info!(
-                "wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'"
-            ),
-            Err(e) => {
-                log::warn!("wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}")
-            }
-        }
-    }
+    // R311ot / R311oy — declare the outbound liveliness TOKEN SYNCHRONOUSLY in
+    // this pre-drive registration phase, BEFORE `drive_session_until_terminal`
+    // serves any inbound frame (the R249 register-before-serve rule). The
+    // subscriber + queryable declares moved to `install_session_handles` in
+    // R311oy: `--key` / `--queryable` declare a ROUTED subscriber / queryable
+    // through the real `Session::declare_{subscriber, queryable}` path (R311ou /
+    // R311ow), retiring the low-level `send_declare_{subscriber, queryable}`
+    // raw-emit hooks; only the token's pre-drive declare remains here. It (a)
+    // closes the `wz_liveliness_get_round_trip` ordering race by construction —
+    // a peer's CURRENT liveliness-get always finds the token in the
+    // LocalTokenRegistry — and (b) the background `declare_task` stays retired
+    // (the session is already Established here). The token's RAII
+    // `LivelinessToken` is held to teardown (its Drop emits `Declare(UndeclToken)`,
+    // ordered ahead of Close by the teardown chain).
     let token: Option<LivelinessToken> = match declare_spec.token_keyexpr.as_deref() {
         Some(keyexpr) => {
             match session.declare_token(keyexpr.to_string(), LivelinessOptions::default()) {

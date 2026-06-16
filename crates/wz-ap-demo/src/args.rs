@@ -125,16 +125,15 @@ pub(crate) fn demo_session_init_params(role: &Role) -> SessionInitParams {
     }
 }
 
-/// R121k-5 — bundle of `--declare-subscriber/queryable/token`
-/// keyexprs the demo emits once the session reaches Established.
-/// Each `Option<String>` is the keyexpr literal; the id is hard-coded
-/// to a per-kind sentinel (1001 / 2001 / 3001) so a paired
-/// integration test can assert on the wire shape without an extra
-/// CLI knob. Production deployments source ids from a per-session
-/// counter the same way as send_declare_keyexpr / publisher mapping.
+/// R121k-5 / R311oy — bundle of declare-emit keyexprs the demo emits once the
+/// session reaches Established. Holds `--declare-token` (the high-level
+/// [`wz::runtime_tokio::session::Session::declare_token`] RAII liveliness
+/// token) and `--liveliness-subscribe`. The former `--declare-subscriber` /
+/// `--declare-queryable` raw-emit fields were retired in R311oy: `--key` /
+/// `--queryable` now declare a ROUTED subscriber / queryable through the real
+/// `Session::declare_{subscriber, queryable}` path (R311ou / R311ow), handled
+/// in `install_session_handles` rather than the raw `send_declare_*` emit here.
 pub(crate) struct DeclareEmitSpec {
-    pub(crate) subscriber_keyexpr: Option<String>,
-    pub(crate) queryable_keyexpr: Option<String>,
     pub(crate) token_keyexpr: Option<String>,
     /// R280 — optional `--liveliness-subscribe <keyexpr>` payload.
     /// When `Some`, the demo calls
