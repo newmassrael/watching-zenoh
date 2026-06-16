@@ -37944,6 +37944,54 @@
         "NEXT: TLS-reconnect / mTLS+PEM / pico parity % 재계산. UNPUSHED 예정: R311od(feat + docs/atomic) = 2 commits. push=명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311oe": {
+      "decision_summary": "R311oe: TLS-reconnect — ReconnectingSession이 DialConfig를 by-value 보존(pico reopen-task session_cfg parity), open_attempt 재다이얼이 &self.dial_config. tls/ 세션이 link loss 후 보존된 cert로 재다이얼→rustls 재핸드셰이크→Declare replay. open_session_with_reconnect 시그니처에 dial_config(by-value, params 뒤) 추가; 시그니처 안정(struct 항상 캐리, tls 필드만 cfg-gate). e2e 테스트(보존 cert 없으면 Unsupported로 재다이얼 실패=직접 증명) + Layer C1u 배선. full run-ci(M+G) RUNCI_EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/reconnect.rs: ReconnectingSession에 dial_config: DialConfig 필드 추가(재연결 간 보존; struct는 항상 캐리, DialConfig의 tls 필드만 cfg-gate=시그니처 안정). open_attempt가 dial_locator(.., &DialConfig::default())→&self.dial_config로 재다이얼(stale 'TLS-reconnect 후속' 주석 제거). open_session_with_reconnect가 dial_config: DialConfig를 params 뒤 by-value 수령(one-shot open의 &DialConfig by-ref와 달리 supervisor 수명 내내 소유=pico reopen-task가 session_cfg 보존하는 것과 동형); 초기 dial은 &dial_config borrow 후 struct로 move.",
+        "crates/wz-runtime-tokio/tests/session_reconnect_e2e.rs: 기존 2 TCP 호출부에 DialConfig::default() 추가(behavior-preserving) + 신규 tls_reconnect 모듈(#[cfg(all(transport-link-tls,transport-unicast))]): declares_replay_after_tls_link_loss_and_reconnect = TCP 테스트의 TLS 아날로그. tls/ 세션 open_session_with_reconnect(DialConfig{tls}) → Declare → 링크 절단 → drive 재다이얼(보존 cert) → conn#2 rustls 재핸드셰이크 → Declare verbatim replay + reconnects()==1. loopback_tls_configs/accept_tls_and_collect_declares 모듈-로컬(tls_e2e fixture 미러).",
+        "scripts/run-ci.sh: Layer C1u에 --test session_reconnect_e2e 추가(defaults+tls가 session-reconnect+transport-unicast 보유라 tls_reconnect 모듈 컴파일+실행; 없으면 빈 컴파일=gate-skew). clippy --all-targets --features transport-link-tls는 이미 모듈 lint."
+      ],
+      "verification_bullets": [
+        "새 테스트 declares_replay_after_tls_link_loss_and_reconnect 통과: tls/ 세션 reconnect-supervised open → Declare → 링크 절단 → 보존된 DialConfig로 tls/ 재다이얼 → rustls 재핸드셰이크 → conn#2가 cached Declare verbatim replay + reconnects()==1. 보존 cert가 없으면 dial_locator tls arm이 Unsupported로 재다이얼 실패=이 assertion 자체가 불가하므로 보존이 직접 증명됨. 12/12 non-flaky 연속 통과([[feedback-no-flaky-ever]]).",
+        "Layer C1u에서 session_reconnect_e2e 3 passed(기존 2 TCP + 신규 1 TLS), tls_e2e 2 passed. 컴파일 clean(default + transport-link-tls 양 빌드), clippy default+tls --all-targets -D warnings exit 0, fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', FAILED/error[/panicked 0. Layer F/Q는 opt-in SKIP(M+G 바).",
+        "시그니처 안정 검증: open_session_with_reconnect 시그니처는 transport-link-tls 토글 무관(DialConfig struct 항상 존재, tls 필드만 cfg-gate) — cert-free(tcp/udp) 빌드는 DialConfig::default()로 behavior-preserving([[feedback-signature-stability]]).",
+        "atomic: ledger entries 738->739, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(behavior round)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311oe = TLS-reconnect. ReconnectingSession이 DialConfig를 by-value 보존(pico reopen-task가 session_cfg 보존하는 것과 동형), open_attempt 재다이얼이 &DialConfig::default()→&self.dial_config. tls/ 세션이 link loss 후 보존된 cert로 재다이얼→rustls 재핸드셰이크→Declare replay. open_session_with_reconnect 시그니처에 dial_config(params 뒤, by-value) 추가; 시그니처 안정(struct 항상 캐리, tls 필드만 cfg-gate). cert-free(tcp/udp)는 DialConfig::default()=behavior-preserving.",
+        "설계: by-value(보존)는 one-shot open(R311oc &DialConfig by-ref)과 의도된 비대칭 — reconnect supervisor는 config를 수명 내내 소유(매 재다이얼이 동일 config 사용)라 by-value가 정확 semantics; one-shot은 호출자-소유 공유라 borrow. pico도 reopen task가 session config 보존(_z_client_reopen_task_fn).",
+        "미완(정직, 후속): mTLS(client cert를 ClientConfig에; 설계상 표현 가능, 미테스트) / cert PEM 로딩 헬퍼(production cert material을 app이 공급; 현재 테스트는 rcgen 자가서명) / reconnect 프로덕션 composer(open_session_with_reconnect는 여전히 test-only caller=open_session_at처럼 seam, 호출자 합성이 설계대로) / pico parity % 재계산. wss는 R311od에서 CLOSED(카탈로그 부재).",
+        "NEXT: mTLS+PEM / cert PEM 로딩 헬퍼 / pico parity % 재계산. UNPUSHED: R311od(feat+docs 2) + R311oe(feat+docs 2) = origin/main=a659004 위 4 commits. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙 연속)."
+      ],
+      "publishable_decision_summary": "R311oe: TLS-reconnect — ReconnectingSession이 DialConfig를 by-value 보존(pico reopen-task session_cfg parity), open_attempt 재다이얼이 &self.dial_config. tls/ 세션이 link loss 후 보존된 cert로 재다이얼→rustls 재핸드셰이크→Declare replay. open_session_with_reconnect 시그니처에 dial_config(by-value, params 뒤) 추가; 시그니처 안정(struct 항상 캐리, tls 필드만 cfg-gate). e2e 테스트(보존 cert 없으면 Unsupported로 재다이얼 실패=직접 증명) + Layer C1u 배선. full run-ci(M+G) RUNCI_EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/reconnect.rs: ReconnectingSession에 dial_config: DialConfig 필드 추가(재연결 간 보존; struct는 항상 캐리, DialConfig의 tls 필드만 cfg-gate=시그니처 안정). open_attempt가 dial_locator(.., &DialConfig::default())→&self.dial_config로 재다이얼(stale 'TLS-reconnect 후속' 주석 제거). open_session_with_reconnect가 dial_config: DialConfig를 params 뒤 by-value 수령(one-shot open의 &DialConfig by-ref와 달리 supervisor 수명 내내 소유=pico reopen-task가 session_cfg 보존하는 것과 동형); 초기 dial은 &dial_config borrow 후 struct로 move.",
+        "crates/wz-runtime-tokio/tests/session_reconnect_e2e.rs: 기존 2 TCP 호출부에 DialConfig::default() 추가(behavior-preserving) + 신규 tls_reconnect 모듈(#[cfg(all(transport-link-tls,transport-unicast))]): declares_replay_after_tls_link_loss_and_reconnect = TCP 테스트의 TLS 아날로그. tls/ 세션 open_session_with_reconnect(DialConfig{tls}) → Declare → 링크 절단 → drive 재다이얼(보존 cert) → conn#2 rustls 재핸드셰이크 → Declare verbatim replay + reconnects()==1. loopback_tls_configs/accept_tls_and_collect_declares 모듈-로컬(tls_e2e fixture 미러).",
+        "scripts/run-ci.sh: Layer C1u에 --test session_reconnect_e2e 추가(defaults+tls가 session-reconnect+transport-unicast 보유라 tls_reconnect 모듈 컴파일+실행; 없으면 빈 컴파일=gate-skew). clippy --all-targets --features transport-link-tls는 이미 모듈 lint."
+      ],
+      "publishable_verification_bullets": [
+        "새 테스트 declares_replay_after_tls_link_loss_and_reconnect 통과: tls/ 세션 reconnect-supervised open → Declare → 링크 절단 → 보존된 DialConfig로 tls/ 재다이얼 → rustls 재핸드셰이크 → conn#2가 cached Declare verbatim replay + reconnects()==1. 보존 cert가 없으면 dial_locator tls arm이 Unsupported로 재다이얼 실패=이 assertion 자체가 불가하므로 보존이 직접 증명됨. 12/12 non-flaky 연속 통과([[feedback-no-flaky-ever]]).",
+        "Layer C1u에서 session_reconnect_e2e 3 passed(기존 2 TCP + 신규 1 TLS), tls_e2e 2 passed. 컴파일 clean(default + transport-link-tls 양 빌드), clippy default+tls --all-targets -D warnings exit 0, fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', FAILED/error[/panicked 0. Layer F/Q는 opt-in SKIP(M+G 바).",
+        "시그니처 안정 검증: open_session_with_reconnect 시그니처는 transport-link-tls 토글 무관(DialConfig struct 항상 존재, tls 필드만 cfg-gate) — cert-free(tcp/udp) 빌드는 DialConfig::default()로 behavior-preserving([[feedback-signature-stability]]).",
+        "atomic: ledger entries 738->739, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(behavior round)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311oe = TLS-reconnect. ReconnectingSession이 DialConfig를 by-value 보존(pico reopen-task가 session_cfg 보존하는 것과 동형), open_attempt 재다이얼이 &DialConfig::default()→&self.dial_config. tls/ 세션이 link loss 후 보존된 cert로 재다이얼→rustls 재핸드셰이크→Declare replay. open_session_with_reconnect 시그니처에 dial_config(params 뒤, by-value) 추가; 시그니처 안정(struct 항상 캐리, tls 필드만 cfg-gate). cert-free(tcp/udp)는 DialConfig::default()=behavior-preserving.",
+        "설계: by-value(보존)는 one-shot open(R311oc &DialConfig by-ref)과 의도된 비대칭 — reconnect supervisor는 config를 수명 내내 소유(매 재다이얼이 동일 config 사용)라 by-value가 정확 semantics; one-shot은 호출자-소유 공유라 borrow. pico도 reopen task가 session config 보존(_z_client_reopen_task_fn).",
+        "미완(정직, 후속): mTLS(client cert를 ClientConfig에; 설계상 표현 가능, 미테스트) / cert PEM 로딩 헬퍼(production cert material을 app이 공급; 현재 테스트는 rcgen 자가서명) / reconnect 프로덕션 composer(open_session_with_reconnect는 여전히 test-only caller=open_session_at처럼 seam, 호출자 합성이 설계대로) / pico parity % 재계산. wss는 R311od에서 CLOSED(카탈로그 부재).",
+        "NEXT: mTLS+PEM / cert PEM 로딩 헬퍼 / pico parity % 재계산. UNPUSHED: R311od(feat+docs 2) + R311oe(feat+docs 2) = origin/main=a659004 위 4 commits. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙 연속)."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
