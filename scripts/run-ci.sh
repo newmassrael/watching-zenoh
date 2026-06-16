@@ -1136,12 +1136,28 @@ layer_c1o_keyexpr_gating_behavior() {
 # is pinned here; the rest of `batch_tx_tests` rides the default Layer C1
 # workspace run, and the FeatureDisabled NEG rides the C1j subsets (their
 # base omits transport-batching).
+#
+# R311ol: the `--features transport-fragmentation` wz-runtime-tokio run also
+# picks up the new `tests/udp_chaos_e2e.rs` (gated `#![cfg(all(
+# transport-fragmentation, transport-link-udp))]`, transport-link-udp is a
+# default feature) — the first LOSSY-link robustness e2e (P3.10 chaos): a
+# deterministically-dropped UDP fragment datagram aborts its reassembly chain
+# (the lossy Put is lost, ReassemblyDropped observed) and the SAME live session
+# reassembles a subsequent clean oversize Put byte-exact. Closes the gap where
+# the reassembly + RX-SN-gate RECOVERY path had only unit-test coverage, never
+# an end-to-end lossy real-socket run (every prior e2e ran over a clean link).
+# The clippy line below clippy-gates the transport-fragmentation test targets
+# (udp_chaos_e2e + udp_frag_e2e + layer3_reassembly_{tx,rx}); the C2 workspace
+# clippy resolves DEFAULT features only, so these transport-fragmentation-gated
+# files were rustc-checked by the test build above but never clippy-linted
+# (gate-skew, same shape the C1u/C1v lanes close for tls/ws).
 layer_c1l_reassembly() {
     (cd crates \
         && cargo test -p wz-session-core --features reassembly --quiet \
         && cargo test -p wz-runtime-tokio --features reassembly --quiet \
         && cargo test -p wz-session-core --features transport-fragmentation --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-fragmentation --quiet)
+        && cargo test -p wz-runtime-tokio --features transport-fragmentation --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-fragmentation --quiet -- -D warnings)
 }
 
 # ─── Layer C1p — multicast session FSM + dispatcher (Round A) ────────
