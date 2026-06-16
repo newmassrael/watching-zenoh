@@ -35,24 +35,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
-use tokio_rustls::rustls::pki_types::ServerName;
-
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
-use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::drive_session_until_terminal;
-use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, TlsDialConfig,
-    DEFAULT_OPEN_TICK_MS,
-};
+// `DialConfig` is used only by the negative `dial_locator_*` test below; the
+// open-path session_open imports moved to `tls_harness`.
+use wz_runtime_tokio::session_open::DialConfig;
 use wz_runtime_tokio::sync::Mutex;
-use wz_runtime_tokio::tls_pipeline::accept_tls;
-use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_tls_configs};
+use wz_runtime_tokio_test_support::loopback_tls_configs;
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
-const ITER_CAP: usize = 4096;
+// The wz<->wz TLS open-both-to-Established drive is shared with
+// `tls_pem_mtls_e2e` via the per-binary `tests/tls_harness/` module (R311oi
+// SSOT — see its docs for why this is a subdir module, not the test-support
+// crate).
+mod tls_harness;
+
 const KEYEXPR: &str = "demo/tls";
 
 /// Two wz nodes handshake over TLS, reach Established, and a `Put` published on
@@ -62,58 +61,13 @@ async fn wz_to_wz_over_tls_reaches_established_and_delivers_put() {
     let payload = b"tls-secured-hello".to_vec();
     let (server_config, client_config) = loopback_tls_configs();
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-
-    // ── Open BOTH sessions concurrently (the handshake needs both sides
-    //    progressing): the acceptor runs the rustls server handshake over the
-    //    accepted TcpStream, the initiator the client handshake.
-    let acc_open = async {
-        let (tcp, _peer) = listener.accept().await.expect("accept tcp");
-        let tls = accept_tls(tcp, server_config)
-            .await
-            .expect("server tls handshake");
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4]; // distinct from the initiator
-        accept_and_open_session(
-            DialedLink::Tls(Box::new(tls)),
-            params,
-            TokioTime::new(),
-            Some(ITER_CAP),
-            DEFAULT_OPEN_TICK_MS,
-        )
-        .await
-        .expect("acceptor reaches Established over tls")
-    };
-    let init_open = async {
-        // R311oc — dial TLS FROM THE LOCATOR via the config-threaded seam: a
-        // `tls/...` locator + a DialConfig carrying the rustls client config +
-        // server name flows through connect_and_open_session -> dial_locator ->
-        // dial_tls. This proves the SEAM (pico `session_cfg` parity), not a
-        // bespoke explicit dial — TLS now dials from a locator like every other
-        // transport.
-        let locator = parse_any_locator(&format!("tls/{addr}")).expect("parse tls locator");
-        let server_name = ServerName::try_from("localhost").expect("server name");
-        let cfg = DialConfig {
-            tls: Some(TlsDialConfig {
-                client_config,
-                server_name,
-            }),
-        };
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
-        connect_and_open_session(
-            locator,
-            params,
-            &cfg,
-            TokioTime::new(),
-            Some(ITER_CAP),
-            DEFAULT_OPEN_TICK_MS,
-        )
-        .await
-        .expect("initiator reaches Established over tls via locator")
-    };
-    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+    // Open BOTH ends over TLS to Established via the shared harness: the
+    // acceptor runs the rustls server handshake over the accepted TcpStream, the
+    // initiator dials a `tls/...` locator through the R311oc config-threaded seam
+    // (proving the SEAM, pico `session_cfg` parity). See `tls_harness` for the
+    // drive shared with `tls_pem_mtls_e2e`.
+    let (mut opened_acc, mut opened_init) =
+        tls_harness::open_both_to_established(server_config, client_config).await;
 
     // Both ends reached Established over the encrypted stream.
     assert!(

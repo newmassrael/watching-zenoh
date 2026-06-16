@@ -48,80 +48,20 @@
 //! drives the rustls handshake, which resolves (success or fatal alert) in one
 //! round trip.
 
-use std::sync::Arc;
-
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ClientConfig, ServerConfig};
 
-use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, OpenedSession,
-    TlsDialConfig, DEFAULT_OPEN_TICK_MS,
-};
 use wz_runtime_tokio::tls_config::{
     client_config_from_pem, decode_base64_pem, read_pem_file, server_config_from_pem, ClientAuthPem,
 };
 use wz_runtime_tokio::tls_pipeline::{accept_tls, dial_tls};
-use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_mtls_pems};
-use wz_session_core::locator::parse_any_locator;
+use wz_runtime_tokio_test_support::loopback_mtls_pems;
 
-const ITER_CAP: usize = 4096;
-
-/// Bring up both ends of a wz<->wz TLS session over the given rustls configs and
-/// drive each to Established. The acceptor runs the rustls server handshake over
-/// the accepted `TcpStream`; the initiator dials a `tls/...` locator through the
-/// R311oc config-threaded seam. Shared by the two reach-Established tests, which
-/// differ ONLY in the configs (mTLS vs one-way) handed in.
-async fn open_both_to_established(
-    server_config: Arc<ServerConfig>,
-    client_config: Arc<ClientConfig>,
-) -> (OpenedSession, OpenedSession) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-
-    let acc_open = async {
-        let (tcp, _peer) = listener.accept().await.expect("accept tcp");
-        let tls = accept_tls(tcp, server_config)
-            .await
-            .expect("server tls handshake");
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
-        accept_and_open_session(
-            DialedLink::Tls(Box::new(tls)),
-            params,
-            TokioTime::new(),
-            Some(ITER_CAP),
-            DEFAULT_OPEN_TICK_MS,
-        )
-        .await
-        .expect("acceptor reaches Established over tls")
-    };
-    let init_open = async {
-        let locator = parse_any_locator(&format!("tls/{addr}")).expect("parse tls locator");
-        let server_name = ServerName::try_from("localhost").expect("server name");
-        let cfg = DialConfig {
-            tls: Some(TlsDialConfig {
-                client_config,
-                server_name,
-            }),
-        };
-        let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
-        connect_and_open_session(
-            locator,
-            params,
-            &cfg,
-            TokioTime::new(),
-            Some(ITER_CAP),
-            DEFAULT_OPEN_TICK_MS,
-        )
-        .await
-        .expect("initiator reaches Established over tls via locator")
-    };
-
-    tokio::join!(acc_open, init_open)
-}
+// The wz<->wz TLS open-both-to-Established drive is shared with `tls_e2e` via
+// the per-binary `tests/tls_harness/` module (R311oi SSOT — see its docs for
+// why this is a subdir module, not the test-support crate).
+mod tls_harness;
+use tls_harness::open_both_to_established;
 
 /// mTLS positive: server + client configs built from PEM via the production
 /// loaders, BOTH authenticating, reach Established over the mutually-verified
