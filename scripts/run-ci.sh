@@ -780,14 +780,21 @@ layer_c1u_cargo_test_tls() {
 #      handshake over loopback — the initiator via a `ws/...` LOCATOR, since WS
 #      dials from dial_locator unlike tls — reach Established, and a Put is
 #      delivered byte-exact through WS BINARY messages);
-#   3. clippy-gates the `transport-link-ws` cfg (`--all-targets`);
-#   4. clippy-gates the LIB under `--no-default-features --features
+#   3. R311oj — also runs session_reconnect_e2e: its `ws_reconnect` module
+#      (gated all(transport-link-ws, transport-unicast)) proves a WS session's
+#      reconnect re-dials the `ws/...` locator and re-runs the RFC6455 upgrade.
+#      Same gate-skew reasoning as C1u's tls_reconnect: defaults+ws carry
+#      session-reconnect + transport-unicast, so the module compiles and runs;
+#      without this invocation it is empty and the WS reconnect path is
+#      unexercised. The clippy --all-targets line below already lints it.
+#   4. clippy-gates the `transport-link-ws` cfg (`--all-targets`);
+#   5. clippy-gates the LIB under `--no-default-features --features
 #      transport-link-ws` to prove `ws_pipeline` composes standalone (it needs
 #      no `transport-link-tcp` — WS is datagram-flow, not StreamEnvelope).
 layer_c1v_cargo_test_ws() {
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --test session_reconnect_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-ws --quiet -- -D warnings)
 }

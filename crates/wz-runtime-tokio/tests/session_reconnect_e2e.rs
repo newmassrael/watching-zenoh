@@ -435,3 +435,145 @@ mod tls_reconnect {
         );
     }
 }
+
+/// WebSocket reconnect — the WS analogue of `tls_reconnect` (R311oj). On link
+/// loss the supervisor re-dials the `ws/...` locator, which RE-RUNS the RFC6455
+/// upgrade handshake and replays the cached `Declare`. The reconnect value under
+/// test is WS-specific: TCP has no handshake to re-run and TLS re-reads a
+/// retained cert config, but WS must complete a fresh RFC6455 upgrade on the
+/// second connection with no config at all (`DialConfig::default()`).
+///
+/// Gated on `transport-link-ws` + `transport-unicast`; the WS imports live in
+/// this submodule so the default `session-reconnect` build (WS off) stays
+/// warning-clean. The Layer C1v lane builds + runs it by adding
+/// `--test session_reconnect_e2e` under `--features transport-link-ws` (its
+/// default+ws set already carries session-reconnect + transport-unicast);
+/// without that the module is empty and the WS reconnect path is unexercised
+/// (gate-skew, the same reasoning C1u uses for `tls_reconnect`).
+#[cfg(all(feature = "transport-link-ws", feature = "transport-unicast"))]
+mod ws_reconnect {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use tokio::net::TcpListener;
+
+    use wz_runtime_tokio::reconnect::{
+        open_session_with_reconnect, ReconnectDriveOutcome, ReconnectPolicy,
+    };
+    use wz_runtime_tokio::runtime_impl::TokioTime;
+    use wz_runtime_tokio::session_open::{
+        accept_and_open_session, DialConfig, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    };
+    use wz_runtime_tokio::ws_pipeline::accept_ws;
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_session_core::locator::parse_locator;
+    use wz_session_core::session_timeouts::SessionTimeouts;
+
+    const ITER_CAP: usize = 4096;
+
+    /// Accept one connection, run the RFC6455 SERVER handshake, complete the
+    /// accept-side session handshake, then drive until at least one inbound
+    /// `Declare` lands. WS analogue of `tls_reconnect`'s
+    /// `accept_tls_and_collect_declares`, but WS needs no server config, so it
+    /// takes only the listener (shared across conn #1 and the reconnect's #2).
+    async fn accept_ws_and_collect_declares(
+        listener: &TcpListener,
+    ) -> (OpenedSession, Vec<String>) {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let ws = accept_ws(stream).await.expect("server ws handshake");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4]; // distinct zid from the initiator
+        let mut opened = accept_and_open_session(
+            DialedLink::Ws(Box::new(ws)),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established over ws");
+
+        let declares = super::collect_first_declare(&mut opened).await;
+        (opened, declares)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn declares_replay_after_ws_link_loss_and_reconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let locator = parse_locator(&format!("ws/{addr}")).expect("parse ws locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+
+        let policy = ReconnectPolicy {
+            retry_delay_ms: 50, // test cadence; production default is pico's 1s
+            max_attempts: Some(100),
+        };
+        // WS carries no cert material, so the retained dial config is the
+        // default; the reconnect value under test is the RFC6455 re-handshake,
+        // not a surviving config (contrast tls_reconnect's retained TlsDialConfig).
+        let dial_config = DialConfig::default();
+
+        // ── Connection #1: client opens (reconnect-supervised) over WS,
+        //    declares a subscriber; the acceptor handshakes and observes it.
+        let (mut client, (server_conn1, declares_conn1)) = tokio::join!(
+            async {
+                let session = open_session_with_reconnect(
+                    locator,
+                    params,
+                    dial_config,
+                    TokioTime::new(),
+                    policy,
+                    Some(ITER_CAP),
+                    DEFAULT_OPEN_TICK_MS,
+                )
+                .await
+                .expect("client reaches Established over ws");
+                session
+                    .actions()
+                    .send_declare_subscriber(10, 0, Some("home/ws-reconnect"))
+                    .expect("declare subscriber");
+                session
+            },
+            accept_ws_and_collect_declares(&listener),
+        );
+        assert_eq!(
+            declares_conn1.len(),
+            1,
+            "connection #1 observes exactly the one declared subscriber"
+        );
+
+        // ── Sever the first WS link abruptly (drop the acceptor session).
+        drop(server_conn1);
+
+        // ── Drive the client under the supervisor while the listener
+        //    re-accepts over WS. The re-dial re-runs the RFC6455 upgrade on
+        //    connection #2 and the cached Declare replays.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_server = stop.clone();
+        let timeouts = SessionTimeouts::spec_defaults();
+        let (drive_outcome, declares_conn2) = tokio::join!(
+            client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}),
+            async {
+                let (server_conn2, declares) = accept_ws_and_collect_declares(&listener).await;
+                stop_for_server.store(true, Ordering::Release);
+                drop(server_conn2);
+                declares
+            },
+        );
+
+        assert!(
+            matches!(drive_outcome, ReconnectDriveOutcome::Stopped),
+            "supervisor must stop after the second ws link drop, got {drive_outcome:?}"
+        );
+        assert_eq!(
+            declares_conn2, declares_conn1,
+            "the reconnected WS link must replay the cached Declare verbatim"
+        );
+        assert_eq!(
+            client.reconnects(),
+            1,
+            "exactly one survived WS link loss — the supervisor re-dialed ws/"
+        );
+    }
+}
