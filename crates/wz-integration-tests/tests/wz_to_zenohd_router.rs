@@ -13,7 +13,7 @@
 //! `common` harness. No in-process dial, no per-test harness fork, no
 //! version override — wz speaks the reference protocol out of the box.
 //!
-//! Three legs:
+//! Four legs:
 //!   1. `wz_client_reaches_established_against_zenohd` — wz dials zenohd and
 //!      completes InitSyn/InitAck/OpenSyn/OpenAck to Established (transport
 //!      wire-parity with the canonical implementation). Deterministic: the
@@ -30,6 +30,14 @@
 //!      pins, end-to-end, that wz-as-routed-subscriber works against the
 //!      reference router (the prior R311or "router-mode subscriber out of
 //!      scope" finding was empirically falsified).
+//!   4. `wz_queryable_replies_via_zenohd_to_pico_zget` — the query/reply round
+//!      trip: wz declares a ROUTED queryable (`wz-ap-demo --queryable --reply`,
+//!      which since R311ow emits a `Declare(DeclQueryable)` so zenohd routes
+//!      matching `Query` requests to wz), a zenoh-pico `z_get` queries, zenohd
+//!      routes the query to wz's queryable, wz replies, and zenohd routes the
+//!      reply back to z_get. The regression guard for R311ow — it pins, end to
+//!      end, that wz-as-routed-queryable answers queries through the reference
+//!      router (the declare_queryable sibling of leg 3's declare_subscriber).
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z) AND binary-dep: zenohd is an external
 //! 1.5.0 build (`scripts/build-zenohd.sh`), not a wz artifact, so it never
@@ -395,5 +403,147 @@ fn wz_routed_subscribe_from_zenohd() {
         fired_text.contains(publish_key),
         "wz fired but the routed keyexpr '{publish_key}' is missing from the SUBSCRIBER FIRED \
          line.\n{fired_text}"
+    );
+}
+
+/// The query/reply round trip: a zenoh-pico `z_get`'s query routes through
+/// zenohd to wz's ROUTED queryable, wz replies, and zenohd routes the reply back
+/// to z_get. wz declares the queryable (`--queryable`, which emits a
+/// `Declare(DeclQueryable)` since R311ow); zenohd, seeing wz's declared
+/// queryable, forwards the matching `Query` to wz, whose handler replies, and
+/// the reply routes back to z_get. The declare_queryable sibling of leg 3.
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_get); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_queryable_replies_via_zenohd_to_pico_zget() {
+    let demo = wz_ap_demo_binary();
+    let z_get = zenoh_pico_cli_binary("z_get");
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let queryable_key = "demo/zenohd";
+    let reply_value = "reply-from-wz-queryable";
+
+    let mut zenohd = spawn_zenohd(port);
+    drop(port_res);
+
+    // ── wz-ap-demo: a CLIENT of zenohd that declares a ROUTED queryable.
+    //    `--queryable` now emits `Declare(DeclQueryable)` (R311ow), so wait until
+    //    that declaration has been announced before querying — the route must
+    //    exist on zenohd when the query arrives (deterministic ordering, not a
+    //    sleep). The demo holds the queryable handle across its drive loop, so it
+    //    keeps answering queries until killed.
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect zenohd --queryable --reply)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--queryable")
+            .arg(queryable_key)
+            .arg("--reply")
+            .arg(reply_value)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect zenohd --queryable --reply"),
+    );
+
+    let declared = wait_for_substring(
+        &mut demo_stderr_reader,
+        "DECLARED ROUTED QUERYABLE",
+        Duration::from_secs(10),
+    );
+
+    // ── pico z_get: queries demo/zenohd through zenohd. z_get is a one-shot that
+    //    blocks until the query's final notification, so a SINGLE query arriving
+    //    before wz's DeclQueryable has propagated to zenohd returns final-only
+    //    (no reply) and exits. Unlike leg 3's z_pub (which repeats Puts for ~30s),
+    //    a query fires once — so retry the whole one-shot until a reply lands.
+    //    Robustness for the foreign one-shot + the declaration-propagation window,
+    //    NOT a wz workaround: the wz reply side is deterministic once the query
+    //    reaches it (the queryable handler drains + replies + emits the Final on
+    //    the drive iteration that dispatches the Query).
+    let mut zget_captured = String::new();
+    let mut zget_received = false;
+    if declared.is_ok() {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = tempfile::tempfile().expect("tempfile for z_get stdout");
+            let out_writer = out.try_clone().expect("dup z_get stdout handle");
+            let mut out_reader = out;
+            let mut zget = ChildGuard::wrap(
+                "z_get client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&z_get)
+                    .args(["-k", queryable_key, "-e", &endpoint, "-m", "client"])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_get via stdbuf"),
+            );
+            // z_get prints ">> Received <kind> ('<keyexpr>': '<value>')" per reply.
+            let received =
+                wait_for_substring(&mut out_reader, ">> Received", Duration::from_secs(8));
+            let _ = zget.child_mut().kill();
+            let _ = zget.child_mut().wait();
+            zget_captured = read_captured(&mut out_reader);
+            if received.is_ok() {
+                zget_received = true;
+                break;
+            }
+            eprintln!(
+                "z_get attempt {attempt}/{ATTEMPTS} got no reply (route not yet propagated / \
+                 transient open); retrying"
+            );
+        }
+    }
+
+    // Confirm wz's queryable actually fired — proves the query reached wz through
+    // zenohd (already buffered by the time a reply landed, so a short wait).
+    let fired = wait_for_substring(
+        &mut demo_stderr_reader,
+        "QUERYABLE FIRED",
+        Duration::from_secs(5),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    if let Err(c) = &declared {
+        panic!(
+            "wz-ap-demo did not log 'DECLARED ROUTED QUERYABLE' within 10s — the routed \
+             queryable declare (R311ow) regressed.\n--- captured wz-ap-demo stderr ---\n{c}"
+        );
+    }
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+    eprintln!("--- captured z_get stdout ---\n{zget_captured}");
+
+    assert!(
+        fired.is_ok(),
+        "wz did not log 'QUERYABLE FIRED' — zenohd did not route the z_get query to wz's routed \
+         queryable.\n--- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
+    assert!(
+        zget_received,
+        "pico z_get did not receive a reply within the retry budget — wz's queryable reply did \
+         not route back through zenohd.\n--- captured z_get stdout ---\n{zget_captured}"
+    );
+    assert!(
+        zget_captured.contains(reply_value),
+        "z_get received a reply but the wz reply value '{reply_value}' is missing.\n{zget_captured}"
+    );
+    assert!(
+        zget_captured.contains(queryable_key),
+        "z_get received a reply but the queryable keyexpr '{queryable_key}' is missing.\n\
+         {zget_captured}"
     );
 }
