@@ -525,3 +525,208 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
         "the delivered payload is the SECOND (clean) Put, reassembled in isolation"
     );
 }
+
+/// A REORDERED fragment aborts its message (strict in-order, §2.5) and the late
+/// fragment must not bleed into the next one. R311op: over a real loopback UDP
+/// link two adjacent fragments of an oversize Put are swapped, so the dispatcher
+/// sees F1, F3, F2. F3 arrives where F2 was expected: a forward SN gap that the
+/// per-channel RX gate ADMITS but the reassembly strict in-order continuation
+/// check (`sn::consecutive`) ABORTS — the disrupted Put is lost (correct
+/// best-effort; wz/pico carry no reordering buffer). The late F2 then arrives
+/// with a now-backward SN and is rejected by the RX gate, so it cannot attach to
+/// any later chain. A subsequent clean oversize Put on the SAME session
+/// reassembles byte-exact: one reordered message does not wedge or corrupt the
+/// channel.
+///
+/// ## What this proves that the drop / duplicate tests do not
+///
+/// The drop test exercises a GAP and the duplicate test a repeated frame. This
+/// exercises OUT-OF-ORDER delivery — the third lossy-link perturbation — reached
+/// via both reassembly paths at once: F3 trips the in-chain OOO abort, then the
+/// late F2 trips the RX-gate backward rejection. Together they prove a stale
+/// fragment from an aborted chain cannot corrupt the next message (the reorder
+/// analogue of the R311oo dup-merge correctness guard).
+///
+/// ## Determinism (no-flaky)
+///
+/// Not RNG: swap the 2nd inbound `T_MID_FRAGMENT` datagram with its successor. A
+/// 4 KB Put exceeds the UDP link MTU and splits into 3 fragments, so the 2nd and
+/// 3rd are both P1's; the adjacent swap (`reorder_nth_matching`, hold + emit
+/// successor first) yields F1, F3, F2 deterministically. The two Puts emit
+/// back-to-back with no inter-publish delay (`emit_frame_or_fragments` is
+/// wire-atomic under the TX lock; the writer drains FIFO), so the reordered pair
+/// is unambiguously P1's. The sole synchronization is a poll-on-condition wait
+/// for the clean delivery. ([[feedback-no-flaky-ever]])
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_reordered_fragment_aborts_then_channel_recovers() {
+    // 4 KB: > UDP_LINK_MTU and into 3 fragments, so the 2nd and 3rd are both P1's
+    // and the adjacent swap is a within-message reorder (F1, F3, F2).
+    let payload_lost: Vec<u8> = (0..4096u32).map(|i| i.wrapping_mul(31) as u8).collect();
+    let payload_kept: Vec<u8> = (0..4096u32)
+        .map(|i| i.wrapping_mul(37).wrapping_add(7) as u8)
+        .collect();
+    assert!(
+        payload_lost.len() > 2 * UDP_LINK_MTU,
+        "payload must exceed two UDP link frames so the Put splits into >= 3 fragments"
+    );
+    assert_ne!(
+        payload_lost, payload_kept,
+        "the two Puts must differ so the delivered one is attributable"
+    );
+
+    let acc_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind acceptor");
+    let addr = acc_socket.local_addr().expect("acceptor addr");
+
+    // ── Open BOTH sessions concurrently and CLEANLY (no chaos during the
+    //    handshake; only the steady-state fragment stream is reordered).
+    let acc_open = async {
+        let mut probe = [0u8; 64];
+        let (_n, peer) = acc_socket
+            .peek_from(&mut probe)
+            .await
+            .expect("peek initiator InitSyn datagram");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            DialedLink::Udp {
+                socket: acc_socket,
+                peer,
+            },
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established over udp")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse loopback locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established over udp")
+    };
+    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+
+    assert_eq!(
+        opened_init.actions.negotiated_batch_mtu(),
+        UDP_LINK_MTU,
+        "publisher TX budget must cap to the UDP link MTU so each Put fragments"
+    );
+
+    // ── Wrap the acceptor's inbound driver to REORDER the 2nd fragment datagram
+    //    (P1's middle fragment) past its successor: F1, F3, F2.
+    let mut chaos_inbound =
+        ChaosReadDriver::reorder_nth_matching(opened_acc.inbound, 2, is_fragment_datagram);
+
+    // ── Subscriber on the acceptor's observer; collects each delivered payload.
+    let delivered: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::new(StdMutex::new(Vec::new()));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let delivered = delivered.clone();
+        observer.subscribers.register(KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), KEYEXPR);
+            delivered.lock().unwrap().push(sample.payload().to_vec());
+        });
+    }
+
+    // ── Count the strict-in-order abort the reordered fragment triggers.
+    let drop_events = Arc::new(AtomicUsize::new(0));
+
+    let publisher = TokioSession::new(
+        opened_init.actions.clone(),
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(opened_init.clock),
+    );
+
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive_acc = drive_session_until_terminal(
+        &mut chaos_inbound,
+        &opened_acc.actions,
+        &mut opened_acc.engine,
+        None,
+        &opened_acc.clock,
+        &timeouts,
+        {
+            let drop_events = drop_events.clone();
+            move |event| {
+                if let IterationEvent::ReassemblyDropped(ReassemblyDropReason::OutOfOrder) = &event
+                {
+                    drop_events.fetch_add(1, Ordering::SeqCst);
+                }
+                observer.dispatch_event(event);
+            }
+        },
+    );
+    let drive_init = drive_session_until_terminal(
+        &mut opened_init.inbound,
+        &opened_init.actions,
+        &mut opened_init.engine,
+        None,
+        &opened_init.clock,
+        &timeouts,
+        |_| {},
+    );
+
+    let delivered_probe = delivered.clone();
+    let payload_kept_probe = payload_kept.clone();
+    let scenario = async move {
+        publisher
+            .publish(KEYEXPR, &payload_lost, PublishOptions::put())
+            .expect("first publish builds and routes through the send seam");
+        publisher
+            .publish(KEYEXPR, &payload_kept_probe, PublishOptions::put())
+            .expect("recovery publish builds and routes through the send seam");
+        for _ in 0..200 {
+            if delivered_probe
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == &payload_kept_probe)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("recovery Put not delivered within the ~6s budget");
+    };
+
+    tokio::select! {
+        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
+        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    // ── The chaos driver injected exactly one reorder.
+    assert_eq!(
+        chaos_inbound.reordered, 1,
+        "the chaos driver reordered exactly one fragment datagram"
+    );
+    // ── The reordered fragment tripped the strict-in-order abort.
+    assert!(
+        drop_events.load(Ordering::SeqCst) >= 1,
+        "the out-of-order fragment aborted its chain (ReassemblyDropped::OutOfOrder)"
+    );
+    // ── Exactly one delivery, the SECOND (clean) Put. The first was lost to the
+    //    reorder, and the late backward fragment did NOT corrupt the second.
+    let got = delivered.lock().unwrap().clone();
+    assert_eq!(
+        got.len(),
+        1,
+        "exactly one clean delivery; the reordered/late fragment did NOT corrupt P2 (got {} deliveries)",
+        got.len()
+    );
+    assert_eq!(
+        got[0], payload_kept,
+        "the delivered payload is the SECOND (clean) Put, reassembled in isolation"
+    );
+}

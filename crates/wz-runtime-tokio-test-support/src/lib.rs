@@ -203,15 +203,20 @@ enum ChaosAction {
     /// duplicate-delivery (the lossy-link / malicious-peer hazard the R311oo
     /// reassembly fix defends against).
     Duplicate,
+    /// Delay the targeted frame by one position — emit the frame that follows
+    /// it first, then the held target (an adjacent swap, the out-of-order
+    /// delivery a multi-path / racing link produces).
+    Reorder,
 }
 
 /// A [`LinkDriver`] decorator applying a DETERMINISTIC perturbation to one
 /// frame of the inbound stream: it targets the `ordinal`-th (1-based) frame
 /// for which the caller's predicate returns true and either DROPS it
-/// ([`ChaosReadDriver::drop_nth_matching`]) or DUPLICATES it
-/// ([`ChaosReadDriver::duplicate_nth_matching`]), passing every other event
-/// through. The schedule is a fixed counter — NO RNG — so a chaos scenario
-/// reproduces byte-for-byte every run (the no-flaky contract).
+/// ([`ChaosReadDriver::drop_nth_matching`]), DUPLICATES it
+/// ([`ChaosReadDriver::duplicate_nth_matching`]), or REORDERS it past its
+/// successor ([`ChaosReadDriver::reorder_nth_matching`]), passing every other
+/// event through. The schedule is a fixed counter — NO RNG — so a chaos
+/// scenario reproduces byte-for-byte every run (the no-flaky contract).
 ///
 /// MECHANISM vs POLICY split: the decorator owns only the count + perturb
 /// mechanism; the caller's predicate decides which frame is the candidate.
@@ -221,22 +226,26 @@ enum ChaosAction {
 /// (length-prefixed) and a datagram link alike. Wrap a link AFTER its
 /// handshake so only the steady-state stream is perturbed.
 ///
-/// `dropped` / `duplicated` are `pub` so a test reads them after the drive
-/// completes to assert the perturbation was actually injected, not merely
-/// inferred from a delivery outcome.
+/// `dropped` / `duplicated` / `reordered` are `pub` so a test reads them after
+/// the drive completes to assert the perturbation was actually injected, not
+/// merely inferred from a delivery outcome.
 pub struct ChaosReadDriver<D, P> {
     inner: D,
     predicate: P,
     ordinal: usize,
     action: ChaosAction,
     matched: usize,
-    /// Duplicate mode: a held copy of the targeted frame, re-emitted on the
-    /// next `poll_event` so the duplicate immediately follows its original.
-    pending: Option<RxFrame>,
+    /// A held event re-emitted on a subsequent `poll_event`: the duplicate
+    /// copy (Duplicate), or the delayed target / the event that overtook it
+    /// (Reorder). Held as a `LinkEvent` (not an `RxFrame`) so the Reorder edge
+    /// case — a terminal event following the target — can be stashed too.
+    pending: Option<LinkEvent>,
     /// Count of frames actually swallowed (0 or 1 for a single-ordinal plan).
     pub dropped: usize,
     /// Count of frames re-emitted as a duplicate (0 or 1 for a single ordinal).
     pub duplicated: usize,
+    /// Count of frames delayed past their successor (0 or 1 for a single ordinal).
+    pub reordered: usize,
 }
 
 impl<D, P> ChaosReadDriver<D, P>
@@ -254,6 +263,7 @@ where
             pending: None,
             dropped: 0,
             duplicated: 0,
+            reordered: 0,
         }
     }
 
@@ -269,6 +279,16 @@ where
     /// a link that delivers a frame twice. `dup_ordinal == 0` is a pass-through.
     pub fn duplicate_nth_matching(inner: D, dup_ordinal: usize, should_duplicate: P) -> Self {
         Self::new(inner, dup_ordinal, should_duplicate, ChaosAction::Duplicate)
+    }
+
+    /// Delay the `reorder_ordinal`-th (1-based) inbound frame matching
+    /// `should_reorder` past the single frame that follows it — an adjacent
+    /// swap (`.. T S ..` -> `.. S T ..`), modelling out-of-order delivery. If a
+    /// terminal event (`Lost`) follows the target, it cannot be reordered past
+    /// it and the target emits in place. `reorder_ordinal == 0` is a
+    /// pass-through.
+    pub fn reorder_nth_matching(inner: D, reorder_ordinal: usize, should_reorder: P) -> Self {
+        Self::new(inner, reorder_ordinal, should_reorder, ChaosAction::Reorder)
     }
 }
 
@@ -290,12 +310,13 @@ where
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
-        // Duplicate mode: re-emit the held copy before polling the inner
-        // driver, so the duplicate lands immediately after the frame it copies.
-        // Cancel-safe — `pending` is owned state set without an intervening
-        // await, so a `select!` cancel here loses only the wake.
-        if let Some(frame) = self.pending.take() {
-            return LinkEvent::Rx(frame);
+        // Re-emit a held event (a duplicate copy, or a reorder's delayed
+        // target / overtaking event) before polling the inner driver, so it
+        // lands in the right relative position. Cancel-safe — `pending` is
+        // owned state set without an intervening await, so a `select!` cancel
+        // here loses only the wake.
+        if let Some(event) = self.pending.take() {
+            return event;
         }
         loop {
             let event = self.inner.poll_event().await;
@@ -321,8 +342,27 @@ where
                                 // borrowed `RxFrame<'pool>` migration note in
                                 // `link.rs` unconstrained).
                                 self.duplicated += 1;
-                                self.pending = Some(reclone_rx(frame));
+                                self.pending = Some(LinkEvent::Rx(reclone_rx(frame)));
                                 return event;
+                            }
+                            ChaosAction::Reorder => {
+                                // Delay the target by one: hold it, emit the
+                                // event that follows it first, then the held
+                                // target on the next poll. If a terminal event
+                                // (Lost) follows, the target cannot be reordered
+                                // past it — emit the target now and stash the
+                                // terminal. The single inner poll below adds no
+                                // await between holding and returning beyond the
+                                // recv itself, so a cancel loses only a wake.
+                                self.reordered += 1;
+                                let held = LinkEvent::Rx(reclone_rx(frame));
+                                let next = self.inner.poll_event().await;
+                                if matches!(next, LinkEvent::Rx(_)) {
+                                    self.pending = Some(held);
+                                    return next;
+                                }
+                                self.pending = Some(next);
+                                return held;
                             }
                         }
                     }
@@ -669,5 +709,78 @@ mod tests {
         }
         assert!(matches!(chaos.poll_event().await, LinkEvent::Lost { .. }));
         assert_eq!(chaos.duplicated, 0);
+    }
+
+    /// Reorder mode delays the Nth matching frame past the single frame that
+    /// follows it (an adjacent swap), leaving the rest in order — the
+    /// deterministic single-reorder mechanism, transport-free.
+    #[tokio::test]
+    async fn reorders_the_nth_matching_frame_past_its_successor() {
+        // Target the 1st match (0xAA); it should be delayed past 0xBB.
+        // Sequence in: 0xAA, 0xBB, 0xCC -> out: 0xBB, 0xAA, 0xCC.
+        let inner = QueueDriver::with(vec![rx(0xAA), rx(0xBB), rx(0xCC)]);
+        let mut chaos =
+            ChaosReadDriver::reorder_nth_matching(inner, 1, |f| f.bytes.first() == Some(&0xAA));
+
+        // The successor overtakes the target ...
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xBB]),
+            other => panic!("expected successor Rx first, got {other:?}"),
+        }
+        // ... then the held target ...
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+            other => panic!("expected held target Rx, got {other:?}"),
+        }
+        // ... then the rest, in order.
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xCC]),
+            other => panic!("expected tail Rx in order, got {other:?}"),
+        }
+        assert!(matches!(chaos.poll_event().await, LinkEvent::Lost { .. }));
+        assert_eq!(chaos.reordered, 1, "exactly one frame reordered");
+        assert_eq!(chaos.dropped, 0);
+        assert_eq!(chaos.duplicated, 0);
+    }
+
+    /// When the reorder target is the last frame before a terminal event, it
+    /// cannot be swapped past it: the target emits in place, then the terminal.
+    #[tokio::test]
+    async fn reorder_target_before_terminal_emits_target_then_terminal() {
+        // Target 0xAA is the last frame; 0xBB precedes it, then the queue drains.
+        let inner = QueueDriver::with(vec![rx(0xBB), rx(0xAA)]);
+        let mut chaos =
+            ChaosReadDriver::reorder_nth_matching(inner, 1, |f| f.bytes.first() == Some(&0xAA));
+
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xBB]),
+            other => panic!("expected 0xBB Rx, got {other:?}"),
+        }
+        // Nothing follows the target (the next inner event is Lost), so the
+        // target emits in place rather than being reordered past the terminal.
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+            other => panic!("expected target Rx in place, got {other:?}"),
+        }
+        assert!(matches!(chaos.poll_event().await, LinkEvent::Lost { .. }));
+        assert_eq!(chaos.reordered, 1);
+    }
+
+    /// `reorder_ordinal == 0` is a pass-through: nothing is ever reordered.
+    #[tokio::test]
+    async fn reorder_ordinal_zero_passes_everything() {
+        let inner = QueueDriver::with(vec![rx(0xAA), rx(0xBB)]);
+        let mut chaos =
+            ChaosReadDriver::reorder_nth_matching(inner, 0, |f| f.bytes.first() == Some(&0xAA));
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+            other => panic!("expected pass-through Rx, got {other:?}"),
+        }
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xBB]),
+            other => panic!("expected pass-through Rx, got {other:?}"),
+        }
+        assert!(matches!(chaos.poll_event().await, LinkEvent::Lost { .. }));
+        assert_eq!(chaos.reordered, 0);
     }
 }
