@@ -30,6 +30,11 @@
 //! - `one_way_tls_from_base64_pem_reaches_established`: the CA is supplied
 //!   base64-wrapped (pico's `*_BASE64` key) and decoded via `decode_base64_pem`
 //!   before loading — proving the base64 source composes with the byte loaders.
+//! - `server_name_verification_controls_san_mismatch_dial` (R311oj): the
+//!   `ServerNameVerification` knob — a dial to a peer whose cert SAN does NOT
+//!   match the dialed name is rejected under `Verify` and accepted under
+//!   `AnyName` (which still requires the chain-to-CA). Proves the verify-name
+//!   skip knob in both directions.
 //!
 //! ## Cert material
 //!
@@ -48,11 +53,17 @@
 //! drives the rustls handshake, which resolves (success or fatal alert) in one
 //! round trip.
 
-use tokio::net::TcpListener;
+use std::io;
+use std::sync::Arc;
+
+use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, ServerConfig};
+use tokio_rustls::TlsStream;
 
 use wz_runtime_tokio::tls_config::{
-    client_config_from_pem, decode_base64_pem, read_pem_file, server_config_from_pem, ClientAuthPem,
+    client_config_from_pem, decode_base64_pem, read_pem_file, server_config_from_pem,
+    ClientAuthPem, ServerNameVerification,
 };
 use wz_runtime_tokio::tls_pipeline::{accept_tls, dial_tls};
 use wz_runtime_tokio_test_support::loopback_mtls_pems;
@@ -62,6 +73,33 @@ use wz_runtime_tokio_test_support::loopback_mtls_pems;
 // why this is a subdir module, not the test-support crate).
 mod tls_harness;
 use tls_harness::open_both_to_established;
+
+/// Run JUST the TLS handshake for both ends over a fresh loopback TCP pair and
+/// return each side's result — the acceptor's `accept_tls` and the dialer's
+/// `dial_tls(.., server_name)`. The handshake-level analogue of
+/// `open_both_to_established`: it stops at the rustls handshake (no session open)
+/// because the cases it serves — client name-verification policy and mTLS
+/// client-auth enforcement — are decided entirely by whether the handshake
+/// succeeds. Parameterising `server_name` lets a caller dial a name the cert does
+/// or does not carry. Local to this file (both users live here), so it stays out
+/// of the shared `tls_harness` module that `tls_e2e` also includes.
+async fn tls_handshake_pair(
+    server_config: Arc<ServerConfig>,
+    client_config: Arc<ClientConfig>,
+    server_name: ServerName<'static>,
+) -> (
+    io::Result<TlsStream<TcpStream>>,
+    io::Result<TlsStream<TcpStream>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let acc = async {
+        let (tcp, _peer) = listener.accept().await.expect("accept tcp");
+        accept_tls(tcp, server_config).await
+    };
+    let dial = async { dial_tls(addr, client_config, server_name).await };
+    tokio::join!(acc, dial)
+}
 
 /// mTLS positive: server + client configs built from PEM via the production
 /// loaders, BOTH authenticating, reach Established over the mutually-verified
@@ -85,6 +123,7 @@ async fn mtls_mutual_auth_reaches_established() {
             cert_chain_pem: pems.client_cert_pem.as_bytes(),
             private_key_pem: pems.client_key_pem.as_bytes(),
         }),
+        ServerNameVerification::Verify,
     )
     .expect("build mTLS client config from PEM");
 
@@ -127,23 +166,15 @@ async fn mtls_server_rejects_anonymous_client() {
 
     // Client presents NO cert (one-way client config) — the anonymous case the
     // mTLS server must reject.
-    let client_config = client_config_from_pem(pems.ca_pem.as_bytes(), None)
-        .expect("build anonymous client config from PEM");
+    let client_config =
+        client_config_from_pem(pems.ca_pem.as_bytes(), None, ServerNameVerification::Verify)
+            .expect("build anonymous client config from PEM");
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
     let server_name = ServerName::try_from("localhost").expect("server name");
-
-    let acc = async {
-        let (tcp, _peer) = listener.accept().await.expect("accept tcp");
-        accept_tls(tcp, server_config).await
-    };
-    // The dial must run concurrently so the server handshake can progress; its
-    // result is intentionally not asserted (see the doc comment — TLS 1.3 lets
-    // the client's half complete before the server validates the cert).
-    let dial = async { dial_tls(addr, client_config, server_name).await };
-
-    let (acc_res, _dial_res) = tokio::join!(acc, dial);
+    // The dial's own result is intentionally not asserted: under TLS 1.3 the
+    // client's half completes before the server validates its (empty) cert, so
+    // the SERVER's rejection is the authoritative enforcement signal.
+    let (acc_res, _dial_res) = tls_handshake_pair(server_config, client_config, server_name).await;
 
     assert!(
         acc_res.is_err(),
@@ -168,8 +199,9 @@ async fn plain_tls_from_pem_reaches_established() {
     .expect("build one-way server config from PEM");
 
     // Client trusts the CA, presents NO cert.
-    let client_config = client_config_from_pem(pems.ca_pem.as_bytes(), None)
-        .expect("build one-way client config from PEM");
+    let client_config =
+        client_config_from_pem(pems.ca_pem.as_bytes(), None, ServerNameVerification::Verify)
+            .expect("build one-way client config from PEM");
 
     let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
 
@@ -213,8 +245,8 @@ async fn one_way_tls_from_pem_files_reaches_established() {
 
     let server_config = server_config_from_pem(&server_cert, &server_key, None)
         .expect("build server config from file PEM");
-    let client_config =
-        client_config_from_pem(&ca, None).expect("build client config from file PEM");
+    let client_config = client_config_from_pem(&ca, None, ServerNameVerification::Verify)
+        .expect("build client config from file PEM");
 
     let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
     assert!(
@@ -257,8 +289,8 @@ async fn one_way_tls_from_base64_pem_reaches_established() {
         None,
     )
     .expect("build server config from PEM");
-    let client_config =
-        client_config_from_pem(&ca, None).expect("build client config from base64-sourced CA");
+    let client_config = client_config_from_pem(&ca, None, ServerNameVerification::Verify)
+        .expect("build client config from base64-sourced CA");
 
     let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
     assert!(
@@ -268,5 +300,58 @@ async fn one_way_tls_from_base64_pem_reaches_established() {
     assert!(
         opened_acc.actions.trace_snapshot().record_established_at >= 1,
         "acceptor established over TLS with base64-sourced CA"
+    );
+}
+
+/// Server-name verification knob (`ServerNameVerification`): dialing a peer whose
+/// cert SAN does NOT match the dialed `ServerName` is REJECTED under the default
+/// `Verify` and ACCEPTED under `AnyName` — while `AnyName` still requires the
+/// cert to chain to the trusted CA (only the name match is dropped). The wz
+/// mirror of zenoh-rust's `verify_name_on_connect=false` (`.dangerous()` +
+/// `WebPkiVerifierAnyServerName`) and pico's `VERIFY_NAME_ON_CONNECT`.
+///
+/// Asserted on the DIAL (client) result, not the server: server-cert name
+/// verification is the CLIENT's job and happens DURING the client handshake (the
+/// mirror image of mTLS client-auth, which TLS 1.3 defers to the server), so
+/// `dial_tls`'s Ok/Err IS the authoritative, synchronous signal for this knob.
+/// The server leaf's SAN is `localhost` (from the fixture); both arms dial a name
+/// the cert does NOT carry, holding everything but the policy constant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_name_verification_controls_san_mismatch_dial() {
+    let pems = loopback_mtls_pems();
+    // A name the server leaf's SAN (`localhost`) does not contain.
+    let mismatched = ServerName::try_from("other.host.invalid").expect("server name");
+
+    // One-way server (presents its leaf, requires no client cert); reused per arm
+    // via Arc clone since the dialed-name policy is the only thing under test.
+    let server_config = server_config_from_pem(
+        pems.server_cert_pem.as_bytes(),
+        pems.server_key_pem.as_bytes(),
+        None,
+    )
+    .expect("build one-way server config from PEM");
+
+    // Default `Verify`: the SAN mismatch is rejected by the client handshake.
+    let strict_client =
+        client_config_from_pem(pems.ca_pem.as_bytes(), None, ServerNameVerification::Verify)
+            .expect("build strict client config");
+    let (_acc, strict_dial) =
+        tls_handshake_pair(server_config.clone(), strict_client, mismatched.clone()).await;
+    assert!(
+        strict_dial.is_err(),
+        "Verify must reject a server cert whose SAN != dialed name"
+    );
+
+    // `AnyName`: the same mismatch is accepted (the cert still chains to the CA).
+    let any_name_client = client_config_from_pem(
+        pems.ca_pem.as_bytes(),
+        None,
+        ServerNameVerification::AnyName,
+    )
+    .expect("build any-name client config");
+    let (_acc, any_dial) = tls_handshake_pair(server_config, any_name_client, mismatched).await;
+    assert!(
+        any_dial.is_ok(),
+        "AnyName must accept a CA-chained server cert despite the SAN mismatch"
     );
 }

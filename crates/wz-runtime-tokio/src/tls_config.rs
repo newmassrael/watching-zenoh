@@ -33,6 +33,21 @@
 //! configs are ordinary one-way TLS (server-authenticated only), exactly as
 //! pico's `ENABLE_MTLS` defaults off.
 //!
+//! ## Server-name verification is a policy parameter
+//!
+//! By default a TLS dial verifies the server cert two ways: the chain must reach
+//! a trusted root AND the cert SAN must match the dialed `ServerName`. Some
+//! deployments need the chain check but cannot satisfy the name check — dialing
+//! a peer by raw IP, or sharing one cert across hosts. [`client_config_from_pem`]
+//! takes a [`ServerNameVerification`]: `Verify` (the safe default) keeps both
+//! checks; `AnyName` installs a custom verifier that still requires the
+//! chain-to-root but accepts ANY name. This mirrors zenoh-rust's
+//! `verify_name_on_connect` (`.dangerous()` + `WebPkiVerifierAnyServerName` when
+//! false) and pico's `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT`. Like mTLS it is a
+//! PARAMETER of the single client-config builder, not a separate path; the dial
+//! primitives are unchanged (rustls still needs a `ServerName` for SNI — the
+//! verifier merely skips the name match).
+//!
 //! ## Three sources for the same PEM
 //!
 //! The config builders take PEM as `&[u8]`, so the SOURCE of those bytes is
@@ -55,10 +70,17 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio_rustls::rustls::crypto::ring;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio_rustls::rustls::server::WebPkiClientVerifier;
-use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::client::verify_server_cert_signed_by_trust_anchor;
+use tokio_rustls::rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use tokio_rustls::rustls::server::{ParsedCertificate, WebPkiClientVerifier};
+use tokio_rustls::rustls::{
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, ServerConfig,
+    SignatureScheme,
+};
 
 /// Client-authentication (mTLS) material: the cert chain the dialer presents to
 /// the server plus its matching private key, both as PEM. `Some(_)` on the
@@ -154,26 +176,139 @@ pub fn root_store_from_pem(ca_pem: &[u8]) -> io::Result<RootCertStore> {
     Ok(roots)
 }
 
+/// How a TLS dial verifies the SERVER's certificate name. The cert must ALWAYS
+/// chain to a trusted root; this knob governs only the SAN/hostname match against
+/// the dialed [`ServerName`]. The wz analogue of pico's
+/// `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT` and zenoh-rust's `verify_name_on_connect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerNameVerification {
+    /// Verify the chain to a trusted root AND that the cert SAN matches the
+    /// dialed name. The safe default — the only correct choice when the peer's
+    /// cert carries the name you dial (pico/zenoh `verify_name_on_connect=true`).
+    Verify,
+    /// Verify the chain to a trusted root but accept ANY name in the cert (skip
+    /// the SAN match). For dialing a peer whose cert cannot carry the dialed name
+    /// — a raw-IP locator, or one cert shared across hosts. Chain-to-root is
+    /// STILL enforced; only the name match is dropped (the rustls `.dangerous()`
+    /// path, zenoh's `WebPkiVerifierAnyServerName`). Weaker than `Verify`: a
+    /// valid cert misissued for a different host would be accepted, so use it
+    /// only when the name genuinely cannot match.
+    AnyName,
+}
+
+/// A rustls [`ServerCertVerifier`] that enforces chain-to-trusted-root (and
+/// expiry) but accepts ANY server name — the mechanism behind
+/// [`ServerNameVerification::AnyName`]. A behavioural mirror of zenoh-rust's
+/// `WebPkiVerifierAnyServerName` (`zenoh-link-commons/src/tls.rs`):
+/// `verify_server_cert` runs [`verify_server_cert_signed_by_trust_anchor`] and
+/// ignores the `_server_name`; signature verification delegates to the `ring`
+/// provider. wz sources the verification algorithms from
+/// `ring::default_provider().signature_verification_algorithms` rather than a
+/// direct `webpki` dependency (same algorithm set, one fewer dep).
+#[derive(Debug)]
+struct AnyServerNameVerifier {
+    roots: RootCertStore,
+}
+
+impl AnyServerNameVerifier {
+    fn new(roots: RootCertStore) -> Self {
+        Self { roots }
+    }
+}
+
+impl ServerCertVerifier for AnyServerNameVerifier {
+    /// Verify the cert chains to a trusted root and is unexpired; the
+    /// `_server_name` (SAN/hostname) is deliberately ignored — that is the whole
+    /// point of [`ServerNameVerification::AnyName`].
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            ring::default_provider()
+                .signature_verification_algorithms
+                .all,
+        )?;
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 /// Build a rustls [`ClientConfig`] for a `tls/...` dial from PEM.
 ///
 /// `root_ca_pem` is the trust bundle the dialer verifies the SERVER's cert
 /// against (its certificate, or the CA that issued it). `client_auth` is the
 /// mTLS knob: `Some(_)` makes the dialer PRESENT a client cert (mutual TLS),
-/// `None` is one-way TLS where only the server authenticates.
+/// `None` is one-way TLS where only the server authenticates. `name_verification`
+/// chooses whether the server cert's SAN must match the dialed name
+/// ([`ServerNameVerification::Verify`], the safe default) or may be any name
+/// while still chaining to a trusted root ([`ServerNameVerification::AnyName`]).
 ///
 /// The returned config feeds [`crate::session_open::TlsDialConfig::client_config`]
 /// (the caller supplies the `ServerName` to verify alongside it).
 pub fn client_config_from_pem(
     root_ca_pem: &[u8],
     client_auth: Option<ClientAuthPem<'_>>,
+    name_verification: ServerNameVerification,
 ) -> io::Result<Arc<ClientConfig>> {
     let roots = root_store_from_pem(root_ca_pem)?;
     let provider = Arc::new(ring::default_provider());
 
     let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(invalid_data)?
-        .with_root_certificates(roots);
+        .map_err(invalid_data)?;
+
+    // Install the server-cert verifier per policy. Both arms land on the same
+    // `WantsClientCert` builder state, so the client-auth choice below is shared
+    // (mirrors `server_config_from_pem`'s two-arm client-auth match).
+    let builder = match name_verification {
+        ServerNameVerification::Verify => builder.with_root_certificates(roots),
+        ServerNameVerification::AnyName => builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyServerNameVerifier::new(roots))),
+    };
 
     let config = match client_auth {
         Some(auth) => {

@@ -756,8 +756,11 @@ layer_c1u_cargo_test_tls() {
     # mutual auth reaches Established, an mTLS server rejects an anonymous
     # client, and a one-way config built from PEM reaches Established; R311oh
     # adds the file-path (`read_pem_file`) and base64 (`decode_base64_pem`) cert
-    # sources. Same gate-skew reasoning: without this invocation the module is
-    # empty and the cert-PEM/mTLS path is unexercised.
+    # sources. R311oj adds the verify-name knob (`ServerNameVerification`): a
+    # SAN-mismatched dial is rejected under `Verify`, accepted under `AnyName`.
+    # All in the same tls_pem_mtls_e2e binary, so the `--test` wiring below
+    # already covers it (no gate-skew). Same gate-skew reasoning: without this
+    # invocation the module is empty and the cert-PEM/mTLS path is unexercised.
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --test session_reconnect_e2e --test tls_pem_mtls_e2e --quiet \

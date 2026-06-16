@@ -464,10 +464,12 @@ pub mod tls_pipeline;
 /// cert chain + private key (+ optional CA bundle) into the rustls
 /// [`tls_pipeline`]-ready `ClientConfig` / `ServerConfig`; the optional
 /// client-auth / client-CA arguments are the mTLS knob (the client presents a
-/// cert, the server requires + verifies one). Mirrors zenoh-rust
-/// `zenoh-link-tls/src/utils.rs` and pico's TLS `session_cfg` cert keys
-/// (`ROOT_CA_CERTIFICATE` / `CONNECT_CERTIFICATE` / `LISTEN_CERTIFICATE` /
-/// `ENABLE_MTLS`). Gated `transport-link-tls`.
+/// cert, the server requires + verifies one), and the client builder's
+/// `ServerNameVerification` argument is the verify-name knob (require the cert
+/// SAN to match the dialed name, or accept any CA-chained name). Mirrors
+/// zenoh-rust `zenoh-link-tls/src/utils.rs` and pico's TLS `session_cfg` cert
+/// keys (`ROOT_CA_CERTIFICATE` / `CONNECT_CERTIFICATE` / `LISTEN_CERTIFICATE` /
+/// `ENABLE_MTLS` / `VERIFY_NAME_ON_CONNECT`). Gated `transport-link-tls`.
 #[cfg(feature = "transport-link-tls")]
 pub mod tls_config;
 
