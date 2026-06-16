@@ -2824,6 +2824,42 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
         --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
 }
 
+# ─── Layer Z — wz <-> zenohd (zenoh-full reference router) interop ────
+#
+# R311or — the first cross-impl interop against the REFERENCE Rust router
+# (zenohd v1.5.0), not zenoh-pico. Built on the SAME binary + harness SSOT as
+# the pico interop suite: the wz side is the `wz-ap-demo --connect <zenohd>`
+# binary (already version 0x09 + whatami Client on its initiator path), zenohd
+# is the foreign router, and the wz-integration-tests `common` harness
+# orchestrates. Two legs: wz reaches Established against zenohd (handshake
+# wire-parity), and a wz Put routes through zenohd to a zenoh-pico `z_sub`
+# (data-plane cross-impl through the reference router).
+#
+# Opt-in (--layer Z / WZ_RUN_LAYER_Z=1) AND binary-dep: zenohd is an external
+# 1.5.0 build (scripts/build-zenohd.sh), not a wz artifact, so it never gates
+# the default sweep. Graceful SKIP when zenohd or the pico CLI is absent mirrors
+# Layer M/E prereq discipline. The test (tests/wz_to_zenohd_router.rs) locates
+# zenohd via WZ_ZENOHD_BIN or the build script's target/zenohd/zenohd default.
+layer_z_zenohd_interop() {
+    if [[ "$ONLY_LAYER" != "Z" && "${WZ_RUN_LAYER_Z:-0}" -ne 1 ]]; then
+        echo "Layer Z SKIP (opt-in: --layer Z or WZ_RUN_LAYER_Z=1)"
+        return 0
+    fi
+    local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
+    if [[ ! -x "$zenohd" ]]; then
+        echo "Layer Z SKIP: zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)"
+        return 0
+    fi
+    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+        echo "Layer Z SKIP: zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
+    # wz-ap-demo is the wz client (--connect zenohd); build it like Layer E.
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test wz_to_zenohd_router -- --ignored --quiet) || return 1
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -2868,6 +2904,7 @@ run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
+run_layer Z layer_z_zenohd_interop || overall=1
 
 if [[ $overall -eq 0 ]]; then
     echo ""

@@ -285,6 +285,25 @@ pub mod common {
         path
     }
 
+    /// Locate the `zenohd` (zenoh-full REFERENCE Rust router) binary: the
+    /// `WZ_ZENOHD_BIN` env override, else `scripts/build-zenohd.sh`'s
+    /// `target/zenohd/zenohd` install. zenohd is NOT a wz build artifact
+    /// (zenoh is not a wz dependency), so it is built on demand; this panics
+    /// with the build hint if absent — the same prereq discipline as
+    /// [`zenoh_pico_cli_binary`].
+    pub fn zenohd_binary() -> PathBuf {
+        if let Ok(p) = std::env::var("WZ_ZENOHD_BIN") {
+            return PathBuf::from(p);
+        }
+        let path = project_root().join("target/zenohd/zenohd");
+        assert!(
+            path.is_file(),
+            "zenohd binary missing at {}; set WZ_ZENOHD_BIN or run scripts/build-zenohd.sh first",
+            path.display()
+        );
+        path
+    }
+
     /// Rewind the file to the start and slurp the entire current
     /// contents into a UTF-8 string, replacing any non-UTF-8 byte
     /// sequence with the U+FFFD replacement character. Used to
@@ -327,6 +346,26 @@ pub mod common {
     /// `wz_publisher_del_to_zsub`) so a future raise touches one
     /// constant instead of three call sites.
     pub const Z_SUB_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Poll `127.0.0.1:port` every 50 ms until a TCP connect succeeds (a
+    /// spawned listener / router is accepting) or `timeout` elapses, returning
+    /// `true` once it accepts. Readiness for a spawned process whose stderr is
+    /// not capturable as a stable readiness line — e.g. `zenohd`, which
+    /// block-buffers its startup logs to a non-TTY fd so a stderr-substring wait
+    /// races the flush; a successful TCP connect proves the listener is up.
+    pub fn wait_for_tcp_accept(port: u16, timeout: Duration) -> bool {
+        use std::net::TcpStream;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
 
     /// Poll the captured tempfile every 50 ms until either `needle`
     /// appears in the contents or `timeout` elapses. Returns the
