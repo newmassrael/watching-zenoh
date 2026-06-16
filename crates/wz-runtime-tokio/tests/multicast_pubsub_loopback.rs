@@ -254,3 +254,181 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
 
     assert_eq!(fired.load(Ordering::SeqCst), 1, "exactly one delivery");
 }
+
+/// R311oq — concurrent multi-peer reassembly pool isolation over a real UDP
+/// multicast socket: the pool/quota-under-load (concurrent multi-chain) leg the
+/// single-publisher `oversize_put_fragments_and_reassembles_across_nodes` does
+/// not exercise.
+///
+/// Two publishers (A, C) on distinct ephemeral sockets send DISTINCT oversize
+/// (fragmented) Puts to the SAME group concurrently. The subscriber node B's
+/// reassembly pool keys each chain by source address
+/// ([`multicast_chain_key`](wz_session_core::multicast_dispatch)), so the two
+/// interleaved fragment streams reassemble into two INDEPENDENT byte-exact
+/// samples — neither bleeds into the other even though their datagrams race on
+/// the wire.
+///
+/// ## Determinism (no-flaky)
+///
+/// OUTCOME-deterministic regardless of how the OS interleaves A's and C's
+/// datagrams: per-source keying isolates the chains, so ANY interleaving
+/// reassembles both. Loopback multicast does not drop and the volume is small
+/// (~8 datagrams total — no UDP burst overflow). Both publishes are queued only
+/// AFTER a JOIN-admission settle so B has both peers in its table before their
+/// fragments arrive. The sole synchronization is a poll-on-condition for both
+/// deliveries. A cross-contaminated merge would match NEITHER expected payload
+/// (or fail frame decode), so the two byte-exact assertions are the isolation
+/// proof. ([[feedback-no-flaky-ever]])
+#[cfg(feature = "transport-fragmentation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn concurrent_peers_fragment_reassemble_in_isolation() {
+    const CONC_PORT: u16 = 7451;
+    const CONC_KEYEXPR: &str = "demo/mc/frag-conc";
+    // Two DISTINCT oversize payloads so each delivered sample is attributable to
+    // its publisher and a cross-contaminated merge would match NEITHER.
+    let payload_a: Vec<u8> = (0..200u32).map(|i| (i * 13) as u8).collect();
+    let payload_c: Vec<u8> = (0..200u32).map(|i| (i * 7 + 3) as u8).collect();
+    assert_ne!(
+        payload_a, payload_c,
+        "the two Puts must differ so each delivery is attributable"
+    );
+    // 64-byte batch budget forces each ~200-byte Put into a T_MID_FRAGMENT chain
+    // (same shrink the sibling oversize test uses).
+    let conc_params = |zid_byte: u8| MulticastParams {
+        batch_size: 64,
+        ..mc_params(zid_byte)
+    };
+
+    // ── Subscriber B: joins the group, collects every delivered payload.
+    let mut driver_b = UdpDriver::bind_multicast_v4(GROUP, CONC_PORT)
+        .await
+        .expect("bind multicast subscriber link");
+    let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_b = conc_params(0xBB);
+
+    let delivered: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let delivered = delivered.clone();
+        observer.subscribers.register(CONC_KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), CONC_KEYEXPR);
+            delivered.lock().unwrap().push(sample.payload().to_vec());
+        });
+    }
+
+    // ── Publishers A and C: distinct ephemeral sockets -> distinct source
+    //    addresses -> distinct source-keyed chains in B's pool.
+    let sock_a = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral publisher A socket");
+    let mut driver_a = UdpDriver::from_socket(sock_a, SocketAddr::from((GROUP, CONC_PORT)));
+    let mut dispatcher_a = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_a = conc_params(0xAA);
+
+    let sock_c = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .expect("bind ephemeral publisher C socket");
+    let mut driver_c = UdpDriver::from_socket(sock_c, SocketAddr::from((GROUP, CONC_PORT)));
+    let mut dispatcher_c = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params_c = conc_params(0xCC);
+
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_c, mut rx_c) = tokio::sync::mpsc::unbounded_channel();
+    let (_hold_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+
+    let clock = TokioTime::new();
+    let drive_b = drive_multicast_session(
+        &mut dispatcher_b,
+        MulticastDriveConfig {
+            params: &params_b,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_b,
+        &clock,
+        |event| observer.dispatch_event(event),
+        &mut rx_b,
+    );
+    let drive_a = drive_multicast_session(
+        &mut dispatcher_a,
+        MulticastDriveConfig {
+            params: &params_a,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_a,
+        &clock,
+        |_| {},
+        &mut rx_a,
+    );
+    let drive_c = drive_multicast_session(
+        &mut dispatcher_c,
+        MulticastDriveConfig {
+            params: &params_c,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut driver_c,
+        &clock,
+        |_| {},
+        &mut rx_c,
+    );
+
+    let delivered_probe = delivered.clone();
+    let exp_a = payload_a.clone();
+    let exp_c = payload_c.clone();
+    let scenario = async move {
+        // Both publishers' JOIN beacons admit them into B's peer table first
+        // (an un-admitted peer's fragments are dropped at B's SN gate).
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Then both publish their oversize Put — the two fragment chains
+        // interleave on the group and B's pool must keep them separate.
+        tx_a.send(multicast_put_literal(CONC_KEYEXPR, &exp_a).expect("put A"))
+            .expect("queue publish A");
+        tx_c.send(multicast_put_literal(CONC_KEYEXPR, &exp_c).expect("put C"))
+            .expect("queue publish C");
+        for _ in 0..150 {
+            {
+                let got = delivered_probe.lock().unwrap();
+                if got.iter().any(|p| p == &exp_a) && got.iter().any(|p| p == &exp_c) {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("both concurrent oversize Puts not delivered within the budget");
+    };
+
+    tokio::select! {
+        _ = drive_b => panic!("subscriber drive loop ended unexpectedly"),
+        _ = drive_a => panic!("publisher A drive loop ended unexpectedly"),
+        _ = drive_c => panic!("publisher C drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    let got = delivered.lock().unwrap().clone();
+    // Exactly two deliveries, one per concurrent peer, each byte-exact — neither
+    // source-keyed chain bled into the other.
+    assert_eq!(
+        got.len(),
+        2,
+        "exactly two deliveries (one per concurrent peer), got {}",
+        got.len()
+    );
+    assert!(
+        got.contains(&payload_a),
+        "publisher A's oversize Put reassembled byte-exact in isolation"
+    );
+    assert!(
+        got.contains(&payload_c),
+        "publisher C's oversize Put reassembled byte-exact in isolation"
+    );
+    // B admitted both concurrent publishers (the two source-keyed chains).
+    assert_eq!(
+        dispatcher_b.active_peers(),
+        2,
+        "B admitted both concurrent publishers from their JOIN beacons"
+    );
+}
