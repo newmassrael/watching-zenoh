@@ -38154,6 +38154,54 @@
         "NEXT: pico parity % 재계산 또는 verify-name skip 노브. UNPUSHED: R311og(2)+R311oh(2) = origin/main=cb391dd 위 4 commits. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙)."
       ]
     },
+    "Round 311oi": {
+      "decision_summary": "R311oi: 세션리뷰 후속 SSOT 청산(독립 리뷰어 FINDING 1). open_both_to_established가 tls_e2e 인라인 open 블록과 byte-identical 중복 → tests/tls_harness/mod.rs(per-binary subdir 모듈)로 추출해 tls_e2e+tls_pem_mtls 공유. test-support hoist는 R311fr 격리계약 위반(헬퍼가 tls+session-open 필요→비-TLS 소비자 누출)이라 부적절=리뷰어·자가검증 합의; subdir 모듈이 feature 누출 없는 정답. session_reconnect는 reconnect+collect라 다른 op=의도적 미통합. 프로덕션 무변경, full run-ci(M+G) EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/tls_harness/mod.rs (신규): open_both_to_established(server_config, client_config)->(OpenedSession,OpenedSession) + ITER_CAP를 SSOT로. tests/<dir>/mod.rs subdir 모듈=cargo가 별도 test 바이너리로 안 만들고 mod tls_harness;로 각 포함 바이너리에 컴파일(canonical Cargo integration-test 공유 idiom). test-support 대신 여기인 이유: 헬퍼가 transport-link-tls+session-unicast-open 필요→test-support로 옮기면 dev-dep하는 6개 비-TLS 소비자에 feature 누출(R311fr 격리계약 위반). 순수 데이터 fixture(loopback_*)는 test-support, behavioral drive는 여기=올바른 경계.",
+        "crates/wz-runtime-tokio/tests/tls_e2e.rs: 인라인 acc_open/init_open/tokio::join(~52줄) -> tls_harness::open_both_to_established 1줄 호출. 미사용 import prune(TcpListener/ServerName/TokioTime/accept_tls/fixture_session_init_params/session_open open-set); DialConfig+parse_any_locator는 잔존(음성 dial_locator_tls_without_config 테스트가 사용=컴파일러가 과도 prune 적발). ITER_CAP const 제거(하니스로 이전).",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs: 로컬 open_both_to_established fn + ITER_CAP const 제거 -> mod tls_harness; + use tls_harness::open_both_to_established. 미사용 import prune(Arc/TokioTime/session_open open-set/parse_any_locator/fixture_session_init_params). 4개 호출부는 use로 동일 경로명이라 무변경."
+      ],
+      "verification_bullets": [
+        "tls_e2e 2 passed + tls_pem_mtls_e2e 5 passed(behavior-preserving 추출=순수 코드 이동, 드라이브 로직 byte-동일). session_reconnect_e2e 무변경(다른 open 경로라 미통합).",
+        "clippy default+tls --all-targets(하니스가 양 바이너리에 컴파일; dead_code 0=두 includer 모두 open_both_to_established 사용이라 #[allow] 불요) / no-default+tls 전부 -D warnings exit 0, fmt --check clean.",
+        "컴파일러가 tls_e2e 과도 prune(parse_any_locator/DialConfig)을 즉시 적발->음성 dial_locator 테스트용으로 복원=과잉청산 방지(build-error-first).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0, Layer C1u pass(tls_e2e+session_reconnect+tls_pem_mtls 동일 배선).",
+        "메타: 독립 리뷰어가 FINDING 1(MED) 발견, 자가검증이 교차확인 — session_reconnect는 reconnect+collect-declares라 다른 op(리뷰어 3-file lumping을 2-file로 정정). test-support hoist 부적절=리뷰어·자가검증 합의. 리뷰어 'not a blocker, 후속'을 비용무관 교과서 기준이라 즉시 적용([[feedback-textbook-over-cost]]).",
+        "atomic: ledger entries 742->743, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(test-only SSOT 청산)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311oi = R311og/oh(mTLS+cert-PEM) 독립 세션리뷰 후속 SSOT 청산. 리뷰어 결론: 작업은 textbook+북극성 충실(전부 실재 zenoh feature=pico config.h.in 0x4B..0x56 + zenoh-rust utils.rs 대조 확인, mTLS=Option material로 bare-bool보다 정직, dial_tls/accept_tls 시그니처 안정, 프로덕션 panic-free, 카탈로그 배치 올바름). 단 하나 FINDING: open_both_to_established가 tls_e2e 인라인 블록과 byte-identical 중복.",
+        "청산: tests/tls_harness/mod.rs로 추출(per-binary subdir 모듈=feature 누출 없이 공유). test-support hoist는 R311fr 위반(헬퍼가 tls+session-open 필요→6개 비-TLS 소비자 누출)이라 안 함=리뷰어·자가검증 합의. tls_e2e+tls_pem_mtls가 단일 소스 공유; session_reconnect는 open_session_with_reconnect+collect-declares라 다른 op=의도적 미통합(over-abstraction 회피).",
+        "메타: R311my/mz/of 패턴 반복(검증이 작업 점검). 리뷰어 발견도 무비판 수용 않고 교차검증(session_reconnect lumping 정정, test-support 부적절 합의). 사용자 '비용무관 교과서 SSOT' 기준이라 리뷰어 'not a blocker' deferred 대신 즉시 적용.",
+        "NEXT: verify_name_on_connect skip 노브(dangerous WebPkiVerifierAnyServerName) / pico parity % 재계산. UNPUSHED: R311og(2)+oh(2)+oi(2) = origin/main=cb391dd 위 6 commits. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]]."
+      ],
+      "publishable_decision_summary": "R311oi: 세션리뷰 후속 SSOT 청산(독립 리뷰어 FINDING 1). open_both_to_established가 tls_e2e 인라인 open 블록과 byte-identical 중복 → tests/tls_harness/mod.rs(per-binary subdir 모듈)로 추출해 tls_e2e+tls_pem_mtls 공유. test-support hoist는 R311fr 격리계약 위반(헬퍼가 tls+session-open 필요→비-TLS 소비자 누출)이라 부적절=리뷰어·자가검증 합의; subdir 모듈이 feature 누출 없는 정답. session_reconnect는 reconnect+collect라 다른 op=의도적 미통합. 프로덕션 무변경, full run-ci(M+G) EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/tls_harness/mod.rs (신규): open_both_to_established(server_config, client_config)->(OpenedSession,OpenedSession) + ITER_CAP를 SSOT로. tests/<dir>/mod.rs subdir 모듈=cargo가 별도 test 바이너리로 안 만들고 mod tls_harness;로 각 포함 바이너리에 컴파일(canonical Cargo integration-test 공유 idiom). test-support 대신 여기인 이유: 헬퍼가 transport-link-tls+session-unicast-open 필요→test-support로 옮기면 dev-dep하는 6개 비-TLS 소비자에 feature 누출(R311fr 격리계약 위반). 순수 데이터 fixture(loopback_*)는 test-support, behavioral drive는 여기=올바른 경계.",
+        "crates/wz-runtime-tokio/tests/tls_e2e.rs: 인라인 acc_open/init_open/tokio::join(~52줄) -> tls_harness::open_both_to_established 1줄 호출. 미사용 import prune(TcpListener/ServerName/TokioTime/accept_tls/fixture_session_init_params/session_open open-set); DialConfig+parse_any_locator는 잔존(음성 dial_locator_tls_without_config 테스트가 사용=컴파일러가 과도 prune 적발). ITER_CAP const 제거(하니스로 이전).",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs: 로컬 open_both_to_established fn + ITER_CAP const 제거 -> mod tls_harness; + use tls_harness::open_both_to_established. 미사용 import prune(Arc/TokioTime/session_open open-set/parse_any_locator/fixture_session_init_params). 4개 호출부는 use로 동일 경로명이라 무변경."
+      ],
+      "publishable_verification_bullets": [
+        "tls_e2e 2 passed + tls_pem_mtls_e2e 5 passed(behavior-preserving 추출=순수 코드 이동, 드라이브 로직 byte-동일). session_reconnect_e2e 무변경(다른 open 경로라 미통합).",
+        "clippy default+tls --all-targets(하니스가 양 바이너리에 컴파일; dead_code 0=두 includer 모두 open_both_to_established 사용이라 #[allow] 불요) / no-default+tls 전부 -D warnings exit 0, fmt --check clean.",
+        "컴파일러가 tls_e2e 과도 prune(parse_any_locator/DialConfig)을 즉시 적발->음성 dial_locator 테스트용으로 복원=과잉청산 방지(build-error-first).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0, Layer C1u pass(tls_e2e+session_reconnect+tls_pem_mtls 동일 배선).",
+        "메타: 독립 리뷰어가 FINDING 1(MED) 발견, 자가검증이 교차확인 — session_reconnect는 reconnect+collect-declares라 다른 op(리뷰어 3-file lumping을 2-file로 정정). test-support hoist 부적절=리뷰어·자가검증 합의. 리뷰어 'not a blocker, 후속'을 비용무관 교과서 기준이라 즉시 적용([[feedback-textbook-over-cost]]).",
+        "atomic: ledger entries 742->743, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(test-only SSOT 청산)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311oi = R311og/oh(mTLS+cert-PEM) 독립 세션리뷰 후속 SSOT 청산. 리뷰어 결론: 작업은 textbook+북극성 충실(전부 실재 zenoh feature=pico config.h.in 0x4B..0x56 + zenoh-rust utils.rs 대조 확인, mTLS=Option material로 bare-bool보다 정직, dial_tls/accept_tls 시그니처 안정, 프로덕션 panic-free, 카탈로그 배치 올바름). 단 하나 FINDING: open_both_to_established가 tls_e2e 인라인 블록과 byte-identical 중복.",
+        "청산: tests/tls_harness/mod.rs로 추출(per-binary subdir 모듈=feature 누출 없이 공유). test-support hoist는 R311fr 위반(헬퍼가 tls+session-open 필요→6개 비-TLS 소비자 누출)이라 안 함=리뷰어·자가검증 합의. tls_e2e+tls_pem_mtls가 단일 소스 공유; session_reconnect는 open_session_with_reconnect+collect-declares라 다른 op=의도적 미통합(over-abstraction 회피).",
+        "메타: R311my/mz/of 패턴 반복(검증이 작업 점검). 리뷰어 발견도 무비판 수용 않고 교차검증(session_reconnect lumping 정정, test-support 부적절 합의). 사용자 '비용무관 교과서 SSOT' 기준이라 리뷰어 'not a blocker' deferred 대신 즉시 적용.",
+        "NEXT: verify_name_on_connect skip 노브(dangerous WebPkiVerifierAnyServerName) / pico parity % 재계산. UNPUSHED: R311og(2)+oh(2)+oi(2) = origin/main=cb391dd 위 6 commits. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]]."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
