@@ -38350,6 +38350,54 @@
         "UNPUSHED: R311ol 2 commit(udp_chaos_e2e+run-ci clippy=code; ledger). origin/main=4b6fa6d(R311ok) 위. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
       ]
     },
+    "Round 311om": {
+      "decision_summary": "R311om: R311ol 세션리뷰 반영. ChaosReadDriver를 test-support로 hoist(generic LinkDriver 데코레이터=SSOT, predicate 분리) + fragment를 MID로 식별(size 휴리스틱 제거) + non-load-bearing sleep 제거.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: ChaosReadDriver<D, P> 추가 — generic LinkDriver 데코레이터(메커니즘=count+drop, 정책=caller predicate FnMut(&RxFrame)->bool 분리). drop_nth_matching(inner, ordinal, predicate). R311ol의 udp_chaos_e2e.rs 로컬 데코레이터를 SSOT로 hoist — transport-generic이라 serial/tls/udp 공통 재사용(carry된 reorder/latency/stress 라운드가 복제 없이 재사용; [[feedback-test-fixtures-sibling-crate]]). 자체 단위테스트 2종(QueueDriver 기반: Nth-matching만 drop / ordinal=0 pass-through). RxFrame import 추가.",
+        "crates/wz-runtime-tokio-test-support/Cargo.toml: [dev-dependencies] tokio(rt+macros, default-features=false) 추가 — 데코레이터 self-test의 #[tokio::test]용. dev-dep이라 소비자 6 크레이트에 미전파(R311fr default-features=false 계약 유지).",
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs: 로컬 ChaosReadDriver 제거→test-support import. fragment 식별을 size(len>1000 매직넘버)→MID(is_fragment_datagram: bytes[0]&0x1f==wire_const::T_MID_FRAGMENT, multicast_rx.rs:91 production classifier shape=wire 정체). non-load-bearing sleep 3종 제거(steady-state 300ms + inter-publish 300ms + settle 200ms): emit_frame_or_fragments가 fragment chain을 wire-atomic 동기 emit(session_actions.rs:1235-1238)+writer FIFO라 P1→P2 순서를 구조적으로 보장; delivery poll-on-condition이 유일 동기화 barrier(FIFO상 drop+abort가 P2 완료 전 처리됨=settle 불요). 0.84s→0.03s."
+      ],
+      "verification_bullets": [
+        "udp_chaos_e2e 1 passed + 12/12 연속 non-flaky(sleep 제거 후 재검증, [[feedback-no-flaky-ever]]); 0.84s->0.03s. ChaosReadDriver self-test(test-support) 2 passed + 5/5 연속.",
+        "clippy: wz-runtime-tokio-test-support --all-targets -D warnings EXIT=0 + wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings EXIT=0. fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. C1(workspace test=ChaosReadDriver self-test 포함)+C1l(udp_chaos+clippy)+C2(workspace clippy=test-support ChaosReadDriver lint)+G+M pass.",
+        "SSOT/구조: 데코레이터 test-support 단일 홈(재사용 시 복제 0); production 타입 무오염 유지(InboundLink chaos variant 없음); fragment 식별이 wire_const::T_MID_FRAGMENT SSOT 참조(매직넘버 0); 메커니즘(데코레이터)/정책(predicate) 분리로 transport-agnostic.",
+        "atomic: ledger entries 746->747, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(세션리뷰 리팩터=구조 개선, 신규 feature atom 아님)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311om = R311ol 세션리뷰(사용자 요청 \"①②③ 적용\") 반영. frozen-ledger라 R311ol body 재작성 불가 + CLI 항목 편집 수단 없음 → 리뷰 개선을 R311om append(R311my+mz 세션리뷰 선례 동형). 본 항목이 R311ol의 데코레이터-위치/size-휴리스틱/sleep 디테일을 supersede(R311ol은 최초 ship 기록으로 보존).",
+        "①size→MID: fragment를 wire 정체로 식별(production multicast_rx classifier shape, wire_const::T_MID_FRAGMENT SSOT 참조), 매직넘버 제거. ②test-local→test-support: generic 데코레이터=메커니즘/정책 분리(predicate 주입)로 transport-agnostic SSOT, 향후 chaos 라운드 복제 방지. ③sleep 제거: 순서는 wire-atomic emit+FIFO 구조가 보장, delivery poll이 유일 barrier.",
+        "OPEN finding 유지(R311on+ 후보): duplicate-fragment가 다음 메시지 오염 가능(가설). frame게이트 reject 후 final-frag(more=0)가 chain-start 고아로 열려 다음 메시지와 merge(reassembly_dispatch.rs:827). pico rx.c의 more=0 chain-start parity 확인 후 재현 테스트/수정.",
+        "NEXT 후보(외부의존無 로컬): ①dup-fragment finding ②reorder chaos(ChaosReadDriver 재사용; reorder는 hold+reemit 확장 필요) ③latency/jitter ④동시세션 stress. cross-impl(pico interop·zenoh-full router)은 외부의존 잔존.",
+        "UNPUSHED: R311ol(2 commit)+R311om(2 commit) = origin/main=4b6fa6d 위 4 commit. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
+      ],
+      "publishable_decision_summary": "R311om: R311ol 세션리뷰 반영. ChaosReadDriver를 test-support로 hoist(generic LinkDriver 데코레이터=SSOT, predicate 분리) + fragment를 MID로 식별(size 휴리스틱 제거) + non-load-bearing sleep 제거.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: ChaosReadDriver<D, P> 추가 — generic LinkDriver 데코레이터(메커니즘=count+drop, 정책=caller predicate FnMut(&RxFrame)->bool 분리). drop_nth_matching(inner, ordinal, predicate). R311ol의 udp_chaos_e2e.rs 로컬 데코레이터를 SSOT로 hoist — transport-generic이라 serial/tls/udp 공통 재사용(carry된 reorder/latency/stress 라운드가 복제 없이 재사용; [[feedback-test-fixtures-sibling-crate]]). 자체 단위테스트 2종(QueueDriver 기반: Nth-matching만 drop / ordinal=0 pass-through). RxFrame import 추가.",
+        "crates/wz-runtime-tokio-test-support/Cargo.toml: [dev-dependencies] tokio(rt+macros, default-features=false) 추가 — 데코레이터 self-test의 #[tokio::test]용. dev-dep이라 소비자 6 크레이트에 미전파(R311fr default-features=false 계약 유지).",
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs: 로컬 ChaosReadDriver 제거→test-support import. fragment 식별을 size(len>1000 매직넘버)→MID(is_fragment_datagram: bytes[0]&0x1f==wire_const::T_MID_FRAGMENT, multicast_rx.rs:91 production classifier shape=wire 정체). non-load-bearing sleep 3종 제거(steady-state 300ms + inter-publish 300ms + settle 200ms): emit_frame_or_fragments가 fragment chain을 wire-atomic 동기 emit(session_actions.rs:1235-1238)+writer FIFO라 P1→P2 순서를 구조적으로 보장; delivery poll-on-condition이 유일 동기화 barrier(FIFO상 drop+abort가 P2 완료 전 처리됨=settle 불요). 0.84s→0.03s."
+      ],
+      "publishable_verification_bullets": [
+        "udp_chaos_e2e 1 passed + 12/12 연속 non-flaky(sleep 제거 후 재검증, [[feedback-no-flaky-ever]]); 0.84s->0.03s. ChaosReadDriver self-test(test-support) 2 passed + 5/5 연속.",
+        "clippy: wz-runtime-tokio-test-support --all-targets -D warnings EXIT=0 + wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings EXIT=0. fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. C1(workspace test=ChaosReadDriver self-test 포함)+C1l(udp_chaos+clippy)+C2(workspace clippy=test-support ChaosReadDriver lint)+G+M pass.",
+        "SSOT/구조: 데코레이터 test-support 단일 홈(재사용 시 복제 0); production 타입 무오염 유지(InboundLink chaos variant 없음); fragment 식별이 wire_const::T_MID_FRAGMENT SSOT 참조(매직넘버 0); 메커니즘(데코레이터)/정책(predicate) 분리로 transport-agnostic.",
+        "atomic: ledger entries 746->747, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(세션리뷰 리팩터=구조 개선, 신규 feature atom 아님)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311om = R311ol 세션리뷰(사용자 요청 \"①②③ 적용\") 반영. frozen-ledger라 R311ol body 재작성 불가 + CLI 항목 편집 수단 없음 → 리뷰 개선을 R311om append(R311my+mz 세션리뷰 선례 동형). 본 항목이 R311ol의 데코레이터-위치/size-휴리스틱/sleep 디테일을 supersede(R311ol은 최초 ship 기록으로 보존).",
+        "①size→MID: fragment를 wire 정체로 식별(production multicast_rx classifier shape, wire_const::T_MID_FRAGMENT SSOT 참조), 매직넘버 제거. ②test-local→test-support: generic 데코레이터=메커니즘/정책 분리(predicate 주입)로 transport-agnostic SSOT, 향후 chaos 라운드 복제 방지. ③sleep 제거: 순서는 wire-atomic emit+FIFO 구조가 보장, delivery poll이 유일 barrier.",
+        "OPEN finding 유지(R311on+ 후보): duplicate-fragment가 다음 메시지 오염 가능(가설). frame게이트 reject 후 final-frag(more=0)가 chain-start 고아로 열려 다음 메시지와 merge(reassembly_dispatch.rs:827). pico rx.c의 more=0 chain-start parity 확인 후 재현 테스트/수정.",
+        "NEXT 후보(외부의존無 로컬): ①dup-fragment finding ②reorder chaos(ChaosReadDriver 재사용; reorder는 hold+reemit 확장 필요) ③latency/jitter ④동시세션 stress. cross-impl(pico interop·zenoh-full router)은 외부의존 잔존.",
+        "UNPUSHED: R311ol(2 commit)+R311om(2 commit) = origin/main=4b6fa6d 위 4 commit. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
