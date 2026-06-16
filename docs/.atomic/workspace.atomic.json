@@ -38686,6 +38686,54 @@
         "UNPUSHED 누적: R311oo/op/oq/or/os. origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]]."
       ]
     },
+    "Round 311ot": {
+      "decision_summary": "R311ot: 세션리뷰 concern① 해소 — declare SSOT 일관화. subscriber/queryable/token 모두 run_demo pre-drive 동기 선언(R249 register-before-serve 전체 적용), 백그라운드 declare_task + inter-emit sleep + vestigial Established-poll 제거. 순수 리팩터.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs: subscriber/queryable를 token과 함께 run_demo pre-drive 단계에서 동기 선언(actions.send_declare_subscriber/queryable + session.declare_token; R249 register-before-serve를 모든 declared kind에 일관 적용). DECLARE_SUBSCRIBER_ID/QUERYABLE_ID(1001/2001)를 tasks.rs→runner.rs 이동. spawn_background_tasks에서 declare_spec 파라미터 + declare_task spawn + has_declares + declare_handle 제거.",
+        "crates/wz-ap-demo/src/tasks.rs: declare_task 함수 + DECLARE_*_ID/HANDSHAKE_POLL/HANDSHAKE_TIMEOUT/INTER_EMIT 상수 5종 삭제(전 declare가 pre-drive 동기라 백그라운드 태스크 불요). vestigial Established-poll 루프(세션은 run_demo 진입 시 이미 Established) + DECLARE_INTER_EMIT_MS=100ms 타이밍 smell 제거. DeclareEmitSpec import + 모듈 doc/주석 참조 정리.",
+        "crates/wz-ap-demo/src/teardown.rs: declare_handle 필드(TeardownInitial) + 200ms join(abort_sweep_join_tasks) 제거. SpawnedTasks/SpawnedTasks-doc 갱신.",
+        "crates/wz-integration-tests/tests/wz_remote_declare_round_trip.rs: 주석 갱신 — declares가 이제 pre-drive 동기로 결정적 순서(sub→queryable→token); order-independent 대기는 robust 관행으로 유지(순서 가정 안 함)."
+      ],
+      "verification_bullets": [
+        "세션리뷰(사용자 \"hack/smell 없이 교과서적? 비용 무관 장기 구조? SSOT?\") concern ① 해소: R311os가 token만 pre-drive로 옮겨 R249를 부분 적용→subscriber/queryable는 여전히 declare_task(post-drive 백그라운드, vestigial Established-poll + 100ms inter-emit sleep, 그로 인한 order-dependence가 wz_remote_declare 우회를 강제)였던 SSOT 불일치 smell을 제거. 이제 전 declare가 pre-drive 동기=R249 일관 적용, declare_task 은퇴.",
+        "wz_remote_declare/wz_liveliness_get/wz_liveliness_subscriber 각 pass. Layer E 전체 pass(wz-ap-demo refactor 무회귀). full host run-ci(M+G+Z) 3/3 연속 EXIT=0 \"all required layers pass\"(파이프 없이 exit [[feedback-runci-verdict-exit-code-only]]). clippy wz-ap-demo+wz-integration-tests --all-targets -D warnings EXIT=0, fmt clean.",
+        "동작 보존(순수 리팩터): declares는 동일 keyexpr/id로 동일 와이어 emit, 순서만 결정적(sub→queryable→token)이 됨. teardown R284 불변식(token Drop→UndeclToken→Close) 무변경. happy-path 무영향.",
+        "대형 삭제(declare doc+상수+declare_task 98-230행)는 거대 exact-match 대신 검증된 line-range로 처리 후 seam read-back 검증([[feedback-no-flaky-ever]] 정신=수정 후 즉시 검증).",
+        "atomic: ledger entries 753->754, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(리팩터 라운드)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ot = R311os 세션리뷰 concern ① 해소(declare SSOT 일관화). R249 register-before-serve를 모든 declared kind(subscriber/queryable/token)에 일관 적용→백그라운드 declare_task 은퇴, vestigial Established-poll + DECLARE_INTER_EMIT_MS timing smell 제거. 순수 리팩터(동작 보존, 순서만 결정적).",
+        "남은 세션리뷰 concern(①보다 작음): ②spawn_subscribed_zsub의 z_sub open retry는 root cause 미확정(외부 pico one-shot의 load-하 transient; standalone 30/30서 retry 미발화=load 전용). ③scripts/build-zenohd.sh 비결정적=undeclared zenoh checkout glob; `cargo install zenohd@1.5.0 --locked` 또는 zenoh dev-dep 선언이 repo-만으로 재현 가능한 더 옳은 구조(향후 후보).",
+        "세션 메타: 사용자 2회 \"교과서?\" 질의가 실질 smell을 표면화(1차=in-process+하니스중복+version override hack→SSOT 재작성; 2차=R249 부분적용 불일치→R311ot 통합). [[feedback-textbook-over-cost]] 패턴 작동.",
+        "UNPUSHED 누적: R311oo/op/oq/or/os/ot. origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]]."
+      ],
+      "publishable_decision_summary": "R311ot: 세션리뷰 concern① 해소 — declare SSOT 일관화. subscriber/queryable/token 모두 run_demo pre-drive 동기 선언(R249 register-before-serve 전체 적용), 백그라운드 declare_task + inter-emit sleep + vestigial Established-poll 제거. 순수 리팩터.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs: subscriber/queryable를 token과 함께 run_demo pre-drive 단계에서 동기 선언(actions.send_declare_subscriber/queryable + session.declare_token; R249 register-before-serve를 모든 declared kind에 일관 적용). DECLARE_SUBSCRIBER_ID/QUERYABLE_ID(1001/2001)를 tasks.rs→runner.rs 이동. spawn_background_tasks에서 declare_spec 파라미터 + declare_task spawn + has_declares + declare_handle 제거.",
+        "crates/wz-ap-demo/src/tasks.rs: declare_task 함수 + DECLARE_*_ID/HANDSHAKE_POLL/HANDSHAKE_TIMEOUT/INTER_EMIT 상수 5종 삭제(전 declare가 pre-drive 동기라 백그라운드 태스크 불요). vestigial Established-poll 루프(세션은 run_demo 진입 시 이미 Established) + DECLARE_INTER_EMIT_MS=100ms 타이밍 smell 제거. DeclareEmitSpec import + 모듈 doc/주석 참조 정리.",
+        "crates/wz-ap-demo/src/teardown.rs: declare_handle 필드(TeardownInitial) + 200ms join(abort_sweep_join_tasks) 제거. SpawnedTasks/SpawnedTasks-doc 갱신.",
+        "crates/wz-integration-tests/tests/wz_remote_declare_round_trip.rs: 주석 갱신 — declares가 이제 pre-drive 동기로 결정적 순서(sub→queryable→token); order-independent 대기는 robust 관행으로 유지(순서 가정 안 함)."
+      ],
+      "publishable_verification_bullets": [
+        "세션리뷰(사용자 \"hack/smell 없이 교과서적? 비용 무관 장기 구조? SSOT?\") concern ① 해소: R311os가 token만 pre-drive로 옮겨 R249를 부분 적용→subscriber/queryable는 여전히 declare_task(post-drive 백그라운드, vestigial Established-poll + 100ms inter-emit sleep, 그로 인한 order-dependence가 wz_remote_declare 우회를 강제)였던 SSOT 불일치 smell을 제거. 이제 전 declare가 pre-drive 동기=R249 일관 적용, declare_task 은퇴.",
+        "wz_remote_declare/wz_liveliness_get/wz_liveliness_subscriber 각 pass. Layer E 전체 pass(wz-ap-demo refactor 무회귀). full host run-ci(M+G+Z) 3/3 연속 EXIT=0 \"all required layers pass\"(파이프 없이 exit [[feedback-runci-verdict-exit-code-only]]). clippy wz-ap-demo+wz-integration-tests --all-targets -D warnings EXIT=0, fmt clean.",
+        "동작 보존(순수 리팩터): declares는 동일 keyexpr/id로 동일 와이어 emit, 순서만 결정적(sub→queryable→token)이 됨. teardown R284 불변식(token Drop→UndeclToken→Close) 무변경. happy-path 무영향.",
+        "대형 삭제(declare doc+상수+declare_task 98-230행)는 거대 exact-match 대신 검증된 line-range로 처리 후 seam read-back 검증([[feedback-no-flaky-ever]] 정신=수정 후 즉시 검증).",
+        "atomic: ledger entries 753->754, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(리팩터 라운드)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ot = R311os 세션리뷰 concern ① 해소(declare SSOT 일관화). R249 register-before-serve를 모든 declared kind(subscriber/queryable/token)에 일관 적용→백그라운드 declare_task 은퇴, vestigial Established-poll + DECLARE_INTER_EMIT_MS timing smell 제거. 순수 리팩터(동작 보존, 순서만 결정적).",
+        "남은 세션리뷰 concern(①보다 작음): ②spawn_subscribed_zsub의 z_sub open retry는 root cause 미확정(외부 pico one-shot의 load-하 transient; standalone 30/30서 retry 미발화=load 전용). ③scripts/build-zenohd.sh 비결정적=undeclared zenoh checkout glob; `cargo install zenohd@1.5.0 --locked` 또는 zenoh dev-dep 선언이 repo-만으로 재현 가능한 더 옳은 구조(향후 후보).",
+        "세션 메타: 사용자 2회 \"교과서?\" 질의가 실질 smell을 표면화(1차=in-process+하니스중복+version override hack→SSOT 재작성; 2차=R249 부분적용 불일치→R311ot 통합). [[feedback-textbook-over-cost]] 패턴 작동.",
+        "UNPUSHED 누적: R311oo/op/oq/or/os/ot. origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]]."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
