@@ -57,11 +57,16 @@ impl LivelinessOptions {
 /// is alive on the local session. `Drop` emits
 /// `Declare(UndeclToken)` so the peer's liveliness subscribers
 /// receive the DELETE sample at retraction time — that is the
-/// whole purpose of the liveliness signal. This differs from
-/// [`Subscriber`] / [`Queryable`] `Drop` which only unregister
-/// from the local registry (no wire emit), because zenoh-pico's
-/// router-mode subscriber/queryable declarations are out of scope
-/// for wz while the liveliness path is end-to-end peer-driven.
+/// whole purpose of the liveliness signal. A routed [`Subscriber`] /
+/// [`Queryable`] `Drop` likewise emits a wire retraction
+/// (`UndeclSubscriber` / `UndeclQueryable`, R311ou / R311ow), but to
+/// WITHDRAW ROUTING INTEREST from the router so it stops routing
+/// matching Pushes / Queries here; the liveliness token's
+/// `UndeclToken` instead DRIVES the DELETE liveliness sample to
+/// intersecting subscribers. The retraction's MEANING differs, not
+/// whether it emits (R311pb — the prior "subscriber/queryable Drop
+/// only unregister locally" claim predated the R311ou/ow routed
+/// declares).
 ///
 /// `!Clone` by construction — the underlying `token_id` is a
 /// unique handle; cloning would let two drops race to emit

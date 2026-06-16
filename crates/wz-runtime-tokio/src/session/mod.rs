@@ -257,7 +257,24 @@ use crate::sample::Sample;
 // submodules) all carry the same `transport-unicast` gate, so ANDing it in
 // here is a no-op in a unicast-on build and elides a dangling import in a
 // multicast-only build.
-#[cfg(all(feature = "liveliness-token", feature = "transport-unicast"))]
+// R311pb — `SendDeclareError` is named by THREE error projectors, each with its
+// own feature gate: `map_decl_err` (liveliness-token, declare_token{,_aliased}),
+// `map_subscribe_err` (declare-subscriber, announce_subscriber), and
+// `map_queryable_err` (declare-queryable AND query-queryable, since
+// announce_queryable is query-queryable-gated). The import gate is the EXACT
+// union of those three so the type is in scope iff at least one projector
+// compiles — no missing-import (a `declare-subscriber`/`declare-queryable` build
+// with liveliness-token OFF previously failed E0425, the R311ou/ow latent gate
+// bug this round fixes) and no unused-import (a `declare-queryable` build with
+// query-queryable OFF must NOT pull it in, since `announce_queryable` is absent).
+#[cfg(all(
+    feature = "transport-unicast",
+    any(
+        feature = "liveliness-token",
+        feature = "declare-subscriber",
+        all(feature = "query-queryable", feature = "declare-queryable")
+    )
+))]
 use crate::session_glue::SendDeclareError;
 #[cfg(feature = "transport-unicast")]
 use crate::session_glue::SendWireError;
@@ -2073,9 +2090,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Same no-wire-emit contract as [`Self::declare_querier`]:
     /// declaration is a caller-side aggregation only. Mirrors
     /// zenoh-pico's `z_declare_publisher` minus the wire-emitted
-    /// `DeclarePublisher` record, which zenoh-pico itself elides
-    /// when running without router (peer-only) — wz is router-less
-    /// today so the wire elision is always correct.
+    /// `DeclarePublisher` record. That record is a router-side
+    /// optimization hint (it lets a router pre-resolve the
+    /// publisher's keyexpr), not a routing precondition: a
+    /// publisher's `Put` carries its keyexpr inline, so a router
+    /// (zenohd) routes wz's Puts whether or not a `DeclarePublisher`
+    /// preceded them — verified e2e against zenohd (the Layer Z
+    /// publish leg, `wz_publish_routes_through_zenohd_to_pico_zsub`).
+    /// wz elides the declaration; the data plane is unaffected.
+    /// (R311pb — the prior "wz is router-less today" justification
+    /// predated the R311ou+ routed-declare zenohd interop.)
     pub fn declare_publisher(
         &self,
         keyexpr: impl Into<String>,

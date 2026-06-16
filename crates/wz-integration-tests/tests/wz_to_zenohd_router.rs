@@ -501,13 +501,21 @@ fn wz_queryable_replies_via_zenohd_to_pico_zget() {
                     .spawn()
                     .expect("spawn z_get via stdbuf"),
             );
-            // z_get prints ">> Received <kind> ('<keyexpr>': '<value>')" per reply.
+            // z_get prints ">> Received <kind> ('<keyexpr>': '<value>')" per reply
+            // AND ">> Received query final notification" on the terminating final.
+            // Both contain the bare ">> Received" substring, and the final ALWAYS
+            // lands (even on a zero-reply query that missed the route), so the
+            // break MUST also require the actual reply value — otherwise the
+            // retry budget is dead (it would always break on attempt 1's final
+            // and fall through to the reply-value assert). R311pb — mirror leg 6's
+            // `received.is_ok() && contains(reply_value)` so the retry actually
+            // covers the route-propagation window.
             let received =
                 wait_for_substring(&mut out_reader, ">> Received", Duration::from_secs(8));
             let _ = zget.child_mut().kill();
             let _ = zget.child_mut().wait();
             zget_captured = read_captured(&mut out_reader);
-            if received.is_ok() {
+            if received.is_ok() && zget_captured.contains(reply_value) {
                 zget_received = true;
                 break;
             }

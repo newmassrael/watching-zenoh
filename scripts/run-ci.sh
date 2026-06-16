@@ -1560,6 +1560,18 @@ _wz_consumer_plane_subsets() {
     # liveliness-get)` gates regress invisibly (default CI has query-get ON).
     printf '%s\t%s\n' "liveliness-get-only"   "liveliness-get"
     printf '%s\t%s\n' "declare-observer"      "codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+    # R311pb — `declare-observer` minus `liveliness-token`: the ROUTED
+    # subscriber + queryable declares (`announce_subscriber` /
+    # `announce_queryable`, R311ou / R311ow) name `SendDeclareError`, but the
+    # import was gated on `liveliness-token` alone — so a build with
+    # `declare-subscriber` / `declare-queryable` ON and `liveliness-token` OFF
+    # failed E0425 (the R311ou/ow latent gate bug). No prior subset exercised
+    # that combo (`declare-observer` keeps liveliness-token ON, masking it).
+    # This lane pins routed-declare-without-liveliness so the import-gate union
+    # cannot regress; it carries query-queryable + the request/response codecs
+    # so `announce_queryable`'s `map_queryable_err` (query-queryable-gated) is
+    # actually compiled.
+    printf '%s\t%s\n' "routed-declare-no-liveliness" "codec-declare,declare-subscriber,declare-queryable,declare-undeclare,query-queryable,codec-request,codec-response,codec-response-final,query-reply-err"
     # R311gi gc-2c — statechart switchboard plane (keyexpr -> SCXML
     # domain-event injection). `switchboard` implies codec-push (it reacts
     # to inbound Push); it is the first subset with codec-push ON but
