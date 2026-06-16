@@ -38202,6 +38202,58 @@
         "NEXT: verify_name_on_connect skip 노브(dangerous WebPkiVerifierAnyServerName) / pico parity % 재계산. UNPUSHED: R311og(2)+oh(2)+oi(2) = origin/main=cb391dd 위 6 commits. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]]."
       ]
     },
+    "Round 311oj": {
+      "decision_summary": "R311oj: TLS verify-name skip 노브 — client_config_from_pem에 ServerNameVerification(Verify/AnyName). AnyName=chain-to-root는 유지+SAN 이름만 skip(zenoh AnyServerName verifier 미러, dep 0). dial_tls 무변경.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/tls_config.rs: ServerNameVerification{Verify,AnyName} pub enum(derive Clone/Copy/Debug/Eq) + AnyServerNameVerifier(private rustls ServerCertVerifier impl, zenoh WebPkiVerifierAnyServerName 미러 — verify_server_cert가 verify_server_cert_signed_by_trust_anchor로 chain-to-root+expiry만 검증하고 _server_name 무시; verify_tls12/13_signature·supported_verify_schemes는 ring provider 위임). client_config_from_pem에 name_verification 파라미터 추가: Verify=with_root_certificates(chain+name), AnyName=dangerous().with_custom_certificate_verifier(AnyServerNameVerifier). 두 arm 모두 WantsClientCert로 수렴해 아래 client-auth match 공유(server_config_from_pem 패턴과 동형).",
+        "검증 알고리즘은 ring::default_provider().signature_verification_algorithms(.all / supported_schemes)로 조달 — zenoh의 webpki::ALL_VERIFICATION_ALGS 직접 dep 회피(같은 알고리즘 set, 신규 dep 0개). rustls 0.23.40 client::danger + crypto::verify_tls12/13_signature + server::ParsedCertificate 경로(zenoh-link-commons/tls.rs와 동일).",
+        "dial_tls/accept_tls/TlsDialConfig 시그니처 무변경(R311og signature-stability) — 노브가 ClientConfig 내부 verifier 교체라 dial seam 무영향; rustls는 SNI용 ServerName 여전히 요구하고 verifier만 SAN 이름검증 skip. 모듈 doc에 \"Server-name verification is a policy parameter\" 절 추가, lib.rs tls_config 요약에 verify-name 노브 한 문장.",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs: tls_handshake_pair 로컬 헬퍼 추출(listener+accept_tls+dial_tls+join, 양측 io::Result<TlsStream> 반환) — mtls_server_rejects_anonymous_client의 인라인 listener/accept/dial/join 중복 제거+재사용(behavior-preserving). 신규 server_name_verification_controls_san_mismatch_dial 테스트: SAN=localhost 서버 인증서를 other.host.invalid로 dial해 Verify=dial Err / AnyName=dial Ok(인증서 CA chain 유지) 단언. 기존 5 client_config_from_pem 호출부에 ServerNameVerification::Verify 전달. 헬퍼는 tls_e2e가 포함하는 공유 tls_harness 모듈이 아닌 이 파일 로컬(양 소비자 동일 파일=dead_code 회피).",
+        "scripts/run-ci.sh: C1u 주석에 R311oj verify-name 노브 명시 — 동일 tls_pem_mtls_e2e 바이너리라 기존 --test 배선이 자동 커버(gate-skew 없음, R311oh와 동일 구조)."
+      ],
+      "verification_bullets": [
+        "tls_pem_mtls_e2e 6 passed(기존 mutual-auth/익명거부/plain-PEM/파일소스/base64소스 5 + 신규 verify-name 1) + tls_e2e 2 passed + 신규 server_name_verification_controls_san_mismatch_dial 10/10 연속 non-flaky([[feedback-no-flaky-ever]]). 신규 단언: SAN=localhost 서버 인증서를 other.host.invalid로 dial해 Verify=dial Err / AnyName=dial Ok(CA chain 유지). 핸드셰이크 레벨=서버name 검증은 클라이언트 핸드셰이크 중 동기 결정(mTLS client-auth가 TLS1.3서 서버로 이연되는 것과 반대).",
+        "clippy default+tls --all-targets / no-default-features+tls 전부 -D warnings exit 0(AnyServerNameVerifier dead_code 0=AnyName arm이 실사용해 #[allow] 불요), fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. Layer C1u pass(tls_e2e+session_reconnect+tls_pem_mtls 동일 배선) + Layer G + Layer M pass.",
+        "시그니처 안정: dial_tls/accept_tls/TlsDialConfig 무변경 — 노브가 ClientConfig 내부 verifier 교체. client_config_from_pem은 config 빌더라 name_verification 파라미터 추가가 정당(feature-toggle 무관 일률 적용, 5 호출부 명시 Verify). loopback_tls_configs fixture(test-support 직접 빌드, client_config_from_pem 미경유)는 무영향. 신규 dep 0(ring provider 알고리즘 재사용).",
+        "atomic: ledger entries 743->744, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(verify-name=transport-link-tls backend 심화, 신규 feature atom 아님)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311oj = TLS verify-name skip 노브(R311og/oh carry \"verify_name_on_connect skip\" CLOSED). client_config_from_pem이 ServerNameVerification 파라미터로 server-cert verifier 정책 선택 — Verify(chain+SAN name, 안전 기본)/AnyName(chain만, SAN skip). pico Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT + zenoh-rust verify_name_on_connect=false 미러.",
+        "설계: AnyName은 rustls .dangerous() custom verifier(AnyServerNameVerifier=zenoh WebPkiVerifierAnyServerName 미러)로 chain-to-root는 강제하고 SAN만 무시 — \"검증 off\"가 아니라 \"any name OK\"(잘못 발급된 타호스트 인증서는 통과 위험이라 이름이 본질적으로 못맞을 때만). 검증 알고리즘은 ring provider .signature_verification_algorithms로 조달(webpki 직접 dep 회피, dep 0). dial seam 무변경(노브가 ClientConfig 내부 verifier 교체라 dial_tls/TlsDialConfig 무영향; rustls는 SNI용 ServerName 여전히 요구).",
+        "Task 2(병행 요청): pico parity % 재계산 — 헤드라인 default-ON 92/75/85 불변(TLS=pico default-OFF optional이라 default-ON 21 %에 미반영). Transport 차원 ~78%->~82%(TLS wz↔wz e2e 완성=optional breadth 상승), P2.6 TLS 항목 wz↔wz DONE 갱신. project_pico_parity_status 메모리 갱신(R311oj 시점).",
+        "TLS 트랙(oa~oj)은 wz↔wz e2e 관점 사실상 완료: full session open + tls/ locator dial + reconnect + mTLS + cert-PEM raw/file/base64 소스 + verify-name 노브. 남은건 cross-impl pico TLS interop(pico LINK_TLS default-OFF + 통상 router 짝 필요 = 외부 의존).",
+        "NEXT 후보: ①pico→wz unicast dial-in(P1.2, 외부 router 의존) ②멀티캐스트 JOIN assertion 강화(P3.11, 외부의존 無·flaky 주의) ③WS e2e 완성도 재확인(R311ob ws_pipeline 존재) ④serial tty backend(R311nv). UNPUSHED: R311oj만(og/oh/oi는 origin/main=59402c4로 PUSHED 완료). R311oj 코드+ledger 2 commit 예정, push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]] · [[project-pico-parity-status]]."
+      ],
+      "publishable_decision_summary": "R311oj: TLS verify-name skip 노브 — client_config_from_pem에 ServerNameVerification(Verify/AnyName). AnyName=chain-to-root는 유지+SAN 이름만 skip(zenoh AnyServerName verifier 미러, dep 0). dial_tls 무변경.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/tls_config.rs: ServerNameVerification{Verify,AnyName} pub enum(derive Clone/Copy/Debug/Eq) + AnyServerNameVerifier(private rustls ServerCertVerifier impl, zenoh WebPkiVerifierAnyServerName 미러 — verify_server_cert가 verify_server_cert_signed_by_trust_anchor로 chain-to-root+expiry만 검증하고 _server_name 무시; verify_tls12/13_signature·supported_verify_schemes는 ring provider 위임). client_config_from_pem에 name_verification 파라미터 추가: Verify=with_root_certificates(chain+name), AnyName=dangerous().with_custom_certificate_verifier(AnyServerNameVerifier). 두 arm 모두 WantsClientCert로 수렴해 아래 client-auth match 공유(server_config_from_pem 패턴과 동형).",
+        "검증 알고리즘은 ring::default_provider().signature_verification_algorithms(.all / supported_schemes)로 조달 — zenoh의 webpki::ALL_VERIFICATION_ALGS 직접 dep 회피(같은 알고리즘 set, 신규 dep 0개). rustls 0.23.40 client::danger + crypto::verify_tls12/13_signature + server::ParsedCertificate 경로(zenoh-link-commons/tls.rs와 동일).",
+        "dial_tls/accept_tls/TlsDialConfig 시그니처 무변경(R311og signature-stability) — 노브가 ClientConfig 내부 verifier 교체라 dial seam 무영향; rustls는 SNI용 ServerName 여전히 요구하고 verifier만 SAN 이름검증 skip. 모듈 doc에 \"Server-name verification is a policy parameter\" 절 추가, lib.rs tls_config 요약에 verify-name 노브 한 문장.",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs: tls_handshake_pair 로컬 헬퍼 추출(listener+accept_tls+dial_tls+join, 양측 io::Result<TlsStream> 반환) — mtls_server_rejects_anonymous_client의 인라인 listener/accept/dial/join 중복 제거+재사용(behavior-preserving). 신규 server_name_verification_controls_san_mismatch_dial 테스트: SAN=localhost 서버 인증서를 other.host.invalid로 dial해 Verify=dial Err / AnyName=dial Ok(인증서 CA chain 유지) 단언. 기존 5 client_config_from_pem 호출부에 ServerNameVerification::Verify 전달. 헬퍼는 tls_e2e가 포함하는 공유 tls_harness 모듈이 아닌 이 파일 로컬(양 소비자 동일 파일=dead_code 회피).",
+        "scripts/run-ci.sh: C1u 주석에 R311oj verify-name 노브 명시 — 동일 tls_pem_mtls_e2e 바이너리라 기존 --test 배선이 자동 커버(gate-skew 없음, R311oh와 동일 구조)."
+      ],
+      "publishable_verification_bullets": [
+        "tls_pem_mtls_e2e 6 passed(기존 mutual-auth/익명거부/plain-PEM/파일소스/base64소스 5 + 신규 verify-name 1) + tls_e2e 2 passed + 신규 server_name_verification_controls_san_mismatch_dial 10/10 연속 non-flaky([[feedback-no-flaky-ever]]). 신규 단언: SAN=localhost 서버 인증서를 other.host.invalid로 dial해 Verify=dial Err / AnyName=dial Ok(CA chain 유지). 핸드셰이크 레벨=서버name 검증은 클라이언트 핸드셰이크 중 동기 결정(mTLS client-auth가 TLS1.3서 서버로 이연되는 것과 반대).",
+        "clippy default+tls --all-targets / no-default-features+tls 전부 -D warnings exit 0(AnyServerNameVerifier dead_code 0=AnyName arm이 실사용해 #[allow] 불요), fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. Layer C1u pass(tls_e2e+session_reconnect+tls_pem_mtls 동일 배선) + Layer G + Layer M pass.",
+        "시그니처 안정: dial_tls/accept_tls/TlsDialConfig 무변경 — 노브가 ClientConfig 내부 verifier 교체. client_config_from_pem은 config 빌더라 name_verification 파라미터 추가가 정당(feature-toggle 무관 일률 적용, 5 호출부 명시 Verify). loopback_tls_configs fixture(test-support 직접 빌드, client_config_from_pem 미경유)는 무영향. 신규 dep 0(ring provider 알고리즘 재사용).",
+        "atomic: ledger entries 743->744, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(verify-name=transport-link-tls backend 심화, 신규 feature atom 아님)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311oj = TLS verify-name skip 노브(R311og/oh carry \"verify_name_on_connect skip\" CLOSED). client_config_from_pem이 ServerNameVerification 파라미터로 server-cert verifier 정책 선택 — Verify(chain+SAN name, 안전 기본)/AnyName(chain만, SAN skip). pico Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT + zenoh-rust verify_name_on_connect=false 미러.",
+        "설계: AnyName은 rustls .dangerous() custom verifier(AnyServerNameVerifier=zenoh WebPkiVerifierAnyServerName 미러)로 chain-to-root는 강제하고 SAN만 무시 — \"검증 off\"가 아니라 \"any name OK\"(잘못 발급된 타호스트 인증서는 통과 위험이라 이름이 본질적으로 못맞을 때만). 검증 알고리즘은 ring provider .signature_verification_algorithms로 조달(webpki 직접 dep 회피, dep 0). dial seam 무변경(노브가 ClientConfig 내부 verifier 교체라 dial_tls/TlsDialConfig 무영향; rustls는 SNI용 ServerName 여전히 요구).",
+        "Task 2(병행 요청): pico parity % 재계산 — 헤드라인 default-ON 92/75/85 불변(TLS=pico default-OFF optional이라 default-ON 21 %에 미반영). Transport 차원 ~78%->~82%(TLS wz↔wz e2e 완성=optional breadth 상승), P2.6 TLS 항목 wz↔wz DONE 갱신. project_pico_parity_status 메모리 갱신(R311oj 시점).",
+        "TLS 트랙(oa~oj)은 wz↔wz e2e 관점 사실상 완료: full session open + tls/ locator dial + reconnect + mTLS + cert-PEM raw/file/base64 소스 + verify-name 노브. 남은건 cross-impl pico TLS interop(pico LINK_TLS default-OFF + 통상 router 짝 필요 = 외부 의존).",
+        "NEXT 후보: ①pico→wz unicast dial-in(P1.2, 외부 router 의존) ②멀티캐스트 JOIN assertion 강화(P3.11, 외부의존 無·flaky 주의) ③WS e2e 완성도 재확인(R311ob ws_pipeline 존재) ④serial tty backend(R311nv). UNPUSHED: R311oj만(og/oh/oi는 origin/main=59402c4로 PUSHED 완료). R311oj 코드+ledger 2 commit 예정, push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]] · [[project-pico-parity-status]]."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
