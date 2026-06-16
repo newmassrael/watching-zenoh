@@ -39084,6 +39084,56 @@
         "Layer E 30-trial flake-0 not run; R311p is purely a session_glue signature retrofit with no runtime semantics change."
       ]
     },
+    "Round 311pa": {
+      "decision_summary": "R311pa: wz가 requester로 pico queryable 호출(zenohd 중개, Layer Z 6번째 leg). wz --query→zenohd→pico z_queryable→reply→wz REPLY RECEIVED. leg-4의 대칭(wz=client). 프로덕션 코드 변경 없음.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: wz_query_routed_to_pico_queryable_via_zenohd 신설(Layer Z 6번째 leg) + spawn_ready_z_queryable 헬퍼(spawn_publishing_zpub 동형, foreign one-shot open 재시도). wz-ap-demo --connect 127.0.0.1:port --query demo/zenohd --on-query-reply-log(wz=requester: 아웃바운드 Query emit + 인바운드 reply consume)→zenohd가 pico z_queryable(spawn_ready로 선언, query 응답 루프 persist)로 Query 라우팅→pico reply→zenohd가 wz로 reply 라우팅→wz \"REPLY RECEIVED rid=1 keyexpr='demo/zenohd' body=Put payload='pico-reply-to-wz'\". wz --query는 Established서 1회 Query라 pico queryable 전파 창에 대해 받을 때까지 wz 전체 재시작 재시도(z_get retry와 달리 wz측 재시도; pico queryable은 spawn 1회로 wz 재시작 가로질러 유지). 양단: wz REPLY RECEIVED(reply 왕복) + reply value/query keyexpr 단언. leg-4(pico z_get→wz queryable)의 대칭=wz=client/requester, pico=responder. 모듈 doc Five legs->Six legs. 프로덕션 코드 변경 없음=wz의 기존 z_get(아웃바운드 Query)+reply consume 경로가 reference router 경유 동작함을 e2e 회귀 가드."
+      ],
+      "verification_bullets": [
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 테스트 구축 전 zenohd+pico z_queryable+wz-ap-demo(--query --on-query-reply-log) 수동 3-process 실험으로 동작 확정(wz \"REPLY RECEIVED rid=1 keyexpr='demo/zenohd' body=Put payload='pico-reply-val'\") 후 회귀 가드로 테스트화.",
+        "신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]): wz --query→zenohd→pico z_queryable→reply→wz \"REPLY RECEIVED ... payload='pico-reply-to-wz'\". wz의 아웃바운드 Query + 인바운드 reply consume 경로가 reference router 경유 동작 실증.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 G=1 Z=1) RUNCI_EXIT=0(파이프 없는 직접 exit 캡처 [[feedback-runci-verdict-exit-code-only]]; \"run-ci: all required layers pass\"; error[/^error:/test result:FAILED/panicked/Layer FAIL 각 0). Layer Z 6-leg 직렬(--test-threads=1) 6/6 pass(신규 leg가 기존 5개 client/publish/subscribe/queryable/liveliness과 무간섭). Layer E/M/G pass. fmt(rustfmt가 spawn_ready_z_queryable 시그니처 줄분할 적용 후 --check exit 0)/clippy clean.",
+        "설계 검증: wz --query는 Established서 1회 Query(one-shot)라 pico queryable 전파 창에 flaky-risk→받을 때까지 wz 전체 재시작 재시도(leg-4 z_get 재시도와 달리 wz측 재시도; pico queryable은 spawn_ready로 1회 선언+wz 재시작 가로질러 persist). spawn_ready_z_queryable=spawn_publishing_zpub 동형 foreign one-shot open 재시도(\"Creating Queryable\" ready 신호).",
+        "마일스톤: zenohd 경유 wz↔pico 양방향 핵심 평면 완결 — publish(leg-2)/wz-subscribe(leg-3)/wz-queryable(leg-4)/liveliness(leg-5)/wz-query(leg-6). wz가 producer/consumer/responder/requester 전 역할 cross-impl 검증. 프로덕션 코드 변경 0(테스트+module doc).",
+        "atomic: ledger entries 760->761, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pa = wz=requester→pico=responder query interop(zenohd 중개, Layer Z 6번째 leg). 기존 5 leg는 wz가 주로 producer/responder(publish·subscribe-receive·queryable-respond·token-declare); 빠진 방향=wz가 active client로 pico 서비스 호출. leg-4(pico z_get→wz queryable)의 대칭으로 wz --query→zenohd→pico z_queryable→reply→wz REPLY RECEIVED 완결=cross-impl 검증. 프로덕션 코드 변경 없음(테스트만)=wz의 기존 아웃바운드 z_get + 인바운드 reply consume 경로가 reference router 경유 동작함을 e2e 확정.",
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 구축 전 wz --query→zenohd→pico z_queryable 수동 3-process 실험으로 \"REPLY RECEIVED ... payload='pico-reply-val'\" 동작 확정 후 회귀 가드로 테스트화.",
+        "설계: wz --query는 Established서 1회 Query(one-shot)라 핵심 flaky-risk=단일 Query vs pico queryable 전파 지연→받을 때까지 wz 전체 재시작 재시도(leg-4 z_get은 z_get 재시도였으나, 여기선 wz가 one-shot이라 wz 재시도; pico queryable은 spawn_ready로 1회 선언+wz 재시작 가로질러 persist). spawn_ready_z_queryable=spawn_publishing_zpub 동형(open 재시도, \"Creating Queryable\" ready 신호). rustfmt가 헬퍼 시그니처 줄분할 적용(run-ci Layer 0 fmt가 잡음→cargo fmt로 수정).",
+        "마일스톤: zenohd(reference router) 경유 wz↔pico 양방향 핵심 평면 완결 — wz가 producer/consumer/responder/requester 전 역할. publish(leg-2)·wz-subscribe(leg-3 R311ou)·wz-queryable(leg-4 R311ow/ox)·liveliness(leg-5 R311oz)·wz-query(leg-6 R311pa). data plane 4종 양방향 cross-impl 실증.",
+        "검증: 신규 leg standalone 20/20 zero-flake([[feedback-no-flaky-ever]]) + Layer Z 6-leg 직렬 6/6(기존 5개 무간섭) + full host run-ci(M+G+Z) RUNCI_EXIT=0(직접 캡처) + fmt/clippy clean.",
+        "남은 carry(다음 rung): (1) wz liveliness-subscribe→pico token(z_liveliness declarer 경유=wz가 liveliness observer로 pico 토큰 관측, leg-5의 대칭). (2) zenohd 잔여 부채 ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]], 외부 zenohd 의존). 상세 [[project-pico-parity-status]] 진입점.",
+        "UNPUSHED 누적: R311ox(queryable interop)+R311oy(CLI 은퇴)+R311oz(liveliness interop)+R311pa(wz-query interop). origin/main=d107686보다 8커밋 앞섬. push 명시 동의 강력 권장([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311pa: wz가 requester로 pico queryable 호출(zenohd 중개, Layer Z 6번째 leg). wz --query→zenohd→pico z_queryable→reply→wz REPLY RECEIVED. leg-4의 대칭(wz=client). 프로덕션 코드 변경 없음.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: wz_query_routed_to_pico_queryable_via_zenohd 신설(Layer Z 6번째 leg) + spawn_ready_z_queryable 헬퍼(spawn_publishing_zpub 동형, foreign one-shot open 재시도). wz-ap-demo --connect 127.0.0.1:port --query demo/zenohd --on-query-reply-log(wz=requester: 아웃바운드 Query emit + 인바운드 reply consume)→zenohd가 pico z_queryable(spawn_ready로 선언, query 응답 루프 persist)로 Query 라우팅→pico reply→zenohd가 wz로 reply 라우팅→wz \"REPLY RECEIVED rid=1 keyexpr='demo/zenohd' body=Put payload='pico-reply-to-wz'\". wz --query는 Established서 1회 Query라 pico queryable 전파 창에 대해 받을 때까지 wz 전체 재시작 재시도(z_get retry와 달리 wz측 재시도; pico queryable은 spawn 1회로 wz 재시작 가로질러 유지). 양단: wz REPLY RECEIVED(reply 왕복) + reply value/query keyexpr 단언. leg-4(pico z_get→wz queryable)의 대칭=wz=client/requester, pico=responder. 모듈 doc Five legs->Six legs. 프로덕션 코드 변경 없음=wz의 기존 z_get(아웃바운드 Query)+reply consume 경로가 reference router 경유 동작함을 e2e 회귀 가드."
+      ],
+      "publishable_verification_bullets": [
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 테스트 구축 전 zenohd+pico z_queryable+wz-ap-demo(--query --on-query-reply-log) 수동 3-process 실험으로 동작 확정(wz \"REPLY RECEIVED rid=1 keyexpr='demo/zenohd' body=Put payload='pico-reply-val'\") 후 회귀 가드로 테스트화.",
+        "신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]): wz --query→zenohd→pico z_queryable→reply→wz \"REPLY RECEIVED ... payload='pico-reply-to-wz'\". wz의 아웃바운드 Query + 인바운드 reply consume 경로가 reference router 경유 동작 실증.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 G=1 Z=1) RUNCI_EXIT=0(파이프 없는 직접 exit 캡처 [[feedback-runci-verdict-exit-code-only]]; \"run-ci: all required layers pass\"; error[/^error:/test result:FAILED/panicked/Layer FAIL 각 0). Layer Z 6-leg 직렬(--test-threads=1) 6/6 pass(신규 leg가 기존 5개 client/publish/subscribe/queryable/liveliness과 무간섭). Layer E/M/G pass. fmt(rustfmt가 spawn_ready_z_queryable 시그니처 줄분할 적용 후 --check exit 0)/clippy clean.",
+        "설계 검증: wz --query는 Established서 1회 Query(one-shot)라 pico queryable 전파 창에 flaky-risk→받을 때까지 wz 전체 재시작 재시도(leg-4 z_get 재시도와 달리 wz측 재시도; pico queryable은 spawn_ready로 1회 선언+wz 재시작 가로질러 persist). spawn_ready_z_queryable=spawn_publishing_zpub 동형 foreign one-shot open 재시도(\"Creating Queryable\" ready 신호).",
+        "마일스톤: zenohd 경유 wz↔pico 양방향 핵심 평면 완결 — publish(leg-2)/wz-subscribe(leg-3)/wz-queryable(leg-4)/liveliness(leg-5)/wz-query(leg-6). wz가 producer/consumer/responder/requester 전 역할 cross-impl 검증. 프로덕션 코드 변경 0(테스트+module doc).",
+        "atomic: ledger entries 760->761, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pa = wz=requester→pico=responder query interop(zenohd 중개, Layer Z 6번째 leg). 기존 5 leg는 wz가 주로 producer/responder(publish·subscribe-receive·queryable-respond·token-declare); 빠진 방향=wz가 active client로 pico 서비스 호출. leg-4(pico z_get→wz queryable)의 대칭으로 wz --query→zenohd→pico z_queryable→reply→wz REPLY RECEIVED 완결=cross-impl 검증. 프로덕션 코드 변경 없음(테스트만)=wz의 기존 아웃바운드 z_get + 인바운드 reply consume 경로가 reference router 경유 동작함을 e2e 확정.",
+        "실험 선행([[feedback-diagnose-before-carry]]): 본격 구축 전 wz --query→zenohd→pico z_queryable 수동 3-process 실험으로 \"REPLY RECEIVED ... payload='pico-reply-val'\" 동작 확정 후 회귀 가드로 테스트화.",
+        "설계: wz --query는 Established서 1회 Query(one-shot)라 핵심 flaky-risk=단일 Query vs pico queryable 전파 지연→받을 때까지 wz 전체 재시작 재시도(leg-4 z_get은 z_get 재시도였으나, 여기선 wz가 one-shot이라 wz 재시도; pico queryable은 spawn_ready로 1회 선언+wz 재시작 가로질러 persist). spawn_ready_z_queryable=spawn_publishing_zpub 동형(open 재시도, \"Creating Queryable\" ready 신호). rustfmt가 헬퍼 시그니처 줄분할 적용(run-ci Layer 0 fmt가 잡음→cargo fmt로 수정).",
+        "마일스톤: zenohd(reference router) 경유 wz↔pico 양방향 핵심 평면 완결 — wz가 producer/consumer/responder/requester 전 역할. publish(leg-2)·wz-subscribe(leg-3 R311ou)·wz-queryable(leg-4 R311ow/ox)·liveliness(leg-5 R311oz)·wz-query(leg-6 R311pa). data plane 4종 양방향 cross-impl 실증.",
+        "검증: 신규 leg standalone 20/20 zero-flake([[feedback-no-flaky-ever]]) + Layer Z 6-leg 직렬 6/6(기존 5개 무간섭) + full host run-ci(M+G+Z) RUNCI_EXIT=0(직접 캡처) + fmt/clippy clean.",
+        "남은 carry(다음 rung): (1) wz liveliness-subscribe→pico token(z_liveliness declarer 경유=wz가 liveliness observer로 pico 토큰 관측, leg-5의 대칭). (2) zenohd 잔여 부채 ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]], 외부 zenohd 의존). 상세 [[project-pico-parity-status]] 진입점.",
+        "UNPUSHED 누적: R311ox(queryable interop)+R311oy(CLI 은퇴)+R311oz(liveliness interop)+R311pa(wz-query interop). origin/main=d107686보다 8커밋 앞섬. push 명시 동의 강력 권장([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
