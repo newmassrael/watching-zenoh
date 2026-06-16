@@ -294,3 +294,49 @@ pub fn test_hal_advance_ticks(delta_ms: u64) -> u64 {
 pub fn test_hal_now_ticks() -> u64 {
     TEST_HAL_TICK_MS.load(Ordering::SeqCst)
 }
+
+/// R311of — the loopback TLS config pair: one self-signed `localhost` cert the
+/// server presents and the client trusts (added to a fresh root store). The
+/// SSOT for every wz-runtime-tokio TLS e2e — `tls_e2e`, the scouting
+/// `round3_tls` module, and the `session_reconnect_e2e` `tls_reconnect` module
+/// — which previously copy-pasted this 26-line cert-generation block. Both
+/// configs pin the `ring` crypto provider explicitly so the test does not
+/// depend on a process-default provider being installed. Returns pure rustls
+/// types and touches no wz type, so it carries no wz-runtime-tokio feature;
+/// the `tls-fixtures` gate keeps rustls/rcgen out of the other 6 consumers of
+/// this crate. The caller builds its own `ServerName` for the dial side.
+#[cfg(feature = "tls-fixtures")]
+pub fn loopback_tls_configs() -> (
+    std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
+    std::sync::Arc<tokio_rustls::rustls::ClientConfig>,
+) {
+    use std::sync::Arc;
+    use tokio_rustls::rustls::crypto::ring;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate self-signed localhost cert");
+    let cert_der: CertificateDer<'static> = issued.cert.der().clone();
+    let key_der: PrivateKeyDer<'static> =
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(issued.key_pair.serialize_der()));
+
+    let provider = Arc::new(ring::default_provider());
+
+    let server_config = ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("server default protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der)
+        .expect("server single cert");
+
+    let mut roots = RootCertStore::empty();
+    roots.add(cert_der).expect("trust the self-signed cert");
+    let client_config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("client default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    (Arc::new(server_config), Arc::new(client_config))
+}

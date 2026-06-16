@@ -41,10 +41,11 @@ use std::sync::Arc;
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
 // R311nv — reconnect stays IP-only (`ParsedLocator`): pico's
-// `Z_FEATURE_AUTO_RECONNECT` is a client TCP/UDP re-dial path, and serial is
-// a point-to-point tty without that reopen-task model. The retained locator
-// is wrapped `AnyLocator::Ip` at the (now `AnyLocator`-typed) `dial_locator`
-// call sites.
+// `Z_FEATURE_AUTO_RECONNECT` is a client TCP/UDP/TLS re-dial path (R311oe —
+// TLS is TCP-based, so `Proto::Tls` is an `AnyLocator::Ip` variant too), and
+// serial is a point-to-point tty without that reopen-task model. The retained
+// locator is wrapped `AnyLocator::Ip` at the (now `AnyLocator`-typed)
+// `dial_locator` call sites.
 use wz_session_core::locator::{AnyLocator, ParsedLocator};
 use wz_session_core::reconnect::{ReplayDeclarationsError, SwappableLink};
 use wz_session_core::session_init_params::SessionInitParams;

@@ -37,26 +37,14 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
 
-/// Accept one connection, complete the accept-side handshake, then drive
-/// the steady loop until at least one inbound `Declare` network message is
-/// observed. Returns the live acceptor session (dropping it severs the
-/// link abruptly) plus the Debug rendering of each observed Declare — the
-/// replay assertion compares these across connections, which pins the full
-/// decoded declaration (kind, id, keyexpr) without depending on wire SNs.
-async fn accept_and_collect_declares(listener: &TcpListener) -> (OpenedSession, Vec<String>) {
-    let (stream, _peer) = listener.accept().await.expect("accept");
-    let mut params = fixture_session_init_params();
-    params.zid = vec![0x02; 4]; // distinct zid from the initiator
-    let mut opened = accept_and_open_session(
-        DialedLink::Tcp(stream),
-        params,
-        TokioTime::new(),
-        Some(ITER_CAP),
-        DEFAULT_OPEN_TICK_MS,
-    )
-    .await
-    .expect("acceptor reaches Established");
-
+/// Drive an already-Established acceptor session in single-iteration chunks
+/// until at least one inbound `Declare` network message is observed; return
+/// the Debug rendering of each (the replay assertion compares these across
+/// connections, pinning the full decoded declaration — kind, id, keyexpr —
+/// without depending on wire SNs). Shared by the TCP and TLS accept helpers:
+/// the collect loop is transport-agnostic (it drives the `OpenedSession`, not
+/// the link), so only the accept half (Tcp vs Tls handshake) differs (R311of).
+async fn collect_first_declare(opened: &mut OpenedSession) -> Vec<String> {
     let mut declares = Vec::new();
     // Drive in single-iteration chunks so the helper returns as soon as the
     // Declare lands (a larger chunk would idle out its remaining iterations
@@ -87,6 +75,28 @@ async fn accept_and_collect_declares(listener: &TcpListener) -> (OpenedSession, 
             "peer terminated before its Declare arrived"
         );
     }
+    declares
+}
+
+/// Accept one connection, complete the accept-side handshake, then collect its
+/// first inbound `Declare` ([`collect_first_declare`]). Returns the live
+/// acceptor session (dropping it severs the link abruptly) plus the observed
+/// Declare renderings.
+async fn accept_and_collect_declares(listener: &TcpListener) -> (OpenedSession, Vec<String>) {
+    let (stream, _peer) = listener.accept().await.expect("accept");
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x02; 4]; // distinct zid from the initiator
+    let mut opened = accept_and_open_session(
+        DialedLink::Tcp(stream),
+        params,
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await
+    .expect("acceptor reaches Established");
+
+    let declares = collect_first_declare(&mut opened).await;
     (opened, declares)
 }
 
@@ -289,59 +299,23 @@ mod tls_reconnect {
     use std::sync::Arc;
 
     use tokio::net::TcpListener;
-    use tokio_rustls::rustls::crypto::ring;
-    use tokio_rustls::rustls::pki_types::{
-        CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
-    };
-    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::rustls::ServerConfig;
 
     use wz_runtime_tokio::reconnect::{
         open_session_with_reconnect, ReconnectDriveOutcome, ReconnectPolicy,
     };
     use wz_runtime_tokio::runtime_impl::TokioTime;
-    use wz_runtime_tokio::session_glue::{drive_session_until_terminal, DriverOutcome};
     use wz_runtime_tokio::session_open::{
         accept_and_open_session, DialConfig, DialedLink, OpenedSession, TlsDialConfig,
         DEFAULT_OPEN_TICK_MS,
     };
     use wz_runtime_tokio::tls_pipeline::accept_tls;
-    use wz_runtime_tokio_test_support::fixture_session_init_params;
-    use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_tls_configs};
     use wz_session_core::locator::parse_locator;
-    use wz_session_core::network_message::NetworkMessage;
     use wz_session_core::session_timeouts::SessionTimeouts;
 
     const ITER_CAP: usize = 4096;
-
-    /// Build the (ServerConfig, ClientConfig) pair sharing one self-signed
-    /// `localhost` cert (mirror of `tls_e2e::loopback_tls_configs`, kept
-    /// module-local — integration-test files are separate compilation units).
-    fn loopback_tls_configs() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
-        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("generate self-signed localhost cert");
-        let cert_der: CertificateDer<'static> = issued.cert.der().clone();
-        let key_der: PrivateKeyDer<'static> =
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(issued.key_pair.serialize_der()));
-
-        let provider = Arc::new(ring::default_provider());
-
-        let server_config = ServerConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .expect("server default protocol versions")
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der.clone()], key_der)
-            .expect("server single cert");
-
-        let mut roots = RootCertStore::empty();
-        roots.add(cert_der).expect("trust the self-signed cert");
-        let client_config = ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("client default protocol versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-
-        (Arc::new(server_config), Arc::new(client_config))
-    }
 
     /// Accept one connection, run the rustls SERVER handshake, complete the
     /// accept-side session handshake, then drive until at least one inbound
@@ -368,34 +342,7 @@ mod tls_reconnect {
         .await
         .expect("acceptor reaches Established over tls");
 
-        let mut declares = Vec::new();
-        while declares.is_empty() {
-            let outcome = drive_session_until_terminal(
-                &mut opened.inbound,
-                &opened.actions,
-                &mut opened.engine,
-                Some(1),
-                &opened.clock,
-                &SessionTimeouts::spec_defaults(),
-                |event| {
-                    if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-                        messages, ..
-                    }) = event
-                    {
-                        for message in messages {
-                            if matches!(message, NetworkMessage::Declare(_)) {
-                                declares.push(format!("{message:?}"));
-                            }
-                        }
-                    }
-                },
-            )
-            .await;
-            assert!(
-                !matches!(outcome, DriverOutcome::Terminated),
-                "peer terminated before its Declare arrived"
-            );
-        }
+        let declares = super::collect_first_declare(&mut opened).await;
         (opened, declares)
     }
 

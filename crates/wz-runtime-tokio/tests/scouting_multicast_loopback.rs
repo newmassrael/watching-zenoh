@@ -309,15 +309,10 @@ mod round2 {
 #[cfg(all(feature = "transport-link-tls", feature = "transport-unicast"))]
 mod round3_tls {
     use std::net::Ipv4Addr;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use tokio::net::{TcpListener, UdpSocket};
-    use tokio_rustls::rustls::crypto::ring;
-    use tokio_rustls::rustls::pki_types::{
-        CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
-    };
-    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+    use tokio_rustls::rustls::pki_types::ServerName;
 
     use wz_runtime_tokio::runtime_impl::TokioTime;
     use wz_runtime_tokio::scouting_glue::{
@@ -329,7 +324,7 @@ mod round3_tls {
     };
     use wz_runtime_tokio::tls_pipeline::accept_tls;
     use wz_runtime_tokio::UdpDriver;
-    use wz_runtime_tokio_test_support::fixture_session_init_params;
+    use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_tls_configs};
     use wz_session_core::scout_params::ScoutParams;
 
     // Distinct group port from the discovery-only test (7446) and round2
@@ -339,41 +334,6 @@ mod round3_tls {
     const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
     const PORT: u16 = 7449;
     const ITER_CAP: usize = 4096;
-
-    /// Build the (ServerConfig, ClientConfig) pair sharing one self-signed
-    /// `localhost` cert: the server presents it, the client trusts exactly it.
-    /// Both pin the `ring` provider so no process-default install is needed.
-    /// Mirror of `tests/tls_e2e.rs::loopback_tls_configs` — kept module-local
-    /// (the same per-binary fixture duplication this file already uses for
-    /// `craft_hello_datagram`) since integration-test files are separate
-    /// compilation units and the TLS cert deps (`rcgen` / `tokio-rustls`)
-    /// would otherwise have to migrate into the shared support crate.
-    fn loopback_tls_configs() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
-        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("generate self-signed localhost cert");
-        let cert_der: CertificateDer<'static> = issued.cert.der().clone();
-        let key_der: PrivateKeyDer<'static> =
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(issued.key_pair.serialize_der()));
-
-        let provider = Arc::new(ring::default_provider());
-
-        let server_config = ServerConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .expect("server default protocol versions")
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der.clone()], key_der)
-            .expect("server single cert");
-
-        let mut roots = RootCertStore::empty();
-        roots.add(cert_der).expect("trust the self-signed cert");
-        let client_config = ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("client default protocol versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-
-        (Arc::new(server_config), Arc::new(client_config))
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]

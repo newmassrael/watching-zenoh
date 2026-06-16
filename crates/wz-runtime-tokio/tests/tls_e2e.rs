@@ -36,11 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio_rustls::rustls::crypto::ring;
-use tokio_rustls::rustls::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
-};
-use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
+use tokio_rustls::rustls::pki_types::ServerName;
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -52,42 +48,12 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::tls_pipeline::accept_tls;
-use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_tls_configs};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
 const KEYEXPR: &str = "demo/tls";
-
-/// Build the (ServerConfig, ClientConfig) pair sharing one self-signed
-/// `localhost` cert: the server presents it, the client trusts exactly it.
-/// Both pin the `ring` provider so no process-default install is needed.
-fn loopback_tls_configs() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
-    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-        .expect("generate self-signed localhost cert");
-    let cert_der: CertificateDer<'static> = issued.cert.der().clone();
-    let key_der: PrivateKeyDer<'static> =
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(issued.key_pair.serialize_der()));
-
-    let provider = Arc::new(ring::default_provider());
-
-    let server_config = ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .expect("server default protocol versions")
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der.clone()], key_der)
-        .expect("server single cert");
-
-    let mut roots = RootCertStore::empty();
-    roots.add(cert_der).expect("trust the self-signed cert");
-    let client_config = ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("client default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-
-    (Arc::new(server_config), Arc::new(client_config))
-}
 
 /// Two wz nodes handshake over TLS, reach Established, and a `Put` published on
 /// the initiator is delivered byte-exact to a subscriber on the acceptor.

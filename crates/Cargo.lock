@@ -2124,7 +2124,9 @@ dependencies = [
 name = "wz-runtime-tokio-test-support"
 version = "0.1.0"
 dependencies = [
+ "rcgen",
  "sce-rust-runtime",
+ "tokio-rustls",
  "wz-runtime-tokio",
 ]
 

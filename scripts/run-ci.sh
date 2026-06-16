@@ -2753,6 +2753,12 @@ layer_m_scouting_multicast() {
     # discovery-only test are unaffected — tls is purely additive.
     (cd crates && cargo test -p wz-runtime-tokio --features scouting-active,transport-link-tls \
         --test scouting_multicast_loopback -- --ignored --quiet) || return 1
+    # R311of — clippy-gate the scouting-active + transport-link-tls combo so the
+    # round3_tls module (and round2) get clippy coverage, not only the rustc-deny
+    # the test build above already applies (mirrors the C1u/C1v all-targets
+    # clippy shape). This is the one lane that builds this feature combination.
+    (cd crates && cargo clippy -p wz-runtime-tokio --all-targets \
+        --features scouting-active,transport-link-tls --quiet -- -D warnings) || return 1
     (cd crates && cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation \
         --test multicast_pubsub_loopback -- --ignored --quiet) || return 1

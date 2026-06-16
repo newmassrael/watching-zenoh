@@ -793,7 +793,9 @@ rcgen = "0.13"
 # Cargo feature; the sibling-crate model is a stronger encapsulation
 # contract because a downstream consumer cannot enable the feature
 # transitively to import the fixtures.
-wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
+    "tls-fixtures",
+] }
 # R311gi gc-2c — the EngineInjector bridge, used by the switchboard
 # integration test (tests/switchboard_inject.rs) to wrap a real
 # Engine<SessionFsmUnicastPolicy> as the EventInjector port. Dev-only: the

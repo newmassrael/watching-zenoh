@@ -69,6 +69,25 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "keyexpr-canon",
 ] }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+# R311of — the loopback TLS cert fixture (loopback_tls_configs) is the SSOT
+# for the three wz-runtime-tokio TLS e2e tests (tls_e2e, scouting round3_tls,
+# session_reconnect_e2e tls_reconnect); the 26-line cert-generation block was
+# copy-pasted into all three before this round. Behind `tls-fixtures` so ONLY
+# the TLS consumer pulls rustls + rcgen (this crate is dev-dep'd by 6 other
+# crates that must not). These are pure third-party crates, not wz features,
+# so they leak no wz-runtime-tokio feature into any crate-under-test (the
+# R311fr default-features=false contract is untouched).
+rcgen = { version = "0.13", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+], optional = true }
+
+[features]
+# Pulls the rustls-based loopback cert fixture; enabled by wz-runtime-tokio's
+# dev-dep so its TLS e2e tests share one cert-generation SSOT.
+tls-fixtures = ["dep:rcgen", "dep:tokio-rustls"]
 
 [lints]
 workspace = true
