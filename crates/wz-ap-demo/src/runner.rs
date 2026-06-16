@@ -22,8 +22,10 @@
 //     declare_* API).
 //   * `activate_role` — FSM role-start event dispatch
 //     (`InboundStart` vs `OutboundStart` + `LinkOpened`).
-//   * `spawn_background_tasks` — declare / query / publisher task
-//     spawn + the optional `LivelinessToken` oneshot return path.
+//   * `spawn_background_tasks` — query / publisher / liveliness-get
+//     task spawn (R311ot: declares + the LivelinessToken are emitted
+//     synchronously pre-drive in `run_demo`, not via a background task
+//     + oneshot).
 //
 // Behaviour is identical to the pre-R287 inlined version. The
 // teardown sequence after drive_session ends (sweep abort ->
@@ -81,8 +83,16 @@ use crate::args::{
     ReplyConsumerSpec, Role,
 };
 use crate::shutdown::shutdown_signal;
-use crate::tasks::{declare_task, liveliness_get_task, publisher_task, query_task, QUERY_RID};
+use crate::tasks::{liveliness_get_task, publisher_task, query_task, QUERY_RID};
 use crate::teardown;
+
+// R311ot — outbound DECLARE ids for the `--declare-subscriber` / `--declare-queryable`
+// e2e (hard-coded so `wz_remote_declare_round_trip` can assert the exact echoed
+// ids). Moved here from `tasks.rs` with the declare-emit logic when the
+// background `declare_task` was retired in favour of synchronous pre-drive
+// declaration in `run_demo`.
+const DECLARE_SUBSCRIBER_ID: u64 = 1001;
+const DECLARE_QUERYABLE_ID: u64 = 2001;
 
 /// RAII keepers for the local Session-level declarations
 /// ([`Subscriber`], [`LivelinessSubscriber`], [`Queryable`]). Held
@@ -98,17 +108,17 @@ struct SessionHandles {
     _queryable: Option<Queryable>,
 }
 
-/// Background-task handles + the optional [`LivelinessToken`] return
-/// channel produced by [`spawn_background_tasks`]. `run_demo`
-/// collects these to drive teardown: each task gets a 200ms
-/// timeout-join window after drive_session ends, then the
-/// LivelinessToken (if any) is received from `token_rx` and dropped
-/// (RAII; emits `Declare(UndeclToken)` on the wire).
+/// Background-task handles produced by [`spawn_background_tasks`].
+/// `run_demo` collects these for teardown: each task gets a 200ms
+/// timeout-join window after drive_session ends. (R311ot — the
+/// LivelinessToken is no longer returned here; it is declared
+/// synchronously pre-drive in `run_demo` and threaded directly into
+/// the teardown chain, so its RAII Drop still emits
+/// `Declare(UndeclToken)` ahead of Close.)
 struct SpawnedTasks {
     publisher_handle: Option<TokioJoinHandle<()>>,
     query_handle: Option<TokioJoinHandle<()>>,
     liveliness_get_handle: Option<TokioJoinHandle<()>>,
-    declare_handle: Option<TokioJoinHandle<()>>,
 }
 
 /// Step 1 — TCP setup. Acceptor binds + accepts; Initiator dials.
@@ -415,7 +425,6 @@ fn spawn_background_tasks(
     publisher_spec: Option<(String, PushOperation, Option<u64>)>,
     query_spec: Option<String>,
     liveliness_get_spec: Option<String>,
-    declare_spec: DeclareEmitSpec,
     session_clock: TokioTime,
 ) -> SpawnedTasks {
     let publisher_handle = publisher_spec.map(|(keyexpr, operation, declare_id)| {
@@ -439,27 +448,13 @@ fn spawn_background_tasks(
         TokioRuntime.spawn(liveliness_get_task(session_for_get, keyexpr, session_clock))
     });
 
-    // R311os — the liveliness token is declared synchronously pre-drive in
-    // `run_demo` (ordering-race fix), so declare_task no longer handles it; this
-    // task is spawned only for the subscriber / queryable outbound declares.
-    let has_declares =
-        declare_spec.subscriber_keyexpr.is_some() || declare_spec.queryable_keyexpr.is_some();
-    let declare_handle = if has_declares {
-        let session_for_declare = session.clone();
-        Some(TokioRuntime.spawn(declare_task(
-            session_for_declare,
-            declare_spec,
-            session_clock,
-        )))
-    } else {
-        None
-    };
-
+    // R311ot — no declare_task: all outbound declares (subscriber / queryable /
+    // token) are emitted synchronously pre-drive in `run_demo`, so there is no
+    // longer a background declare task to spawn.
     SpawnedTasks {
         publisher_handle,
         query_handle,
         liveliness_get_handle,
-        declare_handle,
     }
 }
 
@@ -597,16 +592,47 @@ pub(crate) async fn run_demo(
         queryable_spec,
     );
 
-    // R311os — declare the liveliness token SYNCHRONOUSLY in this pre-drive
-    // registration phase, BEFORE `drive_session_until_terminal` serves any
-    // inbound frame. The acceptor's LocalTokenRegistry is then populated before
-    // a peer's CURRENT liveliness-get Interest can be processed, so the snapshot
-    // reply always contains the token. Declaring it in the Established-gated
-    // background `declare_task` instead (pre-R311os) raced the drive loop: an
-    // Interest dispatched before the task's `declare_token` ran got an empty
-    // CURRENT reply — the `wz_liveliness_get_round_trip` flake. The handle is
-    // held to teardown; its RAII Drop emits `Declare(UndeclToken)`, ordered
-    // ahead of Close by the teardown typestate chain (R284).
+    // R311ot — declare ALL outbound state (subscriber -> queryable -> token)
+    // SYNCHRONOUSLY in this pre-drive registration phase, BEFORE
+    // `drive_session_until_terminal` serves any inbound frame. This applies the
+    // R249 register-before-serve rule CONSISTENTLY to every declared kind (not
+    // just the token, as R311os did). It (a) closes the
+    // `wz_liveliness_get_round_trip` ordering race by construction — a peer's
+    // CURRENT liveliness-get always finds the token in the LocalTokenRegistry —
+    // and (b) retires the background `declare_task` entirely: the session is
+    // already Established here, so the task's Established-poll was vestigial and
+    // its `DECLARE_INTER_EMIT_MS` inter-emit sleeps were a timing smell.
+    // Synchronous emission also gives the peer a deterministic declare order.
+    // The token's RAII `LivelinessToken` is held to teardown (its Drop emits
+    // `Declare(UndeclToken)`, ordered ahead of Close by the teardown chain).
+    if let Some(keyexpr) = declare_spec.subscriber_keyexpr.as_deref() {
+        match actions.send_declare_subscriber(
+            DECLARE_SUBSCRIBER_ID,
+            /*mapping_id=*/ 0,
+            Some(keyexpr),
+        ) {
+            Ok(()) => log::info!(
+                "wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'"
+            ),
+            Err(e) => {
+                log::warn!("wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}")
+            }
+        }
+    }
+    if let Some(keyexpr) = declare_spec.queryable_keyexpr.as_deref() {
+        match actions.send_declare_queryable(
+            DECLARE_QUERYABLE_ID,
+            /*mapping_id=*/ 0,
+            Some(keyexpr),
+        ) {
+            Ok(()) => log::info!(
+                "wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'"
+            ),
+            Err(e) => {
+                log::warn!("wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}")
+            }
+        }
+    }
     let token: Option<LivelinessToken> = match declare_spec.token_keyexpr.as_deref() {
         Some(keyexpr) => {
             match session.declare_token(keyexpr.to_string(), LivelinessOptions::default()) {
@@ -630,14 +656,12 @@ pub(crate) async fn run_demo(
         publisher_handle,
         query_handle,
         liveliness_get_handle,
-        declare_handle,
     } = spawn_background_tasks(
         &session,
         &actions,
         publisher_spec,
         query_spec,
         liveliness_get_spec,
-        declare_spec,
         session_clock,
     );
 
@@ -821,7 +845,6 @@ pub(crate) async fn run_demo(
         publisher_handle,
         query_handle,
         liveliness_get_handle,
-        declare_handle,
         token,
         actions,
         writer_handle,

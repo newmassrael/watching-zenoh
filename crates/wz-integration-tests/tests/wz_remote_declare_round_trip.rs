@@ -144,14 +144,13 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         Duration::from_secs(5),
     );
 
-    // R311os — wait for ALL THREE REMOTE * DECLARED lines (order-independent)
-    // BEFORE the SIGTERM below, so the terminate cannot race a not-yet-declared
-    // arm. Pre-R311os declare_task emitted subscriber → queryable → token in
-    // order, so a single wait on the token (last) gated the terminate; now the
-    // token is declared synchronously pre-drive (run_demo) AHEAD of the
-    // subscriber/queryable, so the token is no longer last. Each wait rescans
-    // the full accumulated capture; a missing arm is reported precisely by the
-    // assertions below (with both captures).
+    // Wait for ALL THREE REMOTE * DECLARED lines (order-independent) BEFORE the
+    // SIGTERM below, so the terminate cannot race a not-yet-arrived arm. R311ot:
+    // all three outbound declares now emit synchronously pre-drive in run_demo
+    // (subscriber → queryable → token), so they arrive in a deterministic order;
+    // this wait stays order-independent on principle (it asserts presence, not
+    // sequence). Each wait rescans the full accumulated capture; a missing arm
+    // is reported precisely by the assertions below (with both captures).
     for decl in [
         "REMOTE SUBSCRIBER DECLARED",
         "REMOTE QUERYABLE DECLARED",

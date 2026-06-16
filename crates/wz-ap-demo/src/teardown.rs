@@ -57,7 +57,6 @@ pub(crate) struct TeardownInitial {
     pub publisher_handle: Option<TokioJoinHandle<()>>,
     pub query_handle: Option<TokioJoinHandle<()>>,
     pub liveliness_get_handle: Option<TokioJoinHandle<()>>,
-    pub declare_handle: Option<TokioJoinHandle<()>>,
     /// R311os — the LivelinessToken is now declared SYNCHRONOUSLY pre-drive
     /// (`run_demo`), so it is owned here directly rather than received from a
     /// `declare_task` oneshot. `None` when no `--declare-token` was requested.
@@ -101,9 +100,6 @@ impl TeardownInitial {
             let _ = self.clock.timeout(200, h).await;
         }
         if let Some(h) = self.liveliness_get_handle {
-            let _ = self.clock.timeout(200, h).await;
-        }
-        if let Some(h) = self.declare_handle {
             let _ = self.clock.timeout(200, h).await;
         }
         TasksJoined {

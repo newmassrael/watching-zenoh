@@ -5,14 +5,13 @@
 //
 // R286 — extracted from `main.rs` as part of Phase 2 module
 // decomposition (the R281 carry). Pure code-move, no behaviour
-// change. Holds the three async tasks the demo spawns once the
+// change. Holds the async emit tasks the demo spawns once the
 // session FSM has handshake-completed:
 //
-//   * `declare_task` — emits the `--declare-subscriber/queryable/
-//     token` keyexprs once each, in deterministic order; hands the
-//     RAII [`LivelinessToken`] back to `run_demo` via a oneshot so
-//     `Drop` lands at run_demo scope (graceful UndeclToken on
-//     teardown);
+//   * (R311ot — the former `declare_task` was retired: all outbound
+//     declares now emit SYNCHRONOUSLY pre-drive in `run_demo` so the
+//     R249 register-before-serve rule applies to every declared kind
+//     and no background declare task is spawned);
 //   * `query_task` — single-shot `Request(Query)` emit on the
 //     `--query` keyexpr;
 //   * `publisher_task` — multi-copy burst emit for `--publish` /
@@ -36,7 +35,7 @@ use wz::runtime_tokio::session::{
 use wz::runtime_tokio::session_glue::SessionLinkActions;
 use wz::runtime_tokio::Reliability;
 
-use crate::args::{DeclareEmitSpec, PushOperation};
+use crate::args::PushOperation;
 
 /// R121e — publisher task body. Waits for the session FSM to
 /// reach the Established state (signalled by
@@ -94,139 +93,6 @@ const QUERY_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 /// sourced here means a future round that changes the rid (e.g. to
 /// a per-process counter) lands one edit and both sides follow.
 pub(crate) const QUERY_RID: u64 = 1;
-
-/// R121k-5 — declare emit task. Bundles the three optional
-/// `--declare-*` keyexprs into one Established-gated batch so the
-/// peer sees Sub/Queryable/Token declares in deterministic order
-/// (subscriber → queryable → token). Each declare goes on the
-/// reliable channel — zenoh-pico's `_z_session_recv_declaration`
-/// requires the declare to land before any dependent message that
-/// would alias the declared id.
-///
-/// Hard-coded ids:
-///   subscriber  = 1001
-///   queryable   = 2001
-///   token       = auto-allocated by SessionLinkActions::alloc_next_token_id
-///                 (first call returns 0; R277 migration to LivelinessToken)
-/// Ids are picked per-kind so a wire-capture or integration test can
-/// distinguish at a glance which kind a given declare body belongs
-/// to. Production deployments would source sub / queryable ids from a
-/// per-session counter (the wz-ap-demo binary is intentionally minimal
-/// here for those arms); token already routes through the
-/// per-session counter via Session::declare_token at R277.
-const DECLARE_SUBSCRIBER_ID: u64 = 1001;
-const DECLARE_QUERYABLE_ID: u64 = 2001;
-// R277 — DECLARE_TOKEN_ID retired. The token branch routes through
-// `Session::declare_token` (RAII LivelinessToken handle) which
-// allocates ids via `SessionLinkActions::alloc_next_token_id`. The
-// first auto-allocated id in this demo is 0 (the per-session
-// counter starts at 0 and uses `fetch_add(1, Relaxed)`).
-const DECLARE_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
-const DECLARE_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
-const DECLARE_INTER_EMIT_MS: u64 = 100;
-
-/// R253 — first leaf caller migration: this function previously
-/// reached for `tokio::time::sleep` directly; the three sleep sites
-/// now go through the [`TimeSource`] trait (concrete impl supplied
-/// by the caller, currently
-/// [`wz::runtime_tokio::runtime_impl::TokioTime`] but swappable for
-/// an MCU profile's TimeSource without touching this function body).
-/// The `T: TimeSource + Send + 'static` generic parameter is
-/// monomorphised at the `tokio::spawn(declare_task(.., TokioTime::new()))`
-/// call site in `run_demo`.
-///
-/// R255 — deadline math is now u64-ms based (option (b) from the
-/// R254 carry): `deadline_ms = clock.now_monotonic_ms() +
-/// TIMEOUT_MS`; each loop iteration compares the current monotonic
-/// reading against the deadline. MCU-friendlier than the prior
-/// `std::time::Instant::now() + Duration::from_millis(MS)` pattern
-/// because no_std targets have no `Instant` type. The trait surface
-/// stays unchanged — same `now_monotonic_ms()` everyone already had.
-///
-/// R277/R311os — takes [`Session`] (not `Arc<SessionLinkActions>`) so the
-/// declare arms can route through the session API. The subscriber / queryable
-/// arms route through `session.actions()` (no `Session`-level handle API for
-/// them yet — R245/R246 covered same-process callback wiring only; the
-/// declare-time wire emit still goes through `SessionLinkActions`).
-///
-/// R311os — the liveliness TOKEN arm was LIFTED OUT of this background task
-/// into `run_demo`'s synchronous pre-drive phase, so the token is registered
-/// before the drive loop serves any inbound CURRENT liveliness-get Interest
-/// (ordering-race fix). Its RAII `LivelinessToken` handle is held to teardown
-/// by `run_demo` and dropped — emitting `Declare(UndeclToken)` — by the
-/// teardown typestate chain, ordered ahead of Close (R284). The integration
-/// tests `wz_remote_declare_round_trip_against_wz_initiator` (graceful
-/// UndeclToken) and `wz_liveliness_get_round_trip_against_wz_acceptor`
-/// (CURRENT-get snapshot) cover the two halves.
-pub(crate) async fn declare_task<T>(session: TokioSession, spec: DeclareEmitSpec, clock: T)
-where
-    T: TimeSource + Send + 'static,
-{
-    // R311nf — `session` is now `TokioSession` (= `Session<_,_,Unicast>`),
-    // so `actions()` is infallible: the type system statically guarantees
-    // the unicast action bundle exists.
-    let actions = session.actions();
-    let deadline_ms = clock.now_monotonic_ms() + DECLARE_HANDSHAKE_TIMEOUT_MS;
-    loop {
-        if actions.is_established() {
-            break;
-        }
-        if clock.now_monotonic_ms() >= deadline_ms {
-            log::warn!(
-                "wz-ap-demo: declare_task gave up waiting for Established \
-                 after {DECLARE_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
-                 never fired)"
-            );
-            return;
-        }
-        clock.sleep(DECLARE_HANDSHAKE_POLL_INTERVAL_MS).await;
-    }
-    if let Some(keyexpr) = spec.subscriber_keyexpr.as_deref() {
-        // R300 — the outbound DECLARE gate rejects malformed or
-        // pico-SIGABRT-prone keyexprs pre-emit. The demo treats
-        // a rejected user-supplied keyexpr as a CLI input error:
-        // log + bail this task, do not panic.
-        // R307.5 — drop the duplicate `eprintln!` on the error path
-        // (already covered by `log::warn!` above) and route the
-        // success line through `log::info!` so all writes share the
-        // env_logger lock and never byte-interleave with another
-        // concurrent log record. The integration tests' substring
-        // search continues to match because env_logger renders the
-        // record as `[<ts> WARN/INFO <module>] <message>` and
-        // `<message>` carries the exact pre-R307.5 line verbatim.
-        if let Err(e) = actions.send_declare_subscriber(
-            DECLARE_SUBSCRIBER_ID,
-            /*mapping_id=*/ 0,
-            Some(keyexpr),
-        ) {
-            log::warn!("wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}");
-            return;
-        }
-        log::info!(
-            "wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'"
-        );
-        clock.sleep(DECLARE_INTER_EMIT_MS).await;
-    }
-    if let Some(keyexpr) = spec.queryable_keyexpr.as_deref() {
-        if let Err(e) = actions.send_declare_queryable(
-            DECLARE_QUERYABLE_ID,
-            /*mapping_id=*/ 0,
-            Some(keyexpr),
-        ) {
-            log::warn!("wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}");
-            return;
-        }
-        log::info!("wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'");
-        clock.sleep(DECLARE_INTER_EMIT_MS).await;
-    }
-    // R311os — the liveliness TOKEN is no longer declared here. It is declared
-    // SYNCHRONOUSLY pre-drive in `run_demo` so the acceptor's LocalTokenRegistry
-    // is populated before the drive loop serves any inbound CURRENT
-    // liveliness-get Interest (the `wz_liveliness_get_round_trip` ordering-race
-    // fix). This task keeps the subscriber / queryable outbound declares, which
-    // are fire-and-forget to the peer's remote registries and carry no such
-    // inbound-snapshot race.
-}
 
 /// R254 — `clock: T` generic + 1 sleep site migrated to
 /// [`TimeSource::sleep`], continuing the R253 leaf-first cadence.
@@ -411,7 +277,7 @@ pub(crate) async fn publisher_task<T>(
     //           resolves the loopback literal without the caller
     //           restating it.
     if let Some(mapping_id) = declare_id {
-        // R300 — see declare_task above for the gate rationale.
+        // R300 — the outbound DECLARE gate (cf. run_demo's pre-drive declares).
         // R307.5 — drop the duplicate `eprintln!` on the error path
         // (already covered by `log::warn!`) and route the success
         // line through `log::info!` so all stderr writes share the
