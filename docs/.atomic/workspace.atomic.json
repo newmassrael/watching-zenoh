@@ -38398,6 +38398,56 @@
         "UNPUSHED: R311ol(2 commit)+R311om(2 commit) = origin/main=4b6fa6d 위 4 commit. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
       ]
     },
+    "Round 311on": {
+      "decision_summary": "R311on: dup-fragment finding 조사 결론(repo 무변경 진단). duplicate fragment가 SN-consecutive한 다음 메시지를 오염시키는 wz 버그 확정 — pico divergence(pico rx.c:225 M=0 무조건 finalize, wz Empty transition은 more 무시). 수정 R311oo 계획.",
+      "changes_bullets": [
+        "조사 결론(repo 무변경 진단 라운드, R311ok Task1/2 선례 동형; R311om OPEN finding 가설을 확정으로 격상): duplicate fragment가 자기 메시지뿐 아니라 SN-consecutive한 다음 메시지를 오염시킴. 3중 확정 — 코드추적 + pico 소스 대조 + Router 단위 재현(재현 테스트는 사용자 규칙대로 생성후 삭제).",
+        "메커니즘: 링크가 중간 fragment 중복 전달(F1,F2,F2dup,F3[more=0] 이어서 다음 메시지 P2). F2dup가 frame게이트 precedes(s+1,s+1)=dist0 reject→RxSnRejected→abort_channel이 P1 chain clear(sn.rs:163 admit, drive.rs:410). F3(more=0)가 frame게이트 통과 후 ingest_chain_start로 Begun=stuck orphan(reassembly_dispatch.rs:425-433; first_fragment_more_zero_does_not_complete 테스트가 이 동작 문서화), last_sn=s+2. P2F1(s+3)이 find_active로 orphan 발견→consecutive(s+2,s+3) CONTINUE→P2 payload를 F3꼬리 뒤에 append→Complete deliver [F3꼬리 ++ P2전체].",
+        "pico divergence 확정: pico _z_unicast_handle_fragment_inner(~/zenoh-pico rx.c:225) if(!M){decode}=M=0 fragment를 dbuf-first 여부 무관하게 무조건 즉시 finalize/decode. dup-clear 후 lone M=0는 단독 디코드 시도(garbage 실패)→drop→채널 clean→P2 fresh=merge 불가. wz reassembly_slot.scxml:89-92 Empty transition이 more 무시하고 무조건 begin_chain→Receiving(\"chain의 first fragment는 항상 M=1\" 가정에 의존; 주석 86-88). dup/loss가 그 가정을 깨고 pico는 그 가정 없음.",
+        "empirical: Router 단위 재현(orphan M=0 + consecutive 다음 메시지) → actual [80,49,84,65,73,76,80,50,97,80,50,98]=\"P1TAILP2aP2b\"(오염) vs expected \"P2aP2b\". 재현 후 삭제.",
+        "심각도: correctness + 메시지 무결성. lossy/reorder 링크 자연발생 또는 악의적 peer가 fragment 의도적 중복으로 피해자의 다음 메시지 오염. best-effort 손실은 허용이나 메시지간 내용 누수(merge)는 손실보다 나쁜 결함."
+      ],
+      "verification_bullets": [
+        "코드추적 검증: sn.rs:163 RxSn::admit(reject시 slot baseline 불변/admit시 Some(sn) advance), drive.rs:140-191 admit_rx_frame_sn(forward-gap admit + RxSnRejected→report_outcome_reassembling abort_channel), reassembly_dispatch.rs:402-477 ingest_chain_start(Empty transition more 무시)+ingest_continuation(consecutive append/complete), sn.rs:51-65 precedes dist∈(0,half] / consecutive dist==1.",
+        "pico 소스 직접 read(read-only reference, ~/zenoh-pico/src/transport/unicast/rx.c:145-265 _z_unicast_handle_fragment_inner): rx.c:225 if(!M) 무조건 finalize+decode; rx.c:198 markers-on시 \"First fragment received without the start marker\" drop(추가 가드); markers-off(wz 레짐)서도 M=0 즉시 decode가 merge 방지.",
+        "empirical 재현: ReassemblyDispatcher 단위 테스트(orphan M=0 frag 후 consecutive한 다음 메시지 2-frag) → 병합된 \"P1TAILP2aP2b\" 출력 확인(temp test 생성후 삭제, 사용자 규칙). 기존 reassembly_dispatch 13 테스트 무영향.",
+        "atomic: ledger entries 747->748, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(진단 라운드=repo 무변경)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311on = dup-fragment 버그 확정 진단(R311om OPEN finding 격상, repo 무변경; R311ok Task1/2 진단 선례 동형). 다음 세션 = 수정 R311oo.",
+        "수정 R311oo 계획(pico parity 정렬 = M=0 항상 finalize): ①sources/network/reassembly_slot.scxml Empty transition을 more로 분기 — more!==0→Receiving(begin_chain), more===0→Complete(begin_chain+finalize_message); 주석 86-88 \"unconditionally a chain start\" 가정 정정; SCE regen. ②reassembly_dispatch.rs ingest_chain_start: step 후 get_current_state()==Complete면 deliver(&buf)+release+IngestOutcome::Reassembled 반환(현재 무조건 Begun); 주석 425-428 정정. ③회귀 테스트: orphan 미merge 단위(reassembly_dispatch tests) + dup-fragment e2e(udp_chaos_e2e; ChaosReadDriver에 duplicate_nth_matching=hold+reemit 추가, drop처럼 채널 복구 검증).",
+        "효과 예측: lone M=0 first가 즉시 complete→deliver→상위 reassembled_frame_outcome→parse_frame_payload가 garbage 디코드 실패→drop(pico와 동일)→채널 clean. happy-path(정상 multi-frag, first는 항상 M=1)는 Receiving 경로 유지=무영향. 변경 영향은 M=0-first edge만. **first_fragment_more_zero_does_not_complete 테스트는 새 동작(즉시 complete)으로 갱신 필요**(현재 Begun stuck 단언이 버그 동작을 고정 중).",
+        "P3.10 chaos 트랙: drop-recovery(R311ol+om) DONE, dup는 버그 발견→R311oo 수정. 이후 reorder/latency/동시세션 stress(전부 외부의존無). cross-impl은 외부의존 잔존.",
+        "PUSHED: R311ol+om+on 전부 origin/main 도달(이 턴 push). NEXT=R311oo 수정. 상세 [[project-pico-parity-status]] P3.10."
+      ],
+      "publishable_decision_summary": "R311on: dup-fragment finding 조사 결론(repo 무변경 진단). duplicate fragment가 SN-consecutive한 다음 메시지를 오염시키는 wz 버그 확정 — pico divergence(pico rx.c:225 M=0 무조건 finalize, wz Empty transition은 more 무시). 수정 R311oo 계획.",
+      "publishable_changes_bullets": [
+        "조사 결론(repo 무변경 진단 라운드, R311ok Task1/2 선례 동형; R311om OPEN finding 가설을 확정으로 격상): duplicate fragment가 자기 메시지뿐 아니라 SN-consecutive한 다음 메시지를 오염시킴. 3중 확정 — 코드추적 + pico 소스 대조 + Router 단위 재현(재현 테스트는 사용자 규칙대로 생성후 삭제).",
+        "메커니즘: 링크가 중간 fragment 중복 전달(F1,F2,F2dup,F3[more=0] 이어서 다음 메시지 P2). F2dup가 frame게이트 precedes(s+1,s+1)=dist0 reject→RxSnRejected→abort_channel이 P1 chain clear(sn.rs:163 admit, drive.rs:410). F3(more=0)가 frame게이트 통과 후 ingest_chain_start로 Begun=stuck orphan(reassembly_dispatch.rs:425-433; first_fragment_more_zero_does_not_complete 테스트가 이 동작 문서화), last_sn=s+2. P2F1(s+3)이 find_active로 orphan 발견→consecutive(s+2,s+3) CONTINUE→P2 payload를 F3꼬리 뒤에 append→Complete deliver [F3꼬리 ++ P2전체].",
+        "pico divergence 확정: pico _z_unicast_handle_fragment_inner(~/zenoh-pico rx.c:225) if(!M){decode}=M=0 fragment를 dbuf-first 여부 무관하게 무조건 즉시 finalize/decode. dup-clear 후 lone M=0는 단독 디코드 시도(garbage 실패)→drop→채널 clean→P2 fresh=merge 불가. wz reassembly_slot.scxml:89-92 Empty transition이 more 무시하고 무조건 begin_chain→Receiving(\"chain의 first fragment는 항상 M=1\" 가정에 의존; 주석 86-88). dup/loss가 그 가정을 깨고 pico는 그 가정 없음.",
+        "empirical: Router 단위 재현(orphan M=0 + consecutive 다음 메시지) → actual [80,49,84,65,73,76,80,50,97,80,50,98]=\"P1TAILP2aP2b\"(오염) vs expected \"P2aP2b\". 재현 후 삭제.",
+        "심각도: correctness + 메시지 무결성. lossy/reorder 링크 자연발생 또는 악의적 peer가 fragment 의도적 중복으로 피해자의 다음 메시지 오염. best-effort 손실은 허용이나 메시지간 내용 누수(merge)는 손실보다 나쁜 결함."
+      ],
+      "publishable_verification_bullets": [
+        "코드추적 검증: sn.rs:163 RxSn::admit(reject시 slot baseline 불변/admit시 Some(sn) advance), drive.rs:140-191 admit_rx_frame_sn(forward-gap admit + RxSnRejected→report_outcome_reassembling abort_channel), reassembly_dispatch.rs:402-477 ingest_chain_start(Empty transition more 무시)+ingest_continuation(consecutive append/complete), sn.rs:51-65 precedes dist∈(0,half] / consecutive dist==1.",
+        "pico 소스 직접 read(read-only reference, ~/zenoh-pico/src/transport/unicast/rx.c:145-265 _z_unicast_handle_fragment_inner): rx.c:225 if(!M) 무조건 finalize+decode; rx.c:198 markers-on시 \"First fragment received without the start marker\" drop(추가 가드); markers-off(wz 레짐)서도 M=0 즉시 decode가 merge 방지.",
+        "empirical 재현: ReassemblyDispatcher 단위 테스트(orphan M=0 frag 후 consecutive한 다음 메시지 2-frag) → 병합된 \"P1TAILP2aP2b\" 출력 확인(temp test 생성후 삭제, 사용자 규칙). 기존 reassembly_dispatch 13 테스트 무영향.",
+        "atomic: ledger entries 747->748, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(진단 라운드=repo 무변경)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311on = dup-fragment 버그 확정 진단(R311om OPEN finding 격상, repo 무변경; R311ok Task1/2 진단 선례 동형). 다음 세션 = 수정 R311oo.",
+        "수정 R311oo 계획(pico parity 정렬 = M=0 항상 finalize): ①sources/network/reassembly_slot.scxml Empty transition을 more로 분기 — more!==0→Receiving(begin_chain), more===0→Complete(begin_chain+finalize_message); 주석 86-88 \"unconditionally a chain start\" 가정 정정; SCE regen. ②reassembly_dispatch.rs ingest_chain_start: step 후 get_current_state()==Complete면 deliver(&buf)+release+IngestOutcome::Reassembled 반환(현재 무조건 Begun); 주석 425-428 정정. ③회귀 테스트: orphan 미merge 단위(reassembly_dispatch tests) + dup-fragment e2e(udp_chaos_e2e; ChaosReadDriver에 duplicate_nth_matching=hold+reemit 추가, drop처럼 채널 복구 검증).",
+        "효과 예측: lone M=0 first가 즉시 complete→deliver→상위 reassembled_frame_outcome→parse_frame_payload가 garbage 디코드 실패→drop(pico와 동일)→채널 clean. happy-path(정상 multi-frag, first는 항상 M=1)는 Receiving 경로 유지=무영향. 변경 영향은 M=0-first edge만. **first_fragment_more_zero_does_not_complete 테스트는 새 동작(즉시 complete)으로 갱신 필요**(현재 Begun stuck 단언이 버그 동작을 고정 중).",
+        "P3.10 chaos 트랙: drop-recovery(R311ol+om) DONE, dup는 버그 발견→R311oo 수정. 이후 reorder/latency/동시세션 stress(전부 외부의존無). cross-impl은 외부의존 잔존.",
+        "PUSHED: R311ol+om+on 전부 origin/main 도달(이 턴 push). NEXT=R311oo 수정. 상세 [[project-pico-parity-status]] P3.10."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
