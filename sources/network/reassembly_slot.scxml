@@ -84,11 +84,32 @@
   <sce:import src="fragment_chunk_schema.scxml" kind="event-schema" as="FragmentChunk"/>
 
   <!-- Slot free, awaiting a chain-starting fragment routed here by the
-       Router. The dispatcher only routes a first fragment to a free
-       slot, so the chunk is unconditionally a chain start. -->
+       Router. The dispatcher only routes a first fragment to a free slot,
+       so the chunk is a chain start; the wire more bit then splits the
+       well-formed case from a degenerate one.
+
+       more != 0 — the normal multi-fragment chain begins (-> Receiving).
+
+       more == 0 — a FIRST fragment that is ALSO final. A well-formed
+       sender never mints one (a single-fragment message rides T_MID_FRAME,
+       not T_MID_FRAGMENT), but a lossy / duplicating link or a malicious
+       peer can strand one: a duplicate mid-chain fragment trips the
+       Router's SN gate, which clears the chain, so the chain's trailing
+       final fragment then arrives as a fresh chain start. zenoh-pico's
+       rx.c finalizes any M=0 fragment immediately (`if (!more) decode`);
+       wz matches that here by completing in ONE step (-> Complete) rather
+       than parking a stuck Receiving orphan that the next in-order message
+       would be appended onto and merged into (the R311oo dup-fragment
+       merge bug). The lone tail is delivered upstream and fails frame
+       decode (it is a chain remnant, not a whole frame), so it is dropped
+       — exactly pico's outcome. -->
   <state id="Empty">
-    <transition event="fragment.chunk" target="Receiving">
+    <transition event="fragment.chunk" cond="_event.data.more !== 0" target="Receiving">
       <sce:action name="begin_chain"/>
+    </transition>
+    <transition event="fragment.chunk" cond="_event.data.more === 0" target="Complete">
+      <sce:action name="begin_chain"/>
+      <sce:action name="finalize_message"/>
     </transition>
   </state>
 

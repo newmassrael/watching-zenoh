@@ -360,7 +360,7 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
     ) -> IngestOutcome {
         match self.find_active(frag.peer_key, frag.reliable) {
             Some(idx) => self.ingest_continuation(idx, frag, sn_mask, deliver),
-            None => self.ingest_chain_start(frag, now_ms),
+            None => self.ingest_chain_start(frag, now_ms, deliver),
         }
     }
 
@@ -399,7 +399,12 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
             .count() as u16
     }
 
-    fn ingest_chain_start(&mut self, frag: Fragment<'_>, now_ms: u64) -> IngestOutcome {
+    fn ingest_chain_start<F: FnOnce(&[u8])>(
+        &mut self,
+        frag: Fragment<'_>,
+        now_ms: u64,
+        deliver: F,
+    ) -> IngestOutcome {
         // §5.M quota-first: the per-peer cap is checked before slot
         // availability, so a flood from one peer is refused on quota even
         // while free slots remain for honest peers.
@@ -422,15 +427,33 @@ impl<const SLOTS: usize, const CAP: usize> ReassemblyDispatcher<SLOTS, CAP> {
             return self.abort(idx, AbortReason::CapacityOverflow);
         }
 
-        // Empty --fragment.chunk--> Receiving (begin_chain), unconditional:
-        // a chain's first fragment always has M=1 (a single-fragment
-        // message rides T_MID_FRAME, not T_MID_FRAGMENT), so the Empty
-        // transition does not guard on `more`.
+        // Empty --fragment.chunk--> { Receiving | Complete }, the slot FSM's
+        // `more` guard deciding. A well-formed chain's first fragment has
+        // M=1 (a single-fragment message rides T_MID_FRAME, not
+        // T_MID_FRAGMENT) and lands in Receiving -> Begun. A lone M=0 first
+        // fragment — stranded when a duplicate mid-chain fragment trips the
+        // channel SN gate ([`Self::abort_channel`] clears the chain) and the
+        // trailing final fragment then arrives as a fresh start — completes
+        // in ONE step: deliver it immediately and reclaim the slot
+        // (zenoh-pico rx.c `if (!more) decode` parity). Completing it rather
+        // than parking a stuck Receiving orphan is what stops the next
+        // in-order message from being appended onto the orphan's tail and
+        // delivered as one merged blob (R311oo dup-fragment merge bug). The
+        // delivered lone tail is a chain remnant, not a whole frame, so the
+        // upstream frame decode drops it — exactly pico's outcome.
         self.slots[idx]
             .engine
             .raise_fragment_chunk(chunk_event(frag.more));
         self.slots[idx].engine.step();
-        IngestOutcome::Begun
+
+        match self.slots[idx].engine.get_current_state() {
+            ReassemblySlotState::Complete => {
+                deliver(&self.slots[idx].buf);
+                self.slots[idx].release();
+                IngestOutcome::Reassembled
+            }
+            _ => IngestOutcome::Begun,
+        }
     }
 
     fn ingest_continuation<F: FnOnce(&[u8])>(
@@ -570,7 +593,7 @@ pub fn sweep_reporting<const SLOTS: usize, const CAP: usize, F>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
 
     const PEER_A: &[u8] = &[0xAA; 16];
     const PEER_B: &[u8] = &[0xBB; 16];
@@ -820,17 +843,93 @@ mod tests {
         );
     }
 
-    /// A single-fragment "message" with more==0 as the FIRST fragment does
-    /// NOT complete (the Empty transition is unconditional); it waits as a
-    /// chain and is swept on timeout. (Single-fragment messages ride
-    /// T_MID_FRAME, not the fragment path — this guards the edge.)
+    /// A lone M=0 FIRST fragment completes in ONE step and is delivered
+    /// immediately (the Empty state's `more == 0` arm -> Complete), reclaiming
+    /// the slot — it does NOT park a stuck Receiving orphan. A well-formed
+    /// sender never mints one (a single-fragment message rides T_MID_FRAME,
+    /// not the fragment path), but a duplicate mid-chain fragment can clear a
+    /// chain and strand its trailing final fragment as a fresh start;
+    /// completing it here (zenoh-pico rx.c `if (!more) decode` parity) is what
+    /// keeps the next in-order message from merging into a parked orphan (the
+    /// R311oo dup-fragment merge bug — see
+    /// `stranded_final_fragment_does_not_merge_into_next_message`).
     #[test]
-    fn first_fragment_more_zero_does_not_complete() {
+    fn first_fragment_more_zero_completes_immediately() {
         let mut d = dispatcher::<4, 64>();
-        let r = d.ingest(frag(PEER_A, true, 1, 0, b"solo"), MASK, 0, |_| {
-            panic!("first frag never completes")
+        let mut out: Option<Vec<u8>> = None;
+        let r = d.ingest(frag(PEER_A, true, 1, 0, b"solo"), MASK, 0, |m| {
+            out = Some(m.to_vec())
         });
-        assert_eq!(r, IngestOutcome::Begun);
-        assert_eq!(d.active_chains(), 1);
+        assert_eq!(r, IngestOutcome::Reassembled);
+        assert_eq!(out.as_deref(), Some(&b"solo"[..]));
+        // Slot reclaimed — no stuck orphan left to absorb the next message.
+        assert_eq!(d.active_chains(), 0);
+    }
+
+    /// R311oo regression — a stranded lone M=0 fragment does NOT merge into
+    /// the next in-order message.
+    ///
+    /// The dup-fragment bug: a duplicate mid-chain fragment trips the channel
+    /// SN gate; the drive layer clears the in-progress chain via
+    /// [`ReassemblyDispatcher::abort_channel`], leaving the chain's trailing
+    /// final (M=0) fragment to arrive as a fresh chain start. Before the fix
+    /// that M=0 fragment parked a stuck Receiving orphan whose `last_sn` was
+    /// ring-consecutive to the NEXT message's first fragment (SNs run
+    /// sequentially across messages on a channel), so the next message was
+    /// appended onto the orphan's tail and delivered as one merged blob. Now
+    /// the M=0 fragment completes + is reclaimed immediately, so the next
+    /// message reassembles in isolation.
+    #[test]
+    fn stranded_final_fragment_does_not_merge_into_next_message() {
+        let mut d = dispatcher::<4, 64>();
+        let mut delivered: Vec<Vec<u8>> = Vec::new();
+
+        // P1 opens a chain with its first fragment (sn=1, more).
+        assert_eq!(
+            d.ingest(frag(PEER_A, true, 1, 1, b"P1HEAD"), MASK, 0, |_| panic!(
+                "P1 head is not final"
+            )),
+            IngestOutcome::Begun
+        );
+        // A duplicate mid-chain fragment trips the channel SN gate; the drive
+        // layer clears the chain (drive.rs `abort_channel` on RxSnRejected).
+        assert!(
+            d.abort_channel(PEER_A, true),
+            "the in-progress P1 chain was cleared by the SN-gate rejection"
+        );
+        assert_eq!(d.active_chains(), 0);
+
+        // P1's trailing FINAL fragment (sn=3 — the duplicated/aborted fragment
+        // held sn=2) now arrives as a fresh chain start. It completes
+        // immediately and is delivered ALONE; it does NOT park an orphan.
+        assert_eq!(
+            d.ingest(frag(PEER_A, true, 3, 0, b"P1TAIL"), MASK, 0, |m| delivered
+                .push(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(
+            d.active_chains(),
+            0,
+            "no stuck orphan after the stranded final fragment"
+        );
+
+        // P2: a fresh two-fragment message whose first SN (4) is
+        // ring-consecutive to the stranded fragment's SN (3) — exactly the
+        // condition that, with a parked orphan, merged P2 onto P1's tail.
+        assert_eq!(
+            d.ingest(frag(PEER_A, true, 4, 1, b"P2a"), MASK, 0, |_| panic!(
+                "P2 head is not final"
+            )),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            d.ingest(frag(PEER_A, true, 5, 0, b"P2b"), MASK, 0, |m| delivered
+                .push(m.to_vec())),
+            IngestOutcome::Reassembled
+        );
+
+        // The stranded fragment delivered ALONE, then P2 delivered CLEAN — the
+        // pre-fix bug produced a single merged "P1TAILP2aP2b" delivery instead.
+        assert_eq!(delivered, vec![b"P1TAIL".to_vec(), b"P2aP2b".to_vec()]);
     }
 }
