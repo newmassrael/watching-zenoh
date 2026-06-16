@@ -38,6 +38,13 @@
 //!      reply back to z_get. The regression guard for R311ow — it pins, end to
 //!      end, that wz-as-routed-queryable answers queries through the reference
 //!      router (the declare_queryable sibling of leg 3's declare_subscriber).
+//!   5. `wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness` — the
+//!      liveliness path: wz declares a liveliness TOKEN (`wz-ap-demo
+//!      --declare-token`, the high-level `Session::declare_token` that emits a
+//!      `Declare(DeclToken)`), zenohd tracks it in its liveliness subsystem, and
+//!      a zenoh-pico `z_get_liveliness` query routed through zenohd observes the
+//!      token as Alive. Pins, end to end, that wz's liveliness token declaration
+//!      is liveliness-routable by the reference router.
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z) AND binary-dep: zenohd is an external
 //! 1.5.0 build (`scripts/build-zenohd.sh`), not a wz artifact, so it never
@@ -545,5 +552,125 @@ fn wz_queryable_replies_via_zenohd_to_pico_zget() {
         zget_captured.contains(queryable_key),
         "z_get received a reply but the queryable keyexpr '{queryable_key}' is missing.\n\
          {zget_captured}"
+    );
+}
+
+/// The liveliness path: wz declares a liveliness TOKEN, a zenoh-pico
+/// `z_get_liveliness` queries the liveliness state through zenohd, and zenohd —
+/// tracking wz's token in its liveliness subsystem — answers the pico query so
+/// the token shows up as Alive. wz declares the token via `--declare-token` (the
+/// high-level `Session::declare_token`, which emits a `Declare(DeclToken)` and
+/// holds the RAII `LivelinessToken` for the demo's lifetime).
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_get_liveliness); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness() {
+    let demo = wz_ap_demo_binary();
+    let z_get_liveliness = zenoh_pico_cli_binary("z_get_liveliness");
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let token_keyexpr = "group1/zenohd";
+    let query_pattern = "group1/**";
+
+    let mut zenohd = spawn_zenohd(port);
+    drop(port_res);
+
+    // ── wz-ap-demo: a CLIENT of zenohd that declares a liveliness TOKEN.
+    //    `--declare-token` emits a `Declare(DeclToken)` and holds the RAII
+    //    `LivelinessToken` across the drive loop, so the token stays alive on
+    //    zenohd until the demo is killed. Wait for the declare to be announced
+    //    before querying (deterministic ordering, not a sleep).
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect zenohd --declare-token)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--declare-token")
+            .arg(token_keyexpr)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect zenohd --declare-token"),
+    );
+
+    let declared = wait_for_substring(
+        &mut demo_stderr_reader,
+        "DECLARED TOKEN",
+        Duration::from_secs(10),
+    );
+
+    // ── pico z_get_liveliness: a one-shot liveliness query (like leg 4's z_get,
+    //    it blocks until the query final). A single query arriving before wz's
+    //    DeclToken has propagated to zenohd's liveliness subsystem returns no
+    //    Alive token, so retry the whole one-shot until the token is observed —
+    //    robustness for the foreign one-shot + the declaration-propagation
+    //    window. The wz side is deterministic once the token is tracked.
+    let mut zgl_captured = String::new();
+    let mut zgl_alive = false;
+    if declared.is_ok() {
+        const ATTEMPTS: usize = 6;
+        for attempt in 1..=ATTEMPTS {
+            let out = tempfile::tempfile().expect("tempfile for z_get_liveliness stdout");
+            let out_writer = out.try_clone().expect("dup z_get_liveliness stdout handle");
+            let mut out_reader = out;
+            let mut zgl = ChildGuard::wrap(
+                "z_get_liveliness client (zenoh-pico)",
+                Command::new("stdbuf")
+                    .args(["-oL", "-eL"])
+                    .arg(&z_get_liveliness)
+                    .args(["-k", query_pattern, "-e", &endpoint, "-m", "client"])
+                    .stdout(Stdio::from(out_writer))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn z_get_liveliness via stdbuf"),
+            );
+            // z_get_liveliness prints ">> Alive token ('<keyexpr>')" per live token.
+            let alive =
+                wait_for_substring(&mut out_reader, ">> Alive token", Duration::from_secs(8));
+            let _ = zgl.child_mut().kill();
+            let _ = zgl.child_mut().wait();
+            zgl_captured = read_captured(&mut out_reader);
+            if alive.is_ok() {
+                zgl_alive = true;
+                break;
+            }
+            eprintln!(
+                "z_get_liveliness attempt {attempt}/{ATTEMPTS} saw no Alive token (token not \
+                 yet propagated / transient open); retrying"
+            );
+        }
+    }
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    if let Err(c) = &declared {
+        panic!(
+            "wz-ap-demo did not log 'DECLARED TOKEN' within 10s — the liveliness token \
+             declare regressed.\n--- captured wz-ap-demo stderr ---\n{c}"
+        );
+    }
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+    eprintln!("--- captured z_get_liveliness stdout ---\n{zgl_captured}");
+
+    assert!(
+        zgl_alive,
+        "pico z_get_liveliness saw no Alive token within the retry budget — wz's liveliness \
+         token was not tracked / routed by zenohd.\n--- captured z_get_liveliness stdout ---\n\
+         {zgl_captured}"
+    );
+    assert!(
+        zgl_captured.contains(token_keyexpr),
+        "z_get_liveliness saw an Alive token but the wz token keyexpr '{token_keyexpr}' is \
+         missing.\n{zgl_captured}"
     );
 }
