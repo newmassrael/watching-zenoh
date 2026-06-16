@@ -38794,6 +38794,50 @@
         "UNPUSHED: R311ou(코드+테스트+ledger). push 명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311ov": {
+      "decision_summary": "R311ov: R311ou pre-push 게이트 수정. zenohd interop 테스트가 opt-in 의도와 달리 Layer E required 게이트에 동시실행으로 끼어들어 3 zenohd 부하 핸드셰이크 timeout flake. Layer E서 제외(--skip zenohd, --skip multicast 선례) + Layer Z 직렬화(--test-threads=1, 15/15). R311or 잠복 leak도 교정.",
+      "changes_bullets": [
+        "scripts/run-ci.sh (Layer E, layer_e_ap_demo_round_trip): `--ignored` 스윕에 `--skip zenohd` 추가. zenohd interop 테스트(wz_to_zenohd_router.rs의 wz_client_reaches_established_against_zenohd / wz_publish_routes_through_zenohd_to_pico_zsub / wz_routed_subscribe_from_zenohd)는 #[ignore] 메시지대로 opt-in Layer Z 전용 의도였으나, Layer E의 광범위 --ignored 스윕(wz_e2e_/multicast만 제외)이 required 게이트에서도 실행하고 있었음. --skip multicast(R311nm) 선례 동형: heavy 외부 zenohd 라우터 의존 + 동시실행 부하 민감 = required-gate hazard.",
+        "scripts/run-ci.sh (Layer Z, layer_z_zenohd_interop): cargo test에 `--test-threads=1` 추가. 3개 zenohd 테스트를 직렬화 — 동시실행 시 3 zenohd 인스턴스 + wz-ap-demo/z_pub/z_sub 자식들이 wz<->zenohd 핸드셰이크 중 CPU contention → per-test 10s readiness wait 간헐 starve(~1/10). 직렬화로 각 테스트가 isolation 실행(20/20-stable standalone 동일 조건)=근본 제거(타임아웃 bump 아님). opt-in heavy e2e라 직렬은 wall-clock만 비용, 커버리지 무손실."
+      ],
+      "verification_bullets": [
+        "근본원인 진단(증거 기반): R311ou 코드 검증(수동 full run-ci M+G+Z EXIT=0 + wz_routed_subscribe standalone 20/20)이 통과했으나 첫 git push의 pre-push 게이트가 2/2 실패. full 출력 캡처(파이프 없이)로 실제 실패 확인 — wz_to_zenohd_router.rs:380 \"did not log 'DECLARED ROUTED SUBSCRIBER' within 10s\". Layer E가 run-ci.sh:1922 --ignored 스윕으로 zenohd 테스트를 동시실행(cargo 기본 병렬)한 것이 원인.",
+        "flake 특성화([[feedback-no-flaky-ever]]): Layer E 루프 12/12 통과(내 변경 포함 빌드=R311ou가 유발한 게 아님 입증). Layer Z concurrent 루프 9/10(iter4 wz_client_reaches_established 실패=내 신규 아닌 다른 zenohd 테스트도 동일 contention=테스트 무관 부하 원인 확정). --skip zenohd 적용 후 Layer E: exit 0 + zenohd 0회 실행(3 filtered out). --test-threads=1 적용 후 Layer Z serial 루프 15/15(contention 제거 확정).",
+        "구조: --skip multicast(R311nm env-flaky multicast를 opt-in Layer M으로) 선례 동형 — opt-in env-dependent e2e는 required 게이트서 제외하고 전용 opt-in 레인에서 실행. zenohd 테스트는 이제 Layer Z(직렬, env+외부바이너리 명시 provision)에서만 실행=#[ignore] 선언 home. R311or의 2개 zenohd 테스트도 같은 잠복 leak이 있었고(당시 pre-push는 운/저부하로 통과) 함께 교정.",
+        "atomic: ledger entries 755->756, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경(CI 게이트 위생 수정)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ov = R311ou pre-push 게이트 수정(flake-in-required-gate 구조적 해소). 진짜 원인은 flake가 아니라 leak: zenohd interop 테스트(opt-in Layer Z 의도)가 Layer E의 광범위 --ignored 스윕에 동시실행으로 끼어들어, 3 zenohd + 클라이언트 동시 부하에서 wz<->zenohd 핸드셰이크 10s readiness가 간헐 starve. 수정=Layer E --skip zenohd(--skip multicast 선례 동형) + Layer Z --test-threads=1 직렬화(contention 근본 제거, 타임아웃 bump 아님).",
+        "메타: 내가 첫 push에서 `git push | tail`로 exit를 마스킹([[feedback-runci-verdict-exit-code-only]] 위반)→\"exit 0\" 오보→pre-push 실패를 놓칠 뻔. 2차 push는 파이프 없이 full 캡처로 실제 실패 테스트 확보=mechanical 진단. 단순 retry-pass 거부([[feedback-no-flaky-ever]]): 12/12 Layer E + 9/10 concurrent(재현)→15/15 serial(해소)로 근본원인+수정 입증.",
+        "R311or 잠복 leak 교정: R311or의 2개 zenohd 테스트도 Layer E서 실행되고 있었음(당시 통과는 저부하/운). 이제 전 zenohd 테스트가 opt-in Layer Z(직렬) 전용=#[ignore] 선언 home과 일치.",
+        "검증: --skip zenohd 후 Layer E exit 0(zenohd 0회) + Layer Z serial 15/15 + full default run-ci(pre-push 게이트 동형) green. 다음 단계: run-ci.sh 커밋 + R311ov ledger 커밋 후 R311ou+R311ov 함께 push(pre-push가 HEAD:run-ci.sh=수정본 사용).",
+        "잔여 carry(불변): declare_queryable 동일 divergence(다음 subscriber-sibling rung), --declare-subscriber CLI 은퇴, zenohd interop ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]]). 상세 [[project-pico-parity-status]]."
+      ],
+      "publishable_decision_summary": "R311ov: R311ou pre-push 게이트 수정. zenohd interop 테스트가 opt-in 의도와 달리 Layer E required 게이트에 동시실행으로 끼어들어 3 zenohd 부하 핸드셰이크 timeout flake. Layer E서 제외(--skip zenohd, --skip multicast 선례) + Layer Z 직렬화(--test-threads=1, 15/15). R311or 잠복 leak도 교정.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh (Layer E, layer_e_ap_demo_round_trip): `--ignored` 스윕에 `--skip zenohd` 추가. zenohd interop 테스트(wz_to_zenohd_router.rs의 wz_client_reaches_established_against_zenohd / wz_publish_routes_through_zenohd_to_pico_zsub / wz_routed_subscribe_from_zenohd)는 #[ignore] 메시지대로 opt-in Layer Z 전용 의도였으나, Layer E의 광범위 --ignored 스윕(wz_e2e_/multicast만 제외)이 required 게이트에서도 실행하고 있었음. --skip multicast(R311nm) 선례 동형: heavy 외부 zenohd 라우터 의존 + 동시실행 부하 민감 = required-gate hazard.",
+        "scripts/run-ci.sh (Layer Z, layer_z_zenohd_interop): cargo test에 `--test-threads=1` 추가. 3개 zenohd 테스트를 직렬화 — 동시실행 시 3 zenohd 인스턴스 + wz-ap-demo/z_pub/z_sub 자식들이 wz<->zenohd 핸드셰이크 중 CPU contention → per-test 10s readiness wait 간헐 starve(~1/10). 직렬화로 각 테스트가 isolation 실행(20/20-stable standalone 동일 조건)=근본 제거(타임아웃 bump 아님). opt-in heavy e2e라 직렬은 wall-clock만 비용, 커버리지 무손실."
+      ],
+      "publishable_verification_bullets": [
+        "근본원인 진단(증거 기반): R311ou 코드 검증(수동 full run-ci M+G+Z EXIT=0 + wz_routed_subscribe standalone 20/20)이 통과했으나 첫 git push의 pre-push 게이트가 2/2 실패. full 출력 캡처(파이프 없이)로 실제 실패 확인 — wz_to_zenohd_router.rs:380 \"did not log 'DECLARED ROUTED SUBSCRIBER' within 10s\". Layer E가 run-ci.sh:1922 --ignored 스윕으로 zenohd 테스트를 동시실행(cargo 기본 병렬)한 것이 원인.",
+        "flake 특성화([[feedback-no-flaky-ever]]): Layer E 루프 12/12 통과(내 변경 포함 빌드=R311ou가 유발한 게 아님 입증). Layer Z concurrent 루프 9/10(iter4 wz_client_reaches_established 실패=내 신규 아닌 다른 zenohd 테스트도 동일 contention=테스트 무관 부하 원인 확정). --skip zenohd 적용 후 Layer E: exit 0 + zenohd 0회 실행(3 filtered out). --test-threads=1 적용 후 Layer Z serial 루프 15/15(contention 제거 확정).",
+        "구조: --skip multicast(R311nm env-flaky multicast를 opt-in Layer M으로) 선례 동형 — opt-in env-dependent e2e는 required 게이트서 제외하고 전용 opt-in 레인에서 실행. zenohd 테스트는 이제 Layer Z(직렬, env+외부바이너리 명시 provision)에서만 실행=#[ignore] 선언 home. R311or의 2개 zenohd 테스트도 같은 잠복 leak이 있었고(당시 pre-push는 운/저부하로 통과) 함께 교정.",
+        "atomic: ledger entries 755->756, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경(CI 게이트 위생 수정)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ov = R311ou pre-push 게이트 수정(flake-in-required-gate 구조적 해소). 진짜 원인은 flake가 아니라 leak: zenohd interop 테스트(opt-in Layer Z 의도)가 Layer E의 광범위 --ignored 스윕에 동시실행으로 끼어들어, 3 zenohd + 클라이언트 동시 부하에서 wz<->zenohd 핸드셰이크 10s readiness가 간헐 starve. 수정=Layer E --skip zenohd(--skip multicast 선례 동형) + Layer Z --test-threads=1 직렬화(contention 근본 제거, 타임아웃 bump 아님).",
+        "메타: 내가 첫 push에서 `git push | tail`로 exit를 마스킹([[feedback-runci-verdict-exit-code-only]] 위반)→\"exit 0\" 오보→pre-push 실패를 놓칠 뻔. 2차 push는 파이프 없이 full 캡처로 실제 실패 테스트 확보=mechanical 진단. 단순 retry-pass 거부([[feedback-no-flaky-ever]]): 12/12 Layer E + 9/10 concurrent(재현)→15/15 serial(해소)로 근본원인+수정 입증.",
+        "R311or 잠복 leak 교정: R311or의 2개 zenohd 테스트도 Layer E서 실행되고 있었음(당시 통과는 저부하/운). 이제 전 zenohd 테스트가 opt-in Layer Z(직렬) 전용=#[ignore] 선언 home과 일치.",
+        "검증: --skip zenohd 후 Layer E exit 0(zenohd 0회) + Layer Z serial 15/15 + full default run-ci(pre-push 게이트 동형) green. 다음 단계: run-ci.sh 커밋 + R311ov ledger 커밋 후 R311ou+R311ov 함께 push(pre-push가 HEAD:run-ci.sh=수정본 사용).",
+        "잔여 carry(불변): declare_queryable 동일 divergence(다음 subscriber-sibling rung), --declare-subscriber CLI 은퇴, zenohd interop ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]]). 상세 [[project-pico-parity-status]]."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
