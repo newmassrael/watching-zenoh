@@ -120,6 +120,12 @@ pub struct ReconnectingSession {
     actions: Arc<SessionLinkActions>,
     swappable: Arc<SwappableLink<TokioRuntime>>,
     locator: ParsedLocator,
+    /// R311oe — the dial config RETAINED across reconnects (taken by value at
+    /// open). A `tls/...` re-dial needs the same client config + server name
+    /// the first dial used; cert-free transports hold a default here. Struct
+    /// always carries it (only `DialConfig`'s tls field is cfg-gated), so the
+    /// reconnect supervisor is signature-stable across the tls toggle.
+    dial_config: DialConfig,
     policy: ReconnectPolicy,
     open_max_iters: Option<usize>,
     tick_interval_ms: u64,
@@ -149,10 +155,13 @@ impl ReconnectingSession {
     /// open handshake loop. The wz body of pico's `_z_open` re-run inside
     /// `_z_client_reopen_task_fn`.
     async fn open_attempt(&self, clock: TokioTime) -> Result<OpenedSession, OpenError> {
-        // Reconnect re-dials IP (tcp/udp) only — no TLS material is retained
-        // across a reconnect yet (TLS-reconnect would store the DialConfig;
-        // a documented follow-up), so the default (cert-free) config suffices.
-        let dialed = dial_locator(AnyLocator::Ip(self.locator), &DialConfig::default())
+        // R311oe — re-dial with the RETAINED DialConfig, not a fresh default:
+        // a TLS session's reconnect needs the same client config + server name
+        // the first dial used, so the supervisor stored it at open (pico
+        // retains the session config in its reopen task). Cert-free transports
+        // (tcp/udp) hold a default config here, so this stays behaviour-
+        // preserving for them.
+        let dialed = dial_locator(AnyLocator::Ip(self.locator), &self.dial_config)
             .await
             .map_err(OpenError::Dial)?;
         let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
@@ -304,6 +313,12 @@ impl ReconnectingSession {
 /// [`ReconnectingSession::drive`] can replace the transport without
 /// touching the bundle (or any `Session` / handle clone over it).
 ///
+/// `dial_config` is RETAINED for the supervisor's lifetime (taken by value,
+/// unlike the one-shot opens that borrow it): every reconnect re-dials with
+/// the SAME config, so a `tls/...` session keeps the client config + server
+/// name it first used (pico retains the session config in its reopen task).
+/// Cert-free transports (tcp/udp) pass [`DialConfig::default`] (R311oe).
+///
 /// The INITIAL open does not retry — pico parity: `z_open` is the user's
 /// call and surfaces its own error; `Z_FEATURE_AUTO_RECONNECT` only guards
 /// an established session's transport death (`_zp_unicast_failed_result`
@@ -311,12 +326,15 @@ impl ReconnectingSession {
 pub async fn open_session_with_reconnect(
     locator: ParsedLocator,
     params: SessionInitParams,
+    dial_config: DialConfig,
     clock: TokioTime,
     policy: ReconnectPolicy,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
 ) -> Result<ReconnectingSession, OpenError> {
-    let dialed = dial_locator(AnyLocator::Ip(locator), &DialConfig::default())
+    // R311oe — the dial config is RETAINED (moved into the supervisor below)
+    // so every reconnect re-dials with it; borrow it for the initial dial.
+    let dialed = dial_locator(AnyLocator::Ip(locator), &dial_config)
         .await
         .map_err(OpenError::Dial)?;
     let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
@@ -338,6 +356,7 @@ pub async fn open_session_with_reconnect(
         actions: opened.actions.clone(),
         swappable,
         locator,
+        dial_config,
         policy,
         open_max_iters: max_iters,
         tick_interval_ms,

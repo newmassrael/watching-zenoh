@@ -742,9 +742,16 @@ layer_c1t_cargo_test_serial() {
 #      transport-link-tls` to prove `tls_pipeline` composes standalone (it
 #      needs only the forwarded `transport-link-tcp`, not `transport-unicast`).
 layer_c1u_cargo_test_tls() {
+    # R311oe — also run session_reconnect_e2e here: its `tls_reconnect` module
+    # (gated all(transport-link-tls, transport-unicast)) proves a TLS session's
+    # reconnect re-dials with the RETAINED DialConfig. defaults+tls already
+    # carry session-reconnect + transport-unicast, so the module compiles and
+    # runs; without this invocation it is empty and the retained-config re-dial
+    # is unexercised (gate-skew). The clippy --all-targets line below already
+    # lints the module under tls.
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --test session_reconnect_e2e --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-tls --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-tls --quiet -- -D warnings)
 }
