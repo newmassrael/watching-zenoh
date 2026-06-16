@@ -37992,6 +37992,60 @@
         "NEXT: mTLS+PEM / cert PEM 로딩 헬퍼 / pico parity % 재계산. UNPUSHED: R311od(feat+docs 2) + R311oe(feat+docs 2) = origin/main=a659004 위 4 commits. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙 연속)."
       ]
     },
+    "Round 311of": {
+      "decision_summary": "R311of: 세션리뷰 후속 SSOT 청산(독립 리뷰어+자가검증). loopback_tls_configs(cert fixture) 3중 복제(tls_e2e/scouting/reconnect)를 test-support sibling crate로 hoist(tls-fixtures feature 게이트, 순수 rustls=wz feature 누출 0, C1j isolation으로 실증). collect_first_declare 추출(TCP/TLS reconnect 헬퍼 공유 drive 루프). reconnect.rs stale 주석 + Layer M clippy 보강. 북극성/아키텍처 핵심은 리뷰 CLEAN, SSOT 한 곳만 위반이었고 내 합리화를 검증이 뒤집음. full run-ci(M+G) RUNCI_EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/{Cargo.toml,src/lib.rs}: loopback_tls_configs(26줄 self-signed cert fixture)를 SSOT로 hoist. 신규 tls-fixtures feature(optional rcgen + tokio-rustls) — 순수 third-party rustls 타입 반환이라 wz feature를 누출하지 않음(R311fr default-features=false 계약 무손상); test-support는 6개 크레이트가 dev-dep이라 게이트로 TLS 소비자(wz-runtime-tokio)만 rustls 컴파일. wz-runtime-tokio Cargo.toml dev-dep이 features=[\"tls-fixtures\"] enable.",
+        "crates/wz-runtime-tokio/tests/{tls_e2e,scouting_multicast_loopback,session_reconnect_e2e}.rs: 로컬 loopback_tls_configs 3개 복제 삭제 -> wz_runtime_tokio_test_support::loopback_tls_configs import. fixture 제거로 미사용된 rustls import(ring/CertificateDer/PrivateKeyDer/PrivatePkcs8KeyDer/ClientConfig/RootCertStore + 일부 Arc)를 컴파일러 deny-warnings 지목대로 정밀 prune; ServerName/ServerConfig는 사용처 있어 유지.",
+        "crates/wz-runtime-tokio/tests/session_reconnect_e2e.rs: collect_first_declare(opened: &mut OpenedSession) 부모-레벨 추출 — transport-agnostic drive-until-Declare 루프(~25줄)를 TCP accept_and_collect_declares + TLS accept_tls_and_collect_declares(super:: 호출) 둘이 공유. accept 절반(Tcp vs Tls 핸드셰이크)만 차이.",
+        "crates/wz-runtime-tokio/src/reconnect.rs: R311nv 모듈 주석 \"TCP/UDP re-dial path\" -> \"TCP/UDP/TLS re-dial path\"(R311oe로 stale; TLS=TCP-based이라 Proto::Tls도 AnyLocator::Ip 변형). 'IP-only' 명제는 유지.",
+        "scripts/run-ci.sh: Layer M에 scouting-active,transport-link-tls clippy --all-targets -D warnings 추가(round3_tls + round2 clippy 커버; 종전엔 Layer M 테스트빌드의 rustc-deny만, C1u/C1v shape 미러)."
+      ],
+      "verification_bullets": [
+        "독립 리뷰어 에이전트(general-purpose, fresh diff a659004..HEAD) + 자가검증 교차: 북극성/카탈로그 충실성 CLEAN 확인 — TLS-reconnect는 합성 아닌 zenoh 실재 기능(pico _z_client_reopen_task_fn[session.c:234]이 보존 s->_config로 _z_open 재실행 -> _z_new_link_tls(session_cfg)[link.c:80] 미러, zenoh-rust new_link 동형). by-value/by-ref 비대칭 원칙적, 시그니처 안정, 테스트 false-positive 없음(default cfg -> Unsupported -> GaveUp로 assertion 실패).",
+        "리뷰어 발견 전 청산: HIGH(loopback_tls_configs 3중 복제) + MED(collect 루프 중복, reconnect stale 주석) + LOW(round3_tls clippy 미커버). LOW는 round2 동일 선례라 R311od 신규갭은 아니나 textbook 기준으로 보강. 내 in-code 합리화(\"module-local, would otherwise migrate to support crate\") 자체가 smell 신호였음을 인정.",
+        "3개 테스트 바이너리 컴파일 clean(미사용 import 컴파일러 지목대로 정밀 prune), fmt clean(test-support 포함), clippy default + scouting-active,tls + C1u all-targets 전부 exit 0.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접) 'all required layers pass', FAILED/error[/panicked 0. **C1j isolation matrix pass = test-support tls-fixtures가 wz feature를 누출하지 않음 실증**(third-party rustls만 추가). C1u session_reconnect_e2e 3 passed(TCP 2 + TLS 1) + tls_e2e 2 passed, default C1 TCP reconnect 2 passed(collect 추출 무손상).",
+        "atomic: ledger entries 739->740, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(리팩토 라운드)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311of = 세션리뷰 후속 SSOT 청산(독립 리뷰어+자가검증). 사용자 '비용무관 교과서/SSOT 준수' 점검 요청 -> 독립 리뷰어가 내 합리화를 뒤집음: loopback_tls_configs(cert fixture)를 3개 테스트 파일에 module-local 복제한 것이 진짜 SSOT 위반(내 변명 'craft_hello_datagram 선례'는 부적절 — 그건 prod-vs-test 분리, 이건 test끼리 3중 복제로 분기 이유 0). test-support(기존 fixture SSOT home, fixture_session_init_params 옆)로 hoist.",
+        "실행: loopback_tls_configs 3->1(tls-fixtures feature 게이트, 6개 비-TLS 소비자엔 rustls 미유입) + collect_first_declare 추출(reconnect 테스트의 transport-agnostic drive 루프 SSOT) + reconnect.rs stale 주석 수정 + Layer M scouting+tls clippy 보강.",
+        "메타: 검증이 성급한 추천/합리화를 뒤집은 사례(R311my+mz 패턴 반복). 북극성/아키텍처 핵심은 CLEAN였고 SSOT 한 곳만 위반이었음 — 'would otherwise have to migrate' 같은 정당화 주석이 곧 smell 신호였다([[feedback-textbook-over-cost]] 적용). 리뷰어 발견도 무비판 수용 않고 증거로 교차검증(LOW는 round2 선례 확인 후 textbook 보강 판단).",
+        "미완(정직, 후속): mTLS(client cert를 ClientConfig에; 미테스트) / cert PEM 로딩 헬퍼 / pico parity % 재계산. wss는 R311od CLOSED.",
+        "NEXT: mTLS+PEM / cert PEM 로딩 / pico parity % 재계산. UNPUSHED: R311od(2)+R311oe(2)+R311of(2) = origin/main=a659004 위 6 commits. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙)."
+      ],
+      "publishable_decision_summary": "R311of: 세션리뷰 후속 SSOT 청산(독립 리뷰어+자가검증). loopback_tls_configs(cert fixture) 3중 복제(tls_e2e/scouting/reconnect)를 test-support sibling crate로 hoist(tls-fixtures feature 게이트, 순수 rustls=wz feature 누출 0, C1j isolation으로 실증). collect_first_declare 추출(TCP/TLS reconnect 헬퍼 공유 drive 루프). reconnect.rs stale 주석 + Layer M clippy 보강. 북극성/아키텍처 핵심은 리뷰 CLEAN, SSOT 한 곳만 위반이었고 내 합리화를 검증이 뒤집음. full run-ci(M+G) RUNCI_EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/{Cargo.toml,src/lib.rs}: loopback_tls_configs(26줄 self-signed cert fixture)를 SSOT로 hoist. 신규 tls-fixtures feature(optional rcgen + tokio-rustls) — 순수 third-party rustls 타입 반환이라 wz feature를 누출하지 않음(R311fr default-features=false 계약 무손상); test-support는 6개 크레이트가 dev-dep이라 게이트로 TLS 소비자(wz-runtime-tokio)만 rustls 컴파일. wz-runtime-tokio Cargo.toml dev-dep이 features=[\"tls-fixtures\"] enable.",
+        "crates/wz-runtime-tokio/tests/{tls_e2e,scouting_multicast_loopback,session_reconnect_e2e}.rs: 로컬 loopback_tls_configs 3개 복제 삭제 -> wz_runtime_tokio_test_support::loopback_tls_configs import. fixture 제거로 미사용된 rustls import(ring/CertificateDer/PrivateKeyDer/PrivatePkcs8KeyDer/ClientConfig/RootCertStore + 일부 Arc)를 컴파일러 deny-warnings 지목대로 정밀 prune; ServerName/ServerConfig는 사용처 있어 유지.",
+        "crates/wz-runtime-tokio/tests/session_reconnect_e2e.rs: collect_first_declare(opened: &mut OpenedSession) 부모-레벨 추출 — transport-agnostic drive-until-Declare 루프(~25줄)를 TCP accept_and_collect_declares + TLS accept_tls_and_collect_declares(super:: 호출) 둘이 공유. accept 절반(Tcp vs Tls 핸드셰이크)만 차이.",
+        "crates/wz-runtime-tokio/src/reconnect.rs: R311nv 모듈 주석 \"TCP/UDP re-dial path\" -> \"TCP/UDP/TLS re-dial path\"(R311oe로 stale; TLS=TCP-based이라 Proto::Tls도 AnyLocator::Ip 변형). 'IP-only' 명제는 유지.",
+        "scripts/run-ci.sh: Layer M에 scouting-active,transport-link-tls clippy --all-targets -D warnings 추가(round3_tls + round2 clippy 커버; 종전엔 Layer M 테스트빌드의 rustc-deny만, C1u/C1v shape 미러)."
+      ],
+      "publishable_verification_bullets": [
+        "독립 리뷰어 에이전트(general-purpose, fresh diff a659004..HEAD) + 자가검증 교차: 북극성/카탈로그 충실성 CLEAN 확인 — TLS-reconnect는 합성 아닌 zenoh 실재 기능(pico _z_client_reopen_task_fn[session.c:234]이 보존 s->_config로 _z_open 재실행 -> _z_new_link_tls(session_cfg)[link.c:80] 미러, zenoh-rust new_link 동형). by-value/by-ref 비대칭 원칙적, 시그니처 안정, 테스트 false-positive 없음(default cfg -> Unsupported -> GaveUp로 assertion 실패).",
+        "리뷰어 발견 전 청산: HIGH(loopback_tls_configs 3중 복제) + MED(collect 루프 중복, reconnect stale 주석) + LOW(round3_tls clippy 미커버). LOW는 round2 동일 선례라 R311od 신규갭은 아니나 textbook 기준으로 보강. 내 in-code 합리화(\"module-local, would otherwise migrate to support crate\") 자체가 smell 신호였음을 인정.",
+        "3개 테스트 바이너리 컴파일 clean(미사용 import 컴파일러 지목대로 정밀 prune), fmt clean(test-support 포함), clippy default + scouting-active,tls + C1u all-targets 전부 exit 0.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접) 'all required layers pass', FAILED/error[/panicked 0. **C1j isolation matrix pass = test-support tls-fixtures가 wz feature를 누출하지 않음 실증**(third-party rustls만 추가). C1u session_reconnect_e2e 3 passed(TCP 2 + TLS 1) + tls_e2e 2 passed, default C1 TCP reconnect 2 passed(collect 추출 무손상).",
+        "atomic: ledger entries 739->740, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(리팩토 라운드)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311of = 세션리뷰 후속 SSOT 청산(독립 리뷰어+자가검증). 사용자 '비용무관 교과서/SSOT 준수' 점검 요청 -> 독립 리뷰어가 내 합리화를 뒤집음: loopback_tls_configs(cert fixture)를 3개 테스트 파일에 module-local 복제한 것이 진짜 SSOT 위반(내 변명 'craft_hello_datagram 선례'는 부적절 — 그건 prod-vs-test 분리, 이건 test끼리 3중 복제로 분기 이유 0). test-support(기존 fixture SSOT home, fixture_session_init_params 옆)로 hoist.",
+        "실행: loopback_tls_configs 3->1(tls-fixtures feature 게이트, 6개 비-TLS 소비자엔 rustls 미유입) + collect_first_declare 추출(reconnect 테스트의 transport-agnostic drive 루프 SSOT) + reconnect.rs stale 주석 수정 + Layer M scouting+tls clippy 보강.",
+        "메타: 검증이 성급한 추천/합리화를 뒤집은 사례(R311my+mz 패턴 반복). 북극성/아키텍처 핵심은 CLEAN였고 SSOT 한 곳만 위반이었음 — 'would otherwise have to migrate' 같은 정당화 주석이 곧 smell 신호였다([[feedback-textbook-over-cost]] 적용). 리뷰어 발견도 무비판 수용 않고 증거로 교차검증(LOW는 round2 선례 확인 후 textbook 보강 판단).",
+        "미완(정직, 후속): mTLS(client cert를 ClientConfig에; 미테스트) / cert PEM 로딩 헬퍼 / pico parity % 재계산. wss는 R311od CLOSED.",
+        "NEXT: mTLS+PEM / cert PEM 로딩 / pico parity % 재계산. UNPUSHED: R311od(2)+R311oe(2)+R311of(2) = origin/main=a659004 위 6 commits. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙)."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
