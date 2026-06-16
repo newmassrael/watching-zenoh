@@ -45,6 +45,13 @@
 //!      a zenoh-pico `z_get_liveliness` query routed through zenohd observes the
 //!      token as Alive. Pins, end to end, that wz's liveliness token declaration
 //!      is liveliness-routable by the reference router.
+//!   6. `wz_query_routed_to_pico_queryable_via_zenohd` — wz AS THE REQUESTER:
+//!      wz sends a `Query` (`wz-ap-demo --query`), zenohd routes it to a
+//!      zenoh-pico `z_queryable`, which replies, and zenohd routes the reply
+//!      back to wz (logged `REPLY RECEIVED`). The symmetric counterpart of leg
+//!      4 (which had pico query wz's queryable): here wz is the client/requester
+//!      and pico is the responder, so this pins wz's outbound z_get + inbound
+//!      reply-consume path against the reference router.
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z) AND binary-dep: zenohd is an external
 //! 1.5.0 build (`scripts/build-zenohd.sh`), not a wz artifact, so it never
@@ -672,5 +679,146 @@ fn wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness() {
         zgl_captured.contains(token_keyexpr),
         "z_get_liveliness saw an Alive token but the wz token keyexpr '{token_keyexpr}' is \
          missing.\n{zgl_captured}"
+    );
+}
+
+/// Spawn a zenoh-pico `z_queryable` against zenohd and return it once it has
+/// opened a session and created its queryable (stdout "Creating Queryable").
+/// Like [`spawn_publishing_zpub`], the pico one-shot occasionally fails its
+/// session open under full-run-ci load and does NOT self-retry, so the
+/// orchestrator retries the spawn. The queryable then PERSISTS (it loops
+/// answering inbound queries with the `-v` payload), so once it has propagated
+/// to zenohd, wz's Query reaches it.
+fn spawn_ready_z_queryable(
+    z_queryable: &Path,
+    key: &str,
+    value: &str,
+    endpoint: &str,
+) -> ChildGuard {
+    const ATTEMPTS: usize = 6;
+    for attempt in 1..=ATTEMPTS {
+        let out = tempfile::tempfile().expect("tempfile for z_queryable stdout");
+        let out_writer = out.try_clone().expect("dup z_queryable stdout handle");
+        let mut out_reader = out;
+        let mut child = ChildGuard::wrap(
+            "z_queryable client (zenoh-pico)",
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(z_queryable)
+                .args(["-k", key, "-v", value, "-e", endpoint, "-m", "client"])
+                .stdout(Stdio::from(out_writer))
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn z_queryable via stdbuf"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let cap = read_captured(&mut out_reader);
+            if cap.contains("Creating Queryable") {
+                return child; // session open + queryable declared
+            }
+            if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                break; // transient open failure / timeout -> respawn
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+        eprintln!(
+            "z_queryable open attempt {attempt}/{ATTEMPTS} did not create queryable; retrying"
+        );
+    }
+    panic!("pico z_queryable failed to open a session to zenohd after {ATTEMPTS} attempts");
+}
+
+/// wz AS THE REQUESTER: wz sends a `Query`, zenohd routes it to a zenoh-pico
+/// `z_queryable`, the queryable replies, and zenohd routes the reply back to wz.
+/// The symmetric counterpart of leg 4 (pico queried wz's queryable); here wz is
+/// the client/requester (`wz-ap-demo --query` emits the outbound `Query` and
+/// `--on-query-reply-log` consumes + logs the inbound reply) and pico is the
+/// responder.
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_queryable); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_query_routed_to_pico_queryable_via_zenohd() {
+    let demo = wz_ap_demo_binary();
+    let z_queryable = zenoh_pico_cli_binary("z_queryable");
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let query_key = "demo/zenohd";
+    let reply_value = "pico-reply-to-wz";
+
+    let mut zenohd = spawn_zenohd(port);
+    drop(port_res);
+
+    // ── pico z_queryable: a queryable on demo/zenohd, ready (declared on zenohd)
+    //    before wz queries, and PERSISTING across wz attempts (it loops).
+    let mut z_queryable_child =
+        spawn_ready_z_queryable(&z_queryable, query_key, reply_value, &endpoint);
+
+    // ── wz-ap-demo --query: a one-shot Query emitted once at Established. A
+    //    single Query arriving before the pico queryable has propagated to
+    //    zenohd returns final-only (no reply), so retry the whole demo until the
+    //    reply lands — robustness for the propagation window (the wz outbound
+    //    Query + inbound reply-consume side is deterministic once a reply routes
+    //    back). The pico queryable persists across these wz restarts.
+    let mut wz_captured = String::new();
+    let mut wz_got_reply = false;
+    const ATTEMPTS: usize = 6;
+    for attempt in 1..=ATTEMPTS {
+        let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+        let demo_stderr_writer = demo_stderr
+            .try_clone()
+            .expect("dup wz-ap-demo stderr handle");
+        let mut demo_stderr_reader = demo_stderr;
+        let mut demo_child = ChildGuard::wrap(
+            "wz-ap-demo (--connect zenohd --query --on-query-reply-log)",
+            Command::new(&demo)
+                .arg("--connect")
+                .arg(format!("127.0.0.1:{port}"))
+                .arg("--query")
+                .arg(query_key)
+                .arg("--on-query-reply-log")
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(demo_stderr_writer))
+                .spawn()
+                .expect("spawn wz-ap-demo --connect zenohd --query"),
+        );
+        // wz logs "REPLY RECEIVED rid=.. keyexpr=.. body=Put payload=\"<value>\"".
+        let received = wait_for_substring(
+            &mut demo_stderr_reader,
+            "REPLY RECEIVED",
+            Duration::from_secs(8),
+        );
+        let _ = demo_child.child_mut().kill();
+        let _ = demo_child.child_mut().wait();
+        wz_captured = read_captured(&mut demo_stderr_reader);
+        if received.is_ok() && wz_captured.contains(reply_value) {
+            wz_got_reply = true;
+            break;
+        }
+        eprintln!(
+            "wz --query attempt {attempt}/{ATTEMPTS} got no reply carrying '{reply_value}' \
+             (queryable not yet propagated / transient); retrying"
+        );
+    }
+
+    let _ = z_queryable_child.child_mut().kill();
+    let _ = z_queryable_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    eprintln!("--- captured wz-ap-demo stderr ---\n{wz_captured}");
+
+    assert!(
+        wz_got_reply,
+        "wz did not log 'REPLY RECEIVED' carrying the pico reply value '{reply_value}' within \
+         the retry budget — zenohd did not route wz's Query to the pico z_queryable, or the \
+         reply did not route back.\n--- captured wz-ap-demo stderr ---\n{wz_captured}"
+    );
+    assert!(
+        wz_captured.contains(query_key),
+        "wz received a reply but the query keyexpr '{query_key}' is missing.\n{wz_captured}"
     );
 }
