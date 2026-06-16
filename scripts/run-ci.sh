@@ -1919,8 +1919,19 @@ layer_e_ap_demo_round_trip() {
     # the opt-in Layer M instead, alongside the wz<->wz multicast lanes.
     # The `multicast` substring keeps every future multicast interop test
     # out of this default sweep with one pattern (the wz_e2e_ analogue).
+    # R311ou — also exclude any `zenohd` test: the wz<->zenoh-full (zenohd)
+    # interop tests (wz_to_zenohd_router.rs) drive a HEAVY external reference
+    # router (zenohd v1.5.0, not a wz artifact) and are load-sensitive — under
+    # this default sweep's concurrent process pressure (cargo runs the whole
+    # --ignored set in parallel: 3 zenohd instances + their wz-ap-demo /
+    # z_pub / z_sub children alongside every other e2e), a wz-ap-demo handshake
+    # to zenohd can exceed the per-test readiness budget. Same required-gate
+    # hazard class as `multicast`; they run ONLY in the dedicated opt-in Layer Z
+    # (where the env + external binary are explicitly provisioned), which is
+    # their `#[ignore]`-declared home. The `zenohd` substring keeps every future
+    # zenohd interop test out of this default sweep with one pattern.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
-        --skip wz_e2e_ --skip multicast)
+        --skip wz_e2e_ --skip multicast --skip zenohd)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -2856,8 +2867,18 @@ layer_z_zenohd_interop() {
     fi
     # wz-ap-demo is the wz client (--connect zenohd); build it like Layer E.
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
+    # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
+    # children; run concurrently (cargo's default), 3 zenohd instances + clients
+    # contend for CPU during the wz<->zenohd handshake, and a per-test 10s
+    # readiness wait occasionally starves (observed ~1/10 as
+    # `wz_client_reaches_established` / `wz_routed_subscribe` "did not log ...
+    # within 10s"). Serializing removes the contention at the ROOT (each test
+    # runs in isolation, the same condition as the 20/20-stable standalone) — a
+    # structural fix, not a load-mitigation timeout bump. These are heavy
+    # opt-in e2e tests, so serial execution costs only wall-clock, not coverage.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        --test wz_to_zenohd_router -- --ignored --quiet) || return 1
+        --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────
