@@ -38500,6 +38500,50 @@
         "UNPUSHED: R311oo 코드 commit + ledger commit(origin/main=5b9148a 위). push 명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311op": {
+      "decision_summary": "R311op: reorder chaos e2e(P3.10 교란 3종 drop/dup/reorder 완성). ChaosReadDriver에 reorder_nth_matching(adjacent swap) 추가, pending을 LinkEvent로 일반화. 3-frag Put F2↔F3 스왑→OOO abort→다음 clean Put 복구. 순수 테스트 라운드.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: ChaosReadDriver에 reorder_nth_matching 추가 — Nth matching frame을 successor 1개 뒤로 지연(adjacent swap, \".. T S ..\" -> \".. S T ..\"). ChaosAction에 Reorder arm, pending을 Option<RxFrame>->Option<LinkEvent>로 일반화(dup copy + reorder의 지연 target/overtaking event 공유; target 뒤가 terminal(Lost)이면 swap 불가라 target in-place 후 terminal stash), reordered 카운터. self-test 3종(swap / terminal-edge / ordinal=0 pass-through). drop/dup/reorder 교란 3종을 한 메커니즘이 제공.",
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs: reorder e2e(udp_reordered_fragment_aborts_then_channel_recovers) 추가 — 3-frag Put의 2nd fragment를 successor와 스왑→수신측 F1,F3,F2. F3(forward gap)은 frame게이트 admit하나 reassembly strict in-order(sn::consecutive)가 OOO abort, 늦은 F2(backward SN)는 frame게이트 reject(다음 chain 미오염). 같은 세션이 다음 clean Put byte-exact 복구."
+      ],
+      "verification_bullets": [
+        "test-support self-test 7 passed(drop 2 + duplicate 2 + reorder 3). udp_chaos_e2e 3 passed(drop+dup+reorder) + 12/12 연속 non-flaky([[feedback-no-flaky-ever]]).",
+        "reorder e2e 단언 3종: chaos.reordered==1, ReassemblyDropped(OutOfOrder)>=1(F3 OOO abort), delivered==[payload_kept] 정확히 1개(P1 손실, 늦은 F2가 P2 미오염=reorder판 R311oo dup-merge 정합성 가드).",
+        "clippy EXIT=0 2종: test-support --all-targets -D warnings + wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings. fmt --all --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 캡처, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) \"all required layers pass\" 17 레이어; error[E / test result:FAILED / panicked 각 0.",
+        "atomic: ledger entries 749->750, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(테스트/하니스 라운드=신규 feature atom 아님)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311op = reorder chaos e2e(P3.10 lossy-link 교란 3종 drop/dup/reorder 완성). production 코드 무변경(reassembly 동작은 R311oo에서 이미 정합)=순수 테스트/하니스 라운드: ChaosReadDriver를 reorder까지 일반화(한 메커니즘이 교란 3종, pending=LinkEvent), strict in-order abort+recover를 reorder 원인으로 실증.",
+        "검증 포인트: reorder는 forward-gap OOO abort(F3) + late-backward reject(F2)를 동시에 거쳐, 중단된 chain의 stale fragment가 다음 메시지를 오염시키지 못함을 확인(reorder판 dup-merge 정합성 가드).",
+        "P3.10 chaos 트랙 남은 로컬: latency/jitter(deadline sweep e2e — wall-clock 의존이라 flaky 위험, TestHal/짧은 deadline로 결정적化 필요), 동시세션 stress(pool/quota under load). cross-impl(pico interop·zenoh-full router)은 외부의존 잔존.",
+        "UNPUSHED 누적: R311oo(fix 3961858 + test dbbde22 + ledger 1fcbc21) + R311op(test + ledger). origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
+      ],
+      "publishable_decision_summary": "R311op: reorder chaos e2e(P3.10 교란 3종 drop/dup/reorder 완성). ChaosReadDriver에 reorder_nth_matching(adjacent swap) 추가, pending을 LinkEvent로 일반화. 3-frag Put F2↔F3 스왑→OOO abort→다음 clean Put 복구. 순수 테스트 라운드.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: ChaosReadDriver에 reorder_nth_matching 추가 — Nth matching frame을 successor 1개 뒤로 지연(adjacent swap, \".. T S ..\" -> \".. S T ..\"). ChaosAction에 Reorder arm, pending을 Option<RxFrame>->Option<LinkEvent>로 일반화(dup copy + reorder의 지연 target/overtaking event 공유; target 뒤가 terminal(Lost)이면 swap 불가라 target in-place 후 terminal stash), reordered 카운터. self-test 3종(swap / terminal-edge / ordinal=0 pass-through). drop/dup/reorder 교란 3종을 한 메커니즘이 제공.",
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs: reorder e2e(udp_reordered_fragment_aborts_then_channel_recovers) 추가 — 3-frag Put의 2nd fragment를 successor와 스왑→수신측 F1,F3,F2. F3(forward gap)은 frame게이트 admit하나 reassembly strict in-order(sn::consecutive)가 OOO abort, 늦은 F2(backward SN)는 frame게이트 reject(다음 chain 미오염). 같은 세션이 다음 clean Put byte-exact 복구."
+      ],
+      "publishable_verification_bullets": [
+        "test-support self-test 7 passed(drop 2 + duplicate 2 + reorder 3). udp_chaos_e2e 3 passed(drop+dup+reorder) + 12/12 연속 non-flaky([[feedback-no-flaky-ever]]).",
+        "reorder e2e 단언 3종: chaos.reordered==1, ReassemblyDropped(OutOfOrder)>=1(F3 OOO abort), delivered==[payload_kept] 정확히 1개(P1 손실, 늦은 F2가 P2 미오염=reorder판 R311oo dup-merge 정합성 가드).",
+        "clippy EXIT=0 2종: test-support --all-targets -D warnings + wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings. fmt --all --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 캡처, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) \"all required layers pass\" 17 레이어; error[E / test result:FAILED / panicked 각 0.",
+        "atomic: ledger entries 749->750, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(테스트/하니스 라운드=신규 feature atom 아님)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311op = reorder chaos e2e(P3.10 lossy-link 교란 3종 drop/dup/reorder 완성). production 코드 무변경(reassembly 동작은 R311oo에서 이미 정합)=순수 테스트/하니스 라운드: ChaosReadDriver를 reorder까지 일반화(한 메커니즘이 교란 3종, pending=LinkEvent), strict in-order abort+recover를 reorder 원인으로 실증.",
+        "검증 포인트: reorder는 forward-gap OOO abort(F3) + late-backward reject(F2)를 동시에 거쳐, 중단된 chain의 stale fragment가 다음 메시지를 오염시키지 못함을 확인(reorder판 dup-merge 정합성 가드).",
+        "P3.10 chaos 트랙 남은 로컬: latency/jitter(deadline sweep e2e — wall-clock 의존이라 flaky 위험, TestHal/짧은 deadline로 결정적化 필요), 동시세션 stress(pool/quota under load). cross-impl(pico interop·zenoh-full router)은 외부의존 잔존.",
+        "UNPUSHED 누적: R311oo(fix 3961858 + test dbbde22 + ledger 1fcbc21) + R311op(test + ledger). origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
