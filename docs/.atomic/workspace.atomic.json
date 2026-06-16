@@ -38448,6 +38448,58 @@
         "PUSHED: R311ol+om+on 전부 origin/main 도달(이 턴 push). NEXT=R311oo 수정. 상세 [[project-pico-parity-status]] P3.10."
       ]
     },
+    "Round 311oo": {
+      "decision_summary": "R311oo: dup-fragment merge 버그 수정. reassembly_slot Empty를 more로 분기(M=0 first→Complete 즉시 finalize=pico rx.c parity), ingest_chain_start deliver+Complete. 단위 회귀 + dup e2e(ChaosReadDriver duplicate mode).",
+      "changes_bullets": [
+        "sources/network/reassembly_slot.scxml: Empty state 단일 무조건 transition을 wire more 비트로 분기 — more!==0→Receiving(begin_chain, 정상 멀티프래그먼트 chain 시작), more===0→Complete(begin_chain+finalize_message, lone final 프래그먼트 1-step 완료). 주석에 lossy/dup 링크가 lone M=0 first를 stranded하는 경위 + zenoh-pico rx.c \"if(!more)decode\" parity 명시. build.rs rerun-if-changed가 SCE regen(다중 sce:action transition 정상 emit, SCXML purity 유지=신규 sce:* 없음).",
+        "crates/wz-session-core/src/reassembly_dispatch.rs: ingest_chain_start에 deliver:F 파라미터 추가, step 후 get_current_state()==Complete면 deliver(&buf)+release()+IngestOutcome::Reassembled 반환(이전 무조건 Begun). ingest가 both match arm(continuation/chain_start)에 deliver 전달(FnOnce는 mutually-exclusive arm move라 OK). 멀티캐스트 경로(multicast_dispatch.rs:796)는 동일 deliver 클로저 사용이라 무변경으로 lone M=0 완료를 동일 처리.",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: ChaosReadDriver에 duplicate_nth_matching(hold+reemit) 추가 — ChaosAction enum(Drop/Duplicate), pending:Option<RxFrame>, reclone_rx 헬퍼(public 필드로 재구성=production RxFrame Clone derive 회피→borrowed RxFrame<'pool> zero-copy 마이그레이션 무제약). 메커니즘(count+perturb)/정책(predicate) 분리 유지=transport-agnostic. self-test 2종(duplicate Nth만 / ordinal=0 pass-through).",
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs: dup-fragment e2e 추가 — 2-fragment Put의 1st fragment 중복→frame게이트 RxSnRejected→abort_channel chain clear→stranded M=0 final이 fresh chain start로 도착→fix가 즉시 complete+deliver(remnant라 frame parse 실패 drop)→같은 세션이 다음 clean Put byte-exact 복구(미merge). DriverLoopOutcome import 추가."
+      ],
+      "verification_bullets": [
+        "reassembly_dispatch 단위 14 passed — 신규 stranded_final_fragment_does_not_merge_into_next_message(abort_channel→lone M=0→SN-consecutive 다음 메시지 delivered==[P1TAIL,P2aP2b]=미merge; 버그 시 단일 merge blob \"P1TAILP2aP2b\"). first_fragment_more_zero_does_not_complete→completes_immediately 갱신(Reassembled+deliver \"solo\"; 폐기된 버그-고정 테스트 대체).",
+        "udp_chaos_e2e 2 passed + 12/12 연속 non-flaky([[feedback-no-flaky-ever]]). dup e2e 단언 3종: chaos.duplicated==1, RxSnRejected>=1(dup가 SN게이트 트립=chain clear 양성 증거), delivered==[payload_kept] 정확히 1개(미merge; 버그 시 merge blob frame-parse 실패로 0 delivery).",
+        "test-support self-test 4 passed(drop 2 + duplicate 2). clippy EXIT=0 3종: test-support --all-targets -D warnings + wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings(C1l 게이트) + wz-session-core --features reassembly,alloc -D warnings. fmt --all --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 캡처, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) \"all required layers pass\" 17 레이어; error[E / test result:FAILED / panicked 각 0.",
+        "SCE regen은 동작으로 검증: 생성 FSM이 Empty→Complete(more=0) 1-step 수행(단위/e2e 통과가 증명). production RxFrame 타입 무변경(reclone_rx로 Clone 회피). happy-path(정상 multi-frag first는 항상 M=1) 무영향=변경 영향은 M=0-first edge만.",
+        "atomic: ledger entries 748->749, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(버그 수정 라운드=신규 feature atom 아님)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311oo = dup-fragment merge 버그 수정(R311on 확정 진단의 구현). reassembly_slot Empty transition을 more로 분기해 lone M=0 first fragment를 즉시 complete(zenoh-pico rx.c \"if(!more)decode\" parity)=stranded orphan이 SN-consecutive한 다음 메시지를 흡수하던 merge를 차단. SSOT는 statechart에 유지(SCXML guard 추가, 신규 sce:* 없음).",
+        "효과: lossy/reorder 링크 자연발생 또는 악의적 peer의 fragment 중복으로 피해자의 다음 메시지가 오염되던 경로 차단. lone M=0 tail은 deliver되나 chain remnant라 frame parse 실패로 drop(pico와 동일 outcome). happy-path 무영향=변경 영향은 M=0-first edge에 국한.",
+        "P3.10 chaos 트랙: drop-recovery(R311ol+om) + dup-merge(R311on 진단→R311oo 수정) DONE. 남은 로컬 트랙(외부의존無): reorder chaos(ChaosReadDriver hold+reemit를 재배열 모드로 확장), latency/jitter, 동시세션 stress.",
+        "cross-impl(pico interop·zenoh-full router)은 외부의존 잔존. 상세 [[project-pico-parity-status]] P3.10.",
+        "UNPUSHED: R311oo 코드 commit + ledger commit(origin/main=5b9148a 위). push 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311oo: dup-fragment merge 버그 수정. reassembly_slot Empty를 more로 분기(M=0 first→Complete 즉시 finalize=pico rx.c parity), ingest_chain_start deliver+Complete. 단위 회귀 + dup e2e(ChaosReadDriver duplicate mode).",
+      "publishable_changes_bullets": [
+        "sources/network/reassembly_slot.scxml: Empty state 단일 무조건 transition을 wire more 비트로 분기 — more!==0→Receiving(begin_chain, 정상 멀티프래그먼트 chain 시작), more===0→Complete(begin_chain+finalize_message, lone final 프래그먼트 1-step 완료). 주석에 lossy/dup 링크가 lone M=0 first를 stranded하는 경위 + zenoh-pico rx.c \"if(!more)decode\" parity 명시. build.rs rerun-if-changed가 SCE regen(다중 sce:action transition 정상 emit, SCXML purity 유지=신규 sce:* 없음).",
+        "crates/wz-session-core/src/reassembly_dispatch.rs: ingest_chain_start에 deliver:F 파라미터 추가, step 후 get_current_state()==Complete면 deliver(&buf)+release()+IngestOutcome::Reassembled 반환(이전 무조건 Begun). ingest가 both match arm(continuation/chain_start)에 deliver 전달(FnOnce는 mutually-exclusive arm move라 OK). 멀티캐스트 경로(multicast_dispatch.rs:796)는 동일 deliver 클로저 사용이라 무변경으로 lone M=0 완료를 동일 처리.",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: ChaosReadDriver에 duplicate_nth_matching(hold+reemit) 추가 — ChaosAction enum(Drop/Duplicate), pending:Option<RxFrame>, reclone_rx 헬퍼(public 필드로 재구성=production RxFrame Clone derive 회피→borrowed RxFrame<'pool> zero-copy 마이그레이션 무제약). 메커니즘(count+perturb)/정책(predicate) 분리 유지=transport-agnostic. self-test 2종(duplicate Nth만 / ordinal=0 pass-through).",
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs: dup-fragment e2e 추가 — 2-fragment Put의 1st fragment 중복→frame게이트 RxSnRejected→abort_channel chain clear→stranded M=0 final이 fresh chain start로 도착→fix가 즉시 complete+deliver(remnant라 frame parse 실패 drop)→같은 세션이 다음 clean Put byte-exact 복구(미merge). DriverLoopOutcome import 추가."
+      ],
+      "publishable_verification_bullets": [
+        "reassembly_dispatch 단위 14 passed — 신규 stranded_final_fragment_does_not_merge_into_next_message(abort_channel→lone M=0→SN-consecutive 다음 메시지 delivered==[P1TAIL,P2aP2b]=미merge; 버그 시 단일 merge blob \"P1TAILP2aP2b\"). first_fragment_more_zero_does_not_complete→completes_immediately 갱신(Reassembled+deliver \"solo\"; 폐기된 버그-고정 테스트 대체).",
+        "udp_chaos_e2e 2 passed + 12/12 연속 non-flaky([[feedback-no-flaky-ever]]). dup e2e 단언 3종: chaos.duplicated==1, RxSnRejected>=1(dup가 SN게이트 트립=chain clear 양성 증거), delivered==[payload_kept] 정확히 1개(미merge; 버그 시 merge blob frame-parse 실패로 0 delivery).",
+        "test-support self-test 4 passed(drop 2 + duplicate 2). clippy EXIT=0 3종: test-support --all-targets -D warnings + wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings(C1l 게이트) + wz-session-core --features reassembly,alloc -D warnings. fmt --all --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접 캡처, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) \"all required layers pass\" 17 레이어; error[E / test result:FAILED / panicked 각 0.",
+        "SCE regen은 동작으로 검증: 생성 FSM이 Empty→Complete(more=0) 1-step 수행(단위/e2e 통과가 증명). production RxFrame 타입 무변경(reclone_rx로 Clone 회피). happy-path(정상 multi-frag first는 항상 M=1) 무영향=변경 영향은 M=0-first edge만.",
+        "atomic: ledger entries 748->749, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(버그 수정 라운드=신규 feature atom 아님)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311oo = dup-fragment merge 버그 수정(R311on 확정 진단의 구현). reassembly_slot Empty transition을 more로 분기해 lone M=0 first fragment를 즉시 complete(zenoh-pico rx.c \"if(!more)decode\" parity)=stranded orphan이 SN-consecutive한 다음 메시지를 흡수하던 merge를 차단. SSOT는 statechart에 유지(SCXML guard 추가, 신규 sce:* 없음).",
+        "효과: lossy/reorder 링크 자연발생 또는 악의적 peer의 fragment 중복으로 피해자의 다음 메시지가 오염되던 경로 차단. lone M=0 tail은 deliver되나 chain remnant라 frame parse 실패로 drop(pico와 동일 outcome). happy-path 무영향=변경 영향은 M=0-first edge에 국한.",
+        "P3.10 chaos 트랙: drop-recovery(R311ol+om) + dup-merge(R311on 진단→R311oo 수정) DONE. 남은 로컬 트랙(외부의존無): reorder chaos(ChaosReadDriver hold+reemit를 재배열 모드로 확장), latency/jitter, 동시세션 stress.",
+        "cross-impl(pico interop·zenoh-full router)은 외부의존 잔존. 상세 [[project-pico-parity-status]] P3.10.",
+        "UNPUSHED: R311oo 코드 commit + ledger commit(origin/main=5b9148a 위). push 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
