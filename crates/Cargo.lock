@@ -2138,6 +2138,7 @@ version = "0.1.0"
 dependencies = [
  "rcgen",
  "sce-rust-runtime",
+ "tokio",
  "tokio-rustls",
  "wz-runtime-tokio",
 ]

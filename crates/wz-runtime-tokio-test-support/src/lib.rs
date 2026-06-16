@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use sce_rust_runtime::Hal;
 
 use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
-use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
+use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
 /// fixture inputs, so wire-byte assertions cross-reference cleanly
@@ -191,6 +191,89 @@ impl LinkDriver for QueueDriver {
         self.events.pop_front().unwrap_or(LinkEvent::Lost {
             cause: LostCause::PeerClosed,
         })
+    }
+}
+
+/// A [`LinkDriver`] decorator applying a DETERMINISTIC loss schedule to the
+/// inbound stream: it swallows the `drop_ordinal`-th (1-based) frame for which
+/// the caller's `should_drop` predicate returns true, passing every other
+/// event through. The schedule is a fixed counter — NO RNG — so a lossy-link
+/// scenario reproduces byte-for-byte every run (the no-flaky contract).
+///
+/// MECHANISM vs POLICY split: the decorator owns only the count + drop
+/// mechanism; the caller's predicate decides which frame is a drop candidate.
+/// So transport-specific wire knowledge (e.g. decoding a UDP datagram's
+/// transport MID to recognise a fragment) stays in the test, never baked into
+/// this reusable mechanism — the same decorator drops frames on a stream
+/// (length-prefixed) and a datagram link alike. Wrap a link AFTER its
+/// handshake so only the steady-state stream is perturbed.
+///
+/// `dropped` is `pub` so a test reads it after the drive completes to assert
+/// the loss was actually injected, not merely inferred from a missing delivery.
+pub struct ChaosReadDriver<D, P> {
+    inner: D,
+    should_drop: P,
+    drop_ordinal: usize,
+    matched: usize,
+    /// Count of frames actually swallowed (0 or 1 for a single-ordinal plan).
+    pub dropped: usize,
+}
+
+impl<D, P> ChaosReadDriver<D, P>
+where
+    D: LinkDriver,
+    P: FnMut(&RxFrame) -> bool,
+{
+    /// Drop the `drop_ordinal`-th (1-based) inbound frame matching
+    /// `should_drop`. `drop_ordinal == 0` is a pass-through (no 1-based
+    /// ordinal equals 0), useful as a chaos-disabled control.
+    pub fn drop_nth_matching(inner: D, drop_ordinal: usize, should_drop: P) -> Self {
+        Self {
+            inner,
+            should_drop,
+            drop_ordinal,
+            matched: 0,
+            dropped: 0,
+        }
+    }
+}
+
+impl<D, P> LinkDriver for ChaosReadDriver<D, P>
+where
+    D: LinkDriver,
+    P: FnMut(&RxFrame) -> bool,
+{
+    async fn open(&mut self) -> io::Result<()> {
+        self.inner.open().await
+    }
+
+    async fn send(&mut self, frame: &TxFrame<'_>, reliability: Reliability) -> io::Result<()> {
+        self.inner.send(frame, reliability).await
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        self.inner.close().await
+    }
+
+    async fn poll_event(&mut self) -> LinkEvent {
+        loop {
+            let event = self.inner.poll_event().await;
+            if let LinkEvent::Rx(frame) = &event {
+                if (self.should_drop)(frame) {
+                    self.matched += 1;
+                    if self.matched == self.drop_ordinal {
+                        // Deterministic single drop: swallow this frame and
+                        // poll for the next. Cancel-safe — the inner driver
+                        // owns any partial-read state, and a datagram recv is
+                        // atomic, so a `select!` cancel here loses only the
+                        // wake, never wire bytes.
+                        self.dropped += 1;
+                        continue;
+                    }
+                }
+            }
+            return event;
+        }
     }
 }
 
@@ -408,5 +491,60 @@ pub fn loopback_mtls_pems() -> MtlsPems {
         server_key_pem: server_key.serialize_pem(),
         client_cert_pem: client_cert.pem(),
         client_key_pem: client_key.serialize_pem(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rx(byte: u8) -> LinkEvent {
+        LinkEvent::Rx(RxFrame::new(vec![byte]))
+    }
+
+    /// The decorator swallows exactly the Nth frame matching the predicate and
+    /// passes every other frame (matching or not) through unchanged — the
+    /// deterministic single-loss mechanism, transport-free.
+    #[tokio::test]
+    async fn drops_only_the_nth_matching_frame() {
+        // Marker 0xAA = a drop candidate, 0x00 = a pass-through frame.
+        // Sequence: match, non-match, match(<- 2nd match, dropped), match.
+        let inner = QueueDriver::with(vec![rx(0xAA), rx(0x00), rx(0xAA), rx(0xAA)]);
+        let mut chaos =
+            ChaosReadDriver::drop_nth_matching(inner, 2, |f| f.bytes.first() == Some(&0xAA));
+
+        // 1st matching frame passes.
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+            other => panic!("expected 1st match Rx, got {other:?}"),
+        }
+        // Non-matching frame passes (not counted toward the ordinal).
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0x00]),
+            other => panic!("expected non-match Rx, got {other:?}"),
+        }
+        // 2nd matching frame is SWALLOWED, so the next poll yields the 3rd.
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+            other => panic!("expected 3rd match Rx (2nd dropped), got {other:?}"),
+        }
+        // Inner queue drained -> Lost.
+        assert!(matches!(chaos.poll_event().await, LinkEvent::Lost { .. }));
+        assert_eq!(chaos.dropped, 1, "exactly one frame dropped");
+    }
+
+    /// `drop_ordinal == 0` is a pass-through: nothing is ever swallowed.
+    #[tokio::test]
+    async fn drop_ordinal_zero_passes_everything() {
+        let inner = QueueDriver::with(vec![rx(0xAA), rx(0xAA)]);
+        let mut chaos =
+            ChaosReadDriver::drop_nth_matching(inner, 0, |f| f.bytes.first() == Some(&0xAA));
+        for _ in 0..2 {
+            match chaos.poll_event().await {
+                LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+                other => panic!("expected pass-through Rx, got {other:?}"),
+            }
+        }
+        assert_eq!(chaos.dropped, 0);
     }
 }

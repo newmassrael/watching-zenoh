@@ -84,6 +84,13 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
     "logging",
 ], optional = true }
 
+# A current-thread runtime + the #[tokio::test] macro for THIS crate's own
+# unit tests (the ChaosReadDriver decorator self-test). Dev-only: NOT
+# propagated to the crates that dev-dep this one, so it leaks no feature into
+# any crate-under-test (the R311fr default-features=false contract is intact).
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+
 [features]
 # Pulls the rustls-based loopback cert fixture; enabled by wz-runtime-tokio's
 # dev-dep so its TLS e2e tests share one cert-generation SSOT.

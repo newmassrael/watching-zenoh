@@ -33,26 +33,33 @@
 //!
 //! ## Why the loss is injected by a decorator, not the kernel
 //!
-//! Loopback does not drop, so the loss is applied by [`ChaosReadDriver`], a
-//! `LinkDriver` decorator wrapping the acceptor's `InboundLink` AFTER its
-//! clean handshake — the drop only perturbs the steady-state fragment stream,
-//! never the handshake. It is TEST-LOCAL (no production type carries a chaos
-//! variant): the open path runs the real `accept_and_open_session`, then the
-//! steady-state drive (generic over `D: LinkDriver`) takes the wrapped driver.
+//! Loopback does not drop, so the loss is applied by
+//! [`ChaosReadDriver`](wz_runtime_tokio_test_support::ChaosReadDriver), the
+//! shared deterministic `LinkDriver` loss decorator. It wraps the acceptor's
+//! `InboundLink` AFTER its clean handshake, so only the steady-state fragment
+//! stream is perturbed; the open path runs the real `accept_and_open_session`,
+//! and the steady-state drive (generic over `D: LinkDriver`) takes the wrapped
+//! driver. No PRODUCTION type carries a chaos variant. The decorator is the
+//! reusable MECHANISM (count + drop); the POLICY — which datagram is a
+//! fragment — is this test's [`is_fragment_datagram`] predicate, which decodes
+//! the transport MID (the principled wire identity, not a size heuristic).
 //!
 //! ## Non-flakiness
 //!
-//! The schedule is a fixed counter, NOT RNG: drop the 2nd inbound datagram
-//! whose length exceeds 1000 bytes. The ~1450-byte UDP fragment datagrams are
-//! the only steady-state traffic over that threshold (keepalives are tiny), so
-//! the 2nd large datagram is deterministically the second fragment of the
-//! FIRST (lossy) Put — the two Puts are published sequentially, so their
-//! fragments never interleave. The acceptor side is driven continuously so the
-//! reassembly pool persists across both chains; `select!` drops the drives
-//! once the scenario observes the recovery delivery. Bounded sleeps keep a
-//! regression failing fast instead of hanging. ([[feedback-no-flaky-ever]])
+//! Deterministic by construction, NOT RNG: drop the 2nd inbound datagram whose
+//! transport MID is `T_MID_FRAGMENT`. A 4 KB Put exceeds the UDP link MTU so it
+//! always splits into >= 2 fragments, hence the 2nd fragment is always a
+//! fragment of the FIRST (lossy) Put. The two Puts are emitted back-to-back
+//! with NO inter-publish delay: `emit_frame_or_fragments` writes each Put's
+//! whole fragment chain wire-atomically under the TX lock and the writer drains
+//! FIFO, so P1's fragments precede P2's on the wire deterministically. The only
+//! synchronization is a poll-on-condition wait for the clean delivery; by FIFO
+//! the dropped fragment + the abort are already processed by the time P2
+//! completes, so the assertions need no settle margin. The acceptor is driven
+//! continuously so the reassembly pool persists across both chains; `select!`
+//! drops the drives once the scenario observes the recovery delivery.
+//! ([[feedback-no-flaky-ever]])
 
-use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -68,81 +75,24 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::udp_pipeline::UDP_LINK_MTU;
-use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TxFrame};
-use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_runtime_tokio::RxFrame;
+use wz_runtime_tokio_test_support::{fixture_session_init_params, ChaosReadDriver};
 use wz_session_core::driver_loop::{IterationEvent, ReassemblyDropReason};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
+use wz_session_core::wire_const;
 
 const ITER_CAP: usize = 4096;
 const KEYEXPR: &str = "demo/udp-chaos";
-/// Size split between a UDP fragment datagram (~1450) and the tiny
-/// control/keepalive datagrams (< 100): below the link MTU, far above any
-/// control frame, so the chaos counter sees fragments only.
-const LARGE_THRESHOLD: usize = 1000;
 
-/// A [`LinkDriver`] decorator that applies a DETERMINISTIC loss schedule to
-/// inbound datagrams: it swallows the `drop_large_ordinal`-th (1-based) frame
-/// whose length exceeds `large_threshold`, passing everything else through. No
-/// RNG — the schedule is a fixed counter, so the lossy-link scenario
-/// reproduces byte-for-byte every run ([[feedback-no-flaky-ever]]).
-///
-/// Wraps any `LinkDriver`; the test wraps the acceptor's `InboundLink` after
-/// its clean handshake so only the steady-state fragment stream is perturbed.
-/// `dropped` is read after the drive completes to assert the loss was actually
-/// injected (not merely inferred from the absence of a delivery).
-struct ChaosReadDriver<D: LinkDriver> {
-    inner: D,
-    large_threshold: usize,
-    drop_large_ordinal: usize,
-    large_seen: usize,
-    dropped: usize,
-}
-
-impl<D: LinkDriver> ChaosReadDriver<D> {
-    fn new(inner: D, large_threshold: usize, drop_large_ordinal: usize) -> Self {
-        Self {
-            inner,
-            large_threshold,
-            drop_large_ordinal,
-            large_seen: 0,
-            dropped: 0,
-        }
-    }
-}
-
-impl<D: LinkDriver> LinkDriver for ChaosReadDriver<D> {
-    async fn open(&mut self) -> io::Result<()> {
-        self.inner.open().await
-    }
-
-    async fn send(&mut self, frame: &TxFrame<'_>, reliability: Reliability) -> io::Result<()> {
-        self.inner.send(frame, reliability).await
-    }
-
-    async fn close(&mut self) -> io::Result<()> {
-        self.inner.close().await
-    }
-
-    async fn poll_event(&mut self) -> LinkEvent {
-        loop {
-            let event = self.inner.poll_event().await;
-            if let LinkEvent::Rx(frame) = &event {
-                if frame.bytes.len() > self.large_threshold {
-                    self.large_seen += 1;
-                    if self.large_seen == self.drop_large_ordinal {
-                        // Deterministic single drop: swallow this fragment
-                        // datagram and poll for the next. Cancel-safe — a UDP
-                        // recv is atomic per datagram, so a `select!` cancel
-                        // here loses only the wake, never wire bytes.
-                        self.dropped += 1;
-                        continue;
-                    }
-                }
-            }
-            return event;
-        }
-    }
+/// A UDP datagram carries exactly one transport message, so its first byte is
+/// the transport header whose low 5 bits are the MID — the production
+/// classifier shape (`multicast_rx` / `inbound`: `header & 0x1f`). A
+/// `T_MID_FRAGMENT` datagram is one fragment of an oversize Put. Identifying
+/// the drop candidate by wire identity (not a size heuristic) keeps the policy
+/// principled: the schedule targets "a fragment", not "a big datagram".
+fn is_fragment_datagram(frame: &RxFrame) -> bool {
+    frame.bytes.first().map(|h| h & 0x1f) == Some(wire_const::T_MID_FRAGMENT)
 }
 
 /// A dropped fragment datagram aborts its reassembly chain (the lossy Put is
@@ -159,7 +109,7 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
         .collect();
     assert!(
         payload_lost.len() > UDP_LINK_MTU,
-        "payload must exceed one UDP link frame to force fragmentation"
+        "payload must exceed one UDP link frame to force fragmentation (>= 2 fragments)"
     );
     assert_ne!(
         payload_lost, payload_kept,
@@ -224,11 +174,13 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
         "acceptor TX budget caps to the same UDP link MTU (symmetry)"
     );
 
-    // ── Wrap the acceptor's inbound driver to drop the 2nd large (fragment)
-    //    datagram — a fragment of the FIRST Put, creating the gap that aborts
-    //    its chain. The handshake is already done, so only the fragment stream
-    //    is perturbed.
-    let mut chaos_inbound = ChaosReadDriver::new(opened_acc.inbound, LARGE_THRESHOLD, 2);
+    // ── Wrap the acceptor's inbound driver to drop the 2nd fragment datagram.
+    //    A 4 KB Put is >= 2 fragments, so the 2nd fragment is always a fragment
+    //    of the FIRST Put — dropping it leaves a gap that aborts P1's chain.
+    //    The handshake is already done, so only the fragment stream is
+    //    perturbed.
+    let mut chaos_inbound =
+        ChaosReadDriver::drop_nth_matching(opened_acc.inbound, 2, is_fragment_datagram);
 
     // ── Subscriber on the acceptor's observer; collects each delivered payload
     //    so the assertion can confirm WHICH Put arrived.
@@ -285,35 +237,31 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
     let delivered_probe = delivered.clone();
     let payload_kept_probe = payload_kept.clone();
     let scenario = async move {
-        // Let both drives reach steady state.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        // Put #1 — its 2nd fragment datagram is dropped, so the chain aborts
-        // and this message is NEVER delivered.
+        // Two oversize Puts back-to-back, NO inter-publish delay: each Put's
+        // whole fragment chain emits wire-atomically under the TX lock and the
+        // writer drains FIFO, so P1's fragments precede P2's deterministically
+        // — the 2nd fragment the chaos driver drops is unambiguously P1's.
         publisher
             .publish(KEYEXPR, &payload_lost, PublishOptions::put())
             .expect("lossy publish builds and routes through the send seam");
-        // Let Put #1's fragments flow through (and abort) before Put #2, so the
-        // chaos counter's 2nd large datagram is unambiguously a Put #1 fragment.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        // Put #2 — clean: opens a fresh chain on the same session and
-        // reassembles byte-exact.
         publisher
             .publish(KEYEXPR, &payload_kept_probe, PublishOptions::put())
             .expect("recovery publish builds and routes through the send seam");
-        for _ in 0..100 {
+        // The sole synchronization: poll until the clean Put is delivered. By
+        // FIFO the dropped fragment + P1's abort are already processed by the
+        // time P2 completes, so the post-drive assertions need no settle.
+        for _ in 0..200 {
             if delivered_probe
                 .lock()
                 .unwrap()
                 .iter()
                 .any(|p| p == &payload_kept_probe)
             {
-                break;
+                return;
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        // Settle margin so an erroneous extra delivery (e.g. the lossy Put
-        // wrongly completing) surfaces before the assertions.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        panic!("recovery Put not delivered within the ~6s budget");
     };
 
     tokio::select! {
