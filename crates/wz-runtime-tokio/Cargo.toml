@@ -378,7 +378,7 @@ transport-link-serial = ["wz-session-core/transport-link-serial", "dep:tokio-ser
 # is supplied at the explicit `dial_tls`/`accept_tls` call site, so the
 # generic `dial_locator` returns Unsupported for `tls/...`. NOT in the
 # default set — zenoh-pico ships TLS as an optional link (Z_FEATURE_LINK_TLS).
-transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls"]
+transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile"]
 # R311ob — host WebSocket link backend. UNLIKE TLS (which forwards
 # transport-link-tcp because it reuses the TCP StreamEnvelope framing), WS is
 # a DATAGRAM-flow link (zenoh-pico `_z_new_link_ws` sets
@@ -674,6 +674,16 @@ tokio-serial = { version = "5.4", default-features = false, optional = true }
 # `tokio-serial` dep took. `tls12` + `logging` keep the usual handshake
 # surface; the e2e's self-signed cert comes from the `rcgen` dev-dep.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+# R311og — PEM cert/key loader for the `tls_config` module, behind
+# `transport-link-tls` (`dep:rustls-pemfile`). An application supplies TLS
+# material as on-disk PEM (the universal cert format); `tls_config` parses it
+# into the rustls `CertificateDer` / `PrivateKeyDer` the `dial_tls`/`accept_tls`
+# primitives consume. rustls-pemfile is the canonical PEM->DER decoder rustls
+# itself recommends (it returns `rustls-pki-types` values, unified with the
+# tokio-rustls dep above). zenoh-rust uses the identical crate in
+# `zenoh-link-tls/src/utils.rs`. Like tokio-rustls, optional + tls-gated so a
+# cert-free (tcp/udp/serial) build never compiles it.
+rustls-pemfile = { version = "2", optional = true }
 # R311ob — host WebSocket link backend, behind the optional `transport-link-ws`
 # feature. tokio-tungstenite is the async RFC6455 protocol layer: `client_async`
 # / `accept_async` run the HTTP-Upgrade handshake over a `TcpStream`, then the

@@ -456,6 +456,21 @@ pub mod serial_pipeline;
 #[cfg(feature = "transport-link-tls")]
 pub mod tls_pipeline;
 
+/// R311og — PEM cert/key material loader for the TLS link. Where
+/// [`tls_pipeline`] runs the handshake over a rustls config, this module BUILDS
+/// that config from the on-disk PEM an application supplies — the production
+/// answer to "where do the certs come from" (the e2e tests' `rcgen` fixture is
+/// test-only). `client_config_from_pem` / `server_config_from_pem` parse a PEM
+/// cert chain + private key (+ optional CA bundle) into the rustls
+/// [`tls_pipeline`]-ready `ClientConfig` / `ServerConfig`; the optional
+/// client-auth / client-CA arguments are the mTLS knob (the client presents a
+/// cert, the server requires + verifies one). Mirrors zenoh-rust
+/// `zenoh-link-tls/src/utils.rs` and pico's TLS `session_cfg` cert keys
+/// (`ROOT_CA_CERTIFICATE` / `CONNECT_CERTIFICATE` / `LISTEN_CERTIFICATE` /
+/// `ENABLE_MTLS`). Gated `transport-link-tls`.
+#[cfg(feature = "transport-link-tls")]
+pub mod tls_config;
+
 /// R311ob — WebSocket-over-TCP backend for the WS link. The DATAGRAM-flow
 /// sibling of [`udp_pipeline`], NOT of TCP/TLS: zenoh-pico classes `ws` as
 /// `Z_LINK_CAP_FLOW_DATAGRAM`, so each batch rides one WebSocket BINARY

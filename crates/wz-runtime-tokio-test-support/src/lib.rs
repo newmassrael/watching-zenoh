@@ -340,3 +340,73 @@ pub fn loopback_tls_configs() -> (
 
     (Arc::new(server_config), Arc::new(client_config))
 }
+
+/// R311og — the loopback mutual-TLS (mTLS) PEM material, returned as PEM
+/// strings so a test feeds them through the PRODUCTION
+/// `wz_runtime_tokio::tls_config::{server_config_from_pem, client_config_from_pem}`
+/// loaders — exercising the real cert-PEM path AND mutual auth in one shot. A
+/// single self-signed CA issues both a server leaf (SAN `localhost`, EKU
+/// serverAuth) and a client leaf (EKU clientAuth); that one CA is the trust
+/// anchor for BOTH directions (the client trusts it to verify the server leaf,
+/// the server's client-cert verifier trusts it to verify the client leaf). This
+/// is a richer cert topology than the self-signed-leaf [`loopback_tls_configs`]
+/// because mTLS needs a CA the verifier can chain the peer's leaf to.
+///
+/// Behind `tls-fixtures` (pulls rcgen) like [`loopback_tls_configs`]; returns
+/// only owned `String`s — no rustls or wz type — so it leaks no feature into
+/// the non-TLS consumers of this crate (the R311fr default-features=false
+/// contract is untouched). The caller loads the PEMs via the production module.
+#[cfg(feature = "tls-fixtures")]
+pub struct MtlsPems {
+    /// The CA cert (PEM) — trust anchor for both leaves, in both directions.
+    pub ca_pem: String,
+    /// Server leaf cert (PEM), SAN `localhost`, signed by the CA.
+    pub server_cert_pem: String,
+    /// Server leaf private key (PEM).
+    pub server_key_pem: String,
+    /// Client leaf cert (PEM), signed by the CA, EKU clientAuth.
+    pub client_cert_pem: String,
+    /// Client leaf private key (PEM).
+    pub client_key_pem: String,
+}
+
+/// Generate a fresh [`MtlsPems`] bundle (one CA, one server leaf, one client
+/// leaf) for a mutual-TLS loopback e2e. See the type docs for the trust model.
+#[cfg(feature = "tls-fixtures")]
+pub fn loopback_mtls_pems() -> MtlsPems {
+    use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
+
+    // ── Self-signed CA that issues both leaves. `is_ca` marks it a CA so
+    //    webpki accepts it as a trust anchor a leaf can chain to.
+    let ca_key = KeyPair::generate().expect("ca keypair");
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_cert = ca_params.self_signed(&ca_key).expect("ca self-signed");
+
+    // ── Server leaf: SAN `localhost` (the dial server-name), serverAuth EKU.
+    let server_key = KeyPair::generate().expect("server keypair");
+    let mut server_params =
+        CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let server_cert = server_params
+        .signed_by(&server_key, &ca_cert, &ca_key)
+        .expect("server cert signed by ca");
+
+    // ── Client leaf: clientAuth EKU. No SAN match is needed for client auth —
+    //    the server's verifier checks the chain to the CA, not a name.
+    let client_key = KeyPair::generate().expect("client keypair");
+    let mut client_params =
+        CertificateParams::new(vec!["wz-client".to_string()]).expect("client params");
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client_cert = client_params
+        .signed_by(&client_key, &ca_cert, &ca_key)
+        .expect("client cert signed by ca");
+
+    MtlsPems {
+        ca_pem: ca_cert.pem(),
+        server_cert_pem: server_cert.pem(),
+        server_key_pem: server_key.serialize_pem(),
+        client_cert_pem: client_cert.pem(),
+        client_key_pem: client_key.serialize_pem(),
+    }
+}
