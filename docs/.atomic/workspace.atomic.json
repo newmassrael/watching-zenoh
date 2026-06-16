@@ -38584,6 +38584,108 @@
         "UNPUSHED 누적: R311oo(fix+test+ledger 3)+op(test+ledger 2)+oq(test+ledger 2)=7 commit. origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
       ]
     },
+    "Round 311or": {
+      "decision_summary": "R311or: 첫 wz↔zenoh-full(zenohd v1.5.0) interop. wz-ap-demo --connect zenohd(version 0x09)→Established + wz Put이 zenohd 경유 pico z_sub로 라우팅. SSOT 패턴(wz-ap-demo+공유 하니스, pico interop과 동형). build-zenohd.sh + Layer Z(opt-in).",
+      "changes_bullets": [
+        "scripts/build-zenohd.sh (신규): zenohd v1.5.0를 CLAUDE.md-참조 cargo git 체크아웃(~/.cargo/git/checkouts/zenoh-*/)에서 빌드(toolchain 1.85.0=zenoh rust-toolchain.toml pin, CARGO_TARGET_DIR=target/zenohd-build)→target/zenohd/zenohd 설치. build-zenoh-pico-cli.sh 컨벤션 미러(idempotent, install -m 0755). zenoh는 wz dep 아니므로 체크아웃 부재 시 cargo install zenohd@1.5.0 대안 안내.",
+        "crates/wz-integration-tests/src/lib.rs: zenohd_binary() locator(WZ_ZENOHD_BIN env 또는 target/zenohd/zenohd; zenoh_pico_cli_binary 옆 SSOT) + wait_for_tcp_accept(TCP-accept readiness probe). 설계: zenohd는 startup 로그를 non-TTY fd에 block-buffer해 stderr-substring wait가 flush와 레이스(empty capture 실증)→TCP-accept가 listener-ready 신호.",
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs (신규): 2 테스트. ①wz_client_reaches_established_against_zenohd: wz-ap-demo --connect zenohd→\"session Established\"(결정적; wz-ap-demo가 이미 args.rs version 0x09+whatami Client). ②wz_publish_routes_through_zenohd_to_pico_zsub: wz Put→zenohd가 keyexpr로 라우팅→pico z_sub \"Received\". z_sub는 spawn_subscribed_zsub로 transient open 실패(\"Unable to open session!\") 재시도(pico one-shot은 self-retry 안 함; wz측 결정적이라 외부 바이너리 robustness). 공유 하니스(ChildGuard/wait_for_substring/PortReservation)=pico interop과 동일 SSOT.",
+        "scripts/run-ci.sh: Layer Z(layer_z_zenohd_interop, opt-in --layer Z/WZ_RUN_LAYER_Z=1) 신설 — zenohd 또는 z_sub 부재 시 graceful SKIP(Layer M/E prereq 패턴), wz-ap-demo 빌드 후 wz_to_zenohd_router 실행. dispatch에 run_layer Z."
+      ],
+      "verification_bullets": [
+        "wz_to_zenohd_router 2 passed + 30/30 연속 non-flaky standalone([[feedback-no-flaky-ever]]) + full host run-ci(M+G+Z) 3/3 연속 EXIT=0 \"all required layers pass\"(load 하; 파이프 없이 exit code [[feedback-runci-verdict-exit-code-only]]). clippy wz-integration-tests --all-targets -D warnings EXIT=0, fmt clean.",
+        "handshake: wz-ap-demo가 zenohd v1.5.0에 InitSyn/InitAck/OpenSyn/OpenAck→Established(레퍼런스 Rust 라우터와 transport 와이어 패리티; 기존 interop은 전부 zenoh-pico 상대, 이번이 첫 reference 라우터). publish: wz Put이 zenohd 경유 pico z_sub로 라우팅(데이터플레인 cross-impl).",
+        "zenohd v1.5.0 빌드(toolchain 1.85.0, 28s incremental=의존성 캐시 덕). readiness 진단: log-substring wait는 zenohd가 non-TTY stderr를 block-buffer해 flush 전 empty capture(실증 0/30)→TCP-accept probe로 확정.",
+        "교과서/SSOT 자가감사(사용자 \"hack/smell 없이 교과서적?\" 질의 반영): 최초 in-process(wz-runtime-tokio) 접근=하니스 중복(ChildGuard/witness 재작성)+version 0x05→0x09 override hack+interop 패턴 이탈 smell→폐기. wz-ap-demo --connect(이미 0x09) + wz-integration-tests 공유 하니스 SSOT로 재작성(pico interop과 동형, 단일 하니스).",
+        "stale carry 정정([[feedback-diagnose-before-carry]]): 메모리/parity doc \"zenoh-* 빈 디렉토리=설치 필요\"는 오기 — 소스는 ~/.cargo/git/checkouts/zenoh-9c599d5ef3e0480e/49c8a53(zenoh 1.5.0)에 이미 체크아웃됨. 없던 건 빌드된 zenohd 바이너리뿐.",
+        "atomic: ledger entries 751->752, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(interop 테스트 라운드)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311or = 첫 wz↔zenoh-full(zenohd v1.5.0) cross-impl interop(사용자 option-2=zenoh-full 라우터 설치). wz가 reference Rust 라우터와 handshake 패리티(Established) + 데이터플레인(wz Put→zenohd→pico z_sub) 실증. SSOT 패턴: wz-ap-demo --connect zenohd(이미 version 0x09+whatami Client) + wz-integration-tests 공유 하니스, pico interop과 동형.",
+        "OPEN finding: wz declare_subscriber는 wire no-op(로컬 등록만; declare_subscriber_does_not_emit_wire_frame 단위가 고정)→wz는 라우터에 구독 interest 미전송이라 routed-subscriber(zenohd→wz Push) 불가. wz-as-publisher는 declaration 불요(bare Put이 keyexpr match 라우팅)라 동작. wz routed-subscribe 지원=subscriber-Declare(또는 Interest) emit 구현 필요=별도 라운드 후보.",
+        "cross-impl 진척: wz↔zenohd handshake + wz→zenohd→pico publish DONE. 남은 후보: zenohd→wz subscribe(위 finding), wz→zenohd→wz, zenohd 경유 query/liveliness/get, wz=Client→pico=peer-listen(이제 zenohd 중개로 재시도 가능).",
+        "R311os(별개 라운드)가 R311or run-ci 검증 중 표면화된 pre-existing liveliness-get flake를 root-cause(ordering race)+구조적 수정. UNPUSHED 누적(oo/op/oq/or/os). push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]]."
+      ],
+      "publishable_decision_summary": "R311or: 첫 wz↔zenoh-full(zenohd v1.5.0) interop. wz-ap-demo --connect zenohd(version 0x09)→Established + wz Put이 zenohd 경유 pico z_sub로 라우팅. SSOT 패턴(wz-ap-demo+공유 하니스, pico interop과 동형). build-zenohd.sh + Layer Z(opt-in).",
+      "publishable_changes_bullets": [
+        "scripts/build-zenohd.sh (신규): zenohd v1.5.0를 CLAUDE.md-참조 cargo git 체크아웃(~/.cargo/git/checkouts/zenoh-*/)에서 빌드(toolchain 1.85.0=zenoh rust-toolchain.toml pin, CARGO_TARGET_DIR=target/zenohd-build)→target/zenohd/zenohd 설치. build-zenoh-pico-cli.sh 컨벤션 미러(idempotent, install -m 0755). zenoh는 wz dep 아니므로 체크아웃 부재 시 cargo install zenohd@1.5.0 대안 안내.",
+        "crates/wz-integration-tests/src/lib.rs: zenohd_binary() locator(WZ_ZENOHD_BIN env 또는 target/zenohd/zenohd; zenoh_pico_cli_binary 옆 SSOT) + wait_for_tcp_accept(TCP-accept readiness probe). 설계: zenohd는 startup 로그를 non-TTY fd에 block-buffer해 stderr-substring wait가 flush와 레이스(empty capture 실증)→TCP-accept가 listener-ready 신호.",
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs (신규): 2 테스트. ①wz_client_reaches_established_against_zenohd: wz-ap-demo --connect zenohd→\"session Established\"(결정적; wz-ap-demo가 이미 args.rs version 0x09+whatami Client). ②wz_publish_routes_through_zenohd_to_pico_zsub: wz Put→zenohd가 keyexpr로 라우팅→pico z_sub \"Received\". z_sub는 spawn_subscribed_zsub로 transient open 실패(\"Unable to open session!\") 재시도(pico one-shot은 self-retry 안 함; wz측 결정적이라 외부 바이너리 robustness). 공유 하니스(ChildGuard/wait_for_substring/PortReservation)=pico interop과 동일 SSOT.",
+        "scripts/run-ci.sh: Layer Z(layer_z_zenohd_interop, opt-in --layer Z/WZ_RUN_LAYER_Z=1) 신설 — zenohd 또는 z_sub 부재 시 graceful SKIP(Layer M/E prereq 패턴), wz-ap-demo 빌드 후 wz_to_zenohd_router 실행. dispatch에 run_layer Z."
+      ],
+      "publishable_verification_bullets": [
+        "wz_to_zenohd_router 2 passed + 30/30 연속 non-flaky standalone([[feedback-no-flaky-ever]]) + full host run-ci(M+G+Z) 3/3 연속 EXIT=0 \"all required layers pass\"(load 하; 파이프 없이 exit code [[feedback-runci-verdict-exit-code-only]]). clippy wz-integration-tests --all-targets -D warnings EXIT=0, fmt clean.",
+        "handshake: wz-ap-demo가 zenohd v1.5.0에 InitSyn/InitAck/OpenSyn/OpenAck→Established(레퍼런스 Rust 라우터와 transport 와이어 패리티; 기존 interop은 전부 zenoh-pico 상대, 이번이 첫 reference 라우터). publish: wz Put이 zenohd 경유 pico z_sub로 라우팅(데이터플레인 cross-impl).",
+        "zenohd v1.5.0 빌드(toolchain 1.85.0, 28s incremental=의존성 캐시 덕). readiness 진단: log-substring wait는 zenohd가 non-TTY stderr를 block-buffer해 flush 전 empty capture(실증 0/30)→TCP-accept probe로 확정.",
+        "교과서/SSOT 자가감사(사용자 \"hack/smell 없이 교과서적?\" 질의 반영): 최초 in-process(wz-runtime-tokio) 접근=하니스 중복(ChildGuard/witness 재작성)+version 0x05→0x09 override hack+interop 패턴 이탈 smell→폐기. wz-ap-demo --connect(이미 0x09) + wz-integration-tests 공유 하니스 SSOT로 재작성(pico interop과 동형, 단일 하니스).",
+        "stale carry 정정([[feedback-diagnose-before-carry]]): 메모리/parity doc \"zenoh-* 빈 디렉토리=설치 필요\"는 오기 — 소스는 ~/.cargo/git/checkouts/zenoh-9c599d5ef3e0480e/49c8a53(zenoh 1.5.0)에 이미 체크아웃됨. 없던 건 빌드된 zenohd 바이너리뿐.",
+        "atomic: ledger entries 751->752, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(interop 테스트 라운드)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311or = 첫 wz↔zenoh-full(zenohd v1.5.0) cross-impl interop(사용자 option-2=zenoh-full 라우터 설치). wz가 reference Rust 라우터와 handshake 패리티(Established) + 데이터플레인(wz Put→zenohd→pico z_sub) 실증. SSOT 패턴: wz-ap-demo --connect zenohd(이미 version 0x09+whatami Client) + wz-integration-tests 공유 하니스, pico interop과 동형.",
+        "OPEN finding: wz declare_subscriber는 wire no-op(로컬 등록만; declare_subscriber_does_not_emit_wire_frame 단위가 고정)→wz는 라우터에 구독 interest 미전송이라 routed-subscriber(zenohd→wz Push) 불가. wz-as-publisher는 declaration 불요(bare Put이 keyexpr match 라우팅)라 동작. wz routed-subscribe 지원=subscriber-Declare(또는 Interest) emit 구현 필요=별도 라운드 후보.",
+        "cross-impl 진척: wz↔zenohd handshake + wz→zenohd→pico publish DONE. 남은 후보: zenohd→wz subscribe(위 finding), wz→zenohd→wz, zenohd 경유 query/liveliness/get, wz=Client→pico=peer-listen(이제 zenohd 중개로 재시도 가능).",
+        "R311os(별개 라운드)가 R311or run-ci 검증 중 표면화된 pre-existing liveliness-get flake를 root-cause(ordering race)+구조적 수정. UNPUSHED 누적(oo/op/oq/or/os). push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]]."
+      ]
+    },
+    "Round 311os": {
+      "decision_summary": "R311os: liveliness-get flake 근본수정. acceptor token을 drive inbound 처리 前 pre-drive 동기 선언(R249 register-before-serve SSOT)→CURRENT interest가 token 미등록 시 빈 reply받던 ordering race를 구조적 제거. teardown 순서 보존. settle/timeout 거부.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs: liveliness token을 spawn_background_tasks/drive_session 前 run_demo의 pre-drive 단계에서 session.declare_token으로 동기 선언(R249 register-before-serve 선례 일관 적용). token을 teardown 체인에 직접 전달(token_rx oneshot 제거). spawn_background_tasks에서 token_tx/oneshot 제거 + has_declares를 subscriber||queryable로.",
+        "crates/wz-ap-demo/src/tasks.rs: declare_task에서 token 분기 + token_tx 파라미터 제거(subscriber/queryable outbound declare만 유지; 이들은 peer remote registry로의 fire-and-forget이라 inbound-snapshot race 없음).",
+        "crates/wz-ap-demo/src/teardown.rs: TeardownInitial/TasksJoined의 token_rx: Option<oneshot::Receiver<LivelinessToken>>→token: Option<LivelinessToken>(동기 선언이라 oneshot 불요). drop_liveliness_token을 동기 drop으로(recv 제거); R284 UndeclToken-before-Close 순서 불변식 보존. unused oneshot import 제거.",
+        "crates/wz-integration-tests/tests/wz_remote_declare_round_trip.rs: SIGTERM 前 세 REMOTE * DECLARED를 order-independent로 모두 대기(token이 이제 pre-drive 첫째라 \"token=마지막\" 가정이 깨져 SIGTERM이 queryable과 경쟁하던 것 수정); final_text를 undecl-후 스냅샷으로."
+      ],
+      "verification_bullets": [
+        "root cause: acceptor declare_task(Established-gated 백그라운드 태스크)가 drive_session과 동시 실행→initiator의 CURRENT liveliness-get interest가 token 로컬등록 前 drive 루프에서 처리되면 one-shot reply가 비어 timeout(load가 윈도우 확대). 수정=token을 drive inbound 처리 前 pre-drive 동기 등록→어떤 interest든 token 발견=레이스 표현 불가([[feedback-unrepresentable-over-test]]). settle-delay/timeout-bump(load mitigation) 거부=결정적 수정.",
+        "wz_liveliness_get_round_trip + wz_liveliness_subscriber_round_trip + wz_remote_declare_round_trip 각 pass. Layer E 전체 pass(wz-ap-demo refactor 무회귀). full host run-ci(M+G+Z) 3/3 연속 EXIT=0 \"all required layers pass\"(R311or run-ci 1회서 발현했던 liveliness flake 미재발). clippy wz-ap-demo+wz-integration-tests --all-targets -D warnings EXIT=0, fmt clean.",
+        "teardown 불변식 보존: token을 teardown 체인에 직접 전달, drop_liveliness_token이 Close 前 drop(UndeclToken)→wz_liveliness_subscriber/wz_remote_declare가 REMOTE TOKEN UNDECLARED 단언 통과. declare 순서가 token-first로 바뀌어 wz_remote_declare를 order-independent 대기로 적응(세 declare 모두 SIGTERM 前 대기).",
+        "flake 메모리 정정([[project-layer-e-flake-debt]]): R311or-recurrence 노트가 \"load flake\"로 framing했으나 실제는 token-declare ordering RACE였고 R311os가 구조적 해결. liveliness 케이스 RESOLVED.",
+        "zero-flake 입증: full run-ci M+G+Z 3/3 + zenohd interop standalone 30/30 + 구조적 race 제거(사용자 \"단 한 건의 flake도 안돼\" 지시).",
+        "atomic: ledger entries 752->753, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(버그 수정 라운드)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311os = liveliness-get ordering race 근본 수정(R311or run-ci 검증 중 표면화된 pre-existing Layer E flake). acceptor token을 R249 register-before-serve SSOT대로 pre-drive 동기 선언→CURRENT interest가 token 미등록 시 빈 reply받던 race를 구조적 제거(unrepresentable). 코드베이스 기존 R249 패턴(subscriber pre-drive 등록)을 token에 일관 적용=새 메커니즘 아님.",
+        "메타: 사용자 \"단 한 건의 flake도 안돼\" 지시. settle-delay/timeout-bump(load mitigation) 거부, 결정적 race 제거 채택. zero-flake 입증=full run-ci M+G+Z 3/3 + standalone 30/30.",
+        "[[project-layer-e-flake-debt]] 정정: 이 flake는 load가 아니라 ordering race였음(load는 윈도우 확대 요인일 뿐). liveliness-get 케이스 RESOLVED; 별개의 publish-round-trip(z_sub 수신) 케이스는 잔존 가능(다른 메커니즘).",
+        "teardown R284 불변식(token Drop→UndeclToken→Close) 보존: token_rx oneshot→직접 소유로 단순화. declare 순서가 token-first로 바뀌어 wz_remote_declare 테스트를 order-independent로 적응.",
+        "UNPUSHED 누적: R311oo/op/oq/or/os. origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]]."
+      ],
+      "publishable_decision_summary": "R311os: liveliness-get flake 근본수정. acceptor token을 drive inbound 처리 前 pre-drive 동기 선언(R249 register-before-serve SSOT)→CURRENT interest가 token 미등록 시 빈 reply받던 ordering race를 구조적 제거. teardown 순서 보존. settle/timeout 거부.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs: liveliness token을 spawn_background_tasks/drive_session 前 run_demo의 pre-drive 단계에서 session.declare_token으로 동기 선언(R249 register-before-serve 선례 일관 적용). token을 teardown 체인에 직접 전달(token_rx oneshot 제거). spawn_background_tasks에서 token_tx/oneshot 제거 + has_declares를 subscriber||queryable로.",
+        "crates/wz-ap-demo/src/tasks.rs: declare_task에서 token 분기 + token_tx 파라미터 제거(subscriber/queryable outbound declare만 유지; 이들은 peer remote registry로의 fire-and-forget이라 inbound-snapshot race 없음).",
+        "crates/wz-ap-demo/src/teardown.rs: TeardownInitial/TasksJoined의 token_rx: Option<oneshot::Receiver<LivelinessToken>>→token: Option<LivelinessToken>(동기 선언이라 oneshot 불요). drop_liveliness_token을 동기 drop으로(recv 제거); R284 UndeclToken-before-Close 순서 불변식 보존. unused oneshot import 제거.",
+        "crates/wz-integration-tests/tests/wz_remote_declare_round_trip.rs: SIGTERM 前 세 REMOTE * DECLARED를 order-independent로 모두 대기(token이 이제 pre-drive 첫째라 \"token=마지막\" 가정이 깨져 SIGTERM이 queryable과 경쟁하던 것 수정); final_text를 undecl-후 스냅샷으로."
+      ],
+      "publishable_verification_bullets": [
+        "root cause: acceptor declare_task(Established-gated 백그라운드 태스크)가 drive_session과 동시 실행→initiator의 CURRENT liveliness-get interest가 token 로컬등록 前 drive 루프에서 처리되면 one-shot reply가 비어 timeout(load가 윈도우 확대). 수정=token을 drive inbound 처리 前 pre-drive 동기 등록→어떤 interest든 token 발견=레이스 표현 불가([[feedback-unrepresentable-over-test]]). settle-delay/timeout-bump(load mitigation) 거부=결정적 수정.",
+        "wz_liveliness_get_round_trip + wz_liveliness_subscriber_round_trip + wz_remote_declare_round_trip 각 pass. Layer E 전체 pass(wz-ap-demo refactor 무회귀). full host run-ci(M+G+Z) 3/3 연속 EXIT=0 \"all required layers pass\"(R311or run-ci 1회서 발현했던 liveliness flake 미재발). clippy wz-ap-demo+wz-integration-tests --all-targets -D warnings EXIT=0, fmt clean.",
+        "teardown 불변식 보존: token을 teardown 체인에 직접 전달, drop_liveliness_token이 Close 前 drop(UndeclToken)→wz_liveliness_subscriber/wz_remote_declare가 REMOTE TOKEN UNDECLARED 단언 통과. declare 순서가 token-first로 바뀌어 wz_remote_declare를 order-independent 대기로 적응(세 declare 모두 SIGTERM 前 대기).",
+        "flake 메모리 정정([[project-layer-e-flake-debt]]): R311or-recurrence 노트가 \"load flake\"로 framing했으나 실제는 token-declare ordering RACE였고 R311os가 구조적 해결. liveliness 케이스 RESOLVED.",
+        "zero-flake 입증: full run-ci M+G+Z 3/3 + zenohd interop standalone 30/30 + 구조적 race 제거(사용자 \"단 한 건의 flake도 안돼\" 지시).",
+        "atomic: ledger entries 752->753, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(버그 수정 라운드)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311os = liveliness-get ordering race 근본 수정(R311or run-ci 검증 중 표면화된 pre-existing Layer E flake). acceptor token을 R249 register-before-serve SSOT대로 pre-drive 동기 선언→CURRENT interest가 token 미등록 시 빈 reply받던 race를 구조적 제거(unrepresentable). 코드베이스 기존 R249 패턴(subscriber pre-drive 등록)을 token에 일관 적용=새 메커니즘 아님.",
+        "메타: 사용자 \"단 한 건의 flake도 안돼\" 지시. settle-delay/timeout-bump(load mitigation) 거부, 결정적 race 제거 채택. zero-flake 입증=full run-ci M+G+Z 3/3 + standalone 30/30.",
+        "[[project-layer-e-flake-debt]] 정정: 이 flake는 load가 아니라 ordering race였음(load는 윈도우 확대 요인일 뿐). liveliness-get 케이스 RESOLVED; 별개의 publish-round-trip(z_sub 수신) 케이스는 잔존 가능(다른 메커니즘).",
+        "teardown R284 불변식(token Drop→UndeclToken→Close) 보존: token_rx oneshot→직접 소유로 단순화. declare 순서가 token-first로 바뀌어 wz_remote_declare 테스트를 order-independent로 적응.",
+        "UNPUSHED 누적: R311oo/op/oq/or/os. origin/main=5b9148a. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]]."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
