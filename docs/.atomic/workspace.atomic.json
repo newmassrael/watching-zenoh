@@ -38894,6 +38894,50 @@
         "UNPUSHED: R311ow(코드+테스트+ledger). push 명시 동의 대기([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311ox": {
+      "decision_summary": "R311ox: zenohd 경유 routed-queryable interop(Layer Z 4번째 leg). wz routed queryable<-pico z_get<-zenohd 쿼리/reply 왕복 실증=R311ow 회귀 가드(leg-3 declare_subscriber 동형 sibling). 프로덕션 코드 변경 없음.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: wz_queryable_replies_via_zenohd_to_pico_zget 신설(Layer Z 4번째 leg). wz-ap-demo `--queryable demo/zenohd --reply <val>`(R311ow routed queryable)<-pico z_get<-zenohd 쿼리/reply 왕복. zenohd spawn -> wz-ap-demo(--connect 127.0.0.1:port --queryable --reply) -> \"DECLARED ROUTED QUERYABLE\" 대기(라우트 선존 보장, sleep 아님) -> pico z_get(-k demo/zenohd -e tcp/... -m client) 쿼리 -> zenohd가 wz queryable로 라우팅 -> wz reply -> zenohd가 z_get로 reply 라우팅. z_get은 one-shot(z_condvar_wait로 final까지 블록)이 단일 쿼리라, 라우트 전파 창에 대해 받을 때까지 z_get 전체 재시도(leg-3 z_pub 30회 Put 반복과 다른 접근; foreign one-shot 재시도 철학 동형, wz reply 측은 query 도달 후 결정적). 양단 검증: wz \"QUERYABLE FIRED\"(query 도달) + z_get \">> Received PUT ('demo/zenohd': '<reply>')\"+final(reply 왕복) + reply value/keyexpr 단언. 모듈 doc Three legs->Four legs(leg-4=leg-3 declare_subscriber의 declare_queryable 동형 sibling). 프로덕션 코드 변경 없음=테스트가 R311ow를 e2e 회귀 가드."
+      ],
+      "verification_bullets": [
+        "신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]): wz \"DECLARED ROUTED QUERYABLE id=1 keyexpr='demo/zenohd'\"->\"QUERYABLE FIRED rid=1 reply='reply-from-wz-queryable'\" + pico z_get \">> Received PUT ('demo/zenohd': 'reply-from-wz-queryable')\"+final. R311ow routed queryable이 zenohd 경유 cross-impl 동작 실증(코드 버그 없음=테스트가 R311ow를 e2e 회귀 가드로 검증).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 G=1 Z=1) RUNCI_EXIT=0(파이프 없는 직접 exit 캡처 [[feedback-runci-verdict-exit-code-only]]; \"run-ci: all required layers pass\"; error[/^error:/test result:FAILED/panicked/Layer FAIL 각 0). Layer Z 4-leg 직렬(--test-threads=1) 4/4 pass(신규 leg가 기존 3개 wz_client_reaches_established/wz_publish_routes/wz_routed_subscribe와 무간섭 통합). Layer M/G pass. fmt/clippy clean(Layer 0 fmt + C2 workspace clippy).",
+        "설계 검증: z_get one-shot(z_condvar_wait로 query final까지 블록=고정 reply 타임아웃 아님, wz reply 무한정 대기)이 단일 쿼리라 라우트 전파 창에 flaky-risk -> 받을 때까지 z_get 전체 재시도(leg-3 z_pub 30회 Put 반복과 다른 접근, foreign one-shot 재시도 철학 동형)로 zero-flake 달성. \"DECLARED ROUTED QUERYABLE\" 대기로 z_get 쿼리 전 라우트 선존 보장(sleep 아님). 양단 검증=wz QUERYABLE FIRED(query 도달) + z_get Received PUT(reply 왕복) + reply value/keyexpr 단언.",
+        "프로덕션 코드 변경 0(테스트+module doc만): R311ow의 declare_queryable wire emit이 이미 올바름을 e2e 확정. leg-4=leg-3 declare_subscriber의 declare_queryable 동형 sibling.",
+        "atomic: ledger entries 757->758, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경(테스트 추가 라운드)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ox = zenohd 경유 routed-queryable interop(Layer Z 4번째 leg, R311ow 회귀 가드). wz routed queryable<-pico z_get<-zenohd 쿼리/reply 왕복 실증=cross-impl 검증(north-star 약한 차원 ~75% 진전). leg-3 wz_routed_subscribe_from_zenohd(declare_subscriber)의 declare_queryable 동형 sibling — R311ou가 declare_subscriber를 동일 라운드에서 interop leg로 닫았듯 R311ow의 누락 leg를 보강. 프로덕션 코드 변경 없음(테스트만)=R311ow가 이미 올바른 wire emit을 갖췄음을 e2e 확정.",
+        "설계: z_get one-shot(z_condvar_wait로 query final까지 블록=고정 reply 타임아웃 아님, wz reply를 무한정 대기=z_get 측 flaky 없음)이 단일 쿼리만 emit -> 핵심 flaky-risk=단일 쿼리 vs 라우트 전파 지연(leg-3 z_pub은 30회 Put 반복으로 완화하지만 z_get은 1회). 완화=받을 때까지 z_get 전체 재시도(foreign one-shot 재시도 철학 동형, wz 측은 query 도달 후 결정적: deferred 핸들러 drain->reply->ResponseFinal emit). \"DECLARED ROUTED QUERYABLE\" 대기로 z_get 쿼리 전 라우트 선존 보장.",
+        "검증: 신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]) + Layer Z 4-leg 직렬(--test-threads=1) 4/4(기존 3개와 무간섭) + full host run-ci(M+G+Z) RUNCI_EXIT=0(직접 캡처 [[feedback-runci-verdict-exit-code-only]]) + fmt/clippy clean. wz \"QUERYABLE FIRED rid=1 reply='reply-from-wz-queryable'\" + z_get \">> Received PUT ('demo/zenohd': 'reply-from-wz-queryable')\".",
+        "남은 carry(다음 rung): (1) --declare-subscriber/--declare-queryable CLI 은퇴(--key/--queryable가 routed 흡수; wz_remote_declare_round_trip 마이그레이션). (2) zenohd 경유 liveliness interop(declare_token은 이미 wire emit; z_liveliness 경유 검증). (3) wz=Client->pico(zenohd 중개) 양방향. (4) zenohd 잔여 부채 ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]]). 상세 [[project-pico-parity-status]] 진입점.",
+        "UNPUSHED: R311ox(테스트+ledger). push 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311ox: zenohd 경유 routed-queryable interop(Layer Z 4번째 leg). wz routed queryable<-pico z_get<-zenohd 쿼리/reply 왕복 실증=R311ow 회귀 가드(leg-3 declare_subscriber 동형 sibling). 프로덕션 코드 변경 없음.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: wz_queryable_replies_via_zenohd_to_pico_zget 신설(Layer Z 4번째 leg). wz-ap-demo `--queryable demo/zenohd --reply <val>`(R311ow routed queryable)<-pico z_get<-zenohd 쿼리/reply 왕복. zenohd spawn -> wz-ap-demo(--connect 127.0.0.1:port --queryable --reply) -> \"DECLARED ROUTED QUERYABLE\" 대기(라우트 선존 보장, sleep 아님) -> pico z_get(-k demo/zenohd -e tcp/... -m client) 쿼리 -> zenohd가 wz queryable로 라우팅 -> wz reply -> zenohd가 z_get로 reply 라우팅. z_get은 one-shot(z_condvar_wait로 final까지 블록)이 단일 쿼리라, 라우트 전파 창에 대해 받을 때까지 z_get 전체 재시도(leg-3 z_pub 30회 Put 반복과 다른 접근; foreign one-shot 재시도 철학 동형, wz reply 측은 query 도달 후 결정적). 양단 검증: wz \"QUERYABLE FIRED\"(query 도달) + z_get \">> Received PUT ('demo/zenohd': '<reply>')\"+final(reply 왕복) + reply value/keyexpr 단언. 모듈 doc Three legs->Four legs(leg-4=leg-3 declare_subscriber의 declare_queryable 동형 sibling). 프로덕션 코드 변경 없음=테스트가 R311ow를 e2e 회귀 가드."
+      ],
+      "publishable_verification_bullets": [
+        "신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]): wz \"DECLARED ROUTED QUERYABLE id=1 keyexpr='demo/zenohd'\"->\"QUERYABLE FIRED rid=1 reply='reply-from-wz-queryable'\" + pico z_get \">> Received PUT ('demo/zenohd': 'reply-from-wz-queryable')\"+final. R311ow routed queryable이 zenohd 경유 cross-impl 동작 실증(코드 버그 없음=테스트가 R311ow를 e2e 회귀 가드로 검증).",
+        "full host run-ci(WZ_RUN_LAYER_M=1 G=1 Z=1) RUNCI_EXIT=0(파이프 없는 직접 exit 캡처 [[feedback-runci-verdict-exit-code-only]]; \"run-ci: all required layers pass\"; error[/^error:/test result:FAILED/panicked/Layer FAIL 각 0). Layer Z 4-leg 직렬(--test-threads=1) 4/4 pass(신규 leg가 기존 3개 wz_client_reaches_established/wz_publish_routes/wz_routed_subscribe와 무간섭 통합). Layer M/G pass. fmt/clippy clean(Layer 0 fmt + C2 workspace clippy).",
+        "설계 검증: z_get one-shot(z_condvar_wait로 query final까지 블록=고정 reply 타임아웃 아님, wz reply 무한정 대기)이 단일 쿼리라 라우트 전파 창에 flaky-risk -> 받을 때까지 z_get 전체 재시도(leg-3 z_pub 30회 Put 반복과 다른 접근, foreign one-shot 재시도 철학 동형)로 zero-flake 달성. \"DECLARED ROUTED QUERYABLE\" 대기로 z_get 쿼리 전 라우트 선존 보장(sleep 아님). 양단 검증=wz QUERYABLE FIRED(query 도달) + z_get Received PUT(reply 왕복) + reply value/keyexpr 단언.",
+        "프로덕션 코드 변경 0(테스트+module doc만): R311ow의 declare_queryable wire emit이 이미 올바름을 e2e 확정. leg-4=leg-3 declare_subscriber의 declare_queryable 동형 sibling.",
+        "atomic: ledger entries 757->758, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경(테스트 추가 라운드)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ox = zenohd 경유 routed-queryable interop(Layer Z 4번째 leg, R311ow 회귀 가드). wz routed queryable<-pico z_get<-zenohd 쿼리/reply 왕복 실증=cross-impl 검증(north-star 약한 차원 ~75% 진전). leg-3 wz_routed_subscribe_from_zenohd(declare_subscriber)의 declare_queryable 동형 sibling — R311ou가 declare_subscriber를 동일 라운드에서 interop leg로 닫았듯 R311ow의 누락 leg를 보강. 프로덕션 코드 변경 없음(테스트만)=R311ow가 이미 올바른 wire emit을 갖췄음을 e2e 확정.",
+        "설계: z_get one-shot(z_condvar_wait로 query final까지 블록=고정 reply 타임아웃 아님, wz reply를 무한정 대기=z_get 측 flaky 없음)이 단일 쿼리만 emit -> 핵심 flaky-risk=단일 쿼리 vs 라우트 전파 지연(leg-3 z_pub은 30회 Put 반복으로 완화하지만 z_get은 1회). 완화=받을 때까지 z_get 전체 재시도(foreign one-shot 재시도 철학 동형, wz 측은 query 도달 후 결정적: deferred 핸들러 drain->reply->ResponseFinal emit). \"DECLARED ROUTED QUERYABLE\" 대기로 z_get 쿼리 전 라우트 선존 보장.",
+        "검증: 신규 leg standalone 20/20 연속 zero-flake([[feedback-no-flaky-ever]]) + Layer Z 4-leg 직렬(--test-threads=1) 4/4(기존 3개와 무간섭) + full host run-ci(M+G+Z) RUNCI_EXIT=0(직접 캡처 [[feedback-runci-verdict-exit-code-only]]) + fmt/clippy clean. wz \"QUERYABLE FIRED rid=1 reply='reply-from-wz-queryable'\" + z_get \">> Received PUT ('demo/zenohd': 'reply-from-wz-queryable')\".",
+        "남은 carry(다음 rung): (1) --declare-subscriber/--declare-queryable CLI 은퇴(--key/--queryable가 routed 흡수; wz_remote_declare_round_trip 마이그레이션). (2) zenohd 경유 liveliness interop(declare_token은 이미 wire emit; z_liveliness 경유 검증). (3) wz=Client->pico(zenohd 중개) 양방향. (4) zenohd 잔여 부채 ②z_sub retry root cause ③build-zenohd 재현성([[project-zenohd-interop-debts]]). 상세 [[project-pico-parity-status]] 진입점.",
+        "UNPUSHED: R311ox(테스트+ledger). push 명시 동의 대기([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
