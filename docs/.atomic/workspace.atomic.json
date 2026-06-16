@@ -38102,6 +38102,58 @@
         "NEXT: cert PEM 파일/base64 헬퍼 또는 pico parity % 재계산. UNPUSHED: R311og(feat/test 다수 + 본 ledger) = origin/main=cb391dd 위. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙 연속)."
       ]
     },
+    "Round 311oh": {
+      "decision_summary": "R311oh: cert PEM 파일/base64 소스(R311og carry 미완 ①②). tls_config에 read_pem_file(std::fs, 빈파일 reject) + decode_base64_pem(base64 STANDARD, pico *_BASE64 미러) 추가 — 같은 PEM의 raw/file/base64 3소스가 단일 *_from_pem 빌더로 수렴(zenoh-rust load_tls_* cascade 분해, SSOT 1빌더, 소스!=파스 직교). base64 게이트 dep + tempfile dev-dep. e2e 2종(파일소스/base64소스 Established) + 빈파일·invalid-base64·round-trip 단언. full run-ci(M+G) EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/tls_config.rs: read_pem_file(path)->io::Result<Vec<u8>>(std::fs::read sync=config는 startup-once라 async 색칠 회피, rustls 관용; 빈파일=invalid_data reject로 fail-fast) + decode_base64_pem(b64)->io::Result<Vec<u8>>(base64 general_purpose::STANDARD, .trim()으로 후행개행 허용; pico *_BASE64 키 0x4C/4E/50/53/55 + zenoh-rust base64_decode 미러). 둘 다 PEM bytes 산출=기존 certs_from_pem/private_key_from_pem/root_store_from_pem로 수렴. 모듈 doc에 \"Three sources for the same PEM\"(raw/file/base64 직교) 절 추가.",
+        "crates/wz-runtime-tokio/Cargo.toml: base64 = { version = \"0.22\", optional = true } 프로덕션 dep + transport-link-tls가 dep:base64 포워드(tls-gated, cert-free 빌드 미컴파일); tempfile = \"3\" dev-dep(파일소스 테스트가 fixture PEM을 temp dir에 write->read).",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs: 2 신규 e2e. one_way_tls_from_pem_files_reaches_established(server cert/key+CA를 tempdir write->read_pem_file->로더->Established + 빈파일 reject 단언), one_way_tls_from_base64_pem_reaches_established(CA를 base64 encode->decode_base64_pem->로더->Established + round-trip 동일성 + invalid-base64 reject 단언). open_both_to_established 헬퍼 재사용, import+모듈 doc 갱신.",
+        "scripts/run-ci.sh: Layer C1u 주석에 R311oh 파일/base64 소스 명시. 신규 테스트는 동일 tls_pem_mtls_e2e 파일이라 기존 --test 배선이 자동 커버(gate-skew 없음).",
+        "crates/Cargo.lock: base64/tempfile direct dep 승격(둘 다 기존 transitive)."
+      ],
+      "verification_bullets": [
+        "tls_pem_mtls_e2e 5 passed(기존 mutual-auth/익명거부/plain-PEM 3 + 신규 file-source/base64-source 2) + 10/10 연속 non-flaky([[feedback-no-flaky-ever]]).",
+        "소스 헬퍼 음성경로 단언 통과: base64 round-trip이 원본 CA PEM과 동일, invalid base64 reject, 빈 PEM 파일 reject.",
+        "clippy default+tls --all-targets / no-default-features+tls(tls_config standalone; base64는 transport-link-tls 포워드로 컴파일) 전부 -D warnings exit 0, fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. C1u pass + Layer M pass.",
+        "SSOT/시그니처 안정: *_from_pem 빌더 무변경 — raw/file/base64 3소스가 단일 빌더로 수렴(소스!=파스 직교), 빌더 매트릭스 신설 없음(YAGNI). dial_tls/accept_tls/TlsDialConfig/DialConfig 무변경.",
+        "atomic: ledger entries 741->742, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(소스 헬퍼=feature backend 심화)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311oh = cert PEM 파일 I/O + base64 소스(R311og carry 미완 ①②). tls_config의 byte 빌더(client/server_config_from_pem)는 PEM bytes의 SOURCE와 직교 — read_pem_file(디스크 std::fs::read)/decode_base64_pem(base64 STANDARD)이 그 bytes를 산출하고 같은 빌더로 수렴. zenoh-rust load_tls_*의 raw/file/base64 cascade를 wz 합성가능 함수로 분해(SSOT=빌더 1개, 소스 3개).",
+        "설계: 파일 read는 sync std::fs(config는 startup-once라 async 색칠 회피=rustls 관용); base64는 .trim()으로 후행개행 허용(STANDARD 엄격 디코더). 빌더 매트릭스(file x mTLS 조합 등) 신설 안 함=YAGNI; 앱이 소스 헬퍼+단일 빌더 조합. pico는 *_BASE64를 별도 config 키로 두지만 wz는 디코더 함수로(string-map config 시스템 부재).",
+        "미완(정직, 후속): verify_name_on_connect skip(dangerous WebPkiVerifierAnyServerName; 현재 dial은 항상 이름검증) / pico parity % 재계산(TLS od~oh 반영). cert PEM 파일+base64 소스는 본 라운드로 CLOSED.",
+        "NEXT: pico parity % 재계산 또는 verify-name skip 노브. UNPUSHED: R311og(2)+R311oh(2) = origin/main=cb391dd 위 4 commits. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙)."
+      ],
+      "publishable_decision_summary": "R311oh: cert PEM 파일/base64 소스(R311og carry 미완 ①②). tls_config에 read_pem_file(std::fs, 빈파일 reject) + decode_base64_pem(base64 STANDARD, pico *_BASE64 미러) 추가 — 같은 PEM의 raw/file/base64 3소스가 단일 *_from_pem 빌더로 수렴(zenoh-rust load_tls_* cascade 분해, SSOT 1빌더, 소스!=파스 직교). base64 게이트 dep + tempfile dev-dep. e2e 2종(파일소스/base64소스 Established) + 빈파일·invalid-base64·round-trip 단언. full run-ci(M+G) EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/tls_config.rs: read_pem_file(path)->io::Result<Vec<u8>>(std::fs::read sync=config는 startup-once라 async 색칠 회피, rustls 관용; 빈파일=invalid_data reject로 fail-fast) + decode_base64_pem(b64)->io::Result<Vec<u8>>(base64 general_purpose::STANDARD, .trim()으로 후행개행 허용; pico *_BASE64 키 0x4C/4E/50/53/55 + zenoh-rust base64_decode 미러). 둘 다 PEM bytes 산출=기존 certs_from_pem/private_key_from_pem/root_store_from_pem로 수렴. 모듈 doc에 \"Three sources for the same PEM\"(raw/file/base64 직교) 절 추가.",
+        "crates/wz-runtime-tokio/Cargo.toml: base64 = { version = \"0.22\", optional = true } 프로덕션 dep + transport-link-tls가 dep:base64 포워드(tls-gated, cert-free 빌드 미컴파일); tempfile = \"3\" dev-dep(파일소스 테스트가 fixture PEM을 temp dir에 write->read).",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs: 2 신규 e2e. one_way_tls_from_pem_files_reaches_established(server cert/key+CA를 tempdir write->read_pem_file->로더->Established + 빈파일 reject 단언), one_way_tls_from_base64_pem_reaches_established(CA를 base64 encode->decode_base64_pem->로더->Established + round-trip 동일성 + invalid-base64 reject 단언). open_both_to_established 헬퍼 재사용, import+모듈 doc 갱신.",
+        "scripts/run-ci.sh: Layer C1u 주석에 R311oh 파일/base64 소스 명시. 신규 테스트는 동일 tls_pem_mtls_e2e 파일이라 기존 --test 배선이 자동 커버(gate-skew 없음).",
+        "crates/Cargo.lock: base64/tempfile direct dep 승격(둘 다 기존 transitive)."
+      ],
+      "publishable_verification_bullets": [
+        "tls_pem_mtls_e2e 5 passed(기존 mutual-auth/익명거부/plain-PEM 3 + 신규 file-source/base64-source 2) + 10/10 연속 non-flaky([[feedback-no-flaky-ever]]).",
+        "소스 헬퍼 음성경로 단언 통과: base64 round-trip이 원본 CA PEM과 동일, invalid base64 reject, 빈 PEM 파일 reject.",
+        "clippy default+tls --all-targets / no-default-features+tls(tls_config standalone; base64는 transport-link-tls 포워드로 컴파일) 전부 -D warnings exit 0, fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. C1u pass + Layer M pass.",
+        "SSOT/시그니처 안정: *_from_pem 빌더 무변경 — raw/file/base64 3소스가 단일 빌더로 수렴(소스!=파스 직교), 빌더 매트릭스 신설 없음(YAGNI). dial_tls/accept_tls/TlsDialConfig/DialConfig 무변경.",
+        "atomic: ledger entries 741->742, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(소스 헬퍼=feature backend 심화)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311oh = cert PEM 파일 I/O + base64 소스(R311og carry 미완 ①②). tls_config의 byte 빌더(client/server_config_from_pem)는 PEM bytes의 SOURCE와 직교 — read_pem_file(디스크 std::fs::read)/decode_base64_pem(base64 STANDARD)이 그 bytes를 산출하고 같은 빌더로 수렴. zenoh-rust load_tls_*의 raw/file/base64 cascade를 wz 합성가능 함수로 분해(SSOT=빌더 1개, 소스 3개).",
+        "설계: 파일 read는 sync std::fs(config는 startup-once라 async 색칠 회피=rustls 관용); base64는 .trim()으로 후행개행 허용(STANDARD 엄격 디코더). 빌더 매트릭스(file x mTLS 조합 등) 신설 안 함=YAGNI; 앱이 소스 헬퍼+단일 빌더 조합. pico는 *_BASE64를 별도 config 키로 두지만 wz는 디코더 함수로(string-map config 시스템 부재).",
+        "미완(정직, 후속): verify_name_on_connect skip(dangerous WebPkiVerifierAnyServerName; 현재 dial은 항상 이름검증) / pico parity % 재계산(TLS od~oh 반영). cert PEM 파일+base64 소스는 본 라운드로 CLOSED.",
+        "NEXT: pico parity % 재계산 또는 verify-name skip 노브. UNPUSHED: R311og(2)+R311oh(2) = origin/main=cb391dd 위 4 commits. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙)."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
