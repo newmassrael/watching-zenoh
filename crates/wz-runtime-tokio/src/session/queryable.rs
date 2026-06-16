@@ -215,6 +215,17 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     }
 }
 
+/// R311ow — the type-erased wire retraction a ROUTED queryable carries, the
+/// queryable sibling of
+/// [`SubscriberRetraction`](crate::session::subscriber::SubscriberRetraction).
+/// `Session<_, _, Unicast>::declare_queryable` emitted a
+/// `Declare(DeclQueryable)` to announce the queryable to the router, so on
+/// teardown this closure emits the matching `Declare(UndeclQueryable)` (RAII),
+/// capturing the unicast `SessionLinkActions` Arc + the wire queryable id.
+/// Type-erased so the [`Queryable`] handle stays free of the wire-codec types
+/// the captured `SessionLinkActions<R, T>` would otherwise name.
+pub(super) type QueryableRetraction = Box<dyn FnMut() + Send + 'static>;
+
 #[non_exhaustive]
 pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     // R311ek — `session` is read only by the `query-queryable`-gated
@@ -249,6 +260,20 @@ pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime
     /// struct must compile). `true` at construction; `false` once
     /// teardown has run.
     pub(super) armed: bool,
+    /// R311ow — the wire retraction for a ROUTED queryable; see
+    /// [`QueryableRetraction`]. `Some` exactly when
+    /// [`Session::declare_queryable`] emitted a `Declare(DeclQueryable)` to
+    /// announce this queryable to the router (`query-queryable` +
+    /// `declare-queryable` AND `options.allowed_origin.allows_remote()`), so the
+    /// retraction exists precisely when there is something to retract — the
+    /// emit/retract pairing is unrepresentable-by-construction, not a runtime
+    /// flag. `None` for a session-local queryable (no wire announce) or a build
+    /// without the `declare-queryable` codec, mirroring zenoh-pico's
+    /// `_z_undeclare_queryable` gating the `UndeclQueryable` emit on
+    /// `_z_locality_allows_remote` (`vendor/zenoh-pico/src/net/primitives.c:404`).
+    /// Unconditional (read in every build by `teardown`, so it is not dead-code
+    /// under `deny(warnings)` even on a `query-queryable`-off build).
+    pub(super) retraction: Option<QueryableRetraction>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
@@ -298,8 +323,23 @@ impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
         }
         self.armed = false;
         #[cfg(feature = "query-queryable")]
+        self.cell.kill();
+        // R311ow — emit the wire `Declare(UndeclQueryable)` for a ROUTED
+        // queryable BEFORE the local unregister, mirroring zenoh-pico's
+        // `_z_undeclare_queryable` (`_z_send_undeclare` then
+        // `_z_unregister_session_queryable`,
+        // `vendor/zenoh-pico/src/net/primitives.c:404-417`). `Some` exactly when
+        // `declare_queryable` announced this queryable to the router; a
+        // session-local queryable (or a build without the declare-queryable
+        // codec) has `None` and skips the wire emit, the same gating pico
+        // applies via `_z_locality_allows_remote`. Read in every build so the
+        // field is not dead-code under `deny(warnings)`. `take()` so the
+        // `armed`-guarded second teardown cannot double-emit.
+        if let Some(mut retract) = self.retraction.take() {
+            retract();
+        }
+        #[cfg(feature = "query-queryable")]
         {
-            self.cell.kill();
             R::with_mutex_mut(&self.session.observer, |observer| {
                 observer.queryables.unregister(self.id)
             })
@@ -320,37 +360,60 @@ impl<R: SessionRuntime, T: TimeSource> Drop for Queryable<R, T> {
     }
 }
 
-/// R246 — typed error returned by
-/// [`Session::declare_queryable_aliased`] when the requested
-/// mapping id was never declared on the outbound mapping table
-/// (or was retracted before declare time). Mirror of
-/// [`SubscribeAliasError`] / [`PublishAliasError`] /
-/// [`QueryAliasError`] on the queryable side.
-///
-/// R311r — type-ungated + [`Self::FeatureDisabled`] variant added.
-/// The enum is always defined so the
-/// [`Session::declare_queryable{_aliased}`] Result-form signature
-/// compiles regardless of feature state; a feature-OFF call returns
-/// `Err(FeatureDisabled)` so caller code can branch on it uniformly.
-/// Mirrors the `FeatureDisabled` variant pattern already established
-/// on the LivelinessSubscriberAliasError family at R311q.
+/// R246 / R311ow — typed error returned by
+/// [`Session::declare_queryable_aliased`]. `transport-unicast`-gated (it names
+/// [`OutboundKeyexprError`] and the aliased declare lives on
+/// `impl Session<R, T, Unicast>`). Structurally identical to
+/// [`SubscribeAliasError`]: the alias resolution can miss (`UnknownMapping`),
+/// and — since R311ow routed the aliased queryable by delegating to the
+/// emitting literal [`Session::declare_queryable`] — the wire
+/// `Declare(DeclQueryable)` can fail the same way as the literal path. Those
+/// reject variants are projected verbatim from [`QueryableError`] via the
+/// [`From`] impl below, so the literal and aliased routed-queryable paths share
+/// ONE error surface (SSOT) rather than diverging. R311r had type-ungated this
+/// enum while `declare_queryable` was still a local-only wire-no-op; R311ow
+/// re-gates it on `transport-unicast` now that it names the unicast-only
+/// outbound-keyexpr gate type, mirroring the subscriber re-gate in R311ou.
+#[cfg(feature = "transport-unicast")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryableAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_queryable_aliased call).
     UnknownMapping(u64),
-    /// R311r — the `query-queryable` feature is OFF at compile time.
-    /// Returned by both [`Session::declare_queryable`] and
-    /// [`Session::declare_queryable_aliased`] when the build elides
-    /// the queryable wire-emit + dispatch path. Caller must
-    /// feature-detect at the consumer-crate level before relying on
-    /// queryable callbacks; no callback would ever fire even if a
-    /// stub handle were constructed because the registry-side
-    /// dispatch is gated on the same feature.
+    /// R311ow — the resolved keyexpr (`outbound_mapping[id] || inline_suffix`)
+    /// failed the R300 outbound pico-safety gate. Projected from
+    /// [`QueryableError::InvalidKeyexpr`]; the local registration was rolled
+    /// back, so no orphan queryable lingers.
+    InvalidKeyexpr(OutboundKeyexprError),
+    /// R311ow — the resolved keyexpr exceeded the bounded-codec capacity.
+    /// Projected from [`QueryableError::ExceedsCapacity`].
+    ExceedsCapacity,
+    /// R311r / R311ow — a feature needed for this declare is OFF at compile
+    /// time: either `query-queryable` (no local registry — the
+    /// [`Session::declare_queryable_aliased`] cfg-off arm) or the
+    /// `declare-queryable` send-seam codec (projected from
+    /// [`QueryableError::FeatureDisabled`]). Caller must feature-detect at the
+    /// consumer-crate level before relying on queryable callbacks.
     FeatureDisabled,
+    /// R311ow — the transport is not currently accepting sends (link released /
+    /// reconnecting). Projected from [`QueryableError::TransportUnavailable`].
+    TransportUnavailable,
 }
 
+#[cfg(feature = "transport-unicast")]
+impl From<QueryableError> for QueryableAliasError {
+    fn from(e: QueryableError) -> Self {
+        match e {
+            QueryableError::InvalidKeyexpr(inner) => QueryableAliasError::InvalidKeyexpr(inner),
+            QueryableError::ExceedsCapacity => QueryableAliasError::ExceedsCapacity,
+            QueryableError::FeatureDisabled => QueryableAliasError::FeatureDisabled,
+            QueryableError::TransportUnavailable => QueryableAliasError::TransportUnavailable,
+        }
+    }
+}
+
+#[cfg(feature = "transport-unicast")]
 impl std::fmt::Display for QueryableAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -359,14 +422,100 @@ impl std::fmt::Display for QueryableAliasError {
                 "QueryableAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
             ),
+            QueryableAliasError::InvalidKeyexpr(e) => write!(
+                f,
+                "QueryableAliasError: resolved keyexpr failed the outbound pico-safety gate: {e}"
+            ),
+            QueryableAliasError::ExceedsCapacity => write!(
+                f,
+                "QueryableAliasError: resolved keyexpr exceeds the bounded-codec capacity \
+                 (MAX_KEYEXPR_BYTES)"
+            ),
             QueryableAliasError::FeatureDisabled => write!(
                 f,
-                "QueryableAliasError: query-queryable feature is OFF at compile time; \
-                 the queryable dispatch + reply emit paths are elided, so no \
-                 callback can be installed on this build"
+                "QueryableAliasError: a feature needed for the queryable declare \
+                 (query-queryable or declare-queryable) is OFF at compile time"
+            ),
+            QueryableAliasError::TransportUnavailable => write!(
+                f,
+                "QueryableAliasError: transport not accepting sends (link released / reconnecting)"
             ),
         }
     }
 }
 
+#[cfg(feature = "transport-unicast")]
 impl std::error::Error for QueryableAliasError {}
+
+/// R311ow — typed error from the routed (emitting) [`Session::declare_queryable`].
+/// Mirrors zenoh-pico's `z_result_t` return from `_z_register_queryable`
+/// (`vendor/zenoh-pico/src/net/primitives.c:320`): the local registration
+/// always succeeds, but the wire `Declare(DeclQueryable)` that announces the
+/// queryable to the router can fail. The queryable sibling of
+/// [`SubscribeError`]. There is no `UnknownMapping` variant: the literal
+/// `declare_queryable` never resolves a mapping id (only
+/// [`Session::declare_queryable_aliased`] does, and a miss there maps to
+/// [`QueryableAliasError::UnknownMapping`]) — making the literal path's error
+/// surface unable to express a reject it can never produce. There is no
+/// `RequiresUnicast` variant either: `declare_queryable` lives on
+/// `impl Session<R, T, Unicast>`, so a multicast call is a compile error, not a
+/// runtime reject (typestate makes the transport mismatch unrepresentable).
+///
+/// `transport-unicast`-gated: it names [`OutboundKeyexprError`] (the
+/// `transport-unicast`-gated R300 gate type) and is returned only by the
+/// unicast `Session::declare_queryable`.
+#[cfg(feature = "transport-unicast")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryableError {
+    /// R300 — the keyexpr failed the outbound pico-safety gate: either
+    /// non-canonical per the zenoh keyexpr grammar, OR matching the R299 bug #3
+    /// SIGABRT pattern family. The wire bytes never left; the local
+    /// registration was rolled back so no orphan queryable lingers.
+    InvalidKeyexpr(OutboundKeyexprError),
+    /// W3 — the literal keyexpr exceeded the declared bounded-codec capacity
+    /// (`MAX_KEYEXPR_BYTES`) while copying into the no-alloc owned DECLARE
+    /// mirror, so no wire bytes were emitted. The local registration was
+    /// rolled back.
+    ExceedsCapacity,
+    /// R311g1 — a feature needed for the queryable declare is disabled on this
+    /// build: either `query-queryable` (the registry — the
+    /// [`Session::declare_queryable`] cfg-off arm) or the `declare-queryable`
+    /// send-seam codec. The signature stays available (signature-stability) but
+    /// the queryable cannot be installed / announced.
+    FeatureDisabled,
+    /// F2 — the transport is not currently accepting data sends (link released
+    /// or reconnecting; Established not re-entered). The DECLARE was not
+    /// emitted; re-declare after the session re-establishes (zenoh-pico
+    /// `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
+    TransportUnavailable,
+}
+
+#[cfg(feature = "transport-unicast")]
+impl std::fmt::Display for QueryableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryableError::InvalidKeyexpr(e) => {
+                write!(
+                    f,
+                    "QueryableError: keyexpr failed the outbound pico-safety gate: {e}"
+                )
+            }
+            QueryableError::ExceedsCapacity => write!(
+                f,
+                "QueryableError: keyexpr exceeds the bounded-codec capacity (MAX_KEYEXPR_BYTES)"
+            ),
+            QueryableError::FeatureDisabled => write!(
+                f,
+                "QueryableError: a feature needed for the queryable declare \
+                 (query-queryable or declare-queryable) is disabled on this build"
+            ),
+            QueryableError::TransportUnavailable => write!(
+                f,
+                "QueryableError: transport not accepting sends (link released / reconnecting)"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "transport-unicast")]
+impl std::error::Error for QueryableError {}

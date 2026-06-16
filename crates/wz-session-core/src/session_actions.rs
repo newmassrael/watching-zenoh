@@ -2151,22 +2151,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendDeclareError> {
         #[cfg(feature = "declare-queryable")]
         {
-            // R300 — same gate shape as `send_declare_subscriber`.
-            let reconstructed =
-                self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-            check_outbound_keyexpr_pico_safe(&reconstructed)?;
+            // R311ow — build half (R300 pico-safety gate + envelope) is the
+            // shared `prepare_declare_queryable` SSOT, also called by the
+            // seam-routed `Session::declare_queryable`; this wrapper keeps the
+            // dispatch + reconnect-cache half (byte-stable-wire test callers +
+            // any direct low-level caller). Mirror of the declare-subscriber
+            // split landed in R311ou.
             let declare =
-                build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
+                self.prepare_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_declare(declare, /*reliable=*/ true)
                 .map_err(SendDeclareError::from)?;
             // A4 — record for post-reconnect replay (pico
             // `_z_cache_declaration` on `_Z_RES_OK`).
-            #[cfg(feature = "session-reconnect")]
-            self.cache_declaration(CachedDeclaration::Queryable {
-                queryable_id,
-                mapping_id: keyexpr_mapping_id,
-                suffix: keyexpr_suffix.map(ToString::to_string),
-            });
+            self.cache_queryable_declaration(queryable_id, keyexpr_mapping_id, keyexpr_suffix);
             Ok(())
         }
         #[cfg(not(feature = "declare-queryable"))]
@@ -2340,6 +2337,63 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         #[cfg(not(feature = "session-reconnect"))]
         let _ = (subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
+    }
+
+    /// R311ow — the BUILD half of [`Self::send_declare_queryable`], the
+    /// queryable sibling of [`Self::prepare_declare_subscriber`]: resolve the
+    /// keyexpr from `(keyexpr_mapping_id, keyexpr_suffix)`, run the R300
+    /// outbound pico-safety gate, and assemble the `Declare(DeclQueryable)`
+    /// envelope. Returns the built [`DeclareOwned`] for the caller to route
+    /// through the transport send seam
+    /// ([`Session::send_network_message`](../../wz_runtime_tokio/session/struct.Session.html)).
+    ///
+    /// The seam-routed `Session::declare_queryable` (R311ow — the routed
+    /// queryable that pico's `_z_register_queryable` emits when `allowed_origin`
+    /// allows remote, `vendor/zenoh-pico/src/net/primitives.c:348`) and the
+    /// `send_declare_queryable` wrapper both call this, so the pico-safety gate
+    /// and envelope assembly stay authored exactly once (build SSOT). Mirror of
+    /// the declare-subscriber split landed in R311ou.
+    #[cfg(feature = "declare-queryable")]
+    pub fn prepare_declare_queryable(
+        &self,
+        queryable_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) -> Result<wz_codecs::declare::DeclareOwned, SendDeclareError> {
+        let reconstructed =
+            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        Ok(build_declare_queryable(
+            queryable_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+        )?)
+    }
+
+    /// R311ow — append the post-emit reconnect-replay cache entry for a
+    /// declared queryable (pico `_z_cache_declaration` on `_Z_RES_OK`). The
+    /// session-level counterpart to the seam-routed
+    /// `Session::declare_queryable` emit, mirroring
+    /// [`Self::cache_subscriber_declaration`]: the cache is session-state
+    /// bookkeeping AROUND the wire emit, not part of the transport seam, so it
+    /// lives here rather than inside `send_network_message`. Shared by the
+    /// `send_declare_queryable` wrapper and the seam-routed declare so the
+    /// cache shape is authored once. Signature-stable: a no-op without
+    /// `session-reconnect`.
+    pub fn cache_queryable_declaration(
+        &self,
+        queryable_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        #[cfg(feature = "session-reconnect")]
+        self.cache_declaration(CachedDeclaration::Queryable {
+            queryable_id,
+            mapping_id: keyexpr_mapping_id,
+            suffix: keyexpr_suffix.map(ToString::to_string),
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = (queryable_id, keyexpr_mapping_id, keyexpr_suffix);
     }
 
     /// R283 — encode + dispatch a pre-built `Declare(...)` envelope on

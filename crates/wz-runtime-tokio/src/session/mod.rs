@@ -2181,52 +2181,70 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             .map_err(SubscribeAliasError::from)
     }
 
-    /// R246 — declare a [`Queryable`] for `keyexpr` + `options` that
-    /// fires `callback` on every matching inbound `Request(Query)`.
-    /// Pub/sub mirror of [`Self::declare_subscriber`] on the
-    /// responder/replier side. Returns a [`Queryable`] handle whose
-    /// `Drop` auto-unregisters the queryable from the underlying
-    /// [`crate::query::QueryableRegistry`] (RAII).
+    /// R246 / R311ow — declare a ROUTED [`Queryable`] for `keyexpr` + `options`
+    /// that fires `callback` on every matching inbound `Request(Query)`, AND
+    /// announces the queryable to the peer/router by emitting a
+    /// `Declare(DeclQueryable)` on the outbound link (when
+    /// `options.allowed_origin` allows remote). The responder/replier-side
+    /// mirror of [`Self::declare_subscriber`], and the wz analogue of
+    /// zenoh-pico's `z_declare_queryable` / `_z_register_queryable`
+    /// (`vendor/zenoh-pico/src/net/primitives.c:320`): register the local
+    /// callback table entry, then — iff `_z_locality_allows_remote(allowed_origin)`
+    /// — emit the wire `DeclQueryable` so a router routes matching `Query`
+    /// requests to this session. The callback fires synchronously inside
+    /// [`crate::query::QueryableRegistry::dispatch_request`] (wire arrival) and
+    /// [`crate::query::QueryableRegistry::local_query`] (loopback, R238+).
     ///
-    /// Mirrors zenoh-pico's `z_declare_queryable` shape: caller
-    /// supplies the keyexpr pattern + options + callback at declare
-    /// time; the runtime fires the callback synchronously inside
-    /// [`crate::query::QueryableRegistry::dispatch_request`] (wire
-    /// arrival) and
-    /// [`crate::query::QueryableRegistry::local_query`] (loopback,
-    /// R238+). No wire frame is emitted at declare time — router-mode
-    /// `DeclareQueryable` is elided in peer-only operation.
+    /// Returns a [`Queryable`] handle whose `Drop` (RAII) unregisters the local
+    /// callback AND, for a routed queryable, emits the matching
+    /// `Declare(UndeclQueryable)` retraction so the router stops routing. A
+    /// session-local queryable (`Locality::SessionLocal`) registers locally
+    /// only and emits nothing, exactly as pico gates the emit on
+    /// `_z_locality_allows_remote`.
     ///
-    /// R311r — signature switched to
-    /// `Result<Queryable, QueryableAliasError>` for surface parity
-    /// with [`Self::declare_queryable_aliased`]; the handler signature is
-    /// `FnMut(&dyn QueryView, &mut dyn ReplyOut)` (R311gb-3b model-B seam
-    /// contracts) so the application handler depends on the two narrow
-    /// contracts rather than the wz-codecs wire types. The new Err
-    /// variant a caller sees on this method (over the prior `->
-    /// Queryable` form) is `QueryableAliasError::FeatureDisabled`
-    /// when the build elides `query-queryable`; default-feature
-    /// builds always observe `Ok(...)`. Body cfg-wrap follows the
-    /// R311g1 signature-stability principle.
+    /// Fallible (pico `z_result_t` parity): the keyexpr now reaches the outbound
+    /// wire, so it runs the R300 outbound pico-safety gate. A non-canonical /
+    /// R299-bug-#3 keyexpr returns [`QueryableError::InvalidKeyexpr`] with the
+    /// local registration ROLLED BACK (pico unregisters on `_z_send_declare`
+    /// failure, primitives.c:359), so a rejected declare leaves no orphan
+    /// queryable. `ExceedsCapacity` / `FeatureDisabled` / `TransportUnavailable`
+    /// mirror the [`Self::declare_subscriber`] reject family. There is no
+    /// `UnknownMapping` (the literal path resolves no mapping id — that reject
+    /// belongs to [`Self::declare_queryable_aliased`]) and no `RequiresUnicast`
+    /// (this method lives on `impl Session<R, T, Unicast>`, so a multicast call
+    /// is a compile error).
+    ///
+    /// R311ow — the wire emit routes through the [`Self::send_network_message`]
+    /// transport send seam (the B5b SSOT, uniform with [`Self::declare_subscriber`]
+    /// / [`Self::declare_token`]); the build half + reconnect-replay cache are
+    /// the `SessionLinkActions::prepare_declare_queryable` /
+    /// `cache_queryable_declaration` SSOTs shared with the
+    /// `send_declare_queryable` wrapper. The wire queryable id IS the local
+    /// [`QueryableId`] (one entity id for the local table key + the
+    /// `DeclQueryable` + the `UndeclQueryable`), mirroring pico's single
+    /// `_z_get_entity_id` — no separate wire-id counter. The handler still fires
+    /// via the R311li DEFERRED-FIRE path (the registry stages a sink; the
+    /// handler runs at a drain site OUTSIDE the observer lock over a job-local
+    /// responder, and its replies precede the matching ResponseFinal on the
+    /// wire).
     pub fn declare_queryable(
         &self,
         keyexpr: impl Into<String>,
         options: QueryableOptions,
         callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
-    ) -> Result<Queryable<R, T>, QueryableAliasError>
+    ) -> Result<Queryable<R, T>, QueryableError>
     where
+        // R311ow — the routed queryable's RAII `Drop` emits the
+        // `Declare(UndeclQueryable)` from the type-erased retraction closure,
+        // which captures the `Arc<SessionLinkActions<R, T>>`; for that closure
+        // (and so the handle) to be `Send` the bundle must be `Send + Sync`.
+        // The deferred-fire sink already required this bound, so the routed
+        // path adds no new constraint.
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
         #[cfg(feature = "query-queryable")]
         {
             let keyexpr_string = keyexpr.into();
-            // R311li — DEFERRED FIRE (the R311lf lock-free callback
-            // invariant on the queryable plane): the registry stores a
-            // staging sink; the handler runs at a drain site OUTSIDE
-            // the observer lock over a job-local responder, may
-            // re-enter any observer-locking session API, and its
-            // replies precede the matching ResponseFinal on the wire
-            // (the dispatch SSOT emits finals after the drain).
             // R311nf — this method lives on `impl Session<R, T, Unicast>`, so
             // the unicast guarantee is structural: `actions()` is the
             // infallible bundle borrow (a multicast session has no
@@ -2243,6 +2261,22 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     sink,
                 )
             });
+            // R311ow — announce the queryable to the router iff the locality
+            // allows remote (pico `_z_register_queryable`, primitives.c:348),
+            // rolling the just-registered local entry back on a gate / transport
+            // reject so a rejected declare leaves no orphan queryable
+            // (primitives.c:359). `cell.kill()` suppresses any query staged
+            // between the register and this rollback.
+            let retraction = match self.announce_queryable(id, &keyexpr_string, &options) {
+                Ok(retraction) => retraction,
+                Err(e) => {
+                    cell.kill();
+                    R::with_mutex_mut(&self.observer, |observer| {
+                        observer.queryables.unregister(id)
+                    });
+                    return Err(e);
+                }
+            };
             Ok(Queryable {
                 session: self.clone(),
                 id,
@@ -2251,12 +2285,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 cell,
                 // R311lo — armed: Drop/undeclare teardown frees this handle.
                 armed: true,
+                retraction,
             })
         }
         #[cfg(not(feature = "query-queryable"))]
         {
             let _ = (keyexpr, options, callback);
-            Err(QueryableAliasError::FeatureDisabled)
+            Err(QueryableError::FeatureDisabled)
         }
     }
 
@@ -2297,17 +2332,112 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     composed
                 }
             };
-            // R311r — delegate to the type-ungated declare_queryable
-            // entry. The unwrap is safe inside the cfg-ON branch
-            // because the feature-OFF return path is unreachable here
-            // (the surrounding cfg block already gates on the same
-            // feature).
+            // R311ow — delegate to the routed literal declare_queryable, which
+            // registers locally + emits the wire `Declare(DeclQueryable)` (the
+            // alias resolved once here, at declare time). Its `QueryableError`
+            // reject variants project into `QueryableAliasError` via the `From`
+            // impl, giving the literal + aliased queryable declares ONE routed
+            // SSOT — and the same local-registration rollback on a gate reject.
             self.declare_queryable(resolved, options, callback)
+                .map_err(QueryableAliasError::from)
         }
         #[cfg(not(feature = "query-queryable"))]
         {
             let _ = (mapping_id, inline_suffix, options, callback);
             Err(QueryableAliasError::FeatureDisabled)
+        }
+    }
+
+    /// R311ow — the wire-announce half of [`Self::declare_queryable`] (pico
+    /// `_z_register_queryable` lines 348-362): emit `Declare(DeclQueryable)`
+    /// through the transport send seam iff `allowed_origin.allows_remote()`,
+    /// returning the matching type-erased retraction closure for the
+    /// [`Queryable`] handle's `Drop`. `Ok(None)` for a session-local queryable
+    /// (no router announce). On a build without the `declare-queryable` codec,
+    /// `Ok(None)` — the local queryable stays valid for loopback /
+    /// directly-connected delivery; only the router announce is elided
+    /// (signature-stability: the routed-declare path is the cfg-gated half, the
+    /// local registration is always available). The queryable sibling of
+    /// [`Self::announce_subscriber`].
+    ///
+    /// R311ow — gated on `query-queryable` (not just the impl block's
+    /// `transport-unicast`): the sole call site is [`Self::declare_queryable`]'s
+    /// `query-queryable`-gated body, so a `transport-unicast` build WITHOUT
+    /// `query-queryable` (the handshake-only subset lane) would otherwise carry
+    /// this method as dead code. Unlike [`Self::announce_subscriber`], whose
+    /// caller (`declare_subscriber`) is always compiled in the unicast impl, the
+    /// queryable registry — and thus its declare entry — is `query-queryable`-gated.
+    #[cfg(feature = "query-queryable")]
+    fn announce_queryable(
+        &self,
+        id: QueryableId,
+        keyexpr: &str,
+        options: &QueryableOptions,
+    ) -> Result<Option<QueryableRetraction>, QueryableError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        #[cfg(feature = "declare-queryable")]
+        {
+            // pico (`_z_register_queryable`, primitives.c:348): emit only when
+            // the locality allows remote; a SessionLocal queryable is loopback
+            // only.
+            if !options.allowed_origin.allows_remote() {
+                return Ok(None);
+            }
+            fn map_queryable_err(e: SendDeclareError) -> QueryableError {
+                match e {
+                    SendDeclareError::Keyexpr(inner) => QueryableError::InvalidKeyexpr(inner),
+                    // W3 — literal keyexpr over MAX_KEYEXPR_BYTES, typed through.
+                    SendDeclareError::Codec(_) => QueryableError::ExceedsCapacity,
+                    // F2 — reconnect-window reject, typed through.
+                    SendDeclareError::TransportUnavailable => QueryableError::TransportUnavailable,
+                    // R311g1 — reachable only in a feature combo where
+                    // `declare-queryable` is ON but the send-seam codec
+                    // (`codec-declare`) is OFF; honest projection.
+                    SendDeclareError::FeatureDisabled => QueryableError::FeatureDisabled,
+                    // Literal mode (mapping_id=0, suffix=Some) cannot hit the
+                    // mapping-id arms; and `declare_queryable` lives on `impl
+                    // Session<R, T, Unicast>`, so the seam takes the unicast arm
+                    // and never returns RequiresUnicast (a multicast session is a
+                    // distinct type without this method).
+                    SendDeclareError::RequiresUnicast
+                    | SendDeclareError::UnknownMappingId(_)
+                    | SendDeclareError::ReservedMappingIdZero
+                    | SendDeclareError::MissingKeyexpr => unreachable!(
+                        "declare_queryable literal-mode prepare/seam returned \
+                         {e:?} unexpectedly"
+                    ),
+                }
+            }
+            let actions = self.actions();
+            // R311ow — pico parity: the wire queryable id IS the local
+            // QueryableId (one entity id, mirroring `_z_get_entity_id`).
+            let wire_id = id.as_u64();
+            let declare = actions
+                .prepare_declare_queryable(wire_id, /*mapping_id=*/ 0, Some(keyexpr))
+                .map_err(map_queryable_err)?;
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+                /*reliable=*/ true,
+                /*express=*/ false,
+            )
+            .map_err(|e| map_queryable_err(SendDeclareError::from(e)))?;
+            // A4 — reconnect-replay cache (pico `_z_cache_declaration`);
+            // session-state bookkeeping AROUND the seam emit, like
+            // declare_subscriber.
+            actions.cache_queryable_declaration(wire_id, /*mapping_id=*/ 0, Some(keyexpr));
+            // The retraction captures the unicast actions Arc + the wire id;
+            // type-erased so `Queryable` stays free of the wire-codec types.
+            let actions_for_drop = actions.clone();
+            Ok(Some(Box::new(move || {
+                actions_for_drop.send_undeclare_queryable(wire_id)
+            })))
+        }
+        #[cfg(not(feature = "declare-queryable"))]
+        {
+            let _ = (id, keyexpr, options);
+            Ok(None)
         }
     }
 
@@ -2502,17 +2632,18 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// previously-declared-keyexpr alias form use
     /// [`Self::declare_token_aliased`].
     ///
-    /// Contrast with [`Self::declare_subscriber`] /
-    /// [`Self::declare_queryable`]: those declare APIs are peer-only
-    /// (no wire emit at declare time) because zenoh-pico's
-    /// router-mode `DeclareSubscriber` / `DeclareQueryable` fan-out
-    /// is out of scope for wz. The Liveliness Token is the inverse —
-    /// it MUST emit wire on both declare and undeclare so the peer's
-    /// liveliness subscribers receive PUT + DELETE samples (per
-    /// zenoh-pico's `z_liveliness_declare_token` doc-comment:
-    /// "subscribers on an intersecting key expression will receive a
-    /// PUT sample when connectivity is achieved, and a DELETE
-    /// sample if it's lost").
+    /// Like [`Self::declare_subscriber`] / [`Self::declare_queryable`] (R311ou /
+    /// R311ow routed those declares), the Liveliness Token emits a `Declare` at
+    /// declare time. The distinction is in what the declaration MEANS and in the
+    /// undeclare semantics: a `DeclSubscriber` / `DeclQueryable` registers
+    /// ROUTING INTEREST on the router (so matching Pushes / Queries route back to
+    /// this session, retracted by the handle's `Drop` only when remote-local),
+    /// whereas a `DeclToken` drives the liveliness fan-out — it MUST emit wire on
+    /// both declare AND undeclare so the peer's liveliness subscribers receive
+    /// PUT + DELETE samples (per zenoh-pico's `z_liveliness_declare_token`
+    /// doc-comment: "subscribers on an intersecting key expression will receive a
+    /// PUT sample when connectivity is achieved, and a DELETE sample if it's
+    /// lost").
     ///
     /// Returns a [`LivelinessToken`] handle whose `Drop` emits
     /// `Declare(UndeclToken)` (RAII), retracting the token from the

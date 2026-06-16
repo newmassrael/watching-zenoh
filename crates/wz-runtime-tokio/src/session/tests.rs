@@ -4120,10 +4120,107 @@ fn declare_queryable_returns_handle_with_keyexpr_and_options() {
 }
 
 #[test]
-fn declare_queryable_does_not_emit_wire_frame() {
+fn declare_queryable_session_local_does_not_emit_wire_frame() {
+    // R311ow — pico parity (`_z_register_queryable`, primitives.c:348): a
+    // SessionLocal queryable registers locally only; `allowed_origin` does not
+    // allow remote, so NO `Declare(DeclQueryable)` is announced. (This is the
+    // surviving half of the old `declare_queryable_does_not_emit_wire_frame` —
+    // the wire-no-op is now the session-local case, not the default.)
     let (session, driver) = build_session();
-    let _q = session.declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {});
-    assert_eq!(driver.frame_count(), 0);
+    let _q = session.declare_queryable(
+        "home/temp",
+        QueryableOptions::new().with_allowed_origin(Locality::SessionLocal),
+        |_q, _r| {},
+    );
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "a SessionLocal queryable is loopback-only and emits no wire frame"
+    );
+}
+
+#[cfg(all(feature = "query-queryable", feature = "declare-queryable"))]
+#[test]
+fn declare_queryable_remote_emits_one_reliable_decl_queryable() {
+    // R311ow — pico parity: a remote-locality queryable (default `Any`)
+    // announces itself to the router with exactly one reliable
+    // `Declare(DeclQueryable)` so the router routes matching Query requests
+    // here. The DeclQueryable byte shape is pinned at the builder level
+    // (`build_declare_queryable_emits_zenoh_pico_compatible_wire_bytes`).
+    let (session, driver) = build_session();
+    let q = session
+        .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+        .expect("remote declare against the test link succeeds");
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "a remote-locality queryable emits exactly one Declare(DeclQueryable)"
+    );
+    assert_eq!(
+        driver.frame_reliability(0),
+        Reliability::Reliable,
+        "Declare frames travel on the reliable channel (SN-window ordering)"
+    );
+    // R311ow — the wire queryable id IS the local QueryableId (one entity id,
+    // pico `_z_get_entity_id` parity). Forget the handle so its Drop retraction
+    // does not add a second frame (the retract path is the dedicated test below).
+    let _ = q.id();
+    std::mem::forget(q);
+}
+
+#[cfg(all(
+    feature = "query-queryable",
+    feature = "declare-queryable",
+    feature = "declare-undeclare"
+))]
+#[test]
+fn routed_queryable_drop_emits_undecl_queryable() {
+    // R311ow — RAII retraction: dropping a routed queryable emits the matching
+    // `Declare(UndeclQueryable)` so the router stops routing (pico
+    // `_z_undeclare_queryable`, primitives.c:404-417).
+    let (session, driver) = build_session();
+    {
+        let _q = session
+            .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+            .expect("remote declare against the test link succeeds");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "declare emits DeclQueryable before scope end"
+        );
+    }
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "Queryable Drop emits the matching UndeclQueryable (RAII retract)"
+    );
+}
+
+#[cfg(all(feature = "query-queryable", feature = "declare-queryable"))]
+#[test]
+fn declare_queryable_invalid_keyexpr_rejects_and_rolls_back_local_registration() {
+    // R311ow — pico parity (`_z_register_queryable`, primitives.c:359): when the
+    // wire `Declare(DeclQueryable)` emit is suppressed by the R300 outbound
+    // pico-safety gate, the just-registered LOCAL queryable is rolled back, so a
+    // rejected declare leaves NO orphan queryable in the registry. "**/c/*" is
+    // the R299 bug-#3 family pattern (`**` + non-`*` chunk + `*`-shape chunk) the
+    // gate rejects (`keyexpr_canon::check_outbound_keyexpr_pico_safe`).
+    let (session, driver) = build_session();
+    let result = session.declare_queryable("**/c/*", QueryableOptions::default(), |_q, _r| {});
+    assert!(
+        matches!(result, Err(QueryableError::InvalidKeyexpr(_))),
+        "the bug-#3 keyexpr is rejected by the R300 outbound gate, not declared"
+    );
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "a gate-rejected declare emits no wire frame (the reject is pre-send)"
+    );
+    let registered = session.observer().lock().unwrap().queryables.len();
+    assert_eq!(
+        registered, 0,
+        "pico-parity rollback: the rejected declare left no orphan local queryable"
+    );
 }
 
 #[cfg(all(
@@ -6149,16 +6246,25 @@ fn queryable_handler_runs_deferred_replies_then_final_on_wire() {
         )
         .expect("query-queryable on in this lane");
 
+    // R311ow — the routed declare above emitted its `Declare(DeclQueryable)`
+    // (when `declare-queryable` is on); snapshot the frame count so the
+    // assertions below measure ONLY the QUERY -> Reply -> Final flow. `base`
+    // adapts to the feature config (0 when declare-queryable is off, 1 when it
+    // emitted), so the delta + reply-frame index stay correct in every lane.
+    // The declare-emit itself is covered by
+    // `declare_queryable_remote_emits_one_reliable_decl_queryable`.
+    let base = driver.frame_count();
+
     let outcome = query_frame_outcome(make_request_query(11, "home/temp"));
     session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
 
     assert_eq!(fired.load(Ordering::SeqCst), 1, "handler ran at the drain");
     assert_eq!(
-        driver.frame_count(),
+        driver.frame_count() - base,
         2,
         "one Response + one ResponseFinal left the session"
     );
-    let reply_frame = driver.frame_bytes(0);
+    let reply_frame = driver.frame_bytes(base);
     assert!(
         reply_frame.windows(4).any(|w| w == b"22.5"),
         "first frame is the Reply (carries the payload bytes) — Reply precedes Final"
@@ -6184,11 +6290,15 @@ fn queryable_matched_but_silent_handler_still_sends_final() {
         )
         .expect("query-queryable on in this lane");
 
+    // R311ow — snapshot past the routed declare's `Declare(DeclQueryable)` so
+    // the assertion measures only the bare ResponseFinal of the silent handler.
+    let base = driver.frame_count();
+
     let outcome = query_frame_outcome(make_request_query(12, "home/temp"));
     session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
 
     assert_eq!(
-        driver.frame_count(),
+        driver.frame_count() - base,
         1,
         "bare ResponseFinal terminates the silent handler's reply stream"
     );
@@ -6268,6 +6378,12 @@ fn queryable_staged_before_undeclare_suppressed_but_final_still_sent() {
         obs.dispatch_event(crate::session_glue::IterationEvent::Poll(&outcome));
     }
     assert!(q.undeclare(), "undeclare removes the registration");
+    // R311ow — snapshot past the routed declare's `Declare(DeclQueryable)` AND
+    // the `undeclare`'s `Declare(UndeclQueryable)` retraction so the assertion
+    // measures only the flush's owed ResponseFinal. `base` adapts to the feature
+    // config; the retraction emit itself is covered by
+    // `routed_queryable_drop_emits_undecl_queryable`.
+    let base = driver.frame_count();
     session.drain_deferred_fires();
     // The raw-dispatch site still owes the staged Final through the
     // combined flush (the SSOT path stages it as a job instead).
@@ -6279,7 +6395,7 @@ fn queryable_staged_before_undeclare_suppressed_but_final_still_sent() {
     }
     assert_eq!(fired.load(Ordering::SeqCst), 0, "handler suppressed");
     assert_eq!(
-        driver.frame_count(),
+        driver.frame_count() - base,
         1,
         "the ResponseFinal is still emitted — the requester is not starved"
     );

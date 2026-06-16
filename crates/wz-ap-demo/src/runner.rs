@@ -394,32 +394,51 @@ fn install_session_handles(
             .expect("liveliness-subscriber feature is ON in wz-ap-demo default build")
     });
 
-    let queryable = queryable_spec.map(|(pattern, reply_text)| {
+    let queryable = queryable_spec.and_then(|(pattern, reply_text)| {
         let pattern_for_callback = pattern.clone();
+        let pattern_for_log = pattern.clone();
         let reply_text_for_callback = reply_text.clone();
-        // R311gb-3b — declare_queryable hands the handler the seam
-        // contracts (&dyn QueryView, &mut dyn ReplyOut). rid + keyexpr
-        // are read from the query (QueryView is their SSOT) rather than
-        // the reply sink. wz-ap-demo builds with default features so the
-        // only Err here is FeatureDisabled (impossible on this build);
-        // .expect is the textbook shape per the R311 signature-stability
-        // principle.
-        session
-            .declare_queryable(
-                pattern,
-                QueryableOptions::default(),
-                move |query, responder| {
-                    responder.reply(reply_text_for_callback.as_bytes());
-                    log::info!(
-                        "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
-                        pattern_for_callback,
-                        query.rid(),
-                        query.keyexpr(),
-                        reply_text_for_callback,
-                    );
-                },
-            )
-            .expect("query-queryable feature is ON in wz-ap-demo default build")
+        // R311ow — `--queryable` now declares a ROUTED queryable: register the
+        // local reply callback AND emit `Declare(DeclQueryable)` so a router
+        // (e.g. zenohd) routes matching Query requests to this session. The
+        // keyexpr was R300-validated at argv parse time (main.rs adds
+        // --queryable to the eager outbound gate), so the only residual reject
+        // here is an over-capacity keyexpr / transport-down — log and skip
+        // rather than abort the demo (a rejected declare rolls back its local
+        // registration, so `None` is the correct "no queryable" outcome).
+        //
+        // R311gb-3b — declare_queryable hands the handler the seam contracts
+        // (&dyn QueryView, &mut dyn ReplyOut); rid + keyexpr are read from the
+        // query (QueryView is their SSOT) rather than the reply sink.
+        let declared = session.declare_queryable(
+            pattern,
+            QueryableOptions::default(),
+            move |query, responder| {
+                responder.reply(reply_text_for_callback.as_bytes());
+                log::info!(
+                    "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
+                    pattern_for_callback,
+                    query.rid(),
+                    query.keyexpr(),
+                    reply_text_for_callback,
+                );
+            },
+        );
+        match declared {
+            Ok(q) => {
+                log::info!(
+                    "wz-ap-demo: DECLARED ROUTED QUERYABLE id={} keyexpr='{pattern_for_log}'",
+                    q.id().as_u64(),
+                );
+                Some(q)
+            }
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo: QUERYABLE declare rejected for keyexpr='{pattern_for_log}': {e}"
+                );
+                None
+            }
+        }
     });
 
     SessionHandles {

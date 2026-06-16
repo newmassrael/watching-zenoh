@@ -449,13 +449,20 @@ fn main() -> ExitCode {
     // R311ou — `--key` joined this list: it now declares a ROUTED subscriber
     // (`Session::declare_subscriber` emits `Declare(DeclSubscriber)` so a
     // router routes matching Pushes back), so its keyexpr reaches the outbound
-    // wire and must pass the pico-safety gate. The remaining receive-side
-    // keyexprs (--queryable, --query, --liveliness-subscribe) are still NOT
-    // gated: `declare_queryable` is still wire-no-op (router-mode queryable is
-    // the next-rung carry) and the query/liveliness-subscribe patterns match
-    // INBOUND peer keyexprs, never emitted by wz.
+    // wire and must pass the pico-safety gate.
+    //
+    // R311ow — `--queryable` likewise joined: `Session::declare_queryable` now
+    // declares a ROUTED queryable (emits `Declare(DeclQueryable)` so a router
+    // routes matching Query requests here), so its keyexpr also reaches the
+    // outbound wire. The remaining receive-side keyexprs (--query,
+    // --liveliness-subscribe) are still NOT gated: their patterns match INBOUND
+    // peer keyexprs, never emitted by wz.
     for (flag, keyexpr_opt) in [
         ("--key", key_opt.as_deref()),
+        (
+            "--queryable",
+            queryable_spec.as_ref().map(|(p, _)| p.as_str()),
+        ),
         ("--declare-subscriber", declare_subscriber_opt.as_deref()),
         ("--declare-queryable", declare_queryable_opt.as_deref()),
         ("--declare-token", declare_token_opt.as_deref()),
