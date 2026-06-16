@@ -38046,6 +38046,62 @@
         "NEXT: mTLS+PEM / cert PEM 로딩 / pico parity % 재계산. UNPUSHED: R311od(2)+R311oe(2)+R311of(2) = origin/main=a659004 위 6 commits. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙)."
       ]
     },
+    "Round 311og": {
+      "decision_summary": "R311og: mTLS + cert-PEM 로딩. 신규 tls_config 모듈(client/server_config_from_pem)이 PEM->rustls config 빌드(zenoh-rust utils.rs + pico session_cfg cert 키 미러); mTLS는 옵션 인자(client_auth/client_ca)로 표현, dial_tls/accept_tls/TlsDialConfig 시그니처 무변경. e2e 3종(mutual-auth Established / mTLS 익명거부 / plain-PEM Established) + C1u 배선. TLS 1.3 client-auth-after-finish 발견으로 서버측 거부를 enforcement 정본 증거로 채택. full run-ci(M+G) EXIT=0.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/tls_config.rs (신규): PEM cert/key 로더. certs_from_pem/private_key_from_pem(rustls_pemfile, PKCS#1/8+SEC1 단일콜)/root_store_from_pem 프리미티브 + client_config_from_pem(root_ca_pem, Option<ClientAuthPem>)/server_config_from_pem(cert,key, Option<client_ca_pem>). mTLS는 옵션 인자(client_auth=with_client_auth_cert / client_ca=WebPkiClientVerifier+with_client_cert_verifier). ring provider builder_with_provider로 핀. zenoh-rust zenoh-link-tls/src/utils.rs + pico TLS session_cfg 키(ROOT_CA/CONNECT/LISTEN/ENABLE_MTLS) 미러.",
+        "crates/wz-runtime-tokio/Cargo.toml: rustls-pemfile = { version = \"2\", optional = true } 프로덕션 dep 추가; transport-link-tls feature가 dep:rustls-pemfile 포워드(tokio-rustls와 동일 gating, cert-free 빌드는 미컴파일).",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod tls_config 선언(transport-link-tls 게이트, tls_pipeline 옆). tls_pipeline=핸드셰이크, tls_config=그 config를 PEM에서 빌드.",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: loopback_mtls_pems() fixture(tls-fixtures 게이트). 자가서명 CA 1개가 server leaf(SAN localhost, serverAuth EKU)+client leaf(clientAuth EKU) 서명; CA가 양방향 trust anchor. owned String만 반환(rustls/wz 타입 누출 0). loopback_tls_configs(자가서명 leaf, DER)와 별개의 CA 토폴로지.",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs (신규): 3 테스트. mtls_mutual_auth_reaches_established(양측 PEM 로더로 mTLS config 빌드->Established), mtls_server_rejects_anonymous_client(mTLS 서버가 익명 클라 accept_tls err로 거부), plain_tls_from_pem_reaches_established(로더 None 경로=one-way PEM->Established). open_both_to_established 헬퍼로 reach-Established 2종 공유.",
+        "scripts/run-ci.sh: Layer C1u에 --test tls_pem_mtls_e2e 추가(defaults+tls가 transport-unicast 보유라 모듈 컴파일+실행; 없으면 빈 컴파일=gate-skew). clippy --all-targets --features transport-link-tls가 이미 모듈 lint."
+      ],
+      "verification_bullets": [
+        "tls_pem_mtls_e2e 3 passed(mutual-auth/익명거부/plain-PEM) + 10/10 연속 non-flaky([[feedback-no-flaky-ever]]).",
+        "clippy 3종 전부 -D warnings exit 0: default+tls --all-targets / no-default-features+tls(tls_config standalone, transport-unicast 불요) / test-support tls-fixtures. fmt --check clean.",
+        "mTLS 강제 증거=서버가 익명 클라 거부(acc_res.is_err()). 발견: TLS 1.3에서 client-auth는 client Finished 이후라 dial_tls가 Ok 반환(서버가 그 후 빈 cert 거부->fatal alert는 다음 read에만 표면화). 내 dial_res.is_err() 단언이 TLS 1.3 모델 오해였음->제거(근본원인 수정, 우회 아님). 서버 거부가 정본 enforcement 신호.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. C1u pass(tls_e2e+session_reconnect_e2e+tls_pem_mtls_e2e).",
+        "시그니처 안정: dial_tls/accept_tls/TlsDialConfig/DialConfig 시그니처 무변경 — mTLS material은 전부 rustls ClientConfig/ServerConfig 내부라 프로덕션 primitive 무손상([[feedback-signature-stability]]). 기존 tls_e2e/scouting/reconnect 테스트 무영향(loopback_tls_configs 보존).",
+        "atomic: ledger entries 740->741, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(신규 feature backend 심화, 카탈로그 §5.1 transport는 R311oa로 이미 active)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311og = mTLS + cert-PEM 로딩(carry의 미완 ①②). 신규 프로덕션 모듈 tls_config가 PEM->rustls ClientConfig/ServerConfig 빌드; mTLS는 그 로더의 옵션 인자로 표현+e2e 실증. zenoh-rust utils.rs(동일 rustls 스택) + pico session_cfg cert 키 미러=실재 기능(합성 아님).",
+        "설계 핵심: mTLS material(client auth cert, client cert verifier)은 전부 rustls config 내부라 dial_tls/accept_tls/TlsDialConfig 시그니처 무변경 — 진짜 신규 코드는 PEM 로더뿐이고 mTLS는 파라미터. zenoh-rust도 동일(material을 ServerConfig/ClientConfig 빌더에 주입).",
+        "발견(원장화): TLS 1.3에서 client 인증서 검증은 client Finished 송신 이후라 익명 클라의 dial_tls가 Ok 반환; 서버가 그 후 거부. mTLS enforcement 정본 증거=서버측 accept_tls err. (TLS 1.2였다면 client도 핸드셰이크 실패.) 성급한 client측 단언을 검증이 뒤집음.",
+        "미완(정직, 후속): cert PEM 파일 I/O 헬퍼(현재 로더는 &[u8] bytes 수령; 디스크 read는 app 책임 — zenoh-rust는 tokio::fs::read로 파일 경로도 지원) / base64 PEM 변형(pico의 *_BASE64 키) / verify_name_on_connect skip(dangerous WebPkiVerifierAnyServerName; 현재는 항상 이름검증) / pico parity % 재계산(TLS 트랙 od~og 반영).",
+        "NEXT: cert PEM 파일/base64 헬퍼 또는 pico parity % 재계산. UNPUSHED: R311og(feat/test 다수 + 본 ledger) = origin/main=cb391dd 위. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙 연속)."
+      ],
+      "publishable_decision_summary": "R311og: mTLS + cert-PEM 로딩. 신규 tls_config 모듈(client/server_config_from_pem)이 PEM->rustls config 빌드(zenoh-rust utils.rs + pico session_cfg cert 키 미러); mTLS는 옵션 인자(client_auth/client_ca)로 표현, dial_tls/accept_tls/TlsDialConfig 시그니처 무변경. e2e 3종(mutual-auth Established / mTLS 익명거부 / plain-PEM Established) + C1u 배선. TLS 1.3 client-auth-after-finish 발견으로 서버측 거부를 enforcement 정본 증거로 채택. full run-ci(M+G) EXIT=0.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/tls_config.rs (신규): PEM cert/key 로더. certs_from_pem/private_key_from_pem(rustls_pemfile, PKCS#1/8+SEC1 단일콜)/root_store_from_pem 프리미티브 + client_config_from_pem(root_ca_pem, Option<ClientAuthPem>)/server_config_from_pem(cert,key, Option<client_ca_pem>). mTLS는 옵션 인자(client_auth=with_client_auth_cert / client_ca=WebPkiClientVerifier+with_client_cert_verifier). ring provider builder_with_provider로 핀. zenoh-rust zenoh-link-tls/src/utils.rs + pico TLS session_cfg 키(ROOT_CA/CONNECT/LISTEN/ENABLE_MTLS) 미러.",
+        "crates/wz-runtime-tokio/Cargo.toml: rustls-pemfile = { version = \"2\", optional = true } 프로덕션 dep 추가; transport-link-tls feature가 dep:rustls-pemfile 포워드(tokio-rustls와 동일 gating, cert-free 빌드는 미컴파일).",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod tls_config 선언(transport-link-tls 게이트, tls_pipeline 옆). tls_pipeline=핸드셰이크, tls_config=그 config를 PEM에서 빌드.",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: loopback_mtls_pems() fixture(tls-fixtures 게이트). 자가서명 CA 1개가 server leaf(SAN localhost, serverAuth EKU)+client leaf(clientAuth EKU) 서명; CA가 양방향 trust anchor. owned String만 반환(rustls/wz 타입 누출 0). loopback_tls_configs(자가서명 leaf, DER)와 별개의 CA 토폴로지.",
+        "crates/wz-runtime-tokio/tests/tls_pem_mtls_e2e.rs (신규): 3 테스트. mtls_mutual_auth_reaches_established(양측 PEM 로더로 mTLS config 빌드->Established), mtls_server_rejects_anonymous_client(mTLS 서버가 익명 클라 accept_tls err로 거부), plain_tls_from_pem_reaches_established(로더 None 경로=one-way PEM->Established). open_both_to_established 헬퍼로 reach-Established 2종 공유.",
+        "scripts/run-ci.sh: Layer C1u에 --test tls_pem_mtls_e2e 추가(defaults+tls가 transport-unicast 보유라 모듈 컴파일+실행; 없으면 빈 컴파일=gate-skew). clippy --all-targets --features transport-link-tls가 이미 모듈 lint."
+      ],
+      "publishable_verification_bullets": [
+        "tls_pem_mtls_e2e 3 passed(mutual-auth/익명거부/plain-PEM) + 10/10 연속 non-flaky([[feedback-no-flaky-ever]]).",
+        "clippy 3종 전부 -D warnings exit 0: default+tls --all-targets / no-default-features+tls(tls_config standalone, transport-unicast 불요) / test-support tls-fixtures. fmt --check clean.",
+        "mTLS 강제 증거=서버가 익명 클라 거부(acc_res.is_err()). 발견: TLS 1.3에서 client-auth는 client Finished 이후라 dial_tls가 Ok 반환(서버가 그 후 빈 cert 거부->fatal alert는 다음 read에만 표면화). 내 dial_res.is_err() 단언이 TLS 1.3 모델 오해였음->제거(근본원인 수정, 우회 아님). 서버 거부가 정본 enforcement 신호.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. C1u pass(tls_e2e+session_reconnect_e2e+tls_pem_mtls_e2e).",
+        "시그니처 안정: dial_tls/accept_tls/TlsDialConfig/DialConfig 시그니처 무변경 — mTLS material은 전부 rustls ClientConfig/ServerConfig 내부라 프로덕션 primitive 무손상([[feedback-signature-stability]]). 기존 tls_e2e/scouting/reconnect 테스트 무영향(loopback_tls_configs 보존).",
+        "atomic: ledger entries 740->741, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(신규 feature backend 심화, 카탈로그 §5.1 transport는 R311oa로 이미 active)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311og = mTLS + cert-PEM 로딩(carry의 미완 ①②). 신규 프로덕션 모듈 tls_config가 PEM->rustls ClientConfig/ServerConfig 빌드; mTLS는 그 로더의 옵션 인자로 표현+e2e 실증. zenoh-rust utils.rs(동일 rustls 스택) + pico session_cfg cert 키 미러=실재 기능(합성 아님).",
+        "설계 핵심: mTLS material(client auth cert, client cert verifier)은 전부 rustls config 내부라 dial_tls/accept_tls/TlsDialConfig 시그니처 무변경 — 진짜 신규 코드는 PEM 로더뿐이고 mTLS는 파라미터. zenoh-rust도 동일(material을 ServerConfig/ClientConfig 빌더에 주입).",
+        "발견(원장화): TLS 1.3에서 client 인증서 검증은 client Finished 송신 이후라 익명 클라의 dial_tls가 Ok 반환; 서버가 그 후 거부. mTLS enforcement 정본 증거=서버측 accept_tls err. (TLS 1.2였다면 client도 핸드셰이크 실패.) 성급한 client측 단언을 검증이 뒤집음.",
+        "미완(정직, 후속): cert PEM 파일 I/O 헬퍼(현재 로더는 &[u8] bytes 수령; 디스크 read는 app 책임 — zenoh-rust는 tokio::fs::read로 파일 경로도 지원) / base64 PEM 변형(pico의 *_BASE64 키) / verify_name_on_connect skip(dangerous WebPkiVerifierAnyServerName; 현재는 항상 이름검증) / pico parity % 재계산(TLS 트랙 od~og 반영).",
+        "NEXT: cert PEM 파일/base64 헬퍼 또는 pico parity % 재계산. UNPUSHED: R311og(feat/test 다수 + 본 ledger) = origin/main=cb391dd 위. push=명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-r311od-scouting-tls-load-trigger]](TLS 트랙 연속)."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
