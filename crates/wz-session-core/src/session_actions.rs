@@ -2100,25 +2100,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendDeclareError> {
         #[cfg(feature = "declare-subscriber")]
         {
-            // R300 — reconstruct the full keyexpr from `(mapping_id,
-            // suffix)` and gate-check it BEFORE wire emit so a
-            // cross-boundary bug #3 shape (prefix=`"**"` +
-            // suffix=`"/c/*"`) cannot slip past a suffix-only check.
-            let reconstructed =
-                self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-            check_outbound_keyexpr_pico_safe(&reconstructed)?;
+            // R311ou — build half (R300 pico-safety gate + envelope) is the
+            // shared `prepare_declare_subscriber` SSOT, also called by the
+            // seam-routed `Session::declare_subscriber`; this wrapper keeps the
+            // dispatch + reconnect-cache half (byte-stable-wire test callers +
+            // any direct low-level caller).
             let declare =
-                build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
+                self.prepare_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_declare(declare, /*reliable=*/ true)
                 .map_err(SendDeclareError::from)?;
             // A4 — record for post-reconnect replay (pico
             // `_z_cache_declaration` on `_Z_RES_OK`).
-            #[cfg(feature = "session-reconnect")]
-            self.cache_declaration(CachedDeclaration::Subscriber {
-                subscriber_id,
-                mapping_id: keyexpr_mapping_id,
-                suffix: keyexpr_suffix.map(ToString::to_string),
-            });
+            self.cache_subscriber_declaration(subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
             Ok(())
         }
         #[cfg(not(feature = "declare-subscriber"))]
@@ -2267,6 +2260,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )?)
     }
 
+    /// R311ou — the BUILD half of [`Self::send_declare_subscriber`], mirroring
+    /// [`Self::prepare_declare_token`]: resolve the keyexpr from
+    /// `(keyexpr_mapping_id, keyexpr_suffix)`, run the R300 outbound
+    /// pico-safety gate, and assemble the `Declare(DeclSubscriber)` envelope.
+    /// Returns the built [`DeclareOwned`] for the caller to route through the
+    /// transport send seam
+    /// ([`Session::send_network_message`](../../wz_runtime_tokio/session/struct.Session.html)).
+    ///
+    /// The seam-routed `Session::declare_subscriber` (R311ou — the routed
+    /// subscriber that pico's `_z_register_subscriber` emits when
+    /// `allowed_origin` allows remote, `vendor/zenoh-pico/src/net/primitives.c:235`)
+    /// and the `send_declare_subscriber` wrapper both call this, so the
+    /// pico-safety gate + envelope assembly stay authored exactly once (build
+    /// SSOT). Mirror of the declare-token split landed in R311mw (B5b-2b-3).
+    #[cfg(feature = "declare-subscriber")]
+    pub fn prepare_declare_subscriber(
+        &self,
+        subscriber_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) -> Result<wz_codecs::declare::DeclareOwned, SendDeclareError> {
+        let reconstructed =
+            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        Ok(build_declare_subscriber(
+            subscriber_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+        )?)
+    }
+
     /// R311mw — append the post-emit reconnect-replay cache entry for a
     /// declared liveliness token. The session-level counterpart to the
     /// `Session::declare_token` seam emit: pico caches the declaration on
@@ -2291,6 +2315,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         #[cfg(not(feature = "session-reconnect"))]
         let _ = (token_id, keyexpr_mapping_id, keyexpr_suffix);
+    }
+
+    /// R311ou — append the post-emit reconnect-replay cache entry for a
+    /// declared subscriber (pico `_z_cache_declaration` on `_Z_RES_OK`). The
+    /// session-level counterpart to the seam-routed
+    /// `Session::declare_subscriber` emit, mirroring [`Self::cache_token_declaration`]:
+    /// the cache is session-state bookkeeping AROUND the wire emit, not part of
+    /// the transport seam, so it lives here rather than inside
+    /// `send_network_message`. Shared by the `send_declare_subscriber` wrapper
+    /// and the seam-routed declare so the cache shape is authored once.
+    /// Signature-stable: a no-op without `session-reconnect`.
+    pub fn cache_subscriber_declaration(
+        &self,
+        subscriber_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        #[cfg(feature = "session-reconnect")]
+        self.cache_declaration(CachedDeclaration::Subscriber {
+            subscriber_id,
+            mapping_id: keyexpr_mapping_id,
+            suffix: keyexpr_suffix.map(ToString::to_string),
+        });
+        #[cfg(not(feature = "session-reconnect"))]
+        let _ = (subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
     }
 
     /// R283 — encode + dispatch a pre-built `Declare(...)` envelope on

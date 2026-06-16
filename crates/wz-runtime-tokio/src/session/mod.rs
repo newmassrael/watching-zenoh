@@ -819,72 +819,44 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         });
     }
 
-    /// R245 — declare a [`Subscriber`] for `keyexpr` + `options`
-    /// that fires `callback` on every matching inbound `Sample`.
-    /// Returns a [`Subscriber`] handle whose `Drop` auto-unregisters
-    /// the subscription from the underlying
-    /// [`crate::pubsub::SubscriberRegistry`] (RAII).
+    /// R311ou — the transport-agnostic LOCAL-registration half of
+    /// `declare_subscriber`, shared by the unicast (routed, emitting —
+    /// [`Session::declare_subscriber`] on `impl Session<R, T, Unicast>`) and
+    /// the multicast (local-only — the same name on `impl Session<R, T,
+    /// Multicast>`) entry points. Builds the deferred-fire cell + the staging
+    /// sink and registers them in the observer's subscriber registry under the
+    /// caller's locality, returning the assigned [`SubscriptionId`] + the cell
+    /// so the caller assembles the [`Subscriber`] handle — with a wire
+    /// retraction on the unicast routed path, without one on the
+    /// session-local / multicast path.
     ///
-    /// Mirrors zenoh-pico's `z_declare_subscriber` shape: caller
-    /// supplies the keyexpr pattern + options + callback at declare
-    /// time; the runtime fires the callback synchronously inside
-    /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] (wire
-    /// arrival) and
-    /// [`crate::pubsub::SubscriberRegistry::local_publish`]
-    /// (loopback, R227+). No wire frame is emitted at declare time —
-    /// `Declare(DeclareSubscriber)` is a router-mode feature wz
-    /// elides today (peer-only) per the same router-less rationale
-    /// as [`Self::declare_publisher`].
+    /// Mirrors the local subscriber-table insert in zenoh-pico's
+    /// `_z_register_subscriber` that runs BEFORE the
+    /// `_z_locality_allows_remote` wire-emit gate
+    /// (`vendor/zenoh-pico/src/net/primitives.c:213-234`). The wire emit half
+    /// lives in [`Session::announce_subscriber`] (unicast only).
     ///
-    /// R311mp (Level B, B4) — TRANSPORT-AGNOSTIC: this method reads only
-    /// `self.fires` (via `deferred_sample_sink`) + the observer's
-    /// subscriber registry, never `self.actions()`, so it was lifted out
-    /// of the (now `transport-unicast`-gated) big impl block into this
-    /// ungated one. A multicast-only `Session` therefore declares
-    /// subscribers through the same surface — the handle type
-    /// [`Subscriber`] is already transport-agnostic (it owns only the
-    /// `SubscriptionId` + the deferred cell + a `Session` clone, no
-    /// transport payload). The multicast LOOPBACK leg of
-    /// [`Self::publish`] fires these subscribers in-process; the
-    /// multicast WIRE-RX leg reaches them once the drive loop shares this
-    /// session's observer + drains its `fires` after dispatch (the B5
-    /// both-build unification — until then the multicast drive loop
-    /// dispatches into a standalone observer with raw `register`).
-    pub fn declare_subscriber(
+    /// R311lh — the registry stores a staging sink that copies each matched
+    /// sample to the owned retention form and stages it on the deferred-fire
+    /// queue; `callback` runs at a drain site OUTSIDE the observer lock and may
+    /// re-enter any observer-locking session API (publish loopback, queries,
+    /// declares, handle Drop, even its own handle's `undeclare`).
+    fn register_subscriber_local(
         &self,
-        keyexpr: impl Into<String>,
-        options: SubscribeOptions,
+        keyexpr: &str,
+        options: &SubscribeOptions,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> Subscriber<R> {
-        let keyexpr_string = keyexpr.into();
-        // R311lh — DEFERRED FIRE (the R311lf lock-free callback
-        // invariant on the subscriber-sample plane): the registry
-        // stores a staging sink that copies each matched sample to the
-        // owned retention form and stages it on the deferred-fire
-        // queue; `callback` runs at a drain site OUTSIDE the observer
-        // lock and may re-enter any observer-locking session API —
-        // publish with local loopback, queries, declares, handle Drop,
-        // even its own handle's `undeclare`.
+    ) -> (SubscriptionId, SampleCell<R>) {
         let (cell, sink) = self.deferred_sample_sink(callback);
         // R311de — observer access via R::with_mutex_mut closure form.
         let id = R::with_mutex_mut(&self.observer, |observer| {
             observer.subscribers.register_with_locality(
-                keyexpr_string.clone(),
+                keyexpr.to_string(),
                 options.allowed_origin,
                 sink,
             )
         });
-        Subscriber {
-            // R311nf — store the observer handle, not a full `Session` clone
-            // (the decoupled `Subscriber<R>` is transport-agnostic).
-            observer: self.observer.clone(),
-            id,
-            keyexpr: keyexpr_string,
-            options,
-            cell,
-            // R311lo — armed: Drop/undeclare teardown frees this handle.
-            armed: true,
-        }
+        (id, cell)
     }
 }
 
@@ -950,6 +922,36 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         });
         self.drain_deferred_fires();
     }
+
+    /// R311ou — declare a LOCAL-only [`Subscriber`] on a MULTICAST session.
+    /// Registers the callback in the observer's subscriber registry (fired by
+    /// the multicast RX leg + the loopback leg of [`Self::publish`]); emits NO
+    /// wire frame. A multicast session is connectionless and has no router to
+    /// announce a subscription to — the B4 local-filter model — so unlike the
+    /// unicast [`Session::declare_subscriber`] there is no
+    /// `Declare(DeclSubscriber)` emit and no RAII retraction (`retraction:
+    /// None`). Infallible: the keyexpr never reaches the outbound wire, so the
+    /// R300 outbound pico-safety gate (run by the unicast routed path) does not
+    /// apply. Whole-group subscriber-declaration exchange among multicast peers
+    /// is a separate, later concern.
+    pub fn declare_subscriber(
+        &self,
+        keyexpr: impl Into<String>,
+        options: SubscribeOptions,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> Subscriber<R> {
+        let keyexpr_string = keyexpr.into();
+        let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback);
+        Subscriber {
+            observer: self.observer.clone(),
+            id,
+            keyexpr: keyexpr_string,
+            options,
+            cell,
+            armed: true,
+            retraction: None,
+        }
+    }
 }
 
 // R311nf — the UNICAST `Session` surface: `impl Session<R, T, Unicast>`. Every
@@ -958,10 +960,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
 // typestate confines it to a `Session<R, T, Unicast>` — a `Session<R, T,
 // Multicast>` simply does not have `dispatch_iteration_event` / `query` /
 // `declare_*` (the illegal call is a compile error, not a runtime reject). The
-// transport-agnostic surface (publish / observer / clock / drain / zid /
-// declare_subscriber) lives in the `impl<R, T, Tp> Session<R, T, Tp>` block
-// above; the multicast-only surface lives in the `impl Session<R, T,
-// Multicast>` block below.
+// transport-agnostic surface (publish / observer / clock / drain / zid + the
+// `register_subscriber_local` core) lives in the `impl<R, T, Tp> Session<R, T,
+// Tp>` block above; the multicast-only surface lives in the `impl Session<R, T,
+// Multicast>` block below. R311ou — `declare_subscriber` is now per-transport
+// (it shares `register_subscriber_local`): the unicast one emits the routed
+// `Declare(DeclSubscriber)`, the multicast one is local-only.
 #[cfg(feature = "transport-unicast")]
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Construct a new session bundle from existing handles.
@@ -2144,7 +2148,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         inline_suffix: Option<&str>,
         options: SubscribeOptions,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
-    ) -> Result<Subscriber<R>, SubscribeAliasError> {
+    ) -> Result<Subscriber<R>, SubscribeAliasError>
+    where
+        // R311ou — same honest bound as the literal `declare_subscriber` it
+        // delegates to: the routed subscriber's RAII retraction box captures the
+        // `SessionLinkActions<R, T>`, so a `Send` handle needs a `Send + Sync`
+        // link sink and a `'static` clock.
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
+    {
         let base = self
             .actions()
             .resolve_outbound_mapping(mapping_id)
@@ -2157,7 +2169,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 composed
             }
         };
-        Ok(self.declare_subscriber(resolved, options, callback))
+        // R311ou — route the aliased subscriber by delegating to the emitting
+        // literal `declare_subscriber` on the resolved keyexpr: register the
+        // local callback AND emit `Declare(DeclSubscriber)` (locality-gated) so a
+        // router routes matching Pushes back, with the RAII `UndeclSubscriber` on
+        // Drop. The `SubscribeError` reject family projects to the alias surface
+        // via `From` (so `SubscribeAliasError` mirrors `LivelinessAliasError`),
+        // giving the literal + aliased subscriber declares ONE routed SSOT — and
+        // the same local-registration rollback on a gate reject.
+        self.declare_subscriber(resolved, options, callback)
+            .map_err(SubscribeAliasError::from)
     }
 
     /// R246 — declare a [`Queryable`] for `keyexpr` + `options` that
@@ -2287,6 +2308,176 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         {
             let _ = (mapping_id, inline_suffix, options, callback);
             Err(QueryableAliasError::FeatureDisabled)
+        }
+    }
+
+    /// R311ou — declare a ROUTED [`Subscriber`] on `keyexpr` + `options` that
+    /// fires `callback` on every matching inbound `Sample`, AND announces the
+    /// subscription to the peer/router by emitting a `Declare(DeclSubscriber)`
+    /// on the outbound link (when `options.allowed_origin` allows remote). The
+    /// wz analogue of zenoh-pico's `z_declare_subscriber` /
+    /// `_z_register_subscriber` (`vendor/zenoh-pico/src/net/primitives.c:210`):
+    /// register the local callback table entry, then — iff
+    /// `_z_locality_allows_remote(allowed_origin)` — emit the wire
+    /// `DeclSubscriber` so a router routes matching Pushes back to this session.
+    /// Verified end-to-end against `zenohd` v1.5.0 (the R311ou Layer Z interop
+    /// test); the prior R311or "router-mode subscriber out of scope" finding was
+    /// empirically falsified.
+    ///
+    /// Returns a [`Subscriber`] handle whose `Drop` (RAII) unregisters the local
+    /// callback AND, for a routed subscriber, emits the matching
+    /// `Declare(UndeclSubscriber)` retraction so the router stops routing. A
+    /// session-local subscriber (`Locality::SessionLocal`) registers locally
+    /// only and emits nothing, exactly as pico gates the emit on
+    /// `_z_locality_allows_remote`.
+    ///
+    /// Fallible (pico `z_result_t` parity): the keyexpr now reaches the outbound
+    /// wire, so it runs the R300 outbound pico-safety gate. A non-canonical /
+    /// R299-bug-#3 keyexpr returns [`SubscribeError::InvalidKeyexpr`] with the
+    /// local registration ROLLED BACK (pico unregisters on `_z_send_declare`
+    /// failure, primitives.c:243), so a rejected declare leaves no orphan
+    /// subscriber. `ExceedsCapacity` / `FeatureDisabled` / `TransportUnavailable`
+    /// mirror the [`Self::declare_token`] reject family; there is no
+    /// `RequiresUnicast` (this method lives on `impl Session<R, T, Unicast>`, so
+    /// a multicast call is a compile error — the multicast `declare_subscriber`
+    /// is the infallible local-only sibling).
+    ///
+    /// R311ou — the wire emit routes through the [`Self::send_network_message`]
+    /// transport send seam (the B5b SSOT, uniform with [`Self::declare_token`]);
+    /// the build half + reconnect-replay cache are the
+    /// `SessionLinkActions::prepare_declare_subscriber` /
+    /// `cache_subscriber_declaration` SSOTs shared with the
+    /// `send_declare_subscriber` wrapper. The wire subscriber id IS the local
+    /// [`SubscriptionId`] (one entity id for the local table key + the
+    /// `DeclSubscriber` + the `UndeclSubscriber`), mirroring pico's single
+    /// `_z_get_entity_id` — no separate wire-id counter.
+    pub fn declare_subscriber(
+        &self,
+        keyexpr: impl Into<String>,
+        options: SubscribeOptions,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> Result<Subscriber<R>, SubscribeError>
+    where
+        // R311ou — honest bound: a ROUTED subscriber's RAII `Drop` emits the
+        // `Declare(UndeclSubscriber)` from the type-erased retraction closure,
+        // which captures the `Arc<SessionLinkActions<R, T>>`. For that closure
+        // (and so the `Subscriber<R>` handle) to be `Send` — droppable from any
+        // thread — the runtime's link sink must be `Send + Sync`. Satisfied by
+        // `TokioRuntime`; the same requirement `declare_token` carries
+        // implicitly via its concrete `LivelinessToken<R, T>` handle's auto
+        // `Send`. `T: 'static` so the captured `SessionLinkActions<R, T>`
+        // outlives the `'static` retraction box.
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
+    {
+        let keyexpr_string = keyexpr.into();
+        let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback);
+        let retraction = match self.announce_subscriber(id, &keyexpr_string, &options) {
+            Ok(retraction) => retraction,
+            Err(e) => {
+                // pico parity (`_z_register_subscriber`, primitives.c:243): roll
+                // back the just-registered local entry when the wire announce
+                // fails, so a gate-rejected keyexpr leaves no orphan local
+                // subscriber. `cell.kill()` suppresses any sample staged between
+                // the register and this rollback.
+                cell.kill();
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.subscribers.unregister(id)
+                });
+                return Err(e);
+            }
+        };
+        Ok(Subscriber {
+            observer: self.observer.clone(),
+            id,
+            keyexpr: keyexpr_string,
+            options,
+            cell,
+            armed: true,
+            retraction,
+        })
+    }
+
+    /// R311ou — the wire-announce half of [`Self::declare_subscriber`] (pico
+    /// `_z_register_subscriber` lines 235-246): emit `Declare(DeclSubscriber)`
+    /// through the transport send seam iff `allowed_origin.allows_remote()`,
+    /// returning the matching type-erased retraction closure for the
+    /// [`Subscriber`] handle's `Drop`. `Ok(None)` for a session-local
+    /// subscriber (no router announce). On a build without the
+    /// `declare-subscriber` codec, `Ok(None)` — the local subscriber stays valid
+    /// for loopback / directly-connected delivery; only the router announce is
+    /// elided (signature-stability: the routed-declare path is the cfg-gated
+    /// half, the local registration is always available).
+    fn announce_subscriber(
+        &self,
+        id: SubscriptionId,
+        keyexpr: &str,
+        options: &SubscribeOptions,
+    ) -> Result<Option<SubscriberRetraction>, SubscribeError>
+    where
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        T: 'static,
+    {
+        #[cfg(feature = "declare-subscriber")]
+        {
+            // pico (`_z_register_subscriber`, primitives.c:235): emit only when
+            // the locality allows remote; a SessionLocal subscriber is loopback
+            // only.
+            if !options.allowed_origin.allows_remote() {
+                return Ok(None);
+            }
+            fn map_subscribe_err(e: SendDeclareError) -> SubscribeError {
+                match e {
+                    SendDeclareError::Keyexpr(inner) => SubscribeError::InvalidKeyexpr(inner),
+                    // W3 — literal keyexpr over MAX_KEYEXPR_BYTES, typed through.
+                    SendDeclareError::Codec(_) => SubscribeError::ExceedsCapacity,
+                    // F2 — reconnect-window reject, typed through.
+                    SendDeclareError::TransportUnavailable => SubscribeError::TransportUnavailable,
+                    // R311g1 — reachable only in a feature combo where
+                    // `declare-subscriber` is ON but the send-seam codec
+                    // (`codec-declare`) is OFF; honest projection.
+                    SendDeclareError::FeatureDisabled => SubscribeError::FeatureDisabled,
+                    // Literal mode (mapping_id=0, suffix=Some) cannot hit the
+                    // mapping-id arms; and `declare_subscriber` lives on `impl
+                    // Session<R, T, Unicast>`, so the seam takes the unicast arm
+                    // and never returns RequiresUnicast (a multicast session is a
+                    // distinct type without this method).
+                    SendDeclareError::RequiresUnicast
+                    | SendDeclareError::UnknownMappingId(_)
+                    | SendDeclareError::ReservedMappingIdZero
+                    | SendDeclareError::MissingKeyexpr => unreachable!(
+                        "declare_subscriber literal-mode prepare/seam returned \
+                         {e:?} unexpectedly"
+                    ),
+                }
+            }
+            let actions = self.actions();
+            // R311ou — pico parity: the wire subscriber id IS the local
+            // SubscriptionId (one entity id, mirroring `_z_get_entity_id`).
+            let wire_id = id.as_u64();
+            let declare = actions
+                .prepare_declare_subscriber(wire_id, /*mapping_id=*/ 0, Some(keyexpr))
+                .map_err(map_subscribe_err)?;
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+                /*reliable=*/ true,
+                /*express=*/ false,
+            )
+            .map_err(|e| map_subscribe_err(SendDeclareError::from(e)))?;
+            // A4 — reconnect-replay cache (pico `_z_cache_declaration`);
+            // session-state bookkeeping AROUND the seam emit, like declare_token.
+            actions.cache_subscriber_declaration(wire_id, /*mapping_id=*/ 0, Some(keyexpr));
+            // The retraction captures the unicast actions Arc + the wire id;
+            // type-erased so `Subscriber<R>` stays free of the `T` clock param.
+            let actions_for_drop = actions.clone();
+            Ok(Some(Box::new(move || {
+                actions_for_drop.send_undeclare_subscriber(wire_id)
+            })))
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        {
+            let _ = (id, keyexpr, options);
+            Ok(None)
         }
     }
 

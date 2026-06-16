@@ -440,17 +440,22 @@ fn main() -> ExitCode {
         }
     };
 
-    // R300 — eager argv-level validation of the three DECLARE-side
-    // keyexprs that flow through SessionLinkActions::send_declare_*.
-    // The same gate fires later at send-time (so library API users
-    // are equally protected), but argv-level eager-fail gives the
-    // CLI user a faster + more locatable error than waiting for the
-    // Established gate to fire 5s later. Receive-side keyexprs
-    // (--key, --queryable, --query, --liveliness-subscribe) are NOT
-    // gated here: they register local pattern slots that match
-    // INBOUND peer keyexprs and are never emitted on the outbound
-    // wire by wz, so the R300 gate scope does not apply.
+    // R300 — eager argv-level validation of the keyexprs that flow onto the
+    // OUTBOUND wire. The same gate fires later at send-time (so library API
+    // users are equally protected), but argv-level eager-fail gives the CLI
+    // user a faster + more locatable error than waiting for the Established
+    // gate to fire 5s later.
+    //
+    // R311ou — `--key` joined this list: it now declares a ROUTED subscriber
+    // (`Session::declare_subscriber` emits `Declare(DeclSubscriber)` so a
+    // router routes matching Pushes back), so its keyexpr reaches the outbound
+    // wire and must pass the pico-safety gate. The remaining receive-side
+    // keyexprs (--queryable, --query, --liveliness-subscribe) are still NOT
+    // gated: `declare_queryable` is still wire-no-op (router-mode queryable is
+    // the next-rung carry) and the query/liveliness-subscribe patterns match
+    // INBOUND peer keyexprs, never emitted by wz.
     for (flag, keyexpr_opt) in [
+        ("--key", key_opt.as_deref()),
         ("--declare-subscriber", declare_subscriber_opt.as_deref()),
         ("--declare-queryable", declare_queryable_opt.as_deref()),
         ("--declare-token", declare_token_opt.as_deref()),

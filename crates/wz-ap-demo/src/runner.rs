@@ -318,22 +318,47 @@ fn install_session_handles(
     liveliness_subscriber_keyexpr: Option<&str>,
     queryable_spec: Option<(String, String)>,
 ) -> SessionHandles {
-    let subscriber = key.map(|filter| {
+    let subscriber = key.and_then(|filter| {
         let key_for_callback = filter.clone();
-        session.declare_subscriber(filter, SubscribeOptions::default(), move |sample| {
-            // R311gb-2b — the registry delivers `&dyn SampleView` (the
-            // sink seam accessor contract); read keyexpr / kind /
-            // payload through the accessor methods. R222 had already
-            // collapsed the prior `match push.keyexpr.body` tagged-union
-            // arm extraction, so the call site stays a flat read.
-            log::info!(
-                "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
-                key_for_callback,
-                sample.keyexpr(),
-                sample.kind(),
-                sample.payload().len(),
-            );
-        })
+        // R311ou — `--key` now declares a ROUTED subscriber: register the local
+        // callback AND emit `Declare(DeclSubscriber)` so a router (e.g. zenohd)
+        // routes matching Pushes back to this session. The keyexpr was
+        // R300-validated at argv parse time (main.rs adds --key to the eager
+        // outbound gate), so the only residual reject here is an over-capacity
+        // keyexpr / transport-down — log and skip rather than abort the demo
+        // (a rejected declare rolls back its local registration, so `None` is
+        // the correct "no subscriber" outcome).
+        let declared = session.declare_subscriber(
+            filter.clone(),
+            SubscribeOptions::default(),
+            move |sample| {
+                // R311gb-2b — the registry delivers `&dyn SampleView` (the
+                // sink seam accessor contract); read keyexpr / kind /
+                // payload through the accessor methods. R222 had already
+                // collapsed the prior `match push.keyexpr.body` tagged-union
+                // arm extraction, so the call site stays a flat read.
+                log::info!(
+                    "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
+                    key_for_callback,
+                    sample.keyexpr(),
+                    sample.kind(),
+                    sample.payload().len(),
+                );
+            },
+        );
+        match declared {
+            Ok(sub) => {
+                log::info!(
+                    "wz-ap-demo: DECLARED ROUTED SUBSCRIBER id={} keyexpr='{filter}'",
+                    sub.id().as_u64(),
+                );
+                Some(sub)
+            }
+            Err(e) => {
+                log::warn!("wz-ap-demo: SUBSCRIBER declare rejected for keyexpr='{filter}': {e}");
+                None
+            }
+        }
     });
 
     let liveliness_subscriber = liveliness_subscriber_keyexpr.map(|filter| {

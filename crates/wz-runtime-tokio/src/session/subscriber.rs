@@ -95,6 +95,18 @@ pub struct Subscriber<R: SessionRuntime = TokioRuntime> {
     /// instead of the prior `mem::forget(self)` leaking them. `true` at
     /// construction; `false` once teardown has run.
     pub(super) armed: bool,
+    /// R311ou — the wire retraction for a ROUTED subscriber; see
+    /// [`SubscriberRetraction`]. `Some` exactly when
+    /// [`Session::declare_subscriber`] emitted a `Declare(DeclSubscriber)` to
+    /// announce this subscription to the router (unicast transport AND
+    /// `options.allowed_origin.allows_remote()`), so the retraction exists
+    /// precisely when there is something to retract — the emit/retract pairing
+    /// is unrepresentable-by-construction, not a runtime flag. `None` for a
+    /// session-local subscriber (no wire announce) or a multicast subscriber
+    /// (no router), mirroring zenoh-pico's `_z_undeclare_subscriber` gating the
+    /// `UndeclSubscriber` emit on `_z_locality_allows_remote`
+    /// (`vendor/zenoh-pico/src/net/primitives.c:292`).
+    pub(super) retraction: Option<SubscriberRetraction>,
 }
 
 /// R311lh — the type-erased user callback a deferred subscriber's cell
@@ -102,6 +114,17 @@ pub struct Subscriber<R: SessionRuntime = TokioRuntime> {
 /// nameable cell type (the [`DeclListener`] / [`MatchingListener`]
 /// convention).
 pub(super) type BoxedSampleCallback = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
+
+/// R311ou — the type-erased wire retraction a ROUTED subscriber carries.
+/// `Session<_, _, Unicast>::declare_subscriber` emitted a
+/// `Declare(DeclSubscriber)` to announce the subscription to the router, so on
+/// teardown this closure emits the matching `Declare(UndeclSubscriber)` (RAII),
+/// capturing the unicast `SessionLinkActions` Arc + the wire subscriber id.
+/// Type-erased like [`BoxedSampleCallback`] so the [`Subscriber<R>`] handle
+/// stays free of the `T` clock param the captured `SessionLinkActions<R, T>`
+/// would otherwise drag back in — preserving the R311nf transport-agnostic
+/// handle (a `Session<R, T, Multicast>` can still return a `Subscriber<R>`).
+pub(super) type SubscriberRetraction = Box<dyn FnMut() + Send + 'static>;
 
 /// R311lh — the per-subscriber deferred-fire cell (take-call-restore
 /// with the lossless backlog; see [`wz_session_core::deferred_fire`]).
@@ -201,6 +224,18 @@ impl<R: SessionRuntime> Subscriber<R> {
         }
         self.armed = false;
         self.cell.kill();
+        // R311ou — emit the wire `Declare(UndeclSubscriber)` for a ROUTED
+        // subscriber BEFORE the local unregister, mirroring zenoh-pico's
+        // `_z_undeclare_subscriber` (`_z_send_undeclare` then
+        // `_z_unregister_subscription`, `vendor/zenoh-pico/src/net/primitives.c:300-307`).
+        // `Some` exactly when `declare_subscriber` announced this subscription
+        // to the router; a session-local / multicast subscriber has `None` and
+        // skips the wire emit, the same gating pico applies via
+        // `_z_locality_allows_remote`. `take()` so a hypothetical second
+        // teardown (already guarded by `armed`) cannot double-emit.
+        if let Some(mut retract) = self.retraction.take() {
+            retract();
+        }
         // R311de — observer access via R::with_mutex_mut closure form;
         // per-profile poison-recovery lives inside the runtime impl (AP:
         // PoisonError::into_inner; MCU: no poison concept under panic =
@@ -220,19 +255,54 @@ impl<R: SessionRuntime> Drop for Subscriber<R> {
     }
 }
 
-/// R245 — typed error returned by
-/// [`Session::declare_subscriber_aliased`] when the requested
-/// mapping id was never declared on the outbound mapping table
-/// (or was retracted before declare time). Mirror of
-/// [`PublishAliasError`] / [`QueryAliasError`] on the sub side.
+/// R245 / R311ou — typed error returned by
+/// [`Session::declare_subscriber_aliased`]. `transport-unicast`-gated (it names
+/// [`OutboundKeyexprError`] and the aliased declare lives on
+/// `impl Session<R, T, Unicast>`). Structurally identical to
+/// [`LivelinessAliasError`]: the alias resolution can miss (`UnknownMapping`),
+/// and — since R311ou routed the aliased subscriber by delegating to the
+/// emitting literal [`Session::declare_subscriber`] — the wire
+/// `Declare(DeclSubscriber)` can fail the same way as the literal path. Those
+/// reject variants are projected verbatim from [`SubscribeError`] via the
+/// [`From`] impl below, so the literal and aliased routed-subscriber paths
+/// share ONE error surface (SSOT) rather than diverging.
+#[cfg(feature = "transport-unicast")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubscribeAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_subscriber_aliased call).
     UnknownMapping(u64),
+    /// R311ou — the resolved keyexpr (`outbound_mapping[id] || inline_suffix`)
+    /// failed the R300 outbound pico-safety gate. Projected from
+    /// [`SubscribeError::InvalidKeyexpr`]; the local registration was rolled
+    /// back, so no orphan subscriber lingers.
+    InvalidKeyexpr(OutboundKeyexprError),
+    /// R311ou — the resolved keyexpr exceeded the bounded-codec capacity.
+    /// Projected from [`SubscribeError::ExceedsCapacity`].
+    ExceedsCapacity,
+    /// R311ou — the `declare-subscriber` feature is disabled on this build, so
+    /// the routed announce cannot be emitted. Projected from
+    /// [`SubscribeError::FeatureDisabled`].
+    FeatureDisabled,
+    /// R311ou — the transport is not currently accepting sends (link released /
+    /// reconnecting). Projected from [`SubscribeError::TransportUnavailable`].
+    TransportUnavailable,
 }
 
+#[cfg(feature = "transport-unicast")]
+impl From<SubscribeError> for SubscribeAliasError {
+    fn from(e: SubscribeError) -> Self {
+        match e {
+            SubscribeError::InvalidKeyexpr(inner) => SubscribeAliasError::InvalidKeyexpr(inner),
+            SubscribeError::ExceedsCapacity => SubscribeAliasError::ExceedsCapacity,
+            SubscribeError::FeatureDisabled => SubscribeAliasError::FeatureDisabled,
+            SubscribeError::TransportUnavailable => SubscribeAliasError::TransportUnavailable,
+        }
+    }
+}
+
+#[cfg(feature = "transport-unicast")]
 impl std::fmt::Display for SubscribeAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -241,8 +311,94 @@ impl std::fmt::Display for SubscribeAliasError {
                 "SubscribeAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
             ),
+            SubscribeAliasError::InvalidKeyexpr(e) => write!(
+                f,
+                "SubscribeAliasError: resolved keyexpr failed the outbound pico-safety gate: {e}"
+            ),
+            SubscribeAliasError::ExceedsCapacity => write!(
+                f,
+                "SubscribeAliasError: resolved keyexpr exceeds the bounded-codec capacity \
+                 (MAX_KEYEXPR_BYTES)"
+            ),
+            SubscribeAliasError::FeatureDisabled => write!(
+                f,
+                "SubscribeAliasError: the declare-subscriber feature is disabled on this build"
+            ),
+            SubscribeAliasError::TransportUnavailable => write!(
+                f,
+                "SubscribeAliasError: transport not accepting sends (link released / reconnecting)"
+            ),
         }
     }
 }
 
+#[cfg(feature = "transport-unicast")]
 impl std::error::Error for SubscribeAliasError {}
+
+/// R311ou — typed error from the routed (emitting) [`Session::declare_subscriber`].
+/// Mirrors zenoh-pico's `z_result_t` return from `_z_register_subscriber`
+/// (`vendor/zenoh-pico/src/net/primitives.c:210`): the local registration
+/// always succeeds, but the wire `Declare(DeclSubscriber)` that announces the
+/// subscription to the router can fail. Variants mirror the non-alias arms of
+/// [`LivelinessAliasError`] (the `declare_token` sibling). There is no
+/// `RequiresUnicast` variant: `declare_subscriber` that emits lives on
+/// `impl Session<R, T, Unicast>`, so a multicast call is a compile error, not a
+/// runtime reject (typestate makes the transport mismatch unrepresentable).
+///
+/// `transport-unicast`-gated: it names [`OutboundKeyexprError`] (the
+/// `transport-unicast`-gated R300 gate type) and is returned only by the
+/// unicast `Session::declare_subscriber`, so a multicast-only build neither has
+/// the type in scope nor a caller — mirroring the `liveliness` submodule's gate
+/// on `LivelinessAliasError`.
+#[cfg(feature = "transport-unicast")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscribeError {
+    /// R300 — the keyexpr failed the outbound pico-safety gate: either
+    /// non-canonical per the zenoh keyexpr grammar, OR matching the R299 bug #3
+    /// SIGABRT pattern family. The wire bytes never left; the local
+    /// registration was rolled back so no orphan subscriber lingers.
+    InvalidKeyexpr(OutboundKeyexprError),
+    /// W3 — the literal keyexpr exceeded the declared bounded-codec capacity
+    /// (`MAX_KEYEXPR_BYTES`) while copying into the no-alloc owned DECLARE
+    /// mirror, so no wire bytes were emitted. The local registration was
+    /// rolled back.
+    ExceedsCapacity,
+    /// R311g1 — the `declare-subscriber` feature is disabled on this build, so
+    /// the wire emit path is elided. The `declare_subscriber` signature stays
+    /// available (signature-stability) but the routed announce cannot be made.
+    FeatureDisabled,
+    /// F2 — the transport is not currently accepting data sends (link released
+    /// or reconnecting; Established not re-entered). The DECLARE was not
+    /// emitted; re-declare after the session re-establishes (zenoh-pico
+    /// `_Z_ERR_TRANSPORT_NOT_AVAILABLE`).
+    TransportUnavailable,
+}
+
+#[cfg(feature = "transport-unicast")]
+impl std::fmt::Display for SubscribeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubscribeError::InvalidKeyexpr(e) => {
+                write!(
+                    f,
+                    "SubscribeError: keyexpr failed the outbound pico-safety gate: {e}"
+                )
+            }
+            SubscribeError::ExceedsCapacity => write!(
+                f,
+                "SubscribeError: keyexpr exceeds the bounded-codec capacity (MAX_KEYEXPR_BYTES)"
+            ),
+            SubscribeError::FeatureDisabled => write!(
+                f,
+                "SubscribeError: the declare-subscriber feature is disabled on this build"
+            ),
+            SubscribeError::TransportUnavailable => write!(
+                f,
+                "SubscribeError: transport not accepting sends (link released / reconnecting)"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "transport-unicast")]
+impl std::error::Error for SubscribeError {}

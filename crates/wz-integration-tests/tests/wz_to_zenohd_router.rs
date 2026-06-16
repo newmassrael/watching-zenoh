@@ -13,7 +13,7 @@
 //! `common` harness. No in-process dial, no per-test harness fork, no
 //! version override — wz speaks the reference protocol out of the box.
 //!
-//! Two legs:
+//! Three legs:
 //!   1. `wz_client_reaches_established_against_zenohd` — wz dials zenohd and
 //!      completes InitSyn/InitAck/OpenSyn/OpenAck to Established (transport
 //!      wire-parity with the canonical implementation). Deterministic: the
@@ -22,6 +22,14 @@
 //!      by zenohd to a zenoh-pico `z_sub` (data-plane cross-impl through the
 //!      reference router). wz emits a Put burst (wz-ap-demo's publisher_task)
 //!      so a Put lands after z_sub's subscription has propagated to zenohd.
+//!   3. `wz_routed_subscribe_from_zenohd` — the REVERSE data plane: wz declares
+//!      a ROUTED subscriber (`wz-ap-demo --key`, which since R311ou emits a
+//!      `Declare(DeclSubscriber)` so zenohd routes matching Pushes back), a
+//!      zenoh-pico `z_pub` publishes, and zenohd routes the Put to wz's
+//!      subscriber callback. This is the regression guard for R311ou — it
+//!      pins, end-to-end, that wz-as-routed-subscriber works against the
+//!      reference router (the prior R311or "router-mode subscriber out of
+//!      scope" finding was empirically falsified).
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z) AND binary-dep: zenohd is an external
 //! 1.5.0 build (`scripts/build-zenohd.sh`), not a wz artifact, so it never
@@ -246,5 +254,146 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub() {
     assert!(
         received_text.contains(publish_value),
         "z_sub received but the publish value '{publish_value}' is missing.\n{received_text}"
+    );
+}
+
+/// Spawn a zenoh-pico `z_pub` against zenohd and return it once it has opened a
+/// session, declared its publisher, and begun putting (stdout "Putting Data").
+/// Like [`spawn_subscribed_zsub`], the pico one-shot occasionally fails its
+/// session open under full-run-ci load and does NOT self-retry, so the
+/// orchestrator retries the spawn — robustness for a FOREIGN binary, not a wz
+/// workaround (the wz routed-subscriber side is deterministic: the
+/// `Declare(DeclSubscriber)` is emitted synchronously pre-drive). `z_pub`
+/// `z_sleep_s(1)` before each Put and publishes `-n` times, so the burst spans
+/// ~n seconds; the caller spawns this only AFTER wz logs DECLARED ROUTED
+/// SUBSCRIBER, so the subscription is already on zenohd when the Puts arrive.
+fn spawn_publishing_zpub(z_pub: &Path, key: &str, value: &str, endpoint: &str) -> ChildGuard {
+    const ATTEMPTS: usize = 6;
+    for attempt in 1..=ATTEMPTS {
+        let out = tempfile::tempfile().expect("tempfile for z_pub stdout");
+        let out_writer = out.try_clone().expect("dup z_pub stdout handle");
+        let mut out_reader = out;
+        let mut child = ChildGuard::wrap(
+            "z_pub client (zenoh-pico)",
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(z_pub)
+                .args([
+                    "-k", key, "-v", value, "-e", endpoint, "-m", "client", "-n", "30",
+                ])
+                .stdout(Stdio::from(out_writer))
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn z_pub via stdbuf"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let cap = read_captured(&mut out_reader);
+            if cap.contains("Putting Data") {
+                return child; // session open + publisher declared + publishing
+            }
+            if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                break; // transient open failure / timeout -> respawn
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+        eprintln!("z_pub open attempt {attempt}/{ATTEMPTS} did not start publishing; retrying");
+    }
+    panic!("pico z_pub failed to open a session to zenohd after {ATTEMPTS} attempts");
+}
+
+/// The REVERSE data plane: a zenoh-pico `z_pub`'s Put routes through zenohd to
+/// wz's ROUTED subscriber. wz declares the subscriber (`--key`, which emits a
+/// `Declare(DeclSubscriber)` since R311ou); zenohd, seeing wz's declared
+/// subscription, forwards the matching Put back to wz, whose callback fires.
+#[test]
+#[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_pub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_routed_subscribe_from_zenohd() {
+    let demo = wz_ap_demo_binary();
+    let z_pub = zenoh_pico_cli_binary("z_pub");
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let publish_key = "demo/zenohd";
+    let sub_filter = "demo/**";
+    let publish_value = "hello-routed-to-wz";
+
+    let mut zenohd = spawn_zenohd(port);
+    drop(port_res);
+
+    // ── wz-ap-demo: a CLIENT of zenohd that declares a ROUTED subscriber.
+    //    `--key` now emits `Declare(DeclSubscriber)` (R311ou), so wait until
+    //    that declaration has been announced before publishing — the route must
+    //    exist on zenohd when the Puts arrive (deterministic ordering, not a
+    //    sleep).
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect zenohd --key)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--key")
+            .arg(sub_filter)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect zenohd --key"),
+    );
+
+    let declared = wait_for_substring(
+        &mut demo_stderr_reader,
+        "DECLARED ROUTED SUBSCRIBER",
+        Duration::from_secs(10),
+    );
+
+    // ── pico z_pub: publishes on demo/zenohd through zenohd (retried past any
+    //    transient one-shot open). Spawned only after wz's subscription
+    //    propagated, so zenohd already has the route.
+    let z_pub_child = declared
+        .is_ok()
+        .then(|| spawn_publishing_zpub(&z_pub, publish_key, publish_value, &endpoint));
+
+    let received = wait_for_substring(
+        &mut demo_stderr_reader,
+        "SUBSCRIBER FIRED",
+        Duration::from_secs(12),
+    );
+
+    if let Some(mut c) = z_pub_child {
+        let _ = c.child_mut().kill();
+        let _ = c.child_mut().wait();
+    }
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    if let Err(c) = &declared {
+        panic!(
+            "wz-ap-demo did not log 'DECLARED ROUTED SUBSCRIBER' within 10s — the routed \
+             subscriber declare (R311ou) regressed.\n--- captured wz-ap-demo stderr ---\n{c}"
+        );
+    }
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+
+    let fired_text = match received {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "wz did not log 'SUBSCRIBER FIRED' within 12s — zenohd did not route the z_pub Put \
+             to wz's routed subscriber.\n--- captured wz-ap-demo stderr at deadline ---\n{c}"
+        ),
+    };
+    assert!(
+        fired_text.contains(publish_key),
+        "wz fired but the routed keyexpr '{publish_key}' is missing from the SUBSCRIBER FIRED \
+         line.\n{fired_text}"
     );
 }

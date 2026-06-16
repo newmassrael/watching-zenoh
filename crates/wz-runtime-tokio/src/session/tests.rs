@@ -3747,23 +3747,119 @@ fn subscribe_options_with_allowed_origin_pins_locality() {
 #[test]
 fn declare_subscriber_returns_handle_with_keyexpr_and_options() {
     let (session, _driver) = build_session();
-    let sub = session.declare_subscriber(
-        "home/temp",
-        SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal),
-        |_sample| {},
-    );
+    let sub = session
+        .declare_subscriber(
+            "home/temp",
+            SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal),
+            |_sample| {},
+        )
+        .expect("session-local declare is infallible (no outbound keyexpr)");
     assert_eq!(sub.keyexpr(), "home/temp");
     assert_eq!(sub.options().allowed_origin, Locality::SessionLocal);
 }
 
 #[test]
-fn declare_subscriber_does_not_emit_wire_frame() {
+fn declare_subscriber_session_local_does_not_emit_wire_frame() {
+    // R311ou — pico parity (`_z_register_subscriber`, primitives.c:235): a
+    // SessionLocal subscriber registers locally only; `allowed_origin` does not
+    // allow remote, so NO `Declare(DeclSubscriber)` is announced. (This is the
+    // surviving half of the old `declare_subscriber_does_not_emit_wire_frame` —
+    // the wire-no-op is now the session-local case, not the default.)
     let (session, driver) = build_session();
-    let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), |_| {});
+    let _sub = session
+        .declare_subscriber(
+            "home/temp",
+            SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal),
+            |_| {},
+        )
+        .expect("session-local declare emits nothing and cannot fail the outbound gate");
     assert_eq!(
         driver.frame_count(),
         0,
-        "declare_subscriber is a no-op on the wire"
+        "a SessionLocal subscriber is loopback-only and emits no wire frame"
+    );
+}
+
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn declare_subscriber_remote_emits_one_reliable_decl_subscriber() {
+    // R311ou — pico parity: a remote-locality subscriber (default `Any`)
+    // announces itself to the router with exactly one reliable
+    // `Declare(DeclSubscriber)` so the router routes matching Pushes back. This
+    // falsifies the prior R311or "router-mode subscriber out of scope" finding;
+    // verified end-to-end against zenohd (Layer Z interop). The DeclSubscriber
+    // byte shape is pinned at the builder level
+    // (`build_declare_subscriber_emits_zenoh_pico_compatible_wire_bytes`).
+    let (session, driver) = build_session();
+    let sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "a remote-locality subscriber emits exactly one Declare(DeclSubscriber)"
+    );
+    assert_eq!(
+        driver.frame_reliability(0),
+        Reliability::Reliable,
+        "Declare frames travel on the reliable channel (SN-window ordering)"
+    );
+    // R311ou — the wire subscriber id IS the local SubscriptionId (one entity
+    // id, pico `_z_get_entity_id` parity). Forget the handle so its Drop
+    // retraction does not add a second frame (the retract path is the dedicated
+    // test below).
+    let _ = sub.id();
+    std::mem::forget(sub);
+}
+
+#[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+#[test]
+fn routed_subscriber_drop_emits_undecl_subscriber() {
+    // R311ou — RAII retraction: dropping a routed subscriber emits the matching
+    // `Declare(UndeclSubscriber)` so the router stops routing (pico
+    // `_z_undeclare_subscriber`, primitives.c:300-307).
+    let (session, driver) = build_session();
+    {
+        let _sub = session
+            .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+            .expect("remote declare against the test link succeeds");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "declare emits DeclSubscriber before scope end"
+        );
+    }
+    assert_eq!(
+        driver.frame_count(),
+        2,
+        "Subscriber Drop emits the matching UndeclSubscriber (RAII retract)"
+    );
+}
+
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn declare_subscriber_invalid_keyexpr_rejects_and_rolls_back_local_registration() {
+    // R311ou — pico parity (`_z_register_subscriber`, primitives.c:243): when
+    // the wire `Declare(DeclSubscriber)` emit is suppressed by the R300 outbound
+    // pico-safety gate, the just-registered LOCAL subscriber is rolled back, so a
+    // rejected declare leaves NO orphan subscriber in the registry. "**/c/*" is
+    // the R299 bug-#3 family pattern (`**` + non-`*` chunk + `*`-shape chunk) the
+    // gate rejects (`keyexpr_canon::check_outbound_keyexpr_pico_safe`).
+    let (session, driver) = build_session();
+    let result = session.declare_subscriber("**/c/*", SubscribeOptions::default(), |_| {});
+    assert!(
+        matches!(result, Err(SubscribeError::InvalidKeyexpr(_))),
+        "the bug-#3 keyexpr is rejected by the R300 outbound gate, not declared"
+    );
+    assert_eq!(
+        driver.frame_count(),
+        0,
+        "a gate-rejected declare emits no wire frame (the reject is pre-send)"
+    );
+    let registered = session.observer().lock().unwrap().subscribers.len();
+    assert_eq!(
+        registered, 0,
+        "pico-parity rollback: the rejected declare left no orphan local subscriber"
     );
 }
 
@@ -3773,10 +3869,11 @@ fn declared_subscriber_fires_on_loopback_publish() {
     let (session, _driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    let _sub =
-        session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_sample| {
+    let _sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), move |_sample| {
             fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
+        })
+        .expect("remote declare against the test link succeeds");
 
     session
         .publish(
@@ -3795,10 +3892,11 @@ fn subscriber_drop_auto_unregisters() {
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
     {
-        let _sub =
-            session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {
+        let _sub = session
+            .declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
-            });
+            })
+            .expect("remote declare against the test link succeeds");
         // First publish fires.
         session
             .publish(
@@ -3827,7 +3925,9 @@ fn subscriber_drop_auto_unregisters() {
 #[test]
 fn subscriber_undeclare_returns_true_and_skips_drop() {
     let (session, _driver) = build_session();
-    let sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), |_| {});
+    let sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
     let removed = sub.undeclare();
     assert!(removed, "first undeclare returns true");
     // Empty registry: subsequent publish fires no callback (no panic).
@@ -3845,13 +3945,15 @@ fn declare_subscriber_with_locality_remote_skips_loopback_publish() {
     let (session, _driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    let _sub = session.declare_subscriber(
-        "home/temp",
-        SubscribeOptions::new().with_allowed_origin(Locality::Remote),
-        move |_| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+    let _sub = session
+        .declare_subscriber(
+            "home/temp",
+            SubscribeOptions::new().with_allowed_origin(Locality::Remote),
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("remote declare against the test link succeeds");
 
     session
         .publish(
@@ -4401,7 +4503,9 @@ fn liveliness_token_undeclare_consumes_handle_and_does_not_double_emit() {
 fn subscriber_undeclare_frees_session_clone_no_leak() {
     let (session, _driver) = build_session();
     let base = Arc::strong_count(session.observer());
-    let sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), |_| {});
+    let sub = session
+        .declare_subscriber("home/temp", SubscribeOptions::default(), |_| {})
+        .expect("remote declare against the test link succeeds");
     assert!(
         Arc::strong_count(session.observer()) > base,
         "the handle holds a Session clone (observer Arc count rises)",
@@ -5669,11 +5773,16 @@ fn liveliness_sample_callback_runs_deferred_and_may_reenter_session() {
                 // Re-enter an observer-locking session API from inside
                 // the callback; the handle Drop at scope end locks the
                 // observer a second time.
-                let _re = session_cb.declare_subscriber(
-                    "reentry/ok",
-                    SubscribeOptions::default(),
-                    |_s| {},
-                );
+                // R311ou — SessionLocal re-entrancy probe (re-locks the observer
+                // from inside the callback); not a routed subscriber, so no
+                // spurious wire emit.
+                let _re = session_cb
+                    .declare_subscriber(
+                        "reentry/ok",
+                        SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal),
+                        |_s| {},
+                    )
+                    .expect("re-entrant session-local declare from inside the callback succeeds");
             },
         )
         .expect("liveliness-subscriber is on in this lane");
@@ -5880,29 +5989,31 @@ fn subscriber_sample_callback_runs_deferred_and_may_publish_back() {
     let log: DeliveredLog = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
     let session_cb = session.clone();
-    let _sub = session.declare_subscriber(
-        "home/**",
-        SubscribeOptions::default(),
-        move |sample: &dyn SampleView| {
-            log_cb.lock().unwrap().push((
-                sample.kind(),
-                sample.keyexpr().to_string(),
-                sample.payload().to_vec(),
-            ));
-            // Echo exactly once: re-enter publish (locks the observer
-            // for the loopback fan) from inside the callback.
-            if sample.keyexpr() == "home/temp" {
-                let delivered = session_cb
-                    .publish(
-                        "home/echo",
-                        b"echo",
-                        PublishOptions::put().with_locality(Locality::SessionLocal),
-                    )
-                    .expect("re-entrant publish from inside the callback succeeds lock-free");
-                assert_eq!(delivered, 1, "echo matched this same subscriber");
-            }
-        },
-    );
+    let _sub = session
+        .declare_subscriber(
+            "home/**",
+            SubscribeOptions::default(),
+            move |sample: &dyn SampleView| {
+                log_cb.lock().unwrap().push((
+                    sample.kind(),
+                    sample.keyexpr().to_string(),
+                    sample.payload().to_vec(),
+                ));
+                // Echo exactly once: re-enter publish (locks the observer
+                // for the loopback fan) from inside the callback.
+                if sample.keyexpr() == "home/temp" {
+                    let delivered = session_cb
+                        .publish(
+                            "home/echo",
+                            b"echo",
+                            PublishOptions::put().with_locality(Locality::SessionLocal),
+                        )
+                        .expect("re-entrant publish from inside the callback succeeds lock-free");
+                    assert_eq!(delivered, 1, "echo matched this same subscriber");
+                }
+            },
+        )
+        .expect("remote declare against the test link succeeds");
 
     let delivered = session
         .publish(
@@ -5931,13 +6042,15 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
     let (session, _driver) = build_session();
     let fired = Arc::new(AtomicUsize::new(0));
     let fired_cb = fired.clone();
-    let sub = session.declare_subscriber(
-        "home/**",
-        SubscribeOptions::default(),
-        move |_sample: &dyn SampleView| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+    let sub = session
+        .declare_subscriber(
+            "home/**",
+            SubscribeOptions::default(),
+            move |_sample: &dyn SampleView| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("remote declare against the test link succeeds");
 
     // Stage a fire through the raw registry (no drain yet).
     {
@@ -6021,10 +6134,14 @@ fn queryable_handler_runs_deferred_replies_then_final_on_wire() {
                 assert_eq!(query.keyexpr(), "home/temp");
                 assert!(!query.is_local(), "wire-shaped dispatch");
                 // Re-enter an observer-locking session API from inside
-                // the handler (deadlocked pre-R311li).
+                // the handler (deadlocked pre-R311li). R311ou — SessionLocal so
+                // this re-entrancy probe locks the observer (the point) WITHOUT
+                // emitting a wire `Declare(DeclSubscriber)` that would pollute
+                // the Reply/Final frame assertions below; it is a probe, not a
+                // routed subscriber.
                 let _re = session_cb.declare_subscriber(
                     "reentry/ok",
-                    SubscribeOptions::default(),
+                    SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal),
                     |_| {},
                 );
                 out.reply(b"22.5");
