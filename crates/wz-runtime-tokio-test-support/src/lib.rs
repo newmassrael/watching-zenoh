@@ -194,29 +194,49 @@ impl LinkDriver for QueueDriver {
     }
 }
 
-/// A [`LinkDriver`] decorator applying a DETERMINISTIC loss schedule to the
-/// inbound stream: it swallows the `drop_ordinal`-th (1-based) frame for which
-/// the caller's `should_drop` predicate returns true, passing every other
-/// event through. The schedule is a fixed counter — NO RNG — so a lossy-link
-/// scenario reproduces byte-for-byte every run (the no-flaky contract).
+/// Which deterministic perturbation a [`ChaosReadDriver`] applies to the
+/// targeted (Nth-matching) inbound frame.
+enum ChaosAction {
+    /// Swallow the targeted frame (a single-datagram loss / gap).
+    Drop,
+    /// Re-emit the targeted frame once, immediately after the original — a
+    /// duplicate-delivery (the lossy-link / malicious-peer hazard the R311oo
+    /// reassembly fix defends against).
+    Duplicate,
+}
+
+/// A [`LinkDriver`] decorator applying a DETERMINISTIC perturbation to one
+/// frame of the inbound stream: it targets the `ordinal`-th (1-based) frame
+/// for which the caller's predicate returns true and either DROPS it
+/// ([`ChaosReadDriver::drop_nth_matching`]) or DUPLICATES it
+/// ([`ChaosReadDriver::duplicate_nth_matching`]), passing every other event
+/// through. The schedule is a fixed counter — NO RNG — so a chaos scenario
+/// reproduces byte-for-byte every run (the no-flaky contract).
 ///
-/// MECHANISM vs POLICY split: the decorator owns only the count + drop
-/// mechanism; the caller's predicate decides which frame is a drop candidate.
+/// MECHANISM vs POLICY split: the decorator owns only the count + perturb
+/// mechanism; the caller's predicate decides which frame is the candidate.
 /// So transport-specific wire knowledge (e.g. decoding a UDP datagram's
 /// transport MID to recognise a fragment) stays in the test, never baked into
-/// this reusable mechanism — the same decorator drops frames on a stream
+/// this reusable mechanism — the same decorator perturbs frames on a stream
 /// (length-prefixed) and a datagram link alike. Wrap a link AFTER its
 /// handshake so only the steady-state stream is perturbed.
 ///
-/// `dropped` is `pub` so a test reads it after the drive completes to assert
-/// the loss was actually injected, not merely inferred from a missing delivery.
+/// `dropped` / `duplicated` are `pub` so a test reads them after the drive
+/// completes to assert the perturbation was actually injected, not merely
+/// inferred from a delivery outcome.
 pub struct ChaosReadDriver<D, P> {
     inner: D,
-    should_drop: P,
-    drop_ordinal: usize,
+    predicate: P,
+    ordinal: usize,
+    action: ChaosAction,
     matched: usize,
+    /// Duplicate mode: a held copy of the targeted frame, re-emitted on the
+    /// next `poll_event` so the duplicate immediately follows its original.
+    pending: Option<RxFrame>,
     /// Count of frames actually swallowed (0 or 1 for a single-ordinal plan).
     pub dropped: usize,
+    /// Count of frames re-emitted as a duplicate (0 or 1 for a single ordinal).
+    pub duplicated: usize,
 }
 
 impl<D, P> ChaosReadDriver<D, P>
@@ -224,17 +244,31 @@ where
     D: LinkDriver,
     P: FnMut(&RxFrame) -> bool,
 {
+    fn new(inner: D, ordinal: usize, predicate: P, action: ChaosAction) -> Self {
+        Self {
+            inner,
+            predicate,
+            ordinal,
+            action,
+            matched: 0,
+            pending: None,
+            dropped: 0,
+            duplicated: 0,
+        }
+    }
+
     /// Drop the `drop_ordinal`-th (1-based) inbound frame matching
     /// `should_drop`. `drop_ordinal == 0` is a pass-through (no 1-based
     /// ordinal equals 0), useful as a chaos-disabled control.
     pub fn drop_nth_matching(inner: D, drop_ordinal: usize, should_drop: P) -> Self {
-        Self {
-            inner,
-            should_drop,
-            drop_ordinal,
-            matched: 0,
-            dropped: 0,
-        }
+        Self::new(inner, drop_ordinal, should_drop, ChaosAction::Drop)
+    }
+
+    /// Re-emit the `dup_ordinal`-th (1-based) inbound frame matching
+    /// `should_duplicate` once more, immediately after the original — modelling
+    /// a link that delivers a frame twice. `dup_ordinal == 0` is a pass-through.
+    pub fn duplicate_nth_matching(inner: D, dup_ordinal: usize, should_duplicate: P) -> Self {
+        Self::new(inner, dup_ordinal, should_duplicate, ChaosAction::Duplicate)
     }
 }
 
@@ -256,24 +290,59 @@ where
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
+        // Duplicate mode: re-emit the held copy before polling the inner
+        // driver, so the duplicate lands immediately after the frame it copies.
+        // Cancel-safe — `pending` is owned state set without an intervening
+        // await, so a `select!` cancel here loses only the wake.
+        if let Some(frame) = self.pending.take() {
+            return LinkEvent::Rx(frame);
+        }
         loop {
             let event = self.inner.poll_event().await;
             if let LinkEvent::Rx(frame) = &event {
-                if (self.should_drop)(frame) {
+                if (self.predicate)(frame) {
                     self.matched += 1;
-                    if self.matched == self.drop_ordinal {
-                        // Deterministic single drop: swallow this frame and
-                        // poll for the next. Cancel-safe — the inner driver
-                        // owns any partial-read state, and a datagram recv is
-                        // atomic, so a `select!` cancel here loses only the
-                        // wake, never wire bytes.
-                        self.dropped += 1;
-                        continue;
+                    if self.matched == self.ordinal {
+                        match self.action {
+                            ChaosAction::Drop => {
+                                // Deterministic single drop: swallow this frame
+                                // and poll for the next. Cancel-safe — the inner
+                                // driver owns any partial-read state, and a
+                                // datagram recv is atomic, so a `select!` cancel
+                                // here loses only the wake, never wire bytes.
+                                self.dropped += 1;
+                                continue;
+                            }
+                            ChaosAction::Duplicate => {
+                                // Stash an owned copy to re-emit on the next
+                                // poll, then return this one now. `reclone_rx`
+                                // avoids requiring `RxFrame: Clone` on the
+                                // production type (keeping the owned ->
+                                // borrowed `RxFrame<'pool>` migration note in
+                                // `link.rs` unconstrained).
+                                self.duplicated += 1;
+                                self.pending = Some(reclone_rx(frame));
+                                return event;
+                            }
+                        }
                     }
                 }
             }
             return event;
         }
+    }
+}
+
+/// Reconstruct an owned copy of an [`RxFrame`] from its public fields. The
+/// [`ChaosReadDriver`] duplicate path holds and re-emits a copy of a matched
+/// frame; doing it through the `RxFrame` constructors (rather than a `Clone`
+/// derive) keeps the production type free of a `Clone` capability that the
+/// planned owned -> borrowed `RxFrame<'pool>` zero-copy migration would have to
+/// preserve or break.
+fn reclone_rx(frame: &RxFrame) -> RxFrame {
+    match frame.src {
+        Some(src) => RxFrame::with_src(frame.bytes.clone(), src),
+        None => RxFrame::new(frame.bytes.clone()),
     }
 }
 
@@ -546,5 +615,59 @@ mod tests {
             }
         }
         assert_eq!(chaos.dropped, 0);
+    }
+
+    /// Duplicate mode re-emits exactly the Nth matching frame once, immediately
+    /// after the original, leaving every other frame untouched — the
+    /// deterministic single-duplicate mechanism, transport-free.
+    #[tokio::test]
+    async fn duplicates_only_the_nth_matching_frame() {
+        // Markers 0xAA / 0xBB are drop candidates, 0x00 is a pass-through.
+        // Sequence: match(0xAA), non-match, match(0xBB <- 2nd match, DUPLICATED).
+        let inner = QueueDriver::with(vec![rx(0xAA), rx(0x00), rx(0xBB)]);
+        let mut chaos = ChaosReadDriver::duplicate_nth_matching(inner, 2, |f| {
+            matches!(f.bytes.first(), Some(0xAA | 0xBB))
+        });
+
+        // 1st matching frame passes once.
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+            other => panic!("expected 1st match Rx, got {other:?}"),
+        }
+        // Non-matching frame passes (not counted toward the ordinal).
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0x00]),
+            other => panic!("expected non-match Rx, got {other:?}"),
+        }
+        // 2nd matching frame is emitted ...
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xBB]),
+            other => panic!("expected 2nd match Rx, got {other:?}"),
+        }
+        // ... then re-emitted as a duplicate BEFORE the inner queue is polled.
+        match chaos.poll_event().await {
+            LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xBB]),
+            other => panic!("expected duplicated Rx, got {other:?}"),
+        }
+        // Inner queue drained -> Lost.
+        assert!(matches!(chaos.poll_event().await, LinkEvent::Lost { .. }));
+        assert_eq!(chaos.duplicated, 1, "exactly one frame duplicated");
+        assert_eq!(chaos.dropped, 0);
+    }
+
+    /// `dup_ordinal == 0` is a pass-through: nothing is ever duplicated.
+    #[tokio::test]
+    async fn dup_ordinal_zero_passes_everything() {
+        let inner = QueueDriver::with(vec![rx(0xAA), rx(0xAA)]);
+        let mut chaos =
+            ChaosReadDriver::duplicate_nth_matching(inner, 0, |f| f.bytes.first() == Some(&0xAA));
+        for _ in 0..2 {
+            match chaos.poll_event().await {
+                LinkEvent::Rx(f) => assert_eq!(f.bytes, [0xAA]),
+                other => panic!("expected pass-through Rx, got {other:?}"),
+            }
+        }
+        assert!(matches!(chaos.poll_event().await, LinkEvent::Lost { .. }));
+        assert_eq!(chaos.duplicated, 0);
     }
 }

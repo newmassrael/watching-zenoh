@@ -77,7 +77,7 @@ use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio::udp_pipeline::UDP_LINK_MTU;
 use wz_runtime_tokio::RxFrame;
 use wz_runtime_tokio_test_support::{fixture_session_init_params, ChaosReadDriver};
-use wz_session_core::driver_loop::{IterationEvent, ReassemblyDropReason};
+use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent, ReassemblyDropReason};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::wire_const;
@@ -293,5 +293,235 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
     assert_eq!(
         got[0], payload_kept,
         "the delivered payload is the SECOND (clean) Put; the first was lost to the dropped fragment"
+    );
+}
+
+/// A DUPLICATED fragment datagram must not let its message bleed into the next
+/// one. R311oo: over a real loopback UDP link a duplicate fragment trips the
+/// per-channel RX SN gate (`admit_rx_frame_sn`, a ring distance of 0 is not a
+/// forward step), and the drive layer clears the in-progress reassembly chain
+/// (`abort_channel`, the zenoh-pico `rx.c` dbuf-clear analogue). The chain's
+/// trailing final (M=0) fragment then arrives as a FRESH chain start.
+///
+/// Before the fix that stranded final fragment parked a stuck reassembly orphan
+/// whose SN was ring-consecutive to the NEXT Put's first fragment (SNs run
+/// sequentially across messages on a channel), so the next Put was appended onto
+/// the orphan and delivered as one merged blob — which then failed frame decode,
+/// silently swallowing a perfectly good message. Now the stranded fragment
+/// completes + is reclaimed in one step (zenoh-pico `if (!more) decode` parity),
+/// so the SAME live session reassembles the subsequent clean Put byte-exact.
+///
+/// ## What this proves that `udp_lossy_fragment_chain_aborts_then_channel_recovers` does not
+///
+/// The drop test exercises a GAP (a missing fragment). This exercises a
+/// DUPLICATE (a fragment delivered twice) — a different lossy-link hazard that
+/// reaches reassembly via a different path (the SN-gate `abort_channel` clear,
+/// not the in-chain out-of-order abort) and strands a lone M=0 fragment the
+/// drop path never produces. It is the integration counterpart of the
+/// `stranded_final_fragment_does_not_merge_into_next_message` Router unit test.
+///
+/// ## Determinism (no-flaky)
+///
+/// Not RNG: duplicate the 1st inbound datagram whose transport MID is
+/// `T_MID_FRAGMENT`. Each Put is ~2000 B — above one UDP link MTU (1450) so it
+/// always splits, and below two fragments' worth of payload so it splits into
+/// EXACTLY two fragments. The duplicated 1st fragment is therefore P1's first of
+/// two, and the fragment that arrives after the SN gate clears the chain is P1's
+/// trailing M=0 final — exactly the lone-final edge the fix addresses (a 3+
+/// fragment Put would strand a more!=0 fragment, which never tripped the bug).
+/// The two Puts emit back-to-back with no inter-publish delay
+/// (`emit_frame_or_fragments` writes each Put's whole chain wire-atomically
+/// under the TX lock; the writer drains FIFO), so P1's fragments precede P2's
+/// deterministically and SNs run sequentially across the two messages — the
+/// exact condition that produced the merge. The sole synchronization is a
+/// poll-on-condition wait for the clean delivery. ([[feedback-no-flaky-ever]])
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn udp_duplicate_fragment_strands_then_channel_recovers() {
+    // ~2000 B: > UDP_LINK_MTU (always splits) and within two fragments' payload
+    // budget (each fragment carries < MTU after its header, so 2000 B is two
+    // fragments, never three) — so P1's 2nd fragment is its trailing M=0 final.
+    let payload_lost: Vec<u8> = (0..2000u32).map(|i| i.wrapping_mul(31) as u8).collect();
+    let payload_kept: Vec<u8> = (0..2000u32)
+        .map(|i| i.wrapping_mul(37).wrapping_add(7) as u8)
+        .collect();
+    assert!(
+        payload_lost.len() > UDP_LINK_MTU,
+        "payload must exceed one UDP link frame to force fragmentation (>= 2 fragments)"
+    );
+    assert!(
+        payload_lost.len() < 2 * UDP_LINK_MTU,
+        "payload must stay within two fragments so P1's 2nd fragment is its lone M=0 final"
+    );
+    assert_ne!(
+        payload_lost, payload_kept,
+        "the two Puts must differ so the delivered one is attributable"
+    );
+
+    let acc_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind acceptor");
+    let addr = acc_socket.local_addr().expect("acceptor addr");
+
+    // ── Open BOTH sessions concurrently and CLEANLY (no chaos during the
+    //    handshake; the duplicate perturbs only the steady-state fragment stream).
+    let acc_open = async {
+        let mut probe = [0u8; 64];
+        let (_n, peer) = acc_socket
+            .peek_from(&mut probe)
+            .await
+            .expect("peek initiator InitSyn datagram");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            DialedLink::Udp {
+                socket: acc_socket,
+                peer,
+            },
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established over udp")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("udp/{addr}")).expect("parse loopback locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established over udp")
+    };
+    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+
+    // ── Fragmentation precondition: the UDP link MTU caps the negotiated TX
+    //    budget so each ~2 KB Put splits into datagrams.
+    assert_eq!(
+        opened_init.actions.negotiated_batch_mtu(),
+        UDP_LINK_MTU,
+        "publisher TX budget must cap to the UDP link MTU so each Put fragments"
+    );
+
+    // ── Wrap the acceptor's inbound driver to DUPLICATE the 1st fragment
+    //    datagram (P1's first of two). The handshake is already done, so only
+    //    the fragment stream is perturbed.
+    let mut chaos_inbound =
+        ChaosReadDriver::duplicate_nth_matching(opened_acc.inbound, 1, is_fragment_datagram);
+
+    // ── Subscriber on the acceptor's observer; collects each delivered payload.
+    let delivered: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::new(StdMutex::new(Vec::new()));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let delivered = delivered.clone();
+        observer.subscribers.register(KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), KEYEXPR);
+            delivered.lock().unwrap().push(sample.payload().to_vec());
+        });
+    }
+
+    // ── Count the channel SN-gate rejection the duplicate fragment triggers
+    //    (the positive proof the duplicate was processed and cleared the chain).
+    let sn_rejected = Arc::new(AtomicUsize::new(0));
+
+    // ── Publisher on the initiator side (fresh observer — no local subscriber,
+    //    so the proof is the remote delivery over the lossy link).
+    let publisher = TokioSession::new(
+        opened_init.actions.clone(),
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(opened_init.clock),
+    );
+
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive_acc = drive_session_until_terminal(
+        &mut chaos_inbound,
+        &opened_acc.actions,
+        &mut opened_acc.engine,
+        None,
+        &opened_acc.clock,
+        &timeouts,
+        {
+            let sn_rejected = sn_rejected.clone();
+            move |event| {
+                if let IterationEvent::Poll(DriverLoopOutcome::RxSnRejected { .. }) = &event {
+                    sn_rejected.fetch_add(1, Ordering::SeqCst);
+                }
+                observer.dispatch_event(event);
+            }
+        },
+    );
+    let drive_init = drive_session_until_terminal(
+        &mut opened_init.inbound,
+        &opened_init.actions,
+        &mut opened_init.engine,
+        None,
+        &opened_init.clock,
+        &timeouts,
+        |_| {},
+    );
+
+    let delivered_probe = delivered.clone();
+    let payload_kept_probe = payload_kept.clone();
+    let scenario = async move {
+        // Two oversize Puts back-to-back, NO inter-publish delay: P1's whole
+        // fragment chain precedes P2's on the wire (FIFO), so the duplicated 1st
+        // fragment is unambiguously P1's first.
+        publisher
+            .publish(KEYEXPR, &payload_lost, PublishOptions::put())
+            .expect("first publish builds and routes through the send seam");
+        publisher
+            .publish(KEYEXPR, &payload_kept_probe, PublishOptions::put())
+            .expect("recovery publish builds and routes through the send seam");
+        for _ in 0..200 {
+            if delivered_probe
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == &payload_kept_probe)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("recovery Put not delivered within the ~6s budget");
+    };
+
+    tokio::select! {
+        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
+        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    // ── The chaos driver injected exactly one duplicate.
+    assert_eq!(
+        chaos_inbound.duplicated, 1,
+        "the chaos driver duplicated exactly one fragment datagram"
+    );
+    // ── The duplicate tripped the channel SN gate (the chain was cleared) — the
+    //    perturbation was real, not absorbed silently.
+    assert!(
+        sn_rejected.load(Ordering::SeqCst) >= 1,
+        "the duplicate fragment tripped the channel RX SN gate (RxSnRejected)"
+    );
+    // ── Exactly one delivery, and it is the SECOND (clean) Put. The first was
+    //    lost (its chain cleared by the duplicate), and — crucially — it did NOT
+    //    merge into the second: pre-fix, the stranded final fragment would have
+    //    absorbed P2 and the merged blob would have failed decode, yielding ZERO
+    //    deliveries.
+    let got = delivered.lock().unwrap().clone();
+    assert_eq!(
+        got.len(),
+        1,
+        "exactly one clean delivery; the duplicate-stranded P1 fragment did NOT merge into P2 (got {} deliveries)",
+        got.len()
+    );
+    assert_eq!(
+        got[0], payload_kept,
+        "the delivered payload is the SECOND (clean) Put, reassembled in isolation"
     );
 }
