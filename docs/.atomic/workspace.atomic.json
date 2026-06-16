@@ -38302,6 +38302,54 @@
         "NEXT 후보: serial tty backend(R311nv) / WS·TLS cross-impl(pico LINK_WS=emscripten전용 제약, LINK_TLS=router 의존) / wz=Client→pico=peer-listen(router 외부의존). UNPUSHED: R311oj(2 commit: 5bac839+cf6d676)+R311ok(2 commit) = origin/main=59402c4 위 4 commit. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] · [[project-r311od-scouting-tls-load-trigger]]."
       ]
     },
+    "Round 311ol": {
+      "decision_summary": "R311ol: 첫 lossy-link robustness e2e(P3.10 chaos). UDP fragment datagram 결정적 drop→reassembly chain abort(메시지 손실)→같은 세션이 다음 클린 oversize Put byte-exact 복구. 채널 복구를 live socket로 검증.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs (신규): 첫 lossy-link robustness e2e. ChaosReadDriver<D: LinkDriver> 테스트-로컬 데코레이터(production 타입 무변경)가 inbound datagram에 결정적 loss 스케줄 적용 — len>1000(=UDP fragment ~1450; keepalive 등 control은 <100이라 미카운트)인 2번째 datagram swallow(RNG 아님=재현가능). 핸드셰이크는 accept_and_open_session으로 클린하게 open한 뒤 steady-state에서만 opened_acc.inbound(=InboundLink, LinkDriver impl)를 ChaosReadDriver로 감싸 drive_session_until_terminal<D: LinkDriver> generic seam에 주입.",
+        "시나리오 udp_lossy_fragment_chain_aborts_then_channel_recovers: distinct oversize payload 2개(각 4KB>UDP_LINK_MTU) 순차 발행. P1의 2번째 fragment datagram drop→gap→frame게이트 admit_rx_frame_sn(precedes dist 2≤half) 통과→reassembly_dispatch consecutive(dist 2≠1) abort(OutOfOrder)+슬롯 release(고아 없음)→P1 미전달. P2는 fresh chain으로 byte-exact reassemble. 단언 3종: chaos.dropped==1, ReassemblyDropped(OutOfOrder)≥1 관측, delivered==[payload_kept](P1 손실+P2 복구).",
+        "scripts/run-ci.sh: layer_c1l_reassembly에 cargo clippy -p wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings 추가 — udp_chaos_e2e가 자동 실행되는 레인(transport-link-udp default라 transport-fragmentation 단독으로도 cfg-on)에 clippy 게이트 신설. C2 workspace clippy는 default feature만 resolve해 transport-fragmentation-gated 테스트(udp_chaos/udp_frag/layer3_reassembly_*)가 rustc만 체크되고 clippy 미적용이던 gate-skew 청산(C1u/C1v tls/ws 패턴 동형). R311ol 주석 추가."
+      ],
+      "verification_bullets": [
+        "udp_chaos_e2e 1 passed + 12/12 연속 non-flaky([[feedback-no-flaky-ever]]). 결정적 drop 스케줄(고정 카운터)이라 race 없음. 단언: chaos.dropped==1, drop_events(ReassemblyDropped::OutOfOrder)≥1, delivered len==1 && [0]==payload_kept.",
+        "drop 경로 코드추적 검증(reassembly_dispatch.rs:443-453 consecutive abort+release; drive.rs:140-191 admit_rx_frame_sn forward-gap admit; sn.rs:51-54 precedes dist∈(0,half]): P1F3(s+2) frame게이트 통과(dist 2)→chain consecutive(dist 2≠1) abort+슬롯 release(고아 없음)→P2 fresh chain. corruption 없음(=drop 경로 안전).",
+        "clippy -p wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings EXIT=0(신규 udp_chaos_e2e+기존 udp_frag/layer3_reassembly_* 포함), fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. Layer C1l(udp_chaos+udp_frag+신규 clippy 게이트)+G+M pass.",
+        "atomic: ledger entries 745->746, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(chaos=test 커버리지 보강, 신규 feature atom 아님)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ol = P3.10 chaos 트랙 첫 진입(serial/TLS/WS optional 링크 wz↔wz e2e 완료 후 frontier가 외부의존 위주라, 외부의존 없는 로컬 actionable=chaos/robustness). drop-recovery MVP 완성. 기존 e2e 전부 clean localhost라 reassembly+RX-SN-gate RECOVERY 경로가 unit-test만 있고 live-socket lossy e2e 부재였던 갭 채움.",
+        "설계: chaos는 production 타입 무오염 — ChaosReadDriver는 테스트-로컬 LinkDriver 데코레이터, 핸드셰이크 클린 후 steady-state generic drive seam에만 주입([[feedback-textbook-over-cost]] SSOT, InboundLink에 chaos variant 추가 안 함).",
+        "OPEN finding(가설, 미검증/별도 라운드): duplicate-fragment 경로는 drop과 달리 다음 메시지 오염 가능. P1F2 중복→frame게이트 precedes(s+1,s+1)=dist0 reject→RxSnRejected→abort_channel이 P1 chain clear. 이후 P1F3(more=0)가 chain-start로 재진입→first_fragment_more_zero_does_not_complete(reassembly_dispatch.rs:827)로 stuck orphan(last_sn=s+2). P2F1(s+3)이 find_active로 orphan 발견→consecutive(dist1) CONTINUE→P1F3 payload+P2 fragments merge→P2도 손실/오염 가능. drop은 abort가 슬롯 release라 고아 없지만 dup는 frame게이트 reject 후 final-frag가 고아 chain 염. 다음: pico rx.c(more=0 chain-start 처리) parity 확인 후 재현 테스트+필요시 수정(pico 동일=parity no-op, 다르면 wz 버그).",
+        "NEXT 후보(전부 외부의존 無 로컬): ①위 dup-fragment finding 조사(R311om 후보) ②reorder chaos(reorder도 abort=drop과 동형) ③latency/jitter ④동시 세션 stress. cross-impl(pico interop, zenoh-full router)은 외부의존 잔존.",
+        "UNPUSHED: R311ol 2 commit(udp_chaos_e2e+run-ci clippy=code; ledger). origin/main=4b6fa6d(R311ok) 위. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
+      ],
+      "publishable_decision_summary": "R311ol: 첫 lossy-link robustness e2e(P3.10 chaos). UDP fragment datagram 결정적 drop→reassembly chain abort(메시지 손실)→같은 세션이 다음 클린 oversize Put byte-exact 복구. 채널 복구를 live socket로 검증.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/udp_chaos_e2e.rs (신규): 첫 lossy-link robustness e2e. ChaosReadDriver<D: LinkDriver> 테스트-로컬 데코레이터(production 타입 무변경)가 inbound datagram에 결정적 loss 스케줄 적용 — len>1000(=UDP fragment ~1450; keepalive 등 control은 <100이라 미카운트)인 2번째 datagram swallow(RNG 아님=재현가능). 핸드셰이크는 accept_and_open_session으로 클린하게 open한 뒤 steady-state에서만 opened_acc.inbound(=InboundLink, LinkDriver impl)를 ChaosReadDriver로 감싸 drive_session_until_terminal<D: LinkDriver> generic seam에 주입.",
+        "시나리오 udp_lossy_fragment_chain_aborts_then_channel_recovers: distinct oversize payload 2개(각 4KB>UDP_LINK_MTU) 순차 발행. P1의 2번째 fragment datagram drop→gap→frame게이트 admit_rx_frame_sn(precedes dist 2≤half) 통과→reassembly_dispatch consecutive(dist 2≠1) abort(OutOfOrder)+슬롯 release(고아 없음)→P1 미전달. P2는 fresh chain으로 byte-exact reassemble. 단언 3종: chaos.dropped==1, ReassemblyDropped(OutOfOrder)≥1 관측, delivered==[payload_kept](P1 손실+P2 복구).",
+        "scripts/run-ci.sh: layer_c1l_reassembly에 cargo clippy -p wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings 추가 — udp_chaos_e2e가 자동 실행되는 레인(transport-link-udp default라 transport-fragmentation 단독으로도 cfg-on)에 clippy 게이트 신설. C2 workspace clippy는 default feature만 resolve해 transport-fragmentation-gated 테스트(udp_chaos/udp_frag/layer3_reassembly_*)가 rustc만 체크되고 clippy 미적용이던 gate-skew 청산(C1u/C1v tls/ws 패턴 동형). R311ol 주석 추가."
+      ],
+      "publishable_verification_bullets": [
+        "udp_chaos_e2e 1 passed + 12/12 연속 non-flaky([[feedback-no-flaky-ever]]). 결정적 drop 스케줄(고정 카운터)이라 race 없음. 단언: chaos.dropped==1, drop_events(ReassemblyDropped::OutOfOrder)≥1, delivered len==1 && [0]==payload_kept.",
+        "drop 경로 코드추적 검증(reassembly_dispatch.rs:443-453 consecutive abort+release; drive.rs:140-191 admit_rx_frame_sn forward-gap admit; sn.rs:51-54 precedes dist∈(0,half]): P1F3(s+2) frame게이트 통과(dist 2)→chain consecutive(dist 2≠1) abort+슬롯 release(고아 없음)→P2 fresh chain. corruption 없음(=drop 경로 안전).",
+        "clippy -p wz-runtime-tokio --all-targets --features transport-fragmentation -D warnings EXIT=0(신규 udp_chaos_e2e+기존 udp_frag/layer3_reassembly_* 포함), fmt --check clean.",
+        "full host run-ci(WZ_RUN_LAYER_M=1 WZ_RUN_LAYER_G=1) RUNCI_EXIT=0(로그 직접, 파이프 없음 [[feedback-runci-verdict-exit-code-only]]) 'all required layers pass', error[/panicked/FAILED 0. Layer C1l(udp_chaos+udp_frag+신규 clippy 게이트)+G+M pass.",
+        "atomic: ledger entries 745->746, T1 orphan new=+0(13 불변), T3 warn 4 / T4 info 4 불변, inventory 무변경(chaos=test 커버리지 보강, 신규 feature atom 아님)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ol = P3.10 chaos 트랙 첫 진입(serial/TLS/WS optional 링크 wz↔wz e2e 완료 후 frontier가 외부의존 위주라, 외부의존 없는 로컬 actionable=chaos/robustness). drop-recovery MVP 완성. 기존 e2e 전부 clean localhost라 reassembly+RX-SN-gate RECOVERY 경로가 unit-test만 있고 live-socket lossy e2e 부재였던 갭 채움.",
+        "설계: chaos는 production 타입 무오염 — ChaosReadDriver는 테스트-로컬 LinkDriver 데코레이터, 핸드셰이크 클린 후 steady-state generic drive seam에만 주입([[feedback-textbook-over-cost]] SSOT, InboundLink에 chaos variant 추가 안 함).",
+        "OPEN finding(가설, 미검증/별도 라운드): duplicate-fragment 경로는 drop과 달리 다음 메시지 오염 가능. P1F2 중복→frame게이트 precedes(s+1,s+1)=dist0 reject→RxSnRejected→abort_channel이 P1 chain clear. 이후 P1F3(more=0)가 chain-start로 재진입→first_fragment_more_zero_does_not_complete(reassembly_dispatch.rs:827)로 stuck orphan(last_sn=s+2). P2F1(s+3)이 find_active로 orphan 발견→consecutive(dist1) CONTINUE→P1F3 payload+P2 fragments merge→P2도 손실/오염 가능. drop은 abort가 슬롯 release라 고아 없지만 dup는 frame게이트 reject 후 final-frag가 고아 chain 염. 다음: pico rx.c(more=0 chain-start 처리) parity 확인 후 재현 테스트+필요시 수정(pico 동일=parity no-op, 다르면 wz 버그).",
+        "NEXT 후보(전부 외부의존 無 로컬): ①위 dup-fragment finding 조사(R311om 후보) ②reorder chaos(reorder도 abort=drop과 동형) ③latency/jitter ④동시 세션 stress. cross-impl(pico interop, zenoh-full router)은 외부의존 잔존.",
+        "UNPUSHED: R311ol 2 commit(udp_chaos_e2e+run-ci clippy=code; ledger). origin/main=4b6fa6d(R311ok) 위. push 명시 동의 대기([[feedback-work-on-main-branch]]). 상세 [[project-pico-parity-status]] P3.10."
+      ]
+    },
     "Round 311p": {
       "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
       "changes_bullets": [
