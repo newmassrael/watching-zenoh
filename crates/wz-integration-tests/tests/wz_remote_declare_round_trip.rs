@@ -144,16 +144,24 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         Duration::from_secs(5),
     );
 
-    // The three callback log lines arrive in order: subscriber →
-    // queryable → token (declare_task emits in this order with a
-    // 100ms inter-emit pause). Wait on the LAST one (token) so the
-    // capture includes all three.
-    let last_substr = "REMOTE TOKEN DECLARED";
-    let last_captured = wait_for_substring(
-        &mut initiator_stderr_reader,
-        last_substr,
-        Duration::from_secs(10),
-    );
+    // R311os — wait for ALL THREE REMOTE * DECLARED lines (order-independent)
+    // BEFORE the SIGTERM below, so the terminate cannot race a not-yet-declared
+    // arm. Pre-R311os declare_task emitted subscriber → queryable → token in
+    // order, so a single wait on the token (last) gated the terminate; now the
+    // token is declared synchronously pre-drive (run_demo) AHEAD of the
+    // subscriber/queryable, so the token is no longer last. Each wait rescans
+    // the full accumulated capture; a missing arm is reported precisely by the
+    // assertions below (with both captures).
+    for decl in [
+        "REMOTE SUBSCRIBER DECLARED",
+        "REMOTE QUERYABLE DECLARED",
+        "REMOTE TOKEN DECLARED",
+    ] {
+        if wait_for_substring(&mut initiator_stderr_reader, decl, Duration::from_secs(10)).is_err()
+        {
+            break;
+        }
+    }
 
     // R278 — graceful shutdown of the acceptor (the side holding the
     // LivelinessToken). SIGTERM triggers the `shutdown_signal()` arm
@@ -197,16 +205,11 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         );
     }
 
-    let final_text = match last_captured {
-        Ok(c) => c,
-        Err(c) => panic!(
-            "wz initiator did not log '{last_substr}' within 10s — inbound DECLARE \
-             round-trip regressed somewhere between Declare emit (acceptor side) \
-             and Remote*Registry dispatch (initiator side).\n\
-             --- captured initiator stderr at deadline ---\n{c}\n\
-             --- captured acceptor stderr at deadline ---\n{acceptor_captured}"
-        ),
-    };
+    // R311os — all three declares were gated above (waited before SIGTERM), so
+    // this post-teardown snapshot contains every REMOTE * DECLARED line; assert
+    // against it directly. (Pre-R311os this rebound the token-wait capture,
+    // which — now the token is no longer last — would miss the later arms.)
+    let final_text = &initiator_captured;
 
     // All three Decl arms must surface on the initiator side. The
     // exact line shape (id literal + keyexpr literal) catches both

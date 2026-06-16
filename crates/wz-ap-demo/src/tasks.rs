@@ -27,14 +27,11 @@
 
 use std::sync::Arc;
 
-use tokio::sync::oneshot;
-
 use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::reply_sink::ReplyView;
 use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{
-    LivelinessGetOptions, LivelinessOptions, LivelinessToken, PublishAliasError, PublishOptions,
-    TokioSession,
+    LivelinessGetOptions, PublishAliasError, PublishOptions, TokioSession,
 };
 use wz::runtime_tokio::session_glue::SessionLinkActions;
 use wz::runtime_tokio::Reliability;
@@ -146,36 +143,23 @@ const DECLARE_INTER_EMIT_MS: u64 = 100;
 /// because no_std targets have no `Instant` type. The trait surface
 /// stays unchanged — same `now_monotonic_ms()` everyone already had.
 ///
-/// R277 — takes [`Session`] (not `Arc<SessionLinkActions>`) so the
-/// token branch can route through [`Session::declare_token`] for the
-/// `LivelinessToken` RAII handle. The handle is moved back to
-/// `run_demo` via `token_tx` (oneshot) so its `Drop` — which emits
-/// `Declare(UndeclToken)` on the wire — fires at `run_demo` scope,
-/// not at this task's stack-frame end. Sub / queryable arms still
-/// route through `session.actions()` because no `Session`-level
-/// handle API exists for them yet (R245/R246 covered subscriber +
-/// queryable but only with same-process callback wiring; the
+/// R277/R311os — takes [`Session`] (not `Arc<SessionLinkActions>`) so the
+/// declare arms can route through the session API. The subscriber / queryable
+/// arms route through `session.actions()` (no `Session`-level handle API for
+/// them yet — R245/R246 covered same-process callback wiring only; the
 /// declare-time wire emit still goes through `SessionLinkActions`).
 ///
-/// Shutdown semantics: end-to-end UndeclToken emission requires
-/// graceful unwinding of `run_demo` (FSM hits terminal OR R278
-/// `shutdown_signal()` arm of the `tokio::select!` fires).
-/// Signal-driven shutdown was wired in R278 — sending SIGTERM /
-/// SIGINT to wz-ap-demo now drops the held LivelinessToken (RAII)
-/// before drop(actions), so the peer observes the
-/// `Declare(UndeclToken)` retraction frame ahead of the connection
-/// EOF. The integration test
-/// `wz_remote_declare_round_trip_against_wz_initiator` exercises
-/// the graceful path against the acceptor and asserts
-/// `REMOTE TOKEN UNDECLARED id=0` in initiator stderr.
-/// SIGKILL still bypasses Rust `Drop` entirely; under that path
-/// the peer only sees connection EOF.
-pub(crate) async fn declare_task<T>(
-    session: TokioSession,
-    spec: DeclareEmitSpec,
-    clock: T,
-    token_tx: Option<oneshot::Sender<LivelinessToken>>,
-) where
+/// R311os — the liveliness TOKEN arm was LIFTED OUT of this background task
+/// into `run_demo`'s synchronous pre-drive phase, so the token is registered
+/// before the drive loop serves any inbound CURRENT liveliness-get Interest
+/// (ordering-race fix). Its RAII `LivelinessToken` handle is held to teardown
+/// by `run_demo` and dropped — emitting `Declare(UndeclToken)` — by the
+/// teardown typestate chain, ordered ahead of Close (R284). The integration
+/// tests `wz_remote_declare_round_trip_against_wz_initiator` (graceful
+/// UndeclToken) and `wz_liveliness_get_round_trip_against_wz_acceptor`
+/// (CURRENT-get snapshot) cover the two halves.
+pub(crate) async fn declare_task<T>(session: TokioSession, spec: DeclareEmitSpec, clock: T)
+where
     T: TimeSource + Send + 'static,
 {
     // R311nf — `session` is now `TokioSession` (= `Session<_,_,Unicast>`),
@@ -235,35 +219,13 @@ pub(crate) async fn declare_task<T>(
         log::info!("wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'");
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
-    if let Some(keyexpr) = spec.token_keyexpr.as_deref() {
-        let token = match session.declare_token(keyexpr.to_string(), LivelinessOptions::default()) {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}");
-                return;
-            }
-        };
-        log::info!(
-            "wz-ap-demo: DECLARED TOKEN id={id} keyexpr='{keyexpr}'",
-            id = token.id()
-        );
-        if let Some(tx) = token_tx {
-            // Hand the LivelinessToken back to run_demo. If the
-            // receiver was already dropped (e.g. run_demo bailed
-            // before this gate fired), tx.send returns Err and
-            // the token drops here — same `Declare(UndeclToken)`
-            // is emitted, just immediately after the DeclToken.
-            let _ = tx.send(token);
-        }
-        // else: no oneshot was created (spec.token_keyexpr was
-        // None at spawn time), but we reached this arm because
-        // it became Some between then and now. Cannot happen
-        // with the current spawn-site invariants — token_tx is
-        // Some IFF spec.token_keyexpr was Some at spawn — but
-        // the else branch keeps the code total: token drops here
-        // emitting UndeclToken back-to-back with DeclToken,
-        // signalling the keyexpr surface transition only.
-    }
+    // R311os — the liveliness TOKEN is no longer declared here. It is declared
+    // SYNCHRONOUSLY pre-drive in `run_demo` so the acceptor's LocalTokenRegistry
+    // is populated before the drive loop serves any inbound CURRENT
+    // liveliness-get Interest (the `wz_liveliness_get_round_trip` ordering-race
+    // fix). This task keeps the subscriber / queryable outbound declares, which
+    // are fire-and-forget to the peer's remote registries and carry no such
+    // inbound-snapshot race.
 }
 
 /// R254 — `clock: T` generic + 1 sleep site migrated to

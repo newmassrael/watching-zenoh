@@ -43,7 +43,6 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
 // R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
 // to wz's [`TokioJoinHandle`], the trait-wrapped form returned by
 // `<TokioRuntime as Runtime>::spawn`. The wrapper exposes the same
@@ -65,8 +64,8 @@ use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_tokio::session::{
-    LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken, Queryable,
-    QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
+    LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
+    Queryable, QueryableOptions, SubscribeOptions, Subscriber, TokioSession,
 };
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
@@ -110,7 +109,6 @@ struct SpawnedTasks {
     query_handle: Option<TokioJoinHandle<()>>,
     liveliness_get_handle: Option<TokioJoinHandle<()>>,
     declare_handle: Option<TokioJoinHandle<()>>,
-    token_rx: Option<oneshot::Receiver<LivelinessToken>>,
 }
 
 /// Step 1 — TCP setup. Acceptor binds + accepts; Initiator dials.
@@ -441,22 +439,17 @@ fn spawn_background_tasks(
         TokioRuntime.spawn(liveliness_get_task(session_for_get, keyexpr, session_clock))
     });
 
-    let has_declares = declare_spec.subscriber_keyexpr.is_some()
-        || declare_spec.queryable_keyexpr.is_some()
-        || declare_spec.token_keyexpr.is_some();
-    let (token_tx, token_rx) = if declare_spec.token_keyexpr.is_some() {
-        let (tx, rx) = oneshot::channel::<LivelinessToken>();
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
+    // R311os — the liveliness token is declared synchronously pre-drive in
+    // `run_demo` (ordering-race fix), so declare_task no longer handles it; this
+    // task is spawned only for the subscriber / queryable outbound declares.
+    let has_declares =
+        declare_spec.subscriber_keyexpr.is_some() || declare_spec.queryable_keyexpr.is_some();
     let declare_handle = if has_declares {
         let session_for_declare = session.clone();
         Some(TokioRuntime.spawn(declare_task(
             session_for_declare,
             declare_spec,
             session_clock,
-            token_tx,
         )))
     } else {
         None
@@ -467,7 +460,6 @@ fn spawn_background_tasks(
         query_handle,
         liveliness_get_handle,
         declare_handle,
-        token_rx,
     }
 }
 
@@ -605,12 +597,40 @@ pub(crate) async fn run_demo(
         queryable_spec,
     );
 
+    // R311os — declare the liveliness token SYNCHRONOUSLY in this pre-drive
+    // registration phase, BEFORE `drive_session_until_terminal` serves any
+    // inbound frame. The acceptor's LocalTokenRegistry is then populated before
+    // a peer's CURRENT liveliness-get Interest can be processed, so the snapshot
+    // reply always contains the token. Declaring it in the Established-gated
+    // background `declare_task` instead (pre-R311os) raced the drive loop: an
+    // Interest dispatched before the task's `declare_token` ran got an empty
+    // CURRENT reply — the `wz_liveliness_get_round_trip` flake. The handle is
+    // held to teardown; its RAII Drop emits `Declare(UndeclToken)`, ordered
+    // ahead of Close by the teardown typestate chain (R284).
+    let token: Option<LivelinessToken> = match declare_spec.token_keyexpr.as_deref() {
+        Some(keyexpr) => {
+            match session.declare_token(keyexpr.to_string(), LivelinessOptions::default()) {
+                Ok(t) => {
+                    log::info!(
+                        "wz-ap-demo: DECLARED TOKEN id={id} keyexpr='{keyexpr}'",
+                        id = t.id()
+                    );
+                    Some(t)
+                }
+                Err(e) => {
+                    log::warn!("wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     let SpawnedTasks {
         publisher_handle,
         query_handle,
         liveliness_get_handle,
         declare_handle,
-        token_rx,
     } = spawn_background_tasks(
         &session,
         &actions,
@@ -802,7 +822,7 @@ pub(crate) async fn run_demo(
         query_handle,
         liveliness_get_handle,
         declare_handle,
-        token_rx,
+        token,
         actions,
         writer_handle,
         was_cancelled: outcome.is_none(),
@@ -811,7 +831,6 @@ pub(crate) async fn run_demo(
     .abort_sweep_join_tasks()
     .await
     .drop_liveliness_token()
-    .await
     .emit_close_if_cancelled()
     .drop_actions()
     .drain_writer()

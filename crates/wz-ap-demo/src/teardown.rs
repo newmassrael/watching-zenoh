@@ -13,7 +13,7 @@
 //   TeardownInitial
 //     -> abort_sweep_join_tasks().await
 //     -> TasksJoined
-//     -> drop_liveliness_token().await
+//     -> drop_liveliness_token()
 //     -> TokenDropped
 //     -> emit_close_if_cancelled()
 //     -> CloseEmitted
@@ -33,7 +33,6 @@
 
 use std::sync::Arc;
 
-use tokio::sync::oneshot;
 // R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
 // to wz's [`TokioJoinHandle`] so the typestate handoff inside this
 // teardown chain stays type-uniform with `runner.rs::SpawnedTasks`
@@ -59,7 +58,12 @@ pub(crate) struct TeardownInitial {
     pub query_handle: Option<TokioJoinHandle<()>>,
     pub liveliness_get_handle: Option<TokioJoinHandle<()>>,
     pub declare_handle: Option<TokioJoinHandle<()>>,
-    pub token_rx: Option<oneshot::Receiver<LivelinessToken>>,
+    /// R311os — the LivelinessToken is now declared SYNCHRONOUSLY pre-drive
+    /// (`run_demo`), so it is owned here directly rather than received from a
+    /// `declare_task` oneshot. `None` when no `--declare-token` was requested.
+    /// Step 4 (`drop_liveliness_token`) drops it; the drop ordering invariant
+    /// (UndeclToken before Close) is unchanged.
+    pub token: Option<LivelinessToken>,
     pub actions: Arc<SessionLinkActions>,
     pub writer_handle: TokioJoinHandle<()>,
     pub was_cancelled: bool,
@@ -103,7 +107,7 @@ impl TeardownInitial {
             let _ = self.clock.timeout(200, h).await;
         }
         TasksJoined {
-            token_rx: self.token_rx,
+            token: self.token,
             actions: self.actions,
             writer_handle: self.writer_handle,
             was_cancelled: self.was_cancelled,
@@ -112,18 +116,16 @@ impl TeardownInitial {
     }
 }
 
-/// Tasks joined; LivelinessToken still owned by the declare_task
-/// side of the oneshot. Step 4 receives the token (with a 200ms
-/// timeout that tolerates the no-token path) and drops it so the
-/// RAII Drop enqueues `Declare(UndeclToken)` on the writer
-/// channel. The drop MUST precede the Close emit at step 5 — if
-/// Close enqueues first the peer terminates on Close before
-/// processing the trailing UndeclToken and the liveliness
-/// subscriber never observes the DELETE sample (regression
+/// Tasks joined; the LivelinessToken (declared synchronously pre-drive in
+/// `run_demo`, R311os) is owned here directly. Step 4 drops it so the RAII
+/// Drop enqueues `Declare(UndeclToken)` on the writer channel. The drop MUST
+/// precede the Close emit at step 5 — if Close enqueues first the peer
+/// terminates on Close before processing the trailing UndeclToken and the
+/// liveliness subscriber never observes the DELETE sample (regression
 /// originally caught by
 /// `wz_liveliness_subscriber_round_trip_against_wz_acceptor`).
 pub(crate) struct TasksJoined {
-    token_rx: Option<oneshot::Receiver<LivelinessToken>>,
+    token: Option<LivelinessToken>,
     actions: Arc<SessionLinkActions>,
     writer_handle: TokioJoinHandle<()>,
     was_cancelled: bool,
@@ -131,14 +133,11 @@ pub(crate) struct TasksJoined {
 }
 
 impl TasksJoined {
-    pub(crate) async fn drop_liveliness_token(self) -> TokenDropped {
-        if let Some(rx) = self.token_rx {
-            let token = match self.clock.timeout(200, rx).await {
-                Ok(Ok(token)) => Some(token),
-                _ => None,
-            };
-            drop(token);
-        }
+    pub(crate) fn drop_liveliness_token(self) -> TokenDropped {
+        // R311os — the token is owned directly (no oneshot recv), so this is a
+        // synchronous drop. Its RAII Drop enqueues `Declare(UndeclToken)`
+        // before the Close emit below — the R284 ordering is preserved.
+        drop(self.token);
         TokenDropped {
             actions: self.actions,
             writer_handle: self.writer_handle,
