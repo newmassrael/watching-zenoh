@@ -378,7 +378,7 @@ transport-link-serial = ["wz-session-core/transport-link-serial", "dep:tokio-ser
 # is supplied at the explicit `dial_tls`/`accept_tls` call site, so the
 # generic `dial_locator` returns Unsupported for `tls/...`. NOT in the
 # default set — zenoh-pico ships TLS as an optional link (Z_FEATURE_LINK_TLS).
-transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile"]
+transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64"]
 # R311ob — host WebSocket link backend. UNLIKE TLS (which forwards
 # transport-link-tcp because it reuses the TCP StreamEnvelope framing), WS is
 # a DATAGRAM-flow link (zenoh-pico `_z_new_link_ws` sets
@@ -684,6 +684,15 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # `zenoh-link-tls/src/utils.rs`. Like tokio-rustls, optional + tls-gated so a
 # cert-free (tcp/udp/serial) build never compiles it.
 rustls-pemfile = { version = "2", optional = true }
+# R311oh — base64 source for the `tls_config` PEM decoder, behind
+# `transport-link-tls` (`dep:base64`). pico exposes a `*_BASE64` variant of each
+# TLS cert/key config key (`config.h.in` 0x4C/0x4E/0x50/0x53/0x55) so a
+# multi-line PEM can ride a transport that cannot carry raw newlines (env var,
+# JSON field) base64-wrapped into one token. `decode_base64_pem` decodes it back
+# to PEM bytes. Standard (RFC 4648) alphabet, matching zenoh-rust's
+# `base64_decode` in `zenoh-link-tls/src/utils.rs`. Optional + tls-gated like
+# the other TLS deps.
+base64 = { version = "0.22", optional = true }
 # R311ob — host WebSocket link backend, behind the optional `transport-link-ws`
 # feature. tokio-tungstenite is the async RFC6455 protocol layer: `client_async`
 # / `accept_async` run the HTTP-Upgrade handshake over a `TcpStream`, then the
@@ -797,6 +806,11 @@ socket2 = "0.6"
 # fresh root store, server name "localhost"). Dev-only — never compiled into
 # the lib or the no_std targets; production cert material comes from the app.
 rcgen = "0.13"
+# R311oh — the `tls_pem_mtls_e2e` file-source test writes fixture PEM to a temp
+# dir and reads it back through `tls_config::read_pem_file`, proving the
+# file-path cert source composes with the byte loaders. tempfile gives the
+# RAII-cleaned temp dir so the test leaves no stray files. Dev-only.
+tempfile = "3"
 # R71 — test fixtures + rebind shims moved to a separate sibling crate
 # so the production compile units of this crate carry zero test-only
 # code paths. Previously these helpers lived behind a `_test_support`

@@ -33,6 +33,16 @@
 //! configs are ordinary one-way TLS (server-authenticated only), exactly as
 //! pico's `ENABLE_MTLS` defaults off.
 //!
+//! ## Three sources for the same PEM
+//!
+//! The config builders take PEM as `&[u8]`, so the SOURCE of those bytes is
+//! orthogonal to the parse. An application can supply the PEM as raw bytes (it
+//! already has them), from a file path ([`read_pem_file`]), or base64-wrapped
+//! ([`decode_base64_pem`]) — the wz decomposition of zenoh-rust's raw / `*_FILE`
+//! / `*_BASE64` config-key cascade and pico's file + `*_BASE64` key pairs. All
+//! three converge on the same byte loaders below; no source needs a bespoke
+//! config builder.
+//!
 //! ## Crypto provider
 //!
 //! Both builders pin the `ring` provider explicitly via
@@ -42,6 +52,7 @@
 //! dependency.
 
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio_rustls::rustls::crypto::ring;
@@ -70,6 +81,45 @@ where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     io::Error::new(io::ErrorKind::InvalidData, err)
+}
+
+/// Read TLS PEM material (a cert chain, a private key, or a CA bundle) from a
+/// file into the bytes the decoders below consume — the file-path SOURCE for
+/// [`certs_from_pem`] / [`private_key_from_pem`] / [`root_store_from_pem`]. This
+/// is the wz analogue of zenoh-rust reading the `*_FILE` config keys
+/// (`tokio::fs::read` in `zenoh-link-tls/src/utils.rs`) and of pico's file-path
+/// `TLS_CONFIG_*` keys.
+///
+/// Synchronous `std::fs::read` by design: a TLS config is built ONCE at startup,
+/// not on a hot path, so reading it synchronously keeps the otherwise-sync
+/// config builders free of async colouring (the rustls-idiomatic shape — rustls'
+/// own examples load cert files synchronously). Errors if the file is missing OR
+/// empty: an empty cert/key file is a misconfiguration that should fail fast
+/// rather than silently build a certless config.
+pub fn read_pem_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    let bytes = std::fs::read(path)?;
+    if bytes.is_empty() {
+        return Err(invalid_data("TLS PEM file is empty"));
+    }
+    Ok(bytes)
+}
+
+/// Decode base64-wrapped PEM into the raw PEM bytes the decoders consume — the
+/// base64 SOURCE for [`certs_from_pem`] / [`private_key_from_pem`] /
+/// [`root_store_from_pem`]. Mirrors pico's `*_BASE64` TLS config keys (and
+/// zenoh-rust's `*_base64`): a multi-line PEM base64-wrapped into one token so it
+/// survives a transport that cannot carry raw newlines (an env var, a JSON
+/// field). The decoded bytes ARE PEM — feed them to a decoder like any other PEM
+/// source. Standard (RFC 4648) alphabet, matching zenoh-rust's `base64_decode`.
+///
+/// Surrounding whitespace is trimmed first (a base64 blob from a file or env var
+/// commonly carries a trailing newline, which the strict STANDARD engine would
+/// otherwise reject); internal non-alphabet bytes still error.
+pub fn decode_base64_pem(b64: &str) -> io::Result<Vec<u8>> {
+    use base64::{engine::general_purpose, Engine};
+    general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(invalid_data)
 }
 
 /// Parse a PEM cert chain into DER certificates (leaf first). The chain a TLS

@@ -750,13 +750,14 @@ layer_c1u_cargo_test_tls() {
     # is unexercised (gate-skew). The clippy --all-targets line below already
     # lints the module under tls.
     #
-    # R311og — also run tls_pem_mtls_e2e: mutual-TLS + cert-PEM-loading e2e
+    # R311og/oh — also run tls_pem_mtls_e2e: mutual-TLS + cert-PEM-loading e2e
     # (gated all(transport-link-tls, transport-unicast)). It drives the
     # production `tls_config` PEM loaders to build mTLS configs and asserts
     # mutual auth reaches Established, an mTLS server rejects an anonymous
-    # client, and a one-way config built from PEM reaches Established. Same
-    # gate-skew reasoning: without this invocation the module is empty and the
-    # cert-PEM/mTLS path is unexercised.
+    # client, and a one-way config built from PEM reaches Established; R311oh
+    # adds the file-path (`read_pem_file`) and base64 (`decode_base64_pem`) cert
+    # sources. Same gate-skew reasoning: without this invocation the module is
+    # empty and the cert-PEM/mTLS path is unexercised.
     (cd crates \
         && cargo test -p wz-session-core --features alloc --lib locator --quiet \
         && cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_e2e --test session_reconnect_e2e --test tls_pem_mtls_e2e --quiet \

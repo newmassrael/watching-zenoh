@@ -24,6 +24,12 @@
 //!   PEM (no client auth either side) reach Established — proving the cert-PEM
 //!   loader's non-mTLS path standalone, distinct from the self-signed-DER
 //!   `loopback_tls_configs` fixture the other TLS tests use.
+//! - `one_way_tls_from_pem_files_reaches_established`: the cert material is read
+//!   from temp FILES via `read_pem_file` before loading — proving the file-path
+//!   source (an app's on-disk certs) composes with the byte loaders.
+//! - `one_way_tls_from_base64_pem_reaches_established`: the CA is supplied
+//!   base64-wrapped (pico's `*_BASE64` key) and decoded via `decode_base64_pem`
+//!   before loading — proving the base64 source composes with the byte loaders.
 //!
 //! ## Cert material
 //!
@@ -53,7 +59,9 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, OpenedSession,
     TlsDialConfig, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::tls_config::{client_config_from_pem, server_config_from_pem, ClientAuthPem};
+use wz_runtime_tokio::tls_config::{
+    client_config_from_pem, decode_base64_pem, read_pem_file, server_config_from_pem, ClientAuthPem,
+};
 use wz_runtime_tokio::tls_pipeline::{accept_tls, dial_tls};
 use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_mtls_pems};
 use wz_session_core::locator::parse_any_locator;
@@ -232,5 +240,93 @@ async fn plain_tls_from_pem_reaches_established() {
     assert!(
         opened_acc.actions.trace_snapshot().record_established_at >= 1,
         "acceptor established over one-way TLS built from PEM"
+    );
+}
+
+/// cert-PEM loading from FILES: the server cert/key and client CA are written to
+/// a temp dir, read back through `read_pem_file`, and fed to the byte loaders —
+/// reaching Established. Proves the file-path source (an application's on-disk
+/// cert files) composes with the config builders. Also asserts an empty file is
+/// rejected by `read_pem_file` (fail-fast on a mis-supplied cert).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_way_tls_from_pem_files_reaches_established() {
+    let pems = loopback_mtls_pems();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server_cert_path = dir.path().join("server-cert.pem");
+    let server_key_path = dir.path().join("server-key.pem");
+    let ca_path = dir.path().join("ca.pem");
+    std::fs::write(&server_cert_path, &pems.server_cert_pem).expect("write server cert");
+    std::fs::write(&server_key_path, &pems.server_key_pem).expect("write server key");
+    std::fs::write(&ca_path, &pems.ca_pem).expect("write ca");
+
+    // Empty file fails fast rather than building a certless config.
+    let empty_path = dir.path().join("empty.pem");
+    std::fs::write(&empty_path, b"").expect("write empty");
+    assert!(
+        read_pem_file(&empty_path).is_err(),
+        "an empty PEM file must be rejected"
+    );
+
+    let server_cert = read_pem_file(&server_cert_path).expect("read server cert file");
+    let server_key = read_pem_file(&server_key_path).expect("read server key file");
+    let ca = read_pem_file(&ca_path).expect("read ca file");
+
+    let server_config = server_config_from_pem(&server_cert, &server_key, None)
+        .expect("build server config from file PEM");
+    let client_config =
+        client_config_from_pem(&ca, None).expect("build client config from file PEM");
+
+    let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established over TLS built from file PEM"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established over TLS built from file PEM"
+    );
+    // `dir` (a `TempDir`) removes the files on drop.
+}
+
+/// cert-PEM loading from BASE64: the client CA is supplied as a base64-wrapped
+/// PEM (pico's `*_BASE64` key shape), decoded via `decode_base64_pem`, and fed
+/// to the byte loaders — reaching Established. Proves the base64 source composes
+/// with the config builders. Also asserts the base64 round-trips to the original
+/// PEM and that invalid base64 is rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_way_tls_from_base64_pem_reaches_established() {
+    use base64::{engine::general_purpose, Engine};
+    let pems = loopback_mtls_pems();
+
+    // Wrap the CA PEM as a single base64 token, then decode it back.
+    let ca_b64 = general_purpose::STANDARD.encode(pems.ca_pem.as_bytes());
+    let ca = decode_base64_pem(&ca_b64).expect("decode base64 CA");
+    assert_eq!(
+        ca,
+        pems.ca_pem.as_bytes(),
+        "base64 round-trip yields the original CA PEM"
+    );
+    assert!(
+        decode_base64_pem("!!!not valid base64!!!").is_err(),
+        "invalid base64 must be rejected"
+    );
+
+    let server_config = server_config_from_pem(
+        pems.server_cert_pem.as_bytes(),
+        pems.server_key_pem.as_bytes(),
+        None,
+    )
+    .expect("build server config from PEM");
+    let client_config =
+        client_config_from_pem(&ca, None).expect("build client config from base64-sourced CA");
+
+    let (opened_acc, opened_init) = open_both_to_established(server_config, client_config).await;
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established over TLS with base64-sourced CA"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established over TLS with base64-sourced CA"
     );
 }
