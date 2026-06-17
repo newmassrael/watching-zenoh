@@ -139,6 +139,19 @@ struct SpawnedTasks {
 /// a WebSocket session only when the `ws` feature forwards
 /// `transport-link-ws`; without it the seam surfaces a typed
 /// `Unsupported` io error rather than mis-dialing.
+///
+/// R311pq — STATED ASYMMETRY (not an oversight): the Acceptor arm is
+/// TCP-only and scheme-blind. It binds a plain `TcpListener` on `--listen`
+/// and returns `DialedLink::Tcp`, with no `ws/` / `tls/` counterpart to the
+/// Initiator's locator dial; a scheme-bearing `--listen` fails loudly at
+/// `TcpListener::bind`, not silently. The library DOES carry a symmetric WS
+/// acceptor (`accept_ws` in `wz_runtime_tokio::ws_pipeline`, exercised
+/// in-process by its `ws_e2e.rs`), so the capability exists. The demo omits
+/// it because there is no cross-impl WS DIALER to verify a wz WS acceptor
+/// against: zenoh-pico has no native WS (emscripten-only), and the Layer Z
+/// WS legs run wz as the WS Initiator against zenohd's `ws/` listener. A
+/// demo WS acceptor would therefore be unverifiable (dead) code, so it is
+/// deliberately left out rather than added for symmetry's sake.
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor { listen } => {
