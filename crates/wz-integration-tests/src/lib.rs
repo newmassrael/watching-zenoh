@@ -96,6 +96,35 @@ pub mod common {
         pub fn port(&self) -> u16 {
             self.port
         }
+
+        /// Reserve TWO distinct ephemeral ports under a SINGLE lock
+        /// acquisition, returning the guard (carrying port #1) plus a bare
+        /// second port. R311pk — the WS dual-listen Layer Z legs need a
+        /// `tcp_port` (pico dials TCP) + `ws_port` (wz dials WS) pair on one
+        /// zenohd; calling [`pick`](Self::pick) twice on the same thread would
+        /// re-enter the process-global mutex and deadlock. Both listeners are
+        /// bound while the lock is held — so the two ports are guaranteed
+        /// distinct — then dropped to the free pool. The returned guard holds
+        /// the lock until dropped, exactly like [`pick`](Self::pick): drop it
+        /// once the child has bound both ports.
+        pub fn pick_pair() -> (Self, u16) {
+            let guard = port_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let l1 = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0 (#1)");
+            let l2 = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0 (#2)");
+            let p1 = l1.local_addr().expect("local_addr #1").port();
+            let p2 = l2.local_addr().expect("local_addr #2").port();
+            drop(l1);
+            drop(l2);
+            (
+                Self {
+                    port: p1,
+                    _guard: guard,
+                },
+                p2,
+            )
+        }
     }
 
     /// Resolve the watching-zenoh project root from

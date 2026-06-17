@@ -13,7 +13,7 @@
 //! `common` harness. No in-process dial, no per-test harness fork, no
 //! version override — wz speaks the reference protocol out of the box.
 //!
-//! Seven legs:
+//! Nine legs (1-7 TCP; 8-9 WebSocket transport, R311pk):
 //!   1. `wz_client_reaches_established_against_zenohd` — wz dials zenohd and
 //!      completes InitSyn/InitAck/OpenSyn/OpenAck to Established (transport
 //!      wire-parity with the canonical implementation). Deterministic: the
@@ -61,6 +61,20 @@
 //!      bidirectional liveliness plane through the reference router. The
 //!      zenohd-ROUTED counterpart of the direct Layer E2 test
 //!      `wz_e2e_liveliness_round_trip_against_zenoh_pico_z_liveliness`.
+//!   8. `wz_client_reaches_established_against_zenohd_over_ws` — wz reaches
+//!      Established against zenohd over a WebSocket link (the WS-transport
+//!      counterpart of leg 1). Deterministic, pico-free: pins that wz's WS
+//!      transport (`ws_pipeline`, RFC6455, datagram-flow) completes the zenoh
+//!      4-way handshake against the reference router's `ws/` listener. wz dials
+//!      `--connect ws/...` (the `wz-ap-demo` binary built with the `connect-ws`
+//!      feature); `spawn_zenohd_tcp_ws` dual-listens tcp+ws on one router.
+//!   9. `wz_publish_routes_through_zenohd_to_pico_zsub_over_ws` — wz's Put over a
+//!      WebSocket link routes through zenohd to a zenoh-pico `z_sub` on TCP (the
+//!      WS-transport counterpart of leg 2). zenoh-pico has NO native WS
+//!      (emscripten-only), so wz publishes over WS, the reference router decodes
+//!      it off its `ws/` listener and forwards to the pico TCP subscriber —
+//!      pinning wz's WS DATA PLANE against the reference zenoh WS link (not
+//!      pico's WS, which cannot exist natively).
 //!
 //! Opt-in (`#[ignore]`, run-ci Layer Z) AND binary-dep: zenohd is an external
 //! 1.5.0 build (`scripts/build-zenohd.sh`), not a wz artifact, so it never
@@ -112,6 +126,59 @@ fn spawn_zenohd(port: u16) -> ChildGuard {
     );
     // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz session.
     wait_for_zenohd_handshake_ready(port);
+    guard
+}
+
+/// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients) and
+/// `ws/` (for the wz WebSocket client) on the reserved ports, and block until it
+/// is HANDSHAKE-ready. R311pk — the dual-transport variant of [`spawn_zenohd`]
+/// for the WS legs: zenoh-pico has NO native WS link (emscripten-only — its
+/// `CMakeLists.txt` hard-errors a non-emscripten WS build), so pico dials TCP
+/// while wz dials WS, and zenohd routes between its two listeners. This pins
+/// wz's WS transport against the REFERENCE zenoh `ws/` link, not against pico's
+/// (which cannot exist natively).
+///
+/// Readiness mirrors [`spawn_zenohd`]: each listener is TCP-accept probed (a
+/// `ws/` listener rides TCP, so its accept succeeding proves the listener is up),
+/// then [`wait_for_zenohd_handshake_ready`] drives a real wz session to
+/// `Established` over the `tcp/` port — proving zenohd's transport/routing tasks
+/// are scheduled. The `ws/` listener is the same process, so it is handshake-
+/// ready once the router is.
+fn spawn_zenohd_tcp_ws(tcp_port: u16, ws_port: u16) -> ChildGuard {
+    let guard = ChildGuard::wrap(
+        "zenohd (reference router, tcp+ws)",
+        Command::new(zenohd_binary())
+            .arg("-l")
+            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
+            .arg("-l")
+            .arg(format!("ws/127.0.0.1:{ws_port}"))
+            .arg("--no-multicast-scouting")
+            .arg("--rest-http-port")
+            .arg("none")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn zenohd (tcp+ws)"),
+    );
+    assert!(
+        wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
+        "zenohd did not start accepting on tcp/127.0.0.1:{tcp_port} within 10s"
+    );
+    // R311pk — do NOT raw-TCP-probe the `ws_port`. zenoh's `zenoh-link-ws`
+    // listener expects an RFC6455 WebSocket upgrade on every accepted TCP
+    // connection; a bare `TcpStream::connect`-then-close (exactly what
+    // `wait_for_tcp_accept` does) wedges the listener's accept path so the NEXT
+    // real WS dial gets `Connection refused` (empirically confirmed: one raw
+    // poke is enough to break the subsequent `wz --connect ws/...`). The `ws/`
+    // listener is bound at startup ALONGSIDE `tcp/` — one process, both in
+    // zenohd's "Zenoh can be reached at ..." startup banner — so the
+    // TCP-accept gate above plus the handshake-ready probe below already prove
+    // the router (and therefore its co-bound WS listener) is up. The leg's own
+    // `wz --connect ws/...` is the real WS-handshake readiness signal.
+    //
+    // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz
+    // session over TCP; the WS listener on the same router is ready with it.
+    wait_for_zenohd_handshake_ready(tcp_port);
     guard
 }
 
@@ -1097,5 +1164,156 @@ fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
         put_text.contains(&format!("filter='{subscribe_pattern}'")),
         "wz logged 'LIVELINESS SAMPLE PUT' but the subscribe filter '{subscribe_pattern}' \
          is missing.\n{put_text}"
+    );
+}
+
+/// leg 8 (R311pk) — wz reaches Established against zenohd over a WebSocket link:
+/// the WS-transport counterpart of leg 1 (handshake wire-parity). Deterministic
+/// (no peer-timing race, pico-free) — pins that wz's WS transport
+/// (`ws_pipeline`, RFC6455, datagram-flow) completes the zenoh 4-way handshake
+/// against the reference router's `ws/` listener. wz dials with
+/// `--connect ws/127.0.0.1:{ws_port}` (the `wz-ap-demo` binary built with the
+/// `connect-ws` feature, R311pk); zenohd also listens on `tcp/` for its
+/// handshake-readiness probe. Mirrors
+/// [`wz_client_reaches_established_against_zenohd`] one transport over.
+#[test]
+#[ignore = "binary-dep e2e (zenohd router, WS); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_client_reaches_established_against_zenohd_over_ws() {
+    let demo = wz_ap_demo_binary();
+    let (tcp_res, ws_port) = PortReservation::pick_pair();
+    let tcp_port = tcp_res.port();
+    let mut zenohd = spawn_zenohd_tcp_ws(tcp_port, ws_port);
+    drop(tcp_res);
+
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect ws/zenohd --publish)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("ws/127.0.0.1:{ws_port}"))
+            .arg("--publish")
+            .arg("demo/zenohd")
+            .arg("--value")
+            .arg("ws-handshake-probe")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect ws/zenohd"),
+    );
+
+    let established = wait_for_substring(
+        &mut demo_stderr_reader,
+        "session Established",
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    if let Err(c) = &established {
+        panic!(
+            "wz-ap-demo did not log 'session Established' within 10s over WS — the \
+             wz<->zenohd WebSocket handshake regressed.\n--- captured wz-ap-demo stderr ---\n{c}"
+        );
+    }
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+}
+
+/// leg 9 (R311pk) — wz's Put over a WebSocket link routes through zenohd to a
+/// zenoh-pico `z_sub` on TCP: the WS-transport counterpart of leg 2 (data-plane
+/// cross-impl). wz dials zenohd with `--connect ws/127.0.0.1:{ws_port}` (its
+/// WebSocket transport), pico subscribes over `tcp/`, and zenohd routes wz's Put
+/// ACROSS the two link types. zenoh-pico has no native WS (emscripten-only), so
+/// this pins wz's WS data plane against the REFERENCE zenoh `ws/` link — wz
+/// publishes over WS, the reference router decodes it off its `ws/` listener and
+/// forwards to the pico TCP subscriber. The same Put-burst + retried-zsub shape
+/// as [`wz_publish_routes_through_zenohd_to_pico_zsub`], one transport over.
+#[test]
+#[ignore = "binary-dep e2e (zenohd router WS + zenoh-pico z_sub); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
+fn wz_publish_routes_through_zenohd_to_pico_zsub_over_ws() {
+    let demo = wz_ap_demo_binary();
+    let z_sub = zenoh_pico_cli_binary("z_sub");
+    let (tcp_res, ws_port) = PortReservation::pick_pair();
+    let tcp_port = tcp_res.port();
+    let endpoint = format!("tcp/127.0.0.1:{tcp_port}");
+    let publish_key = "demo/zenohd";
+    let sub_key = "demo/**";
+    let publish_value = "hello-from-wz-over-ws";
+
+    let mut zenohd = spawn_zenohd_tcp_ws(tcp_port, ws_port);
+    drop(tcp_res);
+
+    // ── pico z_sub: a TCP client of zenohd, subscribed and ready (retried past
+    //    any transient one-shot open). Its declared subscription is the route
+    //    zenohd uses to forward wz's WS Put.
+    let (mut z_sub_child, mut z_sub_stdout_reader) =
+        spawn_subscribed_zsub(&z_sub, sub_key, &endpoint);
+
+    // ── wz-ap-demo: a WEBSOCKET client of zenohd that emits a Put burst. The
+    //    burst (publisher_task) covers the window for z_sub's subscription to
+    //    reach zenohd; a Put landing after that propagation is routed to z_sub.
+    let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
+    let demo_stderr_writer = demo_stderr
+        .try_clone()
+        .expect("dup wz-ap-demo stderr handle");
+    let mut demo_stderr_reader = demo_stderr;
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect ws/zenohd --publish)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("ws/127.0.0.1:{ws_port}"))
+            .arg("--publish")
+            .arg(publish_key)
+            .arg("--value")
+            .arg(publish_value)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect ws/zenohd --publish"),
+    );
+
+    let received_substr = ">> [Subscriber] Received";
+    let received = wait_for_substring(
+        &mut z_sub_stdout_reader,
+        received_substr,
+        Duration::from_secs(10),
+    );
+
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
+    let _ = zenohd.child_mut().kill();
+    let _ = zenohd.child_mut().wait();
+
+    let demo_captured = read_captured(&mut demo_stderr_reader);
+    let z_sub_captured = read_captured(&mut z_sub_stdout_reader);
+    eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
+    eprintln!("--- captured z_sub stdout ---\n{z_sub_captured}");
+
+    let received_text = match received {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "z_sub did not log '{received_substr}' within 10s — wz's WS Put did not route \
+             through zenohd to z_sub.\n--- captured z_sub stdout at deadline ---\n{c}\n\
+             --- captured wz-ap-demo stderr ---\n{demo_captured}"
+        ),
+    };
+    assert!(
+        received_text.contains(publish_key),
+        "z_sub received but the publish keyexpr '{publish_key}' is missing.\n{received_text}"
+    );
+    assert!(
+        received_text.contains(publish_value),
+        "z_sub received but the publish value '{publish_value}' is missing.\n{received_text}"
     );
 }

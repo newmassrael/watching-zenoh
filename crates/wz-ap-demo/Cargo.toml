@@ -133,6 +133,15 @@ preset-ap-client = ["wz/preset-ap-client", "switchboard"]
 # the wz facade's switchboard feature (ApplicationLayerObserver.switchboard +
 # dispatch_switchboard). Elidable for the footprint measurement.
 switchboard = ["dep:wz-ap-demo-app", "wz/switchboard"]
+# R311pk — opt-in WebSocket connect. Forwards the wz facade's
+# transport-link-ws backend + locator-ws scheme so wz-ap-demo's
+# `--connect ws/HOST:PORT` dials a WebSocket session through the library
+# dial seam (Layer Z leg-8: wz WS <-> zenohd WS). NOT in `default`
+# (preset-ap-client is TCP-only), so the footprint baseline and every
+# other lane's build are unchanged; only run-ci Layer Z builds wz-ap-demo
+# with this feature. `locator-ws` already pulls `transport-link-ws`, but
+# both are named for clarity.
+connect-ws = ["wz/transport-link-ws", "wz/locator-ws"]
 
 [lints]
 workspace = true

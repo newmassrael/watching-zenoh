@@ -61,6 +61,7 @@ use tokio::net::{TcpListener, TcpStream};
 use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
+use wz::runtime_tokio::locator::parse_any_locator;
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::runtime_impl::TokioTime;
@@ -73,8 +74,8 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, initiate_and_open_session, DialedLink, OpenedSession,
-    DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, dial_locator, initiate_and_open_session, DialConfig, DialedLink,
+    OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -113,30 +114,53 @@ struct SpawnedTasks {
     liveliness_get_handle: Option<TokioJoinHandle<()>>,
 }
 
-/// Step 1 — TCP setup. Acceptor binds + accepts; Initiator dials.
-/// Both paths return the same `TcpStream` value, after which the
-/// FSM-driving code is role-agnostic except for the initial
-/// role-start event dispatch (see [`activate_role`]).
+/// Step 1 — link setup. Acceptor binds + accepts; Initiator dials.
+/// Both paths return a [`DialedLink`] the role-agnostic open helpers
+/// consume, after which the FSM-driving code is role-agnostic except
+/// for the initial role-start event dispatch (see [`activate_role`]).
 ///
-/// R121f — this binary does NOT implement TCP retry / connect
-/// timeout tuning beyond the kernel default; production callers
-/// that need either compose around a `tokio::time::timeout`. The
-/// address must resolve (DNS or numeric) — any
-/// `TcpStream::connect` error is surfaced through the `io::Result`
-/// return so the binary's exit code reflects the cause.
-async fn establish_link(role: &Role) -> io::Result<TcpStream> {
+/// R121f — this binary does NOT implement connect retry / timeout
+/// tuning beyond the kernel default; production callers that need
+/// either compose around a `tokio::time::timeout`. The address must
+/// resolve (DNS or numeric) — any dial error is surfaced through the
+/// `io::Result` return so the binary's exit code reflects the cause.
+///
+/// R311pk — the Initiator dial is locator-aware. A `--connect` value
+/// that carries a scheme (`ws/HOST:PORT`, `tcp/HOST:PORT`) is parsed
+/// into an [`AnyLocator`] and dialed through the library dial seam
+/// ([`dial_locator`]), so `ws/...` opens a WebSocket session exactly
+/// as `ws_e2e.rs` does in-process. A bare `HOST:PORT` (no scheme)
+/// keeps the original direct [`TcpStream::connect`], so every existing
+/// TCP caller dials byte-for-byte unchanged. The WS dial arm inside
+/// `dial_locator` is `transport-link-ws`-gated (wz-ap-demo's
+/// `connect-ws` feature forwards it); without that feature a `ws/...`
+/// locator surfaces a typed `Unsupported` io error rather than
+/// mis-dialing.
+async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor { listen } => {
             let listener = TcpListener::bind(listen).await?;
             log::info!("wz-ap-demo: listening on {}", listener.local_addr()?);
             let (stream, peer) = listener.accept().await?;
             log::info!("wz-ap-demo: accepted peer {peer}");
-            Ok(stream)
+            Ok(DialedLink::Tcp(stream))
         }
         Role::Initiator { connect } => {
-            let stream = TcpStream::connect(connect).await?;
-            log::info!("wz-ap-demo: connected to {}", stream.peer_addr()?);
-            Ok(stream)
+            if connect.contains('/') {
+                let locator = parse_any_locator(connect).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("wz-ap-demo: bad --connect locator {connect:?}: {e:?}"),
+                    )
+                })?;
+                let dialed = dial_locator(locator, &DialConfig::default()).await?;
+                log::info!("wz-ap-demo: connected to {connect} (locator dial)");
+                Ok(dialed)
+            } else {
+                let stream = TcpStream::connect(connect).await?;
+                log::info!("wz-ap-demo: connected to {}", stream.peer_addr()?);
+                Ok(DialedLink::Tcp(stream))
+            }
         }
     }
 }
@@ -541,8 +565,9 @@ pub(crate) async fn run_demo(
         liveliness_get: liveliness_get_spec,
     } = query_role_spec;
 
-    // ── Step 1: TCP setup (Acceptor binds + accepts, Initiator dials).
-    let stream = establish_link(&role).await?;
+    // ── Step 1: link setup (Acceptor binds + accepts, Initiator dials;
+    //          a scheme-bearing --connect dials WS/etc via dial_locator).
+    let dialed = establish_link(&role).await?;
 
     // ── Step 2: open the session to Established via the library open
     //          helpers (R311fc). The handshake phase is wall-clock bounded
@@ -575,24 +600,11 @@ pub(crate) async fn run_demo(
         clock: _,
     } = match &role {
         Role::Acceptor { .. } => {
-            accept_and_open_session(
-                DialedLink::Tcp(stream),
-                params,
-                session_clock,
-                None,
-                DEFAULT_OPEN_TICK_MS,
-            )
-            .await
+            accept_and_open_session(dialed, params, session_clock, None, DEFAULT_OPEN_TICK_MS).await
         }
         Role::Initiator { .. } => {
-            initiate_and_open_session(
-                DialedLink::Tcp(stream),
-                params,
-                session_clock,
-                None,
-                DEFAULT_OPEN_TICK_MS,
-            )
-            .await
+            initiate_and_open_session(dialed, params, session_clock, None, DEFAULT_OPEN_TICK_MS)
+                .await
         }
     }
     .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;

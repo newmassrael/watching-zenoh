@@ -2854,9 +2854,10 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
 # the pico interop suite: the wz side is the `wz-ap-demo --connect <zenohd>`
 # binary (already version 0x09 + whatami Client on its initiator path), zenohd
 # is the foreign router, and the wz-integration-tests `common` harness
-# orchestrates. Two legs: wz reaches Established against zenohd (handshake
-# wire-parity), and a wz Put routes through zenohd to a zenoh-pico `z_sub`
-# (data-plane cross-impl through the reference router).
+# orchestrates. Legs span handshake wire-parity, pub/sub, query/queryable, and
+# liveliness over TCP (legs 1-7); R311pk adds WebSocket-transport legs (8-9) that
+# dial zenohd's `ws/` listener with wz's WS transport while pico stays on TCP
+# (zenoh-pico has no native WS — emscripten-only).
 #
 # Opt-in (--layer Z / WZ_RUN_LAYER_Z=1) AND binary-dep: zenohd is an external
 # 1.5.0 build (scripts/build-zenohd.sh), not a wz artifact, so it never gates
@@ -2877,8 +2878,11 @@ layer_z_zenohd_interop() {
         echo "Layer Z SKIP: zenoh-pico z_sub not built (run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
-    # wz-ap-demo is the wz client (--connect zenohd); build it like Layer E.
-    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    # wz-ap-demo is the wz client (--connect zenohd); build it like Layer E,
+    # plus `connect-ws` (R311pk) so the WS legs 8/9 can dial `ws/...`. The
+    # feature is additive — the TCP legs 1-7 dial through the same binary
+    # unchanged; pico dials TCP (zenoh-pico has no native WS).
+    (cd crates && cargo build -p wz-ap-demo --features connect-ws --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients

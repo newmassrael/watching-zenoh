@@ -143,6 +143,15 @@ pub use wz_session_core::keyexpr_canon;
 // verbatim across the wz-runtime-tokio surface.
 pub use wz_session_core::locality;
 
+/// R311pk — the locator parse seam (`parse_any_locator` + the `AnyLocator`
+/// sum type its scheme-dispatch produces). Re-exported so a facade consumer
+/// (wz-ap-demo's `establish_link`) can turn a `--connect ws/...` argument
+/// into the typed locator that [`session_open::dial_locator`] dials — the
+/// same parse path `ws_e2e.rs` exercises in-process. Ungated (the locator
+/// leaves parse-always regardless of which transport BACKEND is compiled),
+/// so naming it never depends on a `transport-link-*` feature.
+pub use wz_session_core::locator;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. R222 introduced the
 /// three load-bearing fields (`keyexpr` / `kind` / `payload`); R225
