@@ -39930,6 +39930,50 @@
         "남은 단계: push 동의(사용자 명시 필요). 15 commits LOCAL UNPUSHED = R311pk 2(9bc4445/5b2b74d) + pl 1(770f8ee, 직전 세션) + pm/pn/po/pp/pq/pr 각 2(=12). push는 명시 동의 후에만(CLAUDE.md). 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311ps": {
+      "decision_summary": "R311ps: 세션리뷰(4-에이전트) F2(starts_with 특수케이스)+F1(dial SSOT split) textbook 해소 — 파서가 hostname을 AnyLocator::Named 분류(scheme/address axis 분리), plan_dial→AnyLocator, dial_locator 단일 경로(open_session_at도 DNS 무료). +R311pk false-green 메커니즘 정정.",
+      "changes_bullets": [
+        "F2+F1: wz-session-core/src/locator.rs — AnyLocator::Named{proto,host,port} variant + classify_named_ip 헬퍼(token shape 분류만, DNS 해석 없음=deferral 불변). parse_any_locator이 hostname을 Named로 분류(numeric=Ip, malformed=BadAddress 구분). 모듈 doc 정정(hostname=parse error→classified).",
+        "wz-runtime-tokio/src/session_open.rs: dial_locator에 Named arm(tcp→dial_tcp_host; udp/ws/tls name→typed Unsupported=clean 확장점, silent fallback 아님). plan_dial이 AnyLocator 반환(scheme-less만 tcp/ desugar; starts_with(\"tcp/\") 특수케이스 + DialPlan/TcpHost 제거=F2 해소, scheme/address axis 분리). dial_endpoint=plan_dial→dial_locator 단일 dial 경로.",
+        "F1 해소: open_session_at/connect_and_open_session(scouting·static)이 parse_any_locator+dial_locator 공유 seam이라 scheme'd hostname(tcp/host.local:7447) DNS 자동 획득 — dial_endpoint와의 contract split이 코드 추가 없이 dissolve.",
+        "NIT: link_pipeline.rs/lib.rs의 dial_locator(ParsedLocator)→AnyLocator doc 정정 + dial_tcp \"single primitive\"→dial_tcp_host sibling 명시.",
+        "정정(root-cause 적발): R311pq/pr ledger의 \"R311pk false-green=echo/pipe exit 마스킹\"은 오기록. 실제=R311pk가 env M+G+Z 실행→F/Q는 opt-in 가드(run-ci.sh:2059/2435)로 SKIP→return 0(RUNCI_EXIT=0 정당)→ledger 산문이 SKIP을 PASS로 오기재. echo 마스킹은 R311ps 세션 내 내가 빠진 별개 트랩(혼동)."
+      ],
+      "verification_bullets": [
+        "출처=독립 4-에이전트 적대 자가감사: system-architect(MAJOR F1 dial SSOT split + F2 starts_with axis 혼동), quality-engineer(HONEST·false-green/suppression/flaky 0, upstream zenoh accept-loop·feature graph·심볼 경험검증), root-cause-analyst(F/Q 수정 sound+메커니즘 정정), refactoring-expert(MINOR=F2 동일 지점 corroborate). \"push 준비됨\" self-assessment를 architect가 뒤집음(R311my/mz/pb/pg~pj/pl/pq 패턴 7번째).",
+        "신규 테스트: wz-session-core locator(Named 분류 3종 tcp/udp/ws/tls + malformed reject 5종), session_open(plan_dial 라우팅 6종 + non-tcp Named=Unsupported-without-io + numeric loopback e2e). wz-session-core 147/147, wz-runtime-tokio 273/273(+2). clippy --all-targets -D warnings clean(session-core/runtime-tokio/ap-demo; AnyLocator::Named 추가로 non-exhaustive match 없음 확인). fmt clean.",
+        "full run-ci(WZ_RUN_LAYER_F/G/Q/M/Z=1) \"run-ci: all required layers pass\": Layer G 7 MCU 타겟 wz-codecs no_std 크로스컴파일 OK(Named no_std 컴파일 검증), Layer F/Q/M/Z pass, FAIL 0(exit 마스킹 없이 run-ci 마지막 명령). WS leg-8/9 20/20 zero-flake(numeric ws dial 경로 Ip(Ws) arm 불변 확인)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ps = 세션리뷰(독립 4-에이전트) architect F2(starts_with 특수케이스)+F1(dial SSOT split) textbook 해소 + root-cause의 R311pk false-green 메커니즘 정정. dial 라우팅이 파서가 분류한 AnyLocator 단일 값 기반(scheme/address axis 분리), dial_endpoint·open_session_at 모두 dial_locator 단일 경로.",
+        "등록 부채(architect/root-cause 후속, push blocker 아님): (A)[MINOR] F5 Acceptor accept_endpoint seam 부재 — establish_link Acceptor arm이 여전히 인라인 TcpListener::bind+accept(dial 쪽 dial_endpoint 대칭 부재); textbook=bind_endpoint/accept_endpoint seam(라이브러리 accept_ws/tls/serial 존재, 검증 dialer만 부재). (B)[MINOR] Named+reconnect 미배선 — reconnect는 ParsedLocator(numeric)만 보유, hostname --connect는 재연결 안 됨(데모는 reconnect 미사용; reconnect IP-only는 기존 scope). (C)[MED process] opt-in Layer F/Q가 R311p* arc ~20라운드 미실행→footprint/lock staleness 누적했고, pre-push 훅이 F/Q env 미설정이라 push 전 게이트 안 됨(이 사태 구조적 원인). 후속=footprint staleness assertion or pre-push 훅에 F/Q env.",
+        "코드 LOCAL-COMMITTED UNPUSHED(R311ps=61fe795 + 이전 16 = R311pk 2/pl 1/pm~pr). full run-ci(F+G+Q+M+Z) GREEN, WS 20/20. 사용자 \"조사 후 green push\" 결정 충족 → push 동의 대기(명시 동의만 남음). 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311ps: 세션리뷰(4-에이전트) F2(starts_with 특수케이스)+F1(dial SSOT split) textbook 해소 — 파서가 hostname을 AnyLocator::Named 분류(scheme/address axis 분리), plan_dial→AnyLocator, dial_locator 단일 경로(open_session_at도 DNS 무료). +R311pk false-green 메커니즘 정정.",
+      "publishable_changes_bullets": [
+        "F2+F1: wz-session-core/src/locator.rs — AnyLocator::Named{proto,host,port} variant + classify_named_ip 헬퍼(token shape 분류만, DNS 해석 없음=deferral 불변). parse_any_locator이 hostname을 Named로 분류(numeric=Ip, malformed=BadAddress 구분). 모듈 doc 정정(hostname=parse error→classified).",
+        "wz-runtime-tokio/src/session_open.rs: dial_locator에 Named arm(tcp→dial_tcp_host; udp/ws/tls name→typed Unsupported=clean 확장점, silent fallback 아님). plan_dial이 AnyLocator 반환(scheme-less만 tcp/ desugar; starts_with(\"tcp/\") 특수케이스 + DialPlan/TcpHost 제거=F2 해소, scheme/address axis 분리). dial_endpoint=plan_dial→dial_locator 단일 dial 경로.",
+        "F1 해소: open_session_at/connect_and_open_session(scouting·static)이 parse_any_locator+dial_locator 공유 seam이라 scheme'd hostname(tcp/host.local:7447) DNS 자동 획득 — dial_endpoint와의 contract split이 코드 추가 없이 dissolve.",
+        "NIT: link_pipeline.rs/lib.rs의 dial_locator(ParsedLocator)→AnyLocator doc 정정 + dial_tcp \"single primitive\"→dial_tcp_host sibling 명시.",
+        "정정(root-cause 적발): R311pq/pr ledger의 \"R311pk false-green=echo/pipe exit 마스킹\"은 오기록. 실제=R311pk가 env M+G+Z 실행→F/Q는 opt-in 가드(run-ci.sh:2059/2435)로 SKIP→return 0(RUNCI_EXIT=0 정당)→ledger 산문이 SKIP을 PASS로 오기재. echo 마스킹은 R311ps 세션 내 내가 빠진 별개 트랩(혼동)."
+      ],
+      "publishable_verification_bullets": [
+        "출처=독립 4-에이전트 적대 자가감사: system-architect(MAJOR F1 dial SSOT split + F2 starts_with axis 혼동), quality-engineer(HONEST·false-green/suppression/flaky 0, upstream zenoh accept-loop·feature graph·심볼 경험검증), root-cause-analyst(F/Q 수정 sound+메커니즘 정정), refactoring-expert(MINOR=F2 동일 지점 corroborate). \"push 준비됨\" self-assessment를 architect가 뒤집음(R311my/mz/pb/pg~pj/pl/pq 패턴 7번째).",
+        "신규 테스트: wz-session-core locator(Named 분류 3종 tcp/udp/ws/tls + malformed reject 5종), session_open(plan_dial 라우팅 6종 + non-tcp Named=Unsupported-without-io + numeric loopback e2e). wz-session-core 147/147, wz-runtime-tokio 273/273(+2). clippy --all-targets -D warnings clean(session-core/runtime-tokio/ap-demo; AnyLocator::Named 추가로 non-exhaustive match 없음 확인). fmt clean.",
+        "full run-ci(WZ_RUN_LAYER_F/G/Q/M/Z=1) \"run-ci: all required layers pass\": Layer G 7 MCU 타겟 wz-codecs no_std 크로스컴파일 OK(Named no_std 컴파일 검증), Layer F/Q/M/Z pass, FAIL 0(exit 마스킹 없이 run-ci 마지막 명령). WS leg-8/9 20/20 zero-flake(numeric ws dial 경로 Ip(Ws) arm 불변 확인)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ps = 세션리뷰(독립 4-에이전트) architect F2(starts_with 특수케이스)+F1(dial SSOT split) textbook 해소 + root-cause의 R311pk false-green 메커니즘 정정. dial 라우팅이 파서가 분류한 AnyLocator 단일 값 기반(scheme/address axis 분리), dial_endpoint·open_session_at 모두 dial_locator 단일 경로.",
+        "등록 부채(architect/root-cause 후속, push blocker 아님): (A)[MINOR] F5 Acceptor accept_endpoint seam 부재 — establish_link Acceptor arm이 여전히 인라인 TcpListener::bind+accept(dial 쪽 dial_endpoint 대칭 부재); textbook=bind_endpoint/accept_endpoint seam(라이브러리 accept_ws/tls/serial 존재, 검증 dialer만 부재). (B)[MINOR] Named+reconnect 미배선 — reconnect는 ParsedLocator(numeric)만 보유, hostname --connect는 재연결 안 됨(데모는 reconnect 미사용; reconnect IP-only는 기존 scope). (C)[MED process] opt-in Layer F/Q가 R311p* arc ~20라운드 미실행→footprint/lock staleness 누적했고, pre-push 훅이 F/Q env 미설정이라 push 전 게이트 안 됨(이 사태 구조적 원인). 후속=footprint staleness assertion or pre-push 훅에 F/Q env.",
+        "코드 LOCAL-COMMITTED UNPUSHED(R311ps=61fe795 + 이전 16 = R311pk 2/pl 1/pm~pr). full run-ci(F+G+Q+M+Z) GREEN, WS 20/20. 사용자 \"조사 후 green push\" 결정 충족 → push 동의 대기(명시 동의만 남음). 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
