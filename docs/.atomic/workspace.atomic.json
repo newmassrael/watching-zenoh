@@ -40494,6 +40494,46 @@
         "다음=[[project-north-star]] P4(router/SHM/plugin/storage/admin/...) 또는 pico optional(scouting passive/MULTICAST_DECLARATIONS/serial·WS·TLS). 코드 LOCAL-COMMITTED, R311q2(run_qemu_case 로깅)+q3(nodelay) 묶어 push 예정(사용자 (B) 동의). R311pz~q1 PUSHED origin/main=2b1a389. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311q4": {
+      "decision_summary": "R311q4: listener backlog 1024 파리티(zenoh new_listener; tokio 기본 128). bind_listener SSOT=TcpSocket→set_reuseaddr(true)→bind→listen(1024), bind_tcp/bind_tcp_host 경유. set_reuseaddr는 R311pz de-risk 아니라 TcpSocket 전환시 Unix 기본 보존(non-vacuous 단위=TcpSocket 기본 off). 현재 one-shot accept엔 무의미, parity+future router용.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: bind_listener(addr) SSOT 재도입 — TcpSocket(v4/v6) -> set_reuseaddr(true) -> bind -> listen(LISTEN_BACKLOG=1024). zenoh new_listener(io/zenoh-link-commons/src/tcp.rs) 파리티. bind_tcp는 bind_listener에 위임, bind_tcp_host는 lookup_host 루프 + per-addr bind_listener(TcpSocket는 단일 SocketAddr만 받아 resolve loop 필요; numeric 경로가 건너뛰는 부분).",
+        "backlog 1024: tokio/mio TcpListener::bind이 128을 하드코드(직접 소스 검증 mio-1.2.0 listener.rs:92)하는 반면 zenoh는 1024. TcpSocket::listen(n)이 tokio의 유일한 custom-backlog 경로라 TcpSocket 필요. 정직 한계: wz accept_tcp는 현재 one-shot(단일 peer)이라 backlog 깊이가 동작상 무의미(연결 1개만 accept); zenoh construction 파리티 + future multi-peer router accept loop(north-star P4) 대비로 설정.",
+        "set_reuseaddr(true): R311pz의 거짓 'de-risk'가 아님 — TcpListener::bind이 Unix서 자동 설정하던 SO_REUSEADDR를, 이제 TcpSocket(자동 미설정)으로 빌드하므로 보존하기 위함(누락시 reuseaddr 회귀=이 전환이 도입하는 실제 리스크). 신규 단위 bind_tcp_listener_sets_so_reuseaddr: socket2 readback, NON-vacuous(TcpSocket 기본 off라 explicit set 누락 포착; R311pz는 bind_tcp가 TcpListener::bind라 bare-revert를 못 잡는 vacuous였음). backlog 값은 getsockopt 미지원이라 단위 가드 없음(명시 construction + 리뷰)."
+      ],
+      "verification_bullets": [
+        "근본: zenoh new_listener는 socket.listen(1024), tokio/mio TcpListener::bind은 backlog 128(직접 소스 검증: mio-1.2.0 src/net/tcp/listener.rs:92). R311q1/q3 carry의 backlog 부분(사용자가 다음 라운드로 선택). 메타: R311pz가 revert했던 TcpSocket 구성을 재도입하나 이번엔 근거가 참 — backlog 파리티가 TcpSocket을 실제로 요구(custom backlog는 TcpSocket::listen만 가능)하고, set_reuseaddr는 preserve-not-derisk(TcpSocket 전환이 잃는 tokio Unix 기본 보존)라 reuseaddr 단위가 non-vacuous. R311pz와의 차이(거짓 인과 vs 참 인과, vacuous vs non-vacuous)를 changes/ledger가 명시.",
+        "검증: fmt clean, clippy --all-targets -D warnings clean. link_pipeline 단위 4/4(신규 bind_tcp_listener_sets_so_reuseaddr 포함 — socket2로 reuseaddr readback), session_reconnect_e2e 4/4, 바이너리 e2e 파일 5/5(acceptor가 새 TcpSocket bind 경로로 bind해도 회귀0; data-plane sever-reconnect 포함). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅 게이트.",
+        "정직 한계: one-shot accept 모델엔 backlog 1024가 동작상 무의미(파리티+future router 대비); backlog 값 자체는 getsockopt 미지원이라 unit-가드 불가(explicit construction + 리뷰가 가드)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311q4 = listener backlog 1024 파리티(bind_listener SSOT, TcpSocket -> set_reuseaddr(true) -> bind -> listen(1024); zenoh new_listener). set_reuseaddr는 TcpSocket 전환시 tokio Unix 기본 보존(non-vacuous 단위)이지 R311pz de-risk 아님. R311q3(stream nodelay)와 함께 TCP socket-option 파리티 트랙 주요 항목 종료 — listener: reuseaddr+backlog 1024; stream: nodelay; SO_LINGER는 tokio deprecate(async footgun)로 의도적 미설정. 현재 one-shot accept엔 marginal, future multi-peer router(P4)서 backlog 발현.",
+        "남은 TCP-option(저우선): zenoh dial측 socket tx/rx buffer size·DSCP·iface bind cfg는 wz 미노출(deploy.yaml 토폴로지 스키마 대상). 다음 주요 라운드 후보: [[project-north-star]] P4(router/SHM/plugin/storage/admin/sub-agg/API shim/script/advanced) 또는 pico optional(scouting passive/MULTICAST_DECLARATIONS/serial·WS·TLS).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정(link_pipeline.rs 1파일). push 명시 동의 필요(CLAUDE.md). R311pz~q3 PUSHED origin/main=23f0d1e. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311q4: listener backlog 1024 파리티(zenoh new_listener; tokio 기본 128). bind_listener SSOT=TcpSocket→set_reuseaddr(true)→bind→listen(1024), bind_tcp/bind_tcp_host 경유. set_reuseaddr는 R311pz de-risk 아니라 TcpSocket 전환시 Unix 기본 보존(non-vacuous 단위=TcpSocket 기본 off). 현재 one-shot accept엔 무의미, parity+future router용.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: bind_listener(addr) SSOT 재도입 — TcpSocket(v4/v6) -> set_reuseaddr(true) -> bind -> listen(LISTEN_BACKLOG=1024). zenoh new_listener(io/zenoh-link-commons/src/tcp.rs) 파리티. bind_tcp는 bind_listener에 위임, bind_tcp_host는 lookup_host 루프 + per-addr bind_listener(TcpSocket는 단일 SocketAddr만 받아 resolve loop 필요; numeric 경로가 건너뛰는 부분).",
+        "backlog 1024: tokio/mio TcpListener::bind이 128을 하드코드(직접 소스 검증 mio-1.2.0 listener.rs:92)하는 반면 zenoh는 1024. TcpSocket::listen(n)이 tokio의 유일한 custom-backlog 경로라 TcpSocket 필요. 정직 한계: wz accept_tcp는 현재 one-shot(단일 peer)이라 backlog 깊이가 동작상 무의미(연결 1개만 accept); zenoh construction 파리티 + future multi-peer router accept loop(north-star P4) 대비로 설정.",
+        "set_reuseaddr(true): R311pz의 거짓 'de-risk'가 아님 — TcpListener::bind이 Unix서 자동 설정하던 SO_REUSEADDR를, 이제 TcpSocket(자동 미설정)으로 빌드하므로 보존하기 위함(누락시 reuseaddr 회귀=이 전환이 도입하는 실제 리스크). 신규 단위 bind_tcp_listener_sets_so_reuseaddr: socket2 readback, NON-vacuous(TcpSocket 기본 off라 explicit set 누락 포착; R311pz는 bind_tcp가 TcpListener::bind라 bare-revert를 못 잡는 vacuous였음). backlog 값은 getsockopt 미지원이라 단위 가드 없음(명시 construction + 리뷰)."
+      ],
+      "publishable_verification_bullets": [
+        "근본: zenoh new_listener는 socket.listen(1024), tokio/mio TcpListener::bind은 backlog 128(직접 소스 검증: mio-1.2.0 src/net/tcp/listener.rs:92). R311q1/q3 carry의 backlog 부분(사용자가 다음 라운드로 선택). 메타: R311pz가 revert했던 TcpSocket 구성을 재도입하나 이번엔 근거가 참 — backlog 파리티가 TcpSocket을 실제로 요구(custom backlog는 TcpSocket::listen만 가능)하고, set_reuseaddr는 preserve-not-derisk(TcpSocket 전환이 잃는 tokio Unix 기본 보존)라 reuseaddr 단위가 non-vacuous. R311pz와의 차이(거짓 인과 vs 참 인과, vacuous vs non-vacuous)를 changes/ledger가 명시.",
+        "검증: fmt clean, clippy --all-targets -D warnings clean. link_pipeline 단위 4/4(신규 bind_tcp_listener_sets_so_reuseaddr 포함 — socket2로 reuseaddr readback), session_reconnect_e2e 4/4, 바이너리 e2e 파일 5/5(acceptor가 새 TcpSocket bind 경로로 bind해도 회귀0; data-plane sever-reconnect 포함). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅 게이트.",
+        "정직 한계: one-shot accept 모델엔 backlog 1024가 동작상 무의미(파리티+future router 대비); backlog 값 자체는 getsockopt 미지원이라 unit-가드 불가(explicit construction + 리뷰가 가드)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311q4 = listener backlog 1024 파리티(bind_listener SSOT, TcpSocket -> set_reuseaddr(true) -> bind -> listen(1024); zenoh new_listener). set_reuseaddr는 TcpSocket 전환시 tokio Unix 기본 보존(non-vacuous 단위)이지 R311pz de-risk 아님. R311q3(stream nodelay)와 함께 TCP socket-option 파리티 트랙 주요 항목 종료 — listener: reuseaddr+backlog 1024; stream: nodelay; SO_LINGER는 tokio deprecate(async footgun)로 의도적 미설정. 현재 one-shot accept엔 marginal, future multi-peer router(P4)서 backlog 발현.",
+        "남은 TCP-option(저우선): zenoh dial측 socket tx/rx buffer size·DSCP·iface bind cfg는 wz 미노출(deploy.yaml 토폴로지 스키마 대상). 다음 주요 라운드 후보: [[project-north-star]] P4(router/SHM/plugin/storage/admin/sub-agg/API shim/script/advanced) 또는 pico optional(scouting passive/MULTICAST_DECLARATIONS/serial·WS·TLS).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정(link_pipeline.rs 1파일). push 명시 동의 필요(CLAUDE.md). R311pz~q3 PUSHED origin/main=23f0d1e. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
