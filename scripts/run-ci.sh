@@ -362,6 +362,51 @@ run_layer() {
     fi
 }
 
+# Run one QEMU MCU case, CAPTURING qemu stdout+stderr so a FAIL is diagnosable
+# from a SINGLE run (no reproduction needed). On PASS the output is discarded
+# (the lane stays quiet); on FAIL the captured output AND the exit-code meaning
+# (124 = the outer 10s timeout = hang / runaway loop, vs a non-zero semihost
+# SYS_EXIT) are surfaced to stderr. Pre-R311q2 every Q.0/Q.2/Q.4 qemu run
+# redirected to /dev/null, so a rare emulator transient (the R311pw an385 /
+# R311q1 an386 SYS_EXIT hiccup) left ZERO forensic trace and could only be
+# chased by re-running — this helper records everything the first time.
+# The PASS/FAIL line itself is echoed here (label + " PASS"/" FAIL (why)"), so
+# callers only branch on the return code. Args: 1=label 2=cpu 3=machine 4=elf.
+run_qemu_case() {
+    local label="$1" cpu="$2" machine="$3" kernel="$4"
+    local qlog rc
+    qlog="$(mktemp)"
+    # `else rc=$?` (not a post-`fi` capture): after a false `if cond; then …;
+    # fi` bash resets $? to 0, so the timeout exit code is only readable inside
+    # the else branch.
+    if timeout 10 qemu-system-arm \
+        -cpu "$cpu" -machine "$machine" \
+        -nographic -semihosting-config enable=on,target=native \
+        -kernel "$kernel" >"$qlog" 2>&1; then
+        echo "  ${label} PASS"
+        rm -f "$qlog"
+        return 0
+    else
+        rc=$?
+    fi
+    local why="exit=${rc}"
+    if [[ "$rc" -eq 124 ]]; then
+        why="exit=124 (10s timeout — hang / runaway loop)"
+    fi
+    {
+        echo "  ${label} FAIL (${why})"
+        echo "  ── ${label}: captured qemu output (R311q2 one-shot diagnosis) ──"
+        if [[ -s "$qlog" ]]; then
+            sed 's/^/    | /' "$qlog"
+        else
+            echo "    | <qemu produced no output before exit ${rc}>"
+        fi
+        echo "  ── ${label}: end qemu output ──"
+    } >&2
+    rm -f "$qlog"
+    return "$rc"
+}
+
 # ─── Layer 0 — preflight lints (fmt mandatory + actionlint optional) ──
 #
 # R291: cargo fmt --check is promoted into Layer 0 as a mandatory
@@ -2505,13 +2550,9 @@ layer_q_qemu_mcu_e2e() {
             continue
         fi
         pbin="deploy/mcu-noheap-probe/target/${ptarget}/release/mcu-noheap-probe"
-        if timeout 10 qemu-system-arm \
-            -cpu "$pcpu" -machine "$pmachine" \
-            -nographic -semihosting-config enable=on,target=native \
-            -kernel "$pbin" >/dev/null 2>&1; then
-            echo "  Q.0.${pmachine} run mcu-noheap-probe via qemu-system-arm ${pmachine} PASS"
-        else
-            echo "  Q.0.${pmachine} run mcu-noheap-probe via qemu-system-arm ${pmachine} FAIL" >&2
+        if ! run_qemu_case \
+            "Q.0.${pmachine} run mcu-noheap-probe via qemu-system-arm ${pmachine}" \
+            "$pcpu" "$pmachine" "$pbin"; then
             fail=1
         fi
     done
@@ -2616,13 +2657,9 @@ layer_q_qemu_mcu_e2e() {
             # process exit code (0 / 1); a 10s outer timeout bounds
             # a runaway loop so a hung demo does not block CI
             # indefinitely.
-            if timeout 10 qemu-system-arm \
-                -cpu "$cpu" -machine "$machine" \
-                -nographic -semihosting-config enable=on,target=native \
-                -kernel "$bin" >/dev/null 2>&1; then
-                echo "  Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine} PASS"
-            else
-                echo "  Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine} FAIL" >&2
+            if ! run_qemu_case \
+                "Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine}" \
+                "$cpu" "$machine" "$bin"; then
                 fail=1
             fi
         fi
@@ -2700,13 +2737,9 @@ layer_q_qemu_mcu_e2e() {
                 continue
             fi
             abin="deploy/mcu-session-acceptor/target/${atarget}/release/mcu-session-acceptor"
-            if timeout 10 qemu-system-arm \
-                -cpu "$acpu" -machine "$amachine" \
-                -nographic -semihosting-config enable=on,target=native \
-                -kernel "$abin" >/dev/null 2>&1; then
-                echo "  Q.4.${amachine}.${alabel} run mcu-session-acceptor via qemu-system-arm ${amachine} PASS"
-            else
-                echo "  Q.4.${amachine}.${alabel} run mcu-session-acceptor via qemu-system-arm ${amachine} FAIL" >&2
+            if ! run_qemu_case \
+                "Q.4.${amachine}.${alabel} run mcu-session-acceptor via qemu-system-arm ${amachine}" \
+                "$acpu" "$amachine" "$abin"; then
                 fail=1
             fi
         done
@@ -2734,14 +2767,10 @@ layer_q_qemu_mcu_e2e() {
             any_built=1
             if [[ "$has_qemu" -ne 1 ]]; then
                 echo "  Q.4.microbit.slim run SKIP (qemu-system-arm not on PATH)"
-            elif timeout 10 qemu-system-arm \
-                -cpu cortex-m0 -machine microbit \
-                -nographic -semihosting-config enable=on,target=native \
-                -kernel "deploy/mcu-session-acceptor/target/thumbv6m-none-eabi/release/mcu-session-acceptor" \
-                >/dev/null 2>&1; then
-                echo "  Q.4.microbit.slim run mcu-session-acceptor via qemu-system-arm microbit PASS"
-            else
-                echo "  Q.4.microbit.slim run mcu-session-acceptor via qemu-system-arm microbit FAIL" >&2
+            elif ! run_qemu_case \
+                "Q.4.microbit.slim run mcu-session-acceptor via qemu-system-arm microbit" \
+                cortex-m0 microbit \
+                "deploy/mcu-session-acceptor/target/thumbv6m-none-eabi/release/mcu-session-acceptor"; then
                 fail=1
             fi
         else
