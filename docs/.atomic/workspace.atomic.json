@@ -40018,6 +40018,48 @@
         "코드 LOCAL-COMMITTED UNPUSHED 예정: scripts/run-ci.sh + .github/workflows/ci.yml + .githooks/pre-push. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311pu": {
+      "decision_summary": "R311pu: 부채 A — Acceptor accept seam 비대칭 청산. establish_link 인라인 TcpListener::bind을 library accept_endpoint/accept_locator/accept_tcp seam으로(dial 3층 대칭). Tcp wired + 나머지 typed Unsupported 확장점. R311pq stated-asymmetry는 WS acceptor 구현체에 한정.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/link_pipeline.rs: accept_tcp(listen)->（TcpStream,SocketAddr) primitive 추가(dial_tcp_host 대칭). TcpListener::bind+accept one-shot(단일 peer=dial이 단일 stream 주는 것과 대칭). 'listening on'/'accepted peer' log를 establish_link서 이 primitive로 이동(round-trip test substring 보존). TcpListener import 추가.",
+        "session_open.rs: accept_locator(AnyLocator)->DialedLink(dial_locator 대칭, Tcp wired + udp/tls/ws/serial typed Unsupported 확장점=dead code 아님, dial_locator 패턴 정확 미러) + accept_endpoint(listen)->DialedLink(dial_endpoint 대칭, plan_dial 공유 파싱, cfg 없음=TLS accept 미wire라 dead param 회피). plan_dial 코멘트를 dial+accept 공유 classifier로 갱신.",
+        "wz-ap-demo/src/runner.rs: establish_link Acceptor arm이 인라인 TcpListener::bind+accept 대신 accept_endpoint(listen) 위임(Initiator의 dial_endpoint 위임과 대칭). TcpListener import 제거. R311pq STATED ASYMMETRY 코멘트 갱신: 비대칭은 demo WS/TLS acceptor 구현체에 한정(cross-impl dialer 부재로 여전히 미wire), library accept seam은 dial 대칭으로 회복.",
+        "테스트: non_tcp_listen_accept_is_unsupported_without_io(udp/ws/tls accept->Unsupported, dial 측 non_tcp_named_dial 대칭). TCP accept(bind+accept)은 Layer E ap_demo_round_trip이 establish_link 위임 경로로 실증(port-race-free unit 불가=acceptor가 bind 소유)."
+      ],
+      "verification_bullets": [
+        "근본: dial은 R311ps서 단일 library seam(dial_endpoint->dial_locator->dial_tcp)인데 accept만 establish_link 인라인 재조립=대칭/SSOT 위반. R311pq가 비대칭을 stated로 정당화했으나 그건 'demo WS acceptor 구현체=dead code' 한정; 'library accept seam 부재'는 별개 부채(R311ps 등록 A). textbook=dial_locator의 검증된 'Tcp wired + 나머지 typed Unsupported 확장점' 패턴을 accept에 미러(typed Unsupported=확장점이지 dead code 아님; WS acceptor 구현체는 여전히 미추가=R311pq 존중).",
+        "cargo check wz-runtime-tokio + wz-ap-demo(default+ws) clean; clippy --all-targets -D warnings clean(wz-ap-demo+wz-runtime-tokio); fmt clean. wz-runtime-tokio lib 274 passed(+1 accept unit, 273->274). Layer E pass=ap_demo_round_trip의 'listening on'+'accepted peer'(accept_tcp log)+SUBSCRIBER FIRED 통과=establish_link->accept_endpoint->accept_tcp TCP bind+accept 경로 e2e 실증.",
+        "exit 파이프 없이 직접 캡처(E_EXIT=0, TEST_EXIT=0). full run-ci(F+G+Q+M+Z 포함)는 push 시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pu = 부채 A(Acceptor accept_endpoint seam 부재) textbook 청산. library에 accept_endpoint/accept_locator/accept_tcp seam 추가(dial 3층 dial_endpoint/dial_locator/dial_tcp 대칭), establish_link이 dial/accept 양쪽 library 위임=대칭 회복. WS/TLS/serial accept은 typed Unsupported 확장점(verified cross-impl dialer 부재라 R63 미wire); accept_ws/accept_tls primitive는 이미 존재해 1-arm 추가로 준비됨.",
+        "남은 등록 부채(blocker 아님): (B)[MINOR] Named+reconnect 미배선 — reconnect는 numeric ParsedLocator만 보유, hostname --connect는 재연결 안 됨(데모는 reconnect 미사용; reconnect IP-only는 기존 scope). 다음=부채 B 또는 [[project-pico-parity-status]](pico WS=emscripten-only 영구 차단).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정: wz-runtime-tokio/src/{link_pipeline,session_open}.rs + wz-ap-demo/src/runner.rs. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pu: 부채 A — Acceptor accept seam 비대칭 청산. establish_link 인라인 TcpListener::bind을 library accept_endpoint/accept_locator/accept_tcp seam으로(dial 3층 대칭). Tcp wired + 나머지 typed Unsupported 확장점. R311pq stated-asymmetry는 WS acceptor 구현체에 한정.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/link_pipeline.rs: accept_tcp(listen)->（TcpStream,SocketAddr) primitive 추가(dial_tcp_host 대칭). TcpListener::bind+accept one-shot(단일 peer=dial이 단일 stream 주는 것과 대칭). 'listening on'/'accepted peer' log를 establish_link서 이 primitive로 이동(round-trip test substring 보존). TcpListener import 추가.",
+        "session_open.rs: accept_locator(AnyLocator)->DialedLink(dial_locator 대칭, Tcp wired + udp/tls/ws/serial typed Unsupported 확장점=dead code 아님, dial_locator 패턴 정확 미러) + accept_endpoint(listen)->DialedLink(dial_endpoint 대칭, plan_dial 공유 파싱, cfg 없음=TLS accept 미wire라 dead param 회피). plan_dial 코멘트를 dial+accept 공유 classifier로 갱신.",
+        "wz-ap-demo/src/runner.rs: establish_link Acceptor arm이 인라인 TcpListener::bind+accept 대신 accept_endpoint(listen) 위임(Initiator의 dial_endpoint 위임과 대칭). TcpListener import 제거. R311pq STATED ASYMMETRY 코멘트 갱신: 비대칭은 demo WS/TLS acceptor 구현체에 한정(cross-impl dialer 부재로 여전히 미wire), library accept seam은 dial 대칭으로 회복.",
+        "테스트: non_tcp_listen_accept_is_unsupported_without_io(udp/ws/tls accept->Unsupported, dial 측 non_tcp_named_dial 대칭). TCP accept(bind+accept)은 Layer E ap_demo_round_trip이 establish_link 위임 경로로 실증(port-race-free unit 불가=acceptor가 bind 소유)."
+      ],
+      "publishable_verification_bullets": [
+        "근본: dial은 R311ps서 단일 library seam(dial_endpoint->dial_locator->dial_tcp)인데 accept만 establish_link 인라인 재조립=대칭/SSOT 위반. R311pq가 비대칭을 stated로 정당화했으나 그건 'demo WS acceptor 구현체=dead code' 한정; 'library accept seam 부재'는 별개 부채(R311ps 등록 A). textbook=dial_locator의 검증된 'Tcp wired + 나머지 typed Unsupported 확장점' 패턴을 accept에 미러(typed Unsupported=확장점이지 dead code 아님; WS acceptor 구현체는 여전히 미추가=R311pq 존중).",
+        "cargo check wz-runtime-tokio + wz-ap-demo(default+ws) clean; clippy --all-targets -D warnings clean(wz-ap-demo+wz-runtime-tokio); fmt clean. wz-runtime-tokio lib 274 passed(+1 accept unit, 273->274). Layer E pass=ap_demo_round_trip의 'listening on'+'accepted peer'(accept_tcp log)+SUBSCRIBER FIRED 통과=establish_link->accept_endpoint->accept_tcp TCP bind+accept 경로 e2e 실증.",
+        "exit 파이프 없이 직접 캡처(E_EXIT=0, TEST_EXIT=0). full run-ci(F+G+Q+M+Z 포함)는 push 시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pu = 부채 A(Acceptor accept_endpoint seam 부재) textbook 청산. library에 accept_endpoint/accept_locator/accept_tcp seam 추가(dial 3층 dial_endpoint/dial_locator/dial_tcp 대칭), establish_link이 dial/accept 양쪽 library 위임=대칭 회복. WS/TLS/serial accept은 typed Unsupported 확장점(verified cross-impl dialer 부재라 R63 미wire); accept_ws/accept_tls primitive는 이미 존재해 1-arm 추가로 준비됨.",
+        "남은 등록 부채(blocker 아님): (B)[MINOR] Named+reconnect 미배선 — reconnect는 numeric ParsedLocator만 보유, hostname --connect는 재연결 안 됨(데모는 reconnect 미사용; reconnect IP-only는 기존 scope). 다음=부채 B 또는 [[project-pico-parity-status]](pico WS=emscripten-only 영구 차단).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정: wz-runtime-tokio/src/{link_pipeline,session_open}.rs + wz-ap-demo/src/runner.rs. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
