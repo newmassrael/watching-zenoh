@@ -91,42 +91,60 @@ use wz_integration_tests::common::{
     zenoh_pico_cli_binary, zenohd_binary, ChildGuard, PortReservation,
 };
 
-/// Spawn a TCP-only zenohd router on the reserved `port` and block until it is
-/// HANDSHAKE-ready. `--no-multicast-scouting` + `--rest-http-port none` keep it
-/// to a single unicast TCP listener.
+/// Spawn a zenohd router on the given `-l` listener locators and block until it
+/// is HANDSHAKE-ready. The spawn + two-stage readiness SSOT both zenohd spawn
+/// variants delegate to (R311pn — was copy-pasted across [`spawn_zenohd`] and
+/// [`spawn_zenohd_tcp_ws`]). `--no-multicast-scouting` + `--rest-http-port none`
+/// keep it to the configured unicast listeners.
 ///
 /// Two-stage readiness (R311pi — session-review structural fix). First a
-/// TCP-accept probe (`TcpStream::connect`): a captured-stderr log-wait would race
-/// zenohd's block-buffered startup flush, so the connect is the listener-up
-/// signal. But TCP-accept proves only that the KERNEL accepted the SYN — not that
-/// zenohd's transport/routing tasks are scheduled and can complete a zenoh
-/// handshake. Under load there is a cold-start window between "listener up" and
-/// "handshake-ready" that a bare TCP-accept gate leaves open. So the second stage
-/// drives a real wz client to `Established` against zenohd
-/// ([`wait_for_zenohd_handshake_ready`]) before returning — the test's foreign
-/// one-shot clients then connect to a router that has already proven it can
-/// finish a handshake.
-fn spawn_zenohd(port: u16) -> ChildGuard {
+/// TCP-accept probe on `accept_port` (`TcpStream::connect`): a captured-stderr
+/// log-wait would race zenohd's block-buffered startup flush, so the connect is
+/// the listener-up signal. But TCP-accept proves only that the KERNEL accepted
+/// the SYN — not that zenohd's transport/routing tasks are scheduled and can
+/// complete a zenoh handshake. Under load there is a cold-start window between
+/// "listener up" and "handshake-ready" that a bare TCP-accept gate leaves open.
+/// So the second stage drives a real wz client to `Established` against
+/// `handshake_probe` ([`wait_for_zenohd_handshake_ready`]) before returning —
+/// the test's foreign one-shot clients then connect to a router that has already
+/// proven it can finish a handshake.
+fn spawn_zenohd_listeners(
+    listeners: &[String],
+    accept_port: u16,
+    handshake_probe: &str,
+) -> ChildGuard {
+    let mut command = Command::new(zenohd_binary());
+    for locator in listeners {
+        command.arg("-l").arg(locator);
+    }
+    command
+        .arg("--no-multicast-scouting")
+        .arg("--rest-http-port")
+        .arg("none")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let guard = ChildGuard::wrap(
         "zenohd (reference router)",
-        Command::new(zenohd_binary())
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{port}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn zenohd"),
+        command.spawn().expect("spawn zenohd"),
     );
     assert!(
-        wait_for_tcp_accept(port, Duration::from_secs(10)),
-        "zenohd did not start accepting on tcp/127.0.0.1:{port} within 10s"
+        wait_for_tcp_accept(accept_port, Duration::from_secs(10)),
+        "zenohd did not start accepting on 127.0.0.1:{accept_port} within 10s"
     );
     // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz session.
-    wait_for_zenohd_handshake_ready(port);
+    wait_for_zenohd_handshake_ready(handshake_probe);
     guard
+}
+
+/// Spawn a TCP-only zenohd router on the reserved `port` and block until it is
+/// HANDSHAKE-ready. A single unicast TCP listener; both readiness gates target
+/// the one port. See [`spawn_zenohd_listeners`] for the readiness rationale.
+fn spawn_zenohd(port: u16) -> ChildGuard {
+    spawn_zenohd_listeners(
+        &[format!("tcp/127.0.0.1:{port}")],
+        port,
+        &format!("127.0.0.1:{port}"),
+    )
 }
 
 /// Spawn a zenohd router listening on BOTH `tcp/` (for pico TCP clients) and
@@ -138,59 +156,48 @@ fn spawn_zenohd(port: u16) -> ChildGuard {
 /// wz's WS transport against the REFERENCE zenoh `ws/` link, not against pico's
 /// (which cannot exist natively).
 ///
-/// Readiness mirrors [`spawn_zenohd`]: each listener is TCP-accept probed (a
-/// `ws/` listener rides TCP, so its accept succeeding proves the listener is up),
-/// then [`wait_for_zenohd_handshake_ready`] drives a real wz session to
-/// `Established` over the `tcp/` port — proving zenohd's transport/routing tasks
-/// are scheduled. The `ws/` listener is the same process, so it is handshake-
-/// ready once the router is.
+/// R311pn — readiness gives BOTH listeners a POSITIVE probe (was: tcp-accept on
+/// `tcp_port` + a tcp handshake, with the `ws_port` only INFERRED from the
+/// co-bound router being ready — the session-review ② finding). The TCP-accept
+/// gate targets `tcp_port` (pico dials it), and the handshake-ready probe drives
+/// a real wz client to `Established` over `ws/127.0.0.1:{ws_port}` — a genuine
+/// RFC6455 upgrade + zenoh handshake that exercises the WS listener directly.
+///
+/// This is SAFE where R311pk's removed raw-TCP poke was not: that poke was a
+/// bare `TcpStream::connect`-then-close with NO upgrade, so zenoh's serial
+/// single-worker `zenoh-link-ws` accept task hit a tungstenite EOF, returned
+/// `Err`, and self-deleted — wedging every later `ws/` dial. A REAL WS client
+/// completes the upgrade, so the accept task stays alive (the legs then dial WS
+/// 20/20). A completed handshake is exactly the positive WS-readiness signal the
+/// raw poke could never be.
 fn spawn_zenohd_tcp_ws(tcp_port: u16, ws_port: u16) -> ChildGuard {
-    let guard = ChildGuard::wrap(
-        "zenohd (reference router, tcp+ws)",
-        Command::new(zenohd_binary())
-            .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{tcp_port}"))
-            .arg("-l")
-            .arg(format!("ws/127.0.0.1:{ws_port}"))
-            .arg("--no-multicast-scouting")
-            .arg("--rest-http-port")
-            .arg("none")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn zenohd (tcp+ws)"),
-    );
-    assert!(
-        wait_for_tcp_accept(tcp_port, Duration::from_secs(10)),
-        "zenohd did not start accepting on tcp/127.0.0.1:{tcp_port} within 10s"
-    );
-    // R311pk — do NOT raw-TCP-probe the `ws_port`. zenoh's `zenoh-link-ws`
-    // listener expects an RFC6455 WebSocket upgrade on every accepted TCP
-    // connection; a bare `TcpStream::connect`-then-close (exactly what
-    // `wait_for_tcp_accept` does) wedges the listener's accept path so the NEXT
-    // real WS dial gets `Connection refused` (empirically confirmed: one raw
-    // poke is enough to break the subsequent `wz --connect ws/...`). The `ws/`
-    // listener is bound at startup ALONGSIDE `tcp/` — one process, both in
-    // zenohd's "Zenoh can be reached at ..." startup banner — so the
-    // TCP-accept gate above plus the handshake-ready probe below already prove
-    // the router (and therefore its co-bound WS listener) is up. The leg's own
-    // `wz --connect ws/...` is the real WS-handshake readiness signal.
-    //
-    // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz
-    // session over TCP; the WS listener on the same router is ready with it.
-    wait_for_zenohd_handshake_ready(tcp_port);
-    guard
+    spawn_zenohd_listeners(
+        &[
+            format!("tcp/127.0.0.1:{tcp_port}"),
+            format!("ws/127.0.0.1:{ws_port}"),
+        ],
+        tcp_port,
+        &format!("ws/127.0.0.1:{ws_port}"),
+    )
 }
 
 /// R311pi — confirm zenohd can complete a zenoh handshake by driving a throwaway
-/// wz client to `Established` against it, then dropping the client. The wz open is
-/// deterministic (in-process, no fork — the `wz_client_reaches_established` path),
-/// so this probe is reliable even when the foreign one-shot clients' opens
-/// occasionally need a retry under load. This is the readiness signal
-/// `spawn_zenohd` returns on (replacing the bare TCP-accept gate). The probe
-/// publishes to a dedicated keyexpr no test subscribes to, and is killed before
-/// `spawn_zenohd` returns, so it leaves no routing state behind.
-fn wait_for_zenohd_handshake_ready(port: u16) {
+/// wz client to `Established` against the `connect` locator, then dropping the
+/// client. The wz open is deterministic (in-process, no fork — the
+/// `wz_client_reaches_established` path), so this probe is reliable even when the
+/// foreign one-shot clients' opens occasionally need a retry under load. This is
+/// the readiness signal [`spawn_zenohd_listeners`] returns on (replacing the bare
+/// TCP-accept gate). The probe publishes to a dedicated keyexpr no test
+/// subscribes to, and is killed before the spawn returns, so it leaves no routing
+/// state behind.
+///
+/// R311pn — `connect` is a full `--connect` locator (not a bare port), so the
+/// probe can target a `ws/...` listener with a REAL WS handshake (the TCP-only
+/// variant passes `127.0.0.1:{port}`, the dual variant `ws/127.0.0.1:{ws_port}`).
+/// A `ws/...` probe needs the `connect-ws` feature in the demo binary (the Layer
+/// Z build enables it); without it the demo surfaces a typed `Unsupported` and
+/// this probe fails loudly rather than passing on a TCP fallback.
+fn wait_for_zenohd_handshake_ready(connect: &str) {
     let demo = wz_ap_demo_binary();
     let probe_stderr = tempfile::tempfile().expect("tempfile for readiness probe stderr");
     let probe_writer = probe_stderr
@@ -201,7 +208,7 @@ fn wait_for_zenohd_handshake_ready(port: u16) {
         "wz-ap-demo (zenohd handshake readiness probe)",
         Command::new(&demo)
             .arg("--connect")
-            .arg(format!("127.0.0.1:{port}"))
+            .arg(connect)
             .arg("--publish")
             .arg("wz/zenohd/readiness-probe")
             .arg("--value")
@@ -222,8 +229,9 @@ fn wait_for_zenohd_handshake_ready(port: u16) {
     if ready.is_err() {
         let cap = read_captured(&mut probe_reader);
         panic!(
-            "zenohd readiness probe (wz client) did not reach Established within 10s — \
-             zenohd is up on TCP but not handshake-ready.\n--- probe stderr ---\n{cap}"
+            "zenohd readiness probe (wz client) did not reach Established within 10s \
+             over {connect:?} — zenohd is up but not handshake-ready.\n\
+             --- probe stderr ---\n{cap}"
         );
     }
 }
