@@ -39494,6 +39494,48 @@
         "4라운드 후 종합 full run-ci(M+G+Z) 예정. push 미동의=LOCAL까지. 누적 미푸시=R311pc~ph."
       ]
     },
+    "Round 311pi": {
+      "decision_summary": "R311pi: 세션리뷰 후속 3/4 — R311pf 구조 결함. spawn_zenohd에 Established-level readiness probe(throwaway wz client) 추가로 TCP-accept vs handshake-ready cold-start 갭 구조적 폐쇄 + R311pf 주석 과신→정직한 가설로 정정(zenohd stall 미배제) + category error(z_get=propagation≠open transient) 정정. retry=client-side starvation 안전망 재서술.",
+      "changes_bullets": [
+        "세션리뷰(root-cause-analyst 에이전트) R311pf 구조 결함 수정. (구조) spawn_zenohd readiness가 wait_for_tcp_accept(커널 SYN accept만 증명, handshake-ready 미증명)였음→cold-start 갭(listener up vs transport/routing 스케줄됨)을 bare TCP-accept gate가 미커버. 수정=wait_for_zenohd_handshake_ready 추가: throwaway wz-ap-demo --connect --publish wz/zenohd/readiness-probe가 \"session Established\" 도달 확인 후 spawn_zenohd 반환(wz open=in-process 결정적, foreign one-shot 미해당이라 신뢰적; probe는 전용 keyexpr라 테스트 무간섭, 반환 전 kill=routing state 무잔존). zenohd cold-start 갭=구조적 폐쇄(더 결정적). (주석 정직화) spawn_subscribed_zsub R311pf 주석 과신 정정: 실패 synthetic 재현 못 함→원인은 가설(verified fact 아님), zenohd handshake STALL 미배제(증상이 pico측 z_open()<0이라 clean zenohd log+pico timeout 구별불가). R311pi가 actionable 부분(cold-start) 구조적 폐쇄, retry는 client-side starvation 안전망으로 재서술. (category error 정정) 종전 \"same reasoning covers inline z_get retry\"는 틀림→z_get/z_get_liveliness/wz--query retry는 route/declaration propagation 창(이해됨)이지 open transient 아님=별개 현상 명시.",
+        "변경 파일: wz-integration-tests/tests/wz_to_zenohd_router.rs(spawn_zenohd doc+probe call / wait_for_zenohd_handshake_ready helper / spawn_subscribed_zsub R311pf 주석 재작성). 프로덕션 코드 변경 0(테스트 하니스만)."
+      ],
+      "verification_bullets": [
+        "세션리뷰 root-cause-analyst 에이전트가 R311pf를 \"재현 실패의 합리화\"로 강하게 반박: [BETTER-FIX-EXISTS] Established-level readiness probe가 bare TCP-accept보다 결정적인데 null 결과로 기각 / [OVERCONFIDENT] starvation 귀속 과신 / [WEAK-EVIDENCE] zenohd \"no reject\"는 pico측 증상과 무관(handshake stall 미배제) / category error(z_get=propagation). 모두 타당 판정 후 수정.",
+        "구조 수정 검증: spawn_zenohd가 wz client를 Established까지 구동 후 반환. clippy(wz-integration-tests --tests EXIT 0)/fmt(--check EXIT 0) clean. Layer Z 7-leg 직렬 7/7 + 전체 스위트 10/10 zero-flake([[feedback-no-flaky-ever]]; readiness probe가 critical path 추가됐으나 wz open 결정적이라 무flake, probe overhead ~0.4s/스위트). probe가 전용 keyexpr(wz/zenohd/readiness-probe, 어느 테스트도 미구독)+반환 전 kill이라 테스트 무간섭 확인(7/7).",
+        "주석 정직화: 과신(\"is scheduler starvation\"/\"probe would not help\")→가설+zenohd stall 미배제 명시. category error(z_get retry=propagation≠open transient) 정정.",
+        "프로덕션 코드 변경 0(테스트 하니스). 종합 회귀는 4라운드 후 full run-ci로 확인 예정.",
+        "atomic: ledger entries 768->769, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pi = 세션리뷰 후속 3/4 — R311pf 구조 결함. root-cause-analyst가 \"retry 문서화로 smell 회피, readiness probe를 null 결과로 기각\" 반박→spawn_zenohd에 Established-level readiness probe(throwaway wz client) 추가로 cold-start 갭 구조적 폐쇄(더 결정적) + R311pf 주석 과신→정직한 가설로, category error(z_get=propagation) 정정. retry는 client-side starvation 안전망으로 재서술(probe가 zenohd-side 갭 닫음=상호보완, 둘 다 정직). 메타: 독립 리뷰가 R311pf(\"retry 정당, 코드변경 0\")의 약한 결론을 더 결정적 구조로 교정.",
+        "남은 remediation 4/4(사용자 \"전부\"): R311pj=R311pe build-zenohd.sh — Path A도 --release(profile 수렴: 종전 debug-checkout vs release-crates.io=host-의존 오라클 정체성) + 발견 version==1.5.0 fail-fast assert(cache drift 차단) + 결정성 overclaim 문구 완화(toolchain 선provision 필요 명시). 그 후 종합 full run-ci(M+G+Z).",
+        "push 미동의=LOCAL까지. 누적 미푸시=R311pc~pi."
+      ],
+      "publishable_decision_summary": "R311pi: 세션리뷰 후속 3/4 — R311pf 구조 결함. spawn_zenohd에 Established-level readiness probe(throwaway wz client) 추가로 TCP-accept vs handshake-ready cold-start 갭 구조적 폐쇄 + R311pf 주석 과신→정직한 가설로 정정(zenohd stall 미배제) + category error(z_get=propagation≠open transient) 정정. retry=client-side starvation 안전망 재서술.",
+      "publishable_changes_bullets": [
+        "세션리뷰(root-cause-analyst 에이전트) R311pf 구조 결함 수정. (구조) spawn_zenohd readiness가 wait_for_tcp_accept(커널 SYN accept만 증명, handshake-ready 미증명)였음→cold-start 갭(listener up vs transport/routing 스케줄됨)을 bare TCP-accept gate가 미커버. 수정=wait_for_zenohd_handshake_ready 추가: throwaway wz-ap-demo --connect --publish wz/zenohd/readiness-probe가 \"session Established\" 도달 확인 후 spawn_zenohd 반환(wz open=in-process 결정적, foreign one-shot 미해당이라 신뢰적; probe는 전용 keyexpr라 테스트 무간섭, 반환 전 kill=routing state 무잔존). zenohd cold-start 갭=구조적 폐쇄(더 결정적). (주석 정직화) spawn_subscribed_zsub R311pf 주석 과신 정정: 실패 synthetic 재현 못 함→원인은 가설(verified fact 아님), zenohd handshake STALL 미배제(증상이 pico측 z_open()<0이라 clean zenohd log+pico timeout 구별불가). R311pi가 actionable 부분(cold-start) 구조적 폐쇄, retry는 client-side starvation 안전망으로 재서술. (category error 정정) 종전 \"same reasoning covers inline z_get retry\"는 틀림→z_get/z_get_liveliness/wz--query retry는 route/declaration propagation 창(이해됨)이지 open transient 아님=별개 현상 명시.",
+        "변경 파일: wz-integration-tests/tests/wz_to_zenohd_router.rs(spawn_zenohd doc+probe call / wait_for_zenohd_handshake_ready helper / spawn_subscribed_zsub R311pf 주석 재작성). 프로덕션 코드 변경 0(테스트 하니스만)."
+      ],
+      "publishable_verification_bullets": [
+        "세션리뷰 root-cause-analyst 에이전트가 R311pf를 \"재현 실패의 합리화\"로 강하게 반박: [BETTER-FIX-EXISTS] Established-level readiness probe가 bare TCP-accept보다 결정적인데 null 결과로 기각 / [OVERCONFIDENT] starvation 귀속 과신 / [WEAK-EVIDENCE] zenohd \"no reject\"는 pico측 증상과 무관(handshake stall 미배제) / category error(z_get=propagation). 모두 타당 판정 후 수정.",
+        "구조 수정 검증: spawn_zenohd가 wz client를 Established까지 구동 후 반환. clippy(wz-integration-tests --tests EXIT 0)/fmt(--check EXIT 0) clean. Layer Z 7-leg 직렬 7/7 + 전체 스위트 10/10 zero-flake([[feedback-no-flaky-ever]]; readiness probe가 critical path 추가됐으나 wz open 결정적이라 무flake, probe overhead ~0.4s/스위트). probe가 전용 keyexpr(wz/zenohd/readiness-probe, 어느 테스트도 미구독)+반환 전 kill이라 테스트 무간섭 확인(7/7).",
+        "주석 정직화: 과신(\"is scheduler starvation\"/\"probe would not help\")→가설+zenohd stall 미배제 명시. category error(z_get retry=propagation≠open transient) 정정.",
+        "프로덕션 코드 변경 0(테스트 하니스). 종합 회귀는 4라운드 후 full run-ci로 확인 예정.",
+        "atomic: ledger entries 768->769, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pi = 세션리뷰 후속 3/4 — R311pf 구조 결함. root-cause-analyst가 \"retry 문서화로 smell 회피, readiness probe를 null 결과로 기각\" 반박→spawn_zenohd에 Established-level readiness probe(throwaway wz client) 추가로 cold-start 갭 구조적 폐쇄(더 결정적) + R311pf 주석 과신→정직한 가설로, category error(z_get=propagation) 정정. retry는 client-side starvation 안전망으로 재서술(probe가 zenohd-side 갭 닫음=상호보완, 둘 다 정직). 메타: 독립 리뷰가 R311pf(\"retry 정당, 코드변경 0\")의 약한 결론을 더 결정적 구조로 교정.",
+        "남은 remediation 4/4(사용자 \"전부\"): R311pj=R311pe build-zenohd.sh — Path A도 --release(profile 수렴: 종전 debug-checkout vs release-crates.io=host-의존 오라클 정체성) + 발견 version==1.5.0 fail-fast assert(cache drift 차단) + 결정성 overclaim 문구 완화(toolchain 선provision 필요 명시). 그 후 종합 full run-ci(M+G+Z).",
+        "push 미동의=LOCAL까지. 누적 미푸시=R311pc~pi."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
