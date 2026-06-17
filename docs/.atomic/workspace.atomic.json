@@ -39536,6 +39536,48 @@
         "push 미동의=LOCAL까지. 누적 미푸시=R311pc~pi."
       ]
     },
+    "Round 311pj": {
+      "decision_summary": "R311pj: 세션리뷰 후속 4/4 — R311pe build-zenohd.sh 구조 결함. Path A도 cargo build --release(종전 debug-checkout vs release-crates.io=host-의존 오라클 정체성 수렴) + checkout version==ZENOHD_VERSION fail-fast assert(cache drift 차단) + 결정성 overclaim 문구 완화. 양 소스 동일 release zenohd v1.5.0.",
+      "changes_bullets": [
+        "세션리뷰(architecture+hack/smell 에이전트) R311pe build-zenohd.sh 구조 결함 수정. [SMELL major] 한 스크립트가 두 다른 바이너리 생산: Path A=checkout DEBUG / Path B=crates.io RELEASE→wire-parity 기준 오라클이 host-의존 정체성(한 머신서 재현되는 flake가 다른 머신선 안 됨). [SMELL] Path A가 아무 zenoh checkout glob+version 미검증(cache가 다른 zenoh 해결 시 조용히 다른 버전 빌드) + 결정성 overclaim(toolchain 선provision 필요한데 \"fresh clone no manual step\"). 수정: (D1) Path A도 cargo build --release(SRC_BIN BUILD_DIR/release/zenohd)→양 소스 동일 release profile=단일 오라클 정체성. (D2) checkout version==ZENOHD_VERSION fail-fast assert(불일치 시 exit 1 + ZENOHD_VERSION override/ZENOHD_FORCE_CRATES_IO 안내)=cache drift 차단. (D3) 헤더 문구 완화: \"both produce SAME release binary, ONE identity\" + \"no manual ZENOHD step(given pinned toolchain)\" + \"Reproducibility caveat: pinned toolchain must already be installed\". 변경 파일: scripts/build-zenohd.sh 단독. 프로덕션/테스트 코드 무변경(build infra만)."
+      ],
+      "verification_bullets": [
+        "세션리뷰 architecture 에이전트 [SMELL major]=two-binaries(debug-checkout vs release-crates.io) host-의존 오라클 정체성 / hack-smell 에이전트 [SMELL]=Path A version 미검증 drift. 둘 다 타당 판정 후 수정.",
+        "shellcheck 0.8.0 clean. Path A(default, checkout 존재) 실행: version assert 통과(checkout 1.5.0==ZENOHD_VERSION 1.5.0), cargo +1.85.0 build -p zenohd --release 2m15s→\"zenohd v1.5.0 built with rustc 1.85.0\" release 바이너리(15MB, 종전 debug 99MB 대비)=양 path 동일 release profile 수렴. Layer Z 7-leg 직렬 7/7(release checkout 바이너리로 interop 전체 구동, R311pi readiness probe 포함). version assert 동작 확인(1.5.0 일치=통과; 불일치 시 exit 1 경로는 코드 검토).",
+        "양 path 정체성 수렴 확정: Path B(R311pe서 crates.io release로 Layer Z 7/7 검증됨) + Path A(이번 release로 7/7)=둘 다 release zenohd v1.5.0 산출.",
+        "변경=scripts/build-zenohd.sh 단독(build infra). 종합 회귀는 4라운드 후 full run-ci로 확인 예정.",
+        "atomic: ledger entries 769->770, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pj = 세션리뷰 후속 4/4(마지막) — R311pe build-zenohd.sh 구조 결함. architecture+hack/smell 에이전트가 \"한 스크립트 두 다른 바이너리(debug-checkout vs release-crates.io)=host-의존 오라클 정체성\" + \"Path A version 미검증 drift\" + \"결정성 overclaim\" 적발→Path A도 --release(profile 수렴=단일 정체성) + version==1.5.0 fail-fast assert + 정직한 문구로 청산.",
+        "세션리뷰 remediation 4라운드 전부 완료(R311pg=R311pc false-green/dup, R311ph=R311pd leg-7 ordering/retry, R311pi=R311pf readiness probe/주석, R311pj=R311pe build 수렴). 사용자 \"전부(구조 포함)\" 범위 이행.",
+        "다음: 4라운드 종합 full run-ci(M+G+Z) 1회로 전체 회귀 확인(특히 R311pi readiness probe가 모든 Layer Z leg에, R311ph history flag가 wz-ap-demo에 영향). 그 후 push 동의 대기.",
+        "메타: 독립 4-에이전트 세션리뷰가 \"20/20 zero-flake textbook\" self-assessment를 뒤집어 false-green 1 + flake 2 + 구조 smell 2 + 과신 1 적발→전부 수정. R311my/mz/pb 패턴 반복=독립 자가감사 가치 재확인. push 미동의=LOCAL까지. 누적 미푸시=R311pc~pj."
+      ],
+      "publishable_decision_summary": "R311pj: 세션리뷰 후속 4/4 — R311pe build-zenohd.sh 구조 결함. Path A도 cargo build --release(종전 debug-checkout vs release-crates.io=host-의존 오라클 정체성 수렴) + checkout version==ZENOHD_VERSION fail-fast assert(cache drift 차단) + 결정성 overclaim 문구 완화. 양 소스 동일 release zenohd v1.5.0.",
+      "publishable_changes_bullets": [
+        "세션리뷰(architecture+hack/smell 에이전트) R311pe build-zenohd.sh 구조 결함 수정. [SMELL major] 한 스크립트가 두 다른 바이너리 생산: Path A=checkout DEBUG / Path B=crates.io RELEASE→wire-parity 기준 오라클이 host-의존 정체성(한 머신서 재현되는 flake가 다른 머신선 안 됨). [SMELL] Path A가 아무 zenoh checkout glob+version 미검증(cache가 다른 zenoh 해결 시 조용히 다른 버전 빌드) + 결정성 overclaim(toolchain 선provision 필요한데 \"fresh clone no manual step\"). 수정: (D1) Path A도 cargo build --release(SRC_BIN BUILD_DIR/release/zenohd)→양 소스 동일 release profile=단일 오라클 정체성. (D2) checkout version==ZENOHD_VERSION fail-fast assert(불일치 시 exit 1 + ZENOHD_VERSION override/ZENOHD_FORCE_CRATES_IO 안내)=cache drift 차단. (D3) 헤더 문구 완화: \"both produce SAME release binary, ONE identity\" + \"no manual ZENOHD step(given pinned toolchain)\" + \"Reproducibility caveat: pinned toolchain must already be installed\". 변경 파일: scripts/build-zenohd.sh 단독. 프로덕션/테스트 코드 무변경(build infra만)."
+      ],
+      "publishable_verification_bullets": [
+        "세션리뷰 architecture 에이전트 [SMELL major]=two-binaries(debug-checkout vs release-crates.io) host-의존 오라클 정체성 / hack-smell 에이전트 [SMELL]=Path A version 미검증 drift. 둘 다 타당 판정 후 수정.",
+        "shellcheck 0.8.0 clean. Path A(default, checkout 존재) 실행: version assert 통과(checkout 1.5.0==ZENOHD_VERSION 1.5.0), cargo +1.85.0 build -p zenohd --release 2m15s→\"zenohd v1.5.0 built with rustc 1.85.0\" release 바이너리(15MB, 종전 debug 99MB 대비)=양 path 동일 release profile 수렴. Layer Z 7-leg 직렬 7/7(release checkout 바이너리로 interop 전체 구동, R311pi readiness probe 포함). version assert 동작 확인(1.5.0 일치=통과; 불일치 시 exit 1 경로는 코드 검토).",
+        "양 path 정체성 수렴 확정: Path B(R311pe서 crates.io release로 Layer Z 7/7 검증됨) + Path A(이번 release로 7/7)=둘 다 release zenohd v1.5.0 산출.",
+        "변경=scripts/build-zenohd.sh 단독(build infra). 종합 회귀는 4라운드 후 full run-ci로 확인 예정.",
+        "atomic: ledger entries 769->770, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pj = 세션리뷰 후속 4/4(마지막) — R311pe build-zenohd.sh 구조 결함. architecture+hack/smell 에이전트가 \"한 스크립트 두 다른 바이너리(debug-checkout vs release-crates.io)=host-의존 오라클 정체성\" + \"Path A version 미검증 drift\" + \"결정성 overclaim\" 적발→Path A도 --release(profile 수렴=단일 정체성) + version==1.5.0 fail-fast assert + 정직한 문구로 청산.",
+        "세션리뷰 remediation 4라운드 전부 완료(R311pg=R311pc false-green/dup, R311ph=R311pd leg-7 ordering/retry, R311pi=R311pf readiness probe/주석, R311pj=R311pe build 수렴). 사용자 \"전부(구조 포함)\" 범위 이행.",
+        "다음: 4라운드 종합 full run-ci(M+G+Z) 1회로 전체 회귀 확인(특히 R311pi readiness probe가 모든 Layer Z leg에, R311ph history flag가 wz-ap-demo에 영향). 그 후 push 동의 대기.",
+        "메타: 독립 4-에이전트 세션리뷰가 \"20/20 zero-flake textbook\" self-assessment를 뒤집어 false-green 1 + flake 2 + 구조 smell 2 + 과신 1 적발→전부 수정. R311my/mz/pb 패턴 반복=독립 자가감사 가치 재확인. push 미동의=LOCAL까지. 누적 미푸시=R311pc~pj."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
