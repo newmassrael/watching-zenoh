@@ -52,7 +52,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
+    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -295,10 +296,13 @@ fn wz_reconnect_initiator_round_trip_against_wz_acceptor() {
         Duration::from_secs(10),
     );
 
-    // The reconnect initiator is long-lived (runs until killed); both children
-    // are torn down here regardless of the round-trip outcome.
-    let _ = initiator_guard.child_mut().kill();
-    let _ = initiator_guard.child_mut().wait();
+    // R311py — tear the reconnect initiator down with SIGTERM (graceful) so it
+    // runs shutdown_signal() -> the drive fork's select!-None arm ->
+    // ReconnectingSession::into_teardown() -> the R292 teardown chain. A raw
+    // SIGKILL (Child::kill) would bypass that entire graceful path, leaving the
+    // reconnect arm's into_teardown — added in this same track — uncovered. The
+    // acceptor is a one-shot session; SIGKILL is fine for it.
+    graceful_terminate(initiator_guard.child_mut(), Duration::from_secs(5));
     let _ = acceptor_guard.child_mut().kill();
     let _ = acceptor_guard.child_mut().wait();
 
@@ -330,5 +334,84 @@ fn wz_reconnect_initiator_round_trip_against_wz_acceptor() {
         fired_text.contains(publish_key),
         "wz acceptor SUBSCRIBER FIRED line lacks the publish keyexpr '{publish_key}'.\n\
          --- acceptor stderr ---\n{fired_text}"
+    );
+
+    // R311py — pin the GRACEFUL teardown path: SIGTERM (via graceful_terminate)
+    // must drive the reconnect supervisor's shutdown-cancel arm +
+    // ReconnectingSession::into_teardown(). This is the only automated coverage
+    // of into_teardown; a SIGKILL teardown (the prior shape) would never emit
+    // this line.
+    assert!(
+        initiator_captured.contains("reconnect session cancelled by graceful-shutdown signal"),
+        "wz-ap-demo --reconnect did not log the graceful-shutdown teardown line under SIGTERM — \
+         the shutdown-cancel + into_teardown path was not exercised.\n\
+         --- initiator stderr ---\n{initiator_captured}"
+    );
+}
+
+/// R311py — `--reconnect` is rejected with `--listen` (an acceptor has no client
+/// reopen-task model; pico Z_FEATURE_AUTO_RECONNECT is client-only). The arg
+/// guard (main.rs) exits 2 BEFORE any networking. Pins the negative path that
+/// the type-level unrepresentability (`Role::Initiator{reconnect}`) cannot catch
+/// — the flag is parsed before the role is constructed. No sockets, deterministic.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored"]
+fn wz_reconnect_with_listen_is_rejected() {
+    let demo = wz_ap_demo_binary();
+    let out = Command::new(&demo)
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--reconnect")
+        .arg("--key")
+        .arg("demo/**")
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("spawn wz-ap-demo --listen --reconnect");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--listen + --reconnect must exit 2 (usage error).\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--reconnect requires --connect"),
+        "rejection stderr lacks the '--reconnect requires --connect' diagnostic.\n\
+         --- stderr ---\n{stderr}"
+    );
+}
+
+/// R311py — a `serial/...` `--connect` with `--reconnect` is rejected as NOT
+/// reconnectable. `reconnect_endpoint` parses the locator (the serial leaf is
+/// ungated, so this needs no serial backend), narrows it via
+/// `ReconnectLocator::try_from`, and surfaces `OpenError::NotReconnectable`;
+/// `run_demo` returns `Err` → exit 1. The rejection is at parse/narrow time,
+/// BEFORE any dial — no sockets, no tty, deterministic. Pins the binary's wiring
+/// of the typed `NotReconnectable` boundary (unit-tested in the library; this is
+/// its end-to-end surfacing through the demo).
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored"]
+fn wz_reconnect_serial_connect_is_not_reconnectable() {
+    let demo = wz_ap_demo_binary();
+    let out = Command::new(&demo)
+        .arg("--connect")
+        .arg("serial//dev/ttyUSB0#baudrate=115200")
+        .arg("--reconnect")
+        .arg("--publish")
+        .arg("demo/x")
+        .arg("--value")
+        .arg("y")
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("spawn wz-ap-demo --connect serial --reconnect");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "serial --connect --reconnect must exit 1 (open error).\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("reconnect session open failed"),
+        "rejection stderr lacks the 'reconnect session open failed' diagnostic \
+         (expected the NotReconnectable surfacing).\n--- stderr ---\n{stderr}"
     );
 }

@@ -64,7 +64,7 @@ use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::reconnect::{
-    open_session_with_reconnect, ReconnectDriveOutcome, ReconnectLocator, ReconnectPolicy,
+    reconnect_endpoint, ReconnectDriveOutcome, ReconnectPolicy, ReconnectTeardown,
     ReconnectingSession,
 };
 use wz::runtime_tokio::reply_sink::ReplyKind;
@@ -78,8 +78,8 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
-    plan_endpoint, DialConfig, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
+    DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -584,6 +584,32 @@ impl DriveSource {
     }
 }
 
+/// R311py — race a drive future against the graceful-shutdown signal: the SSOT
+/// for the demo's shutdown-cancel semantics, shared by both [`DriveSource`]
+/// arms (the open fork's `actions()` SSOT extended to the drive fork's cancel
+/// shell). Returns `Some(outcome)` when the drive terminated on its own, `None`
+/// when shutdown cancelled it — dropping the drive future mid-iteration, which
+/// is cancel-safe on teardown: the engine/driver live in the caller's frame
+/// (not the future), and on shutdown the link is torn down so a dropped partial
+/// read loses nothing. `noun` names the drive in the cancel log. The writer
+/// task stays alive past cancellation so the R292 teardown can drain Close +
+/// UndeclToken + tail frames.
+async fn race_against_shutdown<O>(
+    drive: impl std::future::Future<Output = O>,
+    noun: &str,
+) -> Option<O> {
+    tokio::select! {
+        o = drive => Some(o),
+        _ = shutdown_signal() => {
+            log::info!(
+                "wz-ap-demo: shutdown signal received; halting {noun} \
+                 (writer task remains alive to drain Close + UndeclToken + tail frames)"
+            );
+            None
+        }
+    }
+}
+
 /// Demo orchestration entry point. Invoked by `fn main` after argv
 /// parsing has been validated and the spec bundles
 /// ([`DeclareEmitSpec`], [`RemoteLogSpec`], [`ReplyConsumerSpec`],
@@ -654,24 +680,17 @@ pub(crate) async fn run_demo(
             connect,
             reconnect: true,
         } => {
-            let locator = ReconnectLocator::try_from(plan_endpoint(connect).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("wz-ap-demo: malformed --connect {connect:?}: {e:?}"),
-                )
-            })?)
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("wz-ap-demo: --connect {connect:?} is not reconnectable: {e:?}"),
-                )
-            })?;
+            // R311py — one library seam owns the `--connect` string →
+            // ReconnectingSession orchestration (parse + narrow-to-reconnectable
+            // + supervised open), symmetric with the one-shot `dial_endpoint`.
             // Long-lived lifecycle: per-connection cap = None (run until the
             // shutdown signal cancels the drive future); pico-default retry
             // policy. Cert-free transports take DialConfig::default; a `tls/`
-            // reconnect would thread its config here (out of demo scope).
-            let recon = open_session_with_reconnect(
-                locator,
+            // reconnect would thread its config here (out of demo scope). A
+            // non-reconnectable `--connect` (serial/...) surfaces as a typed
+            // OpenError::NotReconnectable inside the {e:?}.
+            let recon = reconnect_endpoint(
+                connect,
                 params,
                 DialConfig::default(),
                 session_clock,
@@ -963,8 +982,8 @@ pub(crate) async fn run_demo(
                 ..
             } = *opened;
             let mut driver = inbound;
-            let outcome = tokio::select! {
-                o = drive_session_until_terminal(
+            let outcome = race_against_shutdown(
+                drive_session_until_terminal(
                     &mut driver,
                     &actions,
                     &mut engine,
@@ -972,15 +991,10 @@ pub(crate) async fn run_demo(
                     &session_clock,
                     &session_timeouts,
                     &mut dispatch,
-                ) => Some(o),
-                _ = shutdown_signal() => {
-                    log::info!(
-                        "wz-ap-demo: shutdown signal received; halting drive_session \
-                         (writer task remains alive to drain Close + UndeclToken + tail frames)"
-                    );
-                    None
-                }
-            };
+                ),
+                "drive_session",
+            )
+            .await;
             match &outcome {
                 Some(o) => log::info!("wz-ap-demo: session ended: {o:?}"),
                 None => log::info!(
@@ -997,17 +1011,16 @@ pub(crate) async fn run_demo(
         // select!-drop, the same cancel path the one-shot uses). A `GaveUp`
         // (reconnect retries exhausted) also surfaces here as a natural end.
         DriveSource::Reconnect(mut recon) => {
+            // `stop` stays false: the demo's reconnect lifecycle ends only via
+            // the shutdown select!-drop (below) or a GaveUp; it never sets the
+            // stop flag (that is the in-process caller-stop path the library
+            // tests exercise). per-connection cap = None = long-lived.
             let stop = AtomicBool::new(false);
-            let outcome = tokio::select! {
-                o = recon.drive(&session_timeouts, &stop, None, &mut dispatch) => Some(o),
-                _ = shutdown_signal() => {
-                    log::info!(
-                        "wz-ap-demo: shutdown signal received; halting reconnect supervisor \
-                         (writer task remains alive to drain Close + UndeclToken + tail frames)"
-                    );
-                    None
-                }
-            };
+            let outcome = race_against_shutdown(
+                recon.drive(&session_timeouts, &stop, None, &mut dispatch),
+                "reconnect supervisor",
+            )
+            .await;
             match &outcome {
                 Some(ReconnectDriveOutcome::Stopped) => {
                     log::info!("wz-ap-demo: reconnect drive stopped")
@@ -1024,10 +1037,17 @@ pub(crate) async fn run_demo(
                     recon.reconnects()
                 ),
             }
-            // R311pw — unwrap the supervisor into the teardown handles (the
-            // surviving actions clone is dropped here; the current connection's
-            // writer feeds the R292 chain identically to the one-shot path).
-            let (_actions, writer_handle) = recon.into_teardown();
+            // R311py — unwrap the supervisor into the teardown handles. `actions`
+            // is discarded (we already hold our own clone from
+            // drive_src.actions() above); the last-established connection's
+            // writer feeds the R292 chain. On a GaveUp the returned writer is the
+            // prior, already-closed link — a degenerate (immediately-returning)
+            // drain, correct for an abandoned session with no live peer (see
+            // ReconnectingSession::into_teardown).
+            let ReconnectTeardown {
+                actions: _,
+                writer_handle,
+            } = recon.into_teardown();
             (outcome.is_none(), writer_handle)
         }
     };

@@ -65,7 +65,8 @@ use crate::session_glue::{
     SessionLinkActions,
 };
 use crate::session_open::{
-    dial_locator, initiator_open, wire_dialed_link, DialConfig, OpenError, OpenedSession,
+    dial_locator, initiator_open, plan_endpoint, wire_dialed_link, DialConfig, OpenError,
+    OpenedSession,
 };
 
 /// Reconnect retry policy. The defaults are the pico literals:
@@ -142,6 +143,17 @@ pub struct ReconnectingSession {
     reconnects: u32,
 }
 
+/// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
+/// surviving [`SessionLinkActions`] bundle (the last sink clone — the writer
+/// task's sender lives behind it) and the writer-task join handle of the last
+/// established connection. A named struct rather than a bare tuple so a caller
+/// that only needs one field (e.g. discards `actions` because it already holds
+/// its own clone) reads self-documenting at the destructure.
+pub struct ReconnectTeardown {
+    pub actions: Arc<SessionLinkActions>,
+    pub writer_handle: TokioJoinHandle<()>,
+}
+
 impl ReconnectingSession {
     /// The shared actions bundle — the surviving half across reconnects.
     /// Callers build their `Session` / handles over this exactly as with a
@@ -157,14 +169,15 @@ impl ReconnectingSession {
     }
 
     /// R311pw — consume the supervisor into the graceful-teardown handles a
-    /// caller needs AFTER [`Self::drive`] returns
-    /// [`Stopped`](ReconnectDriveOutcome::Stopped): the surviving
-    /// [`SessionLinkActions`] bundle and the CURRENT connection's writer-task
-    /// join handle. The caller feeds these into its existing teardown sequence
-    /// (drop liveliness tokens → enqueue `Close` → drop the last actions clone
-    /// → drain the writer), identical to the one-shot
+    /// caller needs after [`Self::drive`] returns: the surviving
+    /// [`SessionLinkActions`] bundle and the writer-task join handle of the
+    /// LAST ESTABLISHED connection. The caller feeds these into its existing
+    /// teardown sequence (drop liveliness tokens → enqueue `Close` → drop the
+    /// last actions clone → drain the writer), identical to the one-shot
     /// [`connect_and_open_session`] path — the supervisor adds no teardown
-    /// shape of its own, it just unwraps what it encapsulated.
+    /// shape of its own, it just unwraps what it encapsulated. (R311py — returns
+    /// a named [`ReconnectTeardown`] rather than a bare tuple so the call site
+    /// reads self-documenting.)
     ///
     /// Dropping the supervisor here releases the dead connection's engine +
     /// inbound half and the supervisor's own [`SwappableLink`] handle; the
@@ -173,14 +186,28 @@ impl ReconnectingSession {
     /// "the last sender by construction" and the writer drains to exit exactly
     /// as the non-supervised path's teardown does.
     ///
+    /// CONTRACT on a [`GaveUp`](ReconnectDriveOutcome::GaveUp) outcome (R311py,
+    /// review finding): `writer_handle` is the writer of the last connection
+    /// that reached Established — NOT the half-open link a failed reopen left in
+    /// the [`SwappableLink`]. That is correct, not a mismatch: a reopen that
+    /// dialed but failed the handshake never reached Established, so it carries
+    /// no session and has no graceful `Close` to drain — its orphaned writer
+    /// task exits when the final `actions` drop releases the swapped-in sink.
+    /// The teardown's writer-drain on a `GaveUp` is therefore a degenerate
+    /// (immediately-returning) drain over the prior, already-closed link, which
+    /// is the correct behaviour for an abandoned session with no live peer.
+    ///
     /// [`connect_and_open_session`]: crate::session_open::connect_and_open_session
-    pub fn into_teardown(self) -> (Arc<SessionLinkActions>, TokioJoinHandle<()>) {
+    pub fn into_teardown(self) -> ReconnectTeardown {
         // Destructure so the engine + inbound half + swappable drop here; keep
-        // the surviving actions bundle + the live writer-task handle.
+        // the surviving actions bundle + the last-established writer-task handle.
         let ReconnectingSession {
             actions, opened, ..
         } = self;
-        (actions, opened.writer_handle)
+        ReconnectTeardown {
+            actions,
+            writer_handle: opened.writer_handle,
+        }
     }
 
     /// One reopen attempt: re-dial the retained locator, swap the fresh
@@ -412,4 +439,48 @@ pub async fn open_session_with_reconnect(
         opened,
         reconnects: 0,
     })
+}
+
+/// R311py — open a reconnect-supervised session from a `--connect`-style
+/// STRING. The reconnect-path sibling of [`dial_endpoint`] (string → dialed
+/// link) and [`accept_endpoint`] (string → accepted link): the single library
+/// home of "turn a `--connect` string into a [`ReconnectingSession`]". It
+/// reuses the SHARED [`plan_endpoint`] classifier (scheme-less `tcp/`
+/// convenience included) so the dial / accept / reconnect paths parse a connect
+/// string by ONE set of rules, then narrows the parsed [`AnyLocator`] to the
+/// reconnectable subset via [`ReconnectLocator::try_from`] — a `serial/...`
+/// endpoint is rejected as [`OpenError::NotReconnectable`] (typed, not a string;
+/// pico `Z_FEATURE_AUTO_RECONNECT` is IP-family only), a malformed string as
+/// [`OpenError::BadLocator`].
+///
+/// A consumer (e.g. wz-ap-demo's `--reconnect` Initiator) calls THIS rather than
+/// hand-assembling `plan_endpoint` + `try_from` + [`open_session_with_reconnect`]
+/// — the orchestration is library-owned, symmetric with the dial/accept seams,
+/// so `plan_endpoint` need not be public.
+///
+/// [`dial_endpoint`]: crate::session_open::dial_endpoint
+/// [`accept_endpoint`]: crate::session_open::accept_endpoint
+/// [`AnyLocator`]: wz_session_core::locator::AnyLocator
+pub async fn reconnect_endpoint(
+    connect: &str,
+    params: SessionInitParams,
+    dial_config: DialConfig,
+    clock: TokioTime,
+    policy: ReconnectPolicy,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<ReconnectingSession, OpenError> {
+    let locator =
+        ReconnectLocator::try_from(plan_endpoint(connect).map_err(OpenError::BadLocator)?)
+            .map_err(OpenError::NotReconnectable)?;
+    open_session_with_reconnect(
+        locator,
+        params,
+        dial_config,
+        clock,
+        policy,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
 }

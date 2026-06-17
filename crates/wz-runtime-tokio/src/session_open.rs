@@ -364,13 +364,15 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
 /// open_session_at contract split — both paths now route the same parsed
 /// `AnyLocator` through `dial_locator`.
 ///
-/// R311pw — `pub` so a reconnect-supervised caller reuses this exact classifier
-/// (scheme-less `tcp/` convenience included) to turn a `--connect` string into
-/// an [`AnyLocator`], then narrows to a
-/// [`ReconnectLocator`](wz_session_core::reconnect::ReconnectLocator) via its
-/// `TryFrom` — instead of duplicating the desugar. The dial path
-/// ([`dial_endpoint`]) and the reconnect path share ONE connect-string parse.
-pub fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
+/// R311py — `pub(crate)`: the connect/listen-string classifier SSOT, shared by
+/// the THREE in-crate string→session seams ([`dial_endpoint`] → dialed link,
+/// [`accept_endpoint`] → accepted link, [`crate::reconnect::reconnect_endpoint`]
+/// → reconnect supervisor). It is NOT part of the public surface — a consumer
+/// (e.g. wz-ap-demo) calls one of those orchestration seams, never the raw
+/// classifier (R311pw briefly made it `pub` so the demo could hand-assemble the
+/// reconnect orchestration; R311py moved that orchestration into the library
+/// `reconnect_endpoint` seam, restoring the dial/accept seam discipline).
+pub(crate) fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
     match parse_any_locator(connect) {
         Ok(locator) => Ok(locator),
         // Scheme-less `HOST:PORT` = implicit `tcp` (the `--connect` convenience;
@@ -679,6 +681,15 @@ pub enum OpenError {
     /// diagnostic (docs/scouting-fsm.md §2.4.3 reason #1). Only returned by
     /// [`open_session_static`].
     NoReachableLocator,
+    /// R311py — the `--connect`-style string parsed to a valid locator that is
+    /// NOT a reconnect target (a `serial/...` endpoint: no client reopen-task
+    /// model, pico parity). Only returned by
+    /// [`crate::reconnect::reconnect_endpoint`], which narrows the parsed
+    /// [`AnyLocator`] to the reconnectable subset; the typed
+    /// [`NotReconnectable`](wz_session_core::reconnect::NotReconnectable) is
+    /// carried through rather than flattened to a string so the caller can
+    /// distinguish it from a malformed-locator [`Self::BadLocator`].
+    NotReconnectable(wz_session_core::reconnect::NotReconnectable),
 }
 
 /// Build the session action layer + SCE engine for an open path, ready for
