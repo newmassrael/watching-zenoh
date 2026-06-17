@@ -62,7 +62,9 @@ pub type TcpReadDriver = StreamReadDriver<OwnedReadHalf>;
 /// deferring DNS to the std layer. [`dial_tcp_host`] is the DNS-capable
 /// sibling for a `host:port` STRING.
 pub async fn dial_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
-    TcpStream::connect(addr).await
+    let stream = TcpStream::connect(addr).await?;
+    configure_tcp_stream(&stream);
+    Ok(stream)
 }
 
 /// Dial an outbound TCP connection to a `host:port` STRING — the DNS-capable
@@ -78,7 +80,9 @@ pub async fn dial_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
 /// for a scheme-less `--connect HOST:PORT` and a `tcp/HOST` with a DNS
 /// hostname; the numeric [`dial_tcp`] handles a parsed `tcp/` locator.
 pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
-    TcpStream::connect(host).await
+    let stream = TcpStream::connect(host).await?;
+    configure_tcp_stream(&stream);
+    Ok(stream)
 }
 
 /// Bind a TCP listener on a NUMERIC endpoint — the accept-side "listen half"
@@ -114,7 +118,42 @@ pub async fn bind_tcp_host(host: &str) -> io::Result<TcpListener> {
 /// accept-side mirror of the single [`TcpStream`] [`dial_tcp`] returns. A
 /// multi-peer router composes its own accept loop over [`bind_tcp`] above this.
 pub async fn accept_tcp(listener: TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
-    listener.accept().await
+    let (stream, peer) = listener.accept().await?;
+    configure_tcp_stream(&stream);
+    Ok((stream, peer))
+}
+
+/// Apply zenoh's per-link TCP socket tuning to a freshly connected / accepted
+/// stream: `TCP_NODELAY` on — disable Nagle so every wz frame ships at once,
+/// the low-latency posture zenoh sets on every link (upstream
+/// `LinkUnicastTcp::new`, `io/zenoh-links/zenoh-link-tcp/src/unicast.rs:55`).
+/// `new` is zenoh's SHARED dial + accept link constructor, so both `dial_tcp` /
+/// `dial_tcp_host` and `accept_tcp` route their stream through here — the SSOT
+/// for wz's per-link TCP tuning.
+///
+/// Best-effort, matching zenoh (which `tracing::warn!`s and continues): a
+/// nodelay-set failure is logged and the link proceeds (Nagle-on is a latency
+/// degradation, not a correctness failure). The warning is the one log this
+/// otherwise-quiet primitive emits, and only on the abnormal path.
+///
+/// `SO_LINGER` is DELIBERATELY NOT set, diverging from zenoh's `set_linger(10s)`
+/// (unicast.rs:65): `tokio::net::TcpStream::set_linger` is deprecated because
+/// SO_LINGER makes `close()` BLOCK the worker thread on drop — a footgun in an
+/// async runtime. zenoh's synchronous socket layer can afford it; wz on tokio
+/// must not blindly mirror it. The graceful-close intent (drain tail bytes
+/// before teardown) is already served at the application layer by wz-ap-demo's
+/// R292 teardown chain (writer drain + Close frame), and a normal non-linger
+/// close still lets the kernel background-deliver queued bytes, so nothing is
+/// lost — only the thread-blocking drop is avoided.
+///
+/// Distinct from R311pz's reverted `SO_REUSEADDR`: tokio's `TcpStream` does NOT
+/// set nodelay by default, so this closes a REAL behavioral parity gap — and a
+/// non-vacuous one (a unit reads `nodelay()` back and distinguishes
+/// set-from-unset precisely because tokio's default is off).
+fn configure_tcp_stream(stream: &TcpStream) {
+    if let Err(e) = stream.set_nodelay(true) {
+        log::warn!("wz tcp: set_nodelay(true) failed (Nagle stays on): {e}");
+    }
 }
 
 /// Split a connected [`TcpStream`] into the cooperating drivers the session
@@ -171,5 +210,31 @@ mod tests {
         client.await.expect("client task").expect("client connect");
         assert_eq!(peer.ip(), addr.ip(), "accepted peer is the loopback client");
         assert!(server.peer_addr().is_ok(), "server stream is connected");
+    }
+
+    /// `dial_tcp` + `accept_tcp` set `TCP_NODELAY` on both ends (zenoh per-link
+    /// parity, `configure_tcp_stream`). NON-vacuous: tokio's `TcpStream`
+    /// defaults to nodelay=OFF, so reading `nodelay()` back distinguishes
+    /// set-from-unset — the R311pz lesson (its `SO_REUSEADDR` pin was vacuous
+    /// because tokio already set that on Unix; nodelay is genuinely wz-set).
+    /// `SO_LINGER` is intentionally NOT set (tokio deprecates it; see
+    /// `configure_tcp_stream`), so there is nothing to assert for it.
+    #[tokio::test]
+    async fn dialed_and_accepted_streams_have_nodelay() {
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let client = tokio::spawn(async move { dial_tcp(addr).await });
+        let (server, _peer) = accept_tcp(listener).await.expect("accept one peer");
+        let client_stream = client.await.expect("client task").expect("client dial");
+        assert!(
+            client_stream.nodelay().expect("read nodelay (dial side)"),
+            "dial_tcp must set TCP_NODELAY (tokio default is off)"
+        );
+        assert!(
+            server.nodelay().expect("read nodelay (accept side)"),
+            "accept_tcp must set TCP_NODELAY (tokio default is off)"
+        );
     }
 }
