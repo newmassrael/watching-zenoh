@@ -136,7 +136,7 @@ struct SpawnedTasks {
 /// via `dial_locator`; a scheme-less `HOST:PORT` or a `tcp/HOST` DNS
 /// hostname dials via the std resolver — so a hostname behaves the same
 /// with or without the explicit `tcp/` scheme. A `ws/...` locator opens
-/// a WebSocket session only when the `connect-ws` feature forwards
+/// a WebSocket session only when the `ws` feature forwards
 /// `transport-link-ws`; without it the seam surfaces a typed
 /// `Unsupported` io error rather than mis-dialing.
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {

@@ -82,8 +82,7 @@ pub mod common {
             let guard = port_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-            let port = listener.local_addr().expect("local_addr").port();
+            let (listener, port) = Self::bind_ephemeral();
             drop(listener);
             Self {
                 port,
@@ -111,10 +110,12 @@ pub mod common {
             let guard = port_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let l1 = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0 (#1)");
-            let l2 = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0 (#2)");
-            let p1 = l1.local_addr().expect("local_addr #1").port();
-            let p2 = l2.local_addr().expect("local_addr #2").port();
+            // Bind BOTH before dropping either: holding l1 while binding l2 is
+            // what guarantees p1 != p2 (a bind-then-drop helper called twice
+            // could hand back the same port). The shared bind/extract is
+            // [`bind_ephemeral`]; the drop timing is the per-caller part.
+            let (l1, p1) = Self::bind_ephemeral();
+            let (l2, p2) = Self::bind_ephemeral();
             drop(l1);
             drop(l2);
             (
@@ -124,6 +125,17 @@ pub mod common {
                 },
                 p2,
             )
+        }
+
+        /// Bind a fresh ephemeral loopback listener and return it WITH its
+        /// port — the bind/extract the single and dual reservations share
+        /// (R311pp). The caller owns the drop: [`pick`](Self::pick) drops at
+        /// once, [`pick_pair`](Self::pick_pair) holds both bound until two
+        /// distinct ports are read (so the OS cannot re-hand the first).
+        fn bind_ephemeral() -> (TcpListener, u16) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+            let port = listener.local_addr().expect("local_addr").port();
+            (listener, port)
         }
     }
 

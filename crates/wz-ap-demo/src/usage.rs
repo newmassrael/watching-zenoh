@@ -38,7 +38,7 @@ pub(crate) fn print_usage() {
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
-    eprintln!("    --connect <addr>         initiator mode (e.g. 127.0.0.1:7447)");
+    eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT)");
     eprintln!("    --key <keyexpr>          DECLARE subscriber keyexpr (e.g. demo/example)");
     eprintln!("    --publish <keyexpr>      publisher keyexpr literal (e.g. demo/test)");
     eprintln!("    --value <text>           publisher payload text (required with --publish)");

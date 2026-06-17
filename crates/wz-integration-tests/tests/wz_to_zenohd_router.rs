@@ -66,7 +66,7 @@
 //!      counterpart of leg 1). Deterministic, pico-free: pins that wz's WS
 //!      transport (`ws_pipeline`, RFC6455, datagram-flow) completes the zenoh
 //!      4-way handshake against the reference router's `ws/` listener. wz dials
-//!      `--connect ws/...` (the `wz-ap-demo` binary built with the `connect-ws`
+//!      `--connect ws/...` (the `wz-ap-demo` binary built with the `ws`
 //!      feature); `spawn_zenohd_tcp_ws` dual-listens tcp+ws on one router.
 //!   9. `wz_publish_routes_through_zenohd_to_pico_zsub_over_ws` — wz's Put over a
 //!      WebSocket link routes through zenohd to a zenoh-pico `z_sub` on TCP (the
@@ -194,7 +194,7 @@ fn spawn_zenohd_tcp_ws(tcp_port: u16, ws_port: u16) -> ChildGuard {
 /// R311pn — `connect` is a full `--connect` locator (not a bare port), so the
 /// probe can target a `ws/...` listener with a REAL WS handshake (the TCP-only
 /// variant passes `127.0.0.1:{port}`, the dual variant `ws/127.0.0.1:{ws_port}`).
-/// A `ws/...` probe needs the `connect-ws` feature in the demo binary (the Layer
+/// A `ws/...` probe needs the `ws` feature in the demo binary (the Layer
 /// Z build enables it); without it the demo surfaces a typed `Unsupported` and
 /// this probe fails loudly rather than passing on a TCP fallback.
 fn wait_for_zenohd_handshake_ready(connect: &str) {
@@ -1181,7 +1181,7 @@ fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
 /// (`ws_pipeline`, RFC6455, datagram-flow) completes the zenoh 4-way handshake
 /// against the reference router's `ws/` listener. wz dials with
 /// `--connect ws/127.0.0.1:{ws_port}` (the `wz-ap-demo` binary built with the
-/// `connect-ws` feature, R311pk); zenohd also listens on `tcp/` for its
+/// `ws` feature, R311pk); zenohd also listens on `tcp/` for its
 /// handshake-readiness probe. Mirrors
 /// [`wz_client_reaches_established_against_zenohd`] one transport over.
 #[test]

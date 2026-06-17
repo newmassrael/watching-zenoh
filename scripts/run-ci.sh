@@ -2879,10 +2879,11 @@ layer_z_zenohd_interop() {
         return 0
     fi
     # wz-ap-demo is the wz client (--connect zenohd); build it like Layer E,
-    # plus `connect-ws` (R311pk) so the WS legs 8/9 can dial `ws/...`. The
-    # feature is additive — the TCP legs 1-7 dial through the same binary
-    # unchanged; pico dials TCP (zenoh-pico has no native WS).
-    (cd crates && cargo build -p wz-ap-demo --features connect-ws --quiet) || return 1
+    # plus the `ws` feature (R311pk; renamed from `connect-ws` in R311pp) so
+    # the WS legs 8/9 can dial `ws/...`. The feature is additive — the TCP
+    # legs 1-7 dial through the same binary unchanged; pico dials TCP
+    # (zenoh-pico has no native WS).
+    (cd crates && cargo build -p wz-ap-demo --features ws --quiet) || return 1
     # R311ou — `--test-threads=1`: serialize the zenohd interop tests. Each
     # spawns a full external zenohd router + its wz-ap-demo / z_pub / z_sub
     # children; run concurrently (cargo's default), 3 zenohd instances + clients

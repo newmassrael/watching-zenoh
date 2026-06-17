@@ -27,11 +27,13 @@
 //   --listen   server-side TCP bind address (acceptor mode;
 //              e.g. 127.0.0.1:7447). Binds + accepts one peer,
 //              then drives the session FSM with `InboundStart`.
-//   --connect  remote TCP peer address (initiator mode;
-//              e.g. 127.0.0.1:7447). Dials the peer, then drives
-//              the session FSM with `OutboundStart` + `LinkOpened`
-//              so wz emits the first `InitSyn` and walks the
-//              4-way handshake from the dialing side.
+//   --connect  remote peer locator (initiator mode). A bare
+//              HOST:PORT (e.g. 127.0.0.1:7447) dials TCP; a
+//              scheme'd tcp/HOST:PORT or ws/HOST:PORT dials that
+//              transport (ws/ needs the `ws` build feature). Then
+//              drives the session FSM with `OutboundStart` +
+//              `LinkOpened` so wz emits the first `InitSyn` and
+//              walks the 4-way handshake from the dialing side.
 //              Exactly one of --listen / --connect is required;
 //              the two modes are mutually exclusive (a single
 //              demo invocation acts as either acceptor OR
