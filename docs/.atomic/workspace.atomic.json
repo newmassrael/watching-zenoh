@@ -39808,6 +39808,48 @@
         "코드 LOCAL-COMMITTED UNPUSHED(po=0806995, pn=f656b6c/a98a6a9, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
       ]
     },
+    "Round 311pp": {
+      "decision_summary": "R311pp: 부채⑤(pick_pair 중복)+⑥(--connect help stale)+⑦(connect-ws 네이밍) 수정. PortReservation::bind_ephemeral dedup; --connect help에 tcp/|ws/ locator 문서화; connect-ws→ws 리네임+최소 closure(locator-ws).",
+      "changes_bullets": [
+        "⑤ wz-integration-tests/src/lib.rs: PortReservation::bind_ephemeral()->(TcpListener,u16) 헬퍼 추가; pick/pick_pair가 공유 bind/extract에 위임(drop 타이밍만 per-caller; pick_pair는 둘 다 bind 후 drop=distinct port 보장 유지).",
+        "⑥ wz-ap-demo main.rs/usage.rs: --connect help가 bare HOST:PORT(=TCP)+scheme'd tcp/|ws/HOST:PORT 형식 문서화(기존 \"remote TCP peer address\"/\"e.g. 127.0.0.1:7447\"만 표기, ws/ 미문서였음).",
+        "⑦ wz-ap-demo Cargo.toml: connect-ws→ws 리네임 + ws=[\"wz/locator-ws\"] 최소 closure(locator-ws가 transport-link-ws를 이미 pull=transport-link-ws 중복 제거). run-ci.sh --features ws. doc 참조(runner.rs/wz_to_zenohd_router.rs 3곳) 갱신. connect- prefix가 Initiator-only bake=⑧ Acceptor asymmetry와 충돌→중립 ws."
+      ],
+      "verification_bullets": [
+        "빌드: wz-ap-demo default(ws 없음) + ws + wz-integration-tests. clippy --all-targets -D warnings clean(default + ws 양쪽). fmt --check clean.",
+        "Layer Z 9/9 pass(run-ci가 --features ws로 빌드=리네임+최소 closure 정합 검증). WS leg-8/9 20/20 zero-flake.",
+        "frozen-ledger 준수: R311pk/pl의 connect-ws 언급은 frozen이라 미수정(forward-only 리네임; live code/config만 변경).",
+        "종합 full run-ci(M+G+Z)는 마지막 부채(⑧/R311pq) 수정 후 push 전 1회 수행 예정."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pp = 세션리뷰 부채 ⑤(pick_pair 중복)+⑥(--connect help stale)+⑦(connect-ws 네이밍) MINOR 묶음 수정.",
+        "남은 부채: ⑧Acceptor WS stated asymmetry doc(R311pq, 마지막). 라이브러리 accept_ws 존재+ws_e2e.rs 검증이나 데모 Acceptor arm은 scheme-blind TCP-only; wz --listen ws/ 검증 dialer 부재(pico WS native 불가)→symmetric 구현=dead-code→stated asymmetry doc로 정직화(코드 추가 아님). 후 Layer Z 9/9+WS 20/20+full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(pp=f7abcdb, po=0806995/90b98df, pn=f656b6c/a98a6a9, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ],
+      "publishable_decision_summary": "R311pp: 부채⑤(pick_pair 중복)+⑥(--connect help stale)+⑦(connect-ws 네이밍) 수정. PortReservation::bind_ephemeral dedup; --connect help에 tcp/|ws/ locator 문서화; connect-ws→ws 리네임+최소 closure(locator-ws).",
+      "publishable_changes_bullets": [
+        "⑤ wz-integration-tests/src/lib.rs: PortReservation::bind_ephemeral()->(TcpListener,u16) 헬퍼 추가; pick/pick_pair가 공유 bind/extract에 위임(drop 타이밍만 per-caller; pick_pair는 둘 다 bind 후 drop=distinct port 보장 유지).",
+        "⑥ wz-ap-demo main.rs/usage.rs: --connect help가 bare HOST:PORT(=TCP)+scheme'd tcp/|ws/HOST:PORT 형식 문서화(기존 \"remote TCP peer address\"/\"e.g. 127.0.0.1:7447\"만 표기, ws/ 미문서였음).",
+        "⑦ wz-ap-demo Cargo.toml: connect-ws→ws 리네임 + ws=[\"wz/locator-ws\"] 최소 closure(locator-ws가 transport-link-ws를 이미 pull=transport-link-ws 중복 제거). run-ci.sh --features ws. doc 참조(runner.rs/wz_to_zenohd_router.rs 3곳) 갱신. connect- prefix가 Initiator-only bake=⑧ Acceptor asymmetry와 충돌→중립 ws."
+      ],
+      "publishable_verification_bullets": [
+        "빌드: wz-ap-demo default(ws 없음) + ws + wz-integration-tests. clippy --all-targets -D warnings clean(default + ws 양쪽). fmt --check clean.",
+        "Layer Z 9/9 pass(run-ci가 --features ws로 빌드=리네임+최소 closure 정합 검증). WS leg-8/9 20/20 zero-flake.",
+        "frozen-ledger 준수: R311pk/pl의 connect-ws 언급은 frozen이라 미수정(forward-only 리네임; live code/config만 변경).",
+        "종합 full run-ci(M+G+Z)는 마지막 부채(⑧/R311pq) 수정 후 push 전 1회 수행 예정."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pp = 세션리뷰 부채 ⑤(pick_pair 중복)+⑥(--connect help stale)+⑦(connect-ws 네이밍) MINOR 묶음 수정.",
+        "남은 부채: ⑧Acceptor WS stated asymmetry doc(R311pq, 마지막). 라이브러리 accept_ws 존재+ws_e2e.rs 검증이나 데모 Acceptor arm은 scheme-blind TCP-only; wz --listen ws/ 검증 dialer 부재(pico WS native 불가)→symmetric 구현=dead-code→stated asymmetry doc로 정직화(코드 추가 아님). 후 Layer Z 9/9+WS 20/20+full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(pp=f7abcdb, po=0806995/90b98df, pn=f656b6c/a98a6a9, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
