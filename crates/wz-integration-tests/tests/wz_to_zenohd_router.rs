@@ -77,14 +77,21 @@ use wz_integration_tests::common::{
     zenoh_pico_cli_binary, zenohd_binary, ChildGuard, PortReservation,
 };
 
-/// Spawn a TCP-only zenohd router on the reserved `port` and block until its
-/// listener accepts (a probe `TcpStream::connect`). `--no-multicast-scouting` +
-/// `--rest-http-port none` keep it to a single unicast TCP listener.
+/// Spawn a TCP-only zenohd router on the reserved `port` and block until it is
+/// HANDSHAKE-ready. `--no-multicast-scouting` + `--rest-http-port none` keep it
+/// to a single unicast TCP listener.
 ///
-/// Readiness is a TCP-accept probe, NOT a stderr-log wait: zenohd block-buffers
-/// its startup logs to a non-TTY fd, so a captured-stderr `wait_for_substring`
-/// races the flush and times out with an empty capture (verified). A successful
-/// connect proves the listener is up — the signal the clients actually need.
+/// Two-stage readiness (R311pi — session-review structural fix). First a
+/// TCP-accept probe (`TcpStream::connect`): a captured-stderr log-wait would race
+/// zenohd's block-buffered startup flush, so the connect is the listener-up
+/// signal. But TCP-accept proves only that the KERNEL accepted the SYN — not that
+/// zenohd's transport/routing tasks are scheduled and can complete a zenoh
+/// handshake. Under load there is a cold-start window between "listener up" and
+/// "handshake-ready" that a bare TCP-accept gate leaves open. So the second stage
+/// drives a real wz client to `Established` against zenohd
+/// ([`wait_for_zenohd_handshake_ready`]) before returning — the test's foreign
+/// one-shot clients then connect to a router that has already proven it can
+/// finish a handshake.
 fn spawn_zenohd(port: u16) -> ChildGuard {
     let guard = ChildGuard::wrap(
         "zenohd (reference router)",
@@ -103,7 +110,55 @@ fn spawn_zenohd(port: u16) -> ChildGuard {
         wait_for_tcp_accept(port, Duration::from_secs(10)),
         "zenohd did not start accepting on tcp/127.0.0.1:{port} within 10s"
     );
+    // R311pi — close the TCP-accept-vs-handshake-ready gap with a real wz session.
+    wait_for_zenohd_handshake_ready(port);
     guard
+}
+
+/// R311pi — confirm zenohd can complete a zenoh handshake by driving a throwaway
+/// wz client to `Established` against it, then dropping the client. The wz open is
+/// deterministic (in-process, no fork — the `wz_client_reaches_established` path),
+/// so this probe is reliable even when the foreign one-shot clients' opens
+/// occasionally need a retry under load. This is the readiness signal
+/// `spawn_zenohd` returns on (replacing the bare TCP-accept gate). The probe
+/// publishes to a dedicated keyexpr no test subscribes to, and is killed before
+/// `spawn_zenohd` returns, so it leaves no routing state behind.
+fn wait_for_zenohd_handshake_ready(port: u16) {
+    let demo = wz_ap_demo_binary();
+    let probe_stderr = tempfile::tempfile().expect("tempfile for readiness probe stderr");
+    let probe_writer = probe_stderr
+        .try_clone()
+        .expect("dup readiness probe stderr handle");
+    let mut probe_reader = probe_stderr;
+    let mut probe = ChildGuard::wrap(
+        "wz-ap-demo (zenohd handshake readiness probe)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--publish")
+            .arg("wz/zenohd/readiness-probe")
+            .arg("--value")
+            .arg("ready")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(probe_writer))
+            .spawn()
+            .expect("spawn zenohd readiness probe"),
+    );
+    let ready = wait_for_substring(
+        &mut probe_reader,
+        "session Established",
+        Duration::from_secs(10),
+    );
+    let _ = probe.child_mut().kill();
+    let _ = probe.child_mut().wait();
+    if ready.is_err() {
+        let cap = read_captured(&mut probe_reader);
+        panic!(
+            "zenohd readiness probe (wz client) did not reach Established within 10s — \
+             zenohd is up on TCP but not handshake-ready.\n--- probe stderr ---\n{cap}"
+        );
+    }
 }
 
 /// Spawn a zenoh-pico `z_sub` against zenohd and return it once its session is
@@ -117,17 +172,23 @@ fn spawn_zenohd(port: u16) -> ChildGuard {
 /// keeps the data-plane assertion zero-flake. Returns the subscribed child + its
 /// stdout reader for the `Received` wait.
 ///
-/// R311pf — root cause investigated empirically (debt ② closure): zenohd accepts
-/// the TCP at once and is patient (open_timeout = accept_timeout = 10s), never
-/// rejecting or timing out a handshake across 200+ opens under up to 5x CPU
-/// oversubscription, so a zenohd accept-readiness gap is ruled out (a stronger
-/// `spawn_zenohd` probe would not help); pico's open is likewise starvation-robust
-/// (0 synthetic failures even with 3 zenohd starting under load). The residual
-/// transient is scheduler starvation of the handshake window under the specific
-/// full-run-ci profile (concurrent rustc memory/IO + multiple zenohd), where
-/// retrying a foreign one-shot that cannot self-retry is the correct robustness —
-/// the retry is justified, not a masked defect. The same reasoning covers
-/// `spawn_publishing_zpub` and the inline `z_get` retry below.
+/// R311pf/R311pi — why the retry, honestly. The pico open occasionally fails
+/// under full-run-ci load and was NOT reproduced synthetically (~200+ opens under
+/// up to 5x CPU oversubscription, including 3 zenohd starting under load, produced
+/// zero failures), so the exact mechanism is a HYPOTHESIS, not a verified fact:
+/// scheduler starvation of the handshake window under the specific full-run-ci
+/// profile (concurrent rustc memory/IO + multiple zenohd) is the most likely
+/// candidate, but a zenohd handshake STALL is not excludable — the symptom is
+/// reported on the pico side (`z_open() < 0`), where a clean zenohd log plus a
+/// pico-side client timeout would look identical. R311pi closes the most
+/// actionable part STRUCTURALLY: `spawn_zenohd` now drives a real wz handshake to
+/// `Established` before returning, so the zenohd cold-start window is gated out,
+/// and this retry is left as the client-side-starvation safety net for a foreign
+/// one-shot that cannot self-retry. `spawn_publishing_zpub` shares this exact
+/// open-transient retry. (The `z_get` / `z_get_liveliness` / `wz --query` retries
+/// below are a DIFFERENT, well-understood concern — the route/declaration
+/// propagation window — NOT this open transient; they are not the same phenomenon
+/// and do not share this root-cause story.)
 fn spawn_subscribed_zsub(z_sub: &Path, sub_key: &str, endpoint: &str) -> (ChildGuard, File) {
     const ATTEMPTS: usize = 6;
     for attempt in 1..=ATTEMPTS {
