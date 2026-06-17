@@ -21,8 +21,8 @@ pub mod common {
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
     use std::net::{Ipv4Addr, TcpListener};
-    use std::path::PathBuf;
-    use std::process::Child;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -497,6 +497,43 @@ pub mod common {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    /// Spawn a `wz-ap-demo` acceptor (`--listen <addr> --key <key>`), routing
+    /// the child's stderr into the caller-supplied `stderr` tempfile, and wrap
+    /// it in a panic-safe [`ChildGuard`]. Returns the guard plus the readable
+    /// capture handle (the same `stderr` File, ready for [`wait_for_substring`]).
+    ///
+    /// R311q1 — lifted from three near-verbatim per-test copies (the
+    /// `wz_initiator_*` round-trip tests + the sever-reconnect e2e all spawn an
+    /// identical `--listen --key` acceptor differing only in the keyexpr and
+    /// label), the same per-test-duplicate consolidation R305 applied to
+    /// [`graceful_terminate`]. The `tempfile` crate is a dev-dependency (unusable
+    /// from this lib target), so the caller owns the `tempfile::tempfile()` call
+    /// and passes the File in; the helper owns the dup-for-child + Command shape
+    /// + ChildGuard wrapping, which is the duplicated bulk.
+    pub fn spawn_listen_acceptor(
+        demo: &Path,
+        addr: &str,
+        key: &str,
+        label: &str,
+        stderr: File,
+    ) -> (ChildGuard, File) {
+        let writer = stderr.try_clone().expect("dup acceptor stderr handle");
+        let guard = ChildGuard::wrap(
+            label.to_string(),
+            Command::new(demo)
+                .arg("--listen")
+                .arg(addr)
+                .arg("--key")
+                .arg(key)
+                .env("RUST_LOG", "info")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(writer))
+                .spawn()
+                .expect("spawn wz-ap-demo --listen acceptor"),
+        );
+        (guard, stderr)
     }
 
     /// Send `SIGTERM` to `child` via `kill -TERM <pid>`, then poll

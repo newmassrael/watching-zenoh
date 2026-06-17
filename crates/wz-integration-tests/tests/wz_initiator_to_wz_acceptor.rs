@@ -48,14 +48,12 @@
 //!   7. SIGTERM both children + surface captured stderr on any
 //!      failed assertion.
 
-use std::fs::File;
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
-    PortReservation,
+    graceful_terminate, read_captured, spawn_listen_acceptor, wait_for_substring,
+    wz_ap_demo_binary, ChildGuard, PortReservation,
 };
 
 #[test]
@@ -70,24 +68,12 @@ fn wz_initiator_round_trip_against_wz_acceptor() {
     let publish_value = "hello-from-wz-initiator";
 
     // ── wz acceptor (R121d listener + subscriber) ─────────────
-    let acceptor_stderr = tempfile::tempfile().expect("tempfile for acceptor stderr");
-    let acceptor_stderr_writer = acceptor_stderr
-        .try_clone()
-        .expect("dup acceptor stderr handle");
-    let mut acceptor_stderr_reader = acceptor_stderr;
-
-    let mut acceptor_guard = ChildGuard::wrap(
+    let (mut acceptor_guard, mut acceptor_stderr_reader) = spawn_listen_acceptor(
+        &demo,
+        &addr,
+        sub_pattern,
         "wz-ap-demo acceptor (--listen)",
-        Command::new(&demo)
-            .arg("--listen")
-            .arg(&addr)
-            .arg("--key")
-            .arg(sub_pattern)
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(acceptor_stderr_writer))
-            .spawn()
-            .expect("spawn wz-ap-demo --listen"),
+        tempfile::tempfile().expect("tempfile for acceptor stderr"),
     );
 
     let bound = wait_for_substring(
@@ -224,24 +210,12 @@ fn wz_reconnect_initiator_round_trip_against_wz_acceptor() {
     let publish_value = "hello-from-reconnect-initiator";
 
     // ── wz acceptor (listener + subscriber) ───────────────────
-    let acceptor_stderr = tempfile::tempfile().expect("tempfile for acceptor stderr");
-    let acceptor_stderr_writer = acceptor_stderr
-        .try_clone()
-        .expect("dup acceptor stderr handle");
-    let mut acceptor_stderr_reader = acceptor_stderr;
-
-    let mut acceptor_guard = ChildGuard::wrap(
+    let (mut acceptor_guard, mut acceptor_stderr_reader) = spawn_listen_acceptor(
+        &demo,
+        &addr,
+        sub_pattern,
         "wz-ap-demo acceptor (--listen)",
-        Command::new(&demo)
-            .arg("--listen")
-            .arg(&addr)
-            .arg("--key")
-            .arg(sub_pattern)
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(acceptor_stderr_writer))
-            .spawn()
-            .expect("spawn wz-ap-demo --listen"),
+        tempfile::tempfile().expect("tempfile for acceptor stderr"),
     );
 
     let bound = wait_for_substring(
@@ -418,64 +392,39 @@ fn wz_reconnect_serial_connect_is_not_reconnectable() {
     );
 }
 
-/// R311q0 — spawn a wz-ap-demo acceptor (`--listen <addr>
-/// --on-remote-subscriber-log`) capturing stderr to a tempfile; returns the
-/// panic-safe [`ChildGuard`] + the readable capture handle. Shared by the
-/// sever-reconnect e2e's first acceptor (A1) and the re-spawned acceptor (A2)
-/// so the two are byte-identical but for their capture files. The acceptor
-/// logs "REMOTE SUBSCRIBER DECLARED" whenever it receives the initiator's
-/// `Declare(DeclSubscriber)` — the inbound-declaration witness both the first
-/// connect and the post-reconnect replay surface on.
-fn spawn_remote_sub_acceptor(demo: &Path, addr: &str, label: &str) -> (ChildGuard, File) {
-    let stderr = tempfile::tempfile().expect("tempfile for acceptor stderr");
-    let writer = stderr.try_clone().expect("dup acceptor stderr handle");
-    let reader = stderr;
-    let guard = ChildGuard::wrap(
-        label.to_string(),
-        Command::new(demo)
-            .arg("--listen")
-            .arg(addr)
-            .arg("--on-remote-subscriber-log")
-            .env("RUST_LOG", "info")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(writer))
-            .spawn()
-            .expect("spawn wz-ap-demo --listen acceptor"),
-    );
-    (guard, reader)
-}
-
-/// R311q0 — the reconnect-supervised Initiator RESUMES against a FRESHLY
-/// RE-SPAWNED Acceptor on the SAME fixed port: the binary-level sever +
-/// reconnect witness (the carry #1 goal de-risked by R311pz). Flow: A1 accepts
-/// the initiator's first connection and logs its declared subscriber; A1 is
-/// killed; A2 is spawned on the SAME port; the supervisor re-dials, replays the
-/// declaration cache, and A2 — a FRESH process — logs the REPLAYED subscriber
-/// declaration.
+/// R311q1 — the long-lived `--reconnect` Initiator RESUMES its DATA PLANE
+/// against a freshly RE-SPAWNED Acceptor after a genuine process-death sever:
+/// the binary-level sever-reconnect witness (carry #1). Flow: A1 (`--listen
+/// --key`) accepts the initiator and fires its subscriber on the initiator's
+/// Puts; A1 is SIGKILLed + fully reaped; A2 is spawned on the SAME port; the
+/// reconnect supervisor re-dials, and A2 — a FRESH process — fires its
+/// subscriber on a Put the initiator emits AFTER the reconnect.
 ///
-/// Why this is now non-flaky (R311pz de-risk): A2's bind on the same fixed port
-/// only succeeds promptly because `bind_tcp` sets `SO_REUSEADDR` (zenoh listener
-/// parity). Without it A1's accepted socket would hold the port in TIME_WAIT and
-/// A2's bind would fail `EADDRINUSE` for ~60s — the exact flake that deferred
-/// this e2e. The `port_res` is held across the A1->A2 gap so no other in-process
-/// test can grab the freed port in the window before A2 binds.
+/// The DATA-plane witness (post-reconnect Push → A2 SUBSCRIBER FIRED) is the
+/// point of a long-lived `--reconnect` client: it resumes its application work
+/// across the sever, not merely its control-plane declarations. It is
+/// deterministic because the `--reconnect` publisher is PERIODIC (re-arms per
+/// (re)Established, R311q1) — guaranteed to emit a fresh Put once the supervisor
+/// re-establishes against A2, regardless of how long the reconnect takes. The
+/// in-process control-plane mechanism (declaration-cache replay) is proven by
+/// the library `session_reconnect_e2e`; THIS proves two real processes survive a
+/// real process kill end to end.
 ///
-/// Why the observable is the DECLARATION replay, not the publisher: the demo's
-/// `publisher_task` emits a FINITE burst (`PUBLISHER_BURST_COUNT`) once after the
-/// first Established and does NOT re-fire after a reconnect, so a "SUBSCRIBER
-/// FIRED" witness on A2 would be timing-dependent. The declaration cache replay
-/// fires exactly once per (re)Established — deterministic. This is the binary
-/// counterpart to the library `session_reconnect_e2e`
-/// `declares_replay_after_link_loss_and_reconnect` (same supervisor `drive`
-/// loop); the library proves the mechanism in-process, this proves two real
-/// processes survive a genuine process-death sever.
+/// Same-port respawn: A2 rebinds the fixed port because A1 is fully reaped
+/// (`kill` + `wait`) AND the initiator tore down its half on link-loss, so
+/// nothing holds the listening port — and tokio's `TcpListener::bind` sets
+/// `SO_REUSEADDR` on Unix regardless (mio). `port_res` is held across the
+/// A1->A2 gap so no other in-process test grabs the freed port. (Earlier rounds
+/// mis-attributed this rebind to a wz-added SO_REUSEADDR "de-risk"; the
+/// adversarial review in R311q1 falsified that — the rebind never depended on
+/// it. See the R311q1 ledger.)
 ///
 /// Two independent witnesses:
-///   - acceptor-side: A2 (a fresh process) logs "REMOTE SUBSCRIBER DECLARED" for
-///     the initiator's keyexpr → the initiator reconnected to A2 specifically.
+///   - acceptor-side: A2 (a fresh process) logs "SUBSCRIBER FIRED" for the
+///     publish keyexpr → the initiator reconnected to A2 and resumed publishing.
 ///   - initiator-side: the graceful-teardown line reports "reconnects=1" → the
-///     supervisor performed exactly one successful reopen (failed retries do not
-///     increment the counter, so 1 is exact for a single sever).
+///     supervisor performed exactly one successful reopen (failed dial retries
+///     do not increment the counter, so 1 is exact for a single sever).
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored"]
 fn wz_reconnect_initiator_resumes_against_respawned_acceptor() {
@@ -483,33 +432,39 @@ fn wz_reconnect_initiator_resumes_against_respawned_acceptor() {
     let port_res = PortReservation::pick();
     let port = port_res.port();
     let addr = format!("127.0.0.1:{port}");
-    let sub_key = "demo/reconnect/initiator-sub";
+    let publish_key = "demo/reconnect/resume";
+    let publish_value = "post-reconnect-payload";
 
-    // ── A1: first acceptor on the fixed port ──────────────────
-    let (mut a1_guard, mut a1_reader) =
-        spawn_remote_sub_acceptor(&demo, &addr, "wz-ap-demo acceptor A1 (--listen)");
+    // ── A1: first acceptor (subscriber on the publish keyexpr) ──
+    let (mut a1_guard, mut a1_reader) = spawn_listen_acceptor(
+        &demo,
+        &addr,
+        publish_key,
+        "wz-ap-demo acceptor A1 (--listen)",
+        tempfile::tempfile().expect("tempfile for A1 stderr"),
+    );
     if let Err(captured) =
         wait_for_substring(&mut a1_reader, "listening on", Duration::from_secs(5))
     {
         panic!("A1 --listen did not log 'listening on' within 5s\n--- A1 stderr ---\n{captured}");
     }
 
-    // ── initiator: long-lived reconnect supervisor declaring a routed
-    //    subscriber whose DeclSubscriber the acceptors observe (and the
-    //    supervisor replays onto the second connection).
+    // ── initiator: long-lived reconnect supervisor + PERIODIC publisher.
     let initiator_stderr = tempfile::tempfile().expect("tempfile for initiator stderr");
     let initiator_writer = initiator_stderr
         .try_clone()
         .expect("dup initiator stderr handle");
     let mut initiator_reader = initiator_stderr;
     let mut initiator_guard = ChildGuard::wrap(
-        "wz-ap-demo initiator (--connect --reconnect --key)",
+        "wz-ap-demo initiator (--connect --reconnect --publish)",
         Command::new(&demo)
             .arg("--connect")
             .arg(&addr)
             .arg("--reconnect")
-            .arg("--key")
-            .arg(sub_key)
+            .arg("--publish")
+            .arg(publish_key)
+            .arg("--value")
+            .arg(publish_value)
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(initiator_writer))
@@ -517,43 +472,42 @@ fn wz_reconnect_initiator_resumes_against_respawned_acceptor() {
             .expect("spawn wz-ap-demo --connect --reconnect"),
     );
 
-    // Positive pin on the supervisor open path (a one-shot fallback would not
-    // emit this line — it would log "connected to" via establish_link instead).
+    // Positive pin on the supervisor open path (a one-shot fallback would log
+    // "connected to" via establish_link, which the reconnect path skips).
     let supervised = wait_for_substring(
         &mut initiator_reader,
         "reconnect-supervised session Established",
         Duration::from_secs(5),
     );
-    // A1 observes the initiator's FIRST DeclSubscriber → initial connect proved.
-    let a1_saw = wait_for_substring(
-        &mut a1_reader,
-        "REMOTE SUBSCRIBER DECLARED",
-        Duration::from_secs(10),
-    );
+    // A1 fires on the initiator's first Put → initial data plane proved.
+    let a1_fired = wait_for_substring(&mut a1_reader, "SUBSCRIBER FIRED", Duration::from_secs(10));
 
-    // ── SEVER: kill A1. The initiator's link drops; the supervisor begins
-    //    re-dialing the fixed port every retry_delay_ms (1s, pico parity).
+    // ── SEVER: SIGKILL A1 and fully reap it. The initiator's link drops; the
+    //    supervisor begins re-dialing every retry_delay_ms (1s, pico parity).
     let _ = a1_guard.child_mut().kill();
     let _ = a1_guard.child_mut().wait();
 
-    // ── RESPAWN A2 on the SAME port — the de-risk payoff (R311pz SO_REUSEADDR).
-    //    port_res is STILL held: no other in-process test can grab the freed
-    //    port during the A1->A2 gap.
-    let (mut a2_guard, mut a2_reader) =
-        spawn_remote_sub_acceptor(&demo, &addr, "wz-ap-demo acceptor A2 (--listen respawn)");
+    // ── RESPAWN A2 on the SAME port. port_res is STILL held so no other
+    //    in-process test grabs the freed port during the A1->A2 gap.
+    let (mut a2_guard, mut a2_reader) = spawn_listen_acceptor(
+        &demo,
+        &addr,
+        publish_key,
+        "wz-ap-demo acceptor A2 (--listen respawn)",
+        tempfile::tempfile().expect("tempfile for A2 stderr"),
+    );
     let a2_bound = wait_for_substring(&mut a2_reader, "listening on", Duration::from_secs(5));
     // A2 owns the port now; release the reservation for other tests.
     drop(port_res);
 
-    // A2 (a FRESH process) observes the REPLAYED DeclSubscriber → reconnect.
-    let a2_saw = wait_for_substring(
-        &mut a2_reader,
-        "REMOTE SUBSCRIBER DECLARED",
-        Duration::from_secs(20),
-    );
+    // A2 (a FRESH process) fires on a Put the periodic publisher emits AFTER the
+    // reconnect → data-plane resumption across the sever. Generous budget: the
+    // supervisor retries at 1s and the publisher re-arms each (re)Established.
+    let a2_fired = wait_for_substring(&mut a2_reader, "SUBSCRIBER FIRED", Duration::from_secs(20));
 
     // ── teardown: graceful SIGTERM on the initiator (drives into_teardown +
-    //    surfaces the reconnects counter), then kill A2.
+    //    surfaces the reconnects counter; the periodic publisher stops on the
+    //    same signal, dropping its session clone before teardown), then kill A2.
     graceful_terminate(initiator_guard.child_mut(), Duration::from_secs(5));
     let _ = a2_guard.child_mut().kill();
     let _ = a2_guard.child_mut().wait();
@@ -572,38 +526,36 @@ fn wz_reconnect_initiator_resumes_against_respawned_acceptor() {
              --- initiator stderr ---\n{c}\n--- A1 stderr ---\n{a1_captured}"
         );
     }
-    let a1_text = match a1_saw {
+    let a1_text = match a1_fired {
         Ok(c) => c,
         Err(c) => panic!(
-            "A1 did not log 'REMOTE SUBSCRIBER DECLARED' within 10s — the initial connect or the \
-             initiator's routed-subscriber declare regressed.\n\
+            "A1 did not log 'SUBSCRIBER FIRED' within 10s — the initial connect or the periodic \
+             publisher's first emit regressed.\n\
              --- A1 stderr at deadline ---\n{c}\n--- initiator stderr ---\n{initiator_captured}"
         ),
     };
     assert!(
-        a1_text.contains(sub_key),
-        "A1 REMOTE SUBSCRIBER DECLARED line lacks keyexpr '{sub_key}'.\n--- A1 stderr ---\n{a1_text}"
+        a1_text.contains(publish_key),
+        "A1 SUBSCRIBER FIRED line lacks the publish keyexpr '{publish_key}'.\n--- A1 stderr ---\n{a1_text}"
     );
 
     if let Err(c) = &a2_bound {
         panic!(
-            "A2 --listen did not rebind '{addr}' within 5s — the fixed-port respawn failed \
-             (TIME_WAIT EADDRINUSE means the bind_tcp SO_REUSEADDR de-risk regressed).\n\
+            "A2 --listen did not rebind '{addr}' within 5s — the fixed-port respawn failed.\n\
              --- A2 stderr ---\n{c}"
         );
     }
-    let a2_text = match a2_saw {
+    let a2_text = match a2_fired {
         Ok(c) => c,
         Err(c) => panic!(
-            "A2 (respawn) did not log 'REMOTE SUBSCRIBER DECLARED' within 20s — the supervisor did \
-             not reconnect + replay the declaration to the fresh acceptor.\n\
-             --- A2 stderr at deadline ---\n{c}\n--- initiator stderr ---\n{initiator_captured}"
+            "A2 (respawn) did not log 'SUBSCRIBER FIRED' within 20s — the supervisor did not \
+             reconnect to A2 and the periodic publisher did not resume its data plane across the \
+             sever.\n--- A2 stderr at deadline ---\n{c}\n--- initiator stderr ---\n{initiator_captured}"
         ),
     };
     assert!(
-        a2_text.contains(sub_key),
-        "A2 REMOTE SUBSCRIBER DECLARED line lacks keyexpr '{sub_key}' — the wrong declaration \
-         replayed.\n--- A2 stderr ---\n{a2_text}"
+        a2_text.contains(publish_key),
+        "A2 SUBSCRIBER FIRED line lacks the publish keyexpr '{publish_key}'.\n--- A2 stderr ---\n{a2_text}"
     );
 
     // Initiator-side witness: exactly one successful reopen (failed dial retries
