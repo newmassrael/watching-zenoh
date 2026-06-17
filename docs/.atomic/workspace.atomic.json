@@ -40144,6 +40144,52 @@
         "코드 LOCAL-COMMITTED UNPUSHED 예정: wz-session-core/src/reconnect.rs + wz-runtime-tokio/src/reconnect.rs + wz-runtime-tokio/tests/session_reconnect_e2e.rs. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311px": {
+      "decision_summary": "R311px: --reconnect opt-in 모드를 wz-ap-demo에 배선. Initiator가 reconnect=true시 open_session_with_reconnect+drive(supervisor) 분기, 기본 round-trip 보존. reconnect=application lifecycle 축(capability feature와 별개). preset-ap-client catalog-truthfulness.",
+      "changes_bullets": [
+        "wz-ap-demo/src/{args,main}.rs: Role::Initiator{connect, reconnect:bool} — --reconnect 모드를 Initiator 변종에 인코딩(Acceptor 재연결 불가를 표현불가로; pico AUTO_RECONNECT=client-only). main이 --reconnect presence 파싱 + --listen 동반 시 거부(exit 2) + role 로그.",
+        "wz-ap-demo/src/runner.rs: DriveSource{OneShot(Box<OpenedSession>) | Reconnect(Box<ReconnectingSession>)} fork(양변종 Box=large_enum_variant 회피). reconnect-Initiator는 establish_link 건너뛰고 plan_endpoint→ReconnectLocator::try_from→open_session_with_reconnect(per-connection max=None=long-lived, 기본 정책). 공유 actions 위에 observer/session/handles/tasks/sweep 구성(모드 무관). drive fork: 단일 dispatch 클로저를 &mut로 양쪽 drive에 전달(중복 회피); shutdown=select!-drop(one-shot과 동일 cancel 경로); 종료 후 reconnect는 into_teardown→기존 R292 chain(writer_handle/was_cancelled 통일). usage.rs --reconnect 도움말.",
+        "wz-runtime-tokio/src/reconnect.rs: ReconnectingSession::into_teardown(self)->(Arc<SessionLinkActions>, TokioJoinHandle<()>) consuming graceful-teardown accessor — 엔진+inbound+swappable 드롭, 생존 actions 번들 + 현 연결 writer 반환=데모 R292 teardown chain을 supervisor에서 그대로 재사용. TokioJoinHandle import 추가.",
+        "wz-runtime-tokio/src/session_open.rs: plan_endpoint를 pub로 노출 — 연결문자열 classifier(scheme-less tcp/ desugar 포함) SSOT를 reconnect 경로가 재사용(dial 경로 dial_endpoint와 ONE parse 공유), ReconnectLocator::try_from로 narrow.",
+        "wz-integration-tests/tests/wz_initiator_to_wz_acceptor.rs: wz_reconnect_initiator_round_trip_against_wz_acceptor — --connect --reconnect가 supervisor 경로로 라운드트립함을 바이너리 레벨서 고정. \"reconnect-supervised session Established\" positive pin(one-shot fallback이면 미발화) + acceptor SUBSCRIBER FIRED + keyexpr 단언."
+      ],
+      "verification_bullets": [
+        "근본: preset-ap-client(wz/Cargo.toml:1019)가 session-reconnect를 선언하나 쇼케이스 바이너리는 컴파일만 하고 미사용=catalog-truthfulness 갭. 사용자 결정(B): wz-ap-demo를 long-lived 클라이언트 쇼케이스로 확장, opt-in --reconnect 모드(기본 round-trip-then-exit 보존). 설계 정정: reconnect는 capability(session-reconnect Cargo 피처=컴파일됨)와 별개의 application-lifecycle 축(이 실행이 long-lived 재연결 vs round-trip)이라 런타임 모드 선택은 SSOT 중복도 pico-parity 위반도 아님(pico 앱도 AUTO_RECONNECT 컴파일 위에서 lifecycle 선택). default-on은 round-trip 하니스 역할 + Layer E 종료 계약을 깨므로 기각.",
+        "one-shot 경로 회귀 0(wz_initiator_round_trip_against_wz_acceptor pass — DriveSource fork가 비-reconnect 경로 불변 유지). 신규 --reconnect 바이너리 라운드트립 10/10 연속 통과(무결정; 기존 one-shot 테스트와 동일 spawn+substring-wait 형태). 해피패스 수동 스모크 실증(initiator \"reconnect-supervised session Established\"+publisher 5 Put → acceptor SUBSCRIBER FIRED).",
+        "reconnect-AFTER-LOSS 메커니즘(re-dial + declaration-cache replay, DNS-named 재해석 포함)은 라이브러리 session_reconnect_e2e가 엄밀히 증명(supervisor의 drive 루프를 바이너리가 그대로 사용)=4/4 pass(R311pw named 포함). 풀 바이너리 sever-reconnect e2e는 persistent-listener in-process acceptor 필요(2-process rebind=SO_REUSEADDR 부재 TIME_WAIT flake)라 미작성=층위 커버리지(라이브러리=메커니즘, 바이너리=supervisor 라우팅).",
+        "clippy --all-targets -D warnings clean(wz-ap-demo + wz-runtime-tokio + wz-integration-tests). fmt clean. 라이브러리 reconnect e2e 4/4 + ReconnectLocator 단위 회귀 0. exit 파이프 없이 직접 판정. full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311px = --reconnect opt-in 모드를 wz-ap-demo에 배선(사용자 결정 B: long-lived 클라이언트 쇼케이스). Initiator만 supervisor 분기(Acceptor는 Role 변종으로 표현불가 제외), 기본 round-trip 보존. ReconnectingSession::into_teardown로 supervisor를 데모 R292 teardown chain에 재사용, plan_endpoint pub로 연결문자열 파싱 SSOT 공유. catalog-truthfulness: preset-ap-client의 session-reconnect를 쇼케이스 바이너리가 실제 EXERCISE.",
+        "설계 교훈: reconnect는 capability(Cargo 피처) ≠ application lifecycle(런타임 모드)의 두 축. 세션 중 성급한 \"default-on/플래그=smell\" 판정을 (a)wz-ap-demo의 round-trip 하니스 역할 + (b)drive가 terminal마다 재연결=종료 안 함 + (c)Layer E 종료 계약 발견이 정정 → opt-in 모드(B) 채택. [[feedback-apply-standard-not-ask]] 적용은 deep-enough 조사 후라야(성급한 verdict 위험).",
+        "다음 후보: (1) 풀 바이너리 sever-reconnect e2e(persistent-listener in-process acceptor; 라이브러리 e2e가 메커니즘은 이미 증명하므로 한계가치 검토). (2) [[project-pico-parity-status]] 남은 frontier=대부분 외부 의존. 코드 LOCAL-COMMITTED UNPUSHED 예정(wz-ap-demo 4 + wz-runtime-tokio 2 + wz-integration-tests 1). push 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311px: --reconnect opt-in 모드를 wz-ap-demo에 배선. Initiator가 reconnect=true시 open_session_with_reconnect+drive(supervisor) 분기, 기본 round-trip 보존. reconnect=application lifecycle 축(capability feature와 별개). preset-ap-client catalog-truthfulness.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo/src/{args,main}.rs: Role::Initiator{connect, reconnect:bool} — --reconnect 모드를 Initiator 변종에 인코딩(Acceptor 재연결 불가를 표현불가로; pico AUTO_RECONNECT=client-only). main이 --reconnect presence 파싱 + --listen 동반 시 거부(exit 2) + role 로그.",
+        "wz-ap-demo/src/runner.rs: DriveSource{OneShot(Box<OpenedSession>) | Reconnect(Box<ReconnectingSession>)} fork(양변종 Box=large_enum_variant 회피). reconnect-Initiator는 establish_link 건너뛰고 plan_endpoint→ReconnectLocator::try_from→open_session_with_reconnect(per-connection max=None=long-lived, 기본 정책). 공유 actions 위에 observer/session/handles/tasks/sweep 구성(모드 무관). drive fork: 단일 dispatch 클로저를 &mut로 양쪽 drive에 전달(중복 회피); shutdown=select!-drop(one-shot과 동일 cancel 경로); 종료 후 reconnect는 into_teardown→기존 R292 chain(writer_handle/was_cancelled 통일). usage.rs --reconnect 도움말.",
+        "wz-runtime-tokio/src/reconnect.rs: ReconnectingSession::into_teardown(self)->(Arc<SessionLinkActions>, TokioJoinHandle<()>) consuming graceful-teardown accessor — 엔진+inbound+swappable 드롭, 생존 actions 번들 + 현 연결 writer 반환=데모 R292 teardown chain을 supervisor에서 그대로 재사용. TokioJoinHandle import 추가.",
+        "wz-runtime-tokio/src/session_open.rs: plan_endpoint를 pub로 노출 — 연결문자열 classifier(scheme-less tcp/ desugar 포함) SSOT를 reconnect 경로가 재사용(dial 경로 dial_endpoint와 ONE parse 공유), ReconnectLocator::try_from로 narrow.",
+        "wz-integration-tests/tests/wz_initiator_to_wz_acceptor.rs: wz_reconnect_initiator_round_trip_against_wz_acceptor — --connect --reconnect가 supervisor 경로로 라운드트립함을 바이너리 레벨서 고정. \"reconnect-supervised session Established\" positive pin(one-shot fallback이면 미발화) + acceptor SUBSCRIBER FIRED + keyexpr 단언."
+      ],
+      "publishable_verification_bullets": [
+        "근본: preset-ap-client(wz/Cargo.toml:1019)가 session-reconnect를 선언하나 쇼케이스 바이너리는 컴파일만 하고 미사용=catalog-truthfulness 갭. 사용자 결정(B): wz-ap-demo를 long-lived 클라이언트 쇼케이스로 확장, opt-in --reconnect 모드(기본 round-trip-then-exit 보존). 설계 정정: reconnect는 capability(session-reconnect Cargo 피처=컴파일됨)와 별개의 application-lifecycle 축(이 실행이 long-lived 재연결 vs round-trip)이라 런타임 모드 선택은 SSOT 중복도 pico-parity 위반도 아님(pico 앱도 AUTO_RECONNECT 컴파일 위에서 lifecycle 선택). default-on은 round-trip 하니스 역할 + Layer E 종료 계약을 깨므로 기각.",
+        "one-shot 경로 회귀 0(wz_initiator_round_trip_against_wz_acceptor pass — DriveSource fork가 비-reconnect 경로 불변 유지). 신규 --reconnect 바이너리 라운드트립 10/10 연속 통과(무결정; 기존 one-shot 테스트와 동일 spawn+substring-wait 형태). 해피패스 수동 스모크 실증(initiator \"reconnect-supervised session Established\"+publisher 5 Put → acceptor SUBSCRIBER FIRED).",
+        "reconnect-AFTER-LOSS 메커니즘(re-dial + declaration-cache replay, DNS-named 재해석 포함)은 라이브러리 session_reconnect_e2e가 엄밀히 증명(supervisor의 drive 루프를 바이너리가 그대로 사용)=4/4 pass(R311pw named 포함). 풀 바이너리 sever-reconnect e2e는 persistent-listener in-process acceptor 필요(2-process rebind=SO_REUSEADDR 부재 TIME_WAIT flake)라 미작성=층위 커버리지(라이브러리=메커니즘, 바이너리=supervisor 라우팅).",
+        "clippy --all-targets -D warnings clean(wz-ap-demo + wz-runtime-tokio + wz-integration-tests). fmt clean. 라이브러리 reconnect e2e 4/4 + ReconnectLocator 단위 회귀 0. exit 파이프 없이 직접 판정. full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311px = --reconnect opt-in 모드를 wz-ap-demo에 배선(사용자 결정 B: long-lived 클라이언트 쇼케이스). Initiator만 supervisor 분기(Acceptor는 Role 변종으로 표현불가 제외), 기본 round-trip 보존. ReconnectingSession::into_teardown로 supervisor를 데모 R292 teardown chain에 재사용, plan_endpoint pub로 연결문자열 파싱 SSOT 공유. catalog-truthfulness: preset-ap-client의 session-reconnect를 쇼케이스 바이너리가 실제 EXERCISE.",
+        "설계 교훈: reconnect는 capability(Cargo 피처) ≠ application lifecycle(런타임 모드)의 두 축. 세션 중 성급한 \"default-on/플래그=smell\" 판정을 (a)wz-ap-demo의 round-trip 하니스 역할 + (b)drive가 terminal마다 재연결=종료 안 함 + (c)Layer E 종료 계약 발견이 정정 → opt-in 모드(B) 채택. [[feedback-apply-standard-not-ask]] 적용은 deep-enough 조사 후라야(성급한 verdict 위험).",
+        "다음 후보: (1) 풀 바이너리 sever-reconnect e2e(persistent-listener in-process acceptor; 라이브러리 e2e가 메커니즘은 이미 증명하므로 한계가치 검토). (2) [[project-pico-parity-status]] 남은 frontier=대부분 외부 의존. 코드 LOCAL-COMMITTED UNPUSHED 예정(wz-ap-demo 4 + wz-runtime-tokio 2 + wz-integration-tests 1). push 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
