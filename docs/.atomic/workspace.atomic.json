@@ -39414,6 +39414,44 @@
         "push 미동의=LOCAL-COMMIT까지만. 누적 미푸시=R311pc+pd+pe+pf. push 명시 동의 권장([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311pg": {
+      "decision_summary": "R311pg: 세션리뷰(독립 4-에이전트) 후속 1/4 — R311pc 결함 수정. queryable/subscriber reconnect-replay를 ReplayDeclareKind enum + 단일 parameterized driver로 수렴 + kind marker(DeclSubscriber/DeclQueryable) 양방향 단언. false-green(kind 미단언)+SSOT(84줄 복제) 청산.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/session_reconnect_e2e.rs: 세션리뷰(독립 4-에이전트) R311pc 결함 2종 수정. (1) false-green: queryable/subscriber reconnect-replay 테스트가 Declare가 어떤 kind인지 한 번도 단언 안 함(len==1 + conn2==conn1만)→send_declare_queryable이 DeclSubscriber로 오배선돼도 green. (2) SSOT: 84줄 driver body 거의-바이트동일 복제. 수정=ReplayDeclareKind{Subscriber,Queryable} enum + 단일 driver assert_declare_replays_after_link_loss(keyexpr, kind)로 수렴, kind.marker()(\"DeclSubscriber\"/\"DeclQueryable\"=DeclareOwnedVariant Debug 부분문자열)로 conn1[0] kind 양방향 positively 단언. 두 #[tokio::test]는 helper 호출 thin fn. subscriber 테스트도 이제 DeclSubscriber 단언(기존엔 미단언=개선). kind marker 상호배타(DeclQueryable !⊂ subscriber Debug)라 mis-wire 시 실패=실제 게이트. 중복 driver 제거(declare-action만 차이)는 파일 자신의 \"replay loop kind-agnostic\" 논증의 정직한 적용(내 doc가 TLS/WS 불필요라면서 TCP body 복제한 아이러니 해소). TLS/WS/GaveUp queryable 변종 미추가 YAGNI는 유지(transport 재증명=bloat)."
+      ],
+      "verification_bullets": [
+        "세션리뷰(독립 4-에이전트 적대 감사)가 R311pc 결함 적발: test-fidelity 에이전트 [UNDER-ASSERT major]=kind 미단언 false-green / hack-smell 에이전트 [SSOT major]=84줄 driver 복제. 둘 다 직접 확인 후 수정.",
+        "A1 marker 확정: grep -aoE로 DeclareOwnedVariant variant명 CodecZenohDeclQueryable/CodecZenohDeclSubscriber 확인→\"DeclQueryable\"/\"DeclSubscriber\"가 Debug 부분문자열.",
+        "검증: session_reconnect_e2e 바이너리 3/3(subscriber via helper + queryable via helper + GaveUp 무회귀), kind 단언이 양 테스트서 실제 통과=marker 정확+게이팅(subscriber→DeclSubscriber, queryable→DeclQueryable, 상호배타라 mis-wire시 fail). 20/20 zero-flake(두 TCP 테스트). clippy(wz-runtime-tokio --tests EXIT 0)/fmt(--check EXIT 0) clean.",
+        "프로덕션 코드 변경 0(테스트만). atomic: ledger entries 766->767, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pg = 세션리뷰(독립 4-에이전트 적대 자가감사) 후속 수정 1/4 — R311pc 결함. 사용자 \"전부(구조 포함)\" 범위 선택의 첫 라운드. false-green(kind 미단언)+SSOT(84줄 복제)를 ReplayDeclareKind enum + 단일 parameterized driver + 양방향 kind marker 단언으로 청산. 메타: 세션리뷰가 또 성급한 self-assessment(\"20/20 zero-flake textbook\") 뒤집음(R311my/mz/pb 패턴 반복).",
+        "남은 R311pg 후속(이번 세션 carry, 사용자 승인됨): (2) R311ph=R311pd leg-7 수정 — history=true(LivelinessSubscriberOptions.history 필드 존재, wz-ap-demo 노출)로 ordering 결정화 + z_liveliness open-retry 추가 + \"leg 4 gated around\" 오기 정정 + \"deterministic ordering\" 거짓 주석 정정. (3) R311pi=R311pf — spawn_zenohd에 Established-level readiness probe(throwaway wz client→\"session Established\", 기존 wz_client_reaches_established 경로 재사용) 추가로 TCP-accept 갭 제거 + 주석 정직화(과신→가설, category error: z_get=propagation≠open-starvation 정정) + retry는 client-side starvation 안전망으로 재서술. (4) R311pj=R311pe build-zenohd.sh — Path A도 --release + 발견 version==1.5.0 fail-fast assert + 결정성 overclaim 문구 완화.",
+        "push 미동의=LOCAL까지. 누적 미푸시=R311pc~pg."
+      ],
+      "publishable_decision_summary": "R311pg: 세션리뷰(독립 4-에이전트) 후속 1/4 — R311pc 결함 수정. queryable/subscriber reconnect-replay를 ReplayDeclareKind enum + 단일 parameterized driver로 수렴 + kind marker(DeclSubscriber/DeclQueryable) 양방향 단언. false-green(kind 미단언)+SSOT(84줄 복제) 청산.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/session_reconnect_e2e.rs: 세션리뷰(독립 4-에이전트) R311pc 결함 2종 수정. (1) false-green: queryable/subscriber reconnect-replay 테스트가 Declare가 어떤 kind인지 한 번도 단언 안 함(len==1 + conn2==conn1만)→send_declare_queryable이 DeclSubscriber로 오배선돼도 green. (2) SSOT: 84줄 driver body 거의-바이트동일 복제. 수정=ReplayDeclareKind{Subscriber,Queryable} enum + 단일 driver assert_declare_replays_after_link_loss(keyexpr, kind)로 수렴, kind.marker()(\"DeclSubscriber\"/\"DeclQueryable\"=DeclareOwnedVariant Debug 부분문자열)로 conn1[0] kind 양방향 positively 단언. 두 #[tokio::test]는 helper 호출 thin fn. subscriber 테스트도 이제 DeclSubscriber 단언(기존엔 미단언=개선). kind marker 상호배타(DeclQueryable !⊂ subscriber Debug)라 mis-wire 시 실패=실제 게이트. 중복 driver 제거(declare-action만 차이)는 파일 자신의 \"replay loop kind-agnostic\" 논증의 정직한 적용(내 doc가 TLS/WS 불필요라면서 TCP body 복제한 아이러니 해소). TLS/WS/GaveUp queryable 변종 미추가 YAGNI는 유지(transport 재증명=bloat)."
+      ],
+      "publishable_verification_bullets": [
+        "세션리뷰(독립 4-에이전트 적대 감사)가 R311pc 결함 적발: test-fidelity 에이전트 [UNDER-ASSERT major]=kind 미단언 false-green / hack-smell 에이전트 [SSOT major]=84줄 driver 복제. 둘 다 직접 확인 후 수정.",
+        "A1 marker 확정: grep -aoE로 DeclareOwnedVariant variant명 CodecZenohDeclQueryable/CodecZenohDeclSubscriber 확인→\"DeclQueryable\"/\"DeclSubscriber\"가 Debug 부분문자열.",
+        "검증: session_reconnect_e2e 바이너리 3/3(subscriber via helper + queryable via helper + GaveUp 무회귀), kind 단언이 양 테스트서 실제 통과=marker 정확+게이팅(subscriber→DeclSubscriber, queryable→DeclQueryable, 상호배타라 mis-wire시 fail). 20/20 zero-flake(두 TCP 테스트). clippy(wz-runtime-tokio --tests EXIT 0)/fmt(--check EXIT 0) clean.",
+        "프로덕션 코드 변경 0(테스트만). atomic: ledger entries 766->767, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pg = 세션리뷰(독립 4-에이전트 적대 자가감사) 후속 수정 1/4 — R311pc 결함. 사용자 \"전부(구조 포함)\" 범위 선택의 첫 라운드. false-green(kind 미단언)+SSOT(84줄 복제)를 ReplayDeclareKind enum + 단일 parameterized driver + 양방향 kind marker 단언으로 청산. 메타: 세션리뷰가 또 성급한 self-assessment(\"20/20 zero-flake textbook\") 뒤집음(R311my/mz/pb 패턴 반복).",
+        "남은 R311pg 후속(이번 세션 carry, 사용자 승인됨): (2) R311ph=R311pd leg-7 수정 — history=true(LivelinessSubscriberOptions.history 필드 존재, wz-ap-demo 노출)로 ordering 결정화 + z_liveliness open-retry 추가 + \"leg 4 gated around\" 오기 정정 + \"deterministic ordering\" 거짓 주석 정정. (3) R311pi=R311pf — spawn_zenohd에 Established-level readiness probe(throwaway wz client→\"session Established\", 기존 wz_client_reaches_established 경로 재사용) 추가로 TCP-accept 갭 제거 + 주석 정직화(과신→가설, category error: z_get=propagation≠open-starvation 정정) + retry는 client-side starvation 안전망으로 재서술. (4) R311pj=R311pe build-zenohd.sh — Path A도 --release + 발견 version==1.5.0 fail-fast assert + 결정성 overclaim 문구 완화.",
+        "push 미동의=LOCAL까지. 누적 미푸시=R311pc~pg."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
