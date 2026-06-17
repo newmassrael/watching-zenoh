@@ -522,6 +522,7 @@ fn spawn_background_tasks(
     query_spec: Option<String>,
     liveliness_get_spec: Option<String>,
     session_clock: TokioTime,
+    long_lived: bool,
 ) -> SpawnedTasks {
     let publisher_handle = publisher_spec.map(|(keyexpr, operation, declare_id)| {
         let session_for_publisher = session.clone();
@@ -531,6 +532,7 @@ fn spawn_background_tasks(
             operation,
             declare_id,
             session_clock,
+            long_lived,
         ))
     });
 
@@ -670,6 +672,18 @@ pub(crate) async fn run_demo(
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
     let params = demo_session_init_params(&role);
+    // R311q1 — the long-lived (reconnect) lifecycle drives a PERIODIC publisher
+    // that re-arms emission across reconnects (data-plane continuity past a
+    // sever), vs the default one-shot finite burst. Derived from the role so
+    // "an acceptor publishes long-lived" stays unrepresentable (the reconnect
+    // flag lives only on the Initiator variant).
+    let long_lived = matches!(
+        &role,
+        Role::Initiator {
+            reconnect: true,
+            ..
+        }
+    );
     let drive_src = match &role {
         // R311pw — reconnect Initiator: the supervisor owns the dial. Reuse the
         // library `plan_endpoint` connect-string classifier (scheme-less `tcp/`
@@ -822,6 +836,7 @@ pub(crate) async fn run_demo(
         query_spec,
         liveliness_get_spec,
         session_clock,
+        long_lived,
     );
 
     // ── Step 5: drive the session FSM through the steady state until

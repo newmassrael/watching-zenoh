@@ -200,6 +200,7 @@ pub(crate) async fn publisher_task<T>(
     operation: PushOperation,
     declare_id: Option<u64>,
     clock: T,
+    long_lived: bool,
 ) where
     T: TimeSource + Send + 'static,
 {
@@ -258,6 +259,49 @@ pub(crate) async fn publisher_task<T>(
             "wz-ap-demo: publisher_task observed Established; emitting {PUBLISHER_BURST_COUNT} Del Pushes \
              on keyexpr='{keyexpr}' (R219 MsgDel body, no payload)"
         ),
+    }
+
+    // ── Long-lived (reconnect) periodic publisher: re-arm emission across
+    //           reconnects so a peer the supervisor re-dials after a sever
+    //           observes FRESH Pushes (DATA-plane continuity — the actual point
+    //           of a long-lived `--reconnect` client), not only the replayed
+    //           declarations (control plane). Each cycle (re-)waits for
+    //           Established (a reconnect window can exceed one poll), emits one
+    //           Push, then pauses one cadence; a publish inside the reconnect
+    //           window rejects `TransportUnavailable` and is skipped, and the
+    //           next cycle resumes once the supervisor re-establishes. The loop
+    //           stops on the SAME graceful-shutdown signal the drive loop races,
+    //           so the publisher's `session` clone drops BEFORE run_demo's
+    //           teardown drops `actions` — preserving the writer last-sender
+    //           invariant (crate::teardown). The default (non-reconnect) path
+    //           runs the finite burst below instead.
+    if long_lived {
+        log::info!(
+            "wz-ap-demo: publisher_task entering long-lived periodic mode (--reconnect); \
+             re-arms per (re)Established, stops on graceful-shutdown signal"
+        );
+        let shutdown = crate::shutdown::shutdown_signal();
+        tokio::pin!(shutdown);
+        let mut declared = false;
+        let mut idx = 0usize;
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    log::info!(
+                        "wz-ap-demo: publisher_task stopping on graceful-shutdown signal \
+                         after {idx} long-lived emit(s)"
+                    );
+                    break;
+                }
+                () = publish_cycle(
+                    &session, &keyexpr, &operation, declare_id, &mut declared, idx, &clock,
+                ) => {
+                    idx += 1;
+                }
+            }
+        }
+        return;
     }
 
     // ── Step 2 (R121g): if --declare-id was supplied, send a
@@ -322,83 +366,7 @@ pub(crate) async fn publisher_task<T>(
     //           number of local callbacks invoked per iteration so a
     //           test fixture can distinguish loopback vs wire fans.
     for i in 0..PUBLISHER_BURST_COUNT {
-        let mut opts = PublishOptions::default().with_reliability(Reliability::Reliable);
-        let (kind_tag, payload): (&str, &[u8]) = match &operation {
-            PushOperation::Put { value } => {
-                opts.kind = SampleKind::Put;
-                ("PUT", value.as_bytes())
-            }
-            PushOperation::Delete => {
-                opts.kind = SampleKind::Del;
-                ("DEL", &[])
-            }
-        };
-        let dispatch_outcome: Result<(usize, &'static str), PublishAliasError> = match declare_id {
-            Some(mapping_id) => session
-                .publish_aliased_auto(mapping_id, None, payload, opts)
-                .map(|fired| (fired, "aliased")),
-            None => session
-                .publish(&keyexpr, payload, opts)
-                .map(|fired| (fired, "literal"))
-                .map_err(PublishAliasError::from),
-        };
-        match dispatch_outcome {
-            Ok((loopback_fired, mode)) => {
-                log::info!(
-                    "wz-ap-demo: PUBLISHER EMITTED kind={kind_tag} mode={mode} \
-                     keyexpr='{keyexpr}' declare_id={declare_id:?} payload_len={payload_len} \
-                     idx={i} loopback_fired={loopback_fired}",
-                    payload_len = payload.len(),
-                );
-            }
-            Err(PublishAliasError::UnknownMapping(id)) => {
-                // R234 contract: publisher_task called
-                // `send_declare_keyexpr` in Step 2 before entering
-                // this loop, so an UnknownMapping here means the
-                // mapping was either never registered (Step 2 took
-                // the None branch yet the publisher still asked for
-                // aliased dispatch — wiring bug) or was retracted
-                // by a concurrent `send_undeclare_kexpr`. Log hard
-                // and skip the iteration so the burst still
-                // terminates; the test fixture distinguishes this
-                // line from the EMITTED line.
-                log::error!(
-                    "wz-ap-demo: publisher_task UnknownMapping id={id} on idx={i} — \
-                     declare-before-publish contract violated; skipping this iteration"
-                );
-            }
-            // W3 — the publish build can now also reject when caller
-            // data overflows the declared codec capacity (a no-emit
-            // reject); log and skip the iteration so the burst still
-            // terminates.
-            Err(e @ PublishAliasError::ExceedsCapacity) => {
-                log::error!(
-                    "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
-                     skipping this iteration"
-                );
-            }
-            // F2 — a publish inside a reconnect window rejects typed
-            // (transport gate closed until Established re-entry); log and
-            // skip so the burst still terminates — the next iterations
-            // succeed once the supervisor re-establishes.
-            Err(e @ PublishAliasError::TransportUnavailable) => {
-                log::warn!(
-                    "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
-                     skipping this iteration"
-                );
-            }
-            // B5b-2b / R311nf — an aliased publish on a non-unicast transport
-            // rejects typed. `publisher_task` takes a `TokioSession` (=
-            // `Session<_,_,Unicast>`), so a multicast transport is excluded at
-            // the type level and this arm is unreachable in the demo; the
-            // exhaustive match keeps it, logged + skipped uniformly.
-            Err(e @ PublishAliasError::RequiresUnicast) => {
-                log::warn!(
-                    "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
-                     skipping this iteration"
-                );
-            }
-        }
+        emit_one_push(&session, &keyexpr, &operation, declare_id, i);
         // Cadence pause between emissions (not after the last
         // one — the run_demo cleanup gives the writer a brief
         // drain window).
@@ -407,4 +375,130 @@ pub(crate) async fn publisher_task<T>(
         }
     }
     log::info!("wz-ap-demo: publisher_task finished emission burst");
+}
+
+/// R311q1 — emit ONE Push (Put or Del; literal or DECLARE-aliased) on the
+/// publisher's keyexpr and log the outcome. Extracted so the finite one-shot
+/// burst and the long-lived (reconnect) periodic loop dispatch through ONE
+/// site — in particular the four `PublishAliasError` arms (an earlier round
+/// duplicated this match in each loop). `idx` is the per-emission counter the
+/// log surfaces (burst index in one-shot mode, cumulative cycle count in
+/// long-lived mode).
+fn emit_one_push(
+    session: &TokioSession,
+    keyexpr: &str,
+    operation: &PushOperation,
+    declare_id: Option<u64>,
+    idx: usize,
+) {
+    let mut opts = PublishOptions::default().with_reliability(Reliability::Reliable);
+    let (kind_tag, payload): (&str, &[u8]) = match operation {
+        PushOperation::Put { value } => {
+            opts.kind = SampleKind::Put;
+            ("PUT", value.as_bytes())
+        }
+        PushOperation::Delete => {
+            opts.kind = SampleKind::Del;
+            ("DEL", &[])
+        }
+    };
+    let dispatch_outcome: Result<(usize, &'static str), PublishAliasError> = match declare_id {
+        Some(mapping_id) => session
+            .publish_aliased_auto(mapping_id, None, payload, opts)
+            .map(|fired| (fired, "aliased")),
+        None => session
+            .publish(keyexpr, payload, opts)
+            .map(|fired| (fired, "literal"))
+            .map_err(PublishAliasError::from),
+    };
+    match dispatch_outcome {
+        Ok((loopback_fired, mode)) => {
+            log::info!(
+                "wz-ap-demo: PUBLISHER EMITTED kind={kind_tag} mode={mode} \
+                 keyexpr='{keyexpr}' declare_id={declare_id:?} payload_len={payload_len} \
+                 idx={idx} loopback_fired={loopback_fired}",
+                payload_len = payload.len(),
+            );
+        }
+        Err(PublishAliasError::UnknownMapping(id)) => {
+            // R234 contract: the aliased path requires a prior
+            // `send_declare_keyexpr`; an UnknownMapping means the mapping was
+            // never registered (caller wiring bug) or was retracted / lost on a
+            // reconnect (the per-connection keyexpr table is not in the
+            // declaration-replay set). Log hard and skip so emission continues.
+            log::error!(
+                "wz-ap-demo: publisher_task UnknownMapping id={id} on idx={idx} — \
+                 declare-before-publish contract violated; skipping this iteration"
+            );
+        }
+        // W3 — the publish build can reject when caller data overflows the
+        // declared codec capacity (a no-emit reject); log and skip.
+        Err(e @ PublishAliasError::ExceedsCapacity) => {
+            log::error!(
+                "wz-ap-demo: publisher_task publish rejected on idx={idx}: {e}; \
+                 skipping this iteration"
+            );
+        }
+        // F2 — a publish inside a reconnect window rejects typed (transport gate
+        // closed until Established re-entry); log and skip — the next cycle
+        // succeeds once the supervisor re-establishes. In long-lived mode this
+        // arm is the EXPECTED path during a sever, not an error.
+        Err(e @ PublishAliasError::TransportUnavailable) => {
+            log::warn!(
+                "wz-ap-demo: publisher_task publish rejected on idx={idx}: {e}; \
+                 skipping this iteration (reconnect window — the next cycle \
+                 retries once the supervisor re-establishes)"
+            );
+        }
+        // B5b-2b / R311nf — an aliased publish on a non-unicast transport
+        // rejects typed. `publisher_task` takes a `TokioSession` (=
+        // `Session<_,_,Unicast>`), so a multicast transport is excluded at the
+        // type level and this arm is unreachable in the demo; the exhaustive
+        // match keeps it, logged + skipped uniformly.
+        Err(e @ PublishAliasError::RequiresUnicast) => {
+            log::warn!(
+                "wz-ap-demo: publisher_task publish rejected on idx={idx}: {e}; \
+                 skipping this iteration"
+            );
+        }
+    }
+}
+
+/// R311q1 — one long-lived publish cycle for the reconnect periodic publisher:
+/// (re-)wait for Established (the reconnect window may exceed one poll), then
+/// emit one Push + a cadence pause. Returning per cycle lets the caller's
+/// `select!` interleave the graceful-shutdown arm between cycles AND cancel
+/// mid-cycle (the future is dropped at a sleep `.await`, cancel-safe — the emit
+/// itself is synchronous, never half-sent). The aliased keyexpr mapping is
+/// declared once on first Established (`declared`); a post-reconnect connection
+/// would need declaration replay, so the reconnect showcase uses the literal
+/// path (`declare_id = None`).
+async fn publish_cycle<T>(
+    session: &TokioSession,
+    keyexpr: &str,
+    operation: &PushOperation,
+    declare_id: Option<u64>,
+    declared: &mut bool,
+    idx: usize,
+    clock: &T,
+) where
+    T: TimeSource,
+{
+    while !session.actions().is_established() {
+        clock.sleep(PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS).await;
+    }
+    if let Some(mapping_id) = declare_id {
+        if !*declared {
+            if session
+                .actions()
+                .send_declare_keyexpr(mapping_id, keyexpr)
+                .is_ok()
+            {
+                *declared = true;
+            }
+            clock.sleep(PUBLISHER_BURST_INTERVAL_MS).await;
+        }
+    }
+    emit_one_push(session, keyexpr, operation, declare_id, idx);
+    clock.sleep(PUBLISHER_BURST_INTERVAL_MS).await;
 }
