@@ -192,6 +192,31 @@ pub enum DialedLink {
     Ws(Box<WebSocketStream<TcpStream>>),
 }
 
+impl DialedLink {
+    /// The transport name of the dialed link (`"tcp"` / `"udp"` / `"serial"` /
+    /// `"tls"` / `"ws"`) — the variant→name SSOT, so a caller can log or assert
+    /// WHICH transport it dialed without re-matching the feature-gated arms.
+    ///
+    /// R311po — wz-ap-demo's `establish_link` logs this, and the Layer Z WS legs
+    /// assert `"ws"` appears, turning the WebSocket transport into a logged
+    /// WITNESS rather than an inference from the listener-port split. A future
+    /// regression that quietly dialed TCP on a WS leg would flip this string and
+    /// fail the assertion, where the port split alone would stay silently green.
+    pub fn transport_name(&self) -> &'static str {
+        match self {
+            DialedLink::Tcp(_) => "tcp",
+            #[cfg(feature = "transport-link-udp")]
+            DialedLink::Udp { .. } => "udp",
+            #[cfg(feature = "transport-link-serial")]
+            DialedLink::Serial(_) => "serial",
+            #[cfg(feature = "transport-link-tls")]
+            DialedLink::Tls(_) => "tls",
+            #[cfg(feature = "transport-link-ws")]
+            DialedLink::Ws(_) => "ws",
+        }
+    }
+}
+
 /// Dial a parsed [`AnyLocator`] to its raw transport — the mode-agnostic dial
 /// seam, dispatching on the locator's scheme.
 ///

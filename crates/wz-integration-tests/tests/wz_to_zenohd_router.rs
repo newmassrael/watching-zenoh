@@ -1232,6 +1232,18 @@ fn wz_client_reaches_established_against_zenohd_over_ws() {
              wz<->zenohd WebSocket handshake regressed.\n--- captured wz-ap-demo stderr ---\n{c}"
         );
     }
+    // R311po — WITNESS the WS transport. The reserved `ws_port` is a ws-only
+    // listener and `tcp_port` is a separate port, so a TCP dial here could not
+    // reach Established (structurally — no TCP fallback to silently take); but
+    // that is an INFERENCE. wz-ap-demo logs the dialed transport name, so this
+    // asserts the leg really opened a WebSocket link. A regression that quietly
+    // dialed TCP would drop "over ws transport" and fail here.
+    assert!(
+        demo_captured.contains("over ws transport"),
+        "leg 8 reached Established but did not witness a WS-transport dial in \
+         wz-ap-demo stderr (expected 'over ws transport').\n\
+         --- captured wz-ap-demo stderr ---\n{demo_captured}"
+    );
     eprintln!("--- captured wz-ap-demo stderr ---\n{demo_captured}");
 }
 
@@ -1323,5 +1335,14 @@ fn wz_publish_routes_through_zenohd_to_pico_zsub_over_ws() {
     assert!(
         received_text.contains(publish_value),
         "z_sub received but the publish value '{publish_value}' is missing.\n{received_text}"
+    );
+    // R311po — WITNESS the WS transport. z_sub receiving proves the data plane
+    // routed, but not that wz's leg of it was WebSocket (vs a silent TCP dial);
+    // wz-ap-demo logs the dialed transport name, so assert it dialed `ws`.
+    assert!(
+        demo_captured.contains("over ws transport"),
+        "leg 9 routed wz->zenohd->pico but did not witness a WS-transport dial \
+         in wz-ap-demo stderr (expected 'over ws transport').\n\
+         --- captured wz-ap-demo stderr ---\n{demo_captured}"
     );
 }

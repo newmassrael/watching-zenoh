@@ -150,7 +150,13 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
         }
         Role::Initiator { connect } => {
             let dialed = dial_endpoint(connect, &DialConfig::default()).await?;
-            log::info!("wz-ap-demo: connected to {connect}");
+            // R311po — log WHICH transport was dialed (the DialedLink variant
+            // name). This is the WS legs' witness that a `ws/...` --connect
+            // really opened a WebSocket link, not a silent TCP fallback.
+            log::info!(
+                "wz-ap-demo: connected to {connect} over {} transport",
+                dialed.transport_name()
+            );
             Ok(dialed)
         }
     }
