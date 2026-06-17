@@ -39630,6 +39630,56 @@
         "다음 carry: cross-impl 추가 방향(project-pico-parity-status). pico WS native cross-impl은 emscripten-only로 영구 차단(emscripten 빌드+JS/브라우저 WS 런타임=무거운 별도 인프라, CI 비현실적). 미검증 후보=pico serial cross-impl(통상 router 짝 필요)·wz=Client->pico=peer-listen(zenohd 중개). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311pl": {
+      "decision_summary": "R311pl: R311pk(wz WS↔zenohd cross-impl) 세션리뷰 — 독립 4-에이전트 적대 자가감사가 결함 ①~⑧ 부채 적발·등록(코드 변경 0, 수정 다음 세션). ①root=establish_link 라이브러리 dial SSOT 재조립+heuristic 두 경로 fork, ②WS readiness probe 부재, ③leg WS 미단언, ④~⑦ SSOT/doc, ⑧Acceptor 비대칭.",
+      "changes_bullets": [
+        "① [MAJOR ROOT] establish_link(wz-ap-demo/src/runner.rs:148-167)이 parse_any_locator+dial_locator+에러맵을 바이너리에 재조립 — 라이브러리 open_session_at/connect_and_open_session(session_open.rs:811,663)이 이미 소유(모듈 doc :16 \"R311ev makes the demo consume it removing the duplication\"). 부수: connect.contains('/')가 TCP dial 두 경로 fork(bare host:port=else TcpStream::connect=DNS / tcp/host:port=if parse_locator=numeric-only → tcp/myhost DNS 깨짐, tcp/ scheme 경로 no test). 수정=라이브러리 dial-only locator seam(parser MissingProtoSeparator로 scheme 판단, scheme-less=tcp DNS) 추가→데모 위임.",
+        "② [MEDIUM] WS positive readiness probe 부재 — spawn_zenohd_tcp_ws(wz_to_zenohd_router.rs:147-184)가 tcp_port만 handshake-ready(wait_for_zenohd_handshake_ready), ws_port는 wait_for_tcp_accept 제거 후 inference만. ws 커널소켓 startup sync bind라 refused는 backlog가 막으나 accept_task polling은 timing+wz connect retry 없음(R121f)=verification 아닌 inference. R311pi tcp probe 대칭 누락. 수정=wait_for_zenohd_handshake_ready locator-parameterize(ws/127.0.0.1:{ws_port} real WS handshake probe=upgrade 보내 wedge 안 함).",
+        "③ [MEDIUM] leg-8/9가 WS transport 미단언 — false-green 아니나(ws_port=ws-only listener, raw TCP는 RFC6455 미충족=Established 불가, 포트 분리로 TCP fallback 구조적 표현불가) witness 아닌 inference, 미래 회귀가 leg를 조용히 TCP로 만들어도 통과. 수정=wz-ap-demo establish_link이 DialedLink variant 로그(Ws/Tcp)+leg가 Ws 단언(unrepresentable).",
+        "④ [MINOR SSOT] spawn_zenohd_tcp_ws↔spawn_zenohd 중복(readiness 로직 copy-paste) → 공통 spawn_zenohd_listeners(listeners:&[&str], probe_port) 헬퍼+양쪽 위임.",
+        "⑤ [MINOR SSOT] PortReservation::pick_pair↔pick bind/extract 중복 → 공통 bind 헬퍼.",
+        "⑥ [MINOR DOC] --connect CLI help stale: usage.rs:41(\"e.g. 127.0.0.1:7447\")+main.rs:30(\"remote TCP peer address\")이 새 ws/HOST:PORT 형식 미문서화.",
+        "⑦ [MINOR] connect-ws feature 네이밍: locator-ws가 transport-link-ws 이미 pull=redundant closure; connect- prefix가 Initiator-only를 bake(⑧ 정직화시 misdescribe). 수정=중립 네이밍(transport-ws/ws)+최소 closure.",
+        "⑧ [정직화] Acceptor WS 비대칭: 라이브러리 accept_ws(ws_pipeline.rs:75)→DialedLink::Ws 존재+ws_e2e.rs 검증인데 데모 Acceptor arm은 scheme-blind TCP-only. wz --listen ws/ 검증 dialer 부재(pico WS 불가)→symmetric=dead-code. 수정=stated asymmetry doc 명시(no dead-code)."
+      ],
+      "verification_bullets": [
+        "출처=독립 4-에이전트 적대 자가감사: system-architect(MAJOR-1/2/3+MINOR-1), quality-engineer(F1/F2/F3/F4), root-cause-analyst(Finding1-4), refactoring-expert(M1-M6+A1). \"20/20 zero-flake textbook\" self-assessment 뒤집음(R311my/mz/pb/pg~pj 패턴 5번째 반복).",
+        "검증된 올바른 부분(변경 불필요): 진단(raw poke가 ws listener 파괴)=CONFIRMED REAL MECHANISM(zenoh io/zenoh-links/zenoh-link-ws/src/unicast.rs:529 serial inline accept_async+bare ?→single-worker accept_task Err 종료+self-delete unicast.rs:380; tungstenite EOF→HandshakeIncomplete; Acceptor runtime worker_threads=1). wait_for_tcp_accept(ws_port) 제거=진짜 root-cause fix(증상 회피 아님). 주석 honest(overclaim 없음, \"wedge\" 단어만 imprecise). locator re-export home/granularity·DialedLink 반환(pre-existing)·pick_pair single-lock(std Mutex 비재진입)·ws no-raw-poke readiness 설계(R311pi-consistent)·leg-8/9 copy-paste(leg-1~7 file-wide 선례) 전부 ✓.",
+        "이 entry는 audit 부채 등록 전용 — R311pk 코드/테스트 변경 0. 수정은 다음 세션 별도 entry. full run-ci 등 검증은 수정 시 수행(이 entry는 발견·등록만). 상세 추적=memory project-r311pk-session-review-load-trigger."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pl = R311pk(wz WS↔zenohd cross-impl) 세션리뷰 부채 등록(코드 변경 0). 독립 4-에이전트가 \"20/20 zero-flake textbook\" self-assessment 뒤집고 ①~⑧ 적발. R311pk 2커밋(9bc4445 코드+5b2b74d ledger 771) LOCAL-COMMITTED UNPUSHED, **수정 전 push 금지**(결함 코드 공유 방지, R311pb 선례=세션리뷰가 push 전 실버그 적발→수정 후 push).",
+        "수정 순서(다음 세션 R311pm~): ①root 먼저(라이브러리 dial-only seam→데모 위임=heuristic+두 경로 fork dissolve)→②WS readiness probe(+④spawn_zenohd 공통 헬퍼 묶음)→③WS transport 단언→⑤pick_pair 중복+⑥CLI help+⑦connect-ws 네이밍→⑧Acceptor stated asymmetry doc. 각 수정 후 WS legs 20/20 zero-flake+Layer Z 9/9+full run-ci(M+G+Z) RUNCI_EXIT=0→R311pk+수정 묶어 push 동의 요청.",
+        "상세=[[project-r311pk-session-review-load-trigger]] 토픽(결함별 severity/파일라인/수정방향/출처 에이전트). 다음 cross-impl 후보=[[project-pico-parity-status]](pico WS=emscripten-only 영구 차단; serial cross-impl·wz=Client→pico via zenohd). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pl: R311pk(wz WS↔zenohd cross-impl) 세션리뷰 — 독립 4-에이전트 적대 자가감사가 결함 ①~⑧ 부채 적발·등록(코드 변경 0, 수정 다음 세션). ①root=establish_link 라이브러리 dial SSOT 재조립+heuristic 두 경로 fork, ②WS readiness probe 부재, ③leg WS 미단언, ④~⑦ SSOT/doc, ⑧Acceptor 비대칭.",
+      "publishable_changes_bullets": [
+        "① [MAJOR ROOT] establish_link(wz-ap-demo/src/runner.rs:148-167)이 parse_any_locator+dial_locator+에러맵을 바이너리에 재조립 — 라이브러리 open_session_at/connect_and_open_session(session_open.rs:811,663)이 이미 소유(모듈 doc :16 \"R311ev makes the demo consume it removing the duplication\"). 부수: connect.contains('/')가 TCP dial 두 경로 fork(bare host:port=else TcpStream::connect=DNS / tcp/host:port=if parse_locator=numeric-only → tcp/myhost DNS 깨짐, tcp/ scheme 경로 no test). 수정=라이브러리 dial-only locator seam(parser MissingProtoSeparator로 scheme 판단, scheme-less=tcp DNS) 추가→데모 위임.",
+        "② [MEDIUM] WS positive readiness probe 부재 — spawn_zenohd_tcp_ws(wz_to_zenohd_router.rs:147-184)가 tcp_port만 handshake-ready(wait_for_zenohd_handshake_ready), ws_port는 wait_for_tcp_accept 제거 후 inference만. ws 커널소켓 startup sync bind라 refused는 backlog가 막으나 accept_task polling은 timing+wz connect retry 없음(R121f)=verification 아닌 inference. R311pi tcp probe 대칭 누락. 수정=wait_for_zenohd_handshake_ready locator-parameterize(ws/127.0.0.1:{ws_port} real WS handshake probe=upgrade 보내 wedge 안 함).",
+        "③ [MEDIUM] leg-8/9가 WS transport 미단언 — false-green 아니나(ws_port=ws-only listener, raw TCP는 RFC6455 미충족=Established 불가, 포트 분리로 TCP fallback 구조적 표현불가) witness 아닌 inference, 미래 회귀가 leg를 조용히 TCP로 만들어도 통과. 수정=wz-ap-demo establish_link이 DialedLink variant 로그(Ws/Tcp)+leg가 Ws 단언(unrepresentable).",
+        "④ [MINOR SSOT] spawn_zenohd_tcp_ws↔spawn_zenohd 중복(readiness 로직 copy-paste) → 공통 spawn_zenohd_listeners(listeners:&[&str], probe_port) 헬퍼+양쪽 위임.",
+        "⑤ [MINOR SSOT] PortReservation::pick_pair↔pick bind/extract 중복 → 공통 bind 헬퍼.",
+        "⑥ [MINOR DOC] --connect CLI help stale: usage.rs:41(\"e.g. 127.0.0.1:7447\")+main.rs:30(\"remote TCP peer address\")이 새 ws/HOST:PORT 형식 미문서화.",
+        "⑦ [MINOR] connect-ws feature 네이밍: locator-ws가 transport-link-ws 이미 pull=redundant closure; connect- prefix가 Initiator-only를 bake(⑧ 정직화시 misdescribe). 수정=중립 네이밍(transport-ws/ws)+최소 closure.",
+        "⑧ [정직화] Acceptor WS 비대칭: 라이브러리 accept_ws(ws_pipeline.rs:75)→DialedLink::Ws 존재+ws_e2e.rs 검증인데 데모 Acceptor arm은 scheme-blind TCP-only. wz --listen ws/ 검증 dialer 부재(pico WS 불가)→symmetric=dead-code. 수정=stated asymmetry doc 명시(no dead-code)."
+      ],
+      "publishable_verification_bullets": [
+        "출처=독립 4-에이전트 적대 자가감사: system-architect(MAJOR-1/2/3+MINOR-1), quality-engineer(F1/F2/F3/F4), root-cause-analyst(Finding1-4), refactoring-expert(M1-M6+A1). \"20/20 zero-flake textbook\" self-assessment 뒤집음(R311my/mz/pb/pg~pj 패턴 5번째 반복).",
+        "검증된 올바른 부분(변경 불필요): 진단(raw poke가 ws listener 파괴)=CONFIRMED REAL MECHANISM(zenoh io/zenoh-links/zenoh-link-ws/src/unicast.rs:529 serial inline accept_async+bare ?→single-worker accept_task Err 종료+self-delete unicast.rs:380; tungstenite EOF→HandshakeIncomplete; Acceptor runtime worker_threads=1). wait_for_tcp_accept(ws_port) 제거=진짜 root-cause fix(증상 회피 아님). 주석 honest(overclaim 없음, \"wedge\" 단어만 imprecise). locator re-export home/granularity·DialedLink 반환(pre-existing)·pick_pair single-lock(std Mutex 비재진입)·ws no-raw-poke readiness 설계(R311pi-consistent)·leg-8/9 copy-paste(leg-1~7 file-wide 선례) 전부 ✓.",
+        "이 entry는 audit 부채 등록 전용 — R311pk 코드/테스트 변경 0. 수정은 다음 세션 별도 entry. full run-ci 등 검증은 수정 시 수행(이 entry는 발견·등록만). 상세 추적=memory project-r311pk-session-review-load-trigger."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pl = R311pk(wz WS↔zenohd cross-impl) 세션리뷰 부채 등록(코드 변경 0). 독립 4-에이전트가 \"20/20 zero-flake textbook\" self-assessment 뒤집고 ①~⑧ 적발. R311pk 2커밋(9bc4445 코드+5b2b74d ledger 771) LOCAL-COMMITTED UNPUSHED, **수정 전 push 금지**(결함 코드 공유 방지, R311pb 선례=세션리뷰가 push 전 실버그 적발→수정 후 push).",
+        "수정 순서(다음 세션 R311pm~): ①root 먼저(라이브러리 dial-only seam→데모 위임=heuristic+두 경로 fork dissolve)→②WS readiness probe(+④spawn_zenohd 공통 헬퍼 묶음)→③WS transport 단언→⑤pick_pair 중복+⑥CLI help+⑦connect-ws 네이밍→⑧Acceptor stated asymmetry doc. 각 수정 후 WS legs 20/20 zero-flake+Layer Z 9/9+full run-ci(M+G+Z) RUNCI_EXIT=0→R311pk+수정 묶어 push 동의 요청.",
+        "상세=[[project-r311pk-session-review-load-trigger]] 토픽(결함별 severity/파일라인/수정방향/출처 에이전트). 다음 cross-impl 후보=[[project-pico-parity-status]](pico WS=emscripten-only 영구 차단; serial cross-impl·wz=Client→pico via zenohd). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
