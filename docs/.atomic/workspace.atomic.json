@@ -40104,6 +40104,46 @@
         "남은 등록 부채(blocker 아님): (B)[MINOR] Named+reconnect 미배선(reconnect는 numeric ParsedLocator만; hostname --connect 재연결 안 됨). 다음=부채 B 또는 pico parity(project-pico-parity-status). 코드 LOCAL-COMMITTED UNPUSHED 예정(link_pipeline/session_open/runner/e2e-harness). push 명시 동의 필요. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311pw": {
+      "decision_summary": "R311pw: 부채 B(재연결 IP-only) 청산. reconnect가 ReconnectLocator(Ip|Named) 보유 — hostname --connect 재연결(Named 매 시도 재해석=DNS failover). serial은 narrowing 경계서 표현불가 제외. R311ps dial/reconnect 비대칭 해소.",
+      "changes_bullets": [
+        "wz-session-core/src/reconnect.rs: ReconnectLocator(Ip(ParsedLocator) | Named{proto,host,port}) 신설 — 재연결 가능 subset(IP-family connection-oriented)의 SSOT 타입. From<ReconnectLocator> for AnyLocator(infallible widen) + TryFrom<AnyLocator>(Serial->NotReconnectable narrowing). 단위 3종(Ip/Named round-trip, Serial 거부).",
+        "wz-runtime-tokio/src/reconnect.rs: ReconnectingSession.locator 필드 + open_session_with_reconnect 파라미터를 ParsedLocator->ReconnectLocator. open_attempt/초기 dial이 self.locator.clone().into()로 dial_locator 호출(AnyLocator::Ip 하드코드 제거). pub use로 ReconnectLocator/NotReconnectable 재노출(호출자가 함수+파라미터 타입을 단일 경로서 획득). R311nv \"IP-only ParsedLocator\" 코멘트를 Ip|Named로 갱신.",
+        "wz-runtime-tokio/tests/session_reconnect_e2e.rs: 공유 드라이버 assert_declare_replays_after_link_loss를 (listener, locator) 파라미터화(SSOT, 파일 자체의 parameterize-don't-clone 원칙). ip_loopback 헬퍼로 IP 레그 중복 제거. 신규 named_locator_reconnects_after_link_loss(localhost:0 bind, ReconnectLocator::Named, Subscriber replay) + matches! Named 분류 positive pin. gave_up/tls/ws locator를 ReconnectLocator::Ip로 래핑."
+      ],
+      "verification_bullets": [
+        "근본: R311ps가 hostname을 AnyLocator::Named로 분류했으나 reconnect 슈퍼바이저는 numeric ParsedLocator만 보유 -> hostname --connect는 1회 dial 후 재연결 불가(dial/reconnect 비대칭). textbook=재연결 가능 subset을 ReconnectLocator로 인코딩하고 serial 제외를 runtime guard 아닌 narrowing 경계(TryFrom)의 표현불가로([[feedback-unrepresentable-over-test]]). Named arm은 매 재시도 host 재해석=DNS failover 정상 동작(pico Z_FEATURE_AUTO_RECONNECT=IP-family only 패리티 유지).",
+        "단위 3/3(wz-session-core --features session-unicast). e2e: base TCP 4/4 + TLS 5/5 + WS 5/5(run-ci tls/ws 레인 미러, named 포함). named_locator 테스트 15/15 연속 통과(무결정 + 결정적 resolution 근거: listener가 localhost:0 bind으로 localhost resolved addr에 위치, dial이 동일 resolver 후보 순회로 도달). clippy --all-targets -D warnings clean(wz-session-core session-unicast + wz-runtime-tokio tls,ws). no_std: G.13 MCU 피처셋(session-reconnect,session-unicast,declare-keyexpr,declare-undeclare,no_std) check clean. wz facade + wz-ap-demo --all-targets clean.",
+        "exit 파이프 없이 직접 판정(테스트 result ok / clippy Finished). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트. 데모는 여전히 reconnect 미사용(one-shot initiate_and_open_session); 본 변경은 library reconnect seam 한정."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pw = 부채 B(Named+reconnect 미배선) textbook 청산. reconnect 슈퍼바이저가 ReconnectLocator(Ip|Named) 보유 -> hostname --connect 재연결(Named는 매 재시도 host 재해석=DNS failover). serial은 ReconnectLocator narrowing 경계서 표현불가로 제외(pico Z_FEATURE_AUTO_RECONNECT=IP-family only 패리티). R311ps가 만든 dial/reconnect 비대칭 해소.",
+        "등록 부채 A(accept seam, R311pu+pv) + B(Named reconnect, R311pw) 모두 종료. 다음=[[project-pico-parity-status]](구현 ~92% / cross-impl 검증 ~75%; pico WS=emscripten-only 영구 차단) 또는 신규 트랙.",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정: wz-session-core/src/reconnect.rs + wz-runtime-tokio/src/reconnect.rs + wz-runtime-tokio/tests/session_reconnect_e2e.rs. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pw: 부채 B(재연결 IP-only) 청산. reconnect가 ReconnectLocator(Ip|Named) 보유 — hostname --connect 재연결(Named 매 시도 재해석=DNS failover). serial은 narrowing 경계서 표현불가 제외. R311ps dial/reconnect 비대칭 해소.",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/reconnect.rs: ReconnectLocator(Ip(ParsedLocator) | Named{proto,host,port}) 신설 — 재연결 가능 subset(IP-family connection-oriented)의 SSOT 타입. From<ReconnectLocator> for AnyLocator(infallible widen) + TryFrom<AnyLocator>(Serial->NotReconnectable narrowing). 단위 3종(Ip/Named round-trip, Serial 거부).",
+        "wz-runtime-tokio/src/reconnect.rs: ReconnectingSession.locator 필드 + open_session_with_reconnect 파라미터를 ParsedLocator->ReconnectLocator. open_attempt/초기 dial이 self.locator.clone().into()로 dial_locator 호출(AnyLocator::Ip 하드코드 제거). pub use로 ReconnectLocator/NotReconnectable 재노출(호출자가 함수+파라미터 타입을 단일 경로서 획득). R311nv \"IP-only ParsedLocator\" 코멘트를 Ip|Named로 갱신.",
+        "wz-runtime-tokio/tests/session_reconnect_e2e.rs: 공유 드라이버 assert_declare_replays_after_link_loss를 (listener, locator) 파라미터화(SSOT, 파일 자체의 parameterize-don't-clone 원칙). ip_loopback 헬퍼로 IP 레그 중복 제거. 신규 named_locator_reconnects_after_link_loss(localhost:0 bind, ReconnectLocator::Named, Subscriber replay) + matches! Named 분류 positive pin. gave_up/tls/ws locator를 ReconnectLocator::Ip로 래핑."
+      ],
+      "publishable_verification_bullets": [
+        "근본: R311ps가 hostname을 AnyLocator::Named로 분류했으나 reconnect 슈퍼바이저는 numeric ParsedLocator만 보유 -> hostname --connect는 1회 dial 후 재연결 불가(dial/reconnect 비대칭). textbook=재연결 가능 subset을 ReconnectLocator로 인코딩하고 serial 제외를 runtime guard 아닌 narrowing 경계(TryFrom)의 표현불가로([[feedback-unrepresentable-over-test]]). Named arm은 매 재시도 host 재해석=DNS failover 정상 동작(pico Z_FEATURE_AUTO_RECONNECT=IP-family only 패리티 유지).",
+        "단위 3/3(wz-session-core --features session-unicast). e2e: base TCP 4/4 + TLS 5/5 + WS 5/5(run-ci tls/ws 레인 미러, named 포함). named_locator 테스트 15/15 연속 통과(무결정 + 결정적 resolution 근거: listener가 localhost:0 bind으로 localhost resolved addr에 위치, dial이 동일 resolver 후보 순회로 도달). clippy --all-targets -D warnings clean(wz-session-core session-unicast + wz-runtime-tokio tls,ws). no_std: G.13 MCU 피처셋(session-reconnect,session-unicast,declare-keyexpr,declare-undeclare,no_std) check clean. wz facade + wz-ap-demo --all-targets clean.",
+        "exit 파이프 없이 직접 판정(테스트 result ok / clippy Finished). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트. 데모는 여전히 reconnect 미사용(one-shot initiate_and_open_session); 본 변경은 library reconnect seam 한정."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pw = 부채 B(Named+reconnect 미배선) textbook 청산. reconnect 슈퍼바이저가 ReconnectLocator(Ip|Named) 보유 -> hostname --connect 재연결(Named는 매 재시도 host 재해석=DNS failover). serial은 ReconnectLocator narrowing 경계서 표현불가로 제외(pico Z_FEATURE_AUTO_RECONNECT=IP-family only 패리티). R311ps가 만든 dial/reconnect 비대칭 해소.",
+        "등록 부채 A(accept seam, R311pu+pv) + B(Named reconnect, R311pw) 모두 종료. 다음=[[project-pico-parity-status]](구현 ~92% / cross-impl 검증 ~75%; pico WS=emscripten-only 영구 차단) 또는 신규 트랙.",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정: wz-session-core/src/reconnect.rs + wz-runtime-tokio/src/reconnect.rs + wz-runtime-tokio/tests/session_reconnect_e2e.rs. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
