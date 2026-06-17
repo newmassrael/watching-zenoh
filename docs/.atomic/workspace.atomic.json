@@ -39766,6 +39766,48 @@
         "코드 LOCAL-COMMITTED UNPUSHED(pn=f656b6c, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
       ]
     },
+    "Round 311po": {
+      "decision_summary": "R311po: 부채③(leg-8/9 WS transport 미단언) 수정. DialedLink::transport_name() variant→name SSOT 추가, establish_link이 로그, WS leg가 'over ws transport' witness 단언 — inference를 logged witness로.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: DialedLink::transport_name()->&'static str 메서드 추가 — tcp/udp/serial/tls/ws variant→name SSOT, feature-gated arms 한 곳. pub API라 dead-code 아님.",
+        "wz-ap-demo/src/runner.rs: establish_link이 dial 후 \"connected to {connect} over {transport_name} transport\" 로그(dialed.transport_name()).",
+        "wz_to_zenohd_router.rs: leg-8(Established 후) + leg-9(data-plane 수신 후) 둘 다 demo_captured.contains(\"over ws transport\") 단언 — WS가 logged witness. 미래 회귀가 leg를 조용히 TCP로 만들면 string 바뀌어 fail."
+      ],
+      "verification_bullets": [
+        "빌드: wz-runtime-tokio(default) + wz-ap-demo(connect-ws) + wz-integration-tests 테스트. clippy --all-targets -D warnings clean + fmt --check clean.",
+        "Layer Z 9/9 pass — witness 단언이 실제 \"over ws transport\"를 관측(false-fail 아님 확인). WS leg-8/9 20/20 zero-flake.",
+        "false-green 보강: ws_port=ws-only listener+tcp_port 분리라 TCP fallback 구조적 표현불가(기존 inference)에 더해, 이제 transport_name logged witness가 회귀 가드.",
+        "종합 full run-ci(M+G+Z)는 잔여 부채(R311pp~pq) 수정 후 push 전 1회 수행 예정."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311po = 세션리뷰 부채 ③(leg-8/9 WS transport 미단언) 수정. WS transport가 이제 logged witness(DialedLink::transport_name() SSOT + establish_link 로그 + leg 단언) — inference 아님.",
+        "남은 부채(R311pp~): ⑤pick_pair↔pick bind/extract 중복→공통 bind 헬퍼; ⑥--connect CLI help stale(usage.rs/main.rs ws/HOST:PORT 미문서); ⑦connect-ws 네이밍(locator-ws redundant + connect- prefix가 Initiator-only bake). ⑤⑥⑦=R311pp 묶음, ⑧Acceptor stated asymmetry doc=R311pq. 각 후 Layer Z 9/9+WS 20/20; 전부 후 full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(po=0806995, pn=f656b6c/a98a6a9, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ],
+      "publishable_decision_summary": "R311po: 부채③(leg-8/9 WS transport 미단언) 수정. DialedLink::transport_name() variant→name SSOT 추가, establish_link이 로그, WS leg가 'over ws transport' witness 단언 — inference를 logged witness로.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: DialedLink::transport_name()->&'static str 메서드 추가 — tcp/udp/serial/tls/ws variant→name SSOT, feature-gated arms 한 곳. pub API라 dead-code 아님.",
+        "wz-ap-demo/src/runner.rs: establish_link이 dial 후 \"connected to {connect} over {transport_name} transport\" 로그(dialed.transport_name()).",
+        "wz_to_zenohd_router.rs: leg-8(Established 후) + leg-9(data-plane 수신 후) 둘 다 demo_captured.contains(\"over ws transport\") 단언 — WS가 logged witness. 미래 회귀가 leg를 조용히 TCP로 만들면 string 바뀌어 fail."
+      ],
+      "publishable_verification_bullets": [
+        "빌드: wz-runtime-tokio(default) + wz-ap-demo(connect-ws) + wz-integration-tests 테스트. clippy --all-targets -D warnings clean + fmt --check clean.",
+        "Layer Z 9/9 pass — witness 단언이 실제 \"over ws transport\"를 관측(false-fail 아님 확인). WS leg-8/9 20/20 zero-flake.",
+        "false-green 보강: ws_port=ws-only listener+tcp_port 분리라 TCP fallback 구조적 표현불가(기존 inference)에 더해, 이제 transport_name logged witness가 회귀 가드.",
+        "종합 full run-ci(M+G+Z)는 잔여 부채(R311pp~pq) 수정 후 push 전 1회 수행 예정."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311po = 세션리뷰 부채 ③(leg-8/9 WS transport 미단언) 수정. WS transport가 이제 logged witness(DialedLink::transport_name() SSOT + establish_link 로그 + leg 단언) — inference 아님.",
+        "남은 부채(R311pp~): ⑤pick_pair↔pick bind/extract 중복→공통 bind 헬퍼; ⑥--connect CLI help stale(usage.rs/main.rs ws/HOST:PORT 미문서); ⑦connect-ws 네이밍(locator-ws redundant + connect- prefix가 Initiator-only bake). ⑤⑥⑦=R311pp 묶음, ⑧Acceptor stated asymmetry doc=R311pq. 각 후 Layer Z 9/9+WS 20/20; 전부 후 full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(po=0806995, pn=f656b6c/a98a6a9, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
