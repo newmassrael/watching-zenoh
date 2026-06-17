@@ -33,7 +33,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::tcp::OwnedReadHalf;
-use tokio::net::{lookup_host, TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
@@ -89,55 +89,18 @@ pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
 /// learns its port. Quiet, like the dial primitives: logging is the caller's
 /// concern (the Acceptor's "listening on" line; the Initiator's "connected
 /// to"). Numeric only by construction, mirroring [`dial_tcp`]; [`bind_tcp_host`]
-/// is the DNS-capable sibling. Sets `SO_REUSEADDR` via the shared
-/// [`bind_listener_reuseaddr`] SSOT (zenoh listener parity) so a restarted
-/// acceptor can rebind a fixed port over the prior connection's TIME_WAIT.
+/// is the DNS-capable sibling.
 pub async fn bind_tcp(addr: SocketAddr) -> io::Result<TcpListener> {
-    bind_listener_reuseaddr(addr)
+    TcpListener::bind(addr).await
 }
 
 /// Bind a TCP listener on a `host:port` STRING — the DNS-capable sibling of
-/// [`bind_tcp`], symmetric to [`dial_tcp_host`]. A hostname resolves via the
-/// std resolver ([`lookup_host`]) and each resolved address is tried in order
-/// until one binds, the listen-side mirror of how `TcpStream::connect` walks a
-/// `ToSocketAddrs` set; a numeric string resolves to itself. Each candidate
-/// routes through the same [`bind_listener_reuseaddr`] SSOT, so the
-/// `SO_REUSEADDR` parity property holds whichever address binds. (Listen-side
-/// hostnames are unusual but the resolver path is identical.)
+/// [`bind_tcp`], symmetric to [`dial_tcp_host`]. `TcpListener::bind` takes
+/// `ToSocketAddrs`, so a hostname resolves via the std resolver and a numeric
+/// string binds directly, through the same call the dial host primitive uses.
+/// (Listen-side hostnames are unusual but the resolver path is identical.)
 pub async fn bind_tcp_host(host: &str) -> io::Result<TcpListener> {
-    let mut last_err: Option<io::Error> = None;
-    for addr in lookup_host(host).await? {
-        match bind_listener_reuseaddr(addr) {
-            Ok(listener) => return Ok(listener),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AddrNotAvailable,
-            format!("bind_tcp_host: no addresses resolved for {host:?}"),
-        )
-    }))
-}
-
-/// Build a listening [`TcpListener`] with `SO_REUSEADDR` set before bind — the
-/// shared SSOT both [`bind_tcp`] and [`bind_tcp_host`] route their resolved
-/// [`SocketAddr`] through. Mirrors zenoh upstream's listener
-/// (`io/zenoh-link-commons/src/tcp.rs`: `TcpSocket` -> `set_reuseaddr(true)` ->
-/// `bind` -> `listen(1024)`): `tokio::net::TcpListener::bind` exposes no
-/// pre-bind setsockopt hook, so the socket is built through [`TcpSocket`] and
-/// listened on directly. `SO_REUSEADDR` lets a fresh acceptor rebind a fixed
-/// port while the prior connection's accepted socket lingers in TIME_WAIT;
-/// without it a restarted acceptor fails `EADDRINUSE` for the ~60s wait. The
-/// 1024 backlog matches both zenoh and tokio's `TcpListener::bind` default.
-fn bind_listener_reuseaddr(addr: SocketAddr) -> io::Result<TcpListener> {
-    let socket = match addr {
-        SocketAddr::V4(_) => TcpSocket::new_v4()?,
-        SocketAddr::V6(_) => TcpSocket::new_v6()?,
-    };
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr)?;
-    socket.listen(1024)
+    TcpListener::bind(host).await
 }
 
 /// Accept ONE inbound connection from a bound [`TcpListener`] — the accept-side
@@ -208,39 +171,5 @@ mod tests {
         client.await.expect("client task").expect("client connect");
         assert_eq!(peer.ip(), addr.ip(), "accepted peer is the loopback client");
         assert!(server.peer_addr().is_ok(), "server stream is connected");
-    }
-
-    /// `bind_tcp` sets `SO_REUSEADDR` on the listening socket (zenoh parity:
-    /// `io/zenoh-link-commons/src/tcp.rs` sets it on every listener). Pinned by
-    /// reading the option back off the bound socket via socket2 — deterministic,
-    /// no timing — so a future refactor that drops to a bare `TcpListener::bind`
-    /// (no pre-bind setsockopt) regresses HERE, not as a flaky fixed-port rebind
-    /// failure in the binary sever-reconnect e2e this option de-risks.
-    #[tokio::test]
-    async fn bind_tcp_sets_so_reuseaddr() {
-        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
-            .await
-            .expect("bind loopback");
-        let std_listener = listener.into_std().expect("into_std");
-        let sock = socket2::Socket::from(std_listener);
-        assert!(
-            sock.reuse_address().expect("read SO_REUSEADDR"),
-            "bind_tcp must set SO_REUSEADDR for fixed-port rebind over TIME_WAIT"
-        );
-    }
-
-    /// `bind_tcp_host` (DNS-capable sibling) sets `SO_REUSEADDR` too — it
-    /// resolves the host and routes each candidate through the same
-    /// `bind_listener_reuseaddr` SSOT, so the parity property holds whichever
-    /// bind primitive a locator picks (numeric vs named).
-    #[tokio::test]
-    async fn bind_tcp_host_sets_so_reuseaddr() {
-        let listener = bind_tcp_host("localhost:0").await.expect("bind localhost");
-        let std_listener = listener.into_std().expect("into_std");
-        let sock = socket2::Socket::from(std_listener);
-        assert!(
-            sock.reuse_address().expect("read SO_REUSEADDR"),
-            "bind_tcp_host must set SO_REUSEADDR via the shared bind SSOT"
-        );
     }
 }
