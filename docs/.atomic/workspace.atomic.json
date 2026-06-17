@@ -39578,6 +39578,58 @@
         "메타: 독립 4-에이전트 세션리뷰가 \"20/20 zero-flake textbook\" self-assessment를 뒤집어 false-green 1 + flake 2 + 구조 smell 2 + 과신 1 적발→전부 수정. R311my/mz/pb 패턴 반복=독립 자가감사 가치 재확인. push 미동의=LOCAL까지. 누적 미푸시=R311pc~pj."
       ]
     },
+    "Round 311pk": {
+      "decision_summary": "R311pk: wz WebSocket transport <-> zenohd(zenoh-full) WS link cross-impl 완결(Layer Z leg-8 handshake + leg-9 데이터플레인). pico WS=emscripten 전용 native 불가->wz WS<->표준 zenoh WS 방향 전환. wz-ap-demo --connect locator-aware(ws/ 스킴=dial_locator WS dial) + connect-ws opt-in feature + PortReservation::pick_pair dual-port. 진단: wait_for_tcp_accept(ws_port) raw TCP poke가 zenoh-link-ws listener wedge->제거.",
+      "changes_bullets": [
+        "wz-runtime-tokio lib.rs: pub use wz_session_core::locator 재노출(facade 경유 parse_any_locator/AnyLocator 접근). locator leaf는 ungated라 transport-link-* feature 무관 항상 컴파일.",
+        "wz-ap-demo runner.rs: establish_link 반환 io::Result<TcpStream>->io::Result<DialedLink>. Initiator arm이 --connect에 스킴 구분자 '/'가 있으면 parse_any_locator->dial_locator(DialConfig::default())로 dial(ws/ 스킴=WebSocket), 없으면 기존 TcpStream::connect->DialedLink::Tcp(하위호환=기존 7 TCP leg 경로 byte-for-byte 불변). 호출처 DialedLink::Tcp(stream) 래핑 제거.",
+        "wz-ap-demo Cargo.toml: connect-ws=[wz/transport-link-ws, wz/locator-ws] opt-in feature 신설. default(preset-ap-client) 미포함=footprint baseline+기존 레인 빌드 무영향.",
+        "wz-integration-tests common lib.rs: PortReservation::pick_pair() 신설. 단일 process-global lock 획득 내에서 두 ephemeral 포트 동시 bind후 release(pick() 2회 연속 호출=동일 mutex 재진입 deadlock 회피). WS dual-listen leg의 tcp_port(pico)+ws_port(wz) 쌍 예약용.",
+        "wz_to_zenohd_router.rs: spawn_zenohd_tcp_ws(tcp+ws dual-listen zenohd) 헬퍼 + leg-8 wz_client_reaches_established_against_zenohd_over_ws(WS handshake 결정적 pico-free) + leg-9 wz_publish_routes_through_zenohd_to_pico_zsub_over_ws(wz WS Put->zenohd->pico TCP z_sub 데이터플레인). 모듈 doc Seven->Nine legs.",
+        "scripts/run-ci.sh: Layer Z 빌드 cargo build -p wz-ap-demo에 --features connect-ws 추가(additive=TCP leg 동일 바이너리 동작). Layer Z doc에 WS leg 8-9 기술."
+      ],
+      "verification_bullets": [
+        "진단 우선(diagnose-before-carry): 초기 두 WS leg가 Connection refused(os error 111)로 실패. 수동 3-process 재현으로 근본원인 특정=spawn_zenohd_tcp_ws의 wait_for_tcp_accept(ws_port) raw TCP poke 1회가 zenoh-link-ws listener의 RFC6455-upgrade-expecting accept 경로를 wedge->후속 실제 WS dial이 refused(WS_PORT_OPEN_BEFORE_PROBE->WS_PORT_CLOSED_AFTER 실측). ws readiness 체크 제거로 수정(ws listener는 zenohd startup에 tcp와 동시 bind=Zenoh can be reached 배너 둘 다; tcp-accept+handshake-ready 게이트로 충분).",
+        "수동 sanity: dual-listen zenohd에 wz --connect ws/...->Client handshake done->SentInitSyn->GotInitAck->Established->Put 5 emit; zenohd측 New transport opened whatami:client + transport link accepted ws/127.0.0.1 관측=wz WS transport와 zenoh-full WS link wire 호환 실증.",
+        "WS legs standalone 20/20 zero-flake(no-flaky-ever). clippy --all-targets -D warnings + fmt --check clean(wz-ap-demo/wz-runtime-tokio/wz-integration-tests).",
+        "Layer Z 전체 직렬 9/9(기존 7 TCP leg + 신규 2 WS leg, 회귀 0).",
+        "종합 full run-ci(M+G+Z) RUNCI_EXIT=0 직접 캡처 + run-ci: all required layers pass(Layer E/E2/F/G/Q/M/Z 전부 pass; C1 sweep 포함=establish_link DialedLink 변경+locator re-export가 전 레인 빌드/테스트 통과)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pk = wz WebSocket transport cross-impl 완결(Layer Z leg-8 handshake + leg-9 데이터플레인). 사용자 \"pico WS transport cross-impl\" 요청->진단으로 zenoh-pico WS=emscripten 전용(CMakeLists.txt:362-364 non-emscripten WS 빌드 FATAL_ERROR) native 리눅스 불가 확정->사용자 합의로 \"wz WS transport <-> 표준 zenoh-full(zenohd v1.5.0 transport_ws default-ON) WS link\"로 방향 전환. 검증 대상=wz의 WS transport(ws_pipeline RFC6455 datagram-flow)가 표준 zenoh WS link와 handshake+데이터플레인 wire 호환(pico는 데이터플레인 짝으로 TCP 참여, zenohd가 tcp+ws dual-listen). \"pico WS 검증\"이 아님을 ledger/주석에 명시(정직성).",
+        "핵심 진단 사례: readiness probe(wait_for_tcp_accept의 raw TCP connect-then-close)가 zenoh-link-ws listener를 영구 wedge하는 미묘한 버그를 수동 재현으로 적발->ws listener는 raw-TCP probe 부적합(RFC6455 upgrade 기대). TCP listener엔 무해한 readiness 패턴이 WS listener엔 파괴적.",
+        "push 미동의=LOCAL까지(누적 미푸시=R311pk 1커밋; 직전 R311pj까지 PUSHED origin/main=737f4dc).",
+        "다음 carry: cross-impl 추가 방향(project-pico-parity-status). pico WS native cross-impl은 emscripten-only로 영구 차단(emscripten 빌드+JS/브라우저 WS 런타임=무거운 별도 인프라, CI 비현실적). 미검증 후보=pico serial cross-impl(통상 router 짝 필요)·wz=Client->pico=peer-listen(zenohd 중개). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pk: wz WebSocket transport <-> zenohd(zenoh-full) WS link cross-impl 완결(Layer Z leg-8 handshake + leg-9 데이터플레인). pico WS=emscripten 전용 native 불가->wz WS<->표준 zenoh WS 방향 전환. wz-ap-demo --connect locator-aware(ws/ 스킴=dial_locator WS dial) + connect-ws opt-in feature + PortReservation::pick_pair dual-port. 진단: wait_for_tcp_accept(ws_port) raw TCP poke가 zenoh-link-ws listener wedge->제거.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio lib.rs: pub use wz_session_core::locator 재노출(facade 경유 parse_any_locator/AnyLocator 접근). locator leaf는 ungated라 transport-link-* feature 무관 항상 컴파일.",
+        "wz-ap-demo runner.rs: establish_link 반환 io::Result<TcpStream>->io::Result<DialedLink>. Initiator arm이 --connect에 스킴 구분자 '/'가 있으면 parse_any_locator->dial_locator(DialConfig::default())로 dial(ws/ 스킴=WebSocket), 없으면 기존 TcpStream::connect->DialedLink::Tcp(하위호환=기존 7 TCP leg 경로 byte-for-byte 불변). 호출처 DialedLink::Tcp(stream) 래핑 제거.",
+        "wz-ap-demo Cargo.toml: connect-ws=[wz/transport-link-ws, wz/locator-ws] opt-in feature 신설. default(preset-ap-client) 미포함=footprint baseline+기존 레인 빌드 무영향.",
+        "wz-integration-tests common lib.rs: PortReservation::pick_pair() 신설. 단일 process-global lock 획득 내에서 두 ephemeral 포트 동시 bind후 release(pick() 2회 연속 호출=동일 mutex 재진입 deadlock 회피). WS dual-listen leg의 tcp_port(pico)+ws_port(wz) 쌍 예약용.",
+        "wz_to_zenohd_router.rs: spawn_zenohd_tcp_ws(tcp+ws dual-listen zenohd) 헬퍼 + leg-8 wz_client_reaches_established_against_zenohd_over_ws(WS handshake 결정적 pico-free) + leg-9 wz_publish_routes_through_zenohd_to_pico_zsub_over_ws(wz WS Put->zenohd->pico TCP z_sub 데이터플레인). 모듈 doc Seven->Nine legs.",
+        "scripts/run-ci.sh: Layer Z 빌드 cargo build -p wz-ap-demo에 --features connect-ws 추가(additive=TCP leg 동일 바이너리 동작). Layer Z doc에 WS leg 8-9 기술."
+      ],
+      "publishable_verification_bullets": [
+        "진단 우선(diagnose-before-carry): 초기 두 WS leg가 Connection refused(os error 111)로 실패. 수동 3-process 재현으로 근본원인 특정=spawn_zenohd_tcp_ws의 wait_for_tcp_accept(ws_port) raw TCP poke 1회가 zenoh-link-ws listener의 RFC6455-upgrade-expecting accept 경로를 wedge->후속 실제 WS dial이 refused(WS_PORT_OPEN_BEFORE_PROBE->WS_PORT_CLOSED_AFTER 실측). ws readiness 체크 제거로 수정(ws listener는 zenohd startup에 tcp와 동시 bind=Zenoh can be reached 배너 둘 다; tcp-accept+handshake-ready 게이트로 충분).",
+        "수동 sanity: dual-listen zenohd에 wz --connect ws/...->Client handshake done->SentInitSyn->GotInitAck->Established->Put 5 emit; zenohd측 New transport opened whatami:client + transport link accepted ws/127.0.0.1 관측=wz WS transport와 zenoh-full WS link wire 호환 실증.",
+        "WS legs standalone 20/20 zero-flake(no-flaky-ever). clippy --all-targets -D warnings + fmt --check clean(wz-ap-demo/wz-runtime-tokio/wz-integration-tests).",
+        "Layer Z 전체 직렬 9/9(기존 7 TCP leg + 신규 2 WS leg, 회귀 0).",
+        "종합 full run-ci(M+G+Z) RUNCI_EXIT=0 직접 캡처 + run-ci: all required layers pass(Layer E/E2/F/G/Q/M/Z 전부 pass; C1 sweep 포함=establish_link DialedLink 변경+locator re-export가 전 레인 빌드/테스트 통과)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pk = wz WebSocket transport cross-impl 완결(Layer Z leg-8 handshake + leg-9 데이터플레인). 사용자 \"pico WS transport cross-impl\" 요청->진단으로 zenoh-pico WS=emscripten 전용(CMakeLists.txt:362-364 non-emscripten WS 빌드 FATAL_ERROR) native 리눅스 불가 확정->사용자 합의로 \"wz WS transport <-> 표준 zenoh-full(zenohd v1.5.0 transport_ws default-ON) WS link\"로 방향 전환. 검증 대상=wz의 WS transport(ws_pipeline RFC6455 datagram-flow)가 표준 zenoh WS link와 handshake+데이터플레인 wire 호환(pico는 데이터플레인 짝으로 TCP 참여, zenohd가 tcp+ws dual-listen). \"pico WS 검증\"이 아님을 ledger/주석에 명시(정직성).",
+        "핵심 진단 사례: readiness probe(wait_for_tcp_accept의 raw TCP connect-then-close)가 zenoh-link-ws listener를 영구 wedge하는 미묘한 버그를 수동 재현으로 적발->ws listener는 raw-TCP probe 부적합(RFC6455 upgrade 기대). TCP listener엔 무해한 readiness 패턴이 WS listener엔 파괴적.",
+        "push 미동의=LOCAL까지(누적 미푸시=R311pk 1커밋; 직전 R311pj까지 PUSHED origin/main=737f4dc).",
+        "다음 carry: cross-impl 추가 방향(project-pico-parity-status). pico WS native cross-impl은 emscripten-only로 영구 차단(emscripten 빌드+JS/브라우저 WS 런타임=무거운 별도 인프라, CI 비현실적). 미검증 후보=pico serial cross-impl(통상 router 짝 필요)·wz=Client->pico=peer-listen(zenohd 중개). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
