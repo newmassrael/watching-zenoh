@@ -39724,6 +39724,48 @@
         "코드 LOCAL-COMMITTED UNPUSHED(R311pm=113c85b + R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
       ]
     },
+    "Round 311pn": {
+      "decision_summary": "R311pn: 부채②(WS positive readiness probe 부재)+④(spawn_zenohd readiness 중복) 수정. spawn_zenohd_listeners 공통 SSOT+양쪽 위임; wait_for_zenohd_handshake_ready locator-parameterize로 ws_port에 실제 WS 핸드셰이크 probe.",
+      "changes_bullets": [
+        "wz_to_zenohd_router.rs: spawn_zenohd_listeners(listeners:&[String], accept_port:u16, handshake_probe:&str) 공통 spawn+2-stage readiness SSOT 신설; spawn_zenohd/spawn_zenohd_tcp_ws가 얇은 위임으로 축소(④ readiness copy-paste 제거).",
+        "wait_for_zenohd_handshake_ready(port:u16)→(connect:&str) locator-parameterize. spawn_zenohd_tcp_ws가 ws/127.0.0.1:{ws_port}로 실제 RFC6455 upgrade+zenoh 핸드셰이크 probe = ws_port positive readiness(②: 기존 tcp handshake+ws inference 대체).",
+        "안전성: R311pk가 제거한 raw TCP poke(upgrade 없음→zenoh-link-ws serial accept_task EOF→self-delete wedge)와 달리 실제 WS 핸드셰이크는 upgrade 완료라 accept_task 생존(leg 20× WS dial이 증명). completed handshake가 raw poke가 못 한 positive WS readiness 신호."
+      ],
+      "verification_bullets": [
+        "테스트 컴파일(--no-run) + clippy -p wz-integration-tests --tests -D warnings clean + fmt --check clean.",
+        "Layer Z 9/9 pass(새 ws_port WS-handshake readiness probe 경로 포함; 7 TCP + 2 WS leg 회귀 0).",
+        "WS leg-8/9 20/20 zero-flake 직접 카운트(spawn_zenohd_tcp_ws의 새 WS probe가 20회 모두 정상, wedge 없음).",
+        "종합 full run-ci(M+G+Z)는 잔여 부채 수정 후 push 전 1회 수행 예정."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pn = 세션리뷰 부채 ②(WS positive readiness probe 부재) + ④(spawn_zenohd readiness 중복) 수정. ws_port가 이제 inference 아닌 실제 WS 핸드셰이크 positive probe; spawn+readiness가 spawn_zenohd_listeners 단일 SSOT.",
+        "남은 부채(R311po~): ③WS transport 단언(DialedLink variant 로그+leg가 Ws 단언=false-green 아니나 witness화)→⑤pick_pair↔pick bind 중복→⑥--connect CLI help stale→⑦connect-ws 네이밍→⑧Acceptor stated asymmetry doc. 각 후 Layer Z 9/9+WS 20/20; 전부 후 full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(pn=f656b6c, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ],
+      "publishable_decision_summary": "R311pn: 부채②(WS positive readiness probe 부재)+④(spawn_zenohd readiness 중복) 수정. spawn_zenohd_listeners 공통 SSOT+양쪽 위임; wait_for_zenohd_handshake_ready locator-parameterize로 ws_port에 실제 WS 핸드셰이크 probe.",
+      "publishable_changes_bullets": [
+        "wz_to_zenohd_router.rs: spawn_zenohd_listeners(listeners:&[String], accept_port:u16, handshake_probe:&str) 공통 spawn+2-stage readiness SSOT 신설; spawn_zenohd/spawn_zenohd_tcp_ws가 얇은 위임으로 축소(④ readiness copy-paste 제거).",
+        "wait_for_zenohd_handshake_ready(port:u16)→(connect:&str) locator-parameterize. spawn_zenohd_tcp_ws가 ws/127.0.0.1:{ws_port}로 실제 RFC6455 upgrade+zenoh 핸드셰이크 probe = ws_port positive readiness(②: 기존 tcp handshake+ws inference 대체).",
+        "안전성: R311pk가 제거한 raw TCP poke(upgrade 없음→zenoh-link-ws serial accept_task EOF→self-delete wedge)와 달리 실제 WS 핸드셰이크는 upgrade 완료라 accept_task 생존(leg 20× WS dial이 증명). completed handshake가 raw poke가 못 한 positive WS readiness 신호."
+      ],
+      "publishable_verification_bullets": [
+        "테스트 컴파일(--no-run) + clippy -p wz-integration-tests --tests -D warnings clean + fmt --check clean.",
+        "Layer Z 9/9 pass(새 ws_port WS-handshake readiness probe 경로 포함; 7 TCP + 2 WS leg 회귀 0).",
+        "WS leg-8/9 20/20 zero-flake 직접 카운트(spawn_zenohd_tcp_ws의 새 WS probe가 20회 모두 정상, wedge 없음).",
+        "종합 full run-ci(M+G+Z)는 잔여 부채 수정 후 push 전 1회 수행 예정."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pn = 세션리뷰 부채 ②(WS positive readiness probe 부재) + ④(spawn_zenohd readiness 중복) 수정. ws_port가 이제 inference 아닌 실제 WS 핸드셰이크 positive probe; spawn+readiness가 spawn_zenohd_listeners 단일 SSOT.",
+        "남은 부채(R311po~): ③WS transport 단언(DialedLink variant 로그+leg가 Ws 단언=false-green 아니나 witness화)→⑤pick_pair↔pick bind 중복→⑥--connect CLI help stale→⑦connect-ws 네이밍→⑧Acceptor stated asymmetry doc. 각 후 Layer Z 9/9+WS 20/20; 전부 후 full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(pn=f656b6c, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
