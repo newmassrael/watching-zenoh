@@ -292,9 +292,18 @@ if [[ "$SKIP_THRESHOLD" -ne 1 ]]; then
             # regression. R311m consumer-module cascade is expected to
             # promote them above threshold; until then, allow these
             # specific codecs to soft-skip.
+            #
+            # R311pr — codec-keep-alive joins the soft-skip set. KeepAlive is a
+            # BODYLESS transport message, so its codec is trivial (near-zero
+            # bytes). Its session consumer `transport-keepalive` is a SEPARATE
+            # feature that does NOT pull codec-keep-alive (verified:
+            # transport-keepalive = [wz-session-core/transport-keepalive], no
+            # codec edge), so eliding the codec alone is an HONEST sub-1KB delta
+            # — not the silent re-pull pathology this gate guards. (The -144B
+            # negative delta is LTO/inline noise around a ~0 real saving.)
             case "$codec" in
-                codec-scout|codec-hello|codec-join|codec-fragment)
-                    echo "  THRESHOLD SOFT-SKIP $codec ($delta < $THRESHOLD_BYTES; wz-codecs-only)" >&2
+                codec-scout|codec-hello|codec-join|codec-fragment|codec-keep-alive)
+                    echo "  THRESHOLD SOFT-SKIP $codec ($delta < $THRESHOLD_BYTES; small-codec)" >&2
                     ;;
                 *)
                     echo "  THRESHOLD FAIL $codec ($delta < $THRESHOLD_BYTES)" >&2

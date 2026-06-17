@@ -117,8 +117,12 @@ declare -A BASELINE_BSS=(
 # (HEAP_SIZE-dominated, INFO-only per the R311bj caveat (c)).
 declare -A BASELINE_MC_TEXT=(
     # R311mi — initial measurement (cross-test lwIP port, opt-level=s + LTO).
-    ["thumbv7m-none-eabi"]=50680
-    ["thumbv7em-none-eabihf"]=50484
+    # R311pr — rebased after multicast/session feature accretion since R311mi
+    # (R311mp~ns: publish/subscribe SSOT, Session typestate, seam refactors,
+    # declare routing). text-only growth (data/bss flat), verified feature-driven
+    # by symbol breakdown + 23-commit closure log; not a leak. Old: 50680/50484.
+    ["thumbv7m-none-eabi"]=51260
+    ["thumbv7em-none-eabihf"]=51320
 )
 declare -A BASELINE_MC_DATA=(
     ["thumbv7m-none-eabi"]=4
