@@ -39680,6 +39680,50 @@
         "상세=[[project-r311pk-session-review-load-trigger]] 토픽(결함별 severity/파일라인/수정방향/출처 에이전트). 다음 cross-impl 후보=[[project-pico-parity-status]](pico WS=emscripten-only 영구 차단; serial cross-impl·wz=Client→pico via zenohd). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311pm": {
+      "decision_summary": "R311pm: 부채①(MAJOR root) 수정 — establish_link을 라이브러리 dial_endpoint seam에 위임. connect.contains('/') 두 경로 fork(bare=DNS vs tcp/=numeric-only) dissolve + tcp/hostname DNS 복구.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: dial_endpoint(connect, &DialConfig) seam + plan_dial 순수 분류기(DialPlan::Locator/TcpHost) 신설 — parse+scheme-dispatch+DNS routing SSOT(데모가 인라인 재조립하던 것을 라이브러리로 흡수).",
+        "plan_dial 라우팅 테이블: scheme'd numeric/serial→dial_locator; scheme-less HOST:PORT→std-resolver tcp(MissingProtoSeparator); tcp/HOST DNS hostname→std-resolver tcp(BadAddress+starts_with tcp/); udp/ws/tls는 numeric-only 계약 유지.",
+        "wz-runtime-tokio/src/link_pipeline.rs: dial_tcp_host(&str) DNS-capable 프리미티브 신설 — dial_tcp(SocketAddr) numeric의 sibling, no_std 파서가 defer 한 DNS의 std-layer home.",
+        "wz-ap-demo/src/runner.rs: establish_link Initiator arm이 dial_endpoint 위임(connect.contains('/') heuristic + 두 dial 분기 제거); parse_any_locator/dial_locator/TcpStream import 제거."
+      ],
+      "verification_bullets": [
+        "신규 단위테스트 7종(session_open::tests): plan_dial 라우팅 테이블(scheme-less/tcp numeric/tcp DNS hostname/ws numeric/udp·ws DNS reject/unknown scheme) + dial_endpoint numeric loopback e2e — DNS/소켓 의존 없는 결정론(no-flaky), tcp/hostname 회귀가드 포함.",
+        "fmt --check clean + clippy --all-targets -D warnings clean(wz-runtime-tokio + wz-ap-demo default·connect-ws 양쪽).",
+        "Layer Z 9/9 pass(7 TCP leg + 2 WS leg 회귀 0) + WS leg-8/9 20/20 zero-flake 직접 카운트.",
+        "종합 full run-ci(M+G+Z)는 잔여 부채(R311pn~pq) 수정 후 push 전 1회 수행 예정(이 entry는 ① 단위 검증)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pm = R311pl 세션리뷰 부채 ①(MAJOR root) 수정. dial 라우팅 결정을 순수 함수 plan_dial로 추출 = carry의 \"라이브러리 dial-only seam\" 스케치보다 강한 형태(결정론 단위테스트로 fork dissolve 증명, DNS flake 없음; unrepresentable-over-test).",
+        "남은 부채(R311pn~): ②WS readiness probe(+④spawn_zenohd 공통 헬퍼)→③WS transport 단언→⑤pick_pair 중복+⑥CLI help+⑦connect-ws 네이밍→⑧Acceptor stated asymmetry doc. 각 후 Layer Z 9/9+WS 20/20; 전부 후 full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(R311pm=113c85b + R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ],
+      "publishable_decision_summary": "R311pm: 부채①(MAJOR root) 수정 — establish_link을 라이브러리 dial_endpoint seam에 위임. connect.contains('/') 두 경로 fork(bare=DNS vs tcp/=numeric-only) dissolve + tcp/hostname DNS 복구.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: dial_endpoint(connect, &DialConfig) seam + plan_dial 순수 분류기(DialPlan::Locator/TcpHost) 신설 — parse+scheme-dispatch+DNS routing SSOT(데모가 인라인 재조립하던 것을 라이브러리로 흡수).",
+        "plan_dial 라우팅 테이블: scheme'd numeric/serial→dial_locator; scheme-less HOST:PORT→std-resolver tcp(MissingProtoSeparator); tcp/HOST DNS hostname→std-resolver tcp(BadAddress+starts_with tcp/); udp/ws/tls는 numeric-only 계약 유지.",
+        "wz-runtime-tokio/src/link_pipeline.rs: dial_tcp_host(&str) DNS-capable 프리미티브 신설 — dial_tcp(SocketAddr) numeric의 sibling, no_std 파서가 defer 한 DNS의 std-layer home.",
+        "wz-ap-demo/src/runner.rs: establish_link Initiator arm이 dial_endpoint 위임(connect.contains('/') heuristic + 두 dial 분기 제거); parse_any_locator/dial_locator/TcpStream import 제거."
+      ],
+      "publishable_verification_bullets": [
+        "신규 단위테스트 7종(session_open::tests): plan_dial 라우팅 테이블(scheme-less/tcp numeric/tcp DNS hostname/ws numeric/udp·ws DNS reject/unknown scheme) + dial_endpoint numeric loopback e2e — DNS/소켓 의존 없는 결정론(no-flaky), tcp/hostname 회귀가드 포함.",
+        "fmt --check clean + clippy --all-targets -D warnings clean(wz-runtime-tokio + wz-ap-demo default·connect-ws 양쪽).",
+        "Layer Z 9/9 pass(7 TCP leg + 2 WS leg 회귀 0) + WS leg-8/9 20/20 zero-flake 직접 카운트.",
+        "종합 full run-ci(M+G+Z)는 잔여 부채(R311pn~pq) 수정 후 push 전 1회 수행 예정(이 entry는 ① 단위 검증)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pm = R311pl 세션리뷰 부채 ①(MAJOR root) 수정. dial 라우팅 결정을 순수 함수 plan_dial로 추출 = carry의 \"라이브러리 dial-only seam\" 스케치보다 강한 형태(결정론 단위테스트로 fork dissolve 증명, DNS flake 없음; unrepresentable-over-test).",
+        "남은 부채(R311pn~): ②WS readiness probe(+④spawn_zenohd 공통 헬퍼)→③WS transport 단언→⑤pick_pair 중복+⑥CLI help+⑦connect-ws 네이밍→⑧Acceptor stated asymmetry doc. 각 후 Layer Z 9/9+WS 20/20; 전부 후 full run-ci(M+G+Z)→R311pk+pm~pq 묶어 push 동의.",
+        "코드 LOCAL-COMMITTED UNPUSHED(R311pm=113c85b + R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
