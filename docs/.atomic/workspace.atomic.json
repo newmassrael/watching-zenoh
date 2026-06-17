@@ -1894,7 +1894,9 @@
         "(e) no QEMU boot: multicast self-loopback is host-only lwIP; runtime proof is host Layer C1r",
         "(f) mps2-class only: 32x1536 multicast rx pool ~49KB exceeds nrf51 16KB SRAM; thumbv6m deferred",
         "(g) reproducible: bash scripts/run-ci.sh --layer Q then arm-none-eabi-size the built ELF",
-        "(h) figures are R311mi measurements; this section is their living home (was R311mi ledger-only)"
+        "(h) figures are R311mi measurements; this section is their living home (was R311mi ledger-only)",
+        "(i) R311pr re-measure thumbv7m text=51260 (+580 vs a); multicast accretion, text-only no leak",
+        "(j) R311pr re-measure thumbv7em text=51320 (+836 vs b); same cause; BASELINE_MC rebased"
       ],
       "impact_scope": [
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
@@ -39886,6 +39888,46 @@
         "R311pm~pq = R311pl 세션리뷰 8부채(①~⑧) 전부 수정 완료+검증: ①dial seam SSOT, ②WS readiness probe, ③WS transport witness, ④spawn dedup, ⑤pick_pair dedup, ⑥CLI help, ⑦ws feature rename, ⑧Acceptor 정직화 doc. 검증=Layer Z 9/9 + WS leg 20/20 zero-flake(각 부채 후) + 관련 host lane 전부 pass.",
         "OPEN(8부채 무관, push 전 사용자 결정 필요): Layer F+Q PRE-EXISTING footprint 실패. 옵션=(a)footprint baseline 갱신+증가 정당성 ledger(신규 라운드 R311pr) 후 green push, (b)8부채 번들만 push(F/Q는 origin/main도 red=무회귀), (c)F/Q root-cause 먼저. 어느 경우든 R311pk false-green 정정은 이 entry가 보유.",
         "코드 LOCAL-COMMITTED UNPUSHED(9 commits: R311pk 2 + pm/pn/po/pp 각 2 + pq 1, 단 pq ledger는 별도). push 미동의 유지. 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
+    "Round 311pr": {
+      "decision_summary": "R311pr: PRE-EXISTING Layer F+Q footprint 정정(R311pk false-green, 8부채 무관). Q=BASELINE_MC rebase(multicast feature 누적, text-only no leak). F=codec-keep-alive soft-skip(bodyless trivial codec, transport-keepalive 독립=re-pull 아님).",
+      "changes_bullets": [
+        "Q: scripts/check-footprint.sh BASELINE_MC_TEXT thumbv7m 50680→51260, thumbv7em 50484→51320(±256 tol). 정당성=R311mi 이후 23 feature 커밋(R311mp~ns multicast/session: publish/subscribe SSOT, Session typestate, seam refactor, declare routing) text-only 누적, data/bss flat, 심볼 분포가 parse_frame_payload/multicast_tx_emit/parse_inbound 등 session/multicast 코드=leak 아님.",
+        "Q-SSOT: §6.9 preset-mcu-multicast-pub Section caveat (i)/(j) append(R311pr 재측정 51260/51320; (a)/(b) R311mi historical 보존). script:108 mandate(table+§6.9 함께 갱신) 준수.",
+        "F: scripts/measure-codec-footprint.sh soft-skip case에 codec-keep-alive 추가. KeepAlive=bodyless transport msg라 codec trivial; transport-keepalive=[wz-session-core/transport-keepalive](codec 미참조)=독립 feature라 codec 단독 elision이 정당한 <1KB(-144=LTO/inline 노이즈), silent re-pull 아님. soft-skip label wz-codecs-only→small-codec."
+      ],
+      "verification_bullets": [
+        "진단: transport-keepalive feature 정의가 codec-keep-alive 미참조 직접 확인(F re-pull 배제); deploy/mcu-multicast-e2e/Cargo.toml이 wz-runtime-tokio/wz-ap-demo 미참조 직접 확인(Q가 8부채 변경과 무관 증명); 현재 binary nm size 분포로 text 증가분이 session/multicast 코드 확인.",
+        "full run-ci(WZ_RUN_LAYER_F/G/Q/M/Z=1) \"run-ci: all required layers pass\": Layer F pass(codec-keep-alive SOFT-SKIP small-codec), Layer Q pass(multicast-e2e text=51260/51320 +0 OK / data+0 / bss+0), Layer 0/A~C4e/D/E/E2/G/M/Z 전부 pass, FAIL 0. exit code는 run-ci를 마지막 명령으로 둬 마스킹 없이 캡처(R311pq의 echo-마스킹 트랩 회피).",
+        "R311mi ledger entry(frozen) 미수정; §6.9 caveat append + 이 entry가 정정 기록(frozen-ledger 준수)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub"
+      ],
+      "carry_forward_bullets": [
+        "R311pr = R311pq에서 발견된 PRE-EXISTING Layer F+Q footprint 실패 정정(8부채 R311pm~pq와 무관; R311pk의 full-green 주장이 false-green이던 것 청산). Q=정당 multicast feature 누적 baseline rebase, F=keep-alive soft-skip 분류 정정. 둘 다 게이트 suppression 아닌 검증된 정정.",
+        "이제 full run-ci(F+G+Q+M+Z 포함 전 host lane) GREEN — R311pk+pm~pr 전체 번들 검증 완료. 사용자 결정(옵션1 \"조사 후 green push\") 충족.",
+        "남은 단계: push 동의(사용자 명시 필요). 15 commits LOCAL UNPUSHED = R311pk 2(9bc4445/5b2b74d) + pl 1(770f8ee, 직전 세션) + pm/pn/po/pp/pq/pr 각 2(=12). push는 명시 동의 후에만(CLAUDE.md). 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pr: PRE-EXISTING Layer F+Q footprint 정정(R311pk false-green, 8부채 무관). Q=BASELINE_MC rebase(multicast feature 누적, text-only no leak). F=codec-keep-alive soft-skip(bodyless trivial codec, transport-keepalive 독립=re-pull 아님).",
+      "publishable_changes_bullets": [
+        "Q: scripts/check-footprint.sh BASELINE_MC_TEXT thumbv7m 50680→51260, thumbv7em 50484→51320(±256 tol). 정당성=R311mi 이후 23 feature 커밋(R311mp~ns multicast/session: publish/subscribe SSOT, Session typestate, seam refactor, declare routing) text-only 누적, data/bss flat, 심볼 분포가 parse_frame_payload/multicast_tx_emit/parse_inbound 등 session/multicast 코드=leak 아님.",
+        "Q-SSOT: §6.9 preset-mcu-multicast-pub Section caveat (i)/(j) append(R311pr 재측정 51260/51320; (a)/(b) R311mi historical 보존). script:108 mandate(table+§6.9 함께 갱신) 준수.",
+        "F: scripts/measure-codec-footprint.sh soft-skip case에 codec-keep-alive 추가. KeepAlive=bodyless transport msg라 codec trivial; transport-keepalive=[wz-session-core/transport-keepalive](codec 미참조)=독립 feature라 codec 단독 elision이 정당한 <1KB(-144=LTO/inline 노이즈), silent re-pull 아님. soft-skip label wz-codecs-only→small-codec."
+      ],
+      "publishable_verification_bullets": [
+        "진단: transport-keepalive feature 정의가 codec-keep-alive 미참조 직접 확인(F re-pull 배제); deploy/mcu-multicast-e2e/Cargo.toml이 wz-runtime-tokio/wz-ap-demo 미참조 직접 확인(Q가 8부채 변경과 무관 증명); 현재 binary nm size 분포로 text 증가분이 session/multicast 코드 확인.",
+        "full run-ci(WZ_RUN_LAYER_F/G/Q/M/Z=1) \"run-ci: all required layers pass\": Layer F pass(codec-keep-alive SOFT-SKIP small-codec), Layer Q pass(multicast-e2e text=51260/51320 +0 OK / data+0 / bss+0), Layer 0/A~C4e/D/E/E2/G/M/Z 전부 pass, FAIL 0. exit code는 run-ci를 마지막 명령으로 둬 마스킹 없이 캡처(R311pq의 echo-마스킹 트랩 회피).",
+        "R311mi ledger entry(frozen) 미수정; §6.9 caveat append + 이 entry가 정정 기록(frozen-ledger 준수)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pr = R311pq에서 발견된 PRE-EXISTING Layer F+Q footprint 실패 정정(8부채 R311pm~pq와 무관; R311pk의 full-green 주장이 false-green이던 것 청산). Q=정당 multicast feature 누적 baseline rebase, F=keep-alive soft-skip 분류 정정. 둘 다 게이트 suppression 아닌 검증된 정정.",
+        "이제 full run-ci(F+G+Q+M+Z 포함 전 host lane) GREEN — R311pk+pm~pr 전체 번들 검증 완료. 사용자 결정(옵션1 \"조사 후 green push\") 충족.",
+        "남은 단계: push 동의(사용자 명시 필요). 15 commits LOCAL UNPUSHED = R311pk 2(9bc4445/5b2b74d) + pl 1(770f8ee, 직전 세션) + pm/pn/po/pp/pq/pr 각 2(=12). push는 명시 동의 후에만(CLAUDE.md). 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
     "Round 311q": {
