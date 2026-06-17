@@ -40330,6 +40330,46 @@
         "R311o-A 측 carry 추가 청산: LivelinessAliasError 가족과 LivelinessSubscriberAliasError 가족 surface 일관성 확인 (FeatureDisabled variant 정합)."
       ]
     },
+    "Round 311q0": {
+      "decision_summary": "R311q0: 바이너리 2-process sever-reconnect e2e 완성(carry #1, R311pz de-risk 소비). A1 kill→A2 동일포트 respawn→supervisor 재연결+선언 replay를 A2가 관찰. 선언-replay observable(publish burst는 유한). 10/10 non-flake.",
+      "changes_bullets": [
+        "wz-integration-tests/tests/wz_initiator_to_wz_acceptor.rs: 신규 e2e wz_reconnect_initiator_resumes_against_respawned_acceptor + 헬퍼 spawn_remote_sub_acceptor. initiator(--connect --reconnect --key=routed subscriber), acceptor A1/A2(--listen --on-remote-subscriber-log). A1 kill -> A2 동일 고정포트 respawn(R311pz SO_REUSEADDR로 TIME_WAIT EADDRINUSE 없이 즉시 rebind) -> supervisor 재연결.",
+        "Observable=선언 캐시 replay(연결당 1회 결정적): A2(신규 프로세스)가 'REMOTE SUBSCRIBER DECLARED'(replay된 DeclSubscriber) 로그 = acceptor-side witness. publisher_task는 유한 burst(PUBLISHER_BURST_COUNT=5x200ms, 재연결 후 미발화)라 publish 기반 witness를 의도적으로 회피. 라이브러리 declares_replay_after_link_loss_and_reconnect의 바이너리 대응.",
+        "initiator-side witness: graceful SIGTERM(graceful_terminate) -> shutdown-cancel -> into_teardown 경로가 찍는 'reconnects=1' 단언(실패한 재시도는 카운트 안 됨이라 단일 sever에 정확히 1). port_res는 A1->A2 gap 동안 유지(in-process 포트 탈취 차단), A2 bind 후 drop. std::fs::File/std::path::Path import 추가."
+      ],
+      "verification_bullets": [
+        "출처=carry #1(바이너리 sever-reconnect 풀 e2e). R311py가 NO-DEFERRAL 대상이나 두 구현경로 모두 flake-risk라 de-risk 선행 carry로 추적. R311pz가 SO_REUSEADDR로 2-process rebind flake를 구조적으로 제거한 뒤 본 라운드가 구현. 경로(b)=두 진짜 바이너리 + 프로세스-death sever 채택(R311py 4-에이전트 조사 결론: 하이브리드 in-process보다 강한 증명).",
+        "non-flake: 신규 테스트 10/10 연속 통과(전부 ~1.21s, 재연결 ~1s=retry_delay_ms 1000 pico parity 1회로 타이밍 극히 안정). 동일 파일 기존 4 ignored 테스트 회귀0(직렬 5/5 PASS). fmt clean(crates workspace), clippy --tests -D warnings clean(wz-integration-tests).",
+        "타이밍 근거: ReconnectPolicy::default retry_delay_ms=1000/max_attempts=None(reconnect.rs:87-88), reconnects()는 성공 reopen만 증가(reconnect.rs:348)라 단일 sever=정확히 1. A2 witness 20s/A2 bind 5s 예산=~10x 재시도 헤드룸. 데모/라이브러리 프로덕션 코드 변경 0(기존 wire 경로를 e2e가 실증). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on) 게이트."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311q0 = 바이너리 2-process sever-reconnect e2e 완성 -> carry #1 종료. A1 kill -> A2 동일포트 respawn -> supervisor 재연결 + 선언 replay를 A2(신규 프로세스)가 'REMOTE SUBSCRIBER DECLARED'로 관찰 + initiator 'reconnects=1'. R311pz SO_REUSEADDR de-risk를 소비(고정포트 즉시 rebind). 라이브러리 e2e=메커니즘, 바이너리 e2e=2-프로세스 실증으로 reconnect 커버리지 층위 완결.",
+        "다음 carry: [[project-north-star]] NO-DEFERRAL. P4 zenoh-full 카탈로그(router/SHM/plugin/storage/admin/sub-agg/API shim/script/advanced) + pico optional(scouting passive/MULTICAST_DECLARATIONS/serial.WS.TLS) 전부 구현. [[project-pico-parity-status]] 남은 frontier는 대부분 외부 의존(zenohd로 최대 확보).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정(테스트 1파일; R311pz 코드+ledger 2커밋은 이미 로컬 3658ffb/0ac34f2). push 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311q0: 바이너리 2-process sever-reconnect e2e 완성(carry #1, R311pz de-risk 소비). A1 kill→A2 동일포트 respawn→supervisor 재연결+선언 replay를 A2가 관찰. 선언-replay observable(publish burst는 유한). 10/10 non-flake.",
+      "publishable_changes_bullets": [
+        "wz-integration-tests/tests/wz_initiator_to_wz_acceptor.rs: 신규 e2e wz_reconnect_initiator_resumes_against_respawned_acceptor + 헬퍼 spawn_remote_sub_acceptor. initiator(--connect --reconnect --key=routed subscriber), acceptor A1/A2(--listen --on-remote-subscriber-log). A1 kill -> A2 동일 고정포트 respawn(R311pz SO_REUSEADDR로 TIME_WAIT EADDRINUSE 없이 즉시 rebind) -> supervisor 재연결.",
+        "Observable=선언 캐시 replay(연결당 1회 결정적): A2(신규 프로세스)가 'REMOTE SUBSCRIBER DECLARED'(replay된 DeclSubscriber) 로그 = acceptor-side witness. publisher_task는 유한 burst(PUBLISHER_BURST_COUNT=5x200ms, 재연결 후 미발화)라 publish 기반 witness를 의도적으로 회피. 라이브러리 declares_replay_after_link_loss_and_reconnect의 바이너리 대응.",
+        "initiator-side witness: graceful SIGTERM(graceful_terminate) -> shutdown-cancel -> into_teardown 경로가 찍는 'reconnects=1' 단언(실패한 재시도는 카운트 안 됨이라 단일 sever에 정확히 1). port_res는 A1->A2 gap 동안 유지(in-process 포트 탈취 차단), A2 bind 후 drop. std::fs::File/std::path::Path import 추가."
+      ],
+      "publishable_verification_bullets": [
+        "출처=carry #1(바이너리 sever-reconnect 풀 e2e). R311py가 NO-DEFERRAL 대상이나 두 구현경로 모두 flake-risk라 de-risk 선행 carry로 추적. R311pz가 SO_REUSEADDR로 2-process rebind flake를 구조적으로 제거한 뒤 본 라운드가 구현. 경로(b)=두 진짜 바이너리 + 프로세스-death sever 채택(R311py 4-에이전트 조사 결론: 하이브리드 in-process보다 강한 증명).",
+        "non-flake: 신규 테스트 10/10 연속 통과(전부 ~1.21s, 재연결 ~1s=retry_delay_ms 1000 pico parity 1회로 타이밍 극히 안정). 동일 파일 기존 4 ignored 테스트 회귀0(직렬 5/5 PASS). fmt clean(crates workspace), clippy --tests -D warnings clean(wz-integration-tests).",
+        "타이밍 근거: ReconnectPolicy::default retry_delay_ms=1000/max_attempts=None(reconnect.rs:87-88), reconnects()는 성공 reopen만 증가(reconnect.rs:348)라 단일 sever=정확히 1. A2 witness 20s/A2 bind 5s 예산=~10x 재시도 헤드룸. 데모/라이브러리 프로덕션 코드 변경 0(기존 wire 경로를 e2e가 실증). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on) 게이트."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311q0 = 바이너리 2-process sever-reconnect e2e 완성 -> carry #1 종료. A1 kill -> A2 동일포트 respawn -> supervisor 재연결 + 선언 replay를 A2(신규 프로세스)가 'REMOTE SUBSCRIBER DECLARED'로 관찰 + initiator 'reconnects=1'. R311pz SO_REUSEADDR de-risk를 소비(고정포트 즉시 rebind). 라이브러리 e2e=메커니즘, 바이너리 e2e=2-프로세스 실증으로 reconnect 커버리지 층위 완결.",
+        "다음 carry: [[project-north-star]] NO-DEFERRAL. P4 zenoh-full 카탈로그(router/SHM/plugin/storage/admin/sub-agg/API shim/script/advanced) + pico optional(scouting passive/MULTICAST_DECLARATIONS/serial.WS.TLS) 전부 구현. [[project-pico-parity-status]] 남은 frontier는 대부분 외부 의존(zenohd로 최대 확보).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정(테스트 1파일; R311pz 코드+ledger 2커밋은 이미 로컬 3658ffb/0ac34f2). push 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
