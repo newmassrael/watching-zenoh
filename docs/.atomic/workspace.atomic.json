@@ -40234,6 +40234,46 @@
         "코드 LOCAL-COMMITTED UNPUSHED 예정(wz-runtime-tokio 2 + wz-ap-demo 1 + wz-integration-tests 1). push 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311pz": {
+      "decision_summary": "R311pz: bind_tcp/bind_tcp_host에 SO_REUSEADDR(zenoh listener parity, TcpSocket bind_listener_reuseaddr SSOT). 재시작 acceptor 고정포트 TIME_WAIT rebind 가능 — 바이너리 sever-reconnect e2e de-risk 레버. socket2 결정적 pin 2.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: bind_tcp/bind_tcp_host가 신규 private SSOT bind_listener_reuseaddr(addr)로 위임 — TcpSocket::new_v4/v6 -> set_reuseaddr(true) -> bind -> listen(1024). zenoh upstream(io/zenoh-link-commons/src/tcp.rs:51) listener 패턴 패리티. 종전 TcpListener::bind은 pre-bind setsockopt 훅이 없어 SO_REUSEADDR 설정 불가였음.",
+        "bind_tcp_host: TcpListener::bind(host) 단일 호출 -> lookup_host(host) 해석 후 resolved addr를 bind_listener_reuseaddr로 순차 시도(TcpStream::connect의 ToSocketAddrs 워크 미러; 첫 성공 반환, 전부 실패 시 last_err). 시그니처 불변(async fn -> io::Result<TcpListener>)이라 호출부 accept_locator(session_open.rs:450/456) .await 안정.",
+        "신규 unit 2종(socket2 옵션 read = 타이밍 무관 결정적 pin): bind_tcp_sets_so_reuseaddr / bind_tcp_host_sets_so_reuseaddr. into_std -> socket2::Socket::from -> reuse_address() assert. 미래에 bare TcpListener::bind으로 회귀하면 flaky rebind가 아니라 이 unit에서 포착."
+      ],
+      "verification_bullets": [
+        "근본: bind_tcp(link_pipeline.rs:93)가 SO_REUSEADDR 미설정 -> 고정포트 acceptor 재시작이 ~60s TIME_WAIT EADDRINUSE = production 재연결 견고성 결함(zenoh는 모든 listener에 set_reuseaddr). carry #1(바이너리 sever-reconnect e2e)의 2-process rebind flake-risk의 근본 원인.",
+        "경로 결정 근거(독립 4-에이전트 조사): zenoh 정본은 TcpSocket+set_reuseaddr(true) listener-only(dial측 미설정, SO_REUSEPORT 없음); wz bind_tcp는 TcpListener::bind 직접; 라이브러리 e2e fixture는 테스트파일 private(외부 미노출); 데모 accept_tcp는 one-shot. 경로(a)in-process는 하이브리드+parity결함 방치라 기각, 경로(b)production fix 채택 — 진짜 두 바이너리+진짜 sever로 더 강한 증명이자 standalone parity 청산.",
+        "검증: fmt clean(crates workspace), clippy --all-targets -D warnings clean(wz-runtime-tokio), link_pipeline unit 4/4(신규 socket2 pin 2 포함), session_reconnect_e2e 4/4 회귀0(base/queryable/named/gaveup). 시그니처 불변이라 호출부 무변경. full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pz = 바이너리 sever-reconnect e2e(carry #1)의 de-risk 레버. bind_tcp/bind_tcp_host에 SO_REUSEADDR(zenoh listener parity, bind_listener_reuseaddr SSOT). 재시작 acceptor가 고정포트를 TIME_WAIT 위로 rebind 가능 -> 2-process e2e의 EADDRINUSE flake 구조적 제거. 테스트 무관 standalone production parity 결함 청산.",
+        "다음(carry #1 본체): 2-process 바이너리 sever-reconnect e2e 구현. 설계=포트P 예약 -> A1(--listen P)+sub -> initiator(--connect P --reconnect) -> 초기 라운드트립 -> A1 kill -> A2(--listen P) respawn -> A2 신규프로세스 'SUBSCRIBER FIRED' = 재연결 witness. 데모 max=None 무한재시도라 A2 기동 gap도 backoff 수렴. 해소필요: 데모 reconnect-모드 publish cadence(runner.rs)로 observable 확정. 10x non-flake 확인 필수(no-flaky).",
+        "코드 LOCAL-COMMITTED UNPUSHED(link_pipeline.rs 1파일, +79/-8). push 명시 동의 필요(CLAUDE.md). 그 다음 carry: [[project-north-star]] NO-DEFERRAL P4 카탈로그. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pz: bind_tcp/bind_tcp_host에 SO_REUSEADDR(zenoh listener parity, TcpSocket bind_listener_reuseaddr SSOT). 재시작 acceptor 고정포트 TIME_WAIT rebind 가능 — 바이너리 sever-reconnect e2e de-risk 레버. socket2 결정적 pin 2.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: bind_tcp/bind_tcp_host가 신규 private SSOT bind_listener_reuseaddr(addr)로 위임 — TcpSocket::new_v4/v6 -> set_reuseaddr(true) -> bind -> listen(1024). zenoh upstream(io/zenoh-link-commons/src/tcp.rs:51) listener 패턴 패리티. 종전 TcpListener::bind은 pre-bind setsockopt 훅이 없어 SO_REUSEADDR 설정 불가였음.",
+        "bind_tcp_host: TcpListener::bind(host) 단일 호출 -> lookup_host(host) 해석 후 resolved addr를 bind_listener_reuseaddr로 순차 시도(TcpStream::connect의 ToSocketAddrs 워크 미러; 첫 성공 반환, 전부 실패 시 last_err). 시그니처 불변(async fn -> io::Result<TcpListener>)이라 호출부 accept_locator(session_open.rs:450/456) .await 안정.",
+        "신규 unit 2종(socket2 옵션 read = 타이밍 무관 결정적 pin): bind_tcp_sets_so_reuseaddr / bind_tcp_host_sets_so_reuseaddr. into_std -> socket2::Socket::from -> reuse_address() assert. 미래에 bare TcpListener::bind으로 회귀하면 flaky rebind가 아니라 이 unit에서 포착."
+      ],
+      "publishable_verification_bullets": [
+        "근본: bind_tcp(link_pipeline.rs:93)가 SO_REUSEADDR 미설정 -> 고정포트 acceptor 재시작이 ~60s TIME_WAIT EADDRINUSE = production 재연결 견고성 결함(zenoh는 모든 listener에 set_reuseaddr). carry #1(바이너리 sever-reconnect e2e)의 2-process rebind flake-risk의 근본 원인.",
+        "경로 결정 근거(독립 4-에이전트 조사): zenoh 정본은 TcpSocket+set_reuseaddr(true) listener-only(dial측 미설정, SO_REUSEPORT 없음); wz bind_tcp는 TcpListener::bind 직접; 라이브러리 e2e fixture는 테스트파일 private(외부 미노출); 데모 accept_tcp는 one-shot. 경로(a)in-process는 하이브리드+parity결함 방치라 기각, 경로(b)production fix 채택 — 진짜 두 바이너리+진짜 sever로 더 강한 증명이자 standalone parity 청산.",
+        "검증: fmt clean(crates workspace), clippy --all-targets -D warnings clean(wz-runtime-tokio), link_pipeline unit 4/4(신규 socket2 pin 2 포함), session_reconnect_e2e 4/4 회귀0(base/queryable/named/gaveup). 시그니처 불변이라 호출부 무변경. full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pz = 바이너리 sever-reconnect e2e(carry #1)의 de-risk 레버. bind_tcp/bind_tcp_host에 SO_REUSEADDR(zenoh listener parity, bind_listener_reuseaddr SSOT). 재시작 acceptor가 고정포트를 TIME_WAIT 위로 rebind 가능 -> 2-process e2e의 EADDRINUSE flake 구조적 제거. 테스트 무관 standalone production parity 결함 청산.",
+        "다음(carry #1 본체): 2-process 바이너리 sever-reconnect e2e 구현. 설계=포트P 예약 -> A1(--listen P)+sub -> initiator(--connect P --reconnect) -> 초기 라운드트립 -> A1 kill -> A2(--listen P) respawn -> A2 신규프로세스 'SUBSCRIBER FIRED' = 재연결 witness. 데모 max=None 무한재시도라 A2 기동 gap도 backoff 수렴. 해소필요: 데모 reconnect-모드 publish cadence(runner.rs)로 observable 확정. 10x non-flake 확인 필수(no-flaky).",
+        "코드 LOCAL-COMMITTED UNPUSHED(link_pipeline.rs 1파일, +79/-8). push 명시 동의 필요(CLAUDE.md). 그 다음 carry: [[project-north-star]] NO-DEFERRAL P4 카탈로그. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
