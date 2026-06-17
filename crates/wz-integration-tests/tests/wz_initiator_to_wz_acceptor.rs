@@ -189,3 +189,146 @@ fn wz_initiator_round_trip_against_wz_acceptor() {
          --- acceptor stderr ---\n{fired_text}"
     );
 }
+
+/// R311pw — the `--reconnect` (long-lived reconnect-supervised) Initiator
+/// lifecycle round-trips end-to-end at the BINARY level. This proves the demo
+/// routes `--connect --reconnect` through `open_session_with_reconnect` +
+/// `ReconnectingSession::drive` (NOT the one-shot `initiate_and_open_session`
+/// path) and that the full demo machinery (publisher + subscriber observer +
+/// teardown) works over the supervised drive.
+///
+/// The reconnect-AFTER-LOSS mechanism itself — re-dial + declaration-cache
+/// replay, including DNS-named re-resolution — is exhaustively proven by the
+/// library `session_reconnect_e2e` suite (the supervisor's `drive` loop the
+/// binary uses verbatim). THIS test is the binary-level catalog-truthfulness
+/// witness: preset-ap-client declares `session-reconnect`, and the showcase
+/// binary now EXERCISES it (not merely compiles it).
+///
+/// Positive pin: the initiator must log "reconnect-supervised session
+/// Established" — the supervisor open path. A regression that silently fell
+/// back to the one-shot open would instead log "connected to" (via
+/// `establish_link`, which the reconnect path skips), so the substring wait
+/// localises a mis-route.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored"]
+fn wz_reconnect_initiator_round_trip_against_wz_acceptor() {
+    let demo = wz_ap_demo_binary();
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    let addr = format!("127.0.0.1:{port}");
+    let publish_key = "demo/test";
+    let sub_pattern = "demo/**";
+    let publish_value = "hello-from-reconnect-initiator";
+
+    // ── wz acceptor (listener + subscriber) ───────────────────
+    let acceptor_stderr = tempfile::tempfile().expect("tempfile for acceptor stderr");
+    let acceptor_stderr_writer = acceptor_stderr
+        .try_clone()
+        .expect("dup acceptor stderr handle");
+    let mut acceptor_stderr_reader = acceptor_stderr;
+
+    let mut acceptor_guard = ChildGuard::wrap(
+        "wz-ap-demo acceptor (--listen)",
+        Command::new(&demo)
+            .arg("--listen")
+            .arg(&addr)
+            .arg("--key")
+            .arg(sub_pattern)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(acceptor_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --listen"),
+    );
+
+    let bound = wait_for_substring(
+        &mut acceptor_stderr_reader,
+        "listening on",
+        Duration::from_secs(5),
+    );
+    if let Err(captured) = &bound {
+        let _ = acceptor_guard.child_mut().kill();
+        let _ = acceptor_guard.child_mut().wait();
+        panic!(
+            "wz-ap-demo --listen did not log 'listening on' within 5s\n\
+             --- captured acceptor stderr ---\n{captured}"
+        );
+    }
+    drop(port_res);
+
+    // ── wz initiator (--reconnect dialer + publisher) ─────────
+    let initiator_stderr = tempfile::tempfile().expect("tempfile for initiator stderr");
+    let initiator_stderr_writer = initiator_stderr
+        .try_clone()
+        .expect("dup initiator stderr handle");
+    let mut initiator_stderr_reader = initiator_stderr;
+
+    let mut initiator_guard = ChildGuard::wrap(
+        "wz-ap-demo initiator (--connect --reconnect)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(&addr)
+            .arg("--reconnect")
+            .arg("--publish")
+            .arg(publish_key)
+            .arg("--value")
+            .arg(publish_value)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(initiator_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect --reconnect"),
+    );
+
+    // Positive pin on the SUPERVISOR open path (the reconnect lifecycle skips
+    // establish_link's "connected to" log; a one-shot fallback would not emit
+    // this line).
+    let supervised = wait_for_substring(
+        &mut initiator_stderr_reader,
+        "reconnect-supervised session Established",
+        Duration::from_secs(5),
+    );
+    let fire_substr = "SUBSCRIBER FIRED";
+    let fired = wait_for_substring(
+        &mut acceptor_stderr_reader,
+        fire_substr,
+        Duration::from_secs(10),
+    );
+
+    // The reconnect initiator is long-lived (runs until killed); both children
+    // are torn down here regardless of the round-trip outcome.
+    let _ = initiator_guard.child_mut().kill();
+    let _ = initiator_guard.child_mut().wait();
+    let _ = acceptor_guard.child_mut().kill();
+    let _ = acceptor_guard.child_mut().wait();
+
+    let acceptor_captured = read_captured(&mut acceptor_stderr_reader);
+    let initiator_captured = read_captured(&mut initiator_stderr_reader);
+    eprintln!("--- captured wz acceptor stderr ---\n{acceptor_captured}");
+    eprintln!("--- captured wz reconnect initiator stderr ---\n{initiator_captured}");
+
+    if let Err(c) = &supervised {
+        panic!(
+            "wz-ap-demo --connect --reconnect did not log 'reconnect-supervised \
+             session Established' within 5s — the reconnect lifecycle did not route \
+             through open_session_with_reconnect.\n\
+             --- captured initiator stderr ---\n{c}\n\
+             --- captured acceptor stderr ---\n{acceptor_captured}"
+        );
+    }
+
+    let fired_text = match fired {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "wz acceptor did not log '{fire_substr}' within 10s — the reconnect-\
+             supervised initiator's handshake or publisher emission regressed.\n\
+             --- captured acceptor stderr at deadline ---\n{c}\n\
+             --- captured initiator stderr at deadline ---\n{initiator_captured}"
+        ),
+    };
+    assert!(
+        fired_text.contains(publish_key),
+        "wz acceptor SUBSCRIBER FIRED line lacks the publish keyexpr '{publish_key}'.\n\
+         --- acceptor stderr ---\n{fired_text}"
+    );
+}

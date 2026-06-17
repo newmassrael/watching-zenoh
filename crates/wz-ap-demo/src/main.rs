@@ -119,9 +119,26 @@ fn main() -> ExitCode {
     // self-loopback configuration that would justify both.
     let listen_opt = parse_pair(rest, "--listen");
     let connect_opt = parse_pair(rest, "--connect");
+    // R311pw — `--reconnect` is a presence flag (no value): it opts the
+    // Initiator into the long-lived reconnect-supervised lifecycle. It is
+    // meaningful ONLY with `--connect` (pico AUTO_RECONNECT is client-only);
+    // pairing it with `--listen` is a usage error, rejected below.
+    let reconnect = rest.iter().any(|a| a == "--reconnect");
     let role: Role = match (listen_opt, connect_opt) {
+        (Some(_), None) if reconnect => {
+            eprintln!(
+                "wz-ap-demo: --reconnect requires --connect (an acceptor has no \
+                 client reopen-task model; pico Z_FEATURE_AUTO_RECONNECT is client-only)"
+            );
+            eprintln!();
+            print_usage();
+            return ExitCode::from(2);
+        }
         (Some(addr), None) => Role::Acceptor { listen: addr },
-        (None, Some(addr)) => Role::Initiator { connect: addr },
+        (None, Some(addr)) => Role::Initiator {
+            connect: addr,
+            reconnect,
+        },
         (Some(_), Some(_)) => {
             eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
             eprintln!();
@@ -375,7 +392,12 @@ fn main() -> ExitCode {
     eprintln!("{ABOUT}");
     match &role {
         Role::Acceptor { listen } => log::info!("listen  = {listen}"),
-        Role::Initiator { connect } => log::info!("connect = {connect}"),
+        Role::Initiator { connect, reconnect } => {
+            log::info!("connect = {connect}");
+            if *reconnect {
+                log::info!("reconnect = on (long-lived supervised lifecycle)");
+            }
+        }
     }
     if let Some(k) = &key_opt {
         log::info!("key     = {k}");

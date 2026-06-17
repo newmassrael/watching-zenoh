@@ -20,7 +20,7 @@ pub(crate) fn print_usage() {
     eprintln!("{ABOUT}");
     eprintln!();
     eprintln!("USAGE:");
-    eprintln!("    wz-ap-demo (--listen <addr> | --connect <addr>)");
+    eprintln!("    wz-ap-demo (--listen <addr> | --connect <addr> [--reconnect])");
     eprintln!("               [--key <keyexpr>]");
     eprintln!("               [--publish <keyexpr> --value <text>]");
     eprintln!("               [--delete <keyexpr>]");
@@ -39,6 +39,13 @@ pub(crate) fn print_usage() {
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
     eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT)");
+    eprintln!("    --reconnect              long-lived reconnect-supervised lifecycle for the");
+    eprintln!("                             initiator (requires --connect): on link loss, re-dial");
+    eprintln!("                             (re-resolving a hostname) + replay the declaration");
+    eprintln!("                             cache instead of exiting. Default is round-trip-then-");
+    eprintln!(
+        "                             exit. pico Z_FEATURE_AUTO_RECONNECT parity (client-only)"
+    );
     eprintln!("    --key <keyexpr>          DECLARE subscriber keyexpr (e.g. demo/example)");
     eprintln!("    --publish <keyexpr>      publisher keyexpr literal (e.g. demo/test)");
     eprintln!("    --value <text>           publisher payload text (required with --publish)");

@@ -59,7 +59,7 @@ use wz_session_core::reconnect::{ReplayDeclarationsError, SwappableLink};
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
-use crate::runtime_impl::{TokioRuntime, TokioTime};
+use crate::runtime_impl::{TokioJoinHandle, TokioRuntime, TokioTime};
 use crate::session_glue::{
     drive_session_until_terminal, new_session_actions, BoxedLinkDriver, DriverOutcome,
     SessionLinkActions,
@@ -154,6 +154,33 @@ impl ReconnectingSession {
     /// (0 until the first link loss is survived).
     pub fn reconnects(&self) -> u32 {
         self.reconnects
+    }
+
+    /// R311pw — consume the supervisor into the graceful-teardown handles a
+    /// caller needs AFTER [`Self::drive`] returns
+    /// [`Stopped`](ReconnectDriveOutcome::Stopped): the surviving
+    /// [`SessionLinkActions`] bundle and the CURRENT connection's writer-task
+    /// join handle. The caller feeds these into its existing teardown sequence
+    /// (drop liveliness tokens → enqueue `Close` → drop the last actions clone
+    /// → drain the writer), identical to the one-shot
+    /// [`connect_and_open_session`] path — the supervisor adds no teardown
+    /// shape of its own, it just unwraps what it encapsulated.
+    ///
+    /// Dropping the supervisor here releases the dead connection's engine +
+    /// inbound half and the supervisor's own [`SwappableLink`] handle; the
+    /// returned `actions` still holds the last sink clone (the writer task's
+    /// `mpsc` sender lives behind it), so the caller's `drop(actions)` remains
+    /// "the last sender by construction" and the writer drains to exit exactly
+    /// as the non-supervised path's teardown does.
+    ///
+    /// [`connect_and_open_session`]: crate::session_open::connect_and_open_session
+    pub fn into_teardown(self) -> (Arc<SessionLinkActions>, TokioJoinHandle<()>) {
+        // Destructure so the engine + inbound half + swappable drop here; keep
+        // the surviving actions bundle + the live writer-task handle.
+        let ReconnectingSession {
+            actions, opened, ..
+        } = self;
+        (actions, opened.writer_handle)
     }
 
     /// One reopen attempt: re-dial the retained locator, swap the fresh

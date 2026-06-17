@@ -26,9 +26,18 @@ use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey};
 /// `OutboundStart` + `LinkOpened`) and different TCP setup
 /// paths (bind+accept vs dial), but share the rest of the
 /// session-FSM + outbound-publisher + inbound-subscriber wiring.
+///
+/// R311pw — `--reconnect` (application LIFECYCLE mode, distinct from the
+/// compiled `session-reconnect` capability) rides on the `Initiator` variant
+/// ONLY: zenoh-pico's `Z_FEATURE_AUTO_RECONNECT` is the CLIENT re-open path
+/// (`_z_client_reopen_task_fn`), and an acceptor has no reopen-task model
+/// (R311nv). Carrying the flag on the Initiator arm makes "an acceptor
+/// reconnects" unrepresentable rather than a runtime guard. `reconnect = true`
+/// runs the long-lived supervised lifecycle (re-dial + declaration replay on
+/// link loss); `false` keeps the default round-trip-then-exit harness.
 pub(crate) enum Role {
     Acceptor { listen: String },
-    Initiator { connect: String },
+    Initiator { connect: String, reconnect: bool },
 }
 
 /// R219 — publisher-task operation kind. `Put` carries the

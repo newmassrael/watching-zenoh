@@ -363,7 +363,14 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
 /// special-case (scheme/address axis conflation) AND the dial_endpoint-vs-
 /// open_session_at contract split — both paths now route the same parsed
 /// `AnyLocator` through `dial_locator`.
-fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
+///
+/// R311pw — `pub` so a reconnect-supervised caller reuses this exact classifier
+/// (scheme-less `tcp/` convenience included) to turn a `--connect` string into
+/// an [`AnyLocator`], then narrows to a
+/// [`ReconnectLocator`](wz_session_core::reconnect::ReconnectLocator) via its
+/// `TryFrom` — instead of duplicating the desugar. The dial path
+/// ([`dial_endpoint`]) and the reconnect path share ONE connect-string parse.
+pub fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
     match parse_any_locator(connect) {
         Ok(locator) => Ok(locator),
         // Scheme-less `HOST:PORT` = implicit `tcp` (the `--connect` convenience;

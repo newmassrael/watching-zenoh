@@ -43,6 +43,7 @@
 // (`wz_liveliness_subscriber_round_trip_against_wz_acceptor`).
 
 use std::io;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 // R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
@@ -62,6 +63,10 @@ use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
+use wz::runtime_tokio::reconnect::{
+    open_session_with_reconnect, ReconnectDriveOutcome, ReconnectLocator, ReconnectPolicy,
+    ReconnectingSession,
+};
 use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
@@ -73,8 +78,8 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
-    DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session,
+    plan_endpoint, DialConfig, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -171,7 +176,11 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             // ever wires in.
             accept_endpoint(listen).await
         }
-        Role::Initiator { connect } => {
+        Role::Initiator { connect, .. } => {
+            // R311pw — `reconnect` is ignored here: `establish_link` runs the
+            // one-shot dial only. The reconnect-Initiator lifecycle dials inside
+            // the supervisor (which re-dials on loss), so `run_demo` routes it
+            // away from `establish_link` entirely (it never reaches this arm).
             let dialed = dial_endpoint(connect, &DialConfig::default()).await?;
             // R311po — log WHICH transport was dialed (the DialedLink variant
             // name). This is the WS legs' witness that a `ws/...` --connect
@@ -545,6 +554,36 @@ fn spawn_background_tasks(
     }
 }
 
+/// R311pw — the demo's session-drive source, forked by lifecycle mode.
+/// `OneShot` (Acceptor, or Initiator without `--reconnect`) drives the FSM
+/// once to terminal; `Reconnect` (Initiator `--reconnect`) drives the
+/// long-lived [`ReconnectingSession`] supervisor, which re-dials + replays the
+/// declaration cache on link loss. Both expose the surviving
+/// [`SessionLinkActions`] bundle that the steady-state machinery
+/// (observer / session / handles / tasks / sweep) and the R292 teardown chain
+/// are built over, so only the OPEN and the DRIVE fork — the ~250 lines
+/// between them stay mode-agnostic.
+///
+/// Both variants are boxed: `OpenedSession` embeds the FSM engine (≥256 bytes)
+/// and `ReconnectingSession` embeds a whole `OpenedSession` plus more, so an
+/// unboxed enum would carry the larger variant's footprint on every value
+/// (clippy `large_enum_variant`); boxing keeps `DriveSource` pointer-sized.
+enum DriveSource {
+    OneShot(Box<OpenedSession>),
+    Reconnect(Box<ReconnectingSession>),
+}
+
+impl DriveSource {
+    /// The surviving actions bundle — the half both modes build the
+    /// steady-state Session / handles / tasks over (and the teardown drops).
+    fn actions(&self) -> &Arc<SessionLinkActions> {
+        match self {
+            DriveSource::OneShot(opened) => &opened.actions,
+            DriveSource::Reconnect(recon) => recon.actions(),
+        }
+    }
+}
+
 /// Demo orchestration entry point. Invoked by `fn main` after argv
 /// parsing has been validated and the spec bundles
 /// ([`DeclareEmitSpec`], [`RemoteLogSpec`], [`ReplyConsumerSpec`],
@@ -585,50 +624,102 @@ pub(crate) async fn run_demo(
         liveliness_get: liveliness_get_spec,
     } = query_role_spec;
 
-    // ── Step 1: link setup (Acceptor binds + accepts, Initiator dials;
-    //          a scheme-bearing --connect dials WS/etc via dial_locator).
-    let dialed = establish_link(&role).await?;
-
-    // ── Step 2: open the session to Established via the library open
-    //          helpers (R311fc). The handshake phase is wall-clock bounded
-    //          by the SCXML handshake timers — Initiator init_ack/open_ack
-    //          (2s) + link.open_timeout (5s); Acceptor
-    //          accepting.inactivity_timeout (1s) — so a peer that connects
-    //          then stalls no longer hangs the binary: the helper's tick pump
-    //          fires the deadline and returns an OpenError instead of looping
-    //          forever (the pre-R311fc inline drive had no tick pump on the
-    //          handshake). Production wall-clock path: `None` iteration cap +
-    //          DEFAULT_OPEN_TICK_MS. The returned OpenedSession owns the same
-    //          wiring the demo previously built inline (split link pipeline +
-    //          Lua-bound FSM engine + actions); steps 3-5 thread its fields
-    //          into the steady-state machinery instead of constructing them.
+    // ── Step 1+2: link setup + open, FORKED by lifecycle mode (R311pw).
+    //          Acceptor and one-shot Initiator dial/accept ONCE via
+    //          establish_link, then open via the library helpers (R311fc).
+    //          The reconnect Initiator (`--connect --reconnect`) instead hands
+    //          its `--connect` locator to `open_session_with_reconnect`, which
+    //          OWNS the dial (it re-dials + replays the declaration cache on
+    //          link loss), so it skips establish_link. Both yield a
+    //          `DriveSource` exposing the surviving actions bundle steps 3-5
+    //          build over.
     //
-    // R294/R263 — `session_clock` is the single shared monotonic epoch passed
-    // into the open helper (which threads it into SessionLinkActions),
-    // install_observer_callbacks, Session::new, drive_session_until_terminal,
-    // and sweep_task. TokioTime is Copy, so the OpenedSession's returned clock
-    // is the same epoch; the demo keeps using its own `session_clock` binding
-    // (clock: _) — load-bearing for the R261 register-time deadline_ms vs
-    // sweep-time now_ms comparison.
+    //          Handshake is wall-clock bounded by the SCXML handshake timers
+    //          (Initiator init_ack/open_ack 2s + link.open_timeout 5s; Acceptor
+    //          accepting.inactivity_timeout 1s); production cap = None +
+    //          DEFAULT_OPEN_TICK_MS.
+    //
+    // R294/R263 — `session_clock` is the single shared monotonic epoch threaded
+    // into the open helper, install_observer_callbacks, Session::new, the drive
+    // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
     let params = demo_session_init_params(&role);
-    let OpenedSession {
-        mut engine,
-        actions,
-        inbound,
-        writer_handle,
-        clock: _,
-    } = match &role {
-        Role::Acceptor { .. } => {
-            accept_and_open_session(dialed, params, session_clock, None, DEFAULT_OPEN_TICK_MS).await
+    let drive_src = match &role {
+        // R311pw — reconnect Initiator: the supervisor owns the dial. Reuse the
+        // library `plan_endpoint` connect-string classifier (scheme-less `tcp/`
+        // convenience included), then narrow to the reconnectable subset via
+        // `ReconnectLocator::try_from` (a `serial/...` --connect is rejected
+        // here with NotReconnectable — pico AUTO_RECONNECT is IP-family only).
+        Role::Initiator {
+            connect,
+            reconnect: true,
+        } => {
+            let locator = ReconnectLocator::try_from(plan_endpoint(connect).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("wz-ap-demo: malformed --connect {connect:?}: {e:?}"),
+                )
+            })?)
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("wz-ap-demo: --connect {connect:?} is not reconnectable: {e:?}"),
+                )
+            })?;
+            // Long-lived lifecycle: per-connection cap = None (run until the
+            // shutdown signal cancels the drive future); pico-default retry
+            // policy. Cert-free transports take DialConfig::default; a `tls/`
+            // reconnect would thread its config here (out of demo scope).
+            let recon = open_session_with_reconnect(
+                locator,
+                params,
+                DialConfig::default(),
+                session_clock,
+                ReconnectPolicy::default(),
+                None,
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .map_err(|e| {
+                io::Error::other(format!("wz-ap-demo: reconnect session open failed: {e:?}"))
+            })?;
+            log::info!(
+                "wz-ap-demo: reconnect-supervised session Established (--reconnect); \
+                 link loss re-dials + replays declarations"
+            );
+            DriveSource::Reconnect(Box::new(recon))
         }
-        Role::Initiator { .. } => {
-            initiate_and_open_session(dialed, params, session_clock, None, DEFAULT_OPEN_TICK_MS)
-                .await
+        // Acceptor + one-shot Initiator: dial/accept once, open one-shot.
+        _ => {
+            let dialed = establish_link(&role).await?;
+            let opened = match &role {
+                Role::Acceptor { .. } => {
+                    accept_and_open_session(
+                        dialed,
+                        params,
+                        session_clock,
+                        None,
+                        DEFAULT_OPEN_TICK_MS,
+                    )
+                    .await
+                }
+                Role::Initiator { .. } => {
+                    initiate_and_open_session(
+                        dialed,
+                        params,
+                        session_clock,
+                        None,
+                        DEFAULT_OPEN_TICK_MS,
+                    )
+                    .await
+                }
+            }
+            .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;
+            log::info!("wz-ap-demo: session Established; entering steady state");
+            DriveSource::OneShot(Box::new(opened))
         }
-    }
-    .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;
-    log::info!("wz-ap-demo: session Established; entering steady state");
+    };
+    let actions = drive_src.actions().clone();
 
     // ── Step 3: observer-side registry callbacks. The handshake exchanged no
     //          application frames, so wiring the observer here — after
@@ -724,7 +815,6 @@ pub(crate) async fn run_demo(
     // only between this loop and background `Session::publish` calls, which
     // serialize naturally on the mutex without livelock.
     log::info!("wz-ap-demo: driving session FSM");
-    let mut driver = inbound;
 
     // gc-3 carry #2 — wire the LIVE application switchboard. Register the
     // demo's keyexpr -> domain-event rows (from wz-ap-demo-app's sidecar) onto
@@ -819,64 +909,128 @@ pub(crate) async fn run_demo(
     // switchboard fan rides the `_with` under-lock hook so it shares
     // the same lock scope as before.
     let session_for_dispatch = session.clone();
-    let outcome = tokio::select! {
-        o = drive_session_until_terminal(
-            &mut driver,
-            &actions,
-            &mut engine,
-            Some(10_000),
-            &session_clock,
-            &session_timeouts,
-            |event: IterationEvent<'_>| {
-                log::debug!("wz-ap-demo: iteration event = {event:?}");
-                // R311ld — the SSOT fans the event into the per-domain
-                // registries + flushes staged outbound records, then
-                // drains the deferred-fire queue after the lock drops.
-                session_for_dispatch.dispatch_iteration_event_with(event, |obs| {
-                    // gc-3 carry #2 — also fan an inbound Push through the
-                    // switchboard into the application engine, under the
-                    // SAME lock scope as the registry fan. IterationEvent
-                    // is Copy, so the same event drives both. The value
-                    // injector decodes the wire payload (temp_payload
-                    // codec) into the typed _event.data; a signal row
-                    // (reset) injects an empty _event.data. A matched row
-                    // advances the app machine, which we then step + log.
-                    #[cfg(feature = "switchboard")]
-                    {
-                        let fired = {
-                            let mut injector =
-                                wz_ap_demo_app::SensorMonitorInjector::new(&mut app_engine);
-                            obs.dispatch_switchboard(event, &mut injector)
-                        };
-                        if fired > 0 {
-                            app_engine.step();
-                            log::info!(
-                                "wz-ap-demo: APP SWITCHBOARD FIRED fired={fired} \
-                                 app_state={:?}",
-                                app_engine.get_current_state()
-                            );
-                        }
-                    }
-                    #[cfg(not(feature = "switchboard"))]
-                    let _ = obs;
-                });
-            },
-        ) => Some(o),
-        _ = shutdown_signal() => {
-            log::info!(
-                "wz-ap-demo: shutdown signal received; halting drive_session \
-                 (writer task remains alive to drain Close + UndeclToken + tail frames)"
-            );
-            None
+    // R311pw — the per-iteration dispatch is built ONCE as a `FnMut` and passed
+    // by `&mut` into whichever drive arm runs (a `&mut F` is itself `FnMut`),
+    // so the one-shot and reconnect paths share one dispatch body rather than
+    // cloning the switchboard fan. The body is unchanged from the pre-fork
+    // inline closure (R311ld SSOT dispatch + gc-3 switchboard fan).
+    let mut dispatch = |event: IterationEvent<'_>| {
+        log::debug!("wz-ap-demo: iteration event = {event:?}");
+        // R311ld — the SSOT fans the event into the per-domain
+        // registries + flushes staged outbound records, then
+        // drains the deferred-fire queue after the lock drops.
+        session_for_dispatch.dispatch_iteration_event_with(event, |obs| {
+            // gc-3 carry #2 — also fan an inbound Push through the
+            // switchboard into the application engine, under the
+            // SAME lock scope as the registry fan. IterationEvent
+            // is Copy, so the same event drives both. The value
+            // injector decodes the wire payload (temp_payload
+            // codec) into the typed _event.data; a signal row
+            // (reset) injects an empty _event.data. A matched row
+            // advances the app machine, which we then step + log.
+            #[cfg(feature = "switchboard")]
+            {
+                let fired = {
+                    let mut injector = wz_ap_demo_app::SensorMonitorInjector::new(&mut app_engine);
+                    obs.dispatch_switchboard(event, &mut injector)
+                };
+                if fired > 0 {
+                    app_engine.step();
+                    log::info!(
+                        "wz-ap-demo: APP SWITCHBOARD FIRED fired={fired} \
+                         app_state={:?}",
+                        app_engine.get_current_state()
+                    );
+                }
+            }
+            #[cfg(not(feature = "switchboard"))]
+            let _ = obs;
+        });
+    };
+
+    // R311pw — drive FORK. Both arms race the drive against the graceful
+    // shutdown signal via the SAME select!-drop cancel path; each yields the
+    // `(was_cancelled, writer_handle)` the shared R292 teardown consumes.
+    let (was_cancelled, writer_handle) = match drive_src {
+        // One-shot (Acceptor / non-reconnect Initiator): drive the FSM once to
+        // terminal. The engine + inbound half live in this stack frame (not
+        // inside the future), so the shutdown select!-drop is cancel-safe.
+        DriveSource::OneShot(opened) => {
+            let OpenedSession {
+                mut engine,
+                inbound,
+                writer_handle,
+                ..
+            } = *opened;
+            let mut driver = inbound;
+            let outcome = tokio::select! {
+                o = drive_session_until_terminal(
+                    &mut driver,
+                    &actions,
+                    &mut engine,
+                    Some(10_000),
+                    &session_clock,
+                    &session_timeouts,
+                    &mut dispatch,
+                ) => Some(o),
+                _ = shutdown_signal() => {
+                    log::info!(
+                        "wz-ap-demo: shutdown signal received; halting drive_session \
+                         (writer task remains alive to drain Close + UndeclToken + tail frames)"
+                    );
+                    None
+                }
+            };
+            match &outcome {
+                Some(o) => log::info!("wz-ap-demo: session ended: {o:?}"),
+                None => log::info!(
+                    "wz-ap-demo: session cancelled by graceful-shutdown signal; \
+                     Close(Generic) enqueues after UndeclToken in the writer drain"
+                ),
+            }
+            (outcome.is_none(), writer_handle)
+        }
+        // Reconnect Initiator (`--reconnect`): the supervisor re-dials + replays
+        // the declaration cache on link loss, so the FSM reaching terminal does
+        // NOT end the demo — it runs the long-lived lifecycle until the shutdown
+        // signal cancels the drive future (`stop` stays false; shutdown is the
+        // select!-drop, the same cancel path the one-shot uses). A `GaveUp`
+        // (reconnect retries exhausted) also surfaces here as a natural end.
+        DriveSource::Reconnect(mut recon) => {
+            let stop = AtomicBool::new(false);
+            let outcome = tokio::select! {
+                o = recon.drive(&session_timeouts, &stop, None, &mut dispatch) => Some(o),
+                _ = shutdown_signal() => {
+                    log::info!(
+                        "wz-ap-demo: shutdown signal received; halting reconnect supervisor \
+                         (writer task remains alive to drain Close + UndeclToken + tail frames)"
+                    );
+                    None
+                }
+            };
+            match &outcome {
+                Some(ReconnectDriveOutcome::Stopped) => {
+                    log::info!("wz-ap-demo: reconnect drive stopped")
+                }
+                Some(ReconnectDriveOutcome::GaveUp { attempts, last }) => log::info!(
+                    "wz-ap-demo: reconnect supervisor gave up after {attempts} attempt(s): {last:?}"
+                ),
+                Some(ReconnectDriveOutcome::IterationLimit) => {
+                    log::info!("wz-ap-demo: reconnect drive hit per-connection iteration limit")
+                }
+                None => log::info!(
+                    "wz-ap-demo: reconnect session cancelled by graceful-shutdown signal; \
+                     Close(Generic) enqueues after UndeclToken in the writer drain (reconnects={})",
+                    recon.reconnects()
+                ),
+            }
+            // R311pw — unwrap the supervisor into the teardown handles (the
+            // surviving actions clone is dropped here; the current connection's
+            // writer feeds the R292 chain identically to the one-shot path).
+            let (_actions, writer_handle) = recon.into_teardown();
+            (outcome.is_none(), writer_handle)
         }
     };
-    match &outcome {
-        Some(o) => log::info!("wz-ap-demo: session ended: {o:?}"),
-        None => log::info!(
-            "wz-ap-demo: session cancelled by graceful-shutdown signal; \
-             Close(Generic) enqueues after UndeclToken in the writer drain"
-        ),
-    }
     log::info!("wz-ap-demo: action trace = {:?}", actions.trace_snapshot());
 
     // R292 — seven-step teardown invariant lifted from inline
@@ -897,7 +1051,7 @@ pub(crate) async fn run_demo(
         token,
         actions,
         writer_handle,
-        was_cancelled: outcome.is_none(),
+        was_cancelled,
         clock: session_clock,
     }
     .abort_sweep_join_tasks()
