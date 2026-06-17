@@ -39360,6 +39360,60 @@
         "push 미동의=LOCAL-COMMIT까지만. 누적 미푸시=R311pc+pd+pe. push 명시 동의 권장([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311pf": {
+      "decision_summary": "R311pf: zenohd 잔여 부채 ② 청산 — z_sub open retry root-cause 진단. 3단계 부하 재현+zenohd stderr 캡처로 zenohd-측 거부 배제(200+ 연결 reject 0건, open_timeout=10s 인내심)→retry는 정당한 robustness 확정. 잔존 원인=full-run-ci 프로파일 starvation. 코드변경 0(주석 문서화). 부채 ②③ 모두 RESOLVED.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: spawn_subscribed_zsub doc 주석에 R311pf root-cause finding 추가(debt ② closure). z_sub/z_pub/z_get retry 3곳이 pico one-shot \"Unable to open session!\"을 6회 재시도하나 root-cause 미확정이던 smell을 진단으로 특성화: zenohd accept-readiness 갭/거부 배제(zenohd config open_timeout=accept_timeout=10s, accept_pending=100; 200+ 연결 reject/timeout 0건; TCP 즉시 accept→더 강한 spawn_zenohd probe 무의미) + pico open starvation-robust(4-5× CPU 과구독서 100/100·60/60 성공) + 잔존 원인=full-run-ci 프로파일(rustc 메모리/IO + 멀티-zenohd 동시) 고유 극희소 starvation transient→foreign one-shot(self-retry 없음) retry는 정당한 robustness(wz 결함도 zenohd readiness 갭도 아님). spawn_publishing_zpub/inline z_get도 동일 reasoning 적용 명시.",
+        "코드 로직/프로덕션 변경 0=test doc 주석만(smell→문서화된 정당 robustness). 부채 ②를 코드 자체에 문서화해 \"root cause 미확정\"을 코드에서 closure."
+      ],
+      "verification_bullets": [
+        "진단(메모리 처방 \"load 재현+zenohd stderr 캡처로 zenohd측 거부 여부 확인\" 이행): 3단계 부하 재현 실험 + zenohd RUST_LOG=zenoh=debug stderr 캡처(block-buffer는 stdbuf -oL 우회).",
+        "실험1(zenohd ready + 96 busy loop + 60 z_sub burst): OK=60/60, zenohd 60 New transport opened, reject 0. 단 z_sub가 idle 코어서 ~2s 조기 완료=부하 미인가.",
+        "실험2(128 load loop 6s 포화 후 100 z_sub burst, load1=10.5/runnable 129): OK=100/100, zenohd reject/timeout 0. 4× 과구독서도 pico open 전부 성공.",
+        "실험3(160 load loop 선행 포화 + 3 zenohd 부하 하 시작 + 60 z_sub, load1=58/runnable 161=5×): OK=60/60, 3 zenohd 각 Accepted=20 reject 0. 가장 충실한(R311ou 직렬화 전) 조건서도 실패 0.",
+        "판정: (b) zenohd accept-readiness 갭/거부=배제(zenohd config 인내심 open_timeout=accept_timeout=10s/accept_pending=100; 200+ 연결 reject·timeout 로그 0건; 채널-체크서 단일 z_sub handshake \"New transport opened\" 정상). (a) pico z_open 결함=배제(과구독서 전부 성공). (c) 스케줄러 starvation=잔존 원인(synthetic 부하로 재현 불가=ready zenohd 상대론 안 터짐→full-run-ci 고유 프로파일 rustc 메모리/IO+멀티-zenohd 동시의 극희소 transient).",
+        "결론: zenohd-측 거부 확정 배제→메모리 처방대로 retry 유지 정당. retry=foreign one-shot(pico self-retry 없음)의 극희소 handshake starvation transient 표준 robustness. 한계: 실제 실패 synthetic 재현 못 함=결론은 evidence-backed 추론(zenohd-측 배제는 확정적/소거법으로 starvation 귀속).",
+        "clippy(wz-integration-tests --tests EXIT 0; doc_lazy_continuation 회피=줄 시작 list 마커 없는 산문)/fmt(--check EXIT 0) clean. 변경=test doc 주석만(코드 로직/프로덕션/테스트 동작 무변경)이라 full run-ci 불필요=비례 검증.",
+        "atomic: ledger entries 765->766, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pf = zenohd 잔여 부채 ② 청산: z_sub open retry root-cause 진단. spawn_subscribed_zsub(+z_pub+z_get) 3 retry 사이트가 pico one-shot \"Unable to open session\"을 6회 재시도하나 root-cause 미확정이던 smell을 부하 재현+zenohd stderr 진단으로 특성화→retry 정당 확정. 코드변경 0(주석 문서화).",
+        "진단(메모리 처방 이행): 3단계 부하 재현(zenohd ready+CPU 과구독 / CPU 포화 후 burst / 3 zenohd 부하 하 시작) + zenohd RUST_LOG=zenoh=debug stderr 캡처. zenohd-측 거부 배제(config open_timeout=accept_timeout=10s 인내심; 200+ 연결 reject 0건; TCP 즉시 accept→spawn_zenohd readiness 강화 무의미) + pico open starvation-robust(4-5× 과구독 100/100·60/60 성공). 잔존 원인=full-run-ci 고유 프로파일(rustc 메모리/IO+멀티-zenohd 동시) 극희소 starvation transient. 메모리 처방대로 zenohd측 배제→retry 유지 정답.",
+        "한계(정직): 실제 실패 synthetic 재현 못 함=결론은 evidence-backed 추론(zenohd-측 배제 확정적, starvation 귀속은 소거법). 추가 재현 시도는 비용 대비 가치 낮음(이미 200+ 연결 5× 과구독서 무실패=극희소 확정).",
+        "부채 상태([[project-zenohd-interop-debts]]): ②③ 모두 RESOLVED(③=R311pe crates.io fallback, ②=R311pf retry 정당화). zenohd interop 부채 트랙 종료.",
+        "남은 carry(다음 rung): cross-impl 추가 방향=[[project-pico-parity-status]] 진입점(구현~92%/cross~75%; wz가 zenohd 경유 producer/consumer/responder/requester/observer 전 역할 검증 완료). pico WS/serial 등 미검증 transport·추가 cross-impl 후보. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/.",
+        "push 미동의=LOCAL-COMMIT까지만. 누적 미푸시=R311pc+pd+pe+pf. push 명시 동의 권장([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311pf: zenohd 잔여 부채 ② 청산 — z_sub open retry root-cause 진단. 3단계 부하 재현+zenohd stderr 캡처로 zenohd-측 거부 배제(200+ 연결 reject 0건, open_timeout=10s 인내심)→retry는 정당한 robustness 확정. 잔존 원인=full-run-ci 프로파일 starvation. 코드변경 0(주석 문서화). 부채 ②③ 모두 RESOLVED.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_to_zenohd_router.rs: spawn_subscribed_zsub doc 주석에 R311pf root-cause finding 추가(debt ② closure). z_sub/z_pub/z_get retry 3곳이 pico one-shot \"Unable to open session!\"을 6회 재시도하나 root-cause 미확정이던 smell을 진단으로 특성화: zenohd accept-readiness 갭/거부 배제(zenohd config open_timeout=accept_timeout=10s, accept_pending=100; 200+ 연결 reject/timeout 0건; TCP 즉시 accept→더 강한 spawn_zenohd probe 무의미) + pico open starvation-robust(4-5× CPU 과구독서 100/100·60/60 성공) + 잔존 원인=full-run-ci 프로파일(rustc 메모리/IO + 멀티-zenohd 동시) 고유 극희소 starvation transient→foreign one-shot(self-retry 없음) retry는 정당한 robustness(wz 결함도 zenohd readiness 갭도 아님). spawn_publishing_zpub/inline z_get도 동일 reasoning 적용 명시.",
+        "코드 로직/프로덕션 변경 0=test doc 주석만(smell→문서화된 정당 robustness). 부채 ②를 코드 자체에 문서화해 \"root cause 미확정\"을 코드에서 closure."
+      ],
+      "publishable_verification_bullets": [
+        "진단(메모리 처방 \"load 재현+zenohd stderr 캡처로 zenohd측 거부 여부 확인\" 이행): 3단계 부하 재현 실험 + zenohd RUST_LOG=zenoh=debug stderr 캡처(block-buffer는 stdbuf -oL 우회).",
+        "실험1(zenohd ready + 96 busy loop + 60 z_sub burst): OK=60/60, zenohd 60 New transport opened, reject 0. 단 z_sub가 idle 코어서 ~2s 조기 완료=부하 미인가.",
+        "실험2(128 load loop 6s 포화 후 100 z_sub burst, load1=10.5/runnable 129): OK=100/100, zenohd reject/timeout 0. 4× 과구독서도 pico open 전부 성공.",
+        "실험3(160 load loop 선행 포화 + 3 zenohd 부하 하 시작 + 60 z_sub, load1=58/runnable 161=5×): OK=60/60, 3 zenohd 각 Accepted=20 reject 0. 가장 충실한(R311ou 직렬화 전) 조건서도 실패 0.",
+        "판정: (b) zenohd accept-readiness 갭/거부=배제(zenohd config 인내심 open_timeout=accept_timeout=10s/accept_pending=100; 200+ 연결 reject·timeout 로그 0건; 채널-체크서 단일 z_sub handshake \"New transport opened\" 정상). (a) pico z_open 결함=배제(과구독서 전부 성공). (c) 스케줄러 starvation=잔존 원인(synthetic 부하로 재현 불가=ready zenohd 상대론 안 터짐→full-run-ci 고유 프로파일 rustc 메모리/IO+멀티-zenohd 동시의 극희소 transient).",
+        "결론: zenohd-측 거부 확정 배제→메모리 처방대로 retry 유지 정당. retry=foreign one-shot(pico self-retry 없음)의 극희소 handshake starvation transient 표준 robustness. 한계: 실제 실패 synthetic 재현 못 함=결론은 evidence-backed 추론(zenohd-측 배제는 확정적/소거법으로 starvation 귀속).",
+        "clippy(wz-integration-tests --tests EXIT 0; doc_lazy_continuation 회피=줄 시작 list 마커 없는 산문)/fmt(--check EXIT 0) clean. 변경=test doc 주석만(코드 로직/프로덕션/테스트 동작 무변경)이라 full run-ci 불필요=비례 검증.",
+        "atomic: ledger entries 765->766, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pf = zenohd 잔여 부채 ② 청산: z_sub open retry root-cause 진단. spawn_subscribed_zsub(+z_pub+z_get) 3 retry 사이트가 pico one-shot \"Unable to open session\"을 6회 재시도하나 root-cause 미확정이던 smell을 부하 재현+zenohd stderr 진단으로 특성화→retry 정당 확정. 코드변경 0(주석 문서화).",
+        "진단(메모리 처방 이행): 3단계 부하 재현(zenohd ready+CPU 과구독 / CPU 포화 후 burst / 3 zenohd 부하 하 시작) + zenohd RUST_LOG=zenoh=debug stderr 캡처. zenohd-측 거부 배제(config open_timeout=accept_timeout=10s 인내심; 200+ 연결 reject 0건; TCP 즉시 accept→spawn_zenohd readiness 강화 무의미) + pico open starvation-robust(4-5× 과구독 100/100·60/60 성공). 잔존 원인=full-run-ci 고유 프로파일(rustc 메모리/IO+멀티-zenohd 동시) 극희소 starvation transient. 메모리 처방대로 zenohd측 배제→retry 유지 정답.",
+        "한계(정직): 실제 실패 synthetic 재현 못 함=결론은 evidence-backed 추론(zenohd-측 배제 확정적, starvation 귀속은 소거법). 추가 재현 시도는 비용 대비 가치 낮음(이미 200+ 연결 5× 과구독서 무실패=극희소 확정).",
+        "부채 상태([[project-zenohd-interop-debts]]): ②③ 모두 RESOLVED(③=R311pe crates.io fallback, ②=R311pf retry 정당화). zenohd interop 부채 트랙 종료.",
+        "남은 carry(다음 rung): cross-impl 추가 방향=[[project-pico-parity-status]] 진입점(구현~92%/cross~75%; wz가 zenohd 경유 producer/consumer/responder/requester/observer 전 역할 검증 완료). pico WS/serial 등 미검증 transport·추가 cross-impl 후보. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/.",
+        "push 미동의=LOCAL-COMMIT까지만. 누적 미푸시=R311pc+pd+pe+pf. push 명시 동의 권장([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
