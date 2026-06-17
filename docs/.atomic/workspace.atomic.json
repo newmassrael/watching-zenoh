@@ -40416,6 +40416,44 @@
         "남은 carry(별도 정직한 항목, NO-DEFERRAL): (1) zenoh TCP socket-option parity — listener backlog 1024(tokio 기본 128) + 모든 unicast 스트림 set_nodelay(true)+set_linger(zenoh-link-tcp/unicast.rs:55,65; wz 미설정). bind 동작이 아니라 별개 튜닝 축이라 별도 라운드. (2) [[project-north-star]] P4 zenoh-full 카탈로그 + pico optional. 코드 LOCAL-COMMITTED UNPUSHED 예정. push 명시 동의 필요. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311q2": {
+      "decision_summary": "R311q2: run-ci Layer Q qemu 실행이 >/dev/null 2>&1로 출력 폐기→실패시 진단불가(R311q1 push의 an386 transient 무로그). run_qemu_case 헬퍼로 FAIL시 qemu 출력+exit code(124=timeout) surface, Q.0/Q.2/Q.4 4사이트 SSOT 통합.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: run_qemu_case(label,cpu,machine,kernel) 헬퍼 추가 — qemu stdout+stderr를 임시 로그로 캡처해, PASS시 폐기(출력 무변), FAIL시 캡처 전체 + exit code 의미(124=10s timeout/hang vs 비정상 semihost SYS_EXIT)를 stderr로 surface. 'else rc=$?'로 exit code 정확 캡처(false `if cond;fi` 후 $?=0 되는 bash 함정 회피), 124 분기는 명시 if(set -e 하에서 `[[ ]] &&` 회피).",
+        "Q.0(mcu-noheap-probe)/Q.2(mcu-qemu-demo)/Q.4(mcu-session-acceptor + microbit slim) 4개 qemu-run 사이트를 헬퍼로 통합 = SSOT. 종전 동일한 `timeout 10 qemu-system-arm ... -kernel X >/dev/null 2>&1` 패턴이 4중복이었고 모두 출력 폐기. PASS 라인 포맷 불변(label+' PASS')이라 기존 grep 가드(예: 'Layer Q pass') 호환."
+      ],
+      "verification_bullets": [
+        "출처=사용자 요청(같은 문제 1회 발생에 모든 로그가 기록되어 원인 즉시 파악). 동기=R311q1 push에서 Q.2.mps2-an386이 1회 transient FAIL했으나 qemu 실행이 출력을 /dev/null로 폐기해 무로그→30회 수동 재현으로만 transient임을 진단해야 했음. 근본 원인=4개 qemu-run 사이트의 `>/dev/null 2>&1`.",
+        "검증: bash -n scripts/run-ci.sh OK. FAIL 경로=함수를 sed로 추출 후 bogus kernel(/nonexistent)로 호출 → '... FAIL (exit=1)' + 캡처된 qemu 출력('Could not load kernel') `|` 프리픽스로 surface + ret=1 확인. PASS 경로=scripts/run-ci.sh --layer Q exit 0, Q.0/Q.2/Q.4 전 서브레인 PASS, 'captured qemu'/'FAIL' 스퓨리어스 라인 0(PASS시 출력 깨끗 + 라인 포맷 불변).",
+        "관점: 이 개선은 observability(실패 진단성)이지 determinism 하드닝이 아님 — emulator transient(R311pw an385/R311q1 an386, MCU 바이트동일·코드무관)는 wz 결함이 아니라 qemu-side라 -icount류 결정성 강제는 별개(R311pw가 fragile로 판정). 다음 재발 시 캡처된 qemu 출력이 timeout vs SYS_EXIT 등 원인을 단일 run에서 구분해 줌."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311q2 = run-ci Layer Q 실패 진단성 개선. run_qemu_case 헬퍼(Q.0/Q.2/Q.4 SSOT)가 FAIL시 qemu 출력+exit code(124=timeout) surface → emulator transient(R311pw an385/R311q1 an386) 또는 실 회귀 재발 시 단일 run에서 원인 파악(재현 불필요). observability 개선이지 determinism 하드닝 아님.",
+        "다음=#1 TCP socket-option parity: zenoh가 모든 unicast 스트림에 set_nodelay(true)+set_linger(Some(10s)) 설정(zenoh-link-tcp/src/unicast.rs:55/65, TCP_LINGER_TIMEOUT=10@lib.rs:81; dial new_link:266 + accept:409 공용 LinkUnicastTcp::new). wz는 dial_tcp/dial_tcp_host/accept_tcp에 configure_tcp_stream 헬퍼 SSOT로 적용(connect/accept 직후 양방향). non-vacuous 단위(tokio 기본 nodelay=off라 set 여부 구별됨 — R311pz vacuous 교훈). listener backlog 1024는 선택(TcpSocket 재도입=정직한 backlog 근거).",
+        "코드 PUSHED 예정(scripts/run-ci.sh 1파일). push 명시 동의 필요. R311pz~q1은 PUSHED origin/main=2b1a389. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311q2: run-ci Layer Q qemu 실행이 >/dev/null 2>&1로 출력 폐기→실패시 진단불가(R311q1 push의 an386 transient 무로그). run_qemu_case 헬퍼로 FAIL시 qemu 출력+exit code(124=timeout) surface, Q.0/Q.2/Q.4 4사이트 SSOT 통합.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: run_qemu_case(label,cpu,machine,kernel) 헬퍼 추가 — qemu stdout+stderr를 임시 로그로 캡처해, PASS시 폐기(출력 무변), FAIL시 캡처 전체 + exit code 의미(124=10s timeout/hang vs 비정상 semihost SYS_EXIT)를 stderr로 surface. 'else rc=$?'로 exit code 정확 캡처(false `if cond;fi` 후 $?=0 되는 bash 함정 회피), 124 분기는 명시 if(set -e 하에서 `[[ ]] &&` 회피).",
+        "Q.0(mcu-noheap-probe)/Q.2(mcu-qemu-demo)/Q.4(mcu-session-acceptor + microbit slim) 4개 qemu-run 사이트를 헬퍼로 통합 = SSOT. 종전 동일한 `timeout 10 qemu-system-arm ... -kernel X >/dev/null 2>&1` 패턴이 4중복이었고 모두 출력 폐기. PASS 라인 포맷 불변(label+' PASS')이라 기존 grep 가드(예: 'Layer Q pass') 호환."
+      ],
+      "publishable_verification_bullets": [
+        "출처=사용자 요청(같은 문제 1회 발생에 모든 로그가 기록되어 원인 즉시 파악). 동기=R311q1 push에서 Q.2.mps2-an386이 1회 transient FAIL했으나 qemu 실행이 출력을 /dev/null로 폐기해 무로그→30회 수동 재현으로만 transient임을 진단해야 했음. 근본 원인=4개 qemu-run 사이트의 `>/dev/null 2>&1`.",
+        "검증: bash -n scripts/run-ci.sh OK. FAIL 경로=함수를 sed로 추출 후 bogus kernel(/nonexistent)로 호출 → '... FAIL (exit=1)' + 캡처된 qemu 출력('Could not load kernel') `|` 프리픽스로 surface + ret=1 확인. PASS 경로=scripts/run-ci.sh --layer Q exit 0, Q.0/Q.2/Q.4 전 서브레인 PASS, 'captured qemu'/'FAIL' 스퓨리어스 라인 0(PASS시 출력 깨끗 + 라인 포맷 불변).",
+        "관점: 이 개선은 observability(실패 진단성)이지 determinism 하드닝이 아님 — emulator transient(R311pw an385/R311q1 an386, MCU 바이트동일·코드무관)는 wz 결함이 아니라 qemu-side라 -icount류 결정성 강제는 별개(R311pw가 fragile로 판정). 다음 재발 시 캡처된 qemu 출력이 timeout vs SYS_EXIT 등 원인을 단일 run에서 구분해 줌."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311q2 = run-ci Layer Q 실패 진단성 개선. run_qemu_case 헬퍼(Q.0/Q.2/Q.4 SSOT)가 FAIL시 qemu 출력+exit code(124=timeout) surface → emulator transient(R311pw an385/R311q1 an386) 또는 실 회귀 재발 시 단일 run에서 원인 파악(재현 불필요). observability 개선이지 determinism 하드닝 아님.",
+        "다음=#1 TCP socket-option parity: zenoh가 모든 unicast 스트림에 set_nodelay(true)+set_linger(Some(10s)) 설정(zenoh-link-tcp/src/unicast.rs:55/65, TCP_LINGER_TIMEOUT=10@lib.rs:81; dial new_link:266 + accept:409 공용 LinkUnicastTcp::new). wz는 dial_tcp/dial_tcp_host/accept_tcp에 configure_tcp_stream 헬퍼 SSOT로 적용(connect/accept 직후 양방향). non-vacuous 단위(tokio 기본 nodelay=off라 set 여부 구별됨 — R311pz vacuous 교훈). listener backlog 1024는 선택(TcpSocket 재도입=정직한 backlog 근거).",
+        "코드 PUSHED 예정(scripts/run-ci.sh 1파일). push 명시 동의 필요. R311pz~q1은 PUSHED origin/main=2b1a389. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
