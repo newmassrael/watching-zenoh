@@ -308,6 +308,7 @@ fn install_session_handles(
     session: &TokioSession,
     key: Option<String>,
     liveliness_subscriber_keyexpr: Option<&str>,
+    liveliness_subscriber_history: bool,
     queryable_spec: Option<(String, String)>,
 ) -> SessionHandles {
     let subscriber = key.and_then(|filter| {
@@ -365,10 +366,16 @@ fn install_session_handles(
         // the textbook shape because a panic at this site would
         // indicate a default-features misconfiguration, which is a
         // build-system bug rather than a runtime condition.
+        // R311ph — `#[non_exhaustive]` LivelinessSubscriberOptions can't be
+        // built with literal syntax outside its crate; set the public `history`
+        // field on the default instead. `history = true` (--liveliness-subscribe-history)
+        // makes the subscriber order-independent of token declare time.
+        let mut liveliness_options = LivelinessSubscriberOptions::default();
+        liveliness_options.history = liveliness_subscriber_history;
         session
             .declare_liveliness_subscriber(
                 owned_filter,
-                LivelinessSubscriberOptions::default(),
+                liveliness_options,
                 move |sample: LivelinessSample<'_>| {
                     let kind_str = match sample.kind {
                         LivelinessSampleKind::Put => "PUT",
@@ -625,6 +632,7 @@ pub(crate) async fn run_demo(
         &session,
         key,
         declare_spec.liveliness_subscriber_keyexpr.as_deref(),
+        declare_spec.liveliness_subscriber_history,
         queryable_spec,
     );
 

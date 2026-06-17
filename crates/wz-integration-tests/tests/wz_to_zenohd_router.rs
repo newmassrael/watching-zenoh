@@ -852,6 +852,54 @@ fn wz_query_routed_to_pico_queryable_via_zenohd() {
     );
 }
 
+/// Spawn a zenoh-pico `z_liveliness` (long-lived liveliness-token declarer)
+/// against zenohd, retrying the open like [`spawn_subscribed_zsub`] /
+/// [`spawn_publishing_zpub`] until the token is declared (stdout
+/// "Declaring liveliness token"). z_liveliness does the same non-self-retrying
+/// `z_open` as z_sub / z_pub (R311pf open-transient class), so the same
+/// foreign-one-shot open-retry applies — leg 7's prior single unguarded spawn
+/// was inconsistent with every other pico-spawning leg in this file. Returns the
+/// declaring child (its token is held for the child's lifetime) + its stdout
+/// reader.
+fn spawn_declaring_z_liveliness(
+    z_liveliness: &Path,
+    token_keyexpr: &str,
+    endpoint: &str,
+) -> (ChildGuard, File) {
+    const ATTEMPTS: usize = 6;
+    for attempt in 1..=ATTEMPTS {
+        let out = tempfile::tempfile().expect("tempfile for z_liveliness stdout");
+        let out_writer = out.try_clone().expect("dup z_liveliness stdout handle");
+        let mut out_reader = out;
+        let mut child = ChildGuard::wrap(
+            "z_liveliness client (zenoh-pico)",
+            Command::new("stdbuf")
+                .args(["-oL", "-eL"])
+                .arg(z_liveliness)
+                .args(["-k", token_keyexpr, "-e", endpoint, "-m", "client"])
+                .stdout(Stdio::from(out_writer))
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn z_liveliness via stdbuf"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let cap = read_captured(&mut out_reader);
+            if cap.contains("Declaring liveliness token") {
+                return (child, out_reader); // session open + token declared
+            }
+            if cap.contains("Unable to open session") || Instant::now() >= deadline {
+                break; // transient open failure / timeout -> respawn
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
+        eprintln!("z_liveliness open attempt {attempt}/{ATTEMPTS} did not declare; retrying");
+    }
+    panic!("pico z_liveliness failed to open a session to zenohd after {ATTEMPTS} attempts");
+}
+
 /// leg 7 (R311pd) — the INVERSE of leg 5
 /// (`wz_liveliness_token_visible_via_zenohd_to_pico_zget_liveliness`): here a
 /// zenoh-pico `z_liveliness` declares a liveliness TOKEN, zenohd tracks it in
@@ -870,12 +918,18 @@ fn wz_query_routed_to_pico_queryable_via_zenohd() {
 /// `--liveliness-subscribe` (the high-level `Session::declare_liveliness_subscriber`,
 /// R280) consumes a liveliness token routed by the reference router.
 ///
-/// No foreign-CLI retry loop (contrast leg 5's one-shot `z_get_liveliness`):
-/// `z_liveliness` HOLDS its token for its lifetime, so once wz is Established
-/// (its subscriber Interest sent to zenohd) a single spawn + a generous wait on
-/// the wz witness covers the declaration-propagation window. The witness is on
-/// the WZ side (its single-writer env_logger stderr), so this leg is
-/// structurally immune to the foreign-stdout capture race leg 4 gated around.
+/// Determinism (R311ph — session-review fix): the wz subscriber is declared
+/// with `--liveliness-subscribe-history` (`history = true`), so zenohd replays
+/// the CURRENT alive token on subscription as well as routing future declares.
+/// That removes the ordering race a `history = false` subscriber had — if pico's
+/// token Declare reached zenohd before wz's Interest registered, a future-only
+/// subscriber would miss it; with history the observer is order-independent of
+/// which side won the race. `z_liveliness`'s open is retried like every other
+/// foreign one-shot in this file (`spawn_declaring_z_liveliness`, the R311pf
+/// open-transient robustness) since it does the same non-self-retrying `z_open`
+/// as z_sub / z_pub. The witness is on the WZ side (its single-writer env_logger
+/// stderr), so this leg is immune to the foreign-stdout block-buffering that
+/// `spawn_zenohd` works around for the foreign CLIs.
 #[test]
 #[ignore = "binary-dep e2e (zenohd router + zenoh-pico z_liveliness); set WZ_ZENOHD_BIN, run via Layer Z / --ignored"]
 fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
@@ -891,23 +945,27 @@ fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
     drop(port_res);
 
     // ── wz-ap-demo: a CLIENT of zenohd that declares a liveliness SUBSCRIBER via
-    //    `--liveliness-subscribe`. On Established it emits an Interest(KE|TO|R|F)
-    //    and logs 'LIVELINESS SAMPLE PUT/DELETE' on every matching token sample
-    //    zenohd routes to it. Wait for Established so the subscriber Interest has
-    //    reached zenohd before the token is declared (deterministic ordering, not
-    //    a sleep).
+    //    `--liveliness-subscribe` + `--liveliness-subscribe-history` (history =
+    //    true). On Established it emits an Interest and logs 'LIVELINESS SAMPLE
+    //    PUT/DELETE' on every matching token sample zenohd routes to it. History
+    //    makes the observer ORDER-INDEPENDENT: zenohd replays the current alive
+    //    token on subscription, so even if pico's token Declare reached zenohd
+    //    before wz's Interest registered (the race a future-only subscriber would
+    //    lose), wz still observes the token. Wait for Established before declaring
+    //    the token so the witness order is stable.
     let demo_stderr = tempfile::tempfile().expect("tempfile for wz-ap-demo stderr");
     let demo_stderr_writer = demo_stderr
         .try_clone()
         .expect("dup wz-ap-demo stderr handle");
     let mut demo_stderr_reader = demo_stderr;
     let mut demo_child = ChildGuard::wrap(
-        "wz-ap-demo (--connect zenohd --liveliness-subscribe)",
+        "wz-ap-demo (--connect zenohd --liveliness-subscribe --history)",
         Command::new(&demo)
             .arg("--connect")
             .arg(format!("127.0.0.1:{port}"))
             .arg("--liveliness-subscribe")
             .arg(subscribe_pattern)
+            .arg("--liveliness-subscribe-history")
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(demo_stderr_writer))
@@ -922,24 +980,12 @@ fn pico_liveliness_token_visible_via_zenohd_to_wz_subscriber() {
     );
 
     // ── pico z_liveliness: declares a liveliness TOKEN and HOLDS it (long-lived,
-    //    unlike leg 5's one-shot). zenohd tracks the token and routes the PUT
-    //    sample to wz's liveliness subscriber.
-    let z_stdout = tempfile::tempfile().expect("tempfile for z_liveliness stdout");
-    let z_stdout_writer = z_stdout
-        .try_clone()
-        .expect("dup z_liveliness stdout handle");
-    let mut z_stdout_reader = z_stdout;
-    let mut z_child = ChildGuard::wrap(
-        "z_liveliness client (zenoh-pico)",
-        Command::new("stdbuf")
-            .args(["-oL", "-eL"])
-            .arg(&z_liveliness)
-            .args(["-k", token_keyexpr, "-e", &endpoint, "-m", "client"])
-            .stdout(Stdio::from(z_stdout_writer))
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn z_liveliness via stdbuf"),
-    );
+    //    unlike leg 5's one-shot). The open is retried until the token is declared
+    //    (foreign one-shot open-transient robustness, like every other pico leg).
+    //    zenohd tracks the token and routes the PUT sample to wz's history
+    //    subscriber.
+    let (mut z_child, mut z_stdout_reader) =
+        spawn_declaring_z_liveliness(&z_liveliness, token_keyexpr, &endpoint);
 
     // Witness on the WZ side: its liveliness-subscriber callback logs
     // 'LIVELINESS SAMPLE PUT ...' once z_liveliness's Declare(Token), routed by

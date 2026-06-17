@@ -59,6 +59,10 @@ pub(crate) fn print_usage() {
     eprintln!("                             emits one Interest(KE|TO|R|F) on Established and");
     eprintln!("                             logs 'LIVELINESS SAMPLE PUT/DELETE' on every matching");
     eprintln!("                             peer DeclToken / UndeclToken arrival");
+    eprintln!("    --liveliness-subscribe-history");
+    eprintln!("                             declare the liveliness subscriber with history=true");
+    eprintln!("                             (replay CURRENT alive tokens on subscription, not");
+    eprintln!("                             just future declares); order-independent observer");
     eprintln!("    --liveliness-get <keyexpr>");
     eprintln!("                             one-shot liveliness snapshot get on <keyexpr>;");
     eprintln!("                             emits one CURRENT Interest(KE|TO|R|C) on Established");

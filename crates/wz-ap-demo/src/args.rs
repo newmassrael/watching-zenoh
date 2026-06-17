@@ -147,6 +147,13 @@ pub(crate) struct DeclareEmitSpec {
     /// token publisher + token subscriber simultaneously on a wz↔wz
     /// round-trip.
     pub(crate) liveliness_subscriber_keyexpr: Option<String>,
+    /// R311ph — `--liveliness-subscribe-history`: declare the liveliness
+    /// subscriber with `history = true` so the peer/router replays the CURRENT
+    /// alive tokens on subscription (not just future declares). This makes an
+    /// observer order-independent of when the token was declared — the fix for
+    /// the leg-7 interop ordering race (a late-arriving `history = false`
+    /// subscriber would miss an already-alive token).
+    pub(crate) liveliness_subscriber_history: bool,
 }
 
 /// R121k-5 — bool flag bundle for the three Remote* registry log

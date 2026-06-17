@@ -194,6 +194,10 @@ fn main() -> ExitCode {
     // outbound Interest once Established and logs every matching peer
     // DeclToken / UndeclToken sample to stderr.
     let liveliness_subscribe_opt = parse_pair(rest, "--liveliness-subscribe");
+    // R311ph — `--liveliness-subscribe-history` declares the liveliness
+    // subscriber with `history = true` (replay current alive tokens on
+    // subscription), so an observer is order-independent of token declare time.
+    let liveliness_subscribe_history = rest.iter().any(|a| a == "--liveliness-subscribe-history");
     let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
     let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
     let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");
@@ -475,6 +479,7 @@ fn main() -> ExitCode {
     let declare_spec = DeclareEmitSpec {
         token_keyexpr: declare_token_opt,
         liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
+        liveliness_subscriber_history: liveliness_subscribe_history,
     };
     let remote_log_spec = RemoteLogSpec {
         on_remote_subscriber: on_remote_sub_log,
