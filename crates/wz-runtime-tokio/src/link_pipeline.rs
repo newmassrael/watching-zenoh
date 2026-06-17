@@ -33,7 +33,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::tcp::OwnedReadHalf;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{lookup_host, TcpListener, TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
@@ -93,18 +93,72 @@ pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
 /// learns its port. Quiet, like the dial primitives: logging is the caller's
 /// concern (the Acceptor's "listening on" line; the Initiator's "connected
 /// to"). Numeric only by construction, mirroring [`dial_tcp`]; [`bind_tcp_host`]
-/// is the DNS-capable sibling.
+/// is the DNS-capable sibling. Built through the [`bind_listener`] SSOT
+/// (`TcpSocket` + backlog 1024, zenoh parity).
 pub async fn bind_tcp(addr: SocketAddr) -> io::Result<TcpListener> {
-    TcpListener::bind(addr).await
+    bind_listener(addr)
 }
 
 /// Bind a TCP listener on a `host:port` STRING — the DNS-capable sibling of
-/// [`bind_tcp`], symmetric to [`dial_tcp_host`]. `TcpListener::bind` takes
-/// `ToSocketAddrs`, so a hostname resolves via the std resolver and a numeric
-/// string binds directly, through the same call the dial host primitive uses.
-/// (Listen-side hostnames are unusual but the resolver path is identical.)
+/// [`bind_tcp`], symmetric to [`dial_tcp_host`]. A hostname resolves via the std
+/// resolver ([`lookup_host`]) and each resolved address is tried in order until
+/// one binds (the listen-side mirror of how `TcpStream::connect` walks a
+/// `ToSocketAddrs` set); a numeric string resolves to itself. Each candidate
+/// goes through the same [`bind_listener`] SSOT, so the backlog / `SO_REUSEADDR`
+/// posture holds whichever address binds. (Listen-side hostnames are unusual,
+/// but `TcpSocket::bind` takes a single `SocketAddr`, so the resolve loop the
+/// numeric path skips is hand-rolled here.)
 pub async fn bind_tcp_host(host: &str) -> io::Result<TcpListener> {
-    TcpListener::bind(host).await
+    let mut last_err: Option<io::Error> = None;
+    for addr in lookup_host(host).await? {
+        match bind_listener(addr) {
+            Ok(listener) => return Ok(listener),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("bind_tcp_host: no addresses resolved for {host:?}"),
+        )
+    }))
+}
+
+/// Listen backlog wz applies to every TCP listener — zenoh's `socket.listen(1024)`
+/// (`io/zenoh-link-commons/src/tcp.rs` `new_listener`), vs tokio/mio's hard-coded
+/// default of 128 (`mio` `TcpListener::bind`). The backlog is the kernel's queue
+/// of completed-but-not-yet-`accept`ed connections; it only bites a MULTI-peer
+/// acceptor taking a burst of simultaneous dials before its accept loop drains
+/// them. wz's [`accept_tcp`] is one-shot today (single peer), so 128 vs 1024 is
+/// immaterial to the current model — this is set for zenoh construction parity
+/// and the future multi-peer router accept loop (north-star P4), not a present
+/// need.
+const LISTEN_BACKLOG: u32 = 1024;
+
+/// Build a listening [`TcpListener`] through `TcpSocket` — the SSOT both
+/// [`bind_tcp`] and [`bind_tcp_host`] route their resolved [`SocketAddr`]
+/// through. Mirrors zenoh's `new_listener` (`io/zenoh-link-commons/src/tcp.rs`:
+/// `TcpSocket` -> `set_reuseaddr(true)` -> `bind` -> `listen(1024)`). The reason
+/// for `TcpSocket` over the simpler `TcpListener::bind` is the [`LISTEN_BACKLOG`]:
+/// `TcpListener::bind` hard-codes mio's 128, and `TcpSocket::listen(n)` is
+/// tokio's only custom-backlog path.
+///
+/// `set_reuseaddr(true)` is NOT the R311pz "de-risk" (that claim was false and
+/// reverted — `TcpListener::bind` already sets `SO_REUSEADDR` on Unix, so it was
+/// a no-op there). It is here to PRESERVE that Unix behavior now that the
+/// listener is built through `TcpSocket`, which — unlike `TcpListener::bind` —
+/// does NOT default the option on; omitting it would silently regress the
+/// reuseaddr posture this crate has always had. (It also aligns the Windows
+/// case, where mio deliberately skips it; wz does not target Windows, so that is
+/// a side benefit, not the motive.)
+fn bind_listener(addr: SocketAddr) -> io::Result<TcpListener> {
+    let socket = match addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
 }
 
 /// Accept ONE inbound connection from a bound [`TcpListener`] — the accept-side
@@ -235,6 +289,27 @@ mod tests {
         assert!(
             server.nodelay().expect("read nodelay (accept side)"),
             "accept_tcp must set TCP_NODELAY (tokio default is off)"
+        );
+    }
+
+    /// `bind_tcp` sets `SO_REUSEADDR` on its listener. NON-vacuous HERE (unlike
+    /// R311pz's reverted vacuous version): the listener is now built through
+    /// `TcpSocket` for the custom [`LISTEN_BACKLOG`], and `TcpSocket` does NOT
+    /// default `SO_REUSEADDR` on — so removing the explicit `set_reuseaddr(true)`
+    /// from `bind_listener` (the realistic regression this TcpSocket switch
+    /// introduces) flips this read to false. The backlog (1024) itself is not
+    /// getsockopt-readable, so it carries no unit guard — only the explicit
+    /// construction + code review.
+    #[tokio::test]
+    async fn bind_tcp_listener_sets_so_reuseaddr() {
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
+            .await
+            .expect("bind loopback");
+        let std_listener = listener.into_std().expect("into_std");
+        let sock = socket2::Socket::from(std_listener);
+        assert!(
+            sock.reuse_address().expect("read SO_REUSEADDR"),
+            "bind_listener must explicitly set SO_REUSEADDR (TcpSocket does not default it on)"
         );
     }
 }
