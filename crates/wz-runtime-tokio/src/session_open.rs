@@ -28,7 +28,7 @@ use std::io;
 use std::sync::Arc;
 
 use sce_rust_runtime::Engine;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::locator::{
@@ -38,7 +38,9 @@ use wz_session_core::locator::{
 use wz_session_core::scout_static::synth_static_locators;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
-use crate::link_pipeline::{accept_tcp, dial_tcp, dial_tcp_host, wire_tcp_stream, TcpReadDriver};
+use crate::link_pipeline::{
+    accept_tcp, bind_tcp, bind_tcp_host, dial_tcp, dial_tcp_host, wire_tcp_stream, TcpReadDriver,
+};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
@@ -361,7 +363,7 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
 /// special-case (scheme/address axis conflation) AND the dial_endpoint-vs-
 /// open_session_at contract split — both paths now route the same parsed
 /// `AnyLocator` through `dial_locator`.
-fn plan_dial(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
+fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
     match parse_any_locator(connect) {
         Ok(locator) => Ok(locator),
         // Scheme-less `HOST:PORT` = implicit `tcp` (the `--connect` convenience;
@@ -380,7 +382,7 @@ fn plan_dial(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
 
 /// Dial a `--connect`-style endpoint string to a raw [`DialedLink`] — the
 /// std-layer dial seam, the single home of "turn a `--connect` string into a
-/// dialed transport". [`plan_dial`] classifies the string into an
+/// dialed transport". [`plan_endpoint`] classifies the string into an
 /// [`AnyLocator`] (applying only the scheme-less = `tcp` convenience), then
 /// [`dial_locator`] — the SINGLE dial path, shared with the scouting /
 /// static-deploy open path — performs the dial: a numeric endpoint via its
@@ -391,13 +393,13 @@ fn plan_dial(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
 /// [`open_session_at`] (the scouting / static-deploy entry) gained the same
 /// scheme'd-hostname capability for free — DNS-capability is now a property of
 /// the resolver layer, not of which caller invoked it. The scheme-LESS
-/// convenience stays demo-only in [`plan_dial`] (configured zenoh locators
+/// convenience stays demo-only in [`plan_endpoint`] (configured zenoh locators
 /// always carry a scheme).
 ///
 /// `cfg` is forwarded to [`dial_locator`] for transports needing out-of-band
 /// material (TLS); cert-free transports ignore it.
 pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<DialedLink> {
-    let locator = plan_dial(connect).map_err(|e| {
+    let locator = plan_endpoint(connect).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("wz dial: malformed / unsupported --connect {connect:?}: {e:?}"),
@@ -406,57 +408,71 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
     dial_locator(locator, cfg).await
 }
 
-/// Accept-side dispatcher symmetric to [`dial_locator`]: bind + accept ONE
-/// inbound link for the [`AnyLocator`]'s scheme, returning the same
-/// [`DialedLink`] union the dial path produces so [`accept_and_open_session`]
-/// consumes one concrete type whatever the role.
+/// Accept-side dispatcher for [`accept_endpoint`]: bind + accept ONE inbound
+/// link for the [`AnyLocator`]'s scheme, returning the same [`DialedLink`]
+/// union the dial path produces so [`accept_and_open_session`] consumes one
+/// concrete type whatever the role.
 ///
-/// R311pu — mirrors [`dial_locator`]'s wiring discipline EXACTLY: `Tcp` is the
-/// wired baseline (bind + accept a plain `TcpStream` via
-/// [`accept_tcp`](crate::link_pipeline::accept_tcp)); every other scheme
-/// returns a typed `Unsupported` — a CLEAN extension point, NOT dead code (the
-/// same shape `dial_locator`'s non-tcp arms carry). The accept-side proto
-/// upgrades wire in HERE when a verified caller lands: `accept_ws` / `accept_tls`
-/// already exist as primitives ([`crate::ws_pipeline`] / [`crate::tls_pipeline`]),
-/// but R311pq recorded that the demo has no cross-impl WS/TLS DIALER to verify a
-/// wz acceptor against (zenoh-pico has no native WS; the Layer Z WS legs run wz
-/// as the WS Initiator), so wiring them now would be dead code (R63
-/// concrete-impls-land-alongside-real-callers). `Udp` is connectionless — it
-/// has no accept; `Serial`'s accept is a tty open
-/// ([`accept_serial`](crate::serial_pipeline::accept_serial)), not a listen
-/// bind, wired when a serial acceptor caller lands.
+/// The `Tcp` path mirrors dial's 3-layer seam: numeric [`bind_tcp`] / DNS
+/// [`bind_tcp_host`] (siblings of [`dial_tcp`] / [`dial_tcp_host`]) then
+/// [`accept_tcp`], wrapped by [`accept_bound`]. The NON-tcp handling is where
+/// the symmetry with [`dial_locator`] deliberately STOPS: dial_locator pairs
+/// each non-tcp scheme with a `#[cfg(feature)]` wired arm + a `#[cfg(not)]`
+/// Unsupported arm, whereas accept_locator returns a single feature-blind
+/// `Unsupported` for ws/tls/udp REGARDLESS of feature. Wiring a real accept
+/// arm is not a one-arm change: an `accept_ws` is `bind_tcp` + `accept_tcp` +
+/// `accept_ws(stream)` — a handshake over an already-accepted stream, two
+/// primitives — unlike dial's single-call `dial_ws(addr)`. The `accept_ws` /
+/// `accept_tls` primitives exist; they wire in when a verified cross-impl
+/// acceptor caller lands (R63; R311pq: no cross-impl WS/TLS dialer to verify a
+/// wz acceptor against). `Udp`'s acceptor would be a `bind` + first-`recv_from`
+/// peer-learn (not a `TcpListener::accept`); `Serial`'s is a tty open
+/// ([`accept_serial`](crate::serial_pipeline::accept_serial)) — both unwired
+/// until their responder caller lands.
 pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
-    // The not-yet-wired accept schemes share one typed-Unsupported message;
-    // the extension point is the arm, not the string.
-    fn unsupported(scheme: &str) -> io::Error {
+    fn unsupported(detail: &str) -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
-            format!(
-                "accept is wired only for tcp; {scheme} acceptor is a not-yet-wired \
-                 extension point (no verified cross-impl dialer to gate it against)"
-            ),
+            format!("accept is wired only for tcp; {detail}"),
         )
     }
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
-            Proto::Tcp => Ok(DialedLink::Tcp(accept_tcp(&ip.addr.to_string()).await?.0)),
-            other => Err(unsupported(&format!("{other:?}"))),
+            Proto::Tcp => accept_bound(bind_tcp(ip.addr).await?).await,
+            other => Err(unsupported(&format!(
+                "{other:?} acceptor is a not-yet-wired extension point"
+            ))),
         },
-        // A DNS-named tcp listen (`tcp/host:port`) binds through the same
-        // resolver-capable `accept_tcp`; a non-tcp name is the same typed
-        // Unsupported extension point as the numeric arm.
         AnyLocator::Named { proto, host, port } => match proto {
-            Proto::Tcp => Ok(DialedLink::Tcp(
-                accept_tcp(&format!("{host}:{port}")).await?.0,
-            )),
-            other => Err(unsupported(&format!("{other:?}"))),
+            Proto::Tcp => accept_bound(bind_tcp_host(&format!("{host}:{port}")).await?).await,
+            // A non-tcp NAME is unwired for two reasons (acceptor + non-tcp
+            // name resolution), kept distinct from the numeric arm's message.
+            other => Err(unsupported(&format!(
+                "{other:?} acceptor and non-tcp name resolution are both unwired"
+            ))),
         },
-        AnyLocator::Serial(_) => Err(unsupported("serial (tty open, not a listen bind)")),
+        AnyLocator::Serial(_) => Err(unsupported(
+            "serial accept is a tty open (accept_serial), not a listen bind; unwired",
+        )),
     }
 }
 
+/// Log the bound address, accept one peer, log it, wrap as `DialedLink::Tcp` —
+/// the accept-side counterpart to the Initiator's "connected to .. over .."
+/// line. The "wz accept:" prefix tags the demo's logs; the e2e harness owns a
+/// binary-name-tagged copy of this 3-line shape (it cannot share the prefix),
+/// so the shared SSOT is the quiet [`bind_tcp`] / [`accept_tcp`] primitives,
+/// not the logging. Logging here (not in the primitives) keeps them quiet like
+/// their `dial_*` siblings.
+async fn accept_bound(listener: TcpListener) -> io::Result<DialedLink> {
+    log::info!("wz accept: listening on {}", listener.local_addr()?);
+    let (stream, peer) = accept_tcp(listener).await?;
+    log::info!("wz accept: accepted peer {peer}");
+    Ok(DialedLink::Tcp(stream))
+}
+
 /// Accept a `--listen`-style endpoint string to a raw [`DialedLink`] — the
-/// std-layer accept seam, symmetric to [`dial_endpoint`]. [`plan_dial`] is the
+/// std-layer accept seam, symmetric to [`dial_endpoint`]. [`plan_endpoint`] is the
 /// SHARED classifier (a listen string parses to an [`AnyLocator`] by the same
 /// rules a connect string does — a scheme'd locator, or the scheme-less =
 /// `tcp` convenience), then [`accept_locator`] performs the bind + accept.
@@ -470,7 +486,7 @@ pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
 /// `TcpListener::bind` into the same library seam the Initiator role already
 /// dials through.
 pub async fn accept_endpoint(listen: &str) -> io::Result<DialedLink> {
-    let locator = plan_dial(listen).map_err(|e| {
+    let locator = plan_endpoint(listen).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("wz accept: malformed / unsupported --listen {listen:?}: {e:?}"),
@@ -1065,7 +1081,7 @@ pub async fn open_session_static(
 mod tests {
     use super::*;
 
-    // ── R311pm/R311ps — dial-routing classifier (`plan_dial`). Pure (no
+    // ── R311pm/R311ps — dial-routing classifier (`plan_endpoint`). Pure (no
     //    socket / DNS I/O): proves the `--connect` two-path fork is dissolved
     //    and DNS-vs-numeric is a property of the PARSED value, not a string
     //    re-inspection. A name classifies to AnyLocator::Named for EVERY
@@ -1076,7 +1092,7 @@ mod tests {
         // Bare `HOST:PORT` (no scheme) desugars to implicit `tcp`; a numeric
         // address parses to AnyLocator::Ip(Tcp), same as the explicit `tcp/`.
         assert_eq!(
-            plan_dial("127.0.0.1:7447"),
+            plan_endpoint("127.0.0.1:7447"),
             Ok(parse_any_locator("tcp/127.0.0.1:7447").unwrap())
         );
     }
@@ -1086,7 +1102,7 @@ mod tests {
         // Bare `HOST:PORT` with a DNS name desugars to implicit tcp and
         // classifies as Named (the std resolver dials it at dial time).
         assert_eq!(
-            plan_dial("example.org:7447"),
+            plan_endpoint("example.org:7447"),
             Ok(AnyLocator::Named {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
@@ -1098,7 +1114,7 @@ mod tests {
     #[test]
     fn tcp_scheme_numeric_classifies_as_ip() {
         assert_eq!(
-            plan_dial("tcp/127.0.0.1:7447"),
+            plan_endpoint("tcp/127.0.0.1:7447"),
             Ok(parse_any_locator("tcp/127.0.0.1:7447").unwrap())
         );
     }
@@ -1110,7 +1126,7 @@ mod tests {
         // path). It now classifies as Named, and — the fork being dissolved —
         // to the SAME parsed value as the scheme-less form.
         assert_eq!(
-            plan_dial("tcp/example.org:7447"),
+            plan_endpoint("tcp/example.org:7447"),
             Ok(AnyLocator::Named {
                 proto: Proto::Tcp,
                 host: "example.org".to_string(),
@@ -1118,8 +1134,8 @@ mod tests {
             })
         );
         assert_eq!(
-            plan_dial("tcp/example.org:7447"),
-            plan_dial("example.org:7447"),
+            plan_endpoint("tcp/example.org:7447"),
+            plan_endpoint("example.org:7447"),
         );
     }
 
@@ -1128,7 +1144,7 @@ mod tests {
         // A `ws/NUMERIC` locator classifies to Ip(Ws); the dial seam decides
         // WS reachability by feature — the classifier never special-cases it.
         assert_eq!(
-            plan_dial("ws/127.0.0.1:7447"),
+            plan_endpoint("ws/127.0.0.1:7447"),
             Ok(parse_any_locator("ws/127.0.0.1:7447").unwrap())
         );
     }
@@ -1136,7 +1152,7 @@ mod tests {
     #[test]
     fn unknown_scheme_is_an_error() {
         assert!(matches!(
-            plan_dial("quic/1.2.3.4:7447"),
+            plan_endpoint("quic/1.2.3.4:7447"),
             Err(AnyLocatorError::Ip(LocatorParseError::UnknownProto(_)))
         ));
     }
@@ -1147,7 +1163,7 @@ mod tests {
         // not a guessed dial — the early typed error is preserved (vs the
         // pre-R311ps `starts_with` arm which routed it to a late connect error).
         assert!(matches!(
-            plan_dial("tcp/no-port-here"),
+            plan_endpoint("tcp/no-port-here"),
             Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(_)))
         ));
     }

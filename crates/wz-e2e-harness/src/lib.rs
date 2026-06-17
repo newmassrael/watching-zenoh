@@ -22,8 +22,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
-
+use wz::runtime_tokio::link_pipeline::{accept_tcp, bind_tcp_host};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::TokioSession;
@@ -128,10 +127,14 @@ pub async fn run_acceptor_e2e<H>(
     listen: String,
     setup: impl FnOnce(&OpenedE2e) -> std::io::Result<H>,
 ) -> std::io::Result<()> {
-    // ── Step 1: bind + accept one peer.
-    let listener = TcpListener::bind(&listen).await?;
+    // ── Step 1: bind + accept one peer. R311pv — share the library accept
+    //    primitives (bind_tcp_host + accept_tcp) instead of an inline
+    //    TcpListener::bind, the same seam wz-ap-demo's establish_link uses; the
+    //    binary-name-tagged log lines stay here (the harness owns its prefix,
+    //    so it cannot share accept_bound's "wz accept:" form).
+    let listener = bind_tcp_host(&listen).await?;
     log::info!("{binary_name}: listening on {}", listener.local_addr()?);
-    let (stream, peer) = listener.accept().await?;
+    let (stream, peer) = accept_tcp(listener).await?;
     log::info!("{binary_name}: accepted peer {peer}");
 
     // ── Step 2: open the session to Established. TokioTime is Copy, so

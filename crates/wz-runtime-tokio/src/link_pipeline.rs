@@ -81,26 +81,40 @@ pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
     TcpStream::connect(host).await
 }
 
-/// Bind a TCP listener on a `host:port` STRING and accept ONE inbound
-/// connection — the accept-side primitive symmetric to [`dial_tcp_host`].
-/// `TcpListener::bind` takes `ToSocketAddrs`, so a numeric `127.0.0.1:7447`,
-/// a wildcard `0.0.0.0:7447`, or a DNS name all bind through the same call,
-/// mirroring how the dial sibling resolves its target. Returns the accepted
-/// [`TcpStream`] + the peer address; the caller splits it via
-/// [`wire_tcp_stream`] exactly as the dial path does, so the steady state is
-/// role-agnostic.
+/// Bind a TCP listener on a NUMERIC endpoint — the accept-side "listen half"
+/// symmetric to dial's numeric [`dial_tcp`] (which connects). Returns the
+/// bound [`TcpListener`] so the caller observes `local_addr()` (the OS-chosen
+/// port for a `:0` bind) BEFORE the blocking accept — which is what lets the
+/// accept path be unit-tested race-free, the same way the dial loopback unit
+/// learns its port. Quiet, like the dial primitives: logging is the caller's
+/// concern (the Acceptor's "listening on" line; the Initiator's "connected
+/// to"). Numeric only by construction, mirroring [`dial_tcp`]; [`bind_tcp_host`]
+/// is the DNS-capable sibling.
+pub async fn bind_tcp(addr: SocketAddr) -> io::Result<TcpListener> {
+    TcpListener::bind(addr).await
+}
+
+/// Bind a TCP listener on a `host:port` STRING — the DNS-capable sibling of
+/// [`bind_tcp`], symmetric to [`dial_tcp_host`]. `TcpListener::bind` takes
+/// `ToSocketAddrs`, so a hostname resolves via the std resolver and a numeric
+/// string binds directly, through the same call the dial host primitive uses.
+/// (Listen-side hostnames are unusual but the resolver path is identical.)
+pub async fn bind_tcp_host(host: &str) -> io::Result<TcpListener> {
+    TcpListener::bind(host).await
+}
+
+/// Accept ONE inbound connection from a bound [`TcpListener`] — the accept-side
+/// completion of [`bind_tcp`] / [`bind_tcp_host`], returning the accepted
+/// [`TcpStream`] + its peer address. Quiet (no log): the caller owns the
+/// "listening on" / "accepted peer" lines, so the log prefix is the caller's
+/// (the demo tags `wz accept:`, the e2e harness tags its binary name) — the
+/// accept-side reason the dial primitives are also log-free.
 ///
-/// ONE-shot accept (not a loop): the session-open contract is a single peer
-/// link, the accept-side mirror of the single [`TcpStream`] [`dial_tcp`] /
-/// [`dial_tcp_host`] return. A multi-peer router would own its own accept
-/// loop ABOVE this primitive, not inside it. The listening address is logged
-/// before the (blocking) accept so a developer sees which port came up.
-pub async fn accept_tcp(listen: &str) -> io::Result<(TcpStream, SocketAddr)> {
-    let listener = TcpListener::bind(listen).await?;
-    log::info!("wz accept_tcp: listening on {}", listener.local_addr()?);
-    let (stream, peer) = listener.accept().await?;
-    log::info!("wz accept_tcp: accepted peer {peer}");
-    Ok((stream, peer))
+/// ONE-shot (not a loop): the session-open contract is a single peer link, the
+/// accept-side mirror of the single [`TcpStream`] [`dial_tcp`] returns. A
+/// multi-peer router composes its own accept loop over [`bind_tcp`] above this.
+pub async fn accept_tcp(listener: TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
+    listener.accept().await
 }
 
 /// Split a connected [`TcpStream`] into the cooperating drivers the session
@@ -139,5 +153,23 @@ mod tests {
         let dead = probe.local_addr().expect("probe addr");
         drop(probe);
         assert!(dial_tcp(dead).await.is_err(), "dial to closed port errors");
+    }
+
+    /// `bind_tcp` + `accept_tcp` complete a loopback connection race-free: the
+    /// test learns the OS-chosen port from the bound listener BEFORE the client
+    /// connects, the accept-side mirror of session_open's dial loopback unit.
+    /// Splitting bind from accept is what exposes `local_addr` and removes the
+    /// port race the prior one-shot `accept_tcp(listen)` form could not avoid.
+    #[tokio::test]
+    async fn bind_tcp_then_accept_tcp_round_trip() {
+        let listener = bind_tcp("127.0.0.1:0".parse().expect("loopback addr"))
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await });
+        let (server, peer) = accept_tcp(listener).await.expect("accept one peer");
+        client.await.expect("client task").expect("client connect");
+        assert_eq!(peer.ip(), addr.ip(), "accepted peer is the loopback client");
+        assert!(server.peer_addr().is_ok(), "server stream is connected");
     }
 }

@@ -145,7 +145,7 @@ struct SpawnedTasks {
 /// [`accept_endpoint`] (symmetric to the Initiator's [`dial_endpoint`]),
 /// dissolving the prior inline `TcpListener::bind` + `accept` re-assembly into
 /// the same seam the dial side uses: `accept_endpoint` classifies `--listen`
-/// through the shared `plan_dial` classifier, then `accept_locator` binds +
+/// through the shared `plan_endpoint` classifier, then `accept_locator` binds +
 /// accepts.
 ///
 /// STATED ASYMMETRY (R311pq, still true at the DEMO level): `accept_locator`
@@ -161,17 +161,15 @@ struct SpawnedTasks {
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor { listen } => {
-            // R311pu — delegate to the library accept seam (symmetric to the
+            // R311pu/pv — delegate to the library accept seam (symmetric to the
             // Initiator's dial_endpoint), dissolving the inline TcpListener::bind.
-            // accept_tcp logs the "listening on" / "accepted peer" lines the
-            // round-trip test waits on; this arm logs the negotiated transport,
-            // mirroring the Initiator's line.
-            let accepted = accept_endpoint(listen).await?;
-            log::info!(
-                "wz-ap-demo: accepted on {listen} over {} transport",
-                accepted.transport_name()
-            );
-            Ok(accepted)
+            // accept_bound logs the "listening on" / "accepted peer" lines the
+            // round-trip test waits on. No "over {transport}" line here: unlike
+            // the Initiator (which can dial ws/tls/udp, so it logs which
+            // transport opened), accept_locator only ever yields Tcp today, so
+            // that line would be a tautology — it returns if a non-tcp acceptor
+            // ever wires in.
+            accept_endpoint(listen).await
         }
         Role::Initiator { connect } => {
             let dialed = dial_endpoint(connect, &DialConfig::default()).await?;
