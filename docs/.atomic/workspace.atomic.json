@@ -40060,6 +40060,50 @@
         "코드 LOCAL-COMMITTED UNPUSHED 예정: wz-runtime-tokio/src/{link_pipeline,session_open}.rs + wz-ap-demo/src/runner.rs. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311pv": {
+      "decision_summary": "R311pv: R311pu 4-에이전트 세션리뷰 remediation. accept_tcp(str)→bind_tcp(SocketAddr)/bind_tcp_host/accept_tcp(listener) dial 3층 대칭+race-free unit. 'mirrors EXACTLY/1-arm' doc over-claim 정정(accept=feature-blind, accept_ws=bind-then-handshake 2-primitive). plan_dial→plan_endpoint rename. harness bind 수렴.",
+      "changes_bullets": [
+        "link_pipeline.rs: accept_tcp(listen:&str) one-shot을 dial 3층 대칭으로 분해 — bind_tcp(SocketAddr) numeric + bind_tcp_host(&str) DNS(dial_tcp/dial_tcp_host 대칭) + accept_tcp(TcpListener). 전부 조용(log는 caller=dial primitive 대칭). 숫자 Ip arm의 ip.addr.to_string() 재-stringify 제거(quality/refactoring finding). bound listener 노출로 race-free accept unit 가능.",
+        "session_open.rs: accept_locator이 bind_tcp/bind_tcp_host + accept_bound(listening/peer log + accept_tcp) 사용. plan_dial->plan_endpoint rename(role-agnostic; dial+accept 공유 classifier). doc over-claim 정정 — 'mirrors dial_locator EXACTLY/same shape' 제거→feature-blind catch-all vs dial의 #[cfg(feature)] paired arm 차이 명시; '1-arm 추가'→accept_ws=bind_tcp+accept_tcp+accept_ws(stream) bind-then-handshake 2-primitive; UDP 'connectionless no accept'→bind+recv_from peer-learn unwired; Named arm 메시지 2-reason 구분.",
+        "link_pipeline.rs test: bind_tcp_then_accept_tcp_round_trip race-free happy-path unit(dial loopback unit 대칭; bound port 사전 learn 후 connect). lib 274->275.",
+        "wz-ap-demo/runner.rs: establish_link Acceptor의 'accepted on {listen} over {transport}' tautology log 제거(accept_locator는 Tcp만 리턴=항상 tcp; Initiator만 discriminate). accept_endpoint(listen).await 한 줄로.",
+        "wz-e2e-harness/lib.rs: run_acceptor_e2e 인라인 TcpListener::bind를 bind_tcp_host+accept_tcp로 수렴(SSOT half-done finding H 해소); binary_name tag log는 prefix 차이로 자체 유지."
+      ],
+      "verification_bullets": [
+        "출처=R311pu 독립 4-에이전트 적대 자가감사(system-architect MINOR-borderline-MAJOR overclaim, quality-engineer MINOR, refactoring-expert MINOR x6, root-cause-analyst CLEAN x2). MAJOR 코드 결함 0=push defensible였으나 만장일치 'mirrors dial_locator EXACTLY/1-arm 추가' over-claim + 대칭 갭(accept_tcp 숫자 재-stringify, accept happy-path unit 부재, plan_dial 이름, harness 미수렴) 적발. 비용 무관 textbook 기준으로 전부 해소(독립 자가감사가 self-assessment 8번째 뒤집음).",
+        "코드 correct는 유지: non-tcp feature-blind catch-all은 R63 준수(accept_ws wire=caller 없는 dead code라 금지=architect 확인), doc만 코드 현실에 맞춤(feature-blind != dial의 feature-paired). lib 275 passed(+bind_tcp_then_accept_tcp_round_trip race-free unit), clippy --all-targets -D warnings clean(wz-runtime-tokio+wz-ap-demo+wz-e2e-harness), fmt clean.",
+        "Layer E pass(ap-demo establish_link->accept_endpoint->accept_bound->bind_tcp/accept_tcp e2e), Layer E2 pass(wz-e2e-* ->run_acceptor_e2e->bind_tcp_host/accept_tcp). exit 파이프 없이 직접 캡처(E_EXIT=0/E2_EXIT=0). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pv = R311pu 세션리뷰(독립 4-에이전트) remediation. accept seam이 dial과 진짜 3층 대칭(bind_tcp/bind_tcp_host/accept_tcp = dial_tcp/dial_tcp_host/connect의 listen 대응), race-free unit로 dial 커버리지 parity, plan_endpoint 공유 classifier, harness까지 bind SSOT 수렴. doc은 feature-blind != dial-paired를 정직히(over-claim 제거).",
+        "non-tcp accept(ws/tls/udp/serial)은 feature-blind typed Unsupported 유지=R63(accept_ws/accept_tls primitive는 존재하나 verified cross-impl acceptor dialer 부재; accept_ws=bind-then-handshake 2-primitive라 wiring은 1-arm 아닌 별도 라운드). 부채 A + 그 remediation 트랙 종료.",
+        "남은 등록 부채(blocker 아님): (B)[MINOR] Named+reconnect 미배선(reconnect는 numeric ParsedLocator만; hostname --connect 재연결 안 됨). 다음=부채 B 또는 pico parity(project-pico-parity-status). 코드 LOCAL-COMMITTED UNPUSHED 예정(link_pipeline/session_open/runner/e2e-harness). push 명시 동의 필요. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pv: R311pu 4-에이전트 세션리뷰 remediation. accept_tcp(str)→bind_tcp(SocketAddr)/bind_tcp_host/accept_tcp(listener) dial 3층 대칭+race-free unit. 'mirrors EXACTLY/1-arm' doc over-claim 정정(accept=feature-blind, accept_ws=bind-then-handshake 2-primitive). plan_dial→plan_endpoint rename. harness bind 수렴.",
+      "publishable_changes_bullets": [
+        "link_pipeline.rs: accept_tcp(listen:&str) one-shot을 dial 3층 대칭으로 분해 — bind_tcp(SocketAddr) numeric + bind_tcp_host(&str) DNS(dial_tcp/dial_tcp_host 대칭) + accept_tcp(TcpListener). 전부 조용(log는 caller=dial primitive 대칭). 숫자 Ip arm의 ip.addr.to_string() 재-stringify 제거(quality/refactoring finding). bound listener 노출로 race-free accept unit 가능.",
+        "session_open.rs: accept_locator이 bind_tcp/bind_tcp_host + accept_bound(listening/peer log + accept_tcp) 사용. plan_dial->plan_endpoint rename(role-agnostic; dial+accept 공유 classifier). doc over-claim 정정 — 'mirrors dial_locator EXACTLY/same shape' 제거→feature-blind catch-all vs dial의 #[cfg(feature)] paired arm 차이 명시; '1-arm 추가'→accept_ws=bind_tcp+accept_tcp+accept_ws(stream) bind-then-handshake 2-primitive; UDP 'connectionless no accept'→bind+recv_from peer-learn unwired; Named arm 메시지 2-reason 구분.",
+        "link_pipeline.rs test: bind_tcp_then_accept_tcp_round_trip race-free happy-path unit(dial loopback unit 대칭; bound port 사전 learn 후 connect). lib 274->275.",
+        "wz-ap-demo/runner.rs: establish_link Acceptor의 'accepted on {listen} over {transport}' tautology log 제거(accept_locator는 Tcp만 리턴=항상 tcp; Initiator만 discriminate). accept_endpoint(listen).await 한 줄로.",
+        "wz-e2e-harness/lib.rs: run_acceptor_e2e 인라인 TcpListener::bind를 bind_tcp_host+accept_tcp로 수렴(SSOT half-done finding H 해소); binary_name tag log는 prefix 차이로 자체 유지."
+      ],
+      "publishable_verification_bullets": [
+        "출처=R311pu 독립 4-에이전트 적대 자가감사(system-architect MINOR-borderline-MAJOR overclaim, quality-engineer MINOR, refactoring-expert MINOR x6, root-cause-analyst CLEAN x2). MAJOR 코드 결함 0=push defensible였으나 만장일치 'mirrors dial_locator EXACTLY/1-arm 추가' over-claim + 대칭 갭(accept_tcp 숫자 재-stringify, accept happy-path unit 부재, plan_dial 이름, harness 미수렴) 적발. 비용 무관 textbook 기준으로 전부 해소(독립 자가감사가 self-assessment 8번째 뒤집음).",
+        "코드 correct는 유지: non-tcp feature-blind catch-all은 R63 준수(accept_ws wire=caller 없는 dead code라 금지=architect 확인), doc만 코드 현실에 맞춤(feature-blind != dial의 feature-paired). lib 275 passed(+bind_tcp_then_accept_tcp_round_trip race-free unit), clippy --all-targets -D warnings clean(wz-runtime-tokio+wz-ap-demo+wz-e2e-harness), fmt clean.",
+        "Layer E pass(ap-demo establish_link->accept_endpoint->accept_bound->bind_tcp/accept_tcp e2e), Layer E2 pass(wz-e2e-* ->run_acceptor_e2e->bind_tcp_host/accept_tcp). exit 파이프 없이 직접 캡처(E_EXIT=0/E2_EXIT=0). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅(R311pt default-on)이 게이트."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pv = R311pu 세션리뷰(독립 4-에이전트) remediation. accept seam이 dial과 진짜 3층 대칭(bind_tcp/bind_tcp_host/accept_tcp = dial_tcp/dial_tcp_host/connect의 listen 대응), race-free unit로 dial 커버리지 parity, plan_endpoint 공유 classifier, harness까지 bind SSOT 수렴. doc은 feature-blind != dial-paired를 정직히(over-claim 제거).",
+        "non-tcp accept(ws/tls/udp/serial)은 feature-blind typed Unsupported 유지=R63(accept_ws/accept_tls primitive는 존재하나 verified cross-impl acceptor dialer 부재; accept_ws=bind-then-handshake 2-primitive라 wiring은 1-arm 아닌 별도 라운드). 부채 A + 그 remediation 트랙 종료.",
+        "남은 등록 부채(blocker 아님): (B)[MINOR] Named+reconnect 미배선(reconnect는 numeric ParsedLocator만; hostname --connect 재연결 안 됨). 다음=부채 B 또는 pico parity(project-pico-parity-status). 코드 LOCAL-COMMITTED UNPUSHED 예정(link_pipeline/session_open/runner/e2e-harness). push 명시 동의 필요. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
