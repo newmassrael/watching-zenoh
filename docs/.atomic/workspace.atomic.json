@@ -39974,6 +39974,50 @@
         "코드 LOCAL-COMMITTED UNPUSHED(R311ps=61fe795 + 이전 16 = R311pk 2/pl 1/pm~pr). full run-ci(F+G+Q+M+Z) GREEN, WS 20/20. 사용자 \"조사 후 green push\" 결정 충족 → push 동의 대기(명시 동의만 남음). 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311pt": {
+      "decision_summary": "R311pt: 부채 C — run-ci opt-in 축(WZ_RUN_LAYER_F/G/Q/Z) 제거. F/G/Q/Z default-on + prereq graceful SKIP으로 footprint/cross-compile/interop 게이트를 pre-push에서 자동화. M만 environment-flaky 경계로 opt-in 유지. SSOT 회복(required 정의 단일화).",
+      "changes_bullets": [
+        "run-ci.sh: layer_f/g/q/z의 opt-in 가드(ONLY_LAYER!=X && WZ_RUN_LAYER_X!=1 -> SKIP return 0) 제거 -> default-on. 비활성은 각 레이어 기존 prereq graceful SKIP에 위임(G=rustup target, Q=target/qemu/arm-gcc, Z=zenohd/pico 바이너리). F는 host-only라 python3 부재 graceful SKIP 추가(일관성). WZ_RUN_LAYER_F/G/Q/Z 참조/usage 전면 제거(M만 유지).",
+        "run-ci.sh: M은 opt-in 유지 — multicast route 정적 감지 불가(IGMP join은 socket bind시에만 실패)라 no-flaky(crit) > SSOT 위해. 헤더/SKIP 메시지를 cost 아닌 environment-flaky 경계(R311pt 후 유일 opt-in)로 명시. Z 'never gates default sweep' -> presence-check 경계로 정정.",
+        "ci.yml: primary ci job에 Layer F step 추가(host-only, footprint elision CI 자동). cross-mcu job 코멘트의 R311iw 'without slowing pre-push' 근거 정정 — CI-only는 push에만 발화해 미push arc(R311p* ~20라운드)에 취약, pre-push default-on이 1차 게이트 CI는 toolchain 미러.",
+        "pre-push: 코드 변경 0(이미 env 없이 run-ci 전체 실행 -> default-on 전환만으로 F/G/Q/Z 자동 게이트). 헤더 코멘트만 default-on lane 목록 + MCU 빌드 비용 반영 갱신."
+      ],
+      "verification_bullets": [
+        "root-cause: opt-in 축이 SSOT 위반 — 'required인가'의 진실이 run-ci 가드 + pre-push env + ci.yml job 3곳 산재 + 이중 SKIP축(opt-in cost + prereq). 비용 무관 원칙상 cost-opt-in 정당성 소멸; M만 flaky 경계로 정당. R311iw가 같은 부채(R311iu baseline drift)를 CI-only로 부분 해결했으나 미push arc 미보장이 R311p*에서 드러남.",
+        "full run-ci(인자 없는 default sweep, 사용자 머신=전 prereq 보유) RUNCI_EXIT=0, 'all required layers pass', FAIL 0. F/G/Q/Z가 SKIP 아닌 실제 게이트 확인: Layer F pass(minus-codec 실측 빌드), Layer G(7타겟 G.1~G.13 OK), Layer Q footprint[qemu-demo] 4타겟 text/data +0 OK + QEMU boot PASS, Layer Z pass(wz_to_zenohd_router). Layer M SKIP(opt-in 유지=의도).",
+        "bash -n run-ci.sh/pre-push clean; --layer 0 단독 실행 보존(디스패처 ONLY_LAYER 가드); ci.yml YAML parse OK. footprint +0 = R311pr rebase baseline과 현재 코드 일치(staleness 없음 재확인). exit는 파이프 없이 직접 캡처(feedback-runci-verdict-exit-code-only)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub"
+      ],
+      "carry_forward_bullets": [
+        "R311pt = 부채 C(footprint/lock staleness) 해소. opt-in 축(비용 게이트) 제거로 footprint(F/Q)+cross-compile(G)+interop(Z) 게이트가 pre-push에서 default-on 자동 실행(prereq 없으면 graceful SKIP). M만 multicast route 정적 감지 불가라 no-flaky(crit>SSOT) 위해 opt-in 유지. SSOT 회복: required 정의가 run-ci.sh 단일 소스, 게이트 비활성 사유는 prereq SKIP + M flaky 경계 둘만.",
+        "남은 등록 부채(R311ps, push blocker 아님): (A)[MINOR] F5 Acceptor accept_endpoint seam 부재(establish_link이 인라인 TcpListener::bind+accept; dial쪽 dial_endpoint 대칭 부재). (B)[MINOR] Named+reconnect 미배선(reconnect는 numeric ParsedLocator만; hostname --connect 재연결 안 됨).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정: scripts/run-ci.sh + .github/workflows/ci.yml + .githooks/pre-push. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pt: 부채 C — run-ci opt-in 축(WZ_RUN_LAYER_F/G/Q/Z) 제거. F/G/Q/Z default-on + prereq graceful SKIP으로 footprint/cross-compile/interop 게이트를 pre-push에서 자동화. M만 environment-flaky 경계로 opt-in 유지. SSOT 회복(required 정의 단일화).",
+      "publishable_changes_bullets": [
+        "run-ci.sh: layer_f/g/q/z의 opt-in 가드(ONLY_LAYER!=X && WZ_RUN_LAYER_X!=1 -> SKIP return 0) 제거 -> default-on. 비활성은 각 레이어 기존 prereq graceful SKIP에 위임(G=rustup target, Q=target/qemu/arm-gcc, Z=zenohd/pico 바이너리). F는 host-only라 python3 부재 graceful SKIP 추가(일관성). WZ_RUN_LAYER_F/G/Q/Z 참조/usage 전면 제거(M만 유지).",
+        "run-ci.sh: M은 opt-in 유지 — multicast route 정적 감지 불가(IGMP join은 socket bind시에만 실패)라 no-flaky(crit) > SSOT 위해. 헤더/SKIP 메시지를 cost 아닌 environment-flaky 경계(R311pt 후 유일 opt-in)로 명시. Z 'never gates default sweep' -> presence-check 경계로 정정.",
+        "ci.yml: primary ci job에 Layer F step 추가(host-only, footprint elision CI 자동). cross-mcu job 코멘트의 R311iw 'without slowing pre-push' 근거 정정 — CI-only는 push에만 발화해 미push arc(R311p* ~20라운드)에 취약, pre-push default-on이 1차 게이트 CI는 toolchain 미러.",
+        "pre-push: 코드 변경 0(이미 env 없이 run-ci 전체 실행 -> default-on 전환만으로 F/G/Q/Z 자동 게이트). 헤더 코멘트만 default-on lane 목록 + MCU 빌드 비용 반영 갱신."
+      ],
+      "publishable_verification_bullets": [
+        "root-cause: opt-in 축이 SSOT 위반 — 'required인가'의 진실이 run-ci 가드 + pre-push env + ci.yml job 3곳 산재 + 이중 SKIP축(opt-in cost + prereq). 비용 무관 원칙상 cost-opt-in 정당성 소멸; M만 flaky 경계로 정당. R311iw가 같은 부채(R311iu baseline drift)를 CI-only로 부분 해결했으나 미push arc 미보장이 R311p*에서 드러남.",
+        "full run-ci(인자 없는 default sweep, 사용자 머신=전 prereq 보유) RUNCI_EXIT=0, 'all required layers pass', FAIL 0. F/G/Q/Z가 SKIP 아닌 실제 게이트 확인: Layer F pass(minus-codec 실측 빌드), Layer G(7타겟 G.1~G.13 OK), Layer Q footprint[qemu-demo] 4타겟 text/data +0 OK + QEMU boot PASS, Layer Z pass(wz_to_zenohd_router). Layer M SKIP(opt-in 유지=의도).",
+        "bash -n run-ci.sh/pre-push clean; --layer 0 단독 실행 보존(디스패처 ONLY_LAYER 가드); ci.yml YAML parse OK. footprint +0 = R311pr rebase baseline과 현재 코드 일치(staleness 없음 재확인). exit는 파이프 없이 직접 캡처(feedback-runci-verdict-exit-code-only)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pt = 부채 C(footprint/lock staleness) 해소. opt-in 축(비용 게이트) 제거로 footprint(F/Q)+cross-compile(G)+interop(Z) 게이트가 pre-push에서 default-on 자동 실행(prereq 없으면 graceful SKIP). M만 multicast route 정적 감지 불가라 no-flaky(crit>SSOT) 위해 opt-in 유지. SSOT 회복: required 정의가 run-ci.sh 단일 소스, 게이트 비활성 사유는 prereq SKIP + M flaky 경계 둘만.",
+        "남은 등록 부채(R311ps, push blocker 아님): (A)[MINOR] F5 Acceptor accept_endpoint seam 부재(establish_link이 인라인 TcpListener::bind+accept; dial쪽 dial_endpoint 대칭 부재). (B)[MINOR] Named+reconnect 미배선(reconnect는 numeric ParsedLocator만; hostname --connect 재연결 안 됨).",
+        "코드 LOCAL-COMMITTED UNPUSHED 예정: scripts/run-ci.sh + .github/workflows/ci.yml + .githooks/pre-push. push는 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
