@@ -107,8 +107,39 @@ async fn accept_and_collect_declares(listener: &TcpListener) -> (OpenedSession, 
     (opened, declares)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn declares_replay_after_link_loss_and_reconnect() {
+/// R311pg — the declaration kind a reconnect-replay scenario declares; drives
+/// both the `send_declare_*` call and the Debug-marker assertion.
+#[derive(Clone, Copy)]
+enum ReplayDeclareKind {
+    Subscriber,
+    Queryable,
+}
+
+impl ReplayDeclareKind {
+    /// The `DeclareOwnedVariant` Debug marker the replayed `Declare` must carry
+    /// (`CodecZenohDeclSubscriber` / `CodecZenohDeclQueryable`).
+    fn marker(self) -> &'static str {
+        match self {
+            ReplayDeclareKind::Subscriber => "DeclSubscriber",
+            ReplayDeclareKind::Queryable => "DeclQueryable",
+        }
+    }
+}
+
+/// R311pg — the shared TCP reconnect-replay driver behind the subscriber and
+/// queryable replay tests. A reconnect-supervised client opens, declares ONE
+/// entity of `kind`, the acceptor observes the Declare, the link is severed, the
+/// supervisor re-dials and replays the declaration cache, and connection #2 must
+/// observe the SAME Declare verbatim.
+///
+/// Parameterizing over `kind` (rather than cloning the ~80-line driver) is the
+/// honest application of this file's own kind-agnostic argument: the replay
+/// cache-walk is declaration-kind-agnostic (one loop, a per-variant `replay_one`
+/// arm — session_actions.rs), so only the `send_declare_*` call and the cached
+/// variant differ. The `marker` assertion positively pins the kind so neither
+/// case can pass green on a mis-wired emit of the other kind (the A1 false-green
+/// hole this closes).
+async fn assert_declare_replays_after_link_loss(keyexpr: &str, kind: ReplayDeclareKind) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
@@ -116,7 +147,7 @@ async fn declares_replay_after_link_loss_and_reconnect() {
     params.zid = vec![0x01; 4];
 
     // ── Connection #1: client opens (reconnect-supervised wiring), declares
-    //    a subscriber; the acceptor handshakes and observes the Declare.
+    //    one entity of `kind`; the acceptor handshakes and observes the Declare.
     let policy = ReconnectPolicy {
         retry_delay_ms: 50, // test cadence; production default is pico's 1s
         max_attempts: Some(100),
@@ -134,10 +165,16 @@ async fn declares_replay_after_link_loss_and_reconnect() {
             )
             .await
             .expect("client reaches Established");
-            session
-                .actions()
-                .send_declare_subscriber(10, 0, Some("home/reconnect"))
-                .expect("declare subscriber");
+            match kind {
+                ReplayDeclareKind::Subscriber => session
+                    .actions()
+                    .send_declare_subscriber(10, 0, Some(keyexpr))
+                    .expect("declare subscriber"),
+                ReplayDeclareKind::Queryable => session
+                    .actions()
+                    .send_declare_queryable(10, 0, Some(keyexpr))
+                    .expect("declare queryable"),
+            };
             session
         },
         accept_and_collect_declares(&listener),
@@ -145,7 +182,16 @@ async fn declares_replay_after_link_loss_and_reconnect() {
     assert_eq!(
         declares_conn1.len(),
         1,
-        "connection #1 observes exactly the one declared subscriber"
+        "connection #1 observes exactly the one declared entity"
+    );
+    // A1/R311pg — positively pin the KIND: the captured Declare's Debug must
+    // carry this kind's `DeclareOwnedVariant` marker, so neither case can pass
+    // green on a mis-wired emit of the other kind.
+    assert!(
+        declares_conn1[0].contains(kind.marker()),
+        "connection #1's Declare must carry the {} marker; got {}",
+        kind.marker(),
+        declares_conn1[0],
     );
 
     // ── Sever the first link abruptly: dropping the acceptor session closes
@@ -192,111 +238,26 @@ async fn declares_replay_after_link_loss_and_reconnect() {
     );
 }
 
-/// A1/R311pc — the **queryable** sibling of
-/// `declares_replay_after_link_loss_and_reconnect`: a client declares a
-/// queryable (not a subscriber), the acceptor observes it, the link is
-/// severed, and connection #2 must observe the SAME `Declare(DeclQueryable)`
-/// replayed from the declaration cache.
-///
-/// This closes the `send_declare_queryable` e2e-coverage parity gap — before
-/// this test the low-level queryable emit was exercised only by `session_glue`
-/// unit tests, while `send_declare_subscriber` already had four reconnect e2e
-/// callers — and guards the `replay_one` `CachedDeclaration::Queryable` arm
-/// end-to-end: the post-link-loss cache-walk re-runs `build_declare_queryable`
-/// and re-emits onto the fresh transport (pico `_z_client_reopen_task_fn`
-/// cache replay parity, the `Decl*` kind that pico's `_z_register_queryable`
-/// records through the caching `_z_send_declare`).
-///
-/// Scope: the replay cache-walk is declaration-kind-agnostic (one loop, a
-/// per-variant arm), so the transport-variant coverage (TLS/WS re-handshake,
-/// GaveUp-resume) stays subscriber-only by design — re-proving those for the
-/// queryable kind would re-exercise the identical replay loop without adding
-/// a distinct invariant. The shared `accept_and_collect_declares` helper
-/// captures any inbound `Declare`, so it pins the DeclQueryable replay with no
-/// queryable-specific harness.
+/// Subscriber reconnect-replay — the canonical scenario. See
+/// [`assert_declare_replays_after_link_loss`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn declares_replay_after_link_loss_and_reconnect() {
+    assert_declare_replays_after_link_loss("home/reconnect", ReplayDeclareKind::Subscriber).await;
+}
+
+/// A1 — queryable sibling of [`declares_replay_after_link_loss_and_reconnect`],
+/// closing the `send_declare_queryable` e2e-coverage parity gap and guarding the
+/// `replay_one` `CachedDeclaration::Queryable` arm end-to-end (pico
+/// `_z_client_reopen_task_fn` cache-replay parity). TLS/WS/GaveUp queryable
+/// variants are intentionally omitted: the replay cache-walk is
+/// declaration-kind-agnostic, so they would re-run the identical loop with a
+/// different `build_declare_*` and add no distinct invariant — the transport
+/// re-handshake those variants exercise is already covered by the subscriber
+/// legs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queryable_declares_replay_after_link_loss_and_reconnect() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
-    let mut params = fixture_session_init_params();
-    params.zid = vec![0x01; 4];
-
-    // ── Connection #1: client opens (reconnect-supervised wiring), declares
-    //    a queryable; the acceptor handshakes and observes the Declare.
-    let policy = ReconnectPolicy {
-        retry_delay_ms: 50, // test cadence; production default is pico's 1s
-        max_attempts: Some(100),
-    };
-    let (mut client, (server_conn1, declares_conn1)) = tokio::join!(
-        async {
-            let session = open_session_with_reconnect(
-                locator,
-                params,
-                DialConfig::default(),
-                TokioTime::new(),
-                policy,
-                Some(ITER_CAP),
-                DEFAULT_OPEN_TICK_MS,
-            )
-            .await
-            .expect("client reaches Established");
-            session
-                .actions()
-                .send_declare_queryable(10, 0, Some("home/qry-reconnect"))
-                .expect("declare queryable");
-            session
-        },
-        accept_and_collect_declares(&listener),
-    );
-    assert_eq!(
-        declares_conn1.len(),
-        1,
-        "connection #1 observes exactly the one declared queryable"
-    );
-
-    // ── Sever the first link abruptly: dropping the acceptor session closes
-    //    the socket without a Close frame — the client sees a link loss, not
-    //    a peer-initiated close.
-    drop(server_conn1);
-
-    // ── Drive the client under the reconnect supervisor while the listener
-    //    re-accepts. The supervisor re-dials, re-handshakes, and replays the
-    //    declaration cache; connection #2 must observe the SAME Declare.
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_for_server = stop.clone();
-    let timeouts = SessionTimeouts::spec_defaults();
-    let (drive_outcome, declares_conn2) = tokio::join!(
-        client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}),
-        async {
-            let (server_conn2, declares) = accept_and_collect_declares(&listener).await;
-            // Replay observed — release the client: raise the stop flag
-            // FIRST, then sever the link so the supervisor's next loop
-            // boundary sees Terminated + stop and returns Stopped instead
-            // of reconnecting again.
-            stop_for_server.store(true, Ordering::Release);
-            drop(server_conn2);
-            declares
-        },
-    );
-
-    assert!(
-        matches!(drive_outcome, ReconnectDriveOutcome::Stopped),
-        "supervisor must observe the stop flag after the second link drop, \
-         got {drive_outcome:?}"
-    );
-    assert_eq!(
-        declares_conn2, declares_conn1,
-        "the reconnected link must replay the cached Declare(DeclQueryable) \
-         verbatim (kind, id, keyexpr all preserved)"
-    );
-    // F6 — `drive` borrows, so the supervisor outlives termination: the
-    // reconnect count survives for post-mortem observability.
-    assert_eq!(
-        client.reconnects(),
-        1,
-        "exactly one survived link loss across the run"
-    );
+    assert_declare_replays_after_link_loss("home/qry-reconnect", ReplayDeclareKind::Queryable)
+        .await;
 }
 
 /// F6/R311ka — pin the documented GaveUp-resume contract: after `drive`
