@@ -39306,6 +39306,60 @@
         "push 미동의=LOCAL-COMMIT까지만. push 명시 동의 권장([[feedback-work-on-main-branch]])."
       ]
     },
+    "Round 311pe": {
+      "decision_summary": "R311pe: zenohd 잔여 부채 ③ 청산 — build-zenohd.sh가 cargo git checkout 부재 시 cargo install zenohd@1.5.0 --locked로 결정적 자동 fallback(crates.io). fresh-clone 재현성 확보. 종전엔 명령 안내만 하고 exit 1. ②(z_sub retry root-cause)는 carry.",
+      "changes_bullets": [
+        "scripts/build-zenohd.sh: cargo git checkout 부재 시 안내-후-exit1을 결정적 자동 fallback으로 교체=fresh clone 재현성 확보(debt ③). Path A(cargo git checkout ~/.cargo/git/checkouts/zenoh-*/.../zenohd 존재 시 debug 빌드, 기존 fast path 유지) + Path B(부재 시 cargo +1.85.0 install zenohd@1.5.0 --locked --root target/zenohd-build/cargo-install --bin zenohd=crates.io published+Cargo.lock-pinned release 빌드, 신규 결정적 경로). 종전엔 checkout 부재 시 \"cargo install zenohd@1.5.0 --locked\" 명령을 stderr로 안내만 하고 exit 1=clean checkout이 Layer Z 바이너리 재현 불가였음.",
+        "ZENOHD_FORCE_CRATES_IO=1 env override 추가: checkout glob 스킵하고 Path B 강제(재현성 self-test + fresh clone이 타는 경로). ZENOHD_VERSION=x.y.z override로 버전 고정 가능(기본 1.5.0). toolchain(1.85.0) 존재 체크를 양 path 공유로 상향(종전 checkout 경로 전용→install도 동일 pinned toolchain). SRC_BIN 변수로 두 경로 산출물을 단일 install -m 0755 step에 수렴.",
+        "진단 선행([[feedback-diagnose-before-carry]]): carry/debt note가 \"해소 후보 ⒜ cargo install zenohd@1.5.0\"를 미검증 가정으로 남겼음. cargo search zenohd→\"zenohd = 1.9.0\"(crates.io 발행 확인, publish=false 없음) + sparse index 조회로 zenohd 1.5.0+1.5.1 실재 확정(44버전) 후 구현. ⒜ 실현가능성 확정=carry 가정 검증됨."
+      ],
+      "verification_bullets": [
+        "진단 선행([[feedback-diagnose-before-carry]]): debt note의 미검증 가정(⒜ cargo install zenohd@1.5.0) 확정. cargo search zenohd→\"zenohd = 1.9.0\"(crates.io 발행, publish=false 없음) + sparse index(cargo UA) 조회로 zenohd 1.5.0+1.5.1 실재 확인(44버전). curl 직접 조회는 crates.io 403(비-cargo UA 차단)이라 empty였을 뿐=오프라인/미발행 아님.",
+        "shellcheck 0.8.0 clean(exit 0).",
+        "Path A 무회귀(checkout 존재 default run): cargo +1.85.0 build -p zenohd from checkout(debug, 25s incremental)→target/zenohd/zenohd \"zenohd v1.5.0 built with rustc 1.85.0\" 정상.",
+        "Path B 검증(ZENOHD_FORCE_CRATES_IO=1 강제, 백그라운드): cargo +1.85.0 install zenohd@1.5.0 --locked --root target/zenohd-build/cargo-install --bin zenohd→crates.io published source release 빌드 58.6s(deps 일부 캐시)→\"Installed package zenohd v1.5.0\"→스크립트가 target/zenohd/zenohd로 copy→\"zenohd v1.5.0 built with rustc 1.85.0\" 정상(25MB release). EXIT=0(/tmp/zenohd_pathb.exit). --locked가 published Cargo.lock 사용=결정적; lock이 yanked 의존 3건(crossbeam-channel 0.5.14/keccak 0.1.5/lz4_flex 0.11.3) 핀해 cargo 경고하나 yanked!=removed라 fetch+빌드 정상 진행(정확한 published 버전=결정성 목표 부합).",
+        "핵심 증명: Path B(crates.io) 산출 zenohd로 Layer Z 7-leg 직렬 7/7 통과=fresh-clone 결정적 경로 산출 바이너리가 실제 interop 전체 구동 실증(established/publish/subscribe/queryable/wz-query/liveliness 양방향). Path A 복원 후 환경 canonical.",
+        "스코프: 변경=scripts/build-zenohd.sh 단독(Rust 코드/테스트 무변경)이라 full run-ci 불필요=비례적 검증(shellcheck + 양 path 작동 바이너리 산출 + Layer Z 7/7 실제 interop 구동). target/는 git-ignored(check-ignore 확인)=산출물 커밋 무관.",
+        "atomic: ledger entries 764->765, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pe = zenohd 잔여 부채 ③ 청산: build-zenohd.sh 결정성(fresh-clone 재현성). 종전 스크립트는 cargo git checkout(~/.cargo/git/checkouts/zenoh-*, wz의 선언된 dep 아님) glob에 의존+부재 시 cargo install 명령 안내만 하고 exit 1=clean checkout이 Layer Z 바이너리 재현 불가. 수정=부재 시 cargo install zenohd@1.5.0 --locked로 자동 결정적 fallback(Path B) + 기존 checkout debug 빌드(Path A) 유지 + ZENOHD_FORCE_CRATES_IO override.",
+        "진단 선행([[feedback-diagnose-before-carry]]): debt note가 ⒜(cargo install)를 미검증 가정으로 남겼음→cargo search/sparse index로 zenohd 1.5.0 crates.io 실재 확정 후 구현(carry 가정 검증). crates.io curl 403은 비-cargo UA 차단일 뿐.",
+        "검증: shellcheck clean + Path A 무회귀(checkout debug) + Path B(crates.io --locked release 58.6s) 둘 다 작동 zenohd v1.5.0 산출 + 결정적 Path B 바이너리로 Layer Z 7-leg 7/7=fresh-clone 경로가 실제 interop 구동 실증. --locked가 yanked 의존 3건 경고하나 빌드 정상(yanked!=removed, 정확한 published 버전=결정성). 변경=스크립트 단독이라 full run-ci 불필요(비례 검증). 상세 [[feedback-runci-verdict-exit-code-only]] 무관(코드 미변경).",
+        "부채 갱신([[project-zenohd-interop-debts]]): ③ DONE. 남은 부채=② z_sub open retry root-cause 미확정(load 전용 transient: pico transient/zenohd readiness gap/CPU starvation 중 미규명, retry 3곳 z_sub/z_pub/z_get). ②는 carry(다음 rung).",
+        "남은 carry(다음 rung): (1) ② z_sub retry root-cause 진단(Layer Z concurrent 재현+zenohd stderr 캡처로 pico측/zenohd측 판별; zenohd측이면 readiness 강화, pico측이면 retry 유지 정당). (2) cross-impl 추가는 [[project-pico-parity-status]] 진입점(구현~92%/cross~75%). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/.",
+        "push 미동의=LOCAL-COMMIT까지만. 누적 미푸시=R311pc+pd+pe. push 명시 동의 권장([[feedback-work-on-main-branch]])."
+      ],
+      "publishable_decision_summary": "R311pe: zenohd 잔여 부채 ③ 청산 — build-zenohd.sh가 cargo git checkout 부재 시 cargo install zenohd@1.5.0 --locked로 결정적 자동 fallback(crates.io). fresh-clone 재현성 확보. 종전엔 명령 안내만 하고 exit 1. ②(z_sub retry root-cause)는 carry.",
+      "publishable_changes_bullets": [
+        "scripts/build-zenohd.sh: cargo git checkout 부재 시 안내-후-exit1을 결정적 자동 fallback으로 교체=fresh clone 재현성 확보(debt ③). Path A(cargo git checkout ~/.cargo/git/checkouts/zenoh-*/.../zenohd 존재 시 debug 빌드, 기존 fast path 유지) + Path B(부재 시 cargo +1.85.0 install zenohd@1.5.0 --locked --root target/zenohd-build/cargo-install --bin zenohd=crates.io published+Cargo.lock-pinned release 빌드, 신규 결정적 경로). 종전엔 checkout 부재 시 \"cargo install zenohd@1.5.0 --locked\" 명령을 stderr로 안내만 하고 exit 1=clean checkout이 Layer Z 바이너리 재현 불가였음.",
+        "ZENOHD_FORCE_CRATES_IO=1 env override 추가: checkout glob 스킵하고 Path B 강제(재현성 self-test + fresh clone이 타는 경로). ZENOHD_VERSION=x.y.z override로 버전 고정 가능(기본 1.5.0). toolchain(1.85.0) 존재 체크를 양 path 공유로 상향(종전 checkout 경로 전용→install도 동일 pinned toolchain). SRC_BIN 변수로 두 경로 산출물을 단일 install -m 0755 step에 수렴.",
+        "진단 선행([[feedback-diagnose-before-carry]]): carry/debt note가 \"해소 후보 ⒜ cargo install zenohd@1.5.0\"를 미검증 가정으로 남겼음. cargo search zenohd→\"zenohd = 1.9.0\"(crates.io 발행 확인, publish=false 없음) + sparse index 조회로 zenohd 1.5.0+1.5.1 실재 확정(44버전) 후 구현. ⒜ 실현가능성 확정=carry 가정 검증됨."
+      ],
+      "publishable_verification_bullets": [
+        "진단 선행([[feedback-diagnose-before-carry]]): debt note의 미검증 가정(⒜ cargo install zenohd@1.5.0) 확정. cargo search zenohd→\"zenohd = 1.9.0\"(crates.io 발행, publish=false 없음) + sparse index(cargo UA) 조회로 zenohd 1.5.0+1.5.1 실재 확인(44버전). curl 직접 조회는 crates.io 403(비-cargo UA 차단)이라 empty였을 뿐=오프라인/미발행 아님.",
+        "shellcheck 0.8.0 clean(exit 0).",
+        "Path A 무회귀(checkout 존재 default run): cargo +1.85.0 build -p zenohd from checkout(debug, 25s incremental)→target/zenohd/zenohd \"zenohd v1.5.0 built with rustc 1.85.0\" 정상.",
+        "Path B 검증(ZENOHD_FORCE_CRATES_IO=1 강제, 백그라운드): cargo +1.85.0 install zenohd@1.5.0 --locked --root target/zenohd-build/cargo-install --bin zenohd→crates.io published source release 빌드 58.6s(deps 일부 캐시)→\"Installed package zenohd v1.5.0\"→스크립트가 target/zenohd/zenohd로 copy→\"zenohd v1.5.0 built with rustc 1.85.0\" 정상(25MB release). EXIT=0(/tmp/zenohd_pathb.exit). --locked가 published Cargo.lock 사용=결정적; lock이 yanked 의존 3건(crossbeam-channel 0.5.14/keccak 0.1.5/lz4_flex 0.11.3) 핀해 cargo 경고하나 yanked!=removed라 fetch+빌드 정상 진행(정확한 published 버전=결정성 목표 부합).",
+        "핵심 증명: Path B(crates.io) 산출 zenohd로 Layer Z 7-leg 직렬 7/7 통과=fresh-clone 결정적 경로 산출 바이너리가 실제 interop 전체 구동 실증(established/publish/subscribe/queryable/wz-query/liveliness 양방향). Path A 복원 후 환경 canonical.",
+        "스코프: 변경=scripts/build-zenohd.sh 단독(Rust 코드/테스트 무변경)이라 full run-ci 불필요=비례적 검증(shellcheck + 양 path 작동 바이너리 산출 + Layer Z 7/7 실제 interop 구동). target/는 git-ignored(check-ignore 확인)=산출물 커밋 무관.",
+        "atomic: ledger entries 764->765, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변, inventory 무변경."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pe = zenohd 잔여 부채 ③ 청산: build-zenohd.sh 결정성(fresh-clone 재현성). 종전 스크립트는 cargo git checkout(~/.cargo/git/checkouts/zenoh-*, wz의 선언된 dep 아님) glob에 의존+부재 시 cargo install 명령 안내만 하고 exit 1=clean checkout이 Layer Z 바이너리 재현 불가. 수정=부재 시 cargo install zenohd@1.5.0 --locked로 자동 결정적 fallback(Path B) + 기존 checkout debug 빌드(Path A) 유지 + ZENOHD_FORCE_CRATES_IO override.",
+        "진단 선행([[feedback-diagnose-before-carry]]): debt note가 ⒜(cargo install)를 미검증 가정으로 남겼음→cargo search/sparse index로 zenohd 1.5.0 crates.io 실재 확정 후 구현(carry 가정 검증). crates.io curl 403은 비-cargo UA 차단일 뿐.",
+        "검증: shellcheck clean + Path A 무회귀(checkout debug) + Path B(crates.io --locked release 58.6s) 둘 다 작동 zenohd v1.5.0 산출 + 결정적 Path B 바이너리로 Layer Z 7-leg 7/7=fresh-clone 경로가 실제 interop 구동 실증. --locked가 yanked 의존 3건 경고하나 빌드 정상(yanked!=removed, 정확한 published 버전=결정성). 변경=스크립트 단독이라 full run-ci 불필요(비례 검증). 상세 [[feedback-runci-verdict-exit-code-only]] 무관(코드 미변경).",
+        "부채 갱신([[project-zenohd-interop-debts]]): ③ DONE. 남은 부채=② z_sub open retry root-cause 미확정(load 전용 transient: pico transient/zenohd readiness gap/CPU starvation 중 미규명, retry 3곳 z_sub/z_pub/z_get). ②는 carry(다음 rung).",
+        "남은 carry(다음 rung): (1) ② z_sub retry root-cause 진단(Layer Z concurrent 재현+zenohd stderr 캡처로 pico측/zenohd측 판별; zenohd측이면 readiness 강화, pico측이면 retry 유지 정당). (2) cross-impl 추가는 [[project-pico-parity-status]] 진입점(구현~92%/cross~75%). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/.",
+        "push 미동의=LOCAL-COMMIT까지만. 누적 미푸시=R311pc+pd+pe. push 명시 동의 권장([[feedback-work-on-main-branch]])."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
