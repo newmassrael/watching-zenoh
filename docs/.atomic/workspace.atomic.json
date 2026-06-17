@@ -39850,6 +39850,44 @@
         "코드 LOCAL-COMMITTED UNPUSHED(pp=f7abcdb, po=0806995/90b98df, pn=f656b6c/a98a6a9, pm=113c85b/5246235, R311pk 2커밋). 수정 전 push 금지 유지(R311pl 정책). 상세=memory project-r311pk-session-review-load-trigger."
       ]
     },
+    "Round 311pq": {
+      "decision_summary": "R311pq: 부채⑧(Acceptor WS 비대칭) stated-asymmetry doc로 정직화(코드 무변경). establish_link doc이 Acceptor TCP-only by design 명시 — 라이브러리 accept_ws 존재하나 cross-impl WS dialer 부재로 데모 WS acceptor=unverifiable dead code.",
+      "changes_bullets": [
+        "wz-ap-demo/src/runner.rs: establish_link doc에 R311pq stated-asymmetry 문단 추가. Acceptor arm=의도적 TCP-only/scheme-blind(TcpListener::bind→DialedLink::Tcp; scheme'd --listen은 bind에서 loud fail). 라이브러리 accept_ws(ws_pipeline.rs:75, ws_e2e.rs in-process 검증) 존재=capability 있으나, cross-impl WS dialer 부재(pico WS=emscripten-only; Layer Z legs=wz WS Initiator vs zenohd ws/ listener)로 데모 WS acceptor=unverifiable dead code→의도적 생략. 코드/테스트 변경 0."
+      ],
+      "verification_bullets": [
+        "⑧ doc-only: wz-ap-demo 빌드(default+ws) + clippy --all-targets -D warnings(default+ws) + fmt --check clean.",
+        "번들 최종 게이트 full run-ci(WZ_RUN_LAYER_F/G/Q/M/Z=1) RUNCI_EXIT=1: Layer 0/A/A2/A3/B/C0~C4e/D/E/E2/G/M/Z 전부 PASS(WS leg-8/9 포함). 단 Layer F(THRESHOLD FAIL codec-keep-alive -144<1024 catalog-truthfulness gate)+Layer Q(mcu-multicast-e2e text +580/+836 vs R311mi BASELINE_MC, ±256 초과) FAIL.",
+        "F/Q는 R311pm~pq(및 R311pk) 무관 PRE-EXISTING: 변경 파일 전부 wz-ap-demo/wz-integration-tests/wz-runtime-tokio/run-ci.sh이고 deploy/mcu-multicast-e2e/Cargo.toml이 wz-runtime-tokio/wz-ap-demo 미참조(직접 확인)→build closure 무관, 결정론적 빌드라 origin/main과 byte-동일. F의 codec-keep-alive 경로도 dial seam과 무관(elision delta 불변). BASELINE_MC 마지막 갱신=R311mi(90bdfd9); 이후 multicast 라운드(mp~ns) 코드 증가를 opt-in Layer Q가 미측정해 누적.",
+        "R311pk ledger \"Layer F/Q pass\" 주장=false-green(파이프/echo exit 마스킹). frozen이라 미수정, 이 entry가 정정 기록."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311pm~pq = R311pl 세션리뷰 8부채(①~⑧) 전부 수정 완료+검증: ①dial seam SSOT, ②WS readiness probe, ③WS transport witness, ④spawn dedup, ⑤pick_pair dedup, ⑥CLI help, ⑦ws feature rename, ⑧Acceptor 정직화 doc. 검증=Layer Z 9/9 + WS leg 20/20 zero-flake(각 부채 후) + 관련 host lane 전부 pass.",
+        "OPEN(8부채 무관, push 전 사용자 결정 필요): Layer F+Q PRE-EXISTING footprint 실패. 옵션=(a)footprint baseline 갱신+증가 정당성 ledger(신규 라운드 R311pr) 후 green push, (b)8부채 번들만 push(F/Q는 origin/main도 red=무회귀), (c)F/Q root-cause 먼저. 어느 경우든 R311pk false-green 정정은 이 entry가 보유.",
+        "코드 LOCAL-COMMITTED UNPUSHED(9 commits: R311pk 2 + pm/pn/po/pp 각 2 + pq 1, 단 pq ledger는 별도). push 미동의 유지. 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311pq: 부채⑧(Acceptor WS 비대칭) stated-asymmetry doc로 정직화(코드 무변경). establish_link doc이 Acceptor TCP-only by design 명시 — 라이브러리 accept_ws 존재하나 cross-impl WS dialer 부재로 데모 WS acceptor=unverifiable dead code.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo/src/runner.rs: establish_link doc에 R311pq stated-asymmetry 문단 추가. Acceptor arm=의도적 TCP-only/scheme-blind(TcpListener::bind→DialedLink::Tcp; scheme'd --listen은 bind에서 loud fail). 라이브러리 accept_ws(ws_pipeline.rs:75, ws_e2e.rs in-process 검증) 존재=capability 있으나, cross-impl WS dialer 부재(pico WS=emscripten-only; Layer Z legs=wz WS Initiator vs zenohd ws/ listener)로 데모 WS acceptor=unverifiable dead code→의도적 생략. 코드/테스트 변경 0."
+      ],
+      "publishable_verification_bullets": [
+        "⑧ doc-only: wz-ap-demo 빌드(default+ws) + clippy --all-targets -D warnings(default+ws) + fmt --check clean.",
+        "번들 최종 게이트 full run-ci(WZ_RUN_LAYER_F/G/Q/M/Z=1) RUNCI_EXIT=1: Layer 0/A/A2/A3/B/C0~C4e/D/E/E2/G/M/Z 전부 PASS(WS leg-8/9 포함). 단 Layer F(THRESHOLD FAIL codec-keep-alive -144<1024 catalog-truthfulness gate)+Layer Q(mcu-multicast-e2e text +580/+836 vs R311mi BASELINE_MC, ±256 초과) FAIL.",
+        "F/Q는 R311pm~pq(및 R311pk) 무관 PRE-EXISTING: 변경 파일 전부 wz-ap-demo/wz-integration-tests/wz-runtime-tokio/run-ci.sh이고 deploy/mcu-multicast-e2e/Cargo.toml이 wz-runtime-tokio/wz-ap-demo 미참조(직접 확인)→build closure 무관, 결정론적 빌드라 origin/main과 byte-동일. F의 codec-keep-alive 경로도 dial seam과 무관(elision delta 불변). BASELINE_MC 마지막 갱신=R311mi(90bdfd9); 이후 multicast 라운드(mp~ns) 코드 증가를 opt-in Layer Q가 미측정해 누적.",
+        "R311pk ledger \"Layer F/Q pass\" 주장=false-green(파이프/echo exit 마스킹). frozen이라 미수정, 이 entry가 정정 기록."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311pm~pq = R311pl 세션리뷰 8부채(①~⑧) 전부 수정 완료+검증: ①dial seam SSOT, ②WS readiness probe, ③WS transport witness, ④spawn dedup, ⑤pick_pair dedup, ⑥CLI help, ⑦ws feature rename, ⑧Acceptor 정직화 doc. 검증=Layer Z 9/9 + WS leg 20/20 zero-flake(각 부채 후) + 관련 host lane 전부 pass.",
+        "OPEN(8부채 무관, push 전 사용자 결정 필요): Layer F+Q PRE-EXISTING footprint 실패. 옵션=(a)footprint baseline 갱신+증가 정당성 ledger(신규 라운드 R311pr) 후 green push, (b)8부채 번들만 push(F/Q는 origin/main도 red=무회귀), (c)F/Q root-cause 먼저. 어느 경우든 R311pk false-green 정정은 이 entry가 보유.",
+        "코드 LOCAL-COMMITTED UNPUSHED(9 commits: R311pk 2 + pm/pn/po/pp 각 2 + pq 1, 단 pq ledger는 별도). push 미동의 유지. 상세=memory project-r311pk-session-review-load-trigger. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
