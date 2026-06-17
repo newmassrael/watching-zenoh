@@ -46,14 +46,37 @@ use crate::stream_link::{writer_task, StreamReadDriver, StreamWriteDriver};
 /// sibling over a `ReadHalf<TlsStream<TcpStream>>`.
 pub type TcpReadDriver = StreamReadDriver<OwnedReadHalf>;
 
-/// Dial an outbound TCP connection — the single raw-dial primitive for the
-/// stream transport. Returns the connected [`TcpStream`] unwrapped so the
-/// caller can choose its consumption shape: the session-open path splits it
-/// via [`wire_tcp_stream`], while [`crate::TcpDriver::connect`] wraps it in
-/// a unified driver. Connect-timeout / retry tuning is the caller's concern
-/// (compose a `tokio::time::timeout`); the kernel default applies otherwise.
+/// Dial an outbound TCP connection to a NUMERIC endpoint — the raw-dial
+/// primitive the mode-agnostic `dial_locator(Proto::Tcp)` dispatcher (R311eu)
+/// routes a parsed [`SocketAddr`] to. Returns the connected [`TcpStream`]
+/// unwrapped so the caller can choose its consumption shape: the session-open
+/// path splits it via [`wire_tcp_stream`], while [`crate::TcpDriver::connect`]
+/// wraps it in a unified driver. Connect-timeout / retry tuning is the
+/// caller's concern (compose a `tokio::time::timeout`); the kernel default
+/// applies otherwise.
+///
+/// Numeric only by construction: the no_std locator parser
+/// ([`wz_session_core::locator`]) resolves a locator to a [`SocketAddr`],
+/// deferring DNS to the std layer. [`dial_tcp_host`] is the DNS-capable
+/// sibling for a `host:port` STRING.
 pub async fn dial_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
     TcpStream::connect(addr).await
+}
+
+/// Dial an outbound TCP connection to a `host:port` STRING — the DNS-capable
+/// sibling of [`dial_tcp`]. This is the std-layer home of the DNS resolution
+/// the no_std locator parser ([`wz_session_core::locator`]) deliberately
+/// defers (a hostname is not a numeric [`SocketAddr`]): `TcpStream::connect`
+/// takes `ToSocketAddrs`, so a DNS name is resolved by the std resolver and
+/// every resolved address is tried in order until one connects. A purely
+/// numeric string (`"127.0.0.1:7447"`, `"[::1]:7447"`) routes through the
+/// same call without touching the resolver.
+///
+/// Used by the session-open dial seam ([`crate::session_open::dial_endpoint`])
+/// for a scheme-less `--connect HOST:PORT` and a `tcp/HOST` with a DNS
+/// hostname; the numeric [`dial_tcp`] handles a parsed `tcp/` locator.
+pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
+    TcpStream::connect(host).await
 }
 
 /// Split a connected [`TcpStream`] into the cooperating drivers the session

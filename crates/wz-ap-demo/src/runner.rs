@@ -44,7 +44,7 @@
 use std::io;
 use std::sync::Arc;
 
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 // R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
 // to wz's [`TokioJoinHandle`], the trait-wrapped form returned by
 // `<TokioRuntime as Runtime>::spawn`. The wrapper exposes the same
@@ -61,7 +61,6 @@ use tokio::net::{TcpListener, TcpStream};
 use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
-use wz::runtime_tokio::locator::parse_any_locator;
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::runtime_impl::TokioTime;
@@ -74,7 +73,7 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, dial_locator, initiate_and_open_session, DialConfig, DialedLink,
+    accept_and_open_session, dial_endpoint, initiate_and_open_session, DialConfig, DialedLink,
     OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
@@ -121,21 +120,25 @@ struct SpawnedTasks {
 ///
 /// R121f — this binary does NOT implement connect retry / timeout
 /// tuning beyond the kernel default; production callers that need
-/// either compose around a `tokio::time::timeout`. The address must
-/// resolve (DNS or numeric) — any dial error is surfaced through the
-/// `io::Result` return so the binary's exit code reflects the cause.
+/// either compose around a `tokio::time::timeout`. Any dial error is
+/// surfaced through the `io::Result` return so the binary's exit code
+/// reflects the cause.
 ///
-/// R311pk — the Initiator dial is locator-aware. A `--connect` value
-/// that carries a scheme (`ws/HOST:PORT`, `tcp/HOST:PORT`) is parsed
-/// into an [`AnyLocator`] and dialed through the library dial seam
-/// ([`dial_locator`]), so `ws/...` opens a WebSocket session exactly
-/// as `ws_e2e.rs` does in-process. A bare `HOST:PORT` (no scheme)
-/// keeps the original direct [`TcpStream::connect`], so every existing
-/// TCP caller dials byte-for-byte unchanged. The WS dial arm inside
-/// `dial_locator` is `transport-link-ws`-gated (wz-ap-demo's
-/// `connect-ws` feature forwards it); without that feature a `ws/...`
-/// locator surfaces a typed `Unsupported` io error rather than
-/// mis-dialing.
+/// R311pm — the Initiator dial delegates wholesale to the library dial
+/// seam [`dial_endpoint`], the single home of "turn a `--connect`
+/// string into a [`DialedLink`]". The demo no longer re-assembles the
+/// parse + dial + error-map the library already owns, and the prior
+/// `connect.contains('/')` heuristic is gone: that heuristic forked a
+/// bare `HOST:PORT` (std-resolver dial, DNS-capable) away from a
+/// `tcp/...` form (numeric-only locator parse), so a `tcp/hostname`
+/// silently failed where a bare `hostname` worked. The seam dissolves
+/// the fork into one decision — a scheme'd numeric/serial locator dials
+/// via `dial_locator`; a scheme-less `HOST:PORT` or a `tcp/HOST` DNS
+/// hostname dials via the std resolver — so a hostname behaves the same
+/// with or without the explicit `tcp/` scheme. A `ws/...` locator opens
+/// a WebSocket session only when the `connect-ws` feature forwards
+/// `transport-link-ws`; without it the seam surfaces a typed
+/// `Unsupported` io error rather than mis-dialing.
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor { listen } => {
@@ -146,21 +149,9 @@ async fn establish_link(role: &Role) -> io::Result<DialedLink> {
             Ok(DialedLink::Tcp(stream))
         }
         Role::Initiator { connect } => {
-            if connect.contains('/') {
-                let locator = parse_any_locator(connect).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("wz-ap-demo: bad --connect locator {connect:?}: {e:?}"),
-                    )
-                })?;
-                let dialed = dial_locator(locator, &DialConfig::default()).await?;
-                log::info!("wz-ap-demo: connected to {connect} (locator dial)");
-                Ok(dialed)
-            } else {
-                let stream = TcpStream::connect(connect).await?;
-                log::info!("wz-ap-demo: connected to {}", stream.peer_addr()?);
-                Ok(DialedLink::Tcp(stream))
-            }
+            let dialed = dial_endpoint(connect, &DialConfig::default()).await?;
+            log::info!("wz-ap-demo: connected to {connect}");
+            Ok(dialed)
         }
     }
 }
