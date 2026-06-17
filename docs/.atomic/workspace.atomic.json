@@ -40454,6 +40454,46 @@
         "코드 PUSHED 예정(scripts/run-ci.sh 1파일). push 명시 동의 필요. R311pz~q1은 PUSHED origin/main=2b1a389. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311q3": {
+      "decision_summary": "R311q3: TCP_NODELAY 파리티 — configure_tcp_stream가 dial_tcp/dial_tcp_host/accept_tcp 모든 스트림에 set_nodelay(true)(zenoh unicast.rs:55 파리티, SSOT). SO_LINGER는 의도적 미설정(tokio deprecate=async-drop 스레드블록; R292 teardown이 app-level graceful close). non-vacuous 단위.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: configure_tcp_stream(&TcpStream) 헬퍼 추가 — set_nodelay(true)(Nagle off, 모든 wz 프레임 즉시 송신)를 dial_tcp/dial_tcp_host(connect 직후)/accept_tcp(수락 직후) 3곳에 적용. zenoh LinkUnicastTcp::new(dial new_link:266 + accept:409 공용 생성자)의 set_nodelay(unicast.rs:55) 파리티 SSOT. best-effort(실패시 log::warn + 계속, zenoh tracing::warn 동형; 정상경로 quiet 유지).",
+        "SO_LINGER(zenoh unicast.rs:65 set_linger(Some(10s)))는 의도적 미설정 — tokio::net::TcpStream::set_linger가 deprecated('SO_LINGER causes the socket to block the thread on drop'; clippy -D warnings가 같은 라운드의 시범 추가를 빌드 실패로 적발). zenoh sync 소켓계층은 감당 가능하나 wz async-tokio는 close()가 워커스레드 블록=footgun. graceful-close 의도는 wz-ap-demo R292 teardown(writer drain + Close frame)이 app-level로 충족하고, non-linger close도 커널이 큐 바이트 백그라운드 전달이라 무손실. 런타임 컨텍스트가 reference와 달라 맹종 안 함.",
+        "신규 단위 dialed_and_accepted_streams_have_nodelay: dial+accept 양단 nodelay() readback 단언. NON-vacuous — tokio TcpStream 기본 nodelay=OFF라 set 여부를 구별(socket2 불요, tokio nodelay() accessor 사용). R311pz vacuous 테스트 교훈 반영."
+      ],
+      "verification_bullets": [
+        "근본: zenoh가 모든 unicast TCP 링크에 set_nodelay(true) 설정(직접 read 검증: io/zenoh-links/zenoh-link-tcp/src/unicast.rs:55, 공용 LinkUnicastTcp::new). wz dial_tcp/dial_tcp_host/accept_tcp는 bare TcpStream::connect/accept라 nodelay OFF = 레이턴시 parity 갭(R311q1 carry로 명시했던 TCP socket-option parity의 nodelay 부분).",
+        "blind-mirror 회피(R311q1 '맹종 말고 검증' 교훈 연장): 같은 라운드에서 set_linger(10s)도 시범 추가했으나 clippy -D warnings가 deprecated로 빌드 실패시킴 → tokio가 SO_LINGER를 async-drop 스레드블록 때문에 deprecate함을 확인. 텍스트북 결정 = nodelay 채택 + SO_LINGER 기각(런타임 컨텍스트가 sync-zenoh와 다름 + wz는 R292 app-level graceful close가 이미 있어 redundant).",
+        "검증: fmt clean, clippy --all-targets -D warnings clean(deprecated 해소). link_pipeline 단위 3/3(신규 dialed_and_accepted_streams_have_nodelay 포함 — dial/accept 양단 nodelay readback), session_reconnect_e2e 4/4, 바이너리 e2e 파일 5/5(dial/accept가 nodelay 설정해도 회귀0; data-plane sever-reconnect 포함). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅 게이트(R311q2 신규 run_qemu_case 로깅도 그때 첫 실전)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311q3 = TCP_NODELAY 파리티(configure_tcp_stream SSOT, dial/accept 양단 set_nodelay(true), zenoh unicast.rs:55). SO_LINGER는 tokio deprecate(async-drop 스레드블록 footgun) + wz R292 app-level graceful close가 이미 있어 의도적 미설정 = 정직한 reference 이탈(런타임 컨텍스트 상이). R311q1 carry의 nodelay 부분 종료.",
+        "남은 TCP socket-option carry(우선순위 낮음): listener backlog 1024(tokio 기본 128) — TcpSocket 재도입 필요(R311pz가 했던 구성을 이번엔 정직한 backlog 근거로). zenoh는 dial측 socket tx/rx buffer size·DSCP·iface bind도 cfg 노출하나 wz 미배선(대부분 deploy.yaml 토폴로지 스키마 대상). 한계적 가치라 별도 라운드.",
+        "다음=[[project-north-star]] P4(router/SHM/plugin/storage/admin/...) 또는 pico optional(scouting passive/MULTICAST_DECLARATIONS/serial·WS·TLS). 코드 LOCAL-COMMITTED, R311q2(run_qemu_case 로깅)+q3(nodelay) 묶어 push 예정(사용자 (B) 동의). R311pz~q1 PUSHED origin/main=2b1a389. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311q3: TCP_NODELAY 파리티 — configure_tcp_stream가 dial_tcp/dial_tcp_host/accept_tcp 모든 스트림에 set_nodelay(true)(zenoh unicast.rs:55 파리티, SSOT). SO_LINGER는 의도적 미설정(tokio deprecate=async-drop 스레드블록; R292 teardown이 app-level graceful close). non-vacuous 단위.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: configure_tcp_stream(&TcpStream) 헬퍼 추가 — set_nodelay(true)(Nagle off, 모든 wz 프레임 즉시 송신)를 dial_tcp/dial_tcp_host(connect 직후)/accept_tcp(수락 직후) 3곳에 적용. zenoh LinkUnicastTcp::new(dial new_link:266 + accept:409 공용 생성자)의 set_nodelay(unicast.rs:55) 파리티 SSOT. best-effort(실패시 log::warn + 계속, zenoh tracing::warn 동형; 정상경로 quiet 유지).",
+        "SO_LINGER(zenoh unicast.rs:65 set_linger(Some(10s)))는 의도적 미설정 — tokio::net::TcpStream::set_linger가 deprecated('SO_LINGER causes the socket to block the thread on drop'; clippy -D warnings가 같은 라운드의 시범 추가를 빌드 실패로 적발). zenoh sync 소켓계층은 감당 가능하나 wz async-tokio는 close()가 워커스레드 블록=footgun. graceful-close 의도는 wz-ap-demo R292 teardown(writer drain + Close frame)이 app-level로 충족하고, non-linger close도 커널이 큐 바이트 백그라운드 전달이라 무손실. 런타임 컨텍스트가 reference와 달라 맹종 안 함.",
+        "신규 단위 dialed_and_accepted_streams_have_nodelay: dial+accept 양단 nodelay() readback 단언. NON-vacuous — tokio TcpStream 기본 nodelay=OFF라 set 여부를 구별(socket2 불요, tokio nodelay() accessor 사용). R311pz vacuous 테스트 교훈 반영."
+      ],
+      "publishable_verification_bullets": [
+        "근본: zenoh가 모든 unicast TCP 링크에 set_nodelay(true) 설정(직접 read 검증: io/zenoh-links/zenoh-link-tcp/src/unicast.rs:55, 공용 LinkUnicastTcp::new). wz dial_tcp/dial_tcp_host/accept_tcp는 bare TcpStream::connect/accept라 nodelay OFF = 레이턴시 parity 갭(R311q1 carry로 명시했던 TCP socket-option parity의 nodelay 부분).",
+        "blind-mirror 회피(R311q1 '맹종 말고 검증' 교훈 연장): 같은 라운드에서 set_linger(10s)도 시범 추가했으나 clippy -D warnings가 deprecated로 빌드 실패시킴 → tokio가 SO_LINGER를 async-drop 스레드블록 때문에 deprecate함을 확인. 텍스트북 결정 = nodelay 채택 + SO_LINGER 기각(런타임 컨텍스트가 sync-zenoh와 다름 + wz는 R292 app-level graceful close가 이미 있어 redundant).",
+        "검증: fmt clean, clippy --all-targets -D warnings clean(deprecated 해소). link_pipeline 단위 3/3(신규 dialed_and_accepted_streams_have_nodelay 포함 — dial/accept 양단 nodelay readback), session_reconnect_e2e 4/4, 바이너리 e2e 파일 5/5(dial/accept가 nodelay 설정해도 회귀0; data-plane sever-reconnect 포함). full run-ci(F+G+Q+M+Z)는 push시 pre-push 훅 게이트(R311q2 신규 run_qemu_case 로깅도 그때 첫 실전)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311q3 = TCP_NODELAY 파리티(configure_tcp_stream SSOT, dial/accept 양단 set_nodelay(true), zenoh unicast.rs:55). SO_LINGER는 tokio deprecate(async-drop 스레드블록 footgun) + wz R292 app-level graceful close가 이미 있어 의도적 미설정 = 정직한 reference 이탈(런타임 컨텍스트 상이). R311q1 carry의 nodelay 부분 종료.",
+        "남은 TCP socket-option carry(우선순위 낮음): listener backlog 1024(tokio 기본 128) — TcpSocket 재도입 필요(R311pz가 했던 구성을 이번엔 정직한 backlog 근거로). zenoh는 dial측 socket tx/rx buffer size·DSCP·iface bind도 cfg 노출하나 wz 미배선(대부분 deploy.yaml 토폴로지 스키마 대상). 한계적 가치라 별도 라운드.",
+        "다음=[[project-north-star]] P4(router/SHM/plugin/storage/admin/...) 또는 pico optional(scouting passive/MULTICAST_DECLARATIONS/serial·WS·TLS). 코드 LOCAL-COMMITTED, R311q2(run_qemu_case 로깅)+q3(nodelay) 묶어 push 예정(사용자 (B) 동의). R311pz~q1 PUSHED origin/main=2b1a389. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
