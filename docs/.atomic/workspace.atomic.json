@@ -39452,6 +39452,48 @@
         "push 미동의=LOCAL까지. 누적 미푸시=R311pc~pg."
       ]
     },
+    "Round 311ph": {
+      "decision_summary": "R311ph: 세션리뷰 후속 2/4 — R311pd leg-7 flake 수정. --liveliness-subscribe-history(history=true) 노출로 ordering race 폐쇄(pico-first history replay 직접 검증=order-independent) + spawn_declaring_z_liveliness open-retry(foreign one-shot 일관) + 거짓 deterministic-ordering/leg-4 오기 주석 정정.",
+      "changes_bullets": [
+        "세션리뷰(test-fidelity 에이전트) R311pd leg-7 결함 2종 + 주석 오기 수정. (B1 flake) 주석 \"deterministic ordering, not a sleep\"이 거짓이었음: wz \"session Established\"는 subscriber 선언+Interest flush 전에 발화, wz subscriber가 history=false라 늦게 도착 시 zenohd가 기존 alive 토큰 replay 안 함→순서가 pico fork+exec가 더 느리다는 타이밍 우연에만 의존(full-run-ci starvation서 역전 가능). 수정=wz-ap-demo에 --liveliness-subscribe-history 노출(LivelinessSubscriberOptions.history pub 필드, #[non_exhaustive]라 default 후 필드 set)→leg-7서 사용→history=true가 구독 시 현재 alive 토큰 replay=order-independent(pico-first/wz-first 양쪽 동작). (B2 flake) pico z_liveliness가 open-retry 없이 1회 spawn이었음(z_liveliness도 z_open 실패 시 \"Unable to open session\" 토큰 미선언; 같은 파일 다른 모든 foreign one-shot은 open-retry). 수정=spawn_declaring_z_liveliness helper(spawn_subscribed_zsub 미러, \"Declaring liveliness token\"까지 6회 retry). (주석) \"foreign-stdout capture race leg 4 gated around\" 오기→leg 4는 propagation 창용 retry지 stdout race gate 아님; spawn_zenohd block-buffering으로 정정.",
+        "변경 파일: wz-ap-demo/src/{args.rs(DeclareEmitSpec.liveliness_subscriber_history 필드)/main.rs(--liveliness-subscribe-history 파싱+spec)/runner.rs(install_session_handles 파라미터+LivelinessSubscriberOptions.history set)/usage.rs(플래그 doc)} + wz-integration-tests/tests/wz_to_zenohd_router.rs(spawn_declaring_z_liveliness helper + leg-7 history flag + 정직한 주석). 프로덕션 변경=additive flag(default false=기존 동작 무변경)."
+      ],
+      "verification_bullets": [
+        "세션리뷰 test-fidelity 에이전트 [FLAKE-RISK major]×2 적발(ordering race + open-retry 누락). 직접 확인 후 수정.",
+        "history replay 작동 직접 검증(order-independence 증명): 수동 실험서 PICO-FIRST(z_liveliness 토큰 먼저 alive)→1s 대기→wz --liveliness-subscribe-history 후행→wz \"LIVELINESS SAMPLE PUT keyexpr='group1/zenoh-pico'\" 관측=OBSERVED_VIA_HISTORY. inverted order(future-PUT 불가 경로)서도 history replay만으로 토큰 surface=ordering race 구조적 폐쇄 확정(보통 순서 통과 아님).",
+        "leg-7 standalone 20/20 zero-flake([[feedback-no-flaky-ever]]). Layer Z 7-leg 직렬 7/7(history flag+open-retry 후 무회귀). wz-ap-demo build/clippy clean(#[non_exhaustive] LivelinessSubscriberOptions라 field_reassign_with_default 린트 억제). wz-integration-tests/wz-ap-demo clippy(EXIT 0)/fmt(--check EXIT 0) clean.",
+        "프로덕션 변경=wz-ap-demo additive flag(default false=기존 --liveliness-subscribe/round-trip/Layer E2 동작 무변경, history 미지정 시 기존 LivelinessSubscriberOptions::default() 동일). 종합 회귀는 remediation 4라운드 후 full run-ci로 확인 예정.",
+        "atomic: ledger entries 767->768, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311ph = 세션리뷰 후속 2/4 — R311pd leg-7 결함. test-fidelity 에이전트가 ordering race(history=false+Established-before-Interest=타이밍 우연 의존)+open-retry 누락(z_liveliness 1회 spawn) 적발. history=true 노출(order-independent, pico-first replay 직접 검증)+spawn_declaring_z_liveliness open-retry+거짓 \"deterministic ordering\"/오기 \"leg 4 gated\" 주석 정정으로 청산.",
+        "남은 remediation(이번 세션, 사용자 승인 \"전부\"): (3) R311pi=R311pf — spawn_zenohd에 Established-level readiness probe(throwaway wz client→\"session Established\", 기존 wz_client_reaches_established 경로 재사용)로 TCP-accept 갭 제거(더 결정적) + R311pf 주석 정직화(과신→가설; category error z_get=propagation≠open-starvation 정정) + retry는 client-side starvation 안전망 재서술. (4) R311pj=R311pe build-zenohd.sh — Path A도 --release(profile 수렴) + 발견 version==1.5.0 fail-fast assert + 결정성 overclaim 문구 완화.",
+        "4라운드 후 종합 full run-ci(M+G+Z) 예정. push 미동의=LOCAL까지. 누적 미푸시=R311pc~ph."
+      ],
+      "publishable_decision_summary": "R311ph: 세션리뷰 후속 2/4 — R311pd leg-7 flake 수정. --liveliness-subscribe-history(history=true) 노출로 ordering race 폐쇄(pico-first history replay 직접 검증=order-independent) + spawn_declaring_z_liveliness open-retry(foreign one-shot 일관) + 거짓 deterministic-ordering/leg-4 오기 주석 정정.",
+      "publishable_changes_bullets": [
+        "세션리뷰(test-fidelity 에이전트) R311pd leg-7 결함 2종 + 주석 오기 수정. (B1 flake) 주석 \"deterministic ordering, not a sleep\"이 거짓이었음: wz \"session Established\"는 subscriber 선언+Interest flush 전에 발화, wz subscriber가 history=false라 늦게 도착 시 zenohd가 기존 alive 토큰 replay 안 함→순서가 pico fork+exec가 더 느리다는 타이밍 우연에만 의존(full-run-ci starvation서 역전 가능). 수정=wz-ap-demo에 --liveliness-subscribe-history 노출(LivelinessSubscriberOptions.history pub 필드, #[non_exhaustive]라 default 후 필드 set)→leg-7서 사용→history=true가 구독 시 현재 alive 토큰 replay=order-independent(pico-first/wz-first 양쪽 동작). (B2 flake) pico z_liveliness가 open-retry 없이 1회 spawn이었음(z_liveliness도 z_open 실패 시 \"Unable to open session\" 토큰 미선언; 같은 파일 다른 모든 foreign one-shot은 open-retry). 수정=spawn_declaring_z_liveliness helper(spawn_subscribed_zsub 미러, \"Declaring liveliness token\"까지 6회 retry). (주석) \"foreign-stdout capture race leg 4 gated around\" 오기→leg 4는 propagation 창용 retry지 stdout race gate 아님; spawn_zenohd block-buffering으로 정정.",
+        "변경 파일: wz-ap-demo/src/{args.rs(DeclareEmitSpec.liveliness_subscriber_history 필드)/main.rs(--liveliness-subscribe-history 파싱+spec)/runner.rs(install_session_handles 파라미터+LivelinessSubscriberOptions.history set)/usage.rs(플래그 doc)} + wz-integration-tests/tests/wz_to_zenohd_router.rs(spawn_declaring_z_liveliness helper + leg-7 history flag + 정직한 주석). 프로덕션 변경=additive flag(default false=기존 동작 무변경)."
+      ],
+      "publishable_verification_bullets": [
+        "세션리뷰 test-fidelity 에이전트 [FLAKE-RISK major]×2 적발(ordering race + open-retry 누락). 직접 확인 후 수정.",
+        "history replay 작동 직접 검증(order-independence 증명): 수동 실험서 PICO-FIRST(z_liveliness 토큰 먼저 alive)→1s 대기→wz --liveliness-subscribe-history 후행→wz \"LIVELINESS SAMPLE PUT keyexpr='group1/zenoh-pico'\" 관측=OBSERVED_VIA_HISTORY. inverted order(future-PUT 불가 경로)서도 history replay만으로 토큰 surface=ordering race 구조적 폐쇄 확정(보통 순서 통과 아님).",
+        "leg-7 standalone 20/20 zero-flake([[feedback-no-flaky-ever]]). Layer Z 7-leg 직렬 7/7(history flag+open-retry 후 무회귀). wz-ap-demo build/clippy clean(#[non_exhaustive] LivelinessSubscriberOptions라 field_reassign_with_default 린트 억제). wz-integration-tests/wz-ap-demo clippy(EXIT 0)/fmt(--check EXIT 0) clean.",
+        "프로덕션 변경=wz-ap-demo additive flag(default false=기존 --liveliness-subscribe/round-trip/Layer E2 동작 무변경, history 미지정 시 기존 LivelinessSubscriberOptions::default() 동일). 종합 회귀는 remediation 4라운드 후 full run-ci로 확인 예정.",
+        "atomic: ledger entries 767->768, T1 orphan new=+0(13 불변), T3 warn 4/T4 info 4 불변."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ph = 세션리뷰 후속 2/4 — R311pd leg-7 결함. test-fidelity 에이전트가 ordering race(history=false+Established-before-Interest=타이밍 우연 의존)+open-retry 누락(z_liveliness 1회 spawn) 적발. history=true 노출(order-independent, pico-first replay 직접 검증)+spawn_declaring_z_liveliness open-retry+거짓 \"deterministic ordering\"/오기 \"leg 4 gated\" 주석 정정으로 청산.",
+        "남은 remediation(이번 세션, 사용자 승인 \"전부\"): (3) R311pi=R311pf — spawn_zenohd에 Established-level readiness probe(throwaway wz client→\"session Established\", 기존 wz_client_reaches_established 경로 재사용)로 TCP-accept 갭 제거(더 결정적) + R311pf 주석 정직화(과신→가설; category error z_get=propagation≠open-starvation 정정) + retry는 client-side starvation 안전망 재서술. (4) R311pj=R311pe build-zenohd.sh — Path A도 --release(profile 수렴) + 발견 version==1.5.0 fail-fast assert + 결정성 overclaim 문구 완화.",
+        "4라운드 후 종합 full run-ci(M+G+Z) 예정. push 미동의=LOCAL까지. 누적 미푸시=R311pc~ph."
+      ]
+    },
     "Round 311q": {
       "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
       "changes_bullets": [
