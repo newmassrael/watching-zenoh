@@ -29,7 +29,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use wz_runtime_tokio::reconnect::{
-    open_session_with_reconnect, ReconnectDriveOutcome, ReconnectPolicy,
+    open_session_with_reconnect, ReconnectDriveOutcome, ReconnectLocator, ReconnectPolicy,
 };
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, DriverOutcome};
@@ -38,7 +38,7 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
-use wz_session_core::locator::parse_locator;
+use wz_session_core::locator::{parse_any_locator, parse_locator};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -139,10 +139,19 @@ impl ReplayDeclareKind {
 /// variant differ. The `marker` assertion positively pins the kind so neither
 /// case can pass green on a mis-wired emit of the other kind (the A1 false-green
 /// hole this closes).
-async fn assert_declare_replays_after_link_loss(keyexpr: &str, kind: ReplayDeclareKind) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+///
+/// R311pw — `listener` + `locator` are supplied by the caller (the same
+/// parameterize-don't-clone discipline): the IP legs bind `127.0.0.1:0` and
+/// pass a numeric [`ReconnectLocator::Ip`], while the Named leg binds a
+/// localhost listener and passes a [`ReconnectLocator::Named`] hostname — the
+/// re-dial path (and the cache-replay it gates) is locator-shape-agnostic, so
+/// only the dial target differs.
+async fn assert_declare_replays_after_link_loss(
+    listener: TcpListener,
+    locator: ReconnectLocator,
+    keyexpr: &str,
+    kind: ReplayDeclareKind,
+) {
     let mut params = fixture_session_init_params();
     params.zid = vec![0x01; 4];
 
@@ -238,11 +247,31 @@ async fn assert_declare_replays_after_link_loss(keyexpr: &str, kind: ReplayDecla
     );
 }
 
+/// Bind a numeric loopback listener and the matching numeric
+/// [`ReconnectLocator::Ip`] — the IP-leg setup shared by the subscriber and
+/// queryable reconnect-replay tests (R311pw lifted it out of the driver so the
+/// Named leg can supply its own listener + locator).
+async fn ip_loopback() -> (TcpListener, ReconnectLocator) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let locator = ReconnectLocator::Ip(
+        parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator"),
+    );
+    (listener, locator)
+}
+
 /// Subscriber reconnect-replay — the canonical scenario. See
 /// [`assert_declare_replays_after_link_loss`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn declares_replay_after_link_loss_and_reconnect() {
-    assert_declare_replays_after_link_loss("home/reconnect", ReplayDeclareKind::Subscriber).await;
+    let (listener, locator) = ip_loopback().await;
+    assert_declare_replays_after_link_loss(
+        listener,
+        locator,
+        "home/reconnect",
+        ReplayDeclareKind::Subscriber,
+    )
+    .await;
 }
 
 /// A1 — queryable sibling of [`declares_replay_after_link_loss_and_reconnect`],
@@ -256,8 +285,52 @@ async fn declares_replay_after_link_loss_and_reconnect() {
 /// legs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queryable_declares_replay_after_link_loss_and_reconnect() {
-    assert_declare_replays_after_link_loss("home/qry-reconnect", ReplayDeclareKind::Queryable)
-        .await;
+    let (listener, locator) = ip_loopback().await;
+    assert_declare_replays_after_link_loss(
+        listener,
+        locator,
+        "home/qry-reconnect",
+        ReplayDeclareKind::Queryable,
+    )
+    .await;
+}
+
+/// R311pw — debt B: a DNS-NAMED `--connect` endpoint reconnects. The supervisor
+/// previously held only a numeric [`parse_locator`] result, so a hostname —
+/// which the dial seam classifies to `AnyLocator::Named` (R311ps) — could be
+/// dialed once yet never reconnect-supervised. Here the client opens with a
+/// [`ReconnectLocator::Named`] host ("localhost", RE-RESOLVED on every re-dial),
+/// survives an abrupt link loss, and replays its declaration cache onto
+/// connection #2 — the same proof the IP leg gives, over the Named arm that
+/// closes the dial/reconnect asymmetry.
+///
+/// The listener binds `localhost:0`, so it sits on one of localhost's resolved
+/// addresses; the Named dial `localhost:{port}` resolves through the std
+/// resolver and connects to it (each resolved address tried in order), making
+/// the scenario deterministic without depending on v4-vs-v6 resolution order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn named_locator_reconnects_after_link_loss() {
+    let listener = TcpListener::bind("localhost:0")
+        .await
+        .expect("bind localhost");
+    let port = listener.local_addr().expect("local_addr").port();
+    let locator = ReconnectLocator::try_from(
+        parse_any_locator(&format!("tcp/localhost:{port}")).expect("parse named locator"),
+    )
+    .expect("a tcp hostname is reconnectable");
+    // Positively pin the classification: the fix is the Named arm, so a
+    // regression that re-narrowed to Ip (or rejected the name) fails here.
+    assert!(
+        matches!(locator, ReconnectLocator::Named { .. }),
+        "a hostname must classify as ReconnectLocator::Named, got {locator:?}"
+    );
+    assert_declare_replays_after_link_loss(
+        listener,
+        locator,
+        "home/named-reconnect",
+        ReplayDeclareKind::Subscriber,
+    )
+    .await;
 }
 
 /// F6/R311ka — pin the documented GaveUp-resume contract: after `drive`
@@ -274,7 +347,9 @@ async fn gave_up_supervisor_resumes_on_re_drive() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
-    let locator = parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let locator = ReconnectLocator::Ip(
+        parse_locator(&format!("tcp/{addr}")).expect("parse loopback locator"),
+    );
     let mut params = fixture_session_init_params();
     params.zid = vec![0x01; 4];
 
@@ -378,7 +453,7 @@ mod tls_reconnect {
     use tokio_rustls::rustls::ServerConfig;
 
     use wz_runtime_tokio::reconnect::{
-        open_session_with_reconnect, ReconnectDriveOutcome, ReconnectPolicy,
+        open_session_with_reconnect, ReconnectDriveOutcome, ReconnectLocator, ReconnectPolicy,
     };
     use wz_runtime_tokio::runtime_impl::TokioTime;
     use wz_runtime_tokio::session_open::{
@@ -427,7 +502,8 @@ mod tls_reconnect {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
-        let locator = parse_locator(&format!("tls/{addr}")).expect("parse tls locator");
+        let locator =
+            ReconnectLocator::Ip(parse_locator(&format!("tls/{addr}")).expect("parse tls locator"));
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
 
@@ -533,7 +609,7 @@ mod ws_reconnect {
     use tokio::net::TcpListener;
 
     use wz_runtime_tokio::reconnect::{
-        open_session_with_reconnect, ReconnectDriveOutcome, ReconnectPolicy,
+        open_session_with_reconnect, ReconnectDriveOutcome, ReconnectLocator, ReconnectPolicy,
     };
     use wz_runtime_tokio::runtime_impl::TokioTime;
     use wz_runtime_tokio::session_open::{
@@ -576,7 +652,8 @@ mod ws_reconnect {
     async fn declares_replay_after_ws_link_loss_and_reconnect() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
-        let locator = parse_locator(&format!("ws/{addr}")).expect("parse ws locator");
+        let locator =
+            ReconnectLocator::Ip(parse_locator(&format!("ws/{addr}")).expect("parse ws locator"));
         let mut params = fixture_session_init_params();
         params.zid = vec![0x01; 4];
 

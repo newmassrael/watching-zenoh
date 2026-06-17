@@ -33,9 +33,91 @@
 use alloc::string::String;
 
 use crate::link::{BoxedLinkDriver, SessionRuntime};
+use crate::locator::{AnyLocator, ParsedLocator, Proto};
 use crate::reliability::Reliability;
 use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
+
+/// The subset of [`AnyLocator`] a reconnect supervisor can re-dial: the
+/// IP-family, connection-oriented endpoints. zenoh-pico's
+/// `Z_FEATURE_AUTO_RECONNECT` is a client re-open path for the
+/// connection-oriented transports (`_z_client_reopen_task_fn` re-runs
+/// `_z_open` against the retained config — tcp/udp/tls/ws); a `serial/...`
+/// endpoint is a point-to-point tty with no reopen-task model, so it is NOT a
+/// reconnect target (R311nv).
+///
+/// R311pw — encoding the reconnectable set as its own type makes "a serial
+/// endpoint cannot be reconnect-supervised" unrepresentable by construction
+/// rather than a runtime guard: the supervisor's retained-locator field IS
+/// this type, so a `serial/...` endpoint can never reach the re-dial loop —
+/// the [`TryFrom<AnyLocator>`] gate rejects it at the boundary
+/// ([`NotReconnectable`]) where the dial input is first classified.
+///
+/// Both arms re-dial through the same [`AnyLocator`] seam
+/// ([`From<ReconnectLocator>`] → [`dial_locator`]), so a re-dial re-resolves a
+/// [`Named`](Self::Named) host EVERY attempt (DNS failover — the reason to
+/// configure a name rather than a fixed IP) and re-connects a numeric
+/// [`Ip`](Self::Ip) address. The [`Named`](Self::Named) arm is what closes the
+/// R311ps dial/reconnect asymmetry: the dial seam classified a hostname into
+/// [`AnyLocator::Named`] but the reconnect supervisor only held a numeric
+/// [`ParsedLocator`], so a hostname `--connect` could be dialed once yet never
+/// reconnect-supervised.
+///
+/// [`dial_locator`]: the runtime dial seam (`wz-runtime-tokio::session_open`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconnectLocator {
+    /// A numeric IP endpoint (`tcp/1.2.3.4:7447`) — see [`AnyLocator::Ip`].
+    /// Re-dialed to the same address every attempt.
+    Ip(ParsedLocator),
+    /// A DNS-named IP-family endpoint (`tcp/example.org:7447`) — see
+    /// [`AnyLocator::Named`]. RE-RESOLVED on every re-dial, so a reconnect
+    /// follows the host's current address (the dial seam wires the `tcp` name
+    /// dial via the std resolver; other protos surface `Unsupported` there).
+    Named {
+        proto: Proto,
+        host: String,
+        port: u16,
+    },
+}
+
+/// Why an [`AnyLocator`] is not a reconnect target — the rejection of
+/// [`ReconnectLocator::try_from`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotReconnectable {
+    /// A `serial/...` endpoint: a point-to-point tty with no reopen-task
+    /// model (pico parity — `Z_FEATURE_AUTO_RECONNECT` is IP-family only).
+    Serial,
+}
+
+impl From<ReconnectLocator> for AnyLocator {
+    /// Widen back to the dial seam's input — infallible: every
+    /// [`ReconnectLocator`] arm is an [`AnyLocator`] arm.
+    fn from(locator: ReconnectLocator) -> Self {
+        match locator {
+            ReconnectLocator::Ip(ip) => AnyLocator::Ip(ip),
+            ReconnectLocator::Named { proto, host, port } => {
+                AnyLocator::Named { proto, host, port }
+            }
+        }
+    }
+}
+
+impl TryFrom<AnyLocator> for ReconnectLocator {
+    type Error = NotReconnectable;
+
+    /// Narrow a parsed locator to the reconnectable subset — the boundary
+    /// where a non-reconnectable transport (serial) is rejected, so the
+    /// supervisor never has to.
+    fn try_from(locator: AnyLocator) -> Result<Self, Self::Error> {
+        match locator {
+            AnyLocator::Ip(ip) => Ok(ReconnectLocator::Ip(ip)),
+            AnyLocator::Named { proto, host, port } => {
+                Ok(ReconnectLocator::Named { proto, host, port })
+            }
+            AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
+        }
+    }
+}
 
 /// One recorded declaration emit, replayable onto a fresh transport.
 ///
@@ -271,5 +353,67 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
 
     fn close_blocking(&self) {
         R::link_driver(&self.inner.borrow()).close_blocking();
+    }
+}
+
+#[cfg(test)]
+mod reconnect_locator_tests {
+    use super::*;
+    use crate::locator::{SerialEndpoint, SerialTarget};
+    use core::net::SocketAddr;
+
+    fn numeric() -> ParsedLocator {
+        ParsedLocator {
+            proto: Proto::Tcp,
+            addr: "1.2.3.4:7447".parse::<SocketAddr>().unwrap(),
+        }
+    }
+
+    #[test]
+    fn ip_narrows_and_widens_round_trip() {
+        // A numeric IP endpoint is reconnectable and survives the
+        // AnyLocator -> ReconnectLocator -> AnyLocator round trip unchanged.
+        let any = AnyLocator::Ip(numeric());
+        let reconnectable = ReconnectLocator::try_from(any.clone()).expect("ip is reconnectable");
+        assert_eq!(reconnectable, ReconnectLocator::Ip(numeric()));
+        assert_eq!(AnyLocator::from(reconnectable), any);
+    }
+
+    #[test]
+    fn named_narrows_and_widens_round_trip() {
+        // R311pw — a DNS-named endpoint is reconnectable (the debt-B fix): it
+        // narrows to ReconnectLocator::Named and widens back verbatim, so the
+        // supervisor can re-dial (and re-resolve) it.
+        let any = AnyLocator::Named {
+            proto: Proto::Tcp,
+            host: "example.org".into(),
+            port: 7447,
+        };
+        let reconnectable =
+            ReconnectLocator::try_from(any.clone()).expect("named is reconnectable");
+        assert_eq!(
+            reconnectable,
+            ReconnectLocator::Named {
+                proto: Proto::Tcp,
+                host: "example.org".into(),
+                port: 7447,
+            }
+        );
+        assert_eq!(AnyLocator::from(reconnectable), any);
+    }
+
+    #[test]
+    fn serial_is_not_reconnectable() {
+        // pico parity: serial is a point-to-point tty with no reopen-task
+        // model, so it is rejected at the narrowing boundary — the supervisor
+        // can never hold a serial endpoint (unrepresentable by construction).
+        let any = AnyLocator::Serial(SerialEndpoint {
+            target: SerialTarget::Device("/dev/ttyUSB0".into()),
+            baudrate: 115200,
+        });
+        assert_eq!(
+            ReconnectLocator::try_from(any),
+            Err(NotReconnectable::Serial)
+        );
     }
 }

@@ -21,7 +21,7 @@
 //!   under the transport mutex);
 //! - the reopen task = [`ReconnectingSession::drive`]'s reconnect loop:
 //!   `reset_for_reopen` (pico's fresh `_z_transport_t`) → re-dial the
-//!   retained [`ParsedLocator`] → swap → the same [`initiator_open`]
+//!   retained [`ReconnectLocator`] → swap → the same [`initiator_open`]
 //!   bring-up the first open used (fresh engine over the same actions) →
 //!   [`SessionLinkActions::replay_declarations`] (pico's declaration-cache
 //!   walk) → resume the steady-state loop;
@@ -40,13 +40,21 @@ use std::sync::Arc;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
-// R311nv — reconnect stays IP-only (`ParsedLocator`): pico's
-// `Z_FEATURE_AUTO_RECONNECT` is a client TCP/UDP/TLS re-dial path (R311oe —
-// TLS is TCP-based, so `Proto::Tls` is an `AnyLocator::Ip` variant too), and
-// serial is a point-to-point tty without that reopen-task model. The retained
-// locator is wrapped `AnyLocator::Ip` at the (now `AnyLocator`-typed)
-// `dial_locator` call sites.
-use wz_session_core::locator::{AnyLocator, ParsedLocator};
+// R311pw — the retained re-dial target is a [`ReconnectLocator`] (the
+// reconnectable subset: numeric `Ip` | DNS `Named`, both IP-family
+// connection-oriented). pico's `Z_FEATURE_AUTO_RECONNECT` is a client
+// TCP/UDP/TLS/WS re-open path (R311oe — TLS/WS ride TCP, so they are `Ip` /
+// `Named` arms too); serial is a point-to-point tty with no reopen-task model
+// and is excluded at the `ReconnectLocator` narrowing boundary, not here. The
+// retained locator widens back to `AnyLocator` (`.into()`) at each
+// `dial_locator` call site — a `Named` arm re-resolves the host on EVERY
+// attempt (DNS failover), where the prior IP-only `ParsedLocator` could not
+// reconnect a hostname `--connect` at all (the R311ps dial/reconnect
+// asymmetry this closes).
+// R311pw — re-export the reconnectable-locator type (and its narrowing
+// rejection) so a caller gets `open_session_with_reconnect` and its parameter
+// type from one path; the supervisor module is where the reconnect API lives.
+pub use wz_session_core::reconnect::{NotReconnectable, ReconnectLocator};
 use wz_session_core::reconnect::{ReplayDeclarationsError, SwappableLink};
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -120,7 +128,7 @@ pub enum ReconnectDriveOutcome {
 pub struct ReconnectingSession {
     actions: Arc<SessionLinkActions>,
     swappable: Arc<SwappableLink<TokioRuntime>>,
-    locator: ParsedLocator,
+    locator: ReconnectLocator,
     /// R311oe — the dial config RETAINED across reconnects (taken by value at
     /// open). A `tls/...` re-dial needs the same client config + server name
     /// the first dial used; cert-free transports hold a default here. Struct
@@ -162,7 +170,7 @@ impl ReconnectingSession {
         // retains the session config in its reopen task). Cert-free transports
         // (tcp/udp) hold a default config here, so this stays behaviour-
         // preserving for them.
-        let dialed = dial_locator(AnyLocator::Ip(self.locator), &self.dial_config)
+        let dialed = dial_locator(self.locator.clone().into(), &self.dial_config)
             .await
             .map_err(OpenError::Dial)?;
         let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
@@ -314,6 +322,16 @@ impl ReconnectingSession {
 /// [`ReconnectingSession::drive`] can replace the transport without
 /// touching the bundle (or any `Session` / handle clone over it).
 ///
+/// `locator` is a [`ReconnectLocator`] — the reconnectable subset (numeric
+/// `Ip` | DNS `Named`). A caller with an [`AnyLocator`] from the parse seam
+/// narrows it via [`ReconnectLocator::try_from`] (a `serial/...` endpoint is
+/// rejected there: no reopen-task model). R311pw — a `Named` host is
+/// RE-RESOLVED on every re-dial, so a hostname `--connect` reconnects and
+/// follows the host's current address; the prior `ParsedLocator` parameter
+/// admitted only numeric endpoints (the R311ps dial/reconnect asymmetry).
+///
+/// [`AnyLocator`]: wz_session_core::locator::AnyLocator
+///
 /// `dial_config` is RETAINED for the supervisor's lifetime (taken by value,
 /// unlike the one-shot opens that borrow it): every reconnect re-dials with
 /// the SAME config, so a `tls/...` session keeps the client config + server
@@ -325,7 +343,7 @@ impl ReconnectingSession {
 /// an established session's transport death (`_zp_unicast_failed_result`
 /// fires from the live read/lease tasks, never from `z_open` itself).
 pub async fn open_session_with_reconnect(
-    locator: ParsedLocator,
+    locator: ReconnectLocator,
     params: SessionInitParams,
     dial_config: DialConfig,
     clock: TokioTime,
@@ -335,7 +353,10 @@ pub async fn open_session_with_reconnect(
 ) -> Result<ReconnectingSession, OpenError> {
     // R311oe — the dial config is RETAINED (moved into the supervisor below)
     // so every reconnect re-dials with it; borrow it for the initial dial.
-    let dialed = dial_locator(AnyLocator::Ip(locator), &dial_config)
+    // R311pw — `locator` is the reconnectable subset (numeric `Ip` | DNS
+    // `Named`); clone it for the initial dial (it widens to `AnyLocator` via
+    // `.into()`) and move the original into the supervisor for the re-dials.
+    let dialed = dial_locator(locator.clone().into(), &dial_config)
         .await
         .map_err(OpenError::Dial)?;
     let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
