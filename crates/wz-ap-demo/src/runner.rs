@@ -9,8 +9,9 @@
 // decomposes the original 683-line body into a thin assembly +
 // six private sub-fns (R230 §5.P inventory pattern):
 //
-//   * `establish_link` — TCP setup; Acceptor binds + accepts,
-//     Initiator dials.
+//   * `establish_link` — link setup; both roles delegate to the
+//     library session-open seam (Acceptor -> accept_endpoint,
+//     Initiator -> dial_endpoint).
 //   * `link_pipeline::wire_tcp_stream` (R311ev) — stream split +
 //     writer task spawn + `TcpReadDriver` / `TcpWriteDriver`
 //     construction, consumed from the library (was the demo-local
@@ -44,7 +45,6 @@
 use std::io;
 use std::sync::Arc;
 
-use tokio::net::TcpListener;
 // R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
 // to wz's [`TokioJoinHandle`], the trait-wrapped form returned by
 // `<TokioRuntime as Runtime>::spawn`. The wrapper exposes the same
@@ -73,8 +73,8 @@ use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionLinkActions, SessionTimeouts,
 };
 use wz::runtime_tokio::session_open::{
-    accept_and_open_session, dial_endpoint, initiate_and_open_session, DialConfig, DialedLink,
-    OpenedSession, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, accept_endpoint, dial_endpoint, initiate_and_open_session, DialConfig,
+    DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
 
@@ -113,7 +113,8 @@ struct SpawnedTasks {
     liveliness_get_handle: Option<TokioJoinHandle<()>>,
 }
 
-/// Step 1 — link setup. Acceptor binds + accepts; Initiator dials.
+/// Step 1 — link setup. Both roles delegate to the library session-open
+/// seam (Acceptor -> [`accept_endpoint`], Initiator -> [`dial_endpoint`]).
 /// Both paths return a [`DialedLink`] the role-agnostic open helpers
 /// consume, after which the FSM-driving code is role-agnostic except
 /// for the initial role-start event dispatch (see [`activate_role`]).
@@ -140,26 +141,37 @@ struct SpawnedTasks {
 /// `transport-link-ws`; without it the seam surfaces a typed
 /// `Unsupported` io error rather than mis-dialing.
 ///
-/// R311pq — STATED ASYMMETRY (not an oversight): the Acceptor arm is
-/// TCP-only and scheme-blind. It binds a plain `TcpListener` on `--listen`
-/// and returns `DialedLink::Tcp`, with no `ws/` / `tls/` counterpart to the
-/// Initiator's locator dial; a scheme-bearing `--listen` fails loudly at
-/// `TcpListener::bind`, not silently. The library DOES carry a symmetric WS
-/// acceptor (`accept_ws` in `wz_runtime_tokio::ws_pipeline`, exercised
-/// in-process by its `ws_e2e.rs`), so the capability exists. The demo omits
-/// it because there is no cross-impl WS DIALER to verify a wz WS acceptor
-/// against: zenoh-pico has no native WS (emscripten-only), and the Layer Z
-/// WS legs run wz as the WS Initiator against zenohd's `ws/` listener. A
-/// demo WS acceptor would therefore be unverifiable (dead) code, so it is
-/// deliberately left out rather than added for symmetry's sake.
+/// R311pu — the Acceptor arm delegates to the library accept seam
+/// [`accept_endpoint`] (symmetric to the Initiator's [`dial_endpoint`]),
+/// dissolving the prior inline `TcpListener::bind` + `accept` re-assembly into
+/// the same seam the dial side uses: `accept_endpoint` classifies `--listen`
+/// through the shared `plan_dial` classifier, then `accept_locator` binds +
+/// accepts.
+///
+/// STATED ASYMMETRY (R311pq, still true at the DEMO level): `accept_locator`
+/// wires `Tcp` and leaves `ws/` / `tls/` as typed-`Unsupported` extension
+/// points — NOT dead code, the same shape `dial_locator`'s non-tcp arms carry.
+/// A wz WS/TLS ACCEPTOR implementation stays unwired because there is no
+/// cross-impl WS/TLS DIALER to verify it against (zenoh-pico has no native WS,
+/// emscripten-only; the Layer Z WS legs run wz as the WS Initiator against
+/// zenohd's `ws/` listener). The `accept_ws` / `accept_tls` primitives exist in
+/// the library, so wiring them is a one-arm change when a verified caller lands
+/// (R63 concrete-impls-land-alongside-real-callers) — the demo dials, not
+/// accepts, those transports today.
 async fn establish_link(role: &Role) -> io::Result<DialedLink> {
     match role {
         Role::Acceptor { listen } => {
-            let listener = TcpListener::bind(listen).await?;
-            log::info!("wz-ap-demo: listening on {}", listener.local_addr()?);
-            let (stream, peer) = listener.accept().await?;
-            log::info!("wz-ap-demo: accepted peer {peer}");
-            Ok(DialedLink::Tcp(stream))
+            // R311pu — delegate to the library accept seam (symmetric to the
+            // Initiator's dial_endpoint), dissolving the inline TcpListener::bind.
+            // accept_tcp logs the "listening on" / "accepted peer" lines the
+            // round-trip test waits on; this arm logs the negotiated transport,
+            // mirroring the Initiator's line.
+            let accepted = accept_endpoint(listen).await?;
+            log::info!(
+                "wz-ap-demo: accepted on {listen} over {} transport",
+                accepted.transport_name()
+            );
+            Ok(accepted)
         }
         Role::Initiator { connect } => {
             let dialed = dial_endpoint(connect, &DialConfig::default()).await?;

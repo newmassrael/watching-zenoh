@@ -33,7 +33,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::tcp::OwnedReadHalf;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use wz_runtime_core::Runtime;
@@ -79,6 +79,28 @@ pub async fn dial_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
 /// hostname; the numeric [`dial_tcp`] handles a parsed `tcp/` locator.
 pub async fn dial_tcp_host(host: &str) -> io::Result<TcpStream> {
     TcpStream::connect(host).await
+}
+
+/// Bind a TCP listener on a `host:port` STRING and accept ONE inbound
+/// connection — the accept-side primitive symmetric to [`dial_tcp_host`].
+/// `TcpListener::bind` takes `ToSocketAddrs`, so a numeric `127.0.0.1:7447`,
+/// a wildcard `0.0.0.0:7447`, or a DNS name all bind through the same call,
+/// mirroring how the dial sibling resolves its target. Returns the accepted
+/// [`TcpStream`] + the peer address; the caller splits it via
+/// [`wire_tcp_stream`] exactly as the dial path does, so the steady state is
+/// role-agnostic.
+///
+/// ONE-shot accept (not a loop): the session-open contract is a single peer
+/// link, the accept-side mirror of the single [`TcpStream`] [`dial_tcp`] /
+/// [`dial_tcp_host`] return. A multi-peer router would own its own accept
+/// loop ABOVE this primitive, not inside it. The listening address is logged
+/// before the (blocking) accept so a developer sees which port came up.
+pub async fn accept_tcp(listen: &str) -> io::Result<(TcpStream, SocketAddr)> {
+    let listener = TcpListener::bind(listen).await?;
+    log::info!("wz accept_tcp: listening on {}", listener.local_addr()?);
+    let (stream, peer) = listener.accept().await?;
+    log::info!("wz accept_tcp: accepted peer {peer}");
+    Ok((stream, peer))
 }
 
 /// Split a connected [`TcpStream`] into the cooperating drivers the session

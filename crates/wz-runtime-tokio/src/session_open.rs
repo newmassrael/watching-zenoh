@@ -38,7 +38,7 @@ use wz_session_core::locator::{
 use wz_session_core::scout_static::synth_static_locators;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
-use crate::link_pipeline::{dial_tcp, dial_tcp_host, wire_tcp_stream, TcpReadDriver};
+use crate::link_pipeline::{accept_tcp, dial_tcp, dial_tcp_host, wire_tcp_stream, TcpReadDriver};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
@@ -343,10 +343,13 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
     }
 }
 
-/// Classify a `--connect`-style endpoint string into the [`AnyLocator`] the
-/// dial seam consumes — the dial routing decision, kept PURE (no I/O) so the
-/// table is unit-tested without sockets or DNS, and [`dial_endpoint`] stays a
-/// thin async wrapper over [`dial_locator`].
+/// Classify a `--connect` / `--listen`-style endpoint string into the
+/// [`AnyLocator`] the dial + accept seams consume — the routing decision, kept
+/// PURE (no I/O) so the table is unit-tested without sockets or DNS.
+/// [`dial_endpoint`] and [`accept_endpoint`] are thin async wrappers over
+/// [`dial_locator`] / [`accept_locator`] respectively; both share THIS
+/// classifier (R311pu — a listen string parses by the same rules a connect
+/// string does, so the dial/accept routing is one source of truth).
 ///
 /// R311ps — the only `--connect`-specific rule left here is the scheme-less
 /// convenience: a bare `HOST:PORT` (no proto separator) is dialed as implicit
@@ -401,6 +404,79 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
         )
     })?;
     dial_locator(locator, cfg).await
+}
+
+/// Accept-side dispatcher symmetric to [`dial_locator`]: bind + accept ONE
+/// inbound link for the [`AnyLocator`]'s scheme, returning the same
+/// [`DialedLink`] union the dial path produces so [`accept_and_open_session`]
+/// consumes one concrete type whatever the role.
+///
+/// R311pu — mirrors [`dial_locator`]'s wiring discipline EXACTLY: `Tcp` is the
+/// wired baseline (bind + accept a plain `TcpStream` via
+/// [`accept_tcp`](crate::link_pipeline::accept_tcp)); every other scheme
+/// returns a typed `Unsupported` — a CLEAN extension point, NOT dead code (the
+/// same shape `dial_locator`'s non-tcp arms carry). The accept-side proto
+/// upgrades wire in HERE when a verified caller lands: `accept_ws` / `accept_tls`
+/// already exist as primitives ([`crate::ws_pipeline`] / [`crate::tls_pipeline`]),
+/// but R311pq recorded that the demo has no cross-impl WS/TLS DIALER to verify a
+/// wz acceptor against (zenoh-pico has no native WS; the Layer Z WS legs run wz
+/// as the WS Initiator), so wiring them now would be dead code (R63
+/// concrete-impls-land-alongside-real-callers). `Udp` is connectionless — it
+/// has no accept; `Serial`'s accept is a tty open
+/// ([`accept_serial`](crate::serial_pipeline::accept_serial)), not a listen
+/// bind, wired when a serial acceptor caller lands.
+pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
+    // The not-yet-wired accept schemes share one typed-Unsupported message;
+    // the extension point is the arm, not the string.
+    fn unsupported(scheme: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "accept is wired only for tcp; {scheme} acceptor is a not-yet-wired \
+                 extension point (no verified cross-impl dialer to gate it against)"
+            ),
+        )
+    }
+    match locator {
+        AnyLocator::Ip(ip) => match ip.proto {
+            Proto::Tcp => Ok(DialedLink::Tcp(accept_tcp(&ip.addr.to_string()).await?.0)),
+            other => Err(unsupported(&format!("{other:?}"))),
+        },
+        // A DNS-named tcp listen (`tcp/host:port`) binds through the same
+        // resolver-capable `accept_tcp`; a non-tcp name is the same typed
+        // Unsupported extension point as the numeric arm.
+        AnyLocator::Named { proto, host, port } => match proto {
+            Proto::Tcp => Ok(DialedLink::Tcp(
+                accept_tcp(&format!("{host}:{port}")).await?.0,
+            )),
+            other => Err(unsupported(&format!("{other:?}"))),
+        },
+        AnyLocator::Serial(_) => Err(unsupported("serial (tty open, not a listen bind)")),
+    }
+}
+
+/// Accept a `--listen`-style endpoint string to a raw [`DialedLink`] — the
+/// std-layer accept seam, symmetric to [`dial_endpoint`]. [`plan_dial`] is the
+/// SHARED classifier (a listen string parses to an [`AnyLocator`] by the same
+/// rules a connect string does — a scheme'd locator, or the scheme-less =
+/// `tcp` convenience), then [`accept_locator`] performs the bind + accept.
+///
+/// R311pu — no `DialConfig` param (unlike [`dial_endpoint`]): the only cfg an
+/// acceptor would consume is a TLS server config, and the TLS accept arm is a
+/// not-yet-wired typed-`Unsupported` extension point in [`accept_locator`].
+/// Adding the param now would be a dead param; it lands alongside the TLS
+/// accept arm when a verified caller does. This is the accept-side counterpart
+/// to the demo's `establish_link` Acceptor role, dissolving its inline
+/// `TcpListener::bind` into the same library seam the Initiator role already
+/// dials through.
+pub async fn accept_endpoint(listen: &str) -> io::Result<DialedLink> {
+    let locator = plan_dial(listen).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("wz accept: malformed / unsupported --listen {listen:?}: {e:?}"),
+        )
+    })?;
+    accept_locator(locator).await
 }
 
 /// Inbound read driver of a dialed link — the transport union on the read
@@ -1119,5 +1195,31 @@ mod tests {
             .await
             .expect("tcp/ host:port dials");
         assert!(matches!(schemed, DialedLink::Tcp(_)));
+    }
+
+    // ── accept-side contract (R311pu): symmetric to the dial side above. Only
+    //    `tcp` is wired; a udp/ws/tls `--listen` is a typed `Unsupported`
+    //    returned BEFORE any bind (no socket) — the same clean extension-point
+    //    shape `dial_locator`'s non-tcp arms carry. The TCP accept path
+    //    (bind + accept) is proven end-to-end by Layer E's ap_demo_round_trip
+    //    (establish_link's Acceptor role now delegates to accept_endpoint); a
+    //    port-race-free unit cannot mirror it because the acceptor owns the
+    //    bind, hiding the OS-chosen port a dialing test would need.
+    #[tokio::test]
+    async fn non_tcp_listen_accept_is_unsupported_without_io() {
+        for s in [
+            "udp/127.0.0.1:7447",
+            "ws/127.0.0.1:7447",
+            "tls/127.0.0.1:7447",
+        ] {
+            match accept_endpoint(s).await {
+                Err(e) => assert_eq!(
+                    e.kind(),
+                    io::ErrorKind::Unsupported,
+                    "{s} accept should be Unsupported (accept only wired for tcp)"
+                ),
+                Ok(_) => panic!("{s} must not accept (accept only wired for tcp)"),
+            }
+        }
     }
 }
