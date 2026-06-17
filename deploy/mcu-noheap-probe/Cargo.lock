@@ -517,6 +517,14 @@ version = "0.1.0"
 dependencies = [
  "heapless",
  "sce-build",
+ "sce-portable-bytes",
+]
+
+[[package]]
+name = "sce-portable-bytes"
+version = "0.1.0"
+dependencies = [
+ "heapless",
 ]
 
 [[package]]
@@ -526,6 +534,7 @@ dependencies = [
  "heapless",
  "log",
  "portable-atomic",
+ "sce-portable-bytes",
  "thiserror",
 ]
 
@@ -723,6 +732,7 @@ version = "0.1.0"
 dependencies = [
  "sce-build",
  "sce-forge-runtime",
+ "sce-portable-bytes",
 ]
 
 [[package]]
