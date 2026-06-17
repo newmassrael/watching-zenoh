@@ -40370,6 +40370,52 @@
         "코드 LOCAL-COMMITTED UNPUSHED 예정(테스트 1파일; R311pz 코드+ledger 2커밋은 이미 로컬 3658ffb/0ac34f2). push 명시 동의 필요(CLAUDE.md). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311q1": {
+      "decision_summary": "R311q1: 4-에이전트 적대 리뷰 remediation. R311pz REVERT(tokio bind이 Unix서 이미 SO_REUSEADDR+resolve-loop=NIH no-op, 테스트 vacuous, de-risk 인과 거짓). e2e를 데이터플레인 재개 witness로 재작성(periodic publisher), DRY spawn_listen_acceptor.",
+      "changes_bullets": [
+        "link_pipeline.rs: R311pz REVERT — bind_tcp/bind_tcp_host를 bare TcpListener::bind으로 복원, bind_listener_reuseaddr 헬퍼 + 2 단위 테스트 + TcpSocket/lookup_host import 제거. 근거: tokio TcpListener::bind이 Unix에서 이미 set_reuseaddr(true)를 bind 전 설정(mio-1.2.0 listener.rs:78-82, tokio-1.52.3 listener.rs:78 doc) + 이미 동일한 resolve+try-each+last_err 루프(tokio listener.rs:103-121) 수행. 변경은 그것의 NIH 재구현(Unix서 backlog 1024 vs 128 외 동작 no-op)이었고 단위 테스트는 vacuous(bare bind도 SO_REUSEADDR=true라 구별 불가, root-cause가 reverted 상태로 실증).",
+        "wz-ap-demo/src/tasks.rs: publisher_task에 long_lived: bool 인자 + reconnect 모드용 periodic 분기. emit_one_push(literal/aliased 4-arm 디스패치)를 추출(finite burst + periodic이 단일 사이트 공유, DRY) + publish_cycle(재-Established 대기 후 1 emit). long_lived 루프=biased select{shutdown_signal()=>break, publish_cycle=>continue}로 재연결마다 재무장 + graceful-shutdown에 clean exit(session clone drop이 teardown drop_actions 전 = writer last-sender 불변 유지).",
+        "wz-ap-demo/src/runner.rs: long_lived=matches!(&role, Role::Initiator{reconnect:true,..})를 spawn_background_tasks→publisher_task로 전달(acceptor long-lived publish는 표현불가).",
+        "wz-integration-tests/src/lib.rs: common::spawn_listen_acceptor(demo,addr,key,label,stderr_file)->(ChildGuard,File) 추가 — R305이 graceful_terminate에 적용한 per-test-중복 통합 선례(tempfile은 dev-dep이라 File 인자로 받아 lib 의존성 변경 회피).",
+        "wz-integration-tests/tests/wz_initiator_to_wz_acceptor.rs: 신규 e2e를 데이터플레인 재개 witness로 재작성(SO_REUSEADDR/TIME_WAIT 거짓 인과 제거) — initiator --connect --reconnect --publish(periodic), A1/A2 --listen --key; A1 SUBSCRIBER FIRED→A1 kill+reap→A2 동일포트 respawn→A2(신규 프로세스) 재연결 '후' Put로 SUBSCRIBER FIRED(데이터플레인 연속) + reconnects=1. 기존 acceptor spawn 2곳을 spawn_listen_acceptor로 통합(3 callers 1 헬퍼)."
+      ],
+      "verification_bullets": [
+        "출처=R311pz+q0 독립 4-에이전트 적대 세션리뷰(architect/quality/refactoring/root-cause). 성급한 self-assessment 10번째 뒤집힘. 적발(전부 교차검증+나 직접 소스 확인): (MAJOR quality 실증) e2e가 SO_REUSEADDR를 게이트 안 함 — 변경 revert 후 10/10 PASS. 메커니즘: initiator가 link death 감지해 자기 half teardown + A1 SIGKILL 후 full reap → listening 포트에 lingering TIME_WAIT 없음 → bare 소켓 rebind OK. (MAJOR root-cause+나 검증) tokio TcpListener::bind이 Unix서 이미 SO_REUSEADDR(mio:82) + resolve-loop(tokio:103) 수행 → 변경=NIH no-op, 단위 테스트 vacuous. ∴ R311pz/q0의 'de-risk 레버/TIME_WAIT EADDRINUSE' 인과는 조작(Professional Honesty + no-document-around-hack 위반). carry #1 원전제(2-process는 SO_REUSEADDR 필요)는 오진.",
+        "(MAJOR architect+root-cause) 데이터플레인 재개 미실증 — publisher_task가 유한 burst라 long-lived --reconnect 쇼케이스가 재연결 후 발행 재개를 안 보여줌. NO-DEFERRAL+가장-교과서 기준으로 acknowledge가 아니라 IMPLEMENT 선택: periodic publisher로 데이터플레인 연속을 e2e가 실증(post-reconnect Put→A2 SUBSCRIBER FIRED). (MINOR refactoring) DRY 회귀 — spawn helper를 common으로.",
+        "검증: fmt clean, clippy --all-targets -D warnings clean(wz-ap-demo+wz-integration-tests). 전체 e2e 파일 10/10 연속(5테스트 각, 1.57s 안정=periodic publisher 구조적 non-flake, 기존 reconnect round-trip 회귀0). link_pipeline 단위 2/2(revert), session_reconnect_e2e 4/4. reconnects=1 exact-by-construction(reconnect.rs:348 성공 reopen만 카운트). full run-ci는 push시 pre-push 훅 게이트.",
+        "SOUND(3에이전트 교차검증, 변경 안 함): reconnect_endpoint seam, GaveUp into_teardown degenerate-but-correct, SIGKILL→loss 감지 보장, reconnects 카운터."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311q1 = R311pz+q0 4-에이전트 적대 리뷰 remediation. R311pz REVERT(tokio bind이 Unix서 이미 SO_REUSEADDR+resolve-loop=NIH no-op + vacuous 테스트 + de-risk 인과 거짓). e2e를 데이터플레인 재개 witness로 재작성(periodic publisher가 재연결 후 발행 재개→A2 SUBSCRIBER FIRED). DRY: spawn_listen_acceptor를 common으로. carry #1(바이너리 sever-reconnect e2e)=control(라이브러리)+data(바이너리) 양 평면 + 실 프로세스 sever로 정직하게 종료.",
+        "교훈: '성급한 self-assessment'가 또 뒤집힘 — 적대 리뷰어 주장도 맹신 말고 직접 검증(tokio/mio 소스 read로 SO_REUSEADDR 기본동작 확인). 거짓 인과는 코드가 통과해도 교과서 위반. frozen-ledger: R311pz/q0 본문 보존, 이 엔트리가 정정.",
+        "남은 carry(별도 정직한 항목, NO-DEFERRAL): (1) zenoh TCP socket-option parity — listener backlog 1024(tokio 기본 128) + 모든 unicast 스트림 set_nodelay(true)+set_linger(zenoh-link-tcp/unicast.rs:55,65; wz 미설정). bind 동작이 아니라 별개 튜닝 축이라 별도 라운드. (2) [[project-north-star]] P4 zenoh-full 카탈로그 + pico optional. 코드 LOCAL-COMMITTED UNPUSHED 예정. push 명시 동의 필요. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311q1: 4-에이전트 적대 리뷰 remediation. R311pz REVERT(tokio bind이 Unix서 이미 SO_REUSEADDR+resolve-loop=NIH no-op, 테스트 vacuous, de-risk 인과 거짓). e2e를 데이터플레인 재개 witness로 재작성(periodic publisher), DRY spawn_listen_acceptor.",
+      "publishable_changes_bullets": [
+        "link_pipeline.rs: R311pz REVERT — bind_tcp/bind_tcp_host를 bare TcpListener::bind으로 복원, bind_listener_reuseaddr 헬퍼 + 2 단위 테스트 + TcpSocket/lookup_host import 제거. 근거: tokio TcpListener::bind이 Unix에서 이미 set_reuseaddr(true)를 bind 전 설정(mio-1.2.0 listener.rs:78-82, tokio-1.52.3 listener.rs:78 doc) + 이미 동일한 resolve+try-each+last_err 루프(tokio listener.rs:103-121) 수행. 변경은 그것의 NIH 재구현(Unix서 backlog 1024 vs 128 외 동작 no-op)이었고 단위 테스트는 vacuous(bare bind도 SO_REUSEADDR=true라 구별 불가, root-cause가 reverted 상태로 실증).",
+        "wz-ap-demo/src/tasks.rs: publisher_task에 long_lived: bool 인자 + reconnect 모드용 periodic 분기. emit_one_push(literal/aliased 4-arm 디스패치)를 추출(finite burst + periodic이 단일 사이트 공유, DRY) + publish_cycle(재-Established 대기 후 1 emit). long_lived 루프=biased select{shutdown_signal()=>break, publish_cycle=>continue}로 재연결마다 재무장 + graceful-shutdown에 clean exit(session clone drop이 teardown drop_actions 전 = writer last-sender 불변 유지).",
+        "wz-ap-demo/src/runner.rs: long_lived=matches!(&role, Role::Initiator{reconnect:true,..})를 spawn_background_tasks→publisher_task로 전달(acceptor long-lived publish는 표현불가).",
+        "wz-integration-tests/src/lib.rs: common::spawn_listen_acceptor(demo,addr,key,label,stderr_file)->(ChildGuard,File) 추가 — R305이 graceful_terminate에 적용한 per-test-중복 통합 선례(tempfile은 dev-dep이라 File 인자로 받아 lib 의존성 변경 회피).",
+        "wz-integration-tests/tests/wz_initiator_to_wz_acceptor.rs: 신규 e2e를 데이터플레인 재개 witness로 재작성(SO_REUSEADDR/TIME_WAIT 거짓 인과 제거) — initiator --connect --reconnect --publish(periodic), A1/A2 --listen --key; A1 SUBSCRIBER FIRED→A1 kill+reap→A2 동일포트 respawn→A2(신규 프로세스) 재연결 '후' Put로 SUBSCRIBER FIRED(데이터플레인 연속) + reconnects=1. 기존 acceptor spawn 2곳을 spawn_listen_acceptor로 통합(3 callers 1 헬퍼)."
+      ],
+      "publishable_verification_bullets": [
+        "출처=R311pz+q0 독립 4-에이전트 적대 세션리뷰(architect/quality/refactoring/root-cause). 성급한 self-assessment 10번째 뒤집힘. 적발(전부 교차검증+나 직접 소스 확인): (MAJOR quality 실증) e2e가 SO_REUSEADDR를 게이트 안 함 — 변경 revert 후 10/10 PASS. 메커니즘: initiator가 link death 감지해 자기 half teardown + A1 SIGKILL 후 full reap → listening 포트에 lingering TIME_WAIT 없음 → bare 소켓 rebind OK. (MAJOR root-cause+나 검증) tokio TcpListener::bind이 Unix서 이미 SO_REUSEADDR(mio:82) + resolve-loop(tokio:103) 수행 → 변경=NIH no-op, 단위 테스트 vacuous. ∴ R311pz/q0의 'de-risk 레버/TIME_WAIT EADDRINUSE' 인과는 조작(Professional Honesty + no-document-around-hack 위반). carry #1 원전제(2-process는 SO_REUSEADDR 필요)는 오진.",
+        "(MAJOR architect+root-cause) 데이터플레인 재개 미실증 — publisher_task가 유한 burst라 long-lived --reconnect 쇼케이스가 재연결 후 발행 재개를 안 보여줌. NO-DEFERRAL+가장-교과서 기준으로 acknowledge가 아니라 IMPLEMENT 선택: periodic publisher로 데이터플레인 연속을 e2e가 실증(post-reconnect Put→A2 SUBSCRIBER FIRED). (MINOR refactoring) DRY 회귀 — spawn helper를 common으로.",
+        "검증: fmt clean, clippy --all-targets -D warnings clean(wz-ap-demo+wz-integration-tests). 전체 e2e 파일 10/10 연속(5테스트 각, 1.57s 안정=periodic publisher 구조적 non-flake, 기존 reconnect round-trip 회귀0). link_pipeline 단위 2/2(revert), session_reconnect_e2e 4/4. reconnects=1 exact-by-construction(reconnect.rs:348 성공 reopen만 카운트). full run-ci는 push시 pre-push 훅 게이트.",
+        "SOUND(3에이전트 교차검증, 변경 안 함): reconnect_endpoint seam, GaveUp into_teardown degenerate-but-correct, SIGKILL→loss 감지 보장, reconnects 카운터."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311q1 = R311pz+q0 4-에이전트 적대 리뷰 remediation. R311pz REVERT(tokio bind이 Unix서 이미 SO_REUSEADDR+resolve-loop=NIH no-op + vacuous 테스트 + de-risk 인과 거짓). e2e를 데이터플레인 재개 witness로 재작성(periodic publisher가 재연결 후 발행 재개→A2 SUBSCRIBER FIRED). DRY: spawn_listen_acceptor를 common으로. carry #1(바이너리 sever-reconnect e2e)=control(라이브러리)+data(바이너리) 양 평면 + 실 프로세스 sever로 정직하게 종료.",
+        "교훈: '성급한 self-assessment'가 또 뒤집힘 — 적대 리뷰어 주장도 맹신 말고 직접 검증(tokio/mio 소스 read로 SO_REUSEADDR 기본동작 확인). 거짓 인과는 코드가 통과해도 교과서 위반. frozen-ledger: R311pz/q0 본문 보존, 이 엔트리가 정정.",
+        "남은 carry(별도 정직한 항목, NO-DEFERRAL): (1) zenoh TCP socket-option parity — listener backlog 1024(tokio 기본 128) + 모든 unicast 스트림 set_nodelay(true)+set_linger(zenoh-link-tcp/unicast.rs:55,65; wz 미설정). bind 동작이 아니라 별개 튜닝 축이라 별도 라운드. (2) [[project-north-star]] P4 zenoh-full 카탈로그 + pico optional. 코드 LOCAL-COMMITTED UNPUSHED 예정. push 명시 동의 필요. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
