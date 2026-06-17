@@ -724,8 +724,8 @@ impl TcpDriver {
     /// primitive [`link_pipeline::dial_tcp`], so this unified-driver
     /// constructor and the split session-open pipeline
     /// ([`link_pipeline::wire_tcp_stream`]) share one connect path. The
-    /// mode-agnostic `dial_locator(ParsedLocator)` dispatcher (R311eu)
-    /// dispatches a `Proto::Tcp` endpoint to `dial_tcp` and then splits the
+    /// mode-agnostic `dial_locator(AnyLocator)` dispatcher (R311eu)
+    /// dispatches a numeric `Proto::Tcp` endpoint to `dial_tcp` and then splits the
     /// stream for the FSM, rather than burying the stream inside this
     /// driver — hence the raw-dial seam lives in `link_pipeline`.
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {

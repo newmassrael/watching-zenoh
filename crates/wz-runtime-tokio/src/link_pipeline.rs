@@ -16,9 +16,11 @@
 //!
 //! ## Pieces
 //!
-//! - [`dial_tcp`] — the single raw-dial primitive: `proto/addr:port` ->
-//!   connected [`TcpStream`]. The mode-agnostic `dial_locator(ParsedLocator)`
-//!   dispatcher (R311eu) routes a `Proto::Tcp` endpoint here.
+//! - [`dial_tcp`] / [`dial_tcp_host`] — the TCP raw-dial primitives: a NUMERIC
+//!   `SocketAddr` and a DNS-capable `host:port` STRING respectively, both ->
+//!   connected [`TcpStream`]. The mode-agnostic `dial_locator(AnyLocator)`
+//!   dispatcher (R311eu) routes a numeric `Proto::Tcp` endpoint to `dial_tcp`
+//!   and an `AnyLocator::Named` tcp endpoint to `dial_tcp_host` (R311ps).
 //! - [`wire_tcp_stream`] — splits a connected stream into the cooperating
 //!   `(TcpReadDriver, Arc<`[`StreamWriteDriver`]`>, writer-task handle)`
 //!   triple, building on the shared [`crate::stream_link`] drivers.

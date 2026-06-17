@@ -38,9 +38,14 @@
 //!   [`AnyLocator::Serial`] variant is unconditional; see that leaf's
 //!   note).
 //!
-//! Deferred, surfaced as parse errors rather than silently mis-parsed:
-//! - DNS hostnames (`tcp/example.org:7447`) — resolution is an AP-side
-//!   (`std`) concern, out of this no_std-compatible parse;
+//! DNS hostnames (`tcp/example.org:7447`) are CLASSIFIED, not rejected
+//! (R311ps): the IP leaf [`parse_locator`] is numeric-only and returns
+//! [`LocatorParseError::BadAddress`], but [`parse_any_locator`] then classifies
+//! a hostname-shaped address into [`AnyLocator::Named`]. Only the SHAPE is
+//! decided here — resolution stays an AP-side (`std`) concern, out of this
+//! no_std-compatible parse (the dial seam resolves a `Named` tcp endpoint).
+//!
+//! Still surfaced as parse errors rather than silently mis-parsed:
 //! - IP locator metadata suffixes (`udp/1.2.3.4:7447#iface=eth0`) — the
 //!   `#`-delimited config tail is not split by the IP leaf (the serial
 //!   leaf DOES read its `#baudrate=` tail);
@@ -267,8 +272,27 @@ fn parse_u32(s: &str) -> Result<u32, SerialLocatorError> {
 /// the per-scheme parse leaves; [`parse_any_locator`] builds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnyLocator {
-    /// An IP endpoint (`tcp/...` / `udp/...`) — see [`ParsedLocator`].
+    /// An IP endpoint with a NUMERIC address (`tcp/1.2.3.4:7447`,
+    /// `tcp/[::1]:7447`) — see [`ParsedLocator`]. The address parsed straight
+    /// to a [`SocketAddr`]; no resolution needed.
     Ip(ParsedLocator),
+    /// An IP-family endpoint whose address is a DNS NAME, not a numeric
+    /// [`SocketAddr`] (`tcp/example.org:7447`). R311ps — a name is a distinct
+    /// PARSED outcome from both a numeric address ([`Self::Ip`]) and a
+    /// malformed one ([`LocatorParseError::BadAddress`]): DNS-vs-numeric is a
+    /// property of the ADDRESS TOKEN, orthogonal to the scheme, so the parser
+    /// classifies it here for every IP-family proto rather than letting each
+    /// caller re-inspect the raw string. Resolution stays a std-layer concern
+    /// (this no_std parser only classifies the token shape — it never resolves);
+    /// the dial seam turns a `tcp` name into a host-string TCP dial and reports
+    /// the other protos' name dial as unsupported-for-now (a clean extension
+    /// point, not a string-prefix special-case). `host` is the non-empty,
+    /// non-numeric host token; `port` the validated `u16`.
+    Named {
+        proto: Proto,
+        host: String,
+        port: u16,
+    },
     /// A serial endpoint (`serial/...`) — see [`SerialEndpoint`]. ALWAYS
     /// present (R311ny: the serial locator leaf is ungated), so a
     /// `serial/...` string parses to this on any alloc build. Whether it
@@ -311,9 +335,49 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
             .map(AnyLocator::Serial)
             .map_err(AnyLocatorError::Serial);
     }
-    parse_locator(locator)
-        .map(AnyLocator::Ip)
-        .map_err(AnyLocatorError::Ip)
+    match parse_locator(locator) {
+        Ok(ip) => Ok(AnyLocator::Ip(ip)),
+        // R311ps — a non-numeric IP-family address is either a DNS NAME
+        // (classified to [`AnyLocator::Named`]; resolution stays the std dial
+        // layer's job) or genuinely malformed (the error propagates). Splitting
+        // them here makes DNS-vs-numeric an address-token property the dial seam
+        // routes on, instead of a raw-string re-inspection at each caller.
+        Err(LocatorParseError::BadAddress(addr)) => match classify_named_ip(locator) {
+            Some((proto, host, port)) => Ok(AnyLocator::Named { proto, host, port }),
+            None => Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(addr))),
+        },
+        Err(e) => Err(AnyLocatorError::Ip(e)),
+    }
+}
+
+/// Classify an IP-family locator whose address failed numeric [`SocketAddr`]
+/// parse: a `proto/HOST:PORT` with a known proto, a non-empty host bearing no
+/// `/` or extra `:`, and a valid `u16` port is a DNS NAME
+/// (`Some((proto, host, port))`); anything else — no port, bad port, empty
+/// host, a path-bearing host, or a bracketed (IPv6-literal) address that did
+/// not already parse numerically — is genuinely malformed (`None`). This only
+/// classifies the token SHAPE; it performs NO DNS resolution (that is the std
+/// dial layer's concern, per this module's deferral contract).
+fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16)> {
+    let (proto_str, addr) = locator.split_once('/')?;
+    let proto = match proto_str {
+        "tcp" => Proto::Tcp,
+        "udp" => Proto::Udp,
+        "tls" => Proto::Tls,
+        "ws" => Proto::Ws,
+        _ => return None,
+    };
+    // A bracketed address is an IPv6 literal; if it did not parse as a
+    // SocketAddr above, it is malformed, not a name.
+    if addr.starts_with('[') {
+        return None;
+    }
+    let (host, port_str) = addr.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+    if host.is_empty() || host.contains('/') || host.contains(':') {
+        return None;
+    }
+    Some((proto, host.to_string(), port))
 }
 
 #[cfg(test)]
@@ -443,15 +507,77 @@ mod tests {
     }
 
     #[test]
-    fn parse_any_propagates_ip_leaf_error() {
-        // A malformed IP address surfaces the IP leaf error verbatim,
-        // wrapped in the AnyLocator composition.
+    fn parse_any_propagates_genuinely_malformed_ip_error() {
+        // R311ps — a GENUINELY malformed IP address (no port) still surfaces
+        // the IP leaf error verbatim, wrapped in the AnyLocator composition.
+        // (A DNS name like `tcp/example.org:7447` is now classified as
+        // `AnyLocator::Named`, not an error — see the Named tests below.)
         assert_eq!(
-            parse_any_locator("tcp/example.org:7447"),
+            parse_any_locator("tcp/no-port-here"),
             Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(
-                "example.org:7447".to_string()
+                "no-port-here".to_string()
             )))
         );
+    }
+
+    #[test]
+    fn parse_any_classifies_dns_name_as_named() {
+        // R311ps — a `tcp/HOST:PORT` whose host is a DNS name is a distinct
+        // PARSED outcome (Named), not a BadAddress error. The numeric leaf
+        // `parse_locator` still rejects it (it only knows SocketAddr); the
+        // classification lives in `parse_any_locator`.
+        assert_eq!(
+            parse_any_locator("tcp/example.org:7447"),
+            Ok(AnyLocator::Named {
+                proto: Proto::Tcp,
+                host: "example.org".to_string(),
+                port: 7447,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_any_classifies_named_for_every_ip_proto() {
+        // DNS-vs-numeric is an address-token property orthogonal to scheme:
+        // every IP-family proto classifies a name to Named (whether that proto
+        // can DIAL a name is the dial seam's concern, surfaced there).
+        for (s, proto) in [
+            ("udp/example.org:7447", Proto::Udp),
+            ("ws/example.org:7447", Proto::Ws),
+            ("tls/example.org:7447", Proto::Tls),
+        ] {
+            assert_eq!(
+                parse_any_locator(s),
+                Ok(AnyLocator::Named {
+                    proto,
+                    host: "example.org".to_string(),
+                    port: 7447,
+                }),
+                "{s} should classify as Named"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_any_rejects_malformed_not_as_named() {
+        // Shapes that are NOT a valid host:port stay BadAddress (malformed),
+        // not Named: no port, bad port, empty host, path-bearing host, and an
+        // unparsed bracketed (IPv6-literal) address.
+        for s in [
+            "tcp/example.org",       // no port
+            "tcp/example.org:99999", // port out of u16 range
+            "tcp/:7447",             // empty host
+            "tcp/a/b:7447",          // path-bearing host
+            "tcp/[::1",              // malformed bracketed literal
+        ] {
+            assert!(
+                matches!(
+                    parse_any_locator(s),
+                    Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(_)))
+                ),
+                "{s} should be BadAddress, not Named"
+            );
+        }
     }
 
     #[test]

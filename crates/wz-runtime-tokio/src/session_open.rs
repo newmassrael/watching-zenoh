@@ -298,6 +298,28 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                 "ws session-open requires the transport-link-ws feature",
             )),
         },
+        // R311ps — a DNS-named IP-family endpoint (`tcp/example.org:7447`). The
+        // no_std parser classified the address token as a NAME; resolution is a
+        // std-layer concern, so a `tcp` name dials via the std-resolver host
+        // dial [`dial_tcp_host`] (which feeds the addr string to the resolver).
+        // The datagram/TLS/WS protos keep the numeric-only contract for now:
+        // their name dial is a typed `Unsupported`, a CLEAN extension point
+        // (add the arm when a `ws/HOST` / `tls/HOST` dial is actually wanted),
+        // NOT a silent fallback or a string-prefix special-case. The `Tcp` arm
+        // is unconditional like the `Ip(Proto::Tcp)` arm above — tcp is the
+        // always-on baseline stream transport.
+        AnyLocator::Named { proto, host, port } => match proto {
+            Proto::Tcp => Ok(DialedLink::Tcp(
+                dial_tcp_host(&format!("{host}:{port}")).await?,
+            )),
+            other => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "DNS-name dial is wired only for tcp; {other:?} needs a numeric \
+                     address (name resolution for this transport is not yet implemented)"
+                ),
+            )),
+        },
         // R311nv — a `serial/...` endpoint dials through the tty backend:
         // `dial_serial` opens the device AND drives the serial-link
         // handshake (INIT -> INIT|ACK) to Connected before returning, so the
@@ -321,87 +343,64 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
     }
 }
 
-/// How a `--connect`-style endpoint string should be dialed — the routing
-/// decision the [`dial_endpoint`] seam makes, extracted as a pure value so
-/// the decision is exhaustively unit-testable without any socket / DNS I/O.
+/// Classify a `--connect`-style endpoint string into the [`AnyLocator`] the
+/// dial seam consumes — the dial routing decision, kept PURE (no I/O) so the
+/// table is unit-tested without sockets or DNS, and [`dial_endpoint`] stays a
+/// thin async wrapper over [`dial_locator`].
 ///
-/// R311pm — this dissolves the pre-R311pm `--connect` two-path fork (the
-/// wz-ap-demo binary's `connect.contains('/')` heuristic, which dialed a bare
-/// `HOST:PORT` through the std resolver but routed a `tcp/...` form through
-/// the numeric-only locator parser, so a `tcp/hostname` silently failed as a
-/// `BadAddress` parse reject). The decision now lives in one place with one
-/// table; [`dial_endpoint`] is a thin async wrapper over the two outcomes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DialPlan {
-    /// A scheme'd, parseable locator (`tcp`/`udp`/`ws`/`tls` numeric endpoint
-    /// or `serial/...`), dialed via the mode-agnostic [`dial_locator`].
-    Locator(AnyLocator),
-    /// A `host:port` string for the std-resolver TCP dial ([`dial_tcp_host`]):
-    /// a scheme-less `HOST:PORT` (implicit `tcp`), or a `tcp/HOST` whose host
-    /// is a DNS name the numeric locator parser rejects. DNS resolution is a
-    /// std-layer concern the no_std parser defers ([`wz_session_core::locator`]).
-    TcpHost(String),
-}
-
-/// Classify a `--connect` endpoint string into a [`DialPlan`] — the dial
-/// routing SSOT. Pure (no I/O), so the routing table below is verified
-/// directly in unit tests; [`dial_endpoint`] performs the actual dial.
-fn plan_dial(connect: &str) -> Result<DialPlan, AnyLocatorError> {
+/// R311ps — the only `--connect`-specific rule left here is the scheme-less
+/// convenience: a bare `HOST:PORT` (no proto separator) is dialed as implicit
+/// `tcp`, so `--connect 127.0.0.1:7447` works without a scheme. Everything else
+/// — including a `tcp/HOST` DNS name — is classified by the shared
+/// [`parse_any_locator`] seam, which now yields [`AnyLocator::Named`] for a
+/// hostname. So DNS-vs-numeric routing is a property of the PARSED value, not a
+/// raw-string re-inspection here: this dissolved the R311pm `starts_with("tcp/")`
+/// special-case (scheme/address axis conflation) AND the dial_endpoint-vs-
+/// open_session_at contract split — both paths now route the same parsed
+/// `AnyLocator` through `dial_locator`.
+fn plan_dial(connect: &str) -> Result<AnyLocator, AnyLocatorError> {
     match parse_any_locator(connect) {
-        // A scheme'd, numeric (or serial) locator dials via the mode-agnostic
-        // seam. `ws/...` / `tls/...` reachability is decided there by feature.
-        Ok(locator) => Ok(DialPlan::Locator(locator)),
-        // A scheme-less `HOST:PORT` is an implicit `tcp` endpoint dialed by
-        // string, so the std resolver handles it (numeric or DNS alike). This
-        // is the wz-ap-demo `--connect 127.0.0.1:7447` convenience form, kept
-        // byte-for-byte (the prior bare-host `TcpStream::connect`).
+        Ok(locator) => Ok(locator),
+        // Scheme-less `HOST:PORT` = implicit `tcp` (the `--connect` convenience;
+        // zenoh locators otherwise always carry a scheme). Desugar to
+        // `tcp/<connect>` and re-parse through the same classifier so a bare
+        // numeric address and a bare hostname land as `Ip`/`Named` with `Tcp`
+        // uniformly — no separate bare-host code path.
         Err(AnyLocatorError::Ip(LocatorParseError::MissingProtoSeparator)) => {
-            Ok(DialPlan::TcpHost(connect.to_string()))
+            parse_any_locator(&format!("tcp/{connect}"))
         }
-        // `tcp/HOST:PORT` with a DNS hostname: the numeric IP leaf rejects it
-        // (`BadAddress`), but the std resolver can dial the name. Route it to
-        // the SAME std-resolver TCP dial, sans scheme, so a hostname behaves
-        // identically whether or not the `tcp/` scheme is written explicitly.
-        // Only `tcp` gets this convenience — `udp`/`ws`/`tls` keep the
-        // numeric-only contract (the parser defers their DNS, and no caller
-        // needs it), so their `BadAddress` falls through to the error arm.
-        Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(addr)))
-            if connect.starts_with("tcp/") =>
-        {
-            Ok(DialPlan::TcpHost(addr))
-        }
-        // Unknown scheme, a non-tcp DNS host, a metadata suffix, an
-        // out-of-range port, or a malformed `serial/...`: surface the typed
-        // parse error rather than guessing a transport.
+        // Unknown scheme, malformed address, metadata suffix, malformed serial:
+        // surface the typed parse error rather than guessing a transport.
         Err(e) => Err(e),
     }
 }
 
 /// Dial a `--connect`-style endpoint string to a raw [`DialedLink`] — the
-/// std-layer dial seam, the single home of "turn a connect string into a
-/// dialed transport". It owns the parse + scheme dispatch + DNS routing the
-/// wz-ap-demo binary previously re-assembled inline (R311pm): a scheme'd
-/// numeric/serial locator dials via [`dial_locator`]; a scheme-less
-/// `HOST:PORT` or a `tcp/HOST` DNS hostname dials via the std-resolver
-/// [`dial_tcp_host`] (see [`plan_dial`] for the routing table).
+/// std-layer dial seam, the single home of "turn a `--connect` string into a
+/// dialed transport". [`plan_dial`] classifies the string into an
+/// [`AnyLocator`] (applying only the scheme-less = `tcp` convenience), then
+/// [`dial_locator`] — the SINGLE dial path, shared with the scouting /
+/// static-deploy open path — performs the dial: a numeric endpoint via its
+/// per-proto raw dial, a `tcp` DNS name via the std-resolver [`dial_tcp_host`].
 ///
-/// Distinct from [`open_session_at`], which dials a scouting / static-deploy
-/// locator: those are machine-supplied and numeric by the parser's contract,
-/// so that path does not carry the human-typed-`--connect` DNS convenience.
+/// R311ps — this no longer carries a bespoke DNS path beside `dial_locator`:
+/// `dial_locator` itself handles the [`AnyLocator::Named`] case, so
+/// [`open_session_at`] (the scouting / static-deploy entry) gained the same
+/// scheme'd-hostname capability for free — DNS-capability is now a property of
+/// the resolver layer, not of which caller invoked it. The scheme-LESS
+/// convenience stays demo-only in [`plan_dial`] (configured zenoh locators
+/// always carry a scheme).
 ///
-/// `cfg` is forwarded to [`dial_locator`] for the transports that need
-/// out-of-band material (TLS); cert-free transports ignore it.
+/// `cfg` is forwarded to [`dial_locator`] for transports needing out-of-band
+/// material (TLS); cert-free transports ignore it.
 pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<DialedLink> {
-    let plan = plan_dial(connect).map_err(|e| {
+    let locator = plan_dial(connect).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("wz dial: malformed / unsupported --connect {connect:?}: {e:?}"),
         )
     })?;
-    match plan {
-        DialPlan::Locator(locator) => dial_locator(locator, cfg).await,
-        DialPlan::TcpHost(host) => Ok(DialedLink::Tcp(dial_tcp_host(&host).await?)),
-    }
+    dial_locator(locator, cfg).await
 }
 
 /// Inbound read driver of a dialed link — the transport union on the read
@@ -990,74 +989,72 @@ pub async fn open_session_static(
 mod tests {
     use super::*;
 
-    // ── R311pm — dial-routing SSOT (`plan_dial`). These prove the
-    //    `--connect` two-path fork is dissolved into one decision table,
-    //    deterministically and with NO socket / DNS I/O: the routing is a
-    //    pure function over the parsed scheme.
+    // ── R311pm/R311ps — dial-routing classifier (`plan_dial`). Pure (no
+    //    socket / DNS I/O): proves the `--connect` two-path fork is dissolved
+    //    and DNS-vs-numeric is a property of the PARSED value, not a string
+    //    re-inspection. A name classifies to AnyLocator::Named for EVERY
+    //    scheme; whether it can be DIALED is the dial-seam's concern below.
 
     #[test]
-    fn scheme_less_host_routes_to_the_std_resolver_tcp_dial() {
-        // A bare `HOST:PORT` (no scheme) is an implicit `tcp` endpoint dialed
-        // by string, so the std resolver handles numeric and DNS alike.
+    fn scheme_less_numeric_classifies_as_implicit_tcp_ip() {
+        // Bare `HOST:PORT` (no scheme) desugars to implicit `tcp`; a numeric
+        // address parses to AnyLocator::Ip(Tcp), same as the explicit `tcp/`.
         assert_eq!(
             plan_dial("127.0.0.1:7447"),
-            Ok(DialPlan::TcpHost("127.0.0.1:7447".to_string()))
+            Ok(parse_any_locator("tcp/127.0.0.1:7447").unwrap())
         );
+    }
+
+    #[test]
+    fn scheme_less_hostname_classifies_as_implicit_tcp_named() {
+        // Bare `HOST:PORT` with a DNS name desugars to implicit tcp and
+        // classifies as Named (the std resolver dials it at dial time).
         assert_eq!(
             plan_dial("example.org:7447"),
-            Ok(DialPlan::TcpHost("example.org:7447".to_string()))
+            Ok(AnyLocator::Named {
+                proto: Proto::Tcp,
+                host: "example.org".to_string(),
+                port: 7447,
+            })
         );
     }
 
     #[test]
-    fn tcp_scheme_numeric_routes_to_the_locator_dial() {
-        // `tcp/NUMERIC` parses to a numeric locator dialed via dial_locator.
+    fn tcp_scheme_numeric_classifies_as_ip() {
         assert_eq!(
             plan_dial("tcp/127.0.0.1:7447"),
-            Ok(DialPlan::Locator(
-                parse_any_locator("tcp/127.0.0.1:7447").unwrap()
-            ))
+            Ok(parse_any_locator("tcp/127.0.0.1:7447").unwrap())
         );
     }
 
     #[test]
-    fn tcp_scheme_dns_host_routes_to_the_std_resolver_tcp_dial() {
-        // R311pm regression guard: `tcp/HOST` with a DNS hostname previously
-        // died as a `BadAddress` parse reject (the numeric IP leaf), forking
-        // it away from the bare-host std-resolver path. It now routes to the
-        // SAME std-resolver TCP dial, sans scheme — a hostname behaves
-        // identically whether or not the `tcp/` scheme is written.
+    fn tcp_scheme_hostname_classifies_as_named_same_as_scheme_less() {
+        // R311pm/R311ps regression guard: `tcp/HOST` with a DNS hostname used
+        // to die as a `BadAddress` parse reject (forking it from the bare-host
+        // path). It now classifies as Named, and — the fork being dissolved —
+        // to the SAME parsed value as the scheme-less form.
         assert_eq!(
             plan_dial("tcp/example.org:7447"),
-            Ok(DialPlan::TcpHost("example.org:7447".to_string()))
+            Ok(AnyLocator::Named {
+                proto: Proto::Tcp,
+                host: "example.org".to_string(),
+                port: 7447,
+            })
+        );
+        assert_eq!(
+            plan_dial("tcp/example.org:7447"),
+            plan_dial("example.org:7447"),
         );
     }
 
     #[test]
-    fn ws_scheme_numeric_routes_to_the_locator_dial() {
-        // A `ws/NUMERIC` locator routes to dial_locator (where the WS backend
-        // is feature-decided); the dial seam never special-cases it.
+    fn ws_scheme_numeric_classifies_as_ip() {
+        // A `ws/NUMERIC` locator classifies to Ip(Ws); the dial seam decides
+        // WS reachability by feature — the classifier never special-cases it.
         assert_eq!(
             plan_dial("ws/127.0.0.1:7447"),
-            Ok(DialPlan::Locator(
-                parse_any_locator("ws/127.0.0.1:7447").unwrap()
-            ))
+            Ok(parse_any_locator("ws/127.0.0.1:7447").unwrap())
         );
-    }
-
-    #[test]
-    fn datagram_scheme_dns_host_is_not_silently_resolved() {
-        // Only `tcp` gets the std-resolver convenience: `udp`/`ws`/`tls` keep
-        // the numeric-only contract, so a DNS host surfaces the parse error
-        // rather than a guessed dial.
-        assert!(matches!(
-            plan_dial("udp/example.org:7447"),
-            Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(_)))
-        ));
-        assert!(matches!(
-            plan_dial("ws/example.org:7447"),
-            Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(_)))
-        ));
     }
 
     #[test]
@@ -1066,6 +1063,40 @@ mod tests {
             plan_dial("quic/1.2.3.4:7447"),
             Err(AnyLocatorError::Ip(LocatorParseError::UnknownProto(_)))
         ));
+    }
+
+    #[test]
+    fn malformed_address_is_an_error_not_named() {
+        // A genuinely malformed `tcp/` (no port) stays a typed parse error,
+        // not a guessed dial — the early typed error is preserved (vs the
+        // pre-R311ps `starts_with` arm which routed it to a late connect error).
+        assert!(matches!(
+            plan_dial("tcp/no-port-here"),
+            Err(AnyLocatorError::Ip(LocatorParseError::BadAddress(_)))
+        ));
+    }
+
+    // ── dial-side contract: only `tcp` dials a NAME. A udp/ws/tls name is a
+    //    typed `Unsupported` returned BEFORE any I/O (no resolver, no socket) —
+    //    a clean extension point, not a silent fallback.
+    #[tokio::test]
+    async fn non_tcp_named_dial_is_unsupported_without_io() {
+        for s in [
+            "udp/example.org:7447",
+            "ws/example.org:7447",
+            "tls/example.org:7447",
+        ] {
+            // DialedLink holds live streams (not Debug), so match rather than
+            // expect_err; a non-tcp name must surface Unsupported before any I/O.
+            match dial_endpoint(s, &DialConfig::default()).await {
+                Err(e) => assert_eq!(
+                    e.kind(),
+                    io::ErrorKind::Unsupported,
+                    "{s} should be Unsupported (name dial only wired for tcp)"
+                ),
+                Ok(_) => panic!("{s} must not dial (name dial only wired for tcp)"),
+            }
+        }
     }
 
     // ── end-to-end: the public seam connects a numeric loopback both with
