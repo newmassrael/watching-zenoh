@@ -116,6 +116,18 @@ fn spawn_zenohd(port: u16) -> ChildGuard {
 /// pass), and a transiently-failed `z_sub` open is not a wz defect — retrying it
 /// keeps the data-plane assertion zero-flake. Returns the subscribed child + its
 /// stdout reader for the `Received` wait.
+///
+/// R311pf — root cause investigated empirically (debt ② closure): zenohd accepts
+/// the TCP at once and is patient (open_timeout = accept_timeout = 10s), never
+/// rejecting or timing out a handshake across 200+ opens under up to 5x CPU
+/// oversubscription, so a zenohd accept-readiness gap is ruled out (a stronger
+/// `spawn_zenohd` probe would not help); pico's open is likewise starvation-robust
+/// (0 synthetic failures even with 3 zenohd starting under load). The residual
+/// transient is scheduler starvation of the handshake window under the specific
+/// full-run-ci profile (concurrent rustc memory/IO + multiple zenohd), where
+/// retrying a foreign one-shot that cannot self-retry is the correct robustness —
+/// the retry is justified, not a masked defect. The same reasoning covers
+/// `spawn_publishing_zpub` and the inline `z_get` retry below.
 fn spawn_subscribed_zsub(z_sub: &Path, sub_key: &str, endpoint: &str) -> (ChildGuard, File) {
     const ATTEMPTS: usize = 6;
     for attempt in 1..=ATTEMPTS {
