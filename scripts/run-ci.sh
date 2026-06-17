@@ -193,7 +193,7 @@
 #              recurrence by failing pre-push if rustfmt would
 #              reformat any tracked file.
 #   Layer F  — codec-footprint catalog truthfulness gate (R311n).
-#              Opt-in via `--layer F` or `WZ_RUN_LAYER_F=1`. Runs
+#              Default gate (R311pt — opt-in axis retired). Runs
 #              scripts/measure-codec-footprint.sh and exits non-zero
 #              if any codec-* atomic feature's minus-<codec> lane
 #              measures a near-zero elision delta (default threshold
@@ -201,12 +201,14 @@
 #              shape where a new high-level consumer feature is
 #              added without listing it in the implies graph and
 #              cargo's resolver silently re-enables the codec the
-#              lane was trying to elide. The bench is expensive
-#              (~5-10 min cold; multiple wz-ap-demo release builds)
-#              so it stays off the default dispatch path; run it
-#              explicitly when authoring a codec cascade.
-#   Layer G  — MCU cross-compile catalog (Phase W). Opt-in via
-#              `--layer G` or `WZ_RUN_LAYER_G=1`. Catalog matrix =
+#              lane was trying to elide. Host-only (python3 + cargo
+#              only), so it runs on every default sweep and SKIPs
+#              gracefully only when python3 is absent. The bench is
+#              expensive (~5-10 min cold; multiple wz-ap-demo release
+#              builds) but that cost is no longer a reason to skip it
+#              — footprint truthfulness must gate before push.
+#   Layer G  — MCU cross-compile catalog (Phase W). Default gate
+#              (R311pt — opt-in axis retired). Catalog matrix =
 #              (crate × target):
 #                Crates:
 #                  G.1 (R311ak) wz-runtime-core — §5.P trait skeleton
@@ -238,17 +240,17 @@
 #                  riscv32imac-unknown-none-elf (RISC-V 32-bit IMAC)
 #              Per-target SKIP if the rustup target is not installed
 #              (no auto-install — keeps a developer machine without
-#              cross-compile interest free of the lane). Stays opt-in
-#              until the wz-runtime-lwip caller lands (R311an+);
-#              promotes to default lane at that point.
+#              cross-compile interest free of the lane). Promoted to
+#              default in R311pt: the wz-runtime-lwip caller landed in
+#              R311av+, satisfying the promotion condition stated here.
 #              Out of scope today: zenoh-pico-sys (arm-none-eabi-gcc
 #              install carry, R311ao+). R40 wz-codecs carry resolved
 #              by R311aq — codec wire encode/decode now cross-compiles
 #              via the alloc-prelude shim in wz-codecs/src/lib.rs;
 #              hosted callers see no behavioural delta.
 #   Layer Q  — QEMU mps2 + microbit MCU e2e demo + footprint
-#              (R311be / R311bg / R311bm-m0). Opt-in via
-#              `--layer Q` or `WZ_RUN_LAYER_Q=1`. Three sub-lanes:
+#              (R311be / R311bg / R311bm-m0). Default gate (R311pt —
+#              opt-in axis retired). Three sub-lanes:
 #                Q.1 build  cargo build --release for thumbv7m-none-
 #                           eabi of deploy/mcu-qemu-demo with
 #                           WZ_LWIP_PORT set to the cross-test port.
@@ -279,15 +281,18 @@
 #              API + lwip-sys cross-real C build, all in one
 #              binary).
 #   Layer M  — active-scouting multicast loopback e2e (R311ep). Opt-in
-#              via `--layer M` or `WZ_RUN_LAYER_M=1`. Binds a real UDP
-#              multicast scouting link (UdpDriver::bind_multicast_v4),
-#              emits a Scout, and resolves a peer locator from a Hello
-#              sent on the group. Opt-in because multicast routing is
-#              environment-dependent (a container without a multicast
-#              route drops the IGMP join) — keeping it out of the
-#              default gate honors the no-flaky rule. The deterministic
-#              FSM + encode/decode logic is covered socket-free by
-#              Layer C1i, so SKIP loses only the real-socket leg.
+#              via `--layer M` or `WZ_RUN_LAYER_M=1` — the ONE lane that
+#              stays opt-in after R311pt retired the cost-based opt-in
+#              axis (F/G/Q/Z). Its opt-in is NOT a cost gate: multicast
+#              route presence cannot be detected statically (the IGMP
+#              join only fails at socket bind time), so a missing route
+#              FAILs rather than SKIPs, which would break the no-flaky
+#              rule if M were a required gate. Binds a real UDP multicast
+#              scouting link (UdpDriver::bind_multicast_v4), emits a
+#              Scout, and resolves a peer locator from a Hello on the
+#              group. The deterministic FSM + encode/decode logic is
+#              covered socket-free by Layer C1i, so opt-out loses only
+#              the real-socket leg.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -295,13 +300,19 @@
 #   2  setup error (sce-codegen binary missing, wrong cwd, etc.)
 #
 # Usage:
-#   scripts/run-ci.sh                  # full CI mirror
+#   scripts/run-ci.sh                  # full default sweep (= CI mirror)
 #   scripts/run-ci.sh --skip-codegen   # skip Layer B (codec emit; ~30s/codec)
 #   scripts/run-ci.sh --layer A        # run only the named layer
+#   WZ_RUN_LAYER_M=1 scripts/run-ci.sh # add the opt-in environment-flaky M lane
 #
 # Time cost (warm cache):
 #   Layer 0: <2s   A: <1s   B: ~30s   C1: ~10s   C2: ~5s   D: <1s
-#   Total ~50s on incremental build, ~5min on cold compile.
+#   Host-only floor ~50s incremental / ~5min cold. With the cross-
+#   toolchain + zenohd/pico binaries present, the default sweep also
+#   runs F (codec footprint ~5-10min) + G (7-target cross-compile) +
+#   Q (QEMU e2e + footprint) + Z (zenohd interop), so a full local
+#   sweep is several minutes even warm. Intentional (R311pt): these
+#   gates must run before push, not as opt-in.
 
 set -uo pipefail
 
@@ -1938,7 +1949,7 @@ layer_e_ap_demo_round_trip() {
     # --ignored set in parallel: 3 zenohd instances + their wz-ap-demo /
     # z_pub / z_sub children alongside every other e2e), a wz-ap-demo handshake
     # to zenohd can exceed the per-test readiness budget. Same required-gate
-    # hazard class as `multicast`; they run ONLY in the dedicated opt-in Layer Z
+    # hazard class as `multicast`; they run ONLY in the dedicated Layer Z
     # (where the env + external binary are explicitly provisioned), which is
     # their `#[ignore]`-declared home. The `zenohd` substring keeps every future
     # zenohd interop test out of this default sweep with one pattern.
@@ -2037,13 +2048,13 @@ layer_e2_facade_subset_e2e() {
 
 # ─── Layer F — codec-footprint catalog truthfulness gate (R311n) ───
 #
-# Opt-in. The bench rebuilds wz-ap-demo under every codec-* atomic
-# feature's transitive-puller-aware exclusion lane, so a single run
-# is several minutes on cold cargo cache. Skipped on the default
-# dispatch path; invoked explicitly via:
+# Default gate (R311pt — opt-in axis retired). The bench rebuilds
+# wz-ap-demo under every codec-* atomic feature's transitive-puller-
+# aware exclusion lane, so a single run is several minutes on cold
+# cargo cache — but that cost no longer keeps it off the default
+# sweep. Run a single isolated lane via:
 #
 #   scripts/run-ci.sh --layer F               # only Layer F
-#   WZ_RUN_LAYER_F=1 scripts/run-ci.sh        # full CI + Layer F
 #
 # Catalog-truthfulness rationale (R311n): for every codec-X atomic
 # feature, turning X off at the wz facade level must mechanically
@@ -2056,8 +2067,13 @@ layer_e2_facade_subset_e2e() {
 # typically a sign that a new high-level consumer feature was added
 # without being listed against the codec it pulls.
 layer_f_codec_footprint() {
-    if [[ "$ONLY_LAYER" != "F" && "${WZ_RUN_LAYER_F:-0}" -ne 1 ]]; then
-        echo "Layer F SKIP (opt-in: --layer F or WZ_RUN_LAYER_F=1)"
+    # Default gate (R311pt — opt-in axis retired). Host-only: no
+    # cross-toolchain prereq, so it runs on every default sweep. SKIPs
+    # gracefully only when python3 is absent (measure-codec-footprint.sh
+    # parses cargo-metadata through python3) — the same prereq-SKIP
+    # discipline the other lanes use for their toolchain deps.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Layer F SKIP (python3 not on PATH; needed by measure-codec-footprint.sh)"
         return 0
     fi
     bash scripts/measure-codec-footprint.sh
@@ -2065,7 +2081,7 @@ layer_f_codec_footprint() {
 
 # ─── Layer G — cross-compile cortex-m wz-runtime-core lib build ────
 #
-# Opt-in via `--layer G` or `WZ_RUN_LAYER_G=1`. Phase W mechanical
+# Default gate (R311pt — opt-in axis retired). Phase W mechanical
 # first gate (R311ak) — wz-runtime-core is the §5.P
 # runtime-services-tier entry crate (R251) and must build for an
 # MCU target so the no_std/MCU half of the composable framework
@@ -2077,10 +2093,11 @@ layer_f_codec_footprint() {
 # caller lands and the cross-compile path has a real consumer
 # (concrete-impls-land-alongside-real-callers, R63 lesson).
 layer_g_cross_compile_cortex_m() {
-    if [[ "$ONLY_LAYER" != "G" && "${WZ_RUN_LAYER_G:-0}" -ne 1 ]]; then
-        echo "Layer G SKIP (opt-in: --layer G or WZ_RUN_LAYER_G=1)"
-        return 0
-    fi
+    # Default gate (R311pt — opt-in axis retired; the wz-runtime-lwip
+    # caller landed in R311av+, satisfying the "promote to default once a
+    # real cross-compile consumer exists" condition stated below). The
+    # per-target + no-targets-installed graceful SKIPs further down keep a
+    # host-only machine from being forced to install the toolchain.
     local targets=(
         thumbv7em-none-eabihf
         thumbv6m-none-eabi
@@ -2389,7 +2406,7 @@ layer_g_cross_compile_cortex_m() {
 
 # ─── Layer Q — QEMU mps2 multi-machine UDP loopback e2e demo run ───
 #
-# Opt-in via `--layer Q` or `WZ_RUN_LAYER_Q=1`. R311be introduced
+# Default gate (R311pt — opt-in axis retired). R311be introduced
 # the lane; R311bf fixed the initial single-machine bug
 # (mps2-an386/M4 ↔ -cpu cortex-m3 ↔ thumbv7m mismatch + DwtClock vs
 # QEMU CYCCNT stub + cwd-dependent link.x). R311bg generalises the
@@ -2432,11 +2449,11 @@ layer_g_cross_compile_cortex_m() {
 # (R311az-2) + lwip-sys cross-real build (R311az-1) + R311bf's
 # SystickClock ClockSource composed in one binary per target).
 layer_q_qemu_mcu_e2e() {
-    if [[ "$ONLY_LAYER" != "Q" && "${WZ_RUN_LAYER_Q:-0}" -ne 1 ]]; then
-        echo "Layer Q SKIP (opt-in: --layer Q or WZ_RUN_LAYER_Q=1)"
-        return 0
-    fi
-
+    # Default gate (R311pt — opt-in axis retired). The rustup-target /
+    # qemu-system-arm / arm-none-eabi-* graceful SKIPs below keep this a
+    # no-op on a host-only machine; on a machine that carries the
+    # cross-toolchain it runs the MCU e2e + footprint regression gate on
+    # every default sweep (closing the staleness window that opt-in left).
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
     local has_qemu=0
@@ -2800,7 +2817,7 @@ layer_q_qemu_mcu_e2e() {
 # fragments at the group batch budget, subscriber reassembles).
 layer_m_scouting_multicast() {
     if [[ "$ONLY_LAYER" != "M" && "${WZ_RUN_LAYER_M:-0}" -ne 1 ]]; then
-        echo "Layer M SKIP (opt-in: --layer M or WZ_RUN_LAYER_M=1)"
+        echo "Layer M SKIP (opt-in environment-flaky lane; --layer M or WZ_RUN_LAYER_M=1)"
         return 0
     fi
     # R311od — `transport-link-tls` is added so the `round3_tls` module
@@ -2859,16 +2876,20 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
 # dial zenohd's `ws/` listener with wz's WS transport while pico stays on TCP
 # (zenoh-pico has no native WS — emscripten-only).
 #
-# Opt-in (--layer Z / WZ_RUN_LAYER_Z=1) AND binary-dep: zenohd is an external
-# 1.5.0 build (scripts/build-zenohd.sh), not a wz artifact, so it never gates
-# the default sweep. Graceful SKIP when zenohd or the pico CLI is absent mirrors
-# Layer M/E prereq discipline. The test (tests/wz_to_zenohd_router.rs) locates
-# zenohd via WZ_ZENOHD_BIN or the build script's target/zenohd/zenohd default.
+# Default gate (R311pt — opt-in axis retired), binary-dep: zenohd is an external
+# 1.5.0 build (scripts/build-zenohd.sh), not a wz artifact. The "external binary"
+# boundary is now expressed by the presence checks below — graceful SKIP when
+# zenohd or the pico CLI is absent (mirrors Layer M/E prereq discipline), gate
+# when a developer voluntarily built zenohd to verify interop. The test
+# (tests/wz_to_zenohd_router.rs) locates zenohd via WZ_ZENOHD_BIN or the build
+# script's target/zenohd/zenohd default.
 layer_z_zenohd_interop() {
-    if [[ "$ONLY_LAYER" != "Z" && "${WZ_RUN_LAYER_Z:-0}" -ne 1 ]]; then
-        echo "Layer Z SKIP (opt-in: --layer Z or WZ_RUN_LAYER_Z=1)"
-        return 0
-    fi
+    # Default gate (R311pt — opt-in axis retired). The "external binary,
+    # never gates the default sweep" boundary is now expressed purely by
+    # the zenohd / pico-CLI presence checks below: a machine that has not
+    # built zenohd SKIPs, a machine that voluntarily built it (intending to
+    # verify interop) gates on every default sweep. The harness is
+    # deterministic (R311ou --test-threads=1 removed the starvation race).
     local zenohd="${WZ_ZENOHD_BIN:-$PWD/target/zenohd/zenohd}"
     if [[ ! -x "$zenohd" ]]; then
         echo "Layer Z SKIP: zenohd not built ($zenohd; run: bash scripts/build-zenohd.sh)"
@@ -2893,7 +2914,7 @@ layer_z_zenohd_interop() {
     # within 10s"). Serializing removes the contention at the ROOT (each test
     # runs in isolation, the same condition as the 20/20-stable standalone) — a
     # structural fix, not a load-mitigation timeout bump. These are heavy
-    # opt-in e2e tests, so serial execution costs only wall-clock, not coverage.
+    # e2e tests, so serial execution costs only wall-clock, not coverage.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
 }

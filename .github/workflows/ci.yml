@@ -316,6 +316,12 @@ jobs:
       - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
         run: bash scripts/run-ci.sh --layer E
 
+      - name: Layer F — codec-footprint catalog truthfulness gate
+        # R311pt — F is host-only (python3 + cargo; no cross-toolchain),
+        # so it runs on the primary runner. Default-on in run-ci.sh now,
+        # but CI invokes it by name to keep this job's lane list explicit.
+        run: bash scripts/run-ci.sh --layer F
+
   # ─────────────────────────────────────────────────────────────────
   # R311iw — embedded cross-compile + QEMU job. Layer G (per-triple
   # no_std cross-compile of the wz crates) and Layer Q (QEMU mps2 /
@@ -323,17 +329,20 @@ jobs:
   # cross-toolchain + qemu-system-arm the primary `ci` job's runner does
   # not carry, so they run in a dedicated job here.
   #
-  # WHY THIS JOB EXISTS: before R311iw the Layer Q footprint gate ran
-  # NOWHERE automatic. Layer Q is opt-in locally (`--layer Q` /
-  # WZ_RUN_LAYER_Q=1) because qemu/arm are not universal dev deps, and
-  # the pre-push hook does not set WZ_RUN_LAYER_Q. So a footprint baseline
-  # could drift stale for rounds undetected — and did (R311iu rebased a
-  # baseline that had been wrong since the R311ir IGMP landing). Hosting
-  # G + Q on the CI runner (which CAN carry the toolchain) gates the
-  # cross-compile + footprint on every push without slowing the local
-  # pre-push path. Lane logic stays in scripts/run-ci.sh (the R65b single
-  # source of truth shared with pre-push); this job only installs the
-  # toolchain and invokes the lanes, so the two paths cannot drift.
+  # WHY THIS JOB EXISTS: this runner carries the ARM cross-toolchain +
+  # qemu-system-arm the primary `ci` runner does not. R311iw originally
+  # hosted G + Q here to gate footprint "without slowing the local
+  # pre-push path" — but R311pt found that trade-off leaves a hole: CI
+  # only fires on push, so a long unpushed arc (R311p*, ~20 rounds) let
+  # footprint drift accumulate undetected on BOTH the CI path (never
+  # triggered) AND the pre-push path (opt-in, never set). R311pt retired
+  # the cost-based opt-in axis: F/G/Q/Z are now default-on in
+  # scripts/run-ci.sh, so the pre-push hook gates footprint locally before
+  # every push (graceful SKIP where the toolchain is absent). This CI job
+  # is now the toolchain-provisioning MIRROR of that gate, not its only
+  # home. Lane logic stays in scripts/run-ci.sh (the R65b single source of
+  # truth shared with pre-push); this job only installs the toolchain and
+  # invokes the lanes, so the two paths cannot drift.
   cross-mcu:
     name: cross-compile + QEMU (Layer G + Q)
     runs-on: ubuntu-22.04

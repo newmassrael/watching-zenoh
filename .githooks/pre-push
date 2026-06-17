@@ -26,15 +26,25 @@
 #       instead of silently racing into phantom gate failures.
 #
 # Delegates to `scripts/run-ci.sh` so CI and pre-push share one
-# source of truth for the lane definitions (Layer 0 preflight-lints
-# = mandatory cargo fmt --check + optional actionlint / A mnemosyne /
-# A2 audit / B verify-codegen / C0 test-discipline / C1 cargo test /
-# C1b alloc test / C2 clippy / D deploy yaml / E ap-demo round-trip).
+# source of truth for the lane definitions. Since R311pt retired the
+# cost-based opt-in axis, the default sweep this hook runs INCLUDES the
+# footprint / cross-compile / interop gates (F codec-footprint, G MCU
+# cross-compile, Q QEMU e2e + ROM footprint, Z zenohd interop) — each
+# graceful-SKIPs when its toolchain / external binary is absent, so a
+# host-only machine pays no extra cost while a machine that CAN measure
+# footprint gates it before every push. Only Layer M (multicast loopback)
+# stays opt-in (environment-flaky, not a cost gate). This closes the
+# staleness window R311iw left: footprint no longer drifts undetected
+# across a long unpushed arc (CI fires only on push; the local gate now
+# does not).
 #
-# Time cost (warm cache): ~50s typical; up to ~5min on cold
-# compile. The hook can be bypassed via `git push --no-verify`
-# for genuinely urgent hotfixes — that escape hatch is the
-# standard git contract; do not use it to dodge real failures.
+# Time cost (warm cache): host-only floor ~50s; with the ARM toolchain +
+# qemu + zenohd/pico binaries present, the footprint / cross-compile /
+# interop gates add several minutes — intentional, they must gate before
+# push. Up to ~5min+ on cold compile. The hook can be bypassed via
+# `git push --no-verify` for genuinely urgent hotfixes — that escape
+# hatch is the standard git contract; do not use it to dodge real
+# failures.
 #
 # Install via `git config core.hooksPath .githooks` (one-time per clone).
 set -euo pipefail
