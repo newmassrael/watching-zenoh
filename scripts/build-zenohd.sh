@@ -11,17 +11,21 @@
 # the handshake + routing a Put through it is the ultimate wire-parity check.
 # zenohd is NOT a wz dependency, so this script provisions it on demand.
 #
-# Two sources, in preference order — the script is SELF-SUFFICIENT either way
-# (R311pe — fresh-clone reproducibility, debt ③):
+# Two sources, in preference order — both produce the SAME release binary, so
+# the reference oracle has ONE identity regardless of which source ran
+# (R311pe fresh-clone reproducibility + R311pj source convergence, debt ③):
 #   A. The cargo git checkout (~/.cargo/git/checkouts/zenoh-*/.../zenohd), when
-#      present: a fast DEBUG build that reuses cargo's already-compiled zenoh
-#      dependency graph. The developer fast path.
-#   B. Otherwise crates.io: `cargo install zenohd@<ver> --locked`, a
-#      DETERMINISTIC release build from the published, Cargo.lock-pinned source.
-#      This is what makes a fresh `git clone` of wz able to provision zenohd
-#      with NO manual step — the prior script only PRINTED this command on a
-#      missing checkout and exited 1, so a clean checkout could not reproduce
-#      the Layer Z binary (the determinism debt this round closes).
+#      present: a RELEASE build that reuses cargo's already-compiled zenoh
+#      dependency graph (incremental, the developer fast path). The checkout's
+#      version is asserted to equal ZENOHD_VERSION, so a cache that later resolves
+#      a different zenoh fails fast instead of silently building a divergent
+#      router.
+#   B. Otherwise crates.io: `cargo install zenohd@<ver> --locked`, a release build
+#      from the published, Cargo.lock-pinned source. This is what lets a fresh
+#      `git clone` of wz provision zenohd with no manual ZENOHD step (the prior
+#      script only PRINTED this command on a missing checkout and exited 1).
+#      Reproducibility caveat: the pinned toolchain must already be installed —
+#      the rustup check below hard-errors with the install hint if it is not.
 #
 # Set ZENOHD_FORCE_CRATES_IO=1 to skip the checkout glob and force source B
 # (reproducibility self-test, and the path a fresh clone takes). Override the
@@ -61,12 +65,21 @@ if [[ "${ZENOHD_FORCE_CRATES_IO:-0}" -ne 1 ]]; then
 fi
 
 if [[ -n "$ZH" ]]; then
-    echo "build-zenohd: source = cargo git checkout $ZH" >&2
-    echo "build-zenohd: zenoh version = $(grep -m1 '^version' "$ZH/Cargo.toml" | cut -d'"' -f2)" >&2
-    echo "build-zenohd: building zenohd (debug, +$TOOLCHAIN) ..." >&2
-    CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build -p zenohd \
+    # R311pj — assert the checkout's version matches the pinned ZENOHD_VERSION so
+    # a cargo cache that later resolves a different zenoh fails fast here rather
+    # than silently building a divergent reference router. Build --release so
+    # source A and source B yield the SAME profile (one oracle identity).
+    checkout_version="$(grep -m1 '^version' "$ZH/Cargo.toml" | cut -d'"' -f2)"
+    echo "build-zenohd: source = cargo git checkout $ZH (version $checkout_version)" >&2
+    if [[ "$checkout_version" != "$ZENOHD_VERSION" ]]; then
+        echo "build-zenohd: checkout version $checkout_version != pinned ZENOHD_VERSION=$ZENOHD_VERSION" >&2
+        echo "  set ZENOHD_VERSION=$checkout_version, or ZENOHD_FORCE_CRATES_IO=1 for the crates.io path." >&2
+        exit 1
+    fi
+    echo "build-zenohd: building zenohd (release, +$TOOLCHAIN) ..." >&2
+    CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build -p zenohd --release \
         --manifest-path "$ZH/Cargo.toml"
-    SRC_BIN="$BUILD_DIR/debug/zenohd"
+    SRC_BIN="$BUILD_DIR/release/zenohd"
 else
     # Source B — deterministic crates.io install (fresh-clone reproducible).
     # --locked pins to the published Cargo.lock; --root keeps the install tree
