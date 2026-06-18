@@ -1217,10 +1217,13 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 /// only accepts, a peer also dials out to form a mesh. Binds `listen`, parses the
 /// `dial_targets` (TCP socket addresses for this atom), then runs the library
 /// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) with a
-/// [`NoOpForwarder`] — a held mesh face routes nothing yet (mesh forwarding +
-/// zid-keyed loop suppression is the next atom). Each face up/down is logged so
-/// the live hold set is observable; the shutdown summary reports the dialed /
-/// accepted split and the high-water concurrency.
+/// [`LinkstateForwarder`](wz::runtime_tokio::linkstate_forward::LinkstateForwarder)
+/// (R311rb / c3d-3): each held face feeds a linkstate-peer topology graph, the
+/// peer periodically floods its own link-state so neighbours converge, and an
+/// inbound link-state is re-flooded onward (transitive mesh propagation). Each
+/// face up/down is logged so the live hold set is observable; the shutdown
+/// summary reports the dialed / accepted split, high-water concurrency, and the
+/// link-state ingest count.
 ///
 /// Runs until the graceful-shutdown signal (SIGTERM / SIGINT). The node identity
 /// is whatami Peer (`NodeKind::Peer` maps to 0x02) — which is genuinely correct
@@ -1229,8 +1232,17 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 #[cfg(feature = "routing-peer")]
 pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Result<()> {
     use crate::args::NodeKind;
-    use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources, NoOpForwarder};
+    use std::time::Duration;
+    use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
+    use wz::runtime_tokio::linkstate_forward::LinkstateForwarder;
     use wz::runtime_tokio::session_open::bind_endpoint;
+
+    // The peer re-advertises its link-state on this cadence (`flood_self`),
+    // bootstrapping the mesh exchange and refreshing it; sn-staleness on
+    // each receiver drops a re-flood of unchanged topology. (Change-only
+    // flooding — flood on a topology delta instead of a fixed tick — is the
+    // tracked optimisation.)
+    const LINKSTATE_FLOOD_MS: u64 = 1000;
 
     let listener = bind_endpoint(listen).await?;
     let local = listener.local_addr()?;
@@ -1258,9 +1270,13 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
     );
 
     let params = demo_session_init_params(NodeKind::Peer);
-    let forwarder = NoOpForwarder;
+    // R311rb (c3d-3) — the peer now maintains a linkstate-peer routing graph:
+    // each held face feeds the topology graph ([`LinkstateForwarder`]), and
+    // the peer periodically floods its own link-state (below) so the mesh
+    // converges. (zid 0x02 = WhatAmI::Peer; `params.zid` is this node's id.)
+    let forwarder = LinkstateForwarder::new(params.zid.clone(), 0x02);
 
-    let summary = peer_loop(
+    let loop_fut = peer_loop(
         FaceSources {
             listener,
             dial_targets: dials,
@@ -1292,16 +1308,33 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
             }
         },
         &forwarder,
-    )
-    .await;
+    );
+    tokio::pin!(loop_fut);
+
+    // Drive the accept/peer loop AND the periodic self-flood on the one
+    // task: a flood tick calls `flood_self` (a synchronous OAM send on each
+    // held face); the loop owns the face lifecycle. Both borrow `&forwarder`
+    // immutably and neither holds its `RefCell`s across an `.await`, so the
+    // single-task interleave is sound (the loop's own forwarder hooks follow
+    // the same discipline). The first `interval` tick fires immediately.
+    let mut flood = tokio::time::interval(Duration::from_millis(LINKSTATE_FLOOD_MS));
+    let summary = loop {
+        tokio::select! {
+            done = &mut loop_fut => break done,
+            _ = flood.tick() => {
+                let _ = forwarder.flood_self();
+            }
+        }
+    };
 
     log::info!(
         "wz-ap-demo peer: shutdown; dialed {}, accepted {}, served {} peer(s), \
-         peak {} concurrent face(s)",
+         peak {} concurrent face(s), ingested {} link-state(s)",
         summary.dialed,
         summary.accepted,
         summary.established,
-        summary.peak_concurrent
+        summary.peak_concurrent,
+        forwarder.ingested()
     );
     Ok(())
 }

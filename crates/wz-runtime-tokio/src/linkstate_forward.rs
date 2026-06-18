@@ -6,12 +6,13 @@
 //! graph to the [`accept_loop`](crate::accept_loop) /
 //! [`peer_loop`](crate::accept_loop::peer_loop) face lifecycle.
 //!
-//! IMPORTANT — not yet installed: [`LinkstateForwarder`] *implements* the
-//! seam but no live loop passes it yet (every `peer_loop` call still uses
-//! [`NoOpForwarder`](crate::accept_loop::NoOpForwarder), e.g. the demo's
-//! `run_peer`). Installing it into `peer_loop` is the c3d atom; combined
-//! with the absent self-link-state TX (below) the subsystem does not yet
-//! exchange topology in production. So far this is unit-test-only.
+//! Installed (R311rb / c3d-3): the demo's `run_peer` passes this to
+//! `peer_loop` and drives [`flood_self`](Self::flood_self) on a periodic
+//! interval, so two real peers now exchange topology in production —
+//! `register`/`forward` feed the graph, `flood_self` advertises self, and
+//! [`propagate`](Self::propagate) re-floods learned topology onward. (A
+//! 2-peer e2e harness is the next atom; the demo still uses one fixed zid,
+//! so distinct per-peer zids are part of that e2e wiring.)
 //!
 //! [`LinkstateForwarder`] is a [`FaceForwarder`]: as peer faces come and
 //! go it connects/disconnects them in the graph
@@ -26,10 +27,9 @@
 //! the cell only for its own synchronous duration, never across an
 //! `.await`.
 //!
-//! What is NOT here yet: emitting self's own link-state on a timer
-//! (`make_msg` send), `Changes`-driven gossip re-flooding, and using the
-//! computed trees to forward DATA — those are the c3b+ atoms.
-//! `routing-peer`-gated.
+//! What is NOT here yet: using the computed spanning trees to forward DATA
+//! (`tree_children_of` is exposed but unused — the c3c atom), and the
+//! change-triggered-flood / `Details` optimisations. `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

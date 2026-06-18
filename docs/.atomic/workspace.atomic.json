@@ -41800,6 +41800,46 @@
         "코드 LOCAL UNPUSHED 2커밋: qz(90c1716 c3d-1)+ra(c3d-2). qm~qy=PUSHED origin/main=14df94d."
       ]
     },
+    "Round 311rb": {
+      "decision_summary": "R311rb: linkstate (c3d-3) peer_loop 배선 + 주기 flood — demo run_peer가 NoOpForwarder 대신 LinkstateForwarder 설치(params.zid=self) + peer_loop와 1s 주기 flood_self를 단일-task select로 구동 + inbound propagate. 프로덕션 peer가 토폴로지 그래프 유지+자기 link-state flood+학습 re-flood. Layer E6 demo mesh e2e green. LinkstateForwarder 이제 프로덕션 caller 보유=적대 리뷰 'unwired pub API' 해소(2-peer 수렴 실증은 c3d-4).",
+      "changes_bullets": [
+        "wz-ap-demo run_peer(routing-peer gated): NoOpForwarder→LinkstateForwarder::new(params.zid.clone(), 0x02=Peer). peer_loop future를 tokio::pin! + tokio::time::interval(LINKSTATE_FLOOD_MS=1000ms) flood tick과 select 루프로 구동(flood tick→forwarder.flood_self(); loop 완료시 break summary). 단일-task 안전: peer_loop(&forwarder)와 flood(forwarder.flood_self())가 같은 task, 둘 다 immut &forwarder, flood_self/register/forward 전부 RefCell을 await 너머로 안 잡음=interleave 안전. shutdown log에 ingested() 추가, run_peer doc 갱신.",
+        "wz-runtime-tokio linkstate_forward 모듈 doc 갱신: \"IMPORTANT not yet installed\"→\"Installed R311rb: run_peer가 설치+주기 flood; register/forward 그래프 공급, flood_self 자기 광고, propagate 학습 토폴로지 re-flood\". \"not here yet\"=tree로 data forward(c3c)+change-triggered-flood/Details 최적화만 잔여로 축소.",
+        "(register flood-on-faceup은 기존 flood/propagate 단위테스트 누적 frame_count를 깨뜨려 채택 안 함=주기 flood로 대체; 부트스트랩은 첫 interval tick들이 처리.)"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-ap-demo --features routing-peer clean. Layer E6(layer_e6_peer_mesh = wz_peer_mesh demo-binary e2e, --ignored) 1 PASS = run_peer의 LinkstateForwarder+flood 변경이 mesh face-hold e2e 무회귀. cargo clippy -p wz-ap-demo + -p wz-runtime-tokio(routing-peer all-targets) -D warnings clean. cargo test linkstate(driver 8 + graph 23) PASS. cargo fmt --all --check exit 0.",
+        "단일-task select 안전성 확인: peer_loop와 flood가 동일 task, 둘 다 immut &forwarder borrow, RefCell borrow를 await 너머로 안 잡음(동기 body 내 borrow+release)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rb = linkstate (c3d-3) peer_loop 배선 + 주기 flood 완료. demo run_peer가 NoOpForwarder 대신 LinkstateForwarder 설치(params.zid=self) + peer_loop와 1s 주기 flood_self를 단일-task select로 구동 + inbound propagate. 프로덕션 peer가 실제 토폴로지 그래프 유지+자기 link-state flood+학습 re-flood. Layer E6 green. LinkstateForwarder 이제 프로덕션 caller 보유=적대 리뷰의 \"unwired pub API/inert in production\" 핵심 해소(단 2-peer 수렴 실증은 c3d-4).",
+        "다음 c3d-4: 2-peer e2e — demo가 현재 고정 zid 0x01020304 공유라 mesh엔 distinct per-peer zid 필요(CLI arg or listen-addr 유도). 통합 테스트로 두 peer 띄워 서로 토폴로지 학습(next_hop/node_count) 검증. 이후 c3c(tree_children_of로 data forward). c3d-4 끝나면 프로덕션 inert 완전 탈출.",
+        "추적 부채: change-triggered flood(고정-tick 대신 topology delta시), Details split(new=full/updated=links-only), options-SSOT(SCE owned-flag-setter), Zid=Vec<u8>→16B newtype, remove_detached_nodes, drop 관측성.",
+        "코드 LOCAL UNPUSHED 3커밋: qz(c3d-1)+ra(c3d-2)+rb(c3d-3). qm~qy=PUSHED origin/main=14df94d."
+      ],
+      "publishable_decision_summary": "R311rb: linkstate (c3d-3) peer_loop 배선 + 주기 flood — demo run_peer가 NoOpForwarder 대신 LinkstateForwarder 설치(params.zid=self) + peer_loop와 1s 주기 flood_self를 단일-task select로 구동 + inbound propagate. 프로덕션 peer가 토폴로지 그래프 유지+자기 link-state flood+학습 re-flood. Layer E6 demo mesh e2e green. LinkstateForwarder 이제 프로덕션 caller 보유=적대 리뷰 'unwired pub API' 해소(2-peer 수렴 실증은 c3d-4).",
+      "publishable_changes_bullets": [
+        "wz-ap-demo run_peer(routing-peer gated): NoOpForwarder→LinkstateForwarder::new(params.zid.clone(), 0x02=Peer). peer_loop future를 tokio::pin! + tokio::time::interval(LINKSTATE_FLOOD_MS=1000ms) flood tick과 select 루프로 구동(flood tick→forwarder.flood_self(); loop 완료시 break summary). 단일-task 안전: peer_loop(&forwarder)와 flood(forwarder.flood_self())가 같은 task, 둘 다 immut &forwarder, flood_self/register/forward 전부 RefCell을 await 너머로 안 잡음=interleave 안전. shutdown log에 ingested() 추가, run_peer doc 갱신.",
+        "wz-runtime-tokio linkstate_forward 모듈 doc 갱신: \"IMPORTANT not yet installed\"→\"Installed R311rb: run_peer가 설치+주기 flood; register/forward 그래프 공급, flood_self 자기 광고, propagate 학습 토폴로지 re-flood\". \"not here yet\"=tree로 data forward(c3c)+change-triggered-flood/Details 최적화만 잔여로 축소.",
+        "(register flood-on-faceup은 기존 flood/propagate 단위테스트 누적 frame_count를 깨뜨려 채택 안 함=주기 flood로 대체; 부트스트랩은 첫 interval tick들이 처리.)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-ap-demo --features routing-peer clean. Layer E6(layer_e6_peer_mesh = wz_peer_mesh demo-binary e2e, --ignored) 1 PASS = run_peer의 LinkstateForwarder+flood 변경이 mesh face-hold e2e 무회귀. cargo clippy -p wz-ap-demo + -p wz-runtime-tokio(routing-peer all-targets) -D warnings clean. cargo test linkstate(driver 8 + graph 23) PASS. cargo fmt --all --check exit 0.",
+        "단일-task select 안전성 확인: peer_loop와 flood가 동일 task, 둘 다 immut &forwarder borrow, RefCell borrow를 await 너머로 안 잡음(동기 body 내 borrow+release)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rb = linkstate (c3d-3) peer_loop 배선 + 주기 flood 완료. demo run_peer가 NoOpForwarder 대신 LinkstateForwarder 설치(params.zid=self) + peer_loop와 1s 주기 flood_self를 단일-task select로 구동 + inbound propagate. 프로덕션 peer가 실제 토폴로지 그래프 유지+자기 link-state flood+학습 re-flood. Layer E6 green. LinkstateForwarder 이제 프로덕션 caller 보유=적대 리뷰의 \"unwired pub API/inert in production\" 핵심 해소(단 2-peer 수렴 실증은 c3d-4).",
+        "다음 c3d-4: 2-peer e2e — demo가 현재 고정 zid 0x01020304 공유라 mesh엔 distinct per-peer zid 필요(CLI arg or listen-addr 유도). 통합 테스트로 두 peer 띄워 서로 토폴로지 학습(next_hop/node_count) 검증. 이후 c3c(tree_children_of로 data forward). c3d-4 끝나면 프로덕션 inert 완전 탈출.",
+        "추적 부채: change-triggered flood(고정-tick 대신 topology delta시), Details split(new=full/updated=links-only), options-SSOT(SCE owned-flag-setter), Zid=Vec<u8>→16B newtype, remove_detached_nodes, drop 관측성.",
+        "코드 LOCAL UNPUSHED 3커밋: qz(c3d-1)+ra(c3d-2)+rb(c3d-3). qm~qy=PUSHED origin/main=14df94d."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
