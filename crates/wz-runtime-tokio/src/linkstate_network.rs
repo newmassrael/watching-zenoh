@@ -148,6 +148,19 @@ pub struct Changes {
     pub updated: Vec<Zid>,
 }
 
+/// A spanning tree rooted at one node, computed from THIS peer's vantage
+/// (`self.idx`). `parent` is the next hop toward the root; `children` are
+/// the nodes for which this peer is the next hop from the root; and
+/// `directions[dest]` is the first hop from this peer toward `dest` along
+/// the tree. Forwarding a message along its source's tree cannot loop —
+/// a tree has no cycles. Mirrors zenoh `Tree` (`network.rs:116-121`).
+#[derive(Debug, Clone, Default)]
+pub struct Tree {
+    pub parent: Option<NodeIndex>,
+    pub children: Vec<NodeIndex>,
+    pub directions: Vec<Option<NodeIndex>>,
+}
+
 /// The linkstate-peer topology graph. Mirrors zenoh `Network` (the
 /// petgraph of `Node`s + the per-link state), narrowed to the routing
 /// state c2 owns: the self node, the neighbour links, and their
@@ -158,6 +171,13 @@ pub struct LinkstateNetwork {
     graph: StableUnGraph<Node, f64>,
     links: HashMap<LinkId, Link>,
     next_link_id: LinkId,
+    /// Per-root spanning trees from this peer's vantage, indexed by the
+    /// root node's `NodeIndex::index()` (sparse; gaps are default Trees).
+    /// Rebuilt by `compute_trees`.
+    trees: Vec<Tree>,
+    /// Shortest-path distance from this peer to each node, indexed by
+    /// `NodeIndex::index()`. The self-rooted Bellman-Ford result.
+    distances: Vec<f64>,
 }
 
 impl LinkstateNetwork {
@@ -177,6 +197,14 @@ impl LinkstateNetwork {
             graph,
             links: HashMap::new(),
             next_link_id: 0,
+            // one (trivial) self-rooted tree + a zero self-distance, as in
+            // zenoh `Network::new` (`network.rs:174-179`).
+            trees: vec![Tree {
+                parent: None,
+                children: vec![],
+                directions: vec![None],
+            }],
+            distances: vec![0.0],
         }
     }
 
@@ -240,12 +268,31 @@ impl LinkstateNetwork {
         })
     }
 
-    /// Register a new link to a neighbour (zid), returning its link id.
-    /// The runtime calls this when a peer face is established (step c3).
-    pub fn add_link(&mut self, peer_zid: Zid) -> LinkId {
+    /// Register a new link to a neighbour and connect self to it in the
+    /// graph, returning the link id. The runtime calls this when a peer
+    /// face is established (step c3). Mirrors zenoh `add_link`
+    /// (`network.rs:812-859`): introduce the neighbour node, record that
+    /// self now links to it (bumping self's link-state sn), and form the
+    /// edge if the neighbour already advertises self back.
+    pub fn add_link(&mut self, peer_zid: Zid, peer_whatami: u8) -> LinkId {
         let id = self.next_link_id;
         self.next_link_id += 1;
-        self.links.insert(id, Link::new(peer_zid));
+        self.links.insert(id, Link::new(peer_zid.clone()));
+
+        if self.get_idx(&peer_zid).is_none() {
+            self.graph.add_node(Node {
+                zid: peer_zid.clone(),
+                whatami: Some(peer_whatami),
+                locators: None,
+                sn: 0,
+                links: HashMap::new(),
+            });
+        }
+        self.graph[self.idx]
+            .links
+            .insert(peer_zid, LinkEdgeWeight::default());
+        self.graph[self.idx].sn += 1;
+        self.rebuild_edges(self.idx);
         id
     }
 
@@ -259,11 +306,17 @@ impl LinkstateNetwork {
         self.links.get_mut(&id)
     }
 
-    /// Remove a link (the peer face went down). Returns the removed link.
-    /// Node/edge pruning on link loss is the ingest/forwarding concern
-    /// (c2b/d); this drops the per-link mapping state.
+    /// Remove a link (the peer face went down): drop the per-link mapping
+    /// state and disconnect self from the neighbour in the graph (self no
+    /// longer advertises the link, so the self<->neighbour edge is pruned
+    /// and self's link-state sn is bumped). Returns the removed link.
+    /// Mirrors zenoh `remove_link`'s self-side bookkeeping.
     pub fn remove_link(&mut self, id: LinkId) -> Option<Link> {
-        self.links.remove(&id)
+        let link = self.links.remove(&id)?;
+        self.graph[self.idx].links.remove(&link.zid);
+        self.graph[self.idx].sn += 1;
+        self.rebuild_edges(self.idx);
+        Some(link)
     }
 
     /// Ingest a `LinkStateList` received on link `src_link_id`: learn its
@@ -466,6 +519,114 @@ impl LinkstateNetwork {
         let jitter = 1.0 + 0.01 * ((hasher.finish() as u32) as f64 / u32::MAX as f64);
         self.graph.update_edge(idx1, idx2, w as f64 * jitter);
     }
+
+    /// Recompute the per-root spanning trees and this peer's shortest-path
+    /// distances from the current graph: for every possible root, a
+    /// Bellman-Ford from that root gives the shortest-path predecessors,
+    /// from which this peer (`self.idx`) derives its parent / children /
+    /// per-destination next hop in that root's tree. Forwarding a message
+    /// along its source's tree is loop-free (a tree has no cycles) — the
+    /// whole point of linkstate-peer routing. Mirrors zenoh `compute_trees`
+    /// (`network.rs:1015-1095`). Call after the topology changes (add_link
+    /// / ingest) and before querying the trees.
+    pub fn compute_trees(&mut self) {
+        let indexes: Vec<NodeIndex> = self.graph.node_indices().collect();
+        let max_idx = match indexes.iter().max() {
+            Some(m) => *m,
+            None => return,
+        };
+
+        self.trees.clear();
+        self.trees.resize_with(max_idx.index() + 1, Tree::default);
+
+        for tree_root_idx in &indexes {
+            let paths = match petgraph::algo::bellman_ford(&self.graph, *tree_root_idx) {
+                Ok(paths) => paths,
+                // positive weights => no negative cycle; unreachable.
+                Err(_) => continue,
+            };
+            if tree_root_idx.index() == self.idx.index() {
+                self.distances = paths.distances.clone();
+            }
+
+            let tree = &mut self.trees[tree_root_idx.index()];
+            tree.parent = paths.predecessors[self.idx.index()];
+            for idx in &indexes {
+                if paths.predecessors[idx.index()] == Some(self.idx) {
+                    tree.children.push(*idx);
+                }
+            }
+            tree.directions.resize(max_idx.index() + 1, None);
+            let parent = tree.parent;
+
+            let mut dfs = petgraph::algo::DfsSpace::new(&self.graph);
+            for destination in &indexes {
+                if self.idx == *destination
+                    || !petgraph::algo::has_path_connecting(
+                        &self.graph,
+                        self.idx,
+                        *destination,
+                        Some(&mut dfs),
+                    )
+                {
+                    continue;
+                }
+                // walk the predecessor chain back from `destination` until a
+                // node whose predecessor is self -> that node is the first
+                // hop; if none (destination is toward the root), use parent.
+                let mut direction = None;
+                let mut current = *destination;
+                while let Some(pred) = paths.predecessors[current.index()] {
+                    if pred == self.idx {
+                        direction = Some(current);
+                        break;
+                    }
+                    current = pred;
+                }
+                self.trees[tree_root_idx.index()].directions[destination.index()] =
+                    direction.or(parent);
+            }
+        }
+    }
+
+    /// This peer's children in the spanning tree rooted at `source` — the
+    /// neighbours to forward a message flooded along `source`'s tree to.
+    /// Empty if `source` is unknown or [`compute_trees`] has not run for
+    /// the current topology.
+    pub fn tree_children_of(&self, source: &Zid) -> Vec<Zid> {
+        let root = match self.get_idx(source) {
+            Some(idx) => idx,
+            None => return Vec::new(),
+        };
+        match self.trees.get(root.index()) {
+            Some(tree) => tree
+                .children
+                .iter()
+                .map(|child| self.graph[*child].zid.clone())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The first hop from this peer toward `dest` along `source`'s tree
+    /// (the unicast next-hop), if a path exists.
+    pub fn next_hop(&self, source: &Zid, dest: &Zid) -> Option<Zid> {
+        let root = self.get_idx(source)?;
+        let dest_idx = self.get_idx(dest)?;
+        let tree = self.trees.get(root.index())?;
+        let hop = tree.directions.get(dest_idx.index()).copied().flatten()?;
+        Some(self.graph[hop].zid.clone())
+    }
+
+    /// Shortest-path distance from this peer to `dest`, if reachable
+    /// (`None` for an unreachable node — Bellman-Ford infinity).
+    pub fn distance_to(&self, dest: &Zid) -> Option<f64> {
+        let dest_idx = self.get_idx(dest)?;
+        self.distances
+            .get(dest_idx.index())
+            .copied()
+            .filter(|d| d.is_finite())
+    }
 }
 
 #[cfg(test)]
@@ -517,7 +678,7 @@ mod tests {
     #[test]
     fn link_psid_to_zid_mapping() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let id = net.add_link(zid(0x07));
+        let id = net.add_link(zid(0x07), 2);
         assert_eq!(net.get_link(id).unwrap().zid, zid(0x07));
 
         let link = net.get_link_mut(id).unwrap();
@@ -529,8 +690,8 @@ mod tests {
     #[test]
     fn add_and_remove_link() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let a = net.add_link(zid(0x07));
-        let b = net.add_link(zid(0x08));
+        let a = net.add_link(zid(0x07), 2);
+        let b = net.add_link(zid(0x08), 2);
         assert_ne!(a, b, "distinct link ids");
         assert!(net.get_link(a).is_some());
         let removed = net.remove_link(a).expect("link present");
@@ -579,7 +740,7 @@ mod tests {
     #[test]
     fn ingest_adds_node_and_learns_mapping() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07));
+        let link = net.add_link(zid(0x07), 2);
         let changes = net.ingest_linkstate_list(
             link,
             list(vec![entry(10, 5, Some(&zid(0xAA)), Some(2), &[])]),
@@ -595,7 +756,7 @@ mod tests {
     #[test]
     fn ingest_sn_staleness_gate() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07));
+        let link = net.add_link(zid(0x07), 2);
         net.ingest_linkstate_list(link, list(vec![entry(10, 5, Some(&zid(0xAA)), None, &[])]));
         // a duplicate (same sn) is ignored.
         let dup = net.ingest_linkstate_list(link, list(vec![entry(10, 5, None, None, &[])]));
@@ -610,7 +771,7 @@ mod tests {
     #[test]
     fn ingest_drops_entry_with_invalid_whatami() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07));
+        let link = net.add_link(zid(0x07), 2);
         // whatami=3 is not a valid single role -> the entry is dropped.
         let changes = net.ingest_linkstate_list(
             link,
@@ -623,7 +784,7 @@ mod tests {
     #[test]
     fn ingest_resolves_link_psids_to_zid_edges() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07));
+        let link = net.add_link(zid(0x07), 2);
         // A (psid 1 -> 0xAA) appears before B, so B's link psid 1 resolves
         // against the mapping A registered earlier in the same list.
         net.ingest_linkstate_list(
@@ -675,7 +836,7 @@ mod tests {
     #[test]
     fn edge_forms_only_on_mutual_advertisement() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07));
+        let link = net.add_link(zid(0x07), 2);
         // learn psid 2 -> 0xBB (B, no links yet)
         net.ingest_linkstate_list(
             link,
@@ -696,7 +857,7 @@ mod tests {
     #[test]
     fn edge_pruned_when_link_no_longer_advertised() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07));
+        let link = net.add_link(zid(0x07), 2);
         net.ingest_linkstate_list(
             link,
             list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
@@ -715,7 +876,7 @@ mod tests {
     #[test]
     fn edge_weight_is_max_of_both_directions() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07));
+        let link = net.add_link(zid(0x07), 2);
         net.ingest_linkstate_list(
             link,
             list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
@@ -744,5 +905,91 @@ mod tests {
             (80.0..=80.8).contains(&w),
             "max(50,80)=80 plus sub-1% jitter, got {w}"
         );
+    }
+
+    // ── d spanning-tree forwarding ──────────────────────────────────
+
+    #[test]
+    fn add_link_connects_self_and_edge_forms_on_mutual() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        // add_link connects self to A in the graph (node + self link).
+        assert_eq!(net.node_count(), 2);
+        assert_eq!(net.edge_count(), 0, "A has not advertised self back yet");
+        // A advertises a link back to self => the self<->A edge forms.
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]), // teach psid 10 -> self
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]), // A links to self
+            ]),
+        );
+        assert_eq!(net.edge_count(), 1, "self<->A mutual edge");
+    }
+
+    #[test]
+    fn self_rooted_tree_lists_direct_neighbour_as_child() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]),
+            ]),
+        );
+        net.compute_trees();
+        assert_eq!(net.tree_children_of(&zid(0x01)), vec![zid(0xAA)]);
+        assert_eq!(net.distance_to(&zid(0x01)), Some(0.0), "self distance is 0");
+        assert!(net.distance_to(&zid(0xAA)).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn next_hop_follows_shortest_path_over_a_line() {
+        // Topology: self -- A -- B (a line). next hop self->B is A.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        // Pass 1: teach every zid mapping; B advertises its link to A.
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 0, Some(&zid(0xAA)), Some(2), &[]),
+                entry(12, 5, Some(&zid(0xBB)), Some(2), &[11]), // B -> A
+            ]),
+        );
+        // Pass 2: A advertises links to self and B (now resolvable).
+        net.ingest_linkstate_list(
+            l,
+            list(vec![entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12])]),
+        );
+        assert_eq!(net.edge_count(), 2, "self<->A and A<->B");
+        net.compute_trees();
+
+        // self forwards toward B via A; B is not a direct child of self.
+        assert_eq!(net.next_hop(&zid(0x01), &zid(0xBB)), Some(zid(0xAA)));
+        assert_eq!(net.tree_children_of(&zid(0x01)), vec![zid(0xAA)]);
+        // distance to B is roughly two hops (~2x the ~100 default weight).
+        let d_b = net.distance_to(&zid(0xBB)).unwrap();
+        assert!(
+            (199.0..=202.0).contains(&d_b),
+            "two-hop distance, got {d_b}"
+        );
+    }
+
+    #[test]
+    fn remove_link_disconnects_self() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]),
+            ]),
+        );
+        assert_eq!(net.edge_count(), 1);
+        net.remove_link(l);
+        assert_eq!(net.edge_count(), 0, "self<->A edge pruned on link removal");
     }
 }

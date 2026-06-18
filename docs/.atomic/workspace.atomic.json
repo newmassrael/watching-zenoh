@@ -41418,6 +41418,46 @@
         "코드 LOCAL UNPUSHED 8커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr(24b151f)/qs. push 미동의=로컬 커밋만."
       ]
     },
+    "Round 311qt": {
+      "decision_summary": "R311qt: linkstate 포팅 (d) spanning-tree forwarding — 순환 mesh 무한루프 방지 완성. add_link/remove_link self-connectivity 강화(neighbour 노드+self.links+sn+mutual edge) + compute_trees(per-root Bellman-Ford→각 source의 spanning tree, trees/distances) + tree_children_of/next_hop/distance_to accessor. zenoh add_link+compute_trees+Tree 미러. 4 d unit(17 total).",
+      "changes_bullets": [
+        "linkstate_network.rs (d): Tree struct{parent/children/directions} + trees/distances 필드 + new() init(자기 tree 1개+distance 0). add_link(peer_zid, peer_whatami) 강화=self를 그래프에 연결(neighbour 노드 ensure + self.graph[self].links+=peer + self.sn+=1 + rebuild_edges(self)로 mutual edge 형성). remove_link=self.links 제거 + sn+1 + rebuild(self↔peer edge prune). zenoh add_link/remove_link network.rs:812-859 미러. 기존 add_link 호출은 whatami 인자 추가.",
+        "compute_trees(): 각 tree_root마다 petgraph::algo::bellman_ford(self 기준 predecessors)→trees[root]={parent(=root 방향 next hop), children(predecessor==self인 노드), directions[dest](dest 방향 first hop=predecessor chain 역추적, 없으면 parent)}; self-root tree의 distances 저장. has_path_connecting+DfsSpace로 reachability 확인. zenoh compute_trees network.rs:1015-1095 미러.",
+        "accessor: tree_children_of(source)=source의 tree서 self의 children(flooding forward 대상=loop-free), next_hop(source,dest)=dest 방향 first hop(unicast routing), distance_to(dest)=최단거리(unreachable=None=bellman-ford inf 필터). 모듈 doc 갱신."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 17/17 PASS(c2a 5+c2b 5+c2c 3+d 4): add_link_connects_self_and_edge_forms_on_mutual(self-connect+mutual edge), self_rooted_tree_lists_direct_neighbour_as_child, next_hop_follows_shortest_path_over_a_line(self-A-B 라인: next_hop(self→B)=A, tree_children(self)=[A], distance(B)≈200=2hop), remove_link_disconnects_self(edge prune).",
+        "petgraph bellman_ford/has_path_connecting/DfsSpace 0.6 정상(zenoh와 동일 알고리즘). fmt --check + clippy --lib clean(workspace warnings=deny). 기존 13 테스트도 green(add_link signature+whatami). default 빌드(routing-peer off) 무영향. validate_workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qt = linkstate 포팅 (d) spanning-tree forwarding 완료 = 순환 mesh 무한루프 방지 핵심 달성. compute_trees(per-source Bellman-Ford로 각 source의 spanning tree) + self-connectivity(add_link이 self를 그래프에 연결). 메시지를 source의 tree 따라 forward=tree에 사이클 없어 loop-free. zenoh add_link+compute_trees+Tree 미러. 4 d unit(17 total). petgraph bellman_ford.",
+        "linkstate 포팅 그래프/알고리즘 코어 완성: (a)peer zid·(b)wire codec(qm/qn)·(c)graph+ingest+edge(qq/qr/qs)·(d)spanning-tree(qt). 남은=c3 async 통합: accept/peer loop 배선(face up→add_link, inbound OAM→try_parse_linkstate_oam→ingest_linkstate_list, self-linkstate make_msg 주기 송신+Changes gossip, tree_children_of로 데이터 forward).",
+        "defer 추적: gossip/autoconnect/locators/set_local_psid_mapping(forwarding table)=c3가 일부 필요. 추적부채: ENC_*/Z flag 6-site wire_const 통합.",
+        "코드 LOCAL UNPUSHED 9커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr(24b151f)/qs(1afc6f4)/qt. push 미동의=로컬 커밋만."
+      ],
+      "publishable_decision_summary": "R311qt: linkstate 포팅 (d) spanning-tree forwarding — 순환 mesh 무한루프 방지 완성. add_link/remove_link self-connectivity 강화(neighbour 노드+self.links+sn+mutual edge) + compute_trees(per-root Bellman-Ford→각 source의 spanning tree, trees/distances) + tree_children_of/next_hop/distance_to accessor. zenoh add_link+compute_trees+Tree 미러. 4 d unit(17 total).",
+      "publishable_changes_bullets": [
+        "linkstate_network.rs (d): Tree struct{parent/children/directions} + trees/distances 필드 + new() init(자기 tree 1개+distance 0). add_link(peer_zid, peer_whatami) 강화=self를 그래프에 연결(neighbour 노드 ensure + self.graph[self].links+=peer + self.sn+=1 + rebuild_edges(self)로 mutual edge 형성). remove_link=self.links 제거 + sn+1 + rebuild(self↔peer edge prune). zenoh add_link/remove_link network.rs:812-859 미러. 기존 add_link 호출은 whatami 인자 추가.",
+        "compute_trees(): 각 tree_root마다 petgraph::algo::bellman_ford(self 기준 predecessors)→trees[root]={parent(=root 방향 next hop), children(predecessor==self인 노드), directions[dest](dest 방향 first hop=predecessor chain 역추적, 없으면 parent)}; self-root tree의 distances 저장. has_path_connecting+DfsSpace로 reachability 확인. zenoh compute_trees network.rs:1015-1095 미러.",
+        "accessor: tree_children_of(source)=source의 tree서 self의 children(flooding forward 대상=loop-free), next_hop(source,dest)=dest 방향 first hop(unicast routing), distance_to(dest)=최단거리(unreachable=None=bellman-ford inf 필터). 모듈 doc 갱신."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 17/17 PASS(c2a 5+c2b 5+c2c 3+d 4): add_link_connects_self_and_edge_forms_on_mutual(self-connect+mutual edge), self_rooted_tree_lists_direct_neighbour_as_child, next_hop_follows_shortest_path_over_a_line(self-A-B 라인: next_hop(self→B)=A, tree_children(self)=[A], distance(B)≈200=2hop), remove_link_disconnects_self(edge prune).",
+        "petgraph bellman_ford/has_path_connecting/DfsSpace 0.6 정상(zenoh와 동일 알고리즘). fmt --check + clippy --lib clean(workspace warnings=deny). 기존 13 테스트도 green(add_link signature+whatami). default 빌드(routing-peer off) 무영향. validate_workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qt = linkstate 포팅 (d) spanning-tree forwarding 완료 = 순환 mesh 무한루프 방지 핵심 달성. compute_trees(per-source Bellman-Ford로 각 source의 spanning tree) + self-connectivity(add_link이 self를 그래프에 연결). 메시지를 source의 tree 따라 forward=tree에 사이클 없어 loop-free. zenoh add_link+compute_trees+Tree 미러. 4 d unit(17 total). petgraph bellman_ford.",
+        "linkstate 포팅 그래프/알고리즘 코어 완성: (a)peer zid·(b)wire codec(qm/qn)·(c)graph+ingest+edge(qq/qr/qs)·(d)spanning-tree(qt). 남은=c3 async 통합: accept/peer loop 배선(face up→add_link, inbound OAM→try_parse_linkstate_oam→ingest_linkstate_list, self-linkstate make_msg 주기 송신+Changes gossip, tree_children_of로 데이터 forward).",
+        "defer 추적: gossip/autoconnect/locators/set_local_psid_mapping(forwarding table)=c3가 일부 필요. 추적부채: ENC_*/Z flag 6-site wire_const 통합.",
+        "코드 LOCAL UNPUSHED 9커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr(24b151f)/qs(1afc6f4)/qt. push 미동의=로컬 커밋만."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
