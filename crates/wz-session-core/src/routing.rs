@@ -54,6 +54,13 @@
 //! [`forward_push`](RouteTable::forward_push) skips the ingress at send time),
 //! so a single entry serves every face that publishes the keyexpr.
 //!
+//! This collapse holds because the `routing-routes` data plane only ever runs
+//! over the accept-only star (one Client->Peer source class): `routing-peer`
+//! deliberately does NOT pull `routing-routes` (Cargo.toml), so a mesh peer
+//! reaches this cache only once mesh forwarding lands — at which point the
+//! whatami / node dimension stops collapsing and this single-map design must be
+//! revisited (the route key gains the source dimension zenoh keys on).
+//!
 //! ## Keyexpr forms (literal + aliased)
 //!
 //! A peer's default publish / declare path emits a **literal** keyexpr
@@ -290,15 +297,22 @@ mod imp {
         /// Number of currently-valid cached routes — the cache-state witness a
         /// test asserts to watch a route get cached (1 after a Put on a fresh
         /// keyexpr) and an invalidation empty it (0 after a declare / undeclare /
-        /// face-removal, before the next Put recomputes).
+        /// face-removal, before the next Put recomputes). `pub` (with
+        /// [`subscription_count`](Self::subscription_count)) only because the
+        /// `RouteTable` lives in this crate while its tests live in
+        /// `wz-runtime-tokio`: a cross-crate test observes live cache state
+        /// through the public surface, where a `#[cfg(test)]` gate could not
+        /// reach. A read-only snapshot, no production state maintained for it.
         pub fn cached_route_count(&self) -> usize {
             self.route_cache.borrow().valid_len(self.generation)
         }
 
-        /// Total route computations (cache misses) run so far — the
-        /// cache-effectiveness witness. A repeated Put on a cached keyexpr does
+        /// Total route computations (cache misses) run so far — a cumulative
+        /// cache-effectiveness signal. A repeated Put on a cached keyexpr does
         /// NOT increment it (served from cache); a Put after an invalidation
-        /// does (a fresh [`declared_intersects`] scan).
+        /// does (a fresh [`declared_intersects`] scan). Both a test witness AND
+        /// a production ops metric: the demo router logs it in its shutdown
+        /// summary (`run_router`), so the counter has a real reader.
         pub fn route_computations(&self) -> u64 {
             self.route_computations.get()
         }

@@ -170,13 +170,20 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
         "peer-A summary must report the dial+accept split (dialed 1, accepted 1)\n\
          --- peer-A stderr ---\n{a_captured}"
     );
-    // R311qi — each held face logs the remote peer's zid, captured at handshake
-    // (the demo nodes all announce zid 0x01020304). Its presence proves the zid
-    // flowed handshake -> Face -> log end-to-end for BOTH a dialed face (the zid
-    // from the InitAck, R311qh's Initiating-side capture) and an accepted one.
+    // R311qi — SMOKE check (not a source-correctness proof): every held face
+    // logs a non-`?` zid, so `zid_hex` is wired into the face log AND the
+    // handshake surfaced a remote zid for a dialed face too (R311qh's
+    // Initiating-side InitAck capture, exercised through the real binary). It
+    // does NOT prove each face carries the OTHER peer's distinct zid — all demo
+    // nodes share the one hardcoded zid 0x01020304 (args.rs), so a wrong-source
+    // bug would still pass here. That distinction IS proven, with DISTINCT zids,
+    // by the unit test r311qh_peer_zid_captures_the_remote_zid_both_directions
+    // and the accept_and_open_session integration test (0x01 vs 0x02). When
+    // atom 2 makes the zid load-bearing (the LinkState graph keys on it), the
+    // demo nodes gain distinct zids and this e2e upgrades to a source witness.
     assert!(
         a_captured.contains("zid 01020304"),
-        "peer-A face logs must carry the remote peer's zid (handshake -> Face)\n\
-         --- peer-A stderr ---\n{a_captured}"
+        "peer-A face logs must carry a captured zid (zid_hex wired; InitAck \
+         capture reached the binary)\n--- peer-A stderr ---\n{a_captured}"
     );
 }
