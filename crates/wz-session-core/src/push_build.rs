@@ -240,6 +240,48 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> Result<PushOwned, CodecEr
     })
 }
 
+/// R311qd — re-key a `Push` for forwarding to a peer that has no expr-id
+/// mapping for the source's keyexpr (the router data-plane re-literalization,
+/// [`crate::routing`]). If the Push already carries a literal (`id == 0`)
+/// keyexpr it is decodable by any peer as-is and returned verbatim (body +
+/// metadata preserved, exact bytes); otherwise it is cloned and re-keyed to
+/// `keyexpr` as a literal (`id == 0`), preserving the Put/Del body and setting
+/// the Push N flag.
+///
+/// This is the wire-layer SSOT for that operation: the literal-keyexpr
+/// construction and the N-flag bit live here next to [`build_push_literal`]
+/// (the only other place that builds a literal-keyexpr Push header), so the
+/// routing kernel that forwards stays free of wire-format knowledge.
+pub fn reliteralize_push(push: &PushOwned, keyexpr: &str) -> Result<PushOwned, CodecError> {
+    // Already literal → any peer decodes it without a mapping; forward verbatim.
+    if push_keyexpr_is_literal(push) {
+        return Ok(push.clone());
+    }
+    let mut fwd = push.clone();
+    fwd.keyexpr = WireexprOwned {
+        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+            id: 0,
+            suffix_len: Some(keyexpr.len() as u64),
+            suffix: Some(crate::codec_owned::owned_string(keyexpr)?),
+        }),
+    };
+    // Push.header N flag (0x20, "suffix carrier present") — set because the
+    // re-literalized keyexpr now carries a suffix (an aliased source had it
+    // clear). Same header bit `build_push_literal` sets; M derives at encode.
+    fwd.header |= 0x20;
+    Ok(fwd)
+}
+
+/// Whether a Push's keyexpr is a literal (`id == 0`) — decodable by any peer
+/// without an expr-id mapping. The forward fast-path predicate for
+/// [`reliteralize_push`].
+fn push_keyexpr_is_literal(push: &PushOwned) -> bool {
+    match &push.keyexpr.body {
+        WireexprOwnedVariant::WireexprLocal(arm) => arm.id == 0,
+        WireexprOwnedVariant::WireexprNonlocal(arm) => arm.id == 0,
+    }
+}
+
 /// R219 — build a DECLARE-aliased `Push` whose body is `MsgDel`.
 /// Mirror of [`build_push_aliased`] for the deletion path. Same
 /// aliased-keyexpr precondition as the Put variant: the peer must
@@ -1301,6 +1343,55 @@ mod tests {
             assert_eq!(att, b"del-att");
         } else {
             panic!("CodecZenohMsgDel variant expected");
+        }
+    }
+
+    #[test]
+    fn reliteralize_push_passes_a_literal_keyexpr_through_verbatim() {
+        // A literal (id=0) source is decodable by any peer as-is; reliteralize
+        // returns it verbatim and IGNORES the passed keyexpr (the fast path).
+        let literal = build_push_literal("demo/test", b"hi").unwrap();
+        let fwd = reliteralize_push(&literal, "ignored/keyexpr").unwrap();
+        assert_eq!(
+            fwd, literal,
+            "a literal source is forwarded verbatim, the keyexpr arg ignored"
+        );
+    }
+
+    #[test]
+    fn reliteralize_push_re_keys_an_aliased_keyexpr_to_a_literal() {
+        // An aliased (id=9, no suffix) Put — its Push header has the N flag CLEAR.
+        let aliased = build_push_aliased(9, None, b"hi").unwrap();
+        assert_eq!(
+            aliased.header,
+            wire_const::N_MID_PUSH,
+            "aliased source carries the N flag clear (no suffix)"
+        );
+
+        let fwd = reliteralize_push(&aliased, "home/temp").unwrap();
+
+        match &fwd.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(arm) => {
+                assert_eq!(arm.id, 0, "re-literalized to the id=0 sentinel");
+                assert_eq!(arm.suffix.as_deref(), Some("home/temp"));
+                assert_eq!(arm.suffix_len, Some(9));
+            }
+            WireexprOwnedVariant::WireexprNonlocal(_) => {
+                panic!("re-literalize must select the WireexprLocal arm")
+            }
+        }
+        // N flag SET (suffix now present), same header bit build_push_literal uses.
+        assert_eq!(
+            fwd.header,
+            wire_const::N_MID_PUSH | 0x20,
+            "N flag set after re-literalize (the keyexpr now carries a suffix)"
+        );
+        // The Put body is preserved verbatim through the re-key.
+        match &fwd.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => {
+                assert_eq!(put.payload, b"hi", "payload preserved through re-key");
+            }
+            _ => panic!("MsgPut body expected"),
         }
     }
 }

@@ -50,7 +50,8 @@
 //! an aliased subscription and an aliased Put resolve through it
 //! ([`resolve_wireexpr`]). A literal Put is still forwarded **verbatim** (all
 //! metadata preserved); an aliased Put is **re-literalized** for the
-//! destination ([`destination_push`]) — the destination never saw the source's
+//! destination ([`reliteralize_push`](crate::push_build::reliteralize_push)) —
+//! the destination never saw the source's
 //! expr-id mapping, so it receives the resolved keyexpr as a literal (`id = 0`)
 //! while the Put body (payload / encoding / attachment) is preserved. An
 //! expr-id with no prior `DeclareKeyexpr` resolves to `None` and is dropped with
@@ -78,14 +79,10 @@ mod imp {
     use alloc::vec::Vec;
     use hashbrown::HashMap;
 
-    use sce_forge_runtime::codec::CodecError;
     use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
     use wz_codecs::push::PushOwned;
-    use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-    use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::TimeSource;
 
-    use crate::codec_owned::owned_string;
     use crate::declare::declared_intersects;
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::link::SessionRuntime;
@@ -296,12 +293,15 @@ mod imp {
             if targets.is_empty() {
                 return 0;
             }
-            // Build the destination-facing Push ONCE: a literal (id=0) source is
-            // forwarded verbatim; an aliased (id!=0) source is RE-LITERALIZED so
-            // a destination that never saw the source's expr-id mapping can
-            // decode it. Fails only if the resolved keyexpr exceeds the wire
-            // bound (no_std heapless cap; unbounded in alloc) — dropped, logged.
-            let forwarded = match destination_push(push, &keyexpr) {
+            // Build the destination-facing Push ONCE via the wire-layer SSOT: a
+            // literal (id=0) source is forwarded verbatim; an aliased (id!=0)
+            // source is re-literalized so a destination that never saw the
+            // source's expr-id mapping can decode it. Fails only if the resolved
+            // keyexpr exceeds the wire bound (no_std heapless cap; unbounded in
+            // alloc) — dropped, logged. The routing kernel stays free of
+            // wire-format knowledge ([`reliteralize_push`] owns the keyexpr
+            // construction + N-flag bit).
+            let forwarded = match crate::push_build::reliteralize_push(push, &keyexpr) {
                 Ok(p) => p,
                 Err(e) => {
                     log::debug!(
@@ -322,40 +322,5 @@ mod imp {
             }
             count
         }
-    }
-
-    /// Whether a wireexpr is a literal (`id == 0`) — decodable by any peer
-    /// without an expr-id mapping. An aliased (`id != 0`) wireexpr is only
-    /// meaningful to the peer that declared the mapping.
-    fn wireexpr_is_literal(w: &WireexprOwned) -> bool {
-        match &w.body {
-            WireexprOwnedVariant::WireexprLocal(arm) => arm.id == 0,
-            WireexprOwnedVariant::WireexprNonlocal(arm) => arm.id == 0,
-        }
-    }
-
-    /// The Push a destination should receive: the source verbatim when its
-    /// keyexpr is already literal, else a clone re-keyed to the resolved literal
-    /// keyexpr (R311qd). Re-literalizing preserves the source's Put body
-    /// (payload / encoding / attachment) and only rewrites the keyexpr +
-    /// sets the Push `N` flag (a literal keyexpr carries a suffix), so a
-    /// destination that never saw the source's expr-id mapping can decode it.
-    fn destination_push(push: &PushOwned, resolved: &str) -> Result<PushOwned, CodecError> {
-        if wireexpr_is_literal(&push.keyexpr) {
-            return Ok(push.clone());
-        }
-        let mut fwd = push.clone();
-        fwd.keyexpr = WireexprOwned {
-            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                id: 0,
-                suffix_len: Some(resolved.len() as u64),
-                suffix: Some(owned_string(resolved)?),
-            }),
-        };
-        // Push.header N flag (bit 5, 0x20) = "suffix carrier present" — set
-        // because the re-literalized keyexpr now carries a suffix (the aliased
-        // source had it clear). Mirrors push_build::build_push_literal's header.
-        fwd.header |= 0x20;
-        Ok(fwd)
     }
 }
