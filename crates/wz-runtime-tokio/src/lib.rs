@@ -536,6 +536,14 @@ pub mod routing_forward;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_network;
 
+/// P4 linkstate-peer routing — the driver (step c3) that wires the
+/// [`linkstate_network`] graph into the accept/peer-loop face lifecycle: a
+/// [`FaceForwarder`](accept_loop::FaceForwarder) that connects faces in the
+/// graph and ingests inbound `OAM_LINKSTATE` topology. Gated on
+/// `routing-peer`.
+#[cfg(feature = "routing-peer")]
+pub mod linkstate_forward;
+
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions
 /// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs

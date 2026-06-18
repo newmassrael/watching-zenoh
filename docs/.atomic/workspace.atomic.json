@@ -41458,6 +41458,46 @@
         "코드 LOCAL UNPUSHED 9커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr(24b151f)/qs(1afc6f4)/qt. push 미동의=로컬 커밋만."
       ]
     },
+    "Round 311qu": {
+      "decision_summary": "R311qu: linkstate 포팅 (c3a) LinkstateForwarder — 그래프를 accept/peer loop face lifecycle에 연결. FaceForwarder 구현(register→add_link, deregister→remove_link, forward→OAM-LINKSTATE 추출→ingest_linkstate_list+compute_trees). RoutingForwarder 구조(Rc<RefCell> 단일 !Send task) 미러. 코어 핸들러 테스트. 4 unit. self-linkstate 송신/data forward=c3b+.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs 신설(c3a): LinkstateForwarder{net: Rc<RefCell<LinkstateNetwork>>, face_links: HashMap<FaceId,LinkId>, ingested: Cell}. 코어 핸들러: on_face_up(face,peer_zid,whatami)→add_link+face_links 등록 / on_face_down→remove_link / on_inbound_linkstate(face,list)→face의 link_id로 ingest_linkstate_list+compute_trees+ingested 카운트.",
+        "FaceForwarder impl: register→actions.peer_zid()(qi)로 on_face_up(whatami=Peer 기본, 핸드셰이크 whatami 아직 face 미배선) / deregister→on_face_down / forward→IterationEvent::Poll(FramePayload{messages})서 NetworkMessage::Oam 추출→try_parse_linkstate_oam→Decoded면 on_inbound_linkstate(Malformed/NotLinkstate는 무시). RoutingForwarder(routing_forward.rs) 구조 미러: 전체 loop이 단일 !Send task라 Mutex 아닌 Rc<RefCell>.",
+        "crates/wz-runtime-tokio/Cargo.toml: routing-peer가 wz-session-core/codec-linkstate forward(try_parse_linkstate_oam). lib.rs cfg(routing-peer) pub mod linkstate_forward."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 21 PASS(linkstate_network 17 + linkstate_forward 4): face_up_connects_neighbour(register→add_link), inbound_linkstate_grows_the_graph_and_counts(forward→ingest), inbound_from_unknown_face_is_dropped, face_down_disconnects_neighbour.",
+        "FaceForwarder trait 구현 컴파일(actions.peer_zid() qi 접근 + IterationEvent::Poll(FramePayload)서 OAM 추출). fmt --check + clippy --lib clean. default 빌드(routing-peer off) 무영향=모듈 dead. validate_workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qu = linkstate (c3a) LinkstateForwarder 완료 = 그래프를 accept/peer loop face lifecycle에 연결(register→add_link, deregister→remove_link, forward→inbound OAM-LINKSTATE→ingest+compute_trees). 코어 핸들러 테스트 가능. RoutingForwarder 구조 미러(Rc<RefCell> 단일 task).",
+        "다음 c3b: self-linkstate 송신 — 자기 그래프 상태를 make_msg(build_linkstate_oam)로 직렬화→주기 timer/Changes로 faces에 flood(send seam). 그래야 peer 서로 토폴로지 학습(현재 RX만, TX 없음). zenoh send_on_link/send_on_links network.rs:367-400 미러 + Changes 기반 gossip 재flood.",
+        "이후 c3c: tree_children_of로 data(Push) forward(RoutingForwarder와 결합/대체), c3d: peer_loop이 LinkstateForwarder 사용(NoOpForwarder 대체)+e2e(2-peer mesh 토폴로지 학습 실증). defer 추적: 핸드셰이크 whatami face 배선, gossip/autoconnect/locators/set_local_psid_mapping.",
+        "코드 LOCAL UNPUSHED 10커밋: qm(b2a4567)~qt(3edfeb8) + qu(linkstate_forward+ledger). push 미동의=로컬 커밋만. 추적부채: ENC_*/Z flag 6-site wire_const."
+      ],
+      "publishable_decision_summary": "R311qu: linkstate 포팅 (c3a) LinkstateForwarder — 그래프를 accept/peer loop face lifecycle에 연결. FaceForwarder 구현(register→add_link, deregister→remove_link, forward→OAM-LINKSTATE 추출→ingest_linkstate_list+compute_trees). RoutingForwarder 구조(Rc<RefCell> 단일 !Send task) 미러. 코어 핸들러 테스트. 4 unit. self-linkstate 송신/data forward=c3b+.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs 신설(c3a): LinkstateForwarder{net: Rc<RefCell<LinkstateNetwork>>, face_links: HashMap<FaceId,LinkId>, ingested: Cell}. 코어 핸들러: on_face_up(face,peer_zid,whatami)→add_link+face_links 등록 / on_face_down→remove_link / on_inbound_linkstate(face,list)→face의 link_id로 ingest_linkstate_list+compute_trees+ingested 카운트.",
+        "FaceForwarder impl: register→actions.peer_zid()(qi)로 on_face_up(whatami=Peer 기본, 핸드셰이크 whatami 아직 face 미배선) / deregister→on_face_down / forward→IterationEvent::Poll(FramePayload{messages})서 NetworkMessage::Oam 추출→try_parse_linkstate_oam→Decoded면 on_inbound_linkstate(Malformed/NotLinkstate는 무시). RoutingForwarder(routing_forward.rs) 구조 미러: 전체 loop이 단일 !Send task라 Mutex 아닌 Rc<RefCell>.",
+        "crates/wz-runtime-tokio/Cargo.toml: routing-peer가 wz-session-core/codec-linkstate forward(try_parse_linkstate_oam). lib.rs cfg(routing-peer) pub mod linkstate_forward."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 21 PASS(linkstate_network 17 + linkstate_forward 4): face_up_connects_neighbour(register→add_link), inbound_linkstate_grows_the_graph_and_counts(forward→ingest), inbound_from_unknown_face_is_dropped, face_down_disconnects_neighbour.",
+        "FaceForwarder trait 구현 컴파일(actions.peer_zid() qi 접근 + IterationEvent::Poll(FramePayload)서 OAM 추출). fmt --check + clippy --lib clean. default 빌드(routing-peer off) 무영향=모듈 dead. validate_workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qu = linkstate (c3a) LinkstateForwarder 완료 = 그래프를 accept/peer loop face lifecycle에 연결(register→add_link, deregister→remove_link, forward→inbound OAM-LINKSTATE→ingest+compute_trees). 코어 핸들러 테스트 가능. RoutingForwarder 구조 미러(Rc<RefCell> 단일 task).",
+        "다음 c3b: self-linkstate 송신 — 자기 그래프 상태를 make_msg(build_linkstate_oam)로 직렬화→주기 timer/Changes로 faces에 flood(send seam). 그래야 peer 서로 토폴로지 학습(현재 RX만, TX 없음). zenoh send_on_link/send_on_links network.rs:367-400 미러 + Changes 기반 gossip 재flood.",
+        "이후 c3c: tree_children_of로 data(Push) forward(RoutingForwarder와 결합/대체), c3d: peer_loop이 LinkstateForwarder 사용(NoOpForwarder 대체)+e2e(2-peer mesh 토폴로지 학습 실증). defer 추적: 핸드셰이크 whatami face 배선, gossip/autoconnect/locators/set_local_psid_mapping.",
+        "코드 LOCAL UNPUSHED 10커밋: qm(b2a4567)~qt(3edfeb8) + qu(linkstate_forward+ledger). push 미동의=로컬 커밋만. 추적부채: ENC_*/Z flag 6-site wire_const."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [

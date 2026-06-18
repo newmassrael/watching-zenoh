@@ -429,7 +429,15 @@ routing-routes = [
 # `dep:petgraph` keeps the graph dependency off every non-peer build.
 # R311qr — pulls `wz-codecs/codec-linkstate` so the graph's LinkStateList
 # ingest (c2b) can consume the decoded `LinkstateListOwned`.
-routing-peer = ["routing-accept", "dep:petgraph", "wz-codecs/codec-linkstate"]
+# R311qu — pulls `wz-session-core/codec-linkstate` for the OAM-LINKSTATE
+# carrier (`try_parse_linkstate_oam`) the `linkstate_forward` driver (c3)
+# decodes inbound topology with.
+routing-peer = [
+    "routing-accept",
+    "dep:petgraph",
+    "wz-codecs/codec-linkstate",
+    "wz-session-core/codec-linkstate",
+]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
