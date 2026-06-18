@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh linkstate-peer routing — the
+     LinkStateList topology-exchange payload (a batch of LinkState
+     entries, one per node the sender knows about).
+
+     P4 routing track, linkstate port step (b): the body a peer floods
+     to share its view of the mesh graph. Mirrors zenoh
+     `zenoh/src/net/protocol/linkstate.rs:154-157` (the `LinkStateList`
+     struct) + `zenoh/src/net/codec/linkstate.rs:146-182` (the
+     `Zenoh080Routing` WCodec/RCodec):
+
+         codec.write(&mut *writer, x.link_states.len())?;  // VLE count
+         for ls in x.link_states.iter() {
+             self.write(&mut *writer, ls)?;                 // each LinkState
+         }
+
+     Wire shape:
+       byte 0+ : num_link_states  (VLE count)
+       repeat  : link_states      (count * linkstate.scxml)
+
+     The `|X|X|X|LK_ST_LS|` header byte in the zenoh ASCII diagram
+     (linkstate.rs:148-153) is NOT part of this codec body — the
+     `Zenoh080Routing` list codec writes only count + entries. That id
+     byte belongs to the OAM / NetworkMessage carrier that frames this
+     payload onto the wire (net/protocol/network.rs:357 writes the bare
+     LinkStateList into a buffer that the OAM envelope then wraps); the
+     carrier is linkstate port step (c). This codec is the body, exactly
+     as the `hello` body codec carries no scouting-message HELLO id byte.
+
+     Composition: B1-alpha VLE count + B5-mu repeat<codec> (ungated,
+     count co-located). No new primitive surface. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="linkstate_list">
+  <sce:import src="linkstate.scxml" kind="codec" as="codec_zenoh_linkstate"/>
+  <datamodel>
+    <sce:field id="num_link_states" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
+    <sce:repeat id="link_states" type="codec_zenoh_linkstate" sce:byte="1"
+                count="num_link_states" max-count="64"/>
+  </datamodel>
+</scxml>

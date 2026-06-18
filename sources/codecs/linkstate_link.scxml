@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh linkstate-peer routing — a single
+     `links` element (a neighbour peer-state-id reference, VLE u64).
+
+     Mirrors the per-element write/read inside zenoh
+     `zenoh/src/net/codec/linkstate.rs:70-73` / `:114-119`:
+
+         codec.write(&mut *writer, x.links.len())?;   // count (VLE)
+         for l in x.links.iter() {
+             codec.write(&mut *writer, *l)?;           // each link = VLE u64
+         }
+
+     The `links` field is `Vec<u64>` — a bare list of base-128 VLE u64
+     psid references with NO per-element wrapper struct on the wire.
+     SCE's `<sce:repeat type=...>` accepts only an imported CODEC alias
+     as its element type (sce-build parser.rs: the repeat body `type`
+     resolves against the import table, never a primitive `sce:type`),
+     so a bare-scalar repeat is not expressible. This 1-field codec is
+     the minimal wrapper that makes the element a codec — byte-identical
+     to a bare VLE u64, exactly as `locator.scxml` wraps a bare
+     length-prefixed string for the locator-list repeat in `hello`.
+
+     Wire shape:
+       byte 0+ : psid  (VLE u64, 1..=10 bytes — a neighbour link-state's
+                        psid, the small-int node id used by the spanning
+                        -tree / shortest-path graph in net/protocol/
+                        network.rs).
+
+     Composition: B1-alpha VLE only (same single-field shape as
+     ext_zint). No new primitive surface. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="linkstate_link">
+  <datamodel>
+    <sce:field id="psid" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
+  </datamodel>
+</scxml>

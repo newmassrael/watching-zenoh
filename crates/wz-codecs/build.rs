@@ -46,6 +46,7 @@ const CODECS: &[&str] = &[
     "open_body",         // §4.1 Open body — parent.A NEGATION gate — R44 ✓
     "join",              // §4.1 Join body — parent.S + multi-VLE — R44 ✓
     "locator",           // §3 hello locator element — R45 (hello dep)
+    "linkstate_link",    // P4 linkstate links-element wrapper (VLE u64) — R311qm
     "keep_alive",        // §4.1 empty body (transport keepalive) — R47 trivial
     "decl_final",        // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
     "undecl_kexpr",      // §5 undecl kexpr leaf — header + id VLE, MID 0x01 — R110b
@@ -76,6 +77,11 @@ const CODECS: &[&str] = &[
     "decl_queryable",    // §5 decl queryable — _z_decl_commons shape, MID 0x04 — R110c
     "decl_token",        // §5 decl token — _z_decl_commons shape, MID 0x06 — R110c
     "declare", // §5 Z_DECLARE envelope — header + I-gated id + Z ext + sub-MID variant — R110a
+    // P4 routing — linkstate-peer topology codecs (imports locator +
+    // linkstate_link; linkstate_list imports linkstate). Composers, so
+    // they trail their leaf deps in the compile order. — R311qm
+    "linkstate",      // LinkState entry — options flags + zid/whatami/locators/links
+    "linkstate_list", // LinkStateList — VLE count + repeat<linkstate>
 ];
 
 // R311a1 — per-codec feature gate. `codec-init-body` / `codec-open-body`
@@ -113,6 +119,13 @@ fn is_codec_enabled(stem: &str) -> bool {
         "crc32" | "serial_envelope" | "cobs_encode" | "cobs_decode" => {
             std::env::var_os("CARGO_FEATURE_CODEC_SERIAL").is_some()
         }
+        // R311qm — P4 linkstate-peer topology codecs (AP/full-node
+        // routing feature; absent from MCU footprint). The element
+        // wrapper, the LinkState entry, and the LinkStateList batch
+        // share `codec-linkstate`.
+        "linkstate_link" | "linkstate" | "linkstate_list" => {
+            std::env::var_os("CARGO_FEATURE_CODEC_LINKSTATE").is_some()
+        }
         _ => true,
     }
 }
@@ -145,6 +158,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_REQUEST");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_RESPONSE");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_SERIAL");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_LINKSTATE");
 
     let options = ForgeCompileOptions::default();
 

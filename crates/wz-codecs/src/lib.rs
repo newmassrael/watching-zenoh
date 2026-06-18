@@ -315,6 +315,24 @@ codec_group!(
     ]
 );
 
+// R311qm — P4 linkstate-peer topology codecs. `linkstate_link` is the
+// bare-VLE-u64 element wrapper for the `links` repeat (SCE repeats only
+// codec types, not scalars); `linkstate` is one LinkState entry
+// (options flags + zid/whatami/locators/links); `linkstate_list` is the
+// flooded LinkStateList batch. The generated `linkstate` module
+// references `super::locator` (always-present top-level mod) and
+// `super::linkstate_link`; all three sit at crate root so the codegen
+// `super::X` lookups resolve. AP/full-node routing feature — gated off
+// the MCU footprint.
+codec_group!(
+    "codec-linkstate",
+    [
+        (linkstate_link, "linkstate_link.rs"),
+        (linkstate, "linkstate.rs"),
+        (linkstate_list, "linkstate_list.rs"),
+    ]
+);
+
 /// R311dl — single-source-of-truth wire-protocol MID / flag constants.
 ///
 /// Each constant is a wire-spec-frozen byte from

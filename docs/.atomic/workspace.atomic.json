@@ -41100,6 +41100,62 @@
         "코드 LOCAL UNPUSHED: R311qf~qk(19커밋)+ql(inventory active+ledger). push 동의 받음(run-ci 그린 후). 엔트리 ID ql=qk 정규 알파 후속."
       ]
     },
+    "Round 311qm": {
+      "decision_summary": "R311qm: P4 linkstate 포팅 (b) — LinkState/LinkStateList topology-exchange wire codec 3종(linkstate_link/linkstate/linkstate_list) 신설. zenoh Zenoh080Routing 미러, byte-parity 3 PASS. weights(H/WGT)는 SCE borrowed-count gated-repeat 갭으로 보류(b2); H=0 default-config wire 완전 패리티.",
+      "changes_bullets": [
+        "sources/codecs/linkstate_link.scxml 신설: links 배열 element wrapper(bare VLE u64). SCE repeat가 imported codec type만 허용(scalar 불가, parser.rs 확인)이라 1-필드 wrapper 필요=locator가 string을 wrap하는 선례와 동형(ext_zint 형태).",
+        "sources/codecs/linkstate.scxml 신설: LinkState 1엔트리. options flags(P/W/L/H=bit 0~3) + psid/sn(VLE) + zid?(P; self-len-prefixed zid_len VLE + bytes, join/hello cbyte-packed와 구별) + whatami?(W; u8) + locators?(L; VLE count + repeat<locator>) + links(VLE count + repeat<linkstate_link>). zenoh net/codec/linkstate.rs:33-143 + core/zenohid.rs:36 + core/locator.rs:57-65 미러.",
+        "sources/codecs/linkstate_list.scxml 신설: LinkStateList = VLE count + repeat<linkstate>. zenoh ASCII의 LK_ST_LS header 바이트는 OAM 캐리어(linkstate 포팅 step c) 소관이라 codec body 미포함(net/protocol/network.rs:357이 bare list를 buffer에 write).",
+        "wz-codecs build.rs: CODECS에 3 stem(linkstate_link leaf, linkstate/linkstate_list composer) dependency-order 추가 + is_codec_enabled CARGO_FEATURE_CODEC_LINKSTATE gate + rerun-if-env-changed.",
+        "wz-codecs src/lib.rs: codec_group!(\"codec-linkstate\", [linkstate_link, linkstate, linkstate_list]). 생성 linkstate 모듈이 super::locator(always-present)+super::linkstate_link 참조=crate-root 동일레벨로 해소.",
+        "wz-codecs Cargo.toml: codec-linkstate feature(default-on, codec-serial 등 카탈로그 컨벤션 동일). AP/full-node routing feature; MCU footprint서 forward 없어 off=footprint 정직.",
+        "crates/wz-codecs/tests/linkstate.rs 신설: byte-parity 3종(rich P|W|L+links 31B / minimal all-flags-0 4B / LinkStateList 2엔트리 36B). zenoh Zenoh080Routing spec 직접 유도 oracle wire."
+      ],
+      "verification_bullets": [
+        "byte-parity: cargo test -p wz-codecs --test linkstate = 3/3 PASS. oracle wire를 zenoh Zenoh080Routing(net/codec/linkstate.rs) spec서 hand-derive, decode 필드단언(options/psid/sn/zid/whatami/locators/links) + encode_to_vec byte동일 확인.",
+        "빌드: cargo build -p wz-codecs(host) + no_std cross(thumbv7em-none-eabihf --no-default-features --features alloc,codec-linkstate) 둘 다 PASS=codec-linkstate no_std 안전(HeaplessVec<_,64>, hello와 동일 primitive). cargo fmt --check + clippy --tests clean.",
+        "SCE codegen이 최복잡 조합(flags + 다중 present-if + length-ref zid + 2 repeat + variable zid 뒤 fixed whatami u8) 처리=serial_envelope의 SCE 57e06f1e9 positional-validity 경로가 fixed-after-variable 커버 재확인. 첫 시도 XML comment의 연속하이픈(zenoh Rust 박스아트 복사) 적발→다이어그램 재작성.",
+        "회귀: 호스트 소비자(wz/wz-runtime-tokio/wz-session-core/wz-ap-demo) 빌드 PASS=codec-linkstate forward 없어 invisible(순수 가산). wz-codecs 전체 스위트(smoke 5 + serial + linkstate 3) green.",
+        "cargo build --workspace는 sce-rust-runtime no_std+http-send 상호배타 compile_error로 실패하나 PRE-EXISTING(wz-codecs는 sce-rust-runtime 무의존; --workspace feature-unification 아티팩트, run-ci per-crate 빌드와 무관, 내 변경의 회귀 아님).",
+        "SSOT: validate_workspace orphan delta 0(13 ledger 유지, new +0). inventory 무변경(별도 linkstate atom 없음=routing-peer active 하위 인프라)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qm = P4 linkstate 포팅 (b) 완료: LinkState/LinkStateList topology-exchange wire codec 3종(byte-parity 3 PASS). routing-peer atom(active) 하위 mesh-forwarding 인프라; inventory flip 불필요(별도 linkstate atom 없음, mesh forwarding=routing-peer reason의 later atom).",
+        "weights(b2) 보류=SCE 갭 보고(stop-first): gated repeat의 count를 always-present links_len서 빌리는 borrowed-count primitive 부재. co-gating validator(parser.rs validate_codec_repeat_present_if_co_gating)가 count-source 필드의 동일 present-if 강제→links_len(무조건 present)을 H-gated weights가 못 빌림. wrapper/dup-count 우회는 wire에 length VLE 추가=zenoh byte-parity 깨짐. SCE가 borrowed-count gated-repeat 전달하면 adopt(R311nq big-message 패턴). 현재 H=0 default-config(무가중치=opt-in TransportWeight 미설정)=spanning-tree MVP(step c/d 소비) 완전 커버; H 비트는 decode되어 options.H로 소비자 가시.",
+        "즉시 다음(linkstate 포팅 c): Network 그래프(zenoh net/protocol/network.rs) — psid↔zid 매핑 + 수신 LinkStateList→그래프 갱신 + OAM 캐리어(LK_ST_LS id) wrap/unwrap. 이후 (d) spanning-tree/최단경로 tree forwarding(hat/linkstate_peer)=순환 mesh 무한루프 방지. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED: R311qm(linkstate_link/linkstate/linkstate_list SCXML 3 + wz-codecs build.rs/lib.rs/Cargo.toml 배선 + tests/linkstate.rs + 이 ledger). push 미동의=로컬 커밋만, 사용자 명시 'push' 대기. 엔트리 ID qm=ql 정규 알파 후속."
+      ],
+      "publishable_decision_summary": "R311qm: P4 linkstate 포팅 (b) — LinkState/LinkStateList topology-exchange wire codec 3종(linkstate_link/linkstate/linkstate_list) 신설. zenoh Zenoh080Routing 미러, byte-parity 3 PASS. weights(H/WGT)는 SCE borrowed-count gated-repeat 갭으로 보류(b2); H=0 default-config wire 완전 패리티.",
+      "publishable_changes_bullets": [
+        "sources/codecs/linkstate_link.scxml 신설: links 배열 element wrapper(bare VLE u64). SCE repeat가 imported codec type만 허용(scalar 불가, parser.rs 확인)이라 1-필드 wrapper 필요=locator가 string을 wrap하는 선례와 동형(ext_zint 형태).",
+        "sources/codecs/linkstate.scxml 신설: LinkState 1엔트리. options flags(P/W/L/H=bit 0~3) + psid/sn(VLE) + zid?(P; self-len-prefixed zid_len VLE + bytes, join/hello cbyte-packed와 구별) + whatami?(W; u8) + locators?(L; VLE count + repeat<locator>) + links(VLE count + repeat<linkstate_link>). zenoh net/codec/linkstate.rs:33-143 + core/zenohid.rs:36 + core/locator.rs:57-65 미러.",
+        "sources/codecs/linkstate_list.scxml 신설: LinkStateList = VLE count + repeat<linkstate>. zenoh ASCII의 LK_ST_LS header 바이트는 OAM 캐리어(linkstate 포팅 step c) 소관이라 codec body 미포함(net/protocol/network.rs:357이 bare list를 buffer에 write).",
+        "wz-codecs build.rs: CODECS에 3 stem(linkstate_link leaf, linkstate/linkstate_list composer) dependency-order 추가 + is_codec_enabled CARGO_FEATURE_CODEC_LINKSTATE gate + rerun-if-env-changed.",
+        "wz-codecs src/lib.rs: codec_group!(\"codec-linkstate\", [linkstate_link, linkstate, linkstate_list]). 생성 linkstate 모듈이 super::locator(always-present)+super::linkstate_link 참조=crate-root 동일레벨로 해소.",
+        "wz-codecs Cargo.toml: codec-linkstate feature(default-on, codec-serial 등 카탈로그 컨벤션 동일). AP/full-node routing feature; MCU footprint서 forward 없어 off=footprint 정직.",
+        "crates/wz-codecs/tests/linkstate.rs 신설: byte-parity 3종(rich P|W|L+links 31B / minimal all-flags-0 4B / LinkStateList 2엔트리 36B). zenoh Zenoh080Routing spec 직접 유도 oracle wire."
+      ],
+      "publishable_verification_bullets": [
+        "byte-parity: cargo test -p wz-codecs --test linkstate = 3/3 PASS. oracle wire를 zenoh Zenoh080Routing(net/codec/linkstate.rs) spec서 hand-derive, decode 필드단언(options/psid/sn/zid/whatami/locators/links) + encode_to_vec byte동일 확인.",
+        "빌드: cargo build -p wz-codecs(host) + no_std cross(thumbv7em-none-eabihf --no-default-features --features alloc,codec-linkstate) 둘 다 PASS=codec-linkstate no_std 안전(HeaplessVec<_,64>, hello와 동일 primitive). cargo fmt --check + clippy --tests clean.",
+        "SCE codegen이 최복잡 조합(flags + 다중 present-if + length-ref zid + 2 repeat + variable zid 뒤 fixed whatami u8) 처리=serial_envelope의 SCE 57e06f1e9 positional-validity 경로가 fixed-after-variable 커버 재확인. 첫 시도 XML comment의 연속하이픈(zenoh Rust 박스아트 복사) 적발→다이어그램 재작성.",
+        "회귀: 호스트 소비자(wz/wz-runtime-tokio/wz-session-core/wz-ap-demo) 빌드 PASS=codec-linkstate forward 없어 invisible(순수 가산). wz-codecs 전체 스위트(smoke 5 + serial + linkstate 3) green.",
+        "cargo build --workspace는 sce-rust-runtime no_std+http-send 상호배타 compile_error로 실패하나 PRE-EXISTING(wz-codecs는 sce-rust-runtime 무의존; --workspace feature-unification 아티팩트, run-ci per-crate 빌드와 무관, 내 변경의 회귀 아님).",
+        "SSOT: validate_workspace orphan delta 0(13 ledger 유지, new +0). inventory 무변경(별도 linkstate atom 없음=routing-peer active 하위 인프라)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qm = P4 linkstate 포팅 (b) 완료: LinkState/LinkStateList topology-exchange wire codec 3종(byte-parity 3 PASS). routing-peer atom(active) 하위 mesh-forwarding 인프라; inventory flip 불필요(별도 linkstate atom 없음, mesh forwarding=routing-peer reason의 later atom).",
+        "weights(b2) 보류=SCE 갭 보고(stop-first): gated repeat의 count를 always-present links_len서 빌리는 borrowed-count primitive 부재. co-gating validator(parser.rs validate_codec_repeat_present_if_co_gating)가 count-source 필드의 동일 present-if 강제→links_len(무조건 present)을 H-gated weights가 못 빌림. wrapper/dup-count 우회는 wire에 length VLE 추가=zenoh byte-parity 깨짐. SCE가 borrowed-count gated-repeat 전달하면 adopt(R311nq big-message 패턴). 현재 H=0 default-config(무가중치=opt-in TransportWeight 미설정)=spanning-tree MVP(step c/d 소비) 완전 커버; H 비트는 decode되어 options.H로 소비자 가시.",
+        "즉시 다음(linkstate 포팅 c): Network 그래프(zenoh net/protocol/network.rs) — psid↔zid 매핑 + 수신 LinkStateList→그래프 갱신 + OAM 캐리어(LK_ST_LS id) wrap/unwrap. 이후 (d) spanning-tree/최단경로 tree forwarding(hat/linkstate_peer)=순환 mesh 무한루프 방지. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED: R311qm(linkstate_link/linkstate/linkstate_list SCXML 3 + wz-codecs build.rs/lib.rs/Cargo.toml 배선 + tests/linkstate.rs + 이 ledger). push 미동의=로컬 커밋만, 사용자 명시 'push' 대기. 엔트리 ID qm=ql 정규 알파 후속."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
