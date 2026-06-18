@@ -2078,8 +2078,15 @@ layer_e_ap_demo_round_trip() {
     # Each owns its variant in its dedicated lane, so all stay out of this sweep
     # (whose binary is whichever variant a prior lane last built — not assertable
     # here). The `wz_router` substring covers all three with one pattern.
+    # R311qk — same for `wz_peer`: wz_peer_mesh needs `--features routing-peer`
+    # (Layer E6 builds it), wz_peer_reject_without_feature needs the DEFAULT build
+    # for its exit-2 assertion (Layer E4 rebuilds it). On THIS sweep's
+    # indeterminate binary, a routing-peer-enabled build turns `--peer` into a
+    # peer SERVER that runs until SIGTERM — so the reject test's `.output()`
+    # blocks forever (the R311qg lane-wiring gap a full run-ci surfaced). The
+    # `wz_peer` substring keeps both out; they run only in E4 / E6.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
-        --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router)
+        --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
