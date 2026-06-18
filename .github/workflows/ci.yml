@@ -330,6 +330,13 @@ jobs:
         # binary at the shared path matches the variant each lane asserts.
         run: bash scripts/run-ci.sh --layer E4
 
+      - name: Layer E5 — router data-plane forwarding e2e (routing-routes)
+        # R311qc — the data-plane counterpart to E3: builds wz-ap-demo with
+        # --features routing-routes and asserts the router forwards a Put across
+        # faces (producer -> router -> matching subscriber). Self-contained
+        # wz<->wz, no external runner like E3/E4.
+        run: bash scripts/run-ci.sh --layer E5
+
       - name: Layer F — codec-footprint catalog truthfulness gate
         # R311pt — F is host-only (python3 + cargo; no cross-toolchain),
         # so it runs on the primary runner. Default-on in run-ci.sh now,

@@ -875,6 +875,34 @@ layer_c1w_cargo_test_routing_accept() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
 }
 
+# ─── Layer C1x — routing-routes: forwarding kernel + forwarder unit + clippy ─
+#
+# R311qc: the data-plane forwarding atom (`routing::RouteTable` kernel +
+# `routing_forward::RoutingForwarder`) is gated on the off-default
+# `routing-routes` feature, so the default Layer C1 does NOT compile it — this
+# lane restores its coverage, mirroring C1w for `routing-accept`:
+#   1. clippy-gates the GENERIC kernel in wz-session-core (it compiles + lints
+#      for the generic `<R, T>`). The kernel's BEHAVIOR is exercised in step 2,
+#      not here: its forward path needs a concrete `SessionLinkActions`, which
+#      only the tokio profile constructs (the test-support dev-dep-cycle keeps
+#      actions tokio-side, see feedback-test-support-dev-dep-cycle), so the
+#      kernel is tested transitively through the Tokio monomorphization.
+#   2. runs the forwarder unit suite (forward / no-match / fan-out / src-skip /
+#      undeclare / face-leave / wildcard / cross-talk / aliased-drop /
+#      best-effort / Del) under `--features routing-routes`;
+#   3. clippy-gates the `routing-routes` cfg (`--all-targets`);
+#   4. clippy-gates the LIB under `--no-default-features --features routing-routes`
+#      to prove the forwarder composes standalone (routing-routes pulls
+#      routing-accept + the kernel + codec-push + declare-subscriber).
+# The demo-binary forwarding e2e is Layer E5 (separate, --features routing-routes).
+layer_c1x_cargo_test_routing_routes() {
+    (cd crates \
+        && cargo clippy -p wz-session-core --features routing-routes --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features routing-routes --lib routing_forward --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-routes --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-routes --quiet -- -D warnings)
+}
+
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
 #
 # R311du: same shape as C1c. The pubsub SubscriberRegistry test module
@@ -2018,13 +2046,14 @@ layer_e_ap_demo_round_trip() {
     # (where the env + external binary are explicitly provisioned), which is
     # their `#[ignore]`-declared home. The `zenohd` substring keeps every future
     # zenohd interop test out of this default sweep with one pattern.
-    # R311qa — also exclude `wz_router`: the router e2es need a SPECIFIC binary
-    # VARIANT this default-binary sweep does not provide. wz_router_multi_peer
+    # R311qa / R311qc — also exclude `wz_router`: the router e2es need a SPECIFIC
+    # binary VARIANT this default-binary sweep does not provide. wz_router_multi_peer
     # needs `--features routing-router` (Layer E3 builds it); wz_router_reject
-    # needs the DEFAULT build to assert the exit-2 reject (Layer E4 rebuilds it).
-    # Each owns its variant in its dedicated lane, so both stay out of this sweep
+    # needs the DEFAULT build to assert the exit-2 reject (Layer E4 rebuilds it);
+    # wz_router_forward needs `--features routing-routes` (Layer E5 builds it).
+    # Each owns its variant in its dedicated lane, so all stay out of this sweep
     # (whose binary is whichever variant a prior lane last built — not assertable
-    # here). The `wz_router` substring covers both with one pattern.
+    # here). The `wz_router` substring covers all three with one pattern.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router)
 }
@@ -3007,6 +3036,25 @@ layer_e4_router_reject() {
         --test wz_router_reject_without_feature -- --ignored --quiet) || return 1
 }
 
+# ─── Layer E5 — router data-plane FORWARDING e2e (R311qc) ───────────
+#
+# The data-plane counterpart to Layer E3's accept-and-hold: a `wz-ap-demo
+# --router` built with `--features routing-routes` forwards a Put received on
+# one peer face to another peer face that declared a matching subscriber.
+# Topology is one router + a `--key` consumer + a `--publish` producer, all
+# distinct processes — neither peer can hear the other directly, so the
+# consumer firing its subscriber callback is a definitive witness that the
+# ROUTER forwarded the Put across faces (a property `routing-router` alone, which
+# holds faces but routes nothing, cannot produce). Self-contained wz<->wz (no
+# external zenohd / pico CLI), so like E3/E4 there is no prereq to SKIP on. The
+# `routing-routes` binary is a superset of the `routing-router` one, so building
+# it here does not invalidate E3's assertions.
+layer_e5_router_forward() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-routes --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_forward -- --ignored --quiet) || return 1
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -3022,6 +3070,7 @@ run_layer C1t layer_c1t_cargo_test_serial || overall=1
 run_layer C1u layer_c1u_cargo_test_tls || overall=1
 run_layer C1v layer_c1v_cargo_test_ws || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
+run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
@@ -3050,6 +3099,7 @@ run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer E3 layer_e3_router_multi_peer || overall=1
 run_layer E4 layer_e4_router_reject || overall=1
+run_layer E5 layer_e5_router_forward || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
