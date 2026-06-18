@@ -395,7 +395,13 @@ query-timeout = ["wz-runtime-tokio?/query-timeout"]
 # future cascades. "1 active / 5 reserved" estimate corrected to 0/6.
 routing-client = []
 routing-failover = ["routing-router"]
-routing-peer = []
+# R311qg — routing-peer atom 1 now composes REAL library code (the dial+accept
+# mesh-node foundation, `peer_loop`), no longer a hollow marker: it forwards the
+# wz-runtime-tokio `routing-peer` atom on top of the `routing-router`
+# accept-and-hold foundation it reuses. `?/` activates only on the AP path
+# (runtime-tokio profile pulls wz-runtime-tokio). Hold-only; mesh forwarding +
+# zid dedup is a later atom (so this does NOT pull `routing-routes`).
+routing-peer = ["routing-router", "wz-runtime-tokio?/routing-peer"]
 # R311qa — routing-router now composes REAL library code: it forwards the
 # wz-runtime-tokio `routing-accept` atom (the multi-peer `accept_loop` foundation)
 # and pulls its transport prerequisites, so selecting `routing-router` cannot leave

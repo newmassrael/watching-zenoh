@@ -417,6 +417,14 @@ routing-routes = [
     "codec-push",
     "declare-subscriber",
 ]
+# R311qg — routing-peer atom 1: the dial+accept mesh-node foundation. Gates the
+# `peer_loop` entry in `accept_loop` — a node that DIALS a configured peer set
+# AND accepts inbound, holding both in one face set. Reuses the ENTIRE
+# `routing-accept` machinery (the shared `face_drive_loop` core); the only
+# net-new surface is the dial-out face source (`dial_face`), so it just pulls
+# `routing-accept`. Hold-only (NoOpForwarder); mesh forwarding + zid-keyed loop
+# dedup is a later atom. Off by default; the facade `routing-peer` selects it.
+routing-peer = ["routing-accept"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the

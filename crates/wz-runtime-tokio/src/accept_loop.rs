@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311qa — multi-peer accept loop: the `routing-router` foundation.
+//! R311qa / qg — multi-peer face loop: the `routing-router` and `routing-peer`
+//! foundations.
+//!
+//! [`accept_loop`] is the accept-only entry (the `routing-router` foundation);
+//! [`peer_loop`] (R311qg, `routing-peer`) generalises it to a node that also
+//! DIALS a configured peer set, holding the dialed and accepted faces in one
+//! set. Both delegate to the shared [`face_drive_loop`] core, differing only in
+//! their [`FaceSources`] (accept-only vs accept + dial).
 //!
 //! The single-peer session-open path ([`crate::session_open::accept_endpoint`]
 //! -> [`accept_locator`](crate::session_open::accept_locator) ->
@@ -60,11 +67,12 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_core::TimeSource;
 
 use crate::link_pipeline::accept_tcp_on;
@@ -73,7 +81,9 @@ use crate::session_glue::{
     drive_session_until_terminal, DriverOutcome, IterationEvent, SessionInitParams,
     SessionLinkActions, SessionTimeouts,
 };
-use crate::session_open::{accept_and_open_session, DialedLink, OpenError, OpenedSession};
+use crate::session_open::{
+    accept_and_open_session, initiate_and_open_session, DialedLink, OpenError, OpenedSession,
+};
 
 /// Backoff applied after an `accept()` error before re-arming the accept —
 /// zenoh's `TCP_ACCEPT_THROTTLE_TIME` (100ms, `io/zenoh-links/zenoh-link-tcp/src/
@@ -175,12 +185,29 @@ impl FaceForwarder for NoOpForwarder {
 pub struct AcceptLoopSummary {
     /// Peers accepted at the TCP layer (a face open was started for each).
     pub accepted: usize,
-    /// Faces that reached Established (entered the faces table at least once).
+    /// Outbound peers dialed (peer-mesh mode, [`peer_loop`]): a face open was
+    /// started for each configured dial target. Always 0 for a pure acceptor
+    /// ([`accept_loop`]). The dial-source counterpart to [`accepted`](Self::accepted).
+    pub dialed: usize,
+    /// Faces that reached Established (entered the faces table at least once) —
+    /// counts dialed and accepted faces uniformly (a held face is a held face).
     pub established: usize,
     /// High-water mark of the live faces table — the "held N peers at once"
     /// witness that distinguishes this from the one-shot accept path.
     pub peak_concurrent: usize,
 }
+
+/// The tagged result of one face-open attempt — the `opening`
+/// [`FuturesUnordered`]'s item. `(id, peer, opened)` so a completion routes to
+/// the right face record without threading state through the set.
+type OpenResult = (FaceId, SocketAddr, Result<OpenedSession, OpenError>);
+
+/// A boxed face-open future — the `opening` set's element type. Boxed `dyn
+/// Future` because the two open SOURCES, [`open_face`] (accept) and [`dial_face`]
+/// (dial), are distinct future types that must share one [`FuturesUnordered`];
+/// one heap alloc per open is negligible beside the handshake it wraps. No
+/// `Send` bound — the whole loop is single-task `!Send` (see the module doc).
+type OpenFuture = Pin<Box<dyn Future<Output = OpenResult>>>;
 
 /// Bring one accepted link up to Established. Tagged with `(id, peer)` so the
 /// loop can route the result without threading state through
@@ -194,8 +221,42 @@ async fn open_face(
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
-) -> (FaceId, SocketAddr, Result<OpenedSession, OpenError>) {
+) -> OpenResult {
     let result = accept_and_open_session(accepted, params, clock, None, tick_interval_ms).await;
+    (id, peer, result)
+}
+
+/// Dial one configured peer and bring the OUTBOUND link up to Established — the
+/// dial-out twin of [`open_face`]. Where `open_face` opens an *accepted* link via
+/// [`accept_and_open_session`], this connects to `peer` then opens the
+/// *initiated* link via [`initiate_and_open_session`] (the same SSOT the
+/// single-session initiator drives), tagged `(id, peer)` so its completion
+/// routes through the same `opening` arm. A failed TCP connect surfaces as
+/// [`OpenError::Dial`] (a `FaceFailed`, not a panic), so one unreachable peer
+/// never sinks the mesh. TCP only — symmetric to the TCP-only accept side
+/// ([`accept_tcp_on`]); locator / DNS / TLS dial (reusing
+/// [`connect_and_open_session`](crate::session_open::connect_and_open_session))
+/// is a later `routing-peer` atom.
+async fn dial_face(
+    id: FaceId,
+    peer: SocketAddr,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+) -> OpenResult {
+    let result = match TcpStream::connect(peer).await {
+        Ok(stream) => {
+            initiate_and_open_session(
+                DialedLink::Tcp(stream),
+                params,
+                clock,
+                None,
+                tick_interval_ms,
+            )
+            .await
+        }
+        Err(e) => Err(OpenError::Dial(e)),
+    };
     (id, peer, result)
 }
 
@@ -238,26 +299,40 @@ enum Step {
     // Boxed: an `OpenedSession` is large (it owns the FSM engine), so carrying it
     // inline would make every `Step` value that big on the stack (clippy
     // `large_enum_variant`). One box per open event is negligible.
-    Opened(Box<(FaceId, SocketAddr, Result<OpenedSession, OpenError>)>),
+    Opened(Box<OpenResult>),
     Driven((Face, DriverOutcome)),
     Accepted(io::Result<(DialedLink, SocketAddr)>),
 }
 
-/// Bind-once, accept-and-hold-N: the multi-peer accept loop.
-///
-/// Loops accepting inbound TCP links on the already-bound `listener`; each
-/// accepted link is opened to Established (concurrently, so one peer's handshake
-/// never blocks accepting the next) and then driven as a held *face* until the
-/// peer closes. `on_event` observes each [`AcceptEvent`]; `params` is the local
-/// node's session-init template, cloned per face (one node zid, many peer zids —
-/// a router has one identity and many peers). The loop runs until `shutdown`
-/// resolves, then returns its [`AcceptLoopSummary`].
+/// Where a face-drive node's faces come from: the inbound `listener` it accepts
+/// on, and the outbound `dial_targets` it dials. A pure acceptor
+/// ([`accept_loop`]) has no dial targets; a peer-mesh node ([`peer_loop`]) has
+/// both. Bundling the two sources keeps the loop signature within the
+/// argument-count budget as the family grows, and names the real distinction
+/// between the two entry points.
+pub struct FaceSources {
+    /// The bound TCP listener for inbound peers (accept source).
+    pub listener: TcpListener,
+    /// The peer addresses to dial at startup (outbound source); empty for a
+    /// pure acceptor.
+    pub dial_targets: Vec<SocketAddr>,
+}
+
+/// Bind-once, hold-N: the shared multi-face drive core behind both
+/// [`accept_loop`] (accept-only) and [`peer_loop`] (dial + accept). A node's
+/// faces come from the two [`FaceSources`] — dialing each `dial_targets` address
+/// (outbound, seeded once at startup) and accepting inbound links on `listener`
+/// — but once a link reaches Established it is a *face*, held and driven
+/// identically regardless of which side opened it (a held face is a held face,
+/// per the module doc). `params` is the local node's session-init template,
+/// cloned per face. The loop runs until `shutdown` resolves, then returns its
+/// [`AcceptLoopSummary`].
 ///
 /// Shutdown drops the in-flight open/drive futures: each face's socket closes
 /// and its (detached, `Send`) writer task drains. Per-face graceful Close is a
 /// NON-goal of this atom (see the module doc).
-pub async fn accept_loop<S, F>(
-    listener: TcpListener,
+async fn face_drive_loop<S, F>(
+    sources: FaceSources,
     params: SessionInitParams,
     clock: TokioTime,
     tick_interval_ms: u64,
@@ -269,13 +344,36 @@ where
     S: Future<Output = ()>,
     F: FnMut(&AcceptEvent),
 {
+    let FaceSources {
+        listener,
+        dial_targets,
+    } = sources;
     tokio::pin!(shutdown);
 
     let mut faces: BTreeMap<FaceId, SocketAddr> = BTreeMap::new();
     let mut next_id: u64 = 0;
     let mut summary = AcceptLoopSummary::default();
-    let mut opening = FuturesUnordered::new();
+    let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
     let mut driving = FuturesUnordered::new();
+
+    // Seed the outbound dial faces (peer-mesh mode). Each configured target is
+    // dialed concurrently and, once Established, held in the SAME face set as
+    // accepted peers — the dial-out face source, symmetric to the accept arm
+    // below. Boxed into the shared `opening` set because `dial_face` and
+    // `open_face` are distinct future types (see [`OpenFuture`]). Empty for a
+    // pure acceptor, so [`accept_loop`] seeds nothing here.
+    for peer in dial_targets {
+        let id = FaceId(next_id);
+        next_id += 1;
+        summary.dialed += 1;
+        opening.push(Box::pin(dial_face(
+            id,
+            peer,
+            params.clone(),
+            clock,
+            tick_interval_ms,
+        )));
+    }
 
     loop {
         let step = tokio::select! {
@@ -321,14 +419,14 @@ where
                 let id = FaceId(next_id);
                 next_id += 1;
                 summary.accepted += 1;
-                opening.push(open_face(
+                opening.push(Box::pin(open_face(
                     id,
                     peer,
                     accepted,
                     params.clone(),
                     clock,
                     tick_interval_ms,
-                ));
+                )));
             }
 
             Step::Accepted(Err(e)) => {
@@ -347,6 +445,87 @@ where
     drop(driving);
     faces.clear();
     summary
+}
+
+/// Bind-once, accept-and-hold-N: the multi-peer accept loop (the
+/// `routing-router` foundation).
+///
+/// Loops accepting inbound TCP links on the already-bound `listener`; each
+/// accepted link is opened to Established (concurrently, so one peer's handshake
+/// never blocks accepting the next) and then driven as a held *face* until the
+/// peer closes. A thin entry over [`face_drive_loop`] with NO outbound dials —
+/// every face comes from accepting. `on_event` observes each [`AcceptEvent`];
+/// the loop runs until `shutdown` resolves, then returns its
+/// [`AcceptLoopSummary`].
+pub async fn accept_loop<S, F>(
+    listener: TcpListener,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    shutdown: S,
+    on_event: F,
+    forwarder: &dyn FaceForwarder,
+) -> AcceptLoopSummary
+where
+    S: Future<Output = ()>,
+    F: FnMut(&AcceptEvent),
+{
+    face_drive_loop(
+        FaceSources {
+            listener,
+            dial_targets: Vec::new(),
+        },
+        params,
+        clock,
+        tick_interval_ms,
+        shutdown,
+        on_event,
+        forwarder,
+    )
+    .await
+}
+
+/// Bind-once, dial-configured-peers, accept-inbound, hold-all: the peer-mesh
+/// node (the `routing-peer` foundation, R311qg).
+///
+/// The dial + accept generalisation of [`accept_loop`]: a peer both DIALS each
+/// [`FaceSources::dial_targets`] address (its outbound mesh links) AND accepts
+/// inbound peers on [`FaceSources::listener`], holding every resulting face in
+/// one set. The only difference from `accept_loop` is the seeded outbound dials;
+/// both delegate to the shared [`face_drive_loop`] core, so accept-side
+/// robustness (one peer's handshake never blocks another, a failed open is
+/// isolated as `FaceFailed`) covers a dialed face too — an unreachable dial
+/// target surfaces as `FaceFailed` and the mesh keeps forming.
+///
+/// Hold-only (this atom): a held mesh face routes nothing yet. Mesh forwarding
+/// needs zid-keyed loop suppression (a Put must not cycle a ring, which the
+/// star router's `src_id != dst` face skip does not prevent), the next
+/// `routing-peer` atom. So `peer_loop` takes the same `forwarder` seam as
+/// `accept_loop`; a hold-only node passes [`NoOpForwarder`].
+#[cfg(feature = "routing-peer")]
+pub async fn peer_loop<S, F>(
+    sources: FaceSources,
+    params: SessionInitParams,
+    clock: TokioTime,
+    tick_interval_ms: u64,
+    shutdown: S,
+    on_event: F,
+    forwarder: &dyn FaceForwarder,
+) -> AcceptLoopSummary
+where
+    S: Future<Output = ()>,
+    F: FnMut(&AcceptEvent),
+{
+    face_drive_loop(
+        sources,
+        params,
+        clock,
+        tick_interval_ms,
+        shutdown,
+        on_event,
+        forwarder,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -660,5 +839,144 @@ mod tests {
             "it never established (shutdown fired mid-handshake)"
         );
         assert_eq!(summary.peak_concurrent, 0, "no face was ever held");
+    }
+
+    // ── routing-peer atom (R311qg): dial + accept mesh node ─────────────
+
+    /// One peer-node identity (a distinct zid from the acceptor and initiators).
+    #[cfg(feature = "routing-peer")]
+    fn peer_params() -> SessionInitParams {
+        let mut p = fixture_session_init_params();
+        p.zid = vec![0xBB; 4];
+        p
+    }
+
+    /// A peer DIALS a configured target and holds the resulting OUTBOUND face —
+    /// the dial-out face source in isolation, the mirror of accept-and-hold. The
+    /// peer also listens (it is a full mesh node) but no inbound peer connects
+    /// here, so its only face is the one it dialed: `dialed == 1`, `accepted == 0`.
+    #[cfg(feature = "routing-peer")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn peer_loop_dials_a_configured_peer_and_holds_it() {
+        let (acc_listener, acc_addr) = bind_loopback().await;
+        let (peer_listener, _peer_addr) = bind_loopback().await;
+
+        // `go` flips when the peer's dialed face is up; it ends BOTH loops.
+        let (go_tx, go_rx) = watch::channel(false);
+
+        // The dial target: a plain acceptor that holds the peer's outbound link.
+        let acceptor = accept_loop(
+            acc_listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            |_event: &AcceptEvent| {},
+            &NoOpForwarder,
+        );
+
+        // The peer dials the acceptor; its FaceUp flips `go`.
+        let on_event = move |event: &AcceptEvent| {
+            if let AcceptEvent::FaceUp(_) = event {
+                let _ = go_tx.send(true);
+            }
+        };
+        let peer = peer_loop(
+            FaceSources {
+                listener: peer_listener,
+                dial_targets: vec![acc_addr],
+            },
+            peer_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (_acc, peer) = tokio::join!(acceptor, peer);
+            peer
+        })
+        .await
+        .expect("peer dial completes within 20s");
+
+        assert_eq!(summary.dialed, 1, "dialed the one configured target");
+        assert_eq!(summary.accepted, 0, "no inbound peer connected");
+        assert_eq!(
+            summary.established, 1,
+            "the dialed face reached Established"
+        );
+        assert_eq!(summary.peak_concurrent, 1, "held the outbound face");
+    }
+
+    /// The mesh keystone: a peer holds a DIALED face and an ACCEPTED face at
+    /// once. It dials an acceptor (outbound) AND accepts an initiator (inbound),
+    /// so its peak is 2 faces from two different sources — `dialed == 1` and
+    /// `accepted == 1` — the property that makes it a mesh node, not a one-sided
+    /// acceptor or one-sided dialer.
+    #[cfg(feature = "routing-peer")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn peer_loop_holds_a_dialed_and_an_accepted_face_at_once() {
+        let (acc_listener, acc_addr) = bind_loopback().await;
+        let (peer_listener, peer_addr) = bind_loopback().await;
+
+        // `go` flips once the peer holds BOTH faces (peak 2); it releases the
+        // initiator and the acceptor and ends the peer loop.
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let up = up.clone();
+            move |event: &AcceptEvent| {
+                if let AcceptEvent::FaceUp(_) = event {
+                    if up.fetch_add(1, SeqCst) + 1 == 2 {
+                        let _ = go_tx.send(true);
+                    }
+                }
+            }
+        };
+
+        // The dial target (outbound leg) and the inbound initiator.
+        let acceptor = accept_loop(
+            acc_listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            |_event: &AcceptEvent| {},
+            &NoOpForwarder,
+        );
+        let initiator = idle_initiator(peer_addr, 0x11, go_rx.clone());
+
+        let peer = peer_loop(
+            FaceSources {
+                listener: peer_listener,
+                dial_targets: vec![acc_addr],
+            },
+            peer_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (_acc, _ini, peer) = tokio::join!(acceptor, initiator, peer);
+            peer
+        })
+        .await
+        .expect("dial+accept mesh forms within 20s");
+
+        assert_eq!(summary.dialed, 1, "dialed the outbound target");
+        assert_eq!(summary.accepted, 1, "accepted the inbound initiator");
+        assert_eq!(
+            summary.established, 2,
+            "both the dialed and the accepted face reached Established"
+        );
+        assert_eq!(
+            summary.peak_concurrent, 2,
+            "held the dialed AND the accepted face at once (a mesh node)"
+        );
     }
 }
