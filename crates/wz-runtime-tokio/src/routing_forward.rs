@@ -96,9 +96,12 @@ mod tests {
     use wz_codecs::push::PushOwned;
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::network_message::NetworkMessage;
-    use wz_session_core::push_build::{build_push_del_literal, build_push_literal};
+    use wz_session_core::push_build::{
+        build_push_aliased, build_push_del_literal, build_push_literal,
+    };
     use wz_session_core_test_support::{
-        decl_subscriber, declare_envelope_decl_subscriber, declare_envelope_undecl_subscriber,
+        decl_kexpr, decl_subscriber, declare_envelope_decl_kexpr, declare_envelope_decl_subscriber,
+        declare_envelope_undecl_kexpr, declare_envelope_undecl_subscriber, undecl_kexpr,
         undecl_subscriber,
     };
 
@@ -143,6 +146,13 @@ mod tests {
     fn publish(forwarder: &RoutingForwarder, face: u64, keyexpr: &str) {
         let push = build_push_literal(keyexpr, b"payload").expect("literal Put push");
         let outcome = push_frame(push, true);
+        forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
+    }
+
+    /// Feed `forwarder` a DeclareKeyexpr mapping `id -> keyexpr` on face `face`
+    /// (R311qd — the peer's bandwidth-optimisation alias).
+    fn declare_kexpr(forwarder: &RoutingForwarder, face: u64, id: u64, keyexpr: &str) {
+        let outcome = declare_frame(declare_envelope_decl_kexpr(decl_kexpr(id, keyexpr)));
         forwarder.forward(FaceId(face), IterationEvent::Poll(&outcome));
     }
 
@@ -319,11 +329,11 @@ mod tests {
     }
 
     #[test]
-    fn an_aliased_subscription_is_not_recorded_yet() {
-        // A DeclareSubscriber whose keyexpr references an expr-id (id != 0) the
-        // router has no mapping for cannot be resolved (alias resolution is a
-        // later increment), so it must NOT be recorded — proven directly via the
-        // subscription count, not just an absent forward.
+    fn an_aliased_subscription_without_a_mapping_is_dropped() {
+        // A DeclareSubscriber whose keyexpr references an expr-id (id != 0) with
+        // NO prior DeclareKeyexpr cannot be resolved, so it must NOT be recorded
+        // — proven directly via the subscription count, not just an absent
+        // forward. (With a prior mapping it IS recorded — the next test.)
         let fwd = RoutingForwarder::new();
         let (consumer, _consumer_sink) = recording_actions();
         fwd.register(FaceId(0), &consumer);
@@ -340,7 +350,66 @@ mod tests {
         assert_eq!(
             fwd.subscription_count(),
             0,
-            "an aliased (id != 0) subscription is not recorded in this atom"
+            "an aliased subscription with no prior DeclareKeyexpr is not recorded"
+        );
+    }
+
+    #[test]
+    fn an_aliased_subscription_resolves_after_its_keyexpr_is_declared() {
+        // R311qd: a peer that DeclareKeyexpr(id=7 -> "home/temp") then declares a
+        // subscriber on the ALIASED keyexpr (WireexprLocal{id:7}) must have its
+        // subscription recorded against the resolved literal — and a literal Put
+        // on "home/temp" then forwards to it.
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_kexpr(&fwd, 0, 7, "home/temp");
+        // aliased DeclareSubscriber: keyexpr WireexprLocal{ id: 7, suffix: None }
+        let sub = declare_frame(declare_envelope_decl_subscriber(decl_subscriber(
+            1, 7, None,
+        )));
+        fwd.forward(FaceId(0), IterationEvent::Poll(&sub));
+
+        assert_eq!(
+            fwd.subscription_count(),
+            1,
+            "the aliased subscription resolved through the declared mapping"
+        );
+        publish(&fwd, 1, "home/temp");
+        assert_eq!(fwd.forwarded(), 1, "a literal Put matched the resolved sub");
+        assert_eq!(consumer_sink.frame_count(), 1);
+    }
+
+    #[test]
+    fn re_literalizes_an_aliased_put_for_the_destination() {
+        // R311qd: a producer that DeclareKeyexpr(id=9 -> "home/temp") then emits
+        // an ALIASED Put (WireexprLocal{id:9, suffix:None}) must be forwarded to
+        // a LITERAL subscriber re-literalized — the destination never saw the
+        // mapping, so the forwarded frame must carry the literal "home/temp".
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_sub(&fwd, 0, 1, "home/temp"); // literal subscriber
+        declare_kexpr(&fwd, 1, 9, "home/temp"); // producer's alias
+        let aliased = build_push_aliased(9, None, b"payload").expect("aliased Put push");
+        let outcome = push_frame(aliased, true);
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+
+        assert_eq!(fwd.forwarded(), 1, "the aliased Put resolved + forwarded");
+        assert_eq!(consumer_sink.frame_count(), 1);
+        // The re-literalized forward must carry the literal keyexpr bytes (an
+        // id-only aliased frame would NOT contain them) so the destination,
+        // which never saw the mapping, can decode it.
+        let frame = consumer_sink.frame_bytes(0);
+        assert!(
+            frame.windows(b"home/temp".len()).any(|w| w == b"home/temp"),
+            "the forwarded frame must carry the re-literalized keyexpr bytes"
         );
     }
 
@@ -388,6 +457,70 @@ mod tests {
         fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
 
         assert_eq!(fwd.forwarded(), 1, "a Del routes like a Put");
+        assert_eq!(consumer_sink.frame_count(), 1);
+    }
+
+    #[test]
+    fn re_literalizes_an_aliased_put_with_a_per_push_suffix() {
+        // The aliased keyexpr resolution is prefix + per-push suffix concat
+        // (resolve_wireexpr: table[id] + suffix, no separator inserted). A
+        // producer maps id=9 -> "home" then publishes an aliased Put carrying a
+        // per-push suffix "/temp" (resolved keyexpr "home/temp"), which must
+        // forward to a literal subscriber on "home/temp", re-literalized.
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_sub(&fwd, 0, 1, "home/temp");
+        declare_kexpr(&fwd, 1, 9, "home"); // prefix-only mapping
+        let aliased = build_push_aliased(9, Some("/temp"), b"payload").expect("aliased Put push");
+        let outcome = push_frame(aliased, true);
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            fwd.forwarded(),
+            1,
+            "prefix+suffix concat resolved to the matching keyexpr"
+        );
+        assert_eq!(consumer_sink.frame_count(), 1);
+        let frame = consumer_sink.frame_bytes(0);
+        assert!(
+            frame.windows(b"home/temp".len()).any(|w| w == b"home/temp"),
+            "the concatenated keyexpr 'home/temp' must be re-literalized on the wire"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_keyexpr_alias_stops_resolving_but_existing_subs_keep_routing() {
+        // UndeclareKeyexpr removes the alias: a SUBSEQUENT aliased record on that
+        // id no longer resolves, but a subscription already recorded against the
+        // resolved LITERAL keeps routing (subs store the literal, not the id).
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_kexpr(&fwd, 1, 9, "home/temp");
+        declare_sub(&fwd, 0, 1, "home/temp"); // literal sub (stores the literal)
+
+        // Undeclare the producer's alias id=9.
+        let undecl = declare_frame(declare_envelope_undecl_kexpr(undecl_kexpr(9)));
+        fwd.forward(FaceId(1), IterationEvent::Poll(&undecl));
+
+        // An aliased Put on the now-removed id is dropped...
+        let aliased = build_push_aliased(9, None, b"payload").expect("aliased Put push");
+        let dropped = push_frame(aliased, true);
+        fwd.forward(FaceId(1), IterationEvent::Poll(&dropped));
+        assert_eq!(fwd.forwarded(), 0, "aliased Put on a removed id is dropped");
+        assert_eq!(consumer_sink.frame_count(), 0);
+
+        // ...but the already-recorded literal subscription still routes a literal
+        // Put (alias removal must not break a resolved route).
+        publish(&fwd, 1, "home/temp");
+        assert_eq!(fwd.forwarded(), 1, "the existing literal sub still routes");
         assert_eq!(consumer_sink.frame_count(), 1);
     }
 }

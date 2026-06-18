@@ -888,8 +888,10 @@ layer_c1w_cargo_test_routing_accept() {
 #      actions tokio-side, see feedback-test-support-dev-dep-cycle), so the
 #      kernel is tested transitively through the Tokio monomorphization.
 #   2. runs the forwarder unit suite (forward / no-match / fan-out / src-skip /
-#      undeclare / face-leave / wildcard / cross-talk / aliased-drop /
-#      best-effort / Del) under `--features routing-routes`;
+#      undeclare / face-leave / wildcard / cross-talk / best-effort / Del, plus
+#      R311qd aliased: drop-without-mapping / resolve-after-declare /
+#      re-literalize / per-push-suffix concat / undeclare-keyexpr) under
+#      `--features routing-routes`;
 #   3. clippy-gates the `routing-routes` cfg (`--all-targets`);
 #   4. clippy-gates the LIB under `--no-default-features --features routing-routes`
 #      to prove the forwarder composes standalone (routing-routes pulls

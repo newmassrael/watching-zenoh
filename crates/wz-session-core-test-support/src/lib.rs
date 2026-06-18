@@ -38,16 +38,35 @@
 //! explicitly; the registries dispatch on `body` and never inspect them.
 
 use wz_codecs::decl_final::DeclFinal;
+use wz_codecs::decl_kexpr::{DeclKexpr, DeclKexprOwned};
 use wz_codecs::decl_queryable::{DeclQueryable, DeclQueryableOwned};
 use wz_codecs::decl_subscriber::{DeclSubscriber, DeclSubscriberOwned};
 use wz_codecs::decl_token::{DeclToken, DeclTokenOwned};
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+use wz_codecs::undecl_kexpr::UndeclKexpr;
 use wz_codecs::undecl_queryable::UndeclQueryable;
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+
+pub fn decl_kexpr(id: u64, keyexpr: &str) -> DeclKexprOwned {
+    let keyexpr_wire = Wireexpr {
+        body: WireexprVariant::WireexprLocal(WireexprLocal {
+            id: 0,
+            suffix_len: Some(keyexpr.len() as u64),
+            suffix: Some(keyexpr),
+        }),
+    };
+    DeclKexpr {
+        id,
+        keyexpr: keyexpr_wire,
+        ..DeclKexpr::default()
+    }
+    .try_into_owned()
+    .unwrap()
+}
 
 pub fn decl_subscriber(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclSubscriberOwned {
     let suffix_len = suffix.map(|s| s.len() as u64);
@@ -87,6 +106,13 @@ pub fn decl_subscriber_nonlocal(
     }
     .try_into_owned()
     .unwrap()
+}
+
+pub fn undecl_kexpr(id: u64) -> UndeclKexpr {
+    UndeclKexpr {
+        id,
+        ..UndeclKexpr::default()
+    }
 }
 
 pub fn undecl_subscriber(id: u64) -> UndeclSubscriber {
@@ -143,6 +169,24 @@ pub fn undecl_token(id: u64) -> UndeclToken {
     UndeclToken {
         id,
         ..UndeclToken::default()
+    }
+}
+
+pub fn declare_envelope_decl_kexpr(d: DeclKexprOwned) -> DeclareOwned {
+    DeclareOwned {
+        header: 0,
+        interest_id: None,
+        extensions: None,
+        body: DeclareOwnedVariant::CodecZenohDeclKexpr(d),
+    }
+}
+
+pub fn declare_envelope_undecl_kexpr(u: UndeclKexpr) -> DeclareOwned {
+    DeclareOwned {
+        header: 0,
+        interest_id: None,
+        extensions: None,
+        body: DeclareOwnedVariant::CodecZenohUndeclKexpr(u),
     }
 }
 

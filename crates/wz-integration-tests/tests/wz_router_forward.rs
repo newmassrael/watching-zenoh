@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311qc — router data-plane FORWARDING e2e: `wz-ap-demo --router` (built with
-//! `--features routing-routes`) forwards a Put received on one peer face to
+//! R311qc/qd — router data-plane FORWARDING e2e: `wz-ap-demo --router` (built
+//! with `--features routing-routes`) forwards a Put received on one peer face to
 //! another peer face that declared a matching subscriber — the `routing-routes`
 //! catalog atom on top of the `routing-router` accept-and-hold foundation.
 //!
@@ -16,10 +16,16 @@
 //! cannot produce. The router's shutdown summary independently reports
 //! `forwarded N sample(s)` with `N >= 1`.
 //!
+//! Two scenarios share one orchestration ([`run_router_forward_e2e`]):
+//!  - literal: the producer publishes a literal-keyexpr Put (forwarded verbatim);
+//!  - aliased (R311qd): the producer `--declare-id 9` sends a DeclareKeyexpr then
+//!    an id-only Put, which the router RE-LITERALIZES for the literal subscriber
+//!    (the destination never saw the producer's expr-id mapping).
+//!
 //! Requires the binary built with `--features routing-routes` (the forwarding
 //! router; `--features routing-router` alone holds faces but routes nothing, so
 //! the consumer would never fire). run-ci's Layer E5 builds it with the feature
-//! and runs this on the `--ignored` lane.
+//! and runs these on the `--ignored` lane.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -33,13 +39,16 @@ use wz_integration_tests::common::{
 /// `demo/router-test` so parallel Layer E runs never cross-match.
 const KEYEXPR: &str = "demo/route-fwd";
 
-#[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E runs via --ignored"]
-fn wz_router_forwards_put_to_a_matching_subscriber_on_another_face() {
+/// Drive the producer -> router -> consumer forwarding scenario and assert the
+/// core witnesses (consumer SUBSCRIBER FIRED on the agreed keyexpr + full
+/// payload, router forwarded >= 1). `producer_extra` is appended to the
+/// producer's args so a caller can opt into the DeclareKeyexpr-aliased publish
+/// (`--declare-id N`). Returns the captured (router, consumer, producer) stderr
+/// for any scenario-specific assertion the caller adds.
+fn run_router_forward_e2e(producer_extra: &[&str]) -> (String, String, String) {
     let demo = wz_ap_demo_binary();
     let port_res = PortReservation::pick();
-    let port = port_res.port();
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("127.0.0.1:{}", port_res.port());
 
     // ── router: bind once, hold faces, FORWARD Puts (routing-routes) ──
     let router_stderr = tempfile::tempfile().expect("tempfile for router stderr");
@@ -108,7 +117,8 @@ fn wz_router_forwards_put_to_a_matching_subscriber_on_another_face() {
     );
     let face0 = wait_for_substring(&mut router_reader, "face 0 UP", Duration::from_secs(10));
 
-    // ── producer: publish a Put on the same keyexpr (a finite burst). ──
+    // ── producer: publish a Put on the same keyexpr (a finite burst), plus any
+    //    scenario-specific args (e.g. --declare-id for the aliased path). ──
     let producer_stderr = tempfile::tempfile().expect("tempfile for producer stderr");
     let producer_writer = producer_stderr
         .try_clone()
@@ -123,6 +133,7 @@ fn wz_router_forwards_put_to_a_matching_subscriber_on_another_face() {
             .arg(KEYEXPR)
             .arg("--value")
             .arg("forwarded-payload")
+            .args(producer_extra)
             .env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(producer_writer))
@@ -197,5 +208,32 @@ fn wz_router_forwards_put_to_a_matching_subscriber_on_another_face() {
     assert!(
         router_captured.contains("forwarded ") && !router_captured.contains("forwarded 0 sample"),
         "router summary must report a non-zero forward count\n--- router stderr ---\n{router_captured}"
+    );
+
+    (router_captured, consumer_captured, producer_captured)
+}
+
+/// Literal-keyexpr forwarding: the producer publishes a literal Put, the router
+/// forwards it verbatim to the matching subscriber.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E runs via --ignored"]
+fn wz_router_forwards_put_to_a_matching_subscriber_on_another_face() {
+    let _ = run_router_forward_e2e(&[]);
+}
+
+/// Aliased-keyexpr forwarding (R311qd): the producer `--declare-id 9` sends a
+/// DeclareKeyexpr then an id-only Put; the router resolves the alias and
+/// RE-LITERALIZES the Put for the literal subscriber (which never saw the
+/// producer's mapping). The consumer firing is the proof the re-literalization
+/// produced a frame the destination could decode.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-routes); Layer E runs via --ignored"]
+fn wz_router_re_literalizes_an_aliased_put_for_a_literal_subscriber() {
+    let (_router, _consumer, producer) = run_router_forward_e2e(&["--declare-id", "9"]);
+    // Confirm the producer actually exercised the DeclareKeyexpr-aliased path
+    // (otherwise this would silently degenerate into the literal scenario).
+    assert!(
+        producer.contains("PUBLISHER DECLARED") && producer.contains("mapping_id=9"),
+        "producer must have sent the DeclareKeyexpr alias (id=9)\n--- producer ---\n{producer}"
     );
 }
