@@ -41062,6 +41062,44 @@
         "코드 LOCAL UNPUSHED: R311qf~qj(17커밋)+qk(run-ci.sh Layer E --skip wz_peer + 이 ledger). push 명시 동의 받음(사용자 'push')이나 run-ci 그린 확인 후 실행. 엔트리 ID qk=qj 정규 알파 후속."
       ]
     },
+    "Round 311ql": {
+      "decision_summary": "R311ql: routing-peer inventory reserved->active. A3 카탈로그 감사가 'reserved인데 실코드 gate=drift' 적발(full run-ci). reserved=코드없음 vs hold-only=부분구현 혼동; peer_loop 실코드 gate하므로 active(성숙도는 reason caveat). qj 리뷰가 놓친 룰.",
+      "changes_bullets": [
+        "inventory(set_inventory_status): routing-peer reserved->active. reason 갱신(dial+accept mesh-node foundation=peer_loop+demo --peer+lib/e2e 실코드; active 사유=실코드 gate, \"hold-only\"는 성숙도 caveat이지 코드없음 아님; mesh forwarding+zid dedup은 later atom). cascade decay 0."
+      ],
+      "verification_bullets": [
+        "근본: push 전 full run-ci가 Layer A3(카탈로그 status 감사)서 FAIL=\"status=reserved but atom GATES real code (stale drift): 1 - routing-peer (set status=active, or remove the cfg gate)\". 코드/테스트 레인은 전부 pass(Layer E hang=R311qk로 해소 확인). A3만 적발.",
+        "오류 분석: 내가 reserved(=코드 없는 placeholder)와 incomplete(=부분 구현)를 혼동. routing-peer는 라이브러리 peer_loop(#cfg routing-peer)를 gate하는 실코드라 카탈로그 truthfulness상 active여야 함; \"hold-only/forward 안 함\"은 reason의 성숙도 caveat. routing-router도 cfg gate 생기며 active된 선례와 일치. R311qj 4-에이전트 리뷰가 \"reserved 옳음\"이라 했으나 이 A3 mechanical 룰을 놓침=diff 리뷰 한계, audit가 정정.",
+        "수정+검증: set_inventory_status routing-peer active(cascade decay 0). audit 레인 A/A2/A3 격리 재실행(--layer) 전부 pass EXIT=0=drift 해소. 코드 레인(C/D/E/F/G/Q/M/Z)은 inventory flip이 코드 무변경이라 무영향=직전 full run의 green 그대로(audit 레인만 inventory 의존). validate_workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ql = routing-peer inventory reserved->active(A3 카탈로그 감사 drift 수정, full run-ci 적발). 교훈: reserved=코드 없음(placeholder) vs active=실코드 존재(부분 구현이어도). 성숙도(\"hold-only\")는 reason caveat이지 reserved 사유 아님. routing-router 선례 일치. qj diff 리뷰가 놓치고 full run-ci audit가 잡음=full run-ci 게이트 가치 재확인(R311qk Layer E hang과 함께 qg 갭 2건).",
+        "즉시 다음: full run-ci 재실행이 push 전 최종 게이트(qk Layer E skip + ql inventory active 반영). 그린이면 qf~ql 21+커밋 push(사용자 'push' 동의). run-ci QEMU(Q)/zenohd(Z)/MCU(G) 포함 시간 소요.",
+        "다음 기능 증분(linkstate 포팅 b): LinkState 와이어 코덱(zenoh network/linkstate.rs)→Network 그래프→tree forwarding. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED: R311qf~qk(19커밋)+ql(inventory active+ledger). push 동의 받음(run-ci 그린 후). 엔트리 ID ql=qk 정규 알파 후속."
+      ],
+      "publishable_decision_summary": "R311ql: routing-peer inventory reserved->active. A3 카탈로그 감사가 'reserved인데 실코드 gate=drift' 적발(full run-ci). reserved=코드없음 vs hold-only=부분구현 혼동; peer_loop 실코드 gate하므로 active(성숙도는 reason caveat). qj 리뷰가 놓친 룰.",
+      "publishable_changes_bullets": [
+        "inventory(set_inventory_status): routing-peer reserved->active. reason 갱신(dial+accept mesh-node foundation=peer_loop+demo --peer+lib/e2e 실코드; active 사유=실코드 gate, \"hold-only\"는 성숙도 caveat이지 코드없음 아님; mesh forwarding+zid dedup은 later atom). cascade decay 0."
+      ],
+      "publishable_verification_bullets": [
+        "근본: push 전 full run-ci가 Layer A3(카탈로그 status 감사)서 FAIL=\"status=reserved but atom GATES real code (stale drift): 1 - routing-peer (set status=active, or remove the cfg gate)\". 코드/테스트 레인은 전부 pass(Layer E hang=R311qk로 해소 확인). A3만 적발.",
+        "오류 분석: 내가 reserved(=코드 없는 placeholder)와 incomplete(=부분 구현)를 혼동. routing-peer는 라이브러리 peer_loop(#cfg routing-peer)를 gate하는 실코드라 카탈로그 truthfulness상 active여야 함; \"hold-only/forward 안 함\"은 reason의 성숙도 caveat. routing-router도 cfg gate 생기며 active된 선례와 일치. R311qj 4-에이전트 리뷰가 \"reserved 옳음\"이라 했으나 이 A3 mechanical 룰을 놓침=diff 리뷰 한계, audit가 정정.",
+        "수정+검증: set_inventory_status routing-peer active(cascade decay 0). audit 레인 A/A2/A3 격리 재실행(--layer) 전부 pass EXIT=0=drift 해소. 코드 레인(C/D/E/F/G/Q/M/Z)은 inventory flip이 코드 무변경이라 무영향=직전 full run의 green 그대로(audit 레인만 inventory 의존). validate_workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ql = routing-peer inventory reserved->active(A3 카탈로그 감사 drift 수정, full run-ci 적발). 교훈: reserved=코드 없음(placeholder) vs active=실코드 존재(부분 구현이어도). 성숙도(\"hold-only\")는 reason caveat이지 reserved 사유 아님. routing-router 선례 일치. qj diff 리뷰가 놓치고 full run-ci audit가 잡음=full run-ci 게이트 가치 재확인(R311qk Layer E hang과 함께 qg 갭 2건).",
+        "즉시 다음: full run-ci 재실행이 push 전 최종 게이트(qk Layer E skip + ql inventory active 반영). 그린이면 qf~ql 21+커밋 push(사용자 'push' 동의). run-ci QEMU(Q)/zenohd(Z)/MCU(G) 포함 시간 소요.",
+        "다음 기능 증분(linkstate 포팅 b): LinkState 와이어 코덱(zenoh network/linkstate.rs)→Network 그래프→tree forwarding. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED: R311qf~qk(19커밋)+ql(inventory active+ledger). push 동의 받음(run-ci 그린 후). 엔트리 ID ql=qk 정규 알파 후속."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
@@ -46840,10 +46878,10 @@
       "reason": "F=failover policy; P=zenoh; C=requires routing-router"
     },
     "routing-peer": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh peer mode",
-      "reason": "R311qg atom 1: dial+accept mesh-node foundation (peer_loop reuses the accept_loop face-drive core + a dial-out face source, hold-only). Demo --peer exercises it. Reserved until mesh forwarding + zid-keyed loop dedup land (atom 2). F=peer-to-peer routing; P=zenoh peer."
+      "reason": "R311qg+ql: dial+accept mesh-node foundation (peer_loop reuses the accept_loop face-drive core + a dial-out face source; demo --peer; lib + e2e). Status=active because it gates real code (A3 catalog-truthfulness audit) — \"hold-only\" is a maturity caveat, not \"no code\": mesh forwarding + zid-keyed loop dedup are later atoms. F=peer-to-peer routing; P=zenoh peer."
     },
     "routing-router": {
       "status": "active",
