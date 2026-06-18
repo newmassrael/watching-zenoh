@@ -40788,6 +40788,50 @@
         "코드 LOCAL UNPUSHED: R311qc 4커밋(0ae7ce5..18f2a0e) + qd 3커밋(c31c86c..6e47dea) + qe(push_build.rs reliteralize_push+단위2, routing.rs 위임+삭제). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qe=qd 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311qf": {
+      "decision_summary": "R311qf: routing-routes 라우트 캐시 — keyexpr별 destination set 캐시(generation 무효화, zenoh routes_version/Routes 미러)로 per-Put O(faces×subs) 스캔 제거. behavior-preserving(15 unit+2 e2e 무변경)+캐시 단위 5.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/routing.rs: 라우트 캐시 추가. RouteTable에 generation:u64(토폴로지 epoch=zenoh tables.routes_version 미러)+route_cache:RefCell<RouteCache>+route_computations:Cell<u64>(미스/스캔 witness) 필드. 신규 RouteCache{version,routes:HashMap<String,Arc<[u64]>>}=zenoh Routes<T>{version,..} 미러: get(version-gated read=get_route), insert(clear-on-version-change=set_route), valid_len. forward_push가 자체 per-Put 스캔 대신 route_targets(keyexpr) 위임=hit시 O(1) Arc clone, miss시 declared_intersects 스캔 1회+캐시. targets는 source-independent(매칭 face 전체 보관, ingress는 send 시 src_id skip)=한 엔트리가 모든 source 재사용. invalidate_routes(generation saturating_add=zenoh disable_all_routes 미러)는 record_declare의 subscription delta(Decl/UndeclSubscriber만; alias 변경 제외)+remove_face에서만 호출; add_face는 무호출(빈 face는 무매칭, 문서화 증명). 모듈 doc 'Route cache(R311qf)' 추가+NON-goals에서 cached-route 제거.",
+        "crates/wz-runtime-tokio/src/routing_forward.rs: RoutingForwarder에 cached_route_count()/route_computations() witness passthrough(subscription_count 형제). 캐시 단위 5 추가(기존 15->20): hit(repeated Put=computations 1)/positive-invalidation(신규 sub->recompute가 새 sub fan-out, computations 2)/face-removal-invalidation(departed face->recompute empty, computations 2)/alias-non-invalidation(DeclareKeyexpr는 무효화 안 함, computations 1)/negative-cache-invalidation(무매칭 Put이 빈 set 캐시 후 구독시 무효화->route). route_computations가 hit/miss 직접 witness.",
+        "inventory(set_inventory_status): routing-routes reason 갱신(literal+aliased+route cache; 다음 routing-failover/static-routes/peer). cascade decay 0."
+      ],
+      "verification_bullets": [
+        "근본: R311qc/qd/qe carry가 명시한 다음 기능 증분=route cache. 양 세션리뷰가 'zenoh와의 유일한 남은 발산'으로 문서화(모듈 doc Divergence from zenoh). zenoh 정본 직접 대조(net/routing/dispatcher): resource.rs Routes<T>{routers/peers/clients,version}+tables.rs routes_version+pubsub.rs get_or_set_route(read-check->compute->set_route, version mismatch시 clear)+disable_all_routes(saturating_add). wz는 star 토폴로지라 per-resource/whatami/node 차원이 1점으로 collapse=single global keyexpr-keyed map으로 충실 미러(문서화된 의도적 발산).",
+        "검증: routing_forward 단위 20/20 무결정(기존 15 무변경=behavior-preserving 직접 증거, 특히 stops_forwarding_after_undeclare/face_leaves가 invalidation 경로 가드). e2e 2/2(literal verbatim+aliased re-literalize, --ignored) 무변경 통과=캐시 end-to-end behavior-preserving. C1(workspace test EXIT=0, 141 ok블록)·C1x(clippy session-core+test 20+clippy tokio all-targets+no-default EXIT=0)·C1w(routing-accept 4/4 회귀)·E5·fmt PASS. 판정=파이프 없는 $? 직접 캡처.",
+        "홀리스틱 자가검토: invalidation 완전성(매칭에 영향주는 mutation 전수=Decl/UndeclSubscriber+remove_face는 bump, DeclareKeyexpr/add_face는 무영향이라 무bump-각 문서화 증명). SSOT 무위반(matcher=declared_intersects 단일출처 유지, reliteralize_push=push_build SSOT 무변경, send_network_message seam 무변경; 캐시는 순수 memoization). 메모리 bounded(version-change-insert가 clear=현 generation 엔트리만 보관). route_computations witness가 hit/miss 직접 단언(추론 아님).",
+        "자가검토 갭 적발+수정: negative cache(무매칭 Put->빈 set 캐시)가 이후 구독 선언에 무효화되는지=publisher-before-subscriber 정상 시작 순서의 distinct 실패모드->5번째 단위(a_subscription_after_an_unmatched_put_still_routes)로 잠금. witness 필드(route_computations/cached_route_count)는 RoutingForwarder::forwarded 형제 router 관측 메트릭(test-only hack 아님)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qf = routing-routes 트랙 4번째 atom: route cache. forward_push가 keyexpr별 destination face-id set을 캐시하고 generation epoch로 lazy 무효화(zenoh tables.routes_version/Routes<T>{version}+get_or_set_route 직접 미러). per-Put O(faces×subs) declared_intersects 스캔이 hit시 O(1) Arc clone로 축소; source-independent 캐시(ingress send 시 skip)로 한 엔트리가 모든 source 재사용. 양 세션리뷰가 지목한 zenoh와의 유일한 남은 발산 해소. behavior-preserving(15 unit+2 e2e 무변경)+캐시 단위 5.",
+        "다음 증분(routing-routes 의존 해소됨): routing-failover(라우터 face 손실시 대체 경로; routing-router 토대 재사용)/routing-static-routes(config 정적 경로)/scouting-gossip(전부 routing-router 의존). routing-peer(routing-accept 재사용+dial-out mesh; zid-keyed mesh dedup 필요=현 src!=dst skip로 star만 충분). 캐시 후속(YAGNI, profile 기반): per-resource 세분 무효화(현 global clear-on-version 대신), LRU(현 generation-bounded로 leak 없음이라 불필요).",
+        "defer(별도 wire-builder-SSOT 라운드, routing과 직교=scope discipline): literal_wireexpr(s)->WireexprOwned SSOT(21-site inline across 6 모듈)+FLAG_N_PUSH_N const(17-site hardcoded 0x20)+inline put_push 4(switchboard/pubsub/2 e2e). 의도적 비범위(문서화): multi-hop declare propagation, zid-keyed mesh dedup, Queryable/liveliness routing(Push만).",
+        "코드 LOCAL UNPUSHED: wz-session-core(routing.rs: RouteCache+generation+route_targets+invalidate_routes, behavior-preserving 리팩터)+wz-runtime-tokio(routing_forward.rs: witness 2 passthrough+캐시 단위 5)+inventory reason. push 명시 동의 필요(CLAUDE.md). 엔트리 ID qf=qe 정규 알파 후속(숫자 접미사 금지). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/ net/routing/dispatcher."
+      ],
+      "publishable_decision_summary": "R311qf: routing-routes 라우트 캐시 — keyexpr별 destination set 캐시(generation 무효화, zenoh routes_version/Routes 미러)로 per-Put O(faces×subs) 스캔 제거. behavior-preserving(15 unit+2 e2e 무변경)+캐시 단위 5.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/routing.rs: 라우트 캐시 추가. RouteTable에 generation:u64(토폴로지 epoch=zenoh tables.routes_version 미러)+route_cache:RefCell<RouteCache>+route_computations:Cell<u64>(미스/스캔 witness) 필드. 신규 RouteCache{version,routes:HashMap<String,Arc<[u64]>>}=zenoh Routes<T>{version,..} 미러: get(version-gated read=get_route), insert(clear-on-version-change=set_route), valid_len. forward_push가 자체 per-Put 스캔 대신 route_targets(keyexpr) 위임=hit시 O(1) Arc clone, miss시 declared_intersects 스캔 1회+캐시. targets는 source-independent(매칭 face 전체 보관, ingress는 send 시 src_id skip)=한 엔트리가 모든 source 재사용. invalidate_routes(generation saturating_add=zenoh disable_all_routes 미러)는 record_declare의 subscription delta(Decl/UndeclSubscriber만; alias 변경 제외)+remove_face에서만 호출; add_face는 무호출(빈 face는 무매칭, 문서화 증명). 모듈 doc 'Route cache(R311qf)' 추가+NON-goals에서 cached-route 제거.",
+        "crates/wz-runtime-tokio/src/routing_forward.rs: RoutingForwarder에 cached_route_count()/route_computations() witness passthrough(subscription_count 형제). 캐시 단위 5 추가(기존 15->20): hit(repeated Put=computations 1)/positive-invalidation(신규 sub->recompute가 새 sub fan-out, computations 2)/face-removal-invalidation(departed face->recompute empty, computations 2)/alias-non-invalidation(DeclareKeyexpr는 무효화 안 함, computations 1)/negative-cache-invalidation(무매칭 Put이 빈 set 캐시 후 구독시 무효화->route). route_computations가 hit/miss 직접 witness.",
+        "inventory(set_inventory_status): routing-routes reason 갱신(literal+aliased+route cache; 다음 routing-failover/static-routes/peer). cascade decay 0."
+      ],
+      "publishable_verification_bullets": [
+        "근본: R311qc/qd/qe carry가 명시한 다음 기능 증분=route cache. 양 세션리뷰가 'zenoh와의 유일한 남은 발산'으로 문서화(모듈 doc Divergence from zenoh). zenoh 정본 직접 대조(net/routing/dispatcher): resource.rs Routes<T>{routers/peers/clients,version}+tables.rs routes_version+pubsub.rs get_or_set_route(read-check->compute->set_route, version mismatch시 clear)+disable_all_routes(saturating_add). wz는 star 토폴로지라 per-resource/whatami/node 차원이 1점으로 collapse=single global keyexpr-keyed map으로 충실 미러(문서화된 의도적 발산).",
+        "검증: routing_forward 단위 20/20 무결정(기존 15 무변경=behavior-preserving 직접 증거, 특히 stops_forwarding_after_undeclare/face_leaves가 invalidation 경로 가드). e2e 2/2(literal verbatim+aliased re-literalize, --ignored) 무변경 통과=캐시 end-to-end behavior-preserving. C1(workspace test EXIT=0, 141 ok블록)·C1x(clippy session-core+test 20+clippy tokio all-targets+no-default EXIT=0)·C1w(routing-accept 4/4 회귀)·E5·fmt PASS. 판정=파이프 없는 $? 직접 캡처.",
+        "홀리스틱 자가검토: invalidation 완전성(매칭에 영향주는 mutation 전수=Decl/UndeclSubscriber+remove_face는 bump, DeclareKeyexpr/add_face는 무영향이라 무bump-각 문서화 증명). SSOT 무위반(matcher=declared_intersects 단일출처 유지, reliteralize_push=push_build SSOT 무변경, send_network_message seam 무변경; 캐시는 순수 memoization). 메모리 bounded(version-change-insert가 clear=현 generation 엔트리만 보관). route_computations witness가 hit/miss 직접 단언(추론 아님).",
+        "자가검토 갭 적발+수정: negative cache(무매칭 Put->빈 set 캐시)가 이후 구독 선언에 무효화되는지=publisher-before-subscriber 정상 시작 순서의 distinct 실패모드->5번째 단위(a_subscription_after_an_unmatched_put_still_routes)로 잠금. witness 필드(route_computations/cached_route_count)는 RoutingForwarder::forwarded 형제 router 관측 메트릭(test-only hack 아님)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qf = routing-routes 트랙 4번째 atom: route cache. forward_push가 keyexpr별 destination face-id set을 캐시하고 generation epoch로 lazy 무효화(zenoh tables.routes_version/Routes<T>{version}+get_or_set_route 직접 미러). per-Put O(faces×subs) declared_intersects 스캔이 hit시 O(1) Arc clone로 축소; source-independent 캐시(ingress send 시 skip)로 한 엔트리가 모든 source 재사용. 양 세션리뷰가 지목한 zenoh와의 유일한 남은 발산 해소. behavior-preserving(15 unit+2 e2e 무변경)+캐시 단위 5.",
+        "다음 증분(routing-routes 의존 해소됨): routing-failover(라우터 face 손실시 대체 경로; routing-router 토대 재사용)/routing-static-routes(config 정적 경로)/scouting-gossip(전부 routing-router 의존). routing-peer(routing-accept 재사용+dial-out mesh; zid-keyed mesh dedup 필요=현 src!=dst skip로 star만 충분). 캐시 후속(YAGNI, profile 기반): per-resource 세분 무효화(현 global clear-on-version 대신), LRU(현 generation-bounded로 leak 없음이라 불필요).",
+        "defer(별도 wire-builder-SSOT 라운드, routing과 직교=scope discipline): literal_wireexpr(s)->WireexprOwned SSOT(21-site inline across 6 모듈)+FLAG_N_PUSH_N const(17-site hardcoded 0x20)+inline put_push 4(switchboard/pubsub/2 e2e). 의도적 비범위(문서화): multi-hop declare propagation, zid-keyed mesh dedup, Queryable/liveliness routing(Push만).",
+        "코드 LOCAL UNPUSHED: wz-session-core(routing.rs: RouteCache+generation+route_targets+invalidate_routes, behavior-preserving 리팩터)+wz-runtime-tokio(routing_forward.rs: witness 2 passthrough+캐시 단위 5)+inventory reason. push 명시 동의 필요(CLAUDE.md). 엔트리 ID qf=qe 정규 알파 후속(숫자 접미사 금지). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/ net/routing/dispatcher."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
@@ -46581,7 +46625,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh router routing tables",
-      "reason": "R311qc+qd: RouteTable + RoutingForwarder; router forwards a Put to faces with a matching subscriber (literal + aliased expr-id keyexpr, single-hop, Push). Route cache is a later increment."
+      "reason": "R311qc+qd+qf: RouteTable + RoutingForwarder; router forwards a Put to faces with a matching subscriber (literal + aliased expr-id keyexpr, single-hop, Push), now with a generation-invalidated per-keyexpr route cache (R311qf, mirrors zenoh routes_version/Routes). Next: routing-failover/static-routes/peer."
     },
     "routing-static-routes": {
       "status": "reserved",
