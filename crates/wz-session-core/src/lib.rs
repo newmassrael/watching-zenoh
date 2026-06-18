@@ -460,6 +460,14 @@ pub mod handshake_encode;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
+/// OAM carrier for the linkstate-peer topology exchange (P4 routing,
+/// linkstate port step c1): `build_linkstate_oam` wraps a `LinkStateList`
+/// as an `OAM_LINKSTATE` network message, `try_parse_linkstate_oam`
+/// extracts one back. `codec-linkstate` gated (AP/full-node routing,
+/// absent from the MCU footprint); owned `Vec` output (alloc-gated).
+#[cfg(all(feature = "alloc", feature = "codec-linkstate"))]
+pub mod linkstate_oam;
+
 /// Outbound DECLARE / UNDECLARE network-message builders
 /// (`build_declare_*` / `build_undeclare_*` / `build_declare_final`)
 /// hoisted from `wz-runtime-tokio::session_glue` so both runtime profiles

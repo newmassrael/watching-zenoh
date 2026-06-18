@@ -155,6 +155,12 @@ codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-suppo
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]
 codec-response-final = ["wz-codecs/codec-response-final", "wz-codecs-test-support/codec-response-final"]
 codec-declare = ["codec-frame", "wz-codecs/codec-declare", "wz-codecs-test-support/codec-declare"]
+# codec-linkstate forwards the wz-codecs linkstate-peer topology codecs
+# (LinkState / LinkStateList). Consumed by `linkstate_oam` (the OAM
+# carrier, P4 routing step c1). The OAM envelope codec is unconditional
+# in wz-codecs, so no codec-frame edge is needed at the carrier layer;
+# the transport-Frame wrapping (step c3) pulls codec-frame separately.
+codec-linkstate = ["wz-codecs/codec-linkstate"]
 # Handshake / liveness transport-body codecs. Consumed by the hoisted
 # `inbound` decode SSOT (`parse_inbound` Init/Open/Close/KeepAlive arms).
 # Independent of `codec-frame` (each is its own transport MID body), so a

@@ -41204,6 +41204,48 @@
         "코드 LOCAL UNPUSHED 3커밋: b2a4567(R311qm linkstate H=0 코어) + ee26e42(SCE 핀 bump) + R311qn(linkstate_weight SCXML + weights repeat + test + 이 ledger). push 미동의=로컬 커밋만, 사용자 'push' 대기. 엔트리 ID qn=qm 정규 알파 후속(중간 ee26e42는 build 커밋, ledger 없음)."
       ]
     },
+    "Round 311qo": {
+      "decision_summary": "R311qo: linkstate 포팅 (c) Network 그래프 시작 — c1 OAM-LINKSTATE 캐리어. build_linkstate_oam(LinkStateList→OAM NetworkMessage id 0x0001 ZBUF body+qos ext) + try_parse_linkstate_oam. zenoh Network::make_msg 미러, byte-parity 4(OAM 와이어 zenoh 코덱서 유도). (b) 코덱을 wire에 연결.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/linkstate_oam.rs 신설(P4 c1): build_linkstate_oam(&LinkstateListOwned)→Result<Vec<u8>>(OAM 와이어) + try_parse_linkstate_oam(&OamOwned)→Option<Result<LinkstateListOwned>>. zenoh Network::make_msg(net/protocol/network.rs:350-365) 미러: LinkStateList→bytes→OAM{id OAM_LINKSTATE, ZBUF body, qos ext}.",
+        "구현: owned 형태(push_build 선례) + crate::codec_owned::owned_bytes SSOT 헬퍼. 상수 OAM_LINKSTATE_HEADER 0xDF(N_MID_OAM|ENC_ZBUF|Z), OAM_ID_LINKSTATE 0x0001, qos ext header 0x21+value 8.",
+        "wz-session-core lib.rs: pub mod linkstate_oam(gate all(alloc, codec-linkstate)). Cargo.toml: codec-linkstate=[\"wz-codecs/codec-linkstate\"]. OAM 코덱이 unconditional이라 codec-frame 불요(Frame 래핑=c3)."
+      ],
+      "verification_bullets": [
+        "byte-parity: cargo test -p wz-session-core --features codec-linkstate linkstate_oam 4/4 PASS. build_matches_zenoh_oam_wire가 OAM 와이어 DF 01 21 08 05 01 00 01 00 00을 단언(zenoh OAM 코덱 spec서 직접 유도) + parse round-trip(body→LinkStateList byte동일).",
+        "zenoh 정본 대조: qos ext 항상 직렬화(QoSType::OAM≠DEFAULT; commons/zenoh-codec/network/oam.rs:56-69), value 8=Priority::Control(0)|D_FLAG(∵DEFAULT_OAM=Block; network/mod.rs:425/408/520). OAM body ZBUF=VLE length+bytes; id z16=VLE.",
+        "32-cap 해소: ext_zbuf max-size 32는 no_std heapless 전용; alloc서 SceBytes=Vec unbounded(from_slice infallible, sce-portable-bytes lib.rs:57). linkstate=alloc-only라 멀티노드 페이로드 무절단. borrowed ext_zbuf decode는 max-size 미enforce(슬라이스).",
+        "회귀: 전체 wz-session-core 스위트(codec-linkstate) 151+2 green. default 빌드(codec-linkstate off)=모듈 dead, 무영향. fmt/clippy --tests clean. validate_workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qo = linkstate 포팅 (c) Network 그래프 시작, c1=OAM-LINKSTATE 캐리어 완료(build+parse, byte-parity 4). (b) LinkStateList 코덱을 NetworkMessage::Oam wire에 연결. wz는 inbound OAM 디코드 경로 기존 보유(network_message.rs:199); 이 모듈이 linkstate-specific build + ZBUF body 추출 추가.",
+        "다음(c2): Network 그래프 데이터구조 — Node(zid/whatami/locators/sn/links HashMap) + per-link psid↔zid 매핑(zenoh Link.mappings VecMap) + 수신 LinkStateList→그래프 ingest(sn-staleness). 표현 결정 보류(사용자 정렬): petgraph 미러(권장=zenoh 충실, host-only dep, routing gate, MCU 무관) vs hand-roll adjacency+Dijkstra. 이후 c3=parse_frame_payload 통합(NetworkMessage::LinkstateOam)+self-linkstate 송신, (d)=spanning-tree forwarding.",
+        "코드 LOCAL UNPUSHED: qm(b2a4567 linkstate H=0)+pin(ee26e42 SCE 3078f8bf7)+qn(76221d7 weights)+qo(linkstate_oam 모듈+배선+ledger). push 미동의=로컬 커밋만. 엔트리 qo=qn 후속."
+      ],
+      "publishable_decision_summary": "R311qo: linkstate 포팅 (c) Network 그래프 시작 — c1 OAM-LINKSTATE 캐리어. build_linkstate_oam(LinkStateList→OAM NetworkMessage id 0x0001 ZBUF body+qos ext) + try_parse_linkstate_oam. zenoh Network::make_msg 미러, byte-parity 4(OAM 와이어 zenoh 코덱서 유도). (b) 코덱을 wire에 연결.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/linkstate_oam.rs 신설(P4 c1): build_linkstate_oam(&LinkstateListOwned)→Result<Vec<u8>>(OAM 와이어) + try_parse_linkstate_oam(&OamOwned)→Option<Result<LinkstateListOwned>>. zenoh Network::make_msg(net/protocol/network.rs:350-365) 미러: LinkStateList→bytes→OAM{id OAM_LINKSTATE, ZBUF body, qos ext}.",
+        "구현: owned 형태(push_build 선례) + crate::codec_owned::owned_bytes SSOT 헬퍼. 상수 OAM_LINKSTATE_HEADER 0xDF(N_MID_OAM|ENC_ZBUF|Z), OAM_ID_LINKSTATE 0x0001, qos ext header 0x21+value 8.",
+        "wz-session-core lib.rs: pub mod linkstate_oam(gate all(alloc, codec-linkstate)). Cargo.toml: codec-linkstate=[\"wz-codecs/codec-linkstate\"]. OAM 코덱이 unconditional이라 codec-frame 불요(Frame 래핑=c3)."
+      ],
+      "publishable_verification_bullets": [
+        "byte-parity: cargo test -p wz-session-core --features codec-linkstate linkstate_oam 4/4 PASS. build_matches_zenoh_oam_wire가 OAM 와이어 DF 01 21 08 05 01 00 01 00 00을 단언(zenoh OAM 코덱 spec서 직접 유도) + parse round-trip(body→LinkStateList byte동일).",
+        "zenoh 정본 대조: qos ext 항상 직렬화(QoSType::OAM≠DEFAULT; commons/zenoh-codec/network/oam.rs:56-69), value 8=Priority::Control(0)|D_FLAG(∵DEFAULT_OAM=Block; network/mod.rs:425/408/520). OAM body ZBUF=VLE length+bytes; id z16=VLE.",
+        "32-cap 해소: ext_zbuf max-size 32는 no_std heapless 전용; alloc서 SceBytes=Vec unbounded(from_slice infallible, sce-portable-bytes lib.rs:57). linkstate=alloc-only라 멀티노드 페이로드 무절단. borrowed ext_zbuf decode는 max-size 미enforce(슬라이스).",
+        "회귀: 전체 wz-session-core 스위트(codec-linkstate) 151+2 green. default 빌드(codec-linkstate off)=모듈 dead, 무영향. fmt/clippy --tests clean. validate_workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qo = linkstate 포팅 (c) Network 그래프 시작, c1=OAM-LINKSTATE 캐리어 완료(build+parse, byte-parity 4). (b) LinkStateList 코덱을 NetworkMessage::Oam wire에 연결. wz는 inbound OAM 디코드 경로 기존 보유(network_message.rs:199); 이 모듈이 linkstate-specific build + ZBUF body 추출 추가.",
+        "다음(c2): Network 그래프 데이터구조 — Node(zid/whatami/locators/sn/links HashMap) + per-link psid↔zid 매핑(zenoh Link.mappings VecMap) + 수신 LinkStateList→그래프 ingest(sn-staleness). 표현 결정 보류(사용자 정렬): petgraph 미러(권장=zenoh 충실, host-only dep, routing gate, MCU 무관) vs hand-roll adjacency+Dijkstra. 이후 c3=parse_frame_payload 통합(NetworkMessage::LinkstateOam)+self-linkstate 송신, (d)=spanning-tree forwarding.",
+        "코드 LOCAL UNPUSHED: qm(b2a4567 linkstate H=0)+pin(ee26e42 SCE 3078f8bf7)+qn(76221d7 weights)+qo(linkstate_oam 모듈+배선+ledger). push 미동의=로컬 커밋만. 엔트리 qo=qn 후속."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
