@@ -28,14 +28,13 @@
 //!   partition heals). It lands with the c3b TX/flood atom, where a
 //!   realistic multi-node topology makes the prune testable (the current
 //!   unit tests model artificially-detached nodes).
-//! - `propagate_link_states` — zenoh re-floods a freshly-received (changed)
-//!   link-state onward to its OTHER links at the END of the receive path
-//!   (`network.rs:804`). This is the mechanism that carries topology
-//!   transitively across a >2-node mesh in production; without it, even a
-//!   wired forwarder only learns its direct neighbours' floods. It lands
-//!   with the flood/send path (c3d) — distinct from any periodic refresh.
-//!   (The `topology_propagates_transitively_over_a_line` test SIMULATES
-//!   this by hand-feeding each hop; production has no equivalent yet.)
+//! - `propagate_link_states` — the receive-side onward re-flood
+//!   (`network.rs:804`) that carries topology transitively across a
+//!   multi-hop mesh. The graph supplies the [`build_linkstate_for`] payload
+//!   builder; the per-face re-flood (changed nodes to every face but the
+//!   source) lives in the driver (`linkstate_forward::propagate`, R311ra).
+//!   Still deferred there: zenoh's full-state-for-new vs links-only-for-
+//!   updated `Details` split (wz re-floods the changed nodes full-state).
 //! - gossip / autoconnect propagation, locator ingest, and the
 //!   `local_mappings` forwarding table.
 //! - the real handshake `whatami` (the driver currently records every
@@ -451,67 +450,88 @@ impl LinkstateNetwork {
         self.process_linkstates(local)
     }
 
+    /// Build one node's `LinkState` keyed by its local `psid` (the petgraph
+    /// `NodeIndex`): its zid (so the receiver learns the psid<->zid mapping),
+    /// whatami, and its links (each resolved to the neighbour's local psid)
+    /// with weights. Mirrors zenoh `make_link_state` (`network.rs:304-348`)
+    /// with the full-state `Details` (zid + links); the `zid:false`
+    /// links-only variant (zenoh's updated-node propagation optimisation)
+    /// and locators are deferred.
+    fn make_link_state(&self, idx: NodeIndex) -> LinkstateOwned {
+        let node = &self.graph[idx];
+        // links: resolve each neighbour zid to its local psid, with a weight
+        // per link (zenoh make_link_state, `network.rs:308-325`).
+        let mut links = Vec::with_capacity(node.links.len());
+        let mut weights = Vec::with_capacity(node.links.len());
+        let mut has_weight = false;
+        for (dest_zid, weight) in &node.links {
+            if let Some(dest_idx) = self.get_idx(dest_zid) {
+                links.push(LinkstateLink {
+                    psid: local_psid(dest_idx),
+                });
+                weights.push(LinkstateWeight {
+                    weight: weight.as_raw(),
+                });
+                has_weight = has_weight || weight.is_set();
+            }
+            // a link to an unknown node is an internal inconsistency; skip it
+            // rather than emit an unresolvable psid.
+        }
+        // options: P (zid, always advertised so the receiver can map the
+        // psid) | W (if whatami known) | H (if any non-default weight).
+        let mut options = OPT_P;
+        if node.whatami.is_some() {
+            options |= OPT_W;
+        }
+        if has_weight {
+            options |= OPT_H;
+        }
+        LinkstateOwned {
+            options,
+            psid: local_psid(idx),
+            sn: node.sn,
+            zid_len: Some(node.zid.len() as u64),
+            // every graph zid is <= ZENOHID_MAX_SIZE by construction (the
+            // ingest drops an oversized wire zid; the handshake supplies a
+            // valid self/neighbour zid), so this never exceeds capacity.
+            zid: Some(SceBytes::from_slice(&node.zid).expect("graph zid is <= ZENOHID_MAX_SIZE")),
+            whatami: node.whatami,
+            num_locators: None,
+            locators: None,
+            links_len: links.len() as u64,
+            links,
+            weights: has_weight.then_some(weights),
+        }
+    }
+
     /// Build the `LinkStateList` advertising THIS peer's full known topology,
     /// for flooding to neighbours (the TX counterpart of
-    /// [`ingest_linkstate_list`](Self::ingest_linkstate_list)). Each graph
-    /// node becomes a `LinkState` keyed by its local `psid` (the petgraph
-    /// `NodeIndex`), carrying its zid (so the receiver learns the
-    /// psid<->zid mapping), whatami, and its links (each resolved to the
-    /// neighbour's local psid) with weights. Mirrors zenoh
-    /// `make_link_state` and `make_msg` (`network.rs:304-365`); locators are
-    /// deferred (the graph does not populate them yet), so the L flag is
-    /// never set, and the "full state" details (zid plus links for every
-    /// node) are always emitted.
+    /// [`ingest_linkstate_list`](Self::ingest_linkstate_list)). Every graph
+    /// node, full state. Mirrors zenoh `make_msg` over all nodes
+    /// (`network.rs:350-365`).
     pub fn build_linkstate_list(&self) -> LinkstateListOwned {
-        let mut link_states = Vec::with_capacity(self.graph.node_count());
-        for idx in self.graph.node_indices() {
-            let node = &self.graph[idx];
-            // links: resolve each neighbour zid to its local psid, with a
-            // weight per link (zenoh make_link_state, `network.rs:308-325`).
-            let mut links = Vec::with_capacity(node.links.len());
-            let mut weights = Vec::with_capacity(node.links.len());
-            let mut has_weight = false;
-            for (dest_zid, weight) in &node.links {
-                if let Some(dest_idx) = self.get_idx(dest_zid) {
-                    links.push(LinkstateLink {
-                        psid: local_psid(dest_idx),
-                    });
-                    weights.push(LinkstateWeight {
-                        weight: weight.as_raw(),
-                    });
-                    has_weight = has_weight || weight.is_set();
-                }
-                // a link to an unknown node is an internal inconsistency;
-                // skip it rather than emit an unresolvable psid.
-            }
-            // options: P (zid, always advertised so the receiver can map the
-            // psid) | W (if whatami known) | H (if any non-default weight).
-            let mut options = OPT_P;
-            if node.whatami.is_some() {
-                options |= OPT_W;
-            }
-            if has_weight {
-                options |= OPT_H;
-            }
-            link_states.push(LinkstateOwned {
-                options,
-                psid: local_psid(idx),
-                sn: node.sn,
-                zid_len: Some(node.zid.len() as u64),
-                // every graph zid is <= ZENOHID_MAX_SIZE by construction (the
-                // ingest drops an oversized wire zid; the handshake supplies a
-                // valid self/neighbour zid), so this never exceeds capacity.
-                zid: Some(
-                    SceBytes::from_slice(&node.zid).expect("graph zid is <= ZENOHID_MAX_SIZE"),
-                ),
-                whatami: node.whatami,
-                num_locators: None,
-                locators: None,
-                links_len: links.len() as u64,
-                links,
-                weights: has_weight.then_some(weights),
-            });
+        let link_states = self
+            .graph
+            .node_indices()
+            .map(|idx| self.make_link_state(idx))
+            .collect::<Vec<_>>();
+        LinkstateListOwned {
+            num_link_states: link_states.len() as u64,
+            link_states,
         }
+    }
+
+    /// Build a `LinkStateList` carrying only the given nodes (full state) —
+    /// the re-flood payload `propagate_link_states` (c3d-2) sends onward when
+    /// an ingest changed a subset of the graph. Unknown zids are skipped.
+    /// Mirrors zenoh `make_msg` over a `Changes`-derived node subset
+    /// (`network.rs:645-678` builds the per-link `out` list this way).
+    pub fn build_linkstate_for(&self, zids: &[Zid]) -> LinkstateListOwned {
+        let link_states = zids
+            .iter()
+            .filter_map(|zid| self.get_idx(zid))
+            .map(|idx| self.make_link_state(idx))
+            .collect::<Vec<_>>();
         LinkstateListOwned {
             num_link_states: link_states.len() as u64,
             link_states,

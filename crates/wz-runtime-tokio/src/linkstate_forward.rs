@@ -44,7 +44,7 @@ use wz_session_core::linkstate_oam::{
 };
 use wz_session_core::network_message::NetworkMessage;
 
-use wz_routing_graph::{LinkId, LinkstateNetwork, Zid, WHATAMI_PEER};
+use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Zid, WHATAMI_PEER};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -94,18 +94,52 @@ impl LinkstateForwarder {
     }
 
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it
-    /// against that face's link and recompute the spanning trees.
-    pub fn on_inbound_linkstate(&self, face: FaceId, list: LinkstateListOwned) {
+    /// against that face's link and recompute the spanning trees. Returns
+    /// what the ingest changed, so the caller can re-flood it onward
+    /// ([`propagate`](Self::propagate)).
+    pub fn on_inbound_linkstate(&self, face: FaceId, list: LinkstateListOwned) -> Changes {
         let link_id = match self.face_links.borrow().get(&face).copied() {
             Some(id) => id,
             // a list from a face with no graph link is dropped.
-            None => return,
+            None => return Changes::default(),
         };
         let mut net = self.net.borrow_mut();
-        net.ingest_linkstate_list(link_id, list);
+        let changes = net.ingest_linkstate_list(link_id, list);
         net.compute_trees();
         drop(net);
         self.ingested.set(self.ingested.get() + 1);
+        changes
+    }
+
+    /// Re-flood the nodes an ingest changed to every face EXCEPT the one it
+    /// arrived on — zenoh `propagate_link_states` (`network.rs:636-678`,
+    /// called at the tail of the receive path `:804`). This is what carries
+    /// topology TRANSITIVELY across a >2-node mesh: a node B learns from face
+    /// A is advertised onward to face C. The source is excluded (it sent the
+    /// state); sn-staleness on each receiver drops a re-flood of unchanged
+    /// state, so the propagation converges rather than storming. Returns the
+    /// number of faces propagated to. (zenoh's full-state-for-new /
+    /// links-only-for-updated `Details` split is the deferred optimisation;
+    /// wz sends the changed nodes full-state.)
+    pub fn propagate(&self, source: FaceId, changes: &Changes) -> Result<usize, CodecError> {
+        if changes.updated.is_empty() {
+            return Ok(0);
+        }
+        let oam = {
+            let net = self.net.borrow();
+            build_linkstate_oam_owned(&net.build_linkstate_for(&changes.updated))?
+        };
+        let mut sent = 0;
+        for (id, actions) in self.faces.borrow().iter() {
+            if *id == source {
+                continue;
+            }
+            let msg = NetworkMessage::Oam(oam.clone());
+            if actions.send_network_message(msg, true, false).is_ok() {
+                sent += 1;
+            }
+        }
+        Ok(sent)
     }
 
     /// Total link-state lists ingested so far — the control-plane witness.
@@ -177,7 +211,12 @@ impl FaceForwarder for LinkstateForwarder {
         for message in messages {
             if let NetworkMessage::Oam(oam) = message {
                 match try_parse_linkstate_oam(oam) {
-                    LinkstateOam::Decoded(list) => self.on_inbound_linkstate(id, list),
+                    LinkstateOam::Decoded(list) => {
+                        // ingest, then re-flood the changed nodes onward to
+                        // the OTHER faces (transitive propagation).
+                        let changes = self.on_inbound_linkstate(id, list);
+                        let _ = self.propagate(id, &changes);
+                    }
                     // a malformed OAM_LINKSTATE or a non-linkstate OAM is
                     // left alone (the generic OAM path / a logged drop).
                     LinkstateOam::Malformed(_) | LinkstateOam::NotLinkstate => {}
@@ -282,5 +321,41 @@ mod tests {
         let sent = fwd.flood_self().expect("flood self after deregister");
         assert_eq!(sent, 0, "the deregistered face is no longer flooded");
         assert_eq!(sink_a.frame_count(), 0);
+    }
+
+    #[test]
+    fn propagate_re_floods_changed_nodes_to_other_faces() {
+        // a change that arrived on face 0 is re-flooded to face 1, never
+        // back to its source (transitive propagation; zenoh excludes src).
+        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let (source, source_sink) = recording_actions();
+        let (other, other_sink) = recording_actions();
+        fwd.register(FaceId(0), &source);
+        fwd.register(FaceId(1), &other);
+
+        // the self node is always in the graph, so it resolves in build.
+        let changes = Changes {
+            updated: vec![zid(0x0B)],
+        };
+        let sent = fwd.propagate(FaceId(0), &changes).expect("propagate");
+        assert_eq!(sent, 1, "propagated to the other face only");
+        assert_eq!(source_sink.frame_count(), 0, "not back to the source");
+        assert_eq!(
+            other_sink.frame_count(),
+            1,
+            "the other face got the re-flood"
+        );
+    }
+
+    #[test]
+    fn propagate_with_no_changes_sends_nothing() {
+        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let (other, other_sink) = recording_actions();
+        fwd.register(FaceId(1), &other);
+        let sent = fwd
+            .propagate(FaceId(0), &Changes::default())
+            .expect("propagate empty");
+        assert_eq!(sent, 0, "an empty change set floods nothing");
+        assert_eq!(other_sink.frame_count(), 0);
     }
 }

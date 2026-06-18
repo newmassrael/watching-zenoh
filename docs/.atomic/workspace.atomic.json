@@ -41760,6 +41760,46 @@
         "R311u+ — QueryEvent.attachment extraction from Query.extensions chain (currently always None as carried-forward parity with pre-R311r QueryResponder)."
       ]
     },
+    "Round 311ra": {
+      "decision_summary": "R311ra: linkstate (c3d-2) propagate_link_states — 수신한 changed nodes를 source 외 OTHER faces에 re-flood(transitive 전파). graph: make_link_state 추출 + build_linkstate_for(zids)=Changes 부분집합 빌드. driver: on_inbound_linkstate가 Changes 반환 + propagate(source 제외, sn-staleness가 loop 차단) + forward가 ingest 후 propagate 호출. zenoh propagate_link_states network.rs:636-678,804 미러. qy 리뷰가 누락 적발한 부채 해소. 4 unit.",
+      "changes_bullets": [
+        "wz-routing-graph: make_link_state(idx) 추출(한 노드의 LinkState; zenoh make_link_state network.rs:304-348), build_linkstate_list=전 노드 map, build_linkstate_for(zids: &[Zid]) 신설=Changes 부분집합만 빌드(unknown zid skip; zenoh make_msg over Changes-derived subset network.rs:645-678). 모듈 doc propagate_link_states deferral 노트를 \"graph가 build_linkstate_for 제공, driver가 per-face re-flood 구현; Details split만 잔여 defer\"로 갱신.",
+        "wz-runtime-tokio linkstate_forward: on_inbound_linkstate가 Changes 반환. propagate(source, &Changes)=changes.updated를 build_linkstate_for→build_linkstate_oam_owned→faces 중 source 외에 NetworkMessage::Oam 송신(reliable; sn-staleness가 unchanged re-flood drop=storm 아닌 converge). forward()가 Decoded시 on_inbound_linkstate→propagate(id, &changes) 호출. zenoh propagate_link_states(network.rs:636-678, receive tail :804) 미러. full-state-for-new vs links-only-for-updated Details split은 defer(changed 노드 full-state 송신).",
+        "테스트: propagate_re_floods_changed_nodes_to_other_faces(face0 changed→face1 전파+face0 미전파=source 제외), propagate_with_no_changes_sends_nothing."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-routing-graph 23 PASS(make_link_state 리팩터 무영향), -p wz-runtime-tokio routing-peer --lib linkstate 8 PASS(propagate 2 신규). clippy -p wz-routing-graph + -p wz-runtime-tokio(routing-peer all-targets + no-default) -D warnings clean. cargo fmt --all --check exit 0. default 빌드 무영향. doc_lazy_continuation(>2-node 선두가 markdown blockquote로 오인) 수정.",
+        "transitive 전파=qy 적대 리뷰가 \"propagate_link_states 누락=배선돼도 직접 이웃만 학습\"으로 적발→qy defer 명시→ra 구현=리뷰 부채 1건 해소."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ra = linkstate (c3d-2) propagate_link_states 완료. 수신한 changed nodes를 source 외 OTHER faces에 re-flood=>2-node mesh transitive 전파 메커니즘(qy 리뷰가 누락 적발→defer 명시→구현). graph build_linkstate_for(부분집합 빌드) + driver propagate(source 제외, sn-staleness가 loop 차단). 4 unit.",
+        "다음 c3d-3: peer_loop이 LinkstateForwarder 사용(현 demo run_peer=NoOpForwarder 대체)+주기 flood 타이머(flood_self 주기 호출=초기 광고+갱신). 이게 프로덕션서 실제 forwarder 동작시킴. → c3d-4: 2-peer e2e(실제 transport 토폴로지 교환 실증). c3d-3+4 끝나면 프로덕션 inert 완전 탈출.",
+        "추적 부채: propagate Details split(new=full/updated=links-only 최적화), options-SSOT(SCE owned-flag-setter 리포트), Zid=Vec<u8>→16B newtype, remove_detached_nodes, drop 관측성(tracing dep).",
+        "코드 LOCAL UNPUSHED 2커밋: qz(90c1716 c3d-1)+ra(c3d-2). qm~qy=PUSHED origin/main=14df94d."
+      ],
+      "publishable_decision_summary": "R311ra: linkstate (c3d-2) propagate_link_states — 수신한 changed nodes를 source 외 OTHER faces에 re-flood(transitive 전파). graph: make_link_state 추출 + build_linkstate_for(zids)=Changes 부분집합 빌드. driver: on_inbound_linkstate가 Changes 반환 + propagate(source 제외, sn-staleness가 loop 차단) + forward가 ingest 후 propagate 호출. zenoh propagate_link_states network.rs:636-678,804 미러. qy 리뷰가 누락 적발한 부채 해소. 4 unit.",
+      "publishable_changes_bullets": [
+        "wz-routing-graph: make_link_state(idx) 추출(한 노드의 LinkState; zenoh make_link_state network.rs:304-348), build_linkstate_list=전 노드 map, build_linkstate_for(zids: &[Zid]) 신설=Changes 부분집합만 빌드(unknown zid skip; zenoh make_msg over Changes-derived subset network.rs:645-678). 모듈 doc propagate_link_states deferral 노트를 \"graph가 build_linkstate_for 제공, driver가 per-face re-flood 구현; Details split만 잔여 defer\"로 갱신.",
+        "wz-runtime-tokio linkstate_forward: on_inbound_linkstate가 Changes 반환. propagate(source, &Changes)=changes.updated를 build_linkstate_for→build_linkstate_oam_owned→faces 중 source 외에 NetworkMessage::Oam 송신(reliable; sn-staleness가 unchanged re-flood drop=storm 아닌 converge). forward()가 Decoded시 on_inbound_linkstate→propagate(id, &changes) 호출. zenoh propagate_link_states(network.rs:636-678, receive tail :804) 미러. full-state-for-new vs links-only-for-updated Details split은 defer(changed 노드 full-state 송신).",
+        "테스트: propagate_re_floods_changed_nodes_to_other_faces(face0 changed→face1 전파+face0 미전파=source 제외), propagate_with_no_changes_sends_nothing."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-routing-graph 23 PASS(make_link_state 리팩터 무영향), -p wz-runtime-tokio routing-peer --lib linkstate 8 PASS(propagate 2 신규). clippy -p wz-routing-graph + -p wz-runtime-tokio(routing-peer all-targets + no-default) -D warnings clean. cargo fmt --all --check exit 0. default 빌드 무영향. doc_lazy_continuation(>2-node 선두가 markdown blockquote로 오인) 수정.",
+        "transitive 전파=qy 적대 리뷰가 \"propagate_link_states 누락=배선돼도 직접 이웃만 학습\"으로 적발→qy defer 명시→ra 구현=리뷰 부채 1건 해소."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ra = linkstate (c3d-2) propagate_link_states 완료. 수신한 changed nodes를 source 외 OTHER faces에 re-flood=>2-node mesh transitive 전파 메커니즘(qy 리뷰가 누락 적발→defer 명시→구현). graph build_linkstate_for(부분집합 빌드) + driver propagate(source 제외, sn-staleness가 loop 차단). 4 unit.",
+        "다음 c3d-3: peer_loop이 LinkstateForwarder 사용(현 demo run_peer=NoOpForwarder 대체)+주기 flood 타이머(flood_self 주기 호출=초기 광고+갱신). 이게 프로덕션서 실제 forwarder 동작시킴. → c3d-4: 2-peer e2e(실제 transport 토폴로지 교환 실증). c3d-3+4 끝나면 프로덕션 inert 완전 탈출.",
+        "추적 부채: propagate Details split(new=full/updated=links-only 최적화), options-SSOT(SCE owned-flag-setter 리포트), Zid=Vec<u8>→16B newtype, remove_detached_nodes, drop 관측성(tracing dep).",
+        "코드 LOCAL UNPUSHED 2커밋: qz(90c1716 c3d-1)+ra(c3d-2). qm~qy=PUSHED origin/main=14df94d."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
