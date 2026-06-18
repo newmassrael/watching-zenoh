@@ -41156,6 +41156,54 @@
         "코드 LOCAL UNPUSHED: R311qm(linkstate_link/linkstate/linkstate_list SCXML 3 + wz-codecs build.rs/lib.rs/Cargo.toml 배선 + tests/linkstate.rs + 이 ledger). push 미동의=로컬 커밋만, 사용자 명시 'push' 대기. 엔트리 ID qm=ql 정규 알파 후속."
       ]
     },
+    "Round 311qn": {
+      "decision_summary": "R311qn: linkstate weights(b2) 구현 — LinkState WGT/link_weights를 borrowed-count gated repeat로 추가(SCE pin 3078f8bf7의 f91a37eba 활용). linkstate_weight VLE-u16 element + H-gated weights repeat(count=links_len). H=1 byte-parity oracle 추가. LinkState wire 완전체, 보류 b2 종료.",
+      "changes_bullets": [
+        "sources/codecs/linkstate_weight.scxml 신설: link_weights element=VLE u16 wrapper. zenoh codec.write(&u16)→write(x as u64)=VLE(zint.rs:212/181), 고정 2바이트 아님. linkstate_link(u64)의 u16 sibling.",
+        "sources/codecs/linkstate.scxml: weights repeat 추가(type=linkstate_weight, count=\"links_len\", present-if=\"options.H\", max-count 64). zenoh net/codec/linkstate.rs:74-79 미러(count=links.len() borrowed, 자체 length 없음). 코멘트 DEFERRED→구현 설명 교체.",
+        "wz-codecs build.rs + src/lib.rs: linkstate_weight stem(leaf, linkstate 앞 dependency-order) + is_codec_enabled gate + codec_group 추가.",
+        "wz-codecs Cargo.toml: codec-linkstate 코멘트 갱신(H=0 한정→WGT 포함 full wire; borrowed-count는 pin f91a37eba).",
+        "crates/wz-codecs/tests/linkstate.rs: H=1 weighted oracle 추가(options=WGT, 2 links+2 weights [100,300]; weight 300=multi-byte VLE 0xAC 0x02=VLE증명) + 기존 H=0 테스트에 weights==None 단언."
+      ],
+      "verification_bullets": [
+        "byte-parity: cargo test -p wz-codecs --test linkstate 4/4 PASS(rich H=0 / minimal / weighted H=1 / LinkStateList). weighted oracle가 borrowed-count gated repeat + VLE-u16 multi-byte를 byte-exact 단언(encode_to_vec==WEIGHTED).",
+        "SCE 실동작 확인: borrowed-count gated repeat(present-if=H, count=links_len)가 새 pin f91a37eba에서 통과 컴파일=리포트한 capability 실증. R311qm서 정확히 이 SCXML이 co-gating으로 거부됐던 것이 이제 accept.",
+        "weight VLE 정본: zenoh codec.write(&u16)→WCodec<u16>→write(x as u64)=VLE(zint.rs:212-214/181-183), decode read::<u16>=VLE u64 후 u16 cast(192-194). 고정 2바이트 batch_size(pico _z_uint16_encode LE)와 구별 — link_weights는 wider VLE 경로.",
+        "빌드: cargo build -p wz-codecs(host) + no_std cross(thumbv7em --no-default-features --features alloc,codec-linkstate) PASS=weights no_std 안전. fmt --check + clippy --tests clean. 전체 스위트(lib2+linkstate4+serial6+smoke5) green.",
+        "SSOT: validate_workspace orphan delta 0(13 ledger 유지). inventory 무변경(routing-peer active 하위)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qn = linkstate weights(b2) 구현 완료 = LinkState wire 완전체(WGT/link_weights 포함). 보류 트랙(b2) 종료. 선행: pin bump ee26e42(57e06f1e9→3078f8bf7, f91a37eba borrowed-count capability)이 prerequisite; R311qm(b2a4567)가 H=0 코어. 흐름: 리포트→사용자가 SCE fix+push→wz 핀 bump→wz adopt.",
+        "즉시 다음(linkstate 포팅 c): Network 그래프(zenoh net/protocol/network.rs) — psid↔zid 매핑 + 수신 LinkStateList→그래프 갱신 + OAM 캐리어(LK_ST_LS id) wrap/unwrap. 이후 (d) spanning-tree/tree forwarding(hat/linkstate_peer)=순환 mesh 무한루프 방지. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED 3커밋: b2a4567(R311qm linkstate H=0 코어) + ee26e42(SCE 핀 bump) + R311qn(linkstate_weight SCXML + weights repeat + test + 이 ledger). push 미동의=로컬 커밋만, 사용자 'push' 대기. 엔트리 ID qn=qm 정규 알파 후속(중간 ee26e42는 build 커밋, ledger 없음)."
+      ],
+      "publishable_decision_summary": "R311qn: linkstate weights(b2) 구현 — LinkState WGT/link_weights를 borrowed-count gated repeat로 추가(SCE pin 3078f8bf7의 f91a37eba 활용). linkstate_weight VLE-u16 element + H-gated weights repeat(count=links_len). H=1 byte-parity oracle 추가. LinkState wire 완전체, 보류 b2 종료.",
+      "publishable_changes_bullets": [
+        "sources/codecs/linkstate_weight.scxml 신설: link_weights element=VLE u16 wrapper. zenoh codec.write(&u16)→write(x as u64)=VLE(zint.rs:212/181), 고정 2바이트 아님. linkstate_link(u64)의 u16 sibling.",
+        "sources/codecs/linkstate.scxml: weights repeat 추가(type=linkstate_weight, count=\"links_len\", present-if=\"options.H\", max-count 64). zenoh net/codec/linkstate.rs:74-79 미러(count=links.len() borrowed, 자체 length 없음). 코멘트 DEFERRED→구현 설명 교체.",
+        "wz-codecs build.rs + src/lib.rs: linkstate_weight stem(leaf, linkstate 앞 dependency-order) + is_codec_enabled gate + codec_group 추가.",
+        "wz-codecs Cargo.toml: codec-linkstate 코멘트 갱신(H=0 한정→WGT 포함 full wire; borrowed-count는 pin f91a37eba).",
+        "crates/wz-codecs/tests/linkstate.rs: H=1 weighted oracle 추가(options=WGT, 2 links+2 weights [100,300]; weight 300=multi-byte VLE 0xAC 0x02=VLE증명) + 기존 H=0 테스트에 weights==None 단언."
+      ],
+      "publishable_verification_bullets": [
+        "byte-parity: cargo test -p wz-codecs --test linkstate 4/4 PASS(rich H=0 / minimal / weighted H=1 / LinkStateList). weighted oracle가 borrowed-count gated repeat + VLE-u16 multi-byte를 byte-exact 단언(encode_to_vec==WEIGHTED).",
+        "SCE 실동작 확인: borrowed-count gated repeat(present-if=H, count=links_len)가 새 pin f91a37eba에서 통과 컴파일=리포트한 capability 실증. R311qm서 정확히 이 SCXML이 co-gating으로 거부됐던 것이 이제 accept.",
+        "weight VLE 정본: zenoh codec.write(&u16)→WCodec<u16>→write(x as u64)=VLE(zint.rs:212-214/181-183), decode read::<u16>=VLE u64 후 u16 cast(192-194). 고정 2바이트 batch_size(pico _z_uint16_encode LE)와 구별 — link_weights는 wider VLE 경로.",
+        "빌드: cargo build -p wz-codecs(host) + no_std cross(thumbv7em --no-default-features --features alloc,codec-linkstate) PASS=weights no_std 안전. fmt --check + clippy --tests clean. 전체 스위트(lib2+linkstate4+serial6+smoke5) green.",
+        "SSOT: validate_workspace orphan delta 0(13 ledger 유지). inventory 무변경(routing-peer active 하위)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qn = linkstate weights(b2) 구현 완료 = LinkState wire 완전체(WGT/link_weights 포함). 보류 트랙(b2) 종료. 선행: pin bump ee26e42(57e06f1e9→3078f8bf7, f91a37eba borrowed-count capability)이 prerequisite; R311qm(b2a4567)가 H=0 코어. 흐름: 리포트→사용자가 SCE fix+push→wz 핀 bump→wz adopt.",
+        "즉시 다음(linkstate 포팅 c): Network 그래프(zenoh net/protocol/network.rs) — psid↔zid 매핑 + 수신 LinkStateList→그래프 갱신 + OAM 캐리어(LK_ST_LS id) wrap/unwrap. 이후 (d) spanning-tree/tree forwarding(hat/linkstate_peer)=순환 mesh 무한루프 방지. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED 3커밋: b2a4567(R311qm linkstate H=0 코어) + ee26e42(SCE 핀 bump) + R311qn(linkstate_weight SCXML + weights repeat + test + 이 ledger). push 미동의=로컬 커밋만, 사용자 'push' 대기. 엔트리 ID qn=qm 정규 알파 후속(중간 ee26e42는 build 커밋, ledger 없음)."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh linkstate-peer routing — a single
+     `link_weights` element (one edge weight, u16).
+
+     Mirrors the per-element write/read inside zenoh
+     `zenoh/src/net/codec/linkstate.rs:74-79` / `:121-131`:
+
+         for w in link_weights.iter() { codec.write(writer, w)?; }   // &u16
+         ...
+         let w: u16 = codec.read(reader)?;
+
+     IMPORTANT — the weight is VLE-encoded, NOT a fixed 2-byte int:
+     `codec.write(w)` (w: &u16) resolves WCodec<&u16> -> WCodec<u16> ->
+     `self.write(writer, x as u64)` (commons/zenoh-codec/src/core/
+     zint.rs:212-214 -> :181-183) = the base-128 VLE u64 path. Decode is
+     the mirror (`:192-194` reads a VLE u64, casts to u16). So a weight
+     value in 0..=127 is one wire byte, 128..=16383 two bytes, etc. This
+     is DISTINCT from the fixed little-endian 2-byte `batch_size`
+     (init_body/join) — those use `_z_uint16_encode`; link_weights ride
+     the wider VLE path. Like `linkstate_link` wraps a bare VLE u64, this
+     wraps a bare VLE u16 so it can be a `<sce:repeat>` element type
+     (SCE repeats codec aliases, not scalars).
+
+     Wire shape:
+       byte 0+ : weight  (VLE u16, an edge weight; default 100 when the
+                          peer omits the WGT block — see linkstate.rs
+                          LinkEdgeWeight::DEFAULT_LINK_WEIGHT).
+
+     Composition: B1-alpha VLE only. No new primitive surface. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="linkstate_weight">
+  <datamodel>
+    <sce:field id="weight" sce:type="uint16" sce:byte="0" sce:bit-size="vle"/>
+  </datamodel>
+</scxml>

@@ -328,6 +328,7 @@ codec_group!(
     "codec-linkstate",
     [
         (linkstate_link, "linkstate_link.rs"),
+        (linkstate_weight, "linkstate_weight.rs"),
         (linkstate, "linkstate.rs"),
         (linkstate_list, "linkstate_list.rs"),
     ]

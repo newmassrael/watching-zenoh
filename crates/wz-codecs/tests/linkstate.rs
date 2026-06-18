@@ -47,6 +47,20 @@ const RICH: [u8; 31] = [
 ///   00          links_len = 0
 const MIN: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
 
+/// Weighted LinkState: only H set, 2 links + 2 weights (count borrowed
+/// from links_len, no own length prefix). Weight 300 exercises a
+/// multi-byte VLE u16 (0xAC 0x02), proving weights are VLE — not a
+/// fixed 2-byte int.
+///
+///   08          options = WGT (0x08)
+///   03          psid = 3
+///   00          sn = 0
+///   02          links_len = 2
+///   05 09       links = [5, 9]
+///   64          weight[0] = 100  (VLE, 1 byte)
+///   AC 02       weight[1] = 300  (VLE, 2 bytes)
+const WEIGHTED: [u8; 9] = [0x08, 0x03, 0x00, 0x02, 0x05, 0x09, 0x64, 0xAC, 0x02];
+
 #[test]
 fn rich_linkstate_round_trips_byte_exact() {
     let mut cursor = SceCursor::new(&RICH);
@@ -66,6 +80,7 @@ fn rich_linkstate_round_trips_byte_exact() {
     assert_eq!(ls.links.len(), 2);
     assert_eq!(ls.links[0].psid, 5);
     assert_eq!(ls.links[1].psid, 9);
+    assert!(ls.weights.is_none(), "H clear => no weights block");
 
     let wire = ls.encode_to_vec();
     assert_eq!(wire, RICH, "encode(decode(RICH)) must be byte-identical");
@@ -86,9 +101,39 @@ fn minimal_linkstate_round_trips_byte_exact() {
     assert!(ls.locators.is_none(), "L clear => no locators");
     assert_eq!(ls.links_len, 0);
     assert_eq!(ls.links.len(), 0);
+    assert!(ls.weights.is_none(), "H clear => no weights block");
 
     let wire = ls.encode_to_vec();
     assert_eq!(wire, MIN, "encode(decode(MIN)) must be byte-identical");
+}
+
+#[test]
+fn weighted_linkstate_round_trips_byte_exact() {
+    let mut cursor = SceCursor::new(&WEIGHTED);
+    let ls = Linkstate::decode(&mut cursor).expect("decode weighted LinkState");
+
+    assert_eq!(ls.options, 0x08, "options = WGT");
+    assert_eq!(ls.psid, 3);
+    assert_eq!(ls.sn, 0);
+    assert_eq!(ls.zid, None);
+    assert_eq!(ls.whatami, None);
+    assert!(ls.locators.is_none());
+    assert_eq!(ls.links_len, 2);
+    assert_eq!(ls.links.len(), 2);
+    assert_eq!(ls.links[0].psid, 5);
+    assert_eq!(ls.links[1].psid, 9);
+
+    // weights: count borrowed from links_len (2), VLE u16 elements.
+    let weights = ls.weights.as_ref().expect("H set => weights present");
+    assert_eq!(weights.len(), 2, "weight count == links count");
+    assert_eq!(weights[0].weight, 100);
+    assert_eq!(weights[1].weight, 300, "multi-byte VLE u16");
+
+    let wire = ls.encode_to_vec();
+    assert_eq!(
+        wire, WEIGHTED,
+        "encode(decode(WEIGHTED)) must be byte-identical"
+    );
 }
 
 #[test]

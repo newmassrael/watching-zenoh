@@ -47,6 +47,7 @@ const CODECS: &[&str] = &[
     "join",              // §4.1 Join body — parent.S + multi-VLE — R44 ✓
     "locator",           // §3 hello locator element — R45 (hello dep)
     "linkstate_link",    // P4 linkstate links-element wrapper (VLE u64) — R311qm
+    "linkstate_weight",  // P4 linkstate weights-element wrapper (VLE u16) — R311qn
     "keep_alive",        // §4.1 empty body (transport keepalive) — R47 trivial
     "decl_final",        // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
     "undecl_kexpr",      // §5 undecl kexpr leaf — header + id VLE, MID 0x01 — R110b
@@ -123,7 +124,7 @@ fn is_codec_enabled(stem: &str) -> bool {
         // routing feature; absent from MCU footprint). The element
         // wrapper, the LinkState entry, and the LinkStateList batch
         // share `codec-linkstate`.
-        "linkstate_link" | "linkstate" | "linkstate_list" => {
+        "linkstate_link" | "linkstate_weight" | "linkstate" | "linkstate_list" => {
             std::env::var_os("CARGO_FEATURE_CODEC_LINKSTATE").is_some()
         }
         _ => true,

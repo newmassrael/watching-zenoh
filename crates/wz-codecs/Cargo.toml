@@ -195,16 +195,17 @@ codec-response = []
 # adopts). transport-link-serial stays reserved / unforwarded.
 codec-serial = []
 # R311qm — `codec-linkstate` gates the SCXML codegen + the `pub mod`
-# trio (linkstate_link / linkstate / linkstate_list) for P4 linkstate-
-# peer routing's topology-exchange wire codec. AP/full-node routing
-# feature: a peer floods LinkStateList to share its mesh-graph view
-# (the input to the spanning-tree forwarding in linkstate port steps
+# 4 (linkstate_link / linkstate_weight / linkstate / linkstate_list) for
+# P4 linkstate-peer routing's topology-exchange wire codec. AP/full-node
+# routing feature: a peer floods LinkStateList to share its mesh-graph
+# view (the input to the spanning-tree forwarding in linkstate port steps
 # (c)/(d)). Gated off the MCU footprint (linkstate-peer routing is not
 # part of the constrained-node profile). Default-on for standalone
-# wz-codecs usage, matching the other catalog codecs. The codec
-# implements the H=0 (default-config, unweighted) wire; the optional
-# WGT/link_weights extension is a follow-up atom blocked on an SCE
-# borrowed-count gated-repeat primitive (documented in linkstate.scxml).
+# wz-codecs usage, matching the other catalog codecs. Full wire including
+# the WGT/link_weights extension (R311qn): weights are an H-gated repeat
+# whose count is borrowed from the always-present links_len, accepted by
+# vendor pin f91a37eba (the wz-reported borrowed-count gated-repeat
+# capability — see linkstate.scxml for the field-by-field mirror).
 codec-linkstate = []
 
 

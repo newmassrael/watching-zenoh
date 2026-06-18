@@ -62,29 +62,25 @@
        links (70..73)     : VLE count + count * VLE u64 (no wrapper). The
                             per-element codec is linkstate_link.scxml.
 
-     WGT / link_weights (bit H) is DEFERRED to a follow-up atom.
-     zenoh's optional `link_weights` (linkstate.rs:51, gated on H/WGT)
-     is `count * u16` with NO own length prefix; its element count is
-     BORROWED from `links.len()` (codec comment "do not write len since
-     it is the same as that of links", net/codec/linkstate.rs:75). That
-     shape is NOT expressible on the current SCE primitive surface: an
-     H-gated `<sce:repeat>` whose `count="links_len"` fails SCE's
-     co-gating validator (sce-build parser.rs
-     `validate_codec_repeat_present_if_co_gating`), which REQUIRES a
-     gated repeat's count-source field to carry the IDENTICAL present-if,
-     but `links_len` is unconditional. The only co-gating-legal
-     work-arounds (a duplicate H-gated `weights_len`, or an embedded
-     wrapper codec with an internal length) would each emit an EXTRA
-     length VLE on the wire, breaking byte-parity with zenoh. Per the
-     SCE-issue-stop-first contract this is reported as an SCE capability
-     gap (a gated repeat with a borrowed always-present count), not
-     hand-rolled around. This codec implements the H=0 wire (the
-     DEFAULT-config zenoh output; link weights are opt-in
-     `TransportWeight` config), and the equal-weight topology is exactly
-     the spanning-tree MVP that steps (c)/(d) consume. The H bit is still
-     DECODED into `options.H` so the higher layer can observe whether a
-     weighted-config peer sent weights; parsing the weights payload is
-     the deferred atom (b2).
+       weights (74..79) : `if H: count * VLE u16`, NO own length prefix —
+                            the element count is BORROWED from
+                            `links.len()` (codec comment "do not write len
+                            since it is the same as that of links"). Each
+                            weight is VLE, not a fixed 2-byte int
+                            (`codec.write(&u16)` -> `write(x as u64)`,
+                            zint.rs:212/181); element codec =
+                            linkstate_weight.scxml. Modelled as an H-gated
+                            `<sce:repeat>` whose `count="links_len"` (the
+                            always-present links count). SCE accepts a
+                            gated repeat with an unconditional borrowed
+                            count as of vendor pin f91a37eba (the
+                            wz-reported borrowed-count primitive — the
+                            co-gating safety condition "count is read
+                            before the gated repeat" holds because
+                            links_len is unconditional). Weights are opt-in
+                            `TransportWeight` config; a default-config peer
+                            clears H and omits the block (LinkEdgeWeight
+                            default 100).
 
      Field `sce:byte` numbers are monotonic field-order indices (each
      VLE / u8 / bytes / repeat = one slot), matching the hello/init_body
@@ -95,12 +91,14 @@
      (psid / sn / zid_len / num_locators / links count) + B2-beta
      present-if + length-ref (zid) + B5-gamma local-flag present-if
      (whatami / locators) + B5-mu repeat<codec> with co-gated count
-     (locators) + ungated repeat<codec> (links). No new primitive
-     surface. -->
+     (locators) + ungated repeat<codec> (links) + H-gated repeat<codec>
+     with a borrowed unconditional count (weights, vendor pin f91a37eba).
+     No new primitive surface. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="linkstate">
   <sce:import src="linkstate_link.scxml" kind="codec" as="codec_zenoh_linkstate_link"/>
+  <sce:import src="linkstate_weight.scxml" kind="codec" as="codec_zenoh_linkstate_weight"/>
   <sce:import src="locator.scxml" kind="codec" as="codec_zenoh_locator"/>
   <datamodel>
     <sce:flags id="options" sce:type="uint8" sce:byte="0" sce:bit-size="8">
@@ -126,5 +124,8 @@
     <sce:field id="links_len" sce:type="uint64" sce:byte="8" sce:bit-size="vle"/>
     <sce:repeat id="links" type="codec_zenoh_linkstate_link" sce:byte="9"
                 count="links_len" max-count="64"/>
+    <sce:repeat id="weights" type="codec_zenoh_linkstate_weight" sce:byte="10"
+                count="links_len" max-count="64"
+                sce:present-if="options.H"/>
   </datamodel>
 </scxml>
