@@ -1100,6 +1100,17 @@ pub(crate) async fn run_demo(
     Ok(())
 }
 
+/// R311qi — format a face's remote peer zid as lowercase hex for the multi-peer
+/// face logs (zid is the routing identity learned at handshake; `?` if the
+/// handshake did not surface it). Shared by the router and peer face observers.
+#[cfg(any(feature = "routing-router", feature = "routing-peer"))]
+fn zid_hex(zid: Option<&[u8]>) -> String {
+    match zid {
+        Some(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        None => "?".to_string(),
+    }
+}
+
 /// R311qa — multi-peer ROUTER mode: bind once and hold N concurrent peer faces
 /// (the `routing-router` foundation), distinct from the one-shot `--listen`
 /// Acceptor. Binds the `--router` endpoint, then runs the library
@@ -1155,9 +1166,10 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
         |event: &AcceptEvent| match event {
             AcceptEvent::FaceUp(face) => {
                 log::info!(
-                    "wz-ap-demo router: face {} UP (peer {})",
+                    "wz-ap-demo router: face {} UP (peer {}, zid {})",
                     face.id.0,
-                    face.peer
+                    face.peer,
+                    zid_hex(face.peer_zid.as_deref())
                 )
             }
             AcceptEvent::FaceDown(face, outcome) => log::info!(
@@ -1254,9 +1266,10 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
         |event: &AcceptEvent| match event {
             AcceptEvent::FaceUp(face) => {
                 log::info!(
-                    "wz-ap-demo peer: face {} UP (peer {})",
+                    "wz-ap-demo peer: face {} UP (peer {}, zid {})",
                     face.id.0,
-                    face.peer
+                    face.peer,
+                    zid_hex(face.peer_zid.as_deref())
                 )
             }
             AcceptEvent::FaceDown(face, outcome) => log::info!(
