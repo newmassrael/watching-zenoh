@@ -41914,6 +41914,54 @@
         "코드 LOCAL UNPUSHED 5커밋: qz(c3d-1)/ra(c3d-2)/rb(c3d-3)/rc(c3d-4)/rd(리뷰 correctness). qm~qy=PUSHED origin/main=14df94d."
       ]
     },
+    "Round 311rf": {
+      "decision_summary": "R311rf: c3d 적대 리뷰 remediation 2차(구조 MAJOR). 주기 link-state flood을 demo run_peer hand-rolled select→FaceForwarder::tick seam 이전(非-demo peer_loop caller도 수렴) + register-time bootstrap(zenoh add_link send-on-new-link) + cheap cleanup(const/struct/helper).",
+      "changes_bullets": [
+        "accept_loop.rs: FaceForwarder += tick_period()(default None) + tick()(default no-op). face_drive_loop이 tick_period로 interval 무장 + Step::Tick arm(forwarder_tick: timer None이면 pending). NoOp/Routing=None→accept-only/hold-only 무변(추가 wakeup 0).",
+        "linkstate_forward.rs: flood seam 이전(tick_period=Some(1s)/tick=flood_self, LINKSTATE_FLOOD_PERIOD const도 forwarder로). register가 zid 있으면 add_link 후 flood_self_to=bootstrap(zenoh network.rs:932 send-on-new-link), 없으면 hold만. build_self_oam 추출+node_count().",
+        "두 map(face_links+faces)→1 HashMap<FaceId,FaceState{actions,link:Option<LinkId>}> 병합(seam/link drift 방지). on_face_up/down 제거→register/deregister 인라인. WHATAMI_PEER re-export(demo가 const 사용).",
+        "runner.rs(demo): flood select+LINKSTATE_FLOOD_MS 제거→loop_fut.await 단일. 0x02→WHATAMI_PEER, 0x7072→PEER_ZID_PREFIX const. shutdown summary에 node_count+'learned mesh topology'(ingested>0 시). test_fixtures: reset()(routing-peer gated).",
+        "wz_peer_mesh e2e: in-run 'learned mesh topology' 15s wait→shutdown summary 단언(bootstrap이 face-up 수렴→결정적). 단위 4개 register 경로 전환(peer_face helper)+bootstrap 단언 2 신규."
+      ],
+      "verification_bullets": [
+        "cargo build/clippy(-D warnings): rt-tokio(routing-peer all-targets + no-default-features ×2[routing-peer/없음]=reset() cfg-gate 확인), ap-demo(routing-peer+routing-router), integration-tests 전부 clean. fmt --all --check exit 0.",
+        "단위: rt-tokio --features routing-peer --lib 299 PASS(linkstate 11[bootstrap 2 신규]/accept_loop 7[Step::Tick 무회귀]/routing_forward 20 포함), 0 fail.",
+        "e2e: E6 wz_peer_mesh 5/5 무flake(0.20s, 이전 1.11s보다 빠름=bootstrap이 ~1s tick 대기 제거). 실측 수렴 A shutdown 'ingested 1 link-state(s), 3 node(s)', face-0 zid 707283fb(B distinct). router multi-peer 1/1(accept_loop 경로 무회귀).",
+        "적대 리뷰 rf 적발: 주기 flood이 demo-only=非-demo peer_loop caller 미수렴(프로토콜 의무를 demo 정책에 둠). seam 이전+bootstrap으로 모든 caller가 수렴."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rf = c3d 적대 리뷰 remediation 2차(구조 MAJOR). flood을 demo select→FaceForwarder::tick seam 이전=모든 peer_loop caller 수렴(非-demo 미수렴 해소). register-time bootstrap(zenoh add_link send-on-new-link)=face-up 즉시 수렴. cheap: WHATAMI_PEER/PEER_ZID_PREFIX const, 2-map→1-struct, reset() helper.",
+        "남은 c3d 리뷰 re=honesty(ledger 정정): fixed 1s whole-graph flood≠zenoh event-driven; 'c3d 핵심 완료' 과장=c3c 미구축; E6 one-directional A←B만(propagate/transitive e2e 0); remove_detached_nodes ghost understated. re-① e2e graph-state는 rf가 선반영(shutdown node_count 로그+ingested>0 witness).",
+        "이후: c3c(tree_children_of로 data Push forward) → 추적부채(change-triggered flood; on-face-up bootstrap은 rf서 완료; Details split; options-SSOT; Zid=Vec<u8>→16B newtype; remove_detached_nodes; gossip/autoconnect/locators).",
+        "코드: rf 1커밋 LOCAL(commit 직후 UNPUSHED). qm~rd=PUSHED origin/main=5049fe0. rf 검증=full 빌드/clippy/fmt/299 unit/E6 5x/router 1x 전부 green."
+      ],
+      "publishable_decision_summary": "R311rf: c3d 적대 리뷰 remediation 2차(구조 MAJOR). 주기 link-state flood을 demo run_peer hand-rolled select→FaceForwarder::tick seam 이전(非-demo peer_loop caller도 수렴) + register-time bootstrap(zenoh add_link send-on-new-link) + cheap cleanup(const/struct/helper).",
+      "publishable_changes_bullets": [
+        "accept_loop.rs: FaceForwarder += tick_period()(default None) + tick()(default no-op). face_drive_loop이 tick_period로 interval 무장 + Step::Tick arm(forwarder_tick: timer None이면 pending). NoOp/Routing=None→accept-only/hold-only 무변(추가 wakeup 0).",
+        "linkstate_forward.rs: flood seam 이전(tick_period=Some(1s)/tick=flood_self, LINKSTATE_FLOOD_PERIOD const도 forwarder로). register가 zid 있으면 add_link 후 flood_self_to=bootstrap(zenoh network.rs:932 send-on-new-link), 없으면 hold만. build_self_oam 추출+node_count().",
+        "두 map(face_links+faces)→1 HashMap<FaceId,FaceState{actions,link:Option<LinkId>}> 병합(seam/link drift 방지). on_face_up/down 제거→register/deregister 인라인. WHATAMI_PEER re-export(demo가 const 사용).",
+        "runner.rs(demo): flood select+LINKSTATE_FLOOD_MS 제거→loop_fut.await 단일. 0x02→WHATAMI_PEER, 0x7072→PEER_ZID_PREFIX const. shutdown summary에 node_count+'learned mesh topology'(ingested>0 시). test_fixtures: reset()(routing-peer gated).",
+        "wz_peer_mesh e2e: in-run 'learned mesh topology' 15s wait→shutdown summary 단언(bootstrap이 face-up 수렴→결정적). 단위 4개 register 경로 전환(peer_face helper)+bootstrap 단언 2 신규."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build/clippy(-D warnings): rt-tokio(routing-peer all-targets + no-default-features ×2[routing-peer/없음]=reset() cfg-gate 확인), ap-demo(routing-peer+routing-router), integration-tests 전부 clean. fmt --all --check exit 0.",
+        "단위: rt-tokio --features routing-peer --lib 299 PASS(linkstate 11[bootstrap 2 신규]/accept_loop 7[Step::Tick 무회귀]/routing_forward 20 포함), 0 fail.",
+        "e2e: E6 wz_peer_mesh 5/5 무flake(0.20s, 이전 1.11s보다 빠름=bootstrap이 ~1s tick 대기 제거). 실측 수렴 A shutdown 'ingested 1 link-state(s), 3 node(s)', face-0 zid 707283fb(B distinct). router multi-peer 1/1(accept_loop 경로 무회귀).",
+        "적대 리뷰 rf 적발: 주기 flood이 demo-only=非-demo peer_loop caller 미수렴(프로토콜 의무를 demo 정책에 둠). seam 이전+bootstrap으로 모든 caller가 수렴."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rf = c3d 적대 리뷰 remediation 2차(구조 MAJOR). flood을 demo select→FaceForwarder::tick seam 이전=모든 peer_loop caller 수렴(非-demo 미수렴 해소). register-time bootstrap(zenoh add_link send-on-new-link)=face-up 즉시 수렴. cheap: WHATAMI_PEER/PEER_ZID_PREFIX const, 2-map→1-struct, reset() helper.",
+        "남은 c3d 리뷰 re=honesty(ledger 정정): fixed 1s whole-graph flood≠zenoh event-driven; 'c3d 핵심 완료' 과장=c3c 미구축; E6 one-directional A←B만(propagate/transitive e2e 0); remove_detached_nodes ghost understated. re-① e2e graph-state는 rf가 선반영(shutdown node_count 로그+ingested>0 witness).",
+        "이후: c3c(tree_children_of로 data Push forward) → 추적부채(change-triggered flood; on-face-up bootstrap은 rf서 완료; Details split; options-SSOT; Zid=Vec<u8>→16B newtype; remove_detached_nodes; gossip/autoconnect/locators).",
+        "코드: rf 1커밋 LOCAL(commit 직후 UNPUSHED). qm~rd=PUSHED origin/main=5049fe0. rf 검증=full 빌드/clippy/fmt/299 unit/E6 5x/router 1x 전부 green."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

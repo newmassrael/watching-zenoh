@@ -66,6 +66,19 @@ impl RecordingLinkDriver {
     pub(crate) fn frame_reliability(&self, idx: usize) -> Reliability {
         self.frames.lock().expect("recording driver mutex poisoned")[idx].1
     }
+
+    /// Discard all recorded frames — lets a test ignore set-up emits (e.g. a
+    /// register-time bootstrap flood) so a later `frame_count()` counts only
+    /// the frames the operation under test produced. Gated like its sole
+    /// consumer (`linkstate_forward`'s tests) so the no-`routing-peer`
+    /// deny-warnings lane does not see it as dead code.
+    #[cfg(feature = "routing-peer")]
+    pub(crate) fn reset(&self) {
+        self.frames
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .clear();
+    }
 }
 
 impl BoxedLinkDriver for RecordingLinkDriver {

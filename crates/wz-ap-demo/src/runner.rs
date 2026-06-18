@@ -1232,17 +1232,17 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 #[cfg(feature = "routing-peer")]
 pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Result<()> {
     use crate::args::NodeKind;
-    use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
-    use wz::runtime_tokio::linkstate_forward::LinkstateForwarder;
+    use wz::runtime_tokio::linkstate_forward::{LinkstateForwarder, WHATAMI_PEER};
     use wz::runtime_tokio::session_open::bind_endpoint;
 
-    // The peer re-advertises its link-state on this cadence (`flood_self`),
-    // bootstrapping the mesh exchange and refreshing it; sn-staleness on
-    // each receiver drops a re-flood of unchanged topology. (Change-only
-    // flooding — flood on a topology delta instead of a fixed tick — is the
-    // tracked optimisation.)
-    const LINKSTATE_FLOOD_MS: u64 = 1000;
+    // Per-peer routing zid = this 2-byte prefix + the listen port (derived
+    // below). The mesh routing graph keys on the zid, so two peers MUST NOT
+    // share one; the prefix keeps the demo's derived zids in a recognisable
+    // range. (The periodic self-flood cadence now lives in the
+    // LinkstateForwarder itself — R311rf, on the FaceForwarder seam — so this
+    // demo no longer owns a flood timer.)
+    const PEER_ZID_PREFIX: u16 = 0x7072;
 
     let listener = bind_endpoint(listen).await?;
     let local = listener.local_addr()?;
@@ -1276,13 +1276,20 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
     // ingest a remote link-state under its OWN zid). Production supplies a
     // real per-process zid; the demo derives a deterministic distinct one.
     let port = local.port();
-    params.zid = vec![0x70, 0x72, (port >> 8) as u8, (port & 0xff) as u8];
+    params.zid = vec![
+        (PEER_ZID_PREFIX >> 8) as u8,
+        (PEER_ZID_PREFIX & 0xff) as u8,
+        (port >> 8) as u8,
+        (port & 0xff) as u8,
+    ];
 
-    // R311rb (c3d-3) — the peer now maintains a linkstate-peer routing graph:
-    // each held face feeds the topology graph ([`LinkstateForwarder`]), and
-    // the peer periodically floods its own link-state (below) so the mesh
-    // converges. (zid 0x02 = WhatAmI::Peer; `params.zid` is this node's id.)
-    let forwarder = LinkstateForwarder::new(params.zid.clone(), 0x02);
+    // R311rb/rf — the peer maintains a linkstate-peer routing graph: each held
+    // face feeds the topology graph ([`LinkstateForwarder`]), which floods its
+    // own link-state on its OWN periodic tick and bootstraps each new neighbour
+    // at face-up, so the mesh converges for every peer_loop caller (the flood
+    // is on the FaceForwarder seam now, not a hand-rolled select here).
+    // `WHATAMI_PEER` is this node's role; `params.zid` is its id.
+    let forwarder = LinkstateForwarder::new(params.zid.clone(), WHATAMI_PEER);
 
     let loop_fut = peer_loop(
         FaceSources {
@@ -1317,44 +1324,34 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
         },
         &forwarder,
     );
-    tokio::pin!(loop_fut);
-
-    // Drive the accept/peer loop AND the periodic self-flood on the one
-    // task: a flood tick calls `flood_self` (a synchronous OAM send on each
-    // held face); the loop owns the face lifecycle. Both borrow `&forwarder`
-    // immutably and neither holds its `RefCell`s across an `.await`, so the
-    // single-task interleave is sound (the loop's own forwarder hooks follow
-    // the same discipline). The first `interval` tick fires immediately.
-    let mut flood = tokio::time::interval(Duration::from_millis(LINKSTATE_FLOOD_MS));
-    let mut last_ingested = 0usize;
-    let summary = loop {
-        tokio::select! {
-            done = &mut loop_fut => break done,
-            _ = flood.tick() => {
-                let _ = forwarder.flood_self();
-                // Surface mesh convergence: log the first time (and each rise)
-                // an inbound link-state is ingested — the e2e witnesses this to
-                // prove two peers actually exchanged topology, not just held a
-                // face.
-                let now = forwarder.ingested();
-                if now > last_ingested {
-                    last_ingested = now;
-                    log::info!(
-                        "wz-ap-demo peer: learned mesh topology (ingested {now} link-state(s))"
-                    );
-                }
-            }
-        }
-    };
+    // The peer loop drives the periodic self-flood itself now (R311rf — the
+    // cadence is the LinkstateForwarder's own obligation, on the FaceForwarder
+    // seam), so this is a single await with no hand-rolled flood select. That
+    // is what makes EVERY peer_loop caller converge, not only this demo.
+    let summary = loop_fut.await;
 
     log::info!(
         "wz-ap-demo peer: shutdown; dialed {}, accepted {}, served {} peer(s), \
-         peak {} concurrent face(s), ingested {} link-state(s)",
+         peak {} concurrent face(s), ingested {} link-state(s), \
+         {} node(s) in topology graph",
         summary.dialed,
         summary.accepted,
         summary.established,
         summary.peak_concurrent,
-        forwarder.ingested()
+        forwarder.ingested(),
+        forwarder.node_count()
     );
+    // Convergence witness the e2e asserts on: emitted ONLY when this peer
+    // actually INGESTED a neighbour's link-state flood — proof topology
+    // converged over the wire, not just that a face was held. The register-time
+    // bootstrap delivers a neighbour's state at face-up, so a connected mesh
+    // has ingested >= 1 by shutdown.
+    if forwarder.ingested() > 0 {
+        log::info!(
+            "wz-ap-demo peer: learned mesh topology (ingested {} link-state(s), {} node(s) in graph)",
+            forwarder.ingested(),
+            forwarder.node_count()
+        );
+    }
     Ok(())
 }

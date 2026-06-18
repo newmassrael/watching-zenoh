@@ -132,20 +132,8 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
     // (from C, id 1). Waiting for both UP lines guarantees peak 2.
     let a_face1 = wait_for_substring(&mut a_reader, "peer: face 1 UP", Duration::from_secs(10));
 
-    // c3d-4 — beyond HOLDING the face, peer A must INGEST peer B's link-state
-    // flood: real topology convergence over the wire (the OAM_LINKSTATE carrier
-    // through the live session transport), not just a held face. With distinct
-    // per-peer zids (each derived from its listen port) the routing graph keys
-    // correctly, so A learns B's node. The first flood tick fires at t=0 (no
-    // face yet); the next (~1s) lands after both faces are up, so this log
-    // follows the `face 1 UP` line.
-    let a_converged = wait_for_substring(
-        &mut a_reader,
-        "learned mesh topology",
-        Duration::from_secs(15),
-    );
-
-    // Graceful-shutdown peer A → it logs its peer-loop summary.
+    // Graceful-shutdown peer A → it logs its peer-loop summary, which carries
+    // the convergence witness asserted below.
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
     let a_captured = read_captured(&mut a_reader);
 
@@ -172,13 +160,23 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
     a_face1.unwrap_or_else(|c| {
         panic!("peer-A did not log 'face 1 UP' (accepted from C) within 10s\n--- peer-A ---\n{c}")
     });
-    a_converged.unwrap_or_else(|c| {
-        panic!(
-            "peer-A did not log 'learned mesh topology' within 15s — it held the \
-             face to B but never INGESTED B's link-state flood (topology did not \
-             converge over the wire)\n--- peer-A ---\n{c}"
-        )
-    });
+
+    // c3d-4 / R311rf — beyond HOLDING the face, peer A must INGEST peer B's
+    // link-state flood: real topology convergence over the wire (the
+    // OAM_LINKSTATE carrier through the live session transport), not just a held
+    // face. With distinct per-peer zids (each derived from its listen port) the
+    // routing graph keys correctly, so A learns B's node. The register-time
+    // bootstrap (R311rf) delivers B's state at face-up — so by shutdown A's
+    // ingest count is >= 1 and the peer-loop summary emits this witness, which
+    // it does ONLY when ingested > 0 (a held-but-never-converged face omits it).
+    // Asserting at shutdown (not mid-run) is robust: the bootstrap converges at
+    // face-up, well before A is terminated, with no dependence on flood timing.
+    assert!(
+        a_captured.contains("learned mesh topology"),
+        "peer-A summary must report 'learned mesh topology' — it held the face \
+         to B but never INGESTED B's link-state flood (topology did not converge \
+         over the wire)\n--- peer-A stderr ---\n{a_captured}"
+    );
 
     assert!(
         a_captured.contains("peak 2 concurrent"),

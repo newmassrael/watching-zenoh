@@ -69,6 +69,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -168,6 +169,28 @@ pub trait FaceForwarder {
     /// the loop installs on each held session's drive loop. A routing
     /// forwarder inspects it for declarations / Puts to route.
     fn forward(&self, id: FaceId, event: IterationEvent<'_>);
+
+    /// How often the loop should call [`tick`](Self::tick), or `None` (the
+    /// default) to never tick. A forwarder whose protocol has a PERIODIC
+    /// control-plane obligation — the linkstate peer re-advertises its own
+    /// link-state on a cadence so neighbours converge — returns `Some(period)`;
+    /// the accept-only / hold-only / data-plane forwarders keep the `None`
+    /// default, so the loop arms no timer and their behaviour is unchanged.
+    /// Read ONCE when the loop starts (a fixed cadence, not a per-tick query).
+    fn tick_period(&self) -> Option<Duration> {
+        None
+    }
+
+    /// The periodic timer fired (cadence from [`tick_period`](Self::tick_period)).
+    /// The forwarder's hook for time-driven work that is the FORWARDER's
+    /// protocol obligation, not a caller policy — the linkstate peer floods its
+    /// own link-state here. Putting it on the seam (rather than in a caller's
+    /// hand-rolled `select!`) is what makes EVERY `peer_loop` caller converge,
+    /// not only the demo. Default no-op; only a forwarder that returned `Some`
+    /// from [`tick_period`](Self::tick_period) is ever ticked. Runs on the
+    /// loop's single task with the same borrow discipline as the other hooks
+    /// (no `RefCell` held across an `.await`).
+    fn tick(&self) {}
 }
 
 /// The hold-only [`FaceForwarder`]: the `routing-router` foundation holds
@@ -304,6 +327,25 @@ enum Step {
     Opened(Box<OpenResult>),
     Driven((Face, DriverOutcome)),
     Accepted(io::Result<(DialedLink, SocketAddr)>),
+    /// The forwarder's periodic timer fired (its [`FaceForwarder::tick_period`]
+    /// cadence) — call [`FaceForwarder::tick`]. Only ever produced when a timer
+    /// is armed (a forwarder that returned `Some` from `tick_period`).
+    Tick,
+}
+
+/// Await the forwarder's periodic tick, or park forever when no timer is armed
+/// (the forwarder declared no periodic obligation via
+/// [`FaceForwarder::tick_period`]). A fixed `select!` arm-set needs every arm to
+/// be a real future at compile time; this makes the tick arm a no-op
+/// `pending()` when there is nothing to tick, so the accept-only / hold-only
+/// paths poll no extra timer and keep their exact prior behaviour.
+async fn forwarder_tick(timer: &mut Option<tokio::time::Interval>) {
+    match timer {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Where a face-drive node's faces come from: the inbound `listener` it accepts
@@ -363,6 +405,14 @@ where
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
     let mut driving = FuturesUnordered::new();
 
+    // Arm the forwarder's periodic tick (e.g. the linkstate peer's self-flood
+    // cadence — its protocol obligation, now driven by the loop so EVERY caller
+    // converges, not only a demo with a hand-rolled flood `select!`). A
+    // forwarder with no periodic obligation returns `None`, so no timer is
+    // created and the tick arm parks forever — the accept-only and hold-only
+    // loops keep their exact prior behaviour (no extra wakeups).
+    let mut tick_timer = forwarder.tick_period().map(tokio::time::interval);
+
     // Seed the outbound dial faces (peer-mesh mode). Each configured target is
     // dialed concurrently and, once Established, held in the SAME face set as
     // accepted peers — the dial-out face source, symmetric to the accept arm
@@ -390,6 +440,7 @@ where
             accepted = accept_tcp_on(&listener) => {
                 Step::Accepted(accepted.map(|(stream, peer)| (DialedLink::Tcp(stream), peer)))
             }
+            _ = forwarder_tick(&mut tick_timer) => Step::Tick,
         };
 
         match step {
@@ -452,6 +503,11 @@ where
                 // would otherwise hot-spin the loop. zenoh's accept_task parity.
                 clock.sleep(ACCEPT_ERROR_THROTTLE_MS).await;
             }
+
+            // The forwarder's periodic cadence elapsed — let it do its
+            // time-driven control-plane work (the linkstate peer floods its own
+            // link-state). A no-timer forwarder never reaches here.
+            Step::Tick => forwarder.tick(),
         }
     }
 
