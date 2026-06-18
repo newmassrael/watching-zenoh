@@ -63,7 +63,7 @@
 //! R292 drain chain composes per face later). Shutdown here stops accepting and
 //! drops in-flight faces (their sockets close; the detached writer tasks drain).
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -352,7 +352,12 @@ where
     } = sources;
     tokio::pin!(shutdown);
 
-    let mut faces: BTreeMap<FaceId, SocketAddr> = BTreeMap::new();
+    // The live face-id set — only its membership and cardinality are read
+    // (`peak_concurrent` high-water + the held-count); the peer address and zid
+    // live authoritatively on the `Face` carried by each event, so the set
+    // stores no value (a `BTreeMap<_, SocketAddr>` value here would be
+    // write-only state duplication).
+    let mut faces: BTreeSet<FaceId> = BTreeSet::new();
     let mut next_id: u64 = 0;
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
@@ -402,7 +407,7 @@ where
                             peer,
                             peer_zid: opened.peer_zid(),
                         };
-                        faces.insert(id, peer);
+                        faces.insert(id);
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
                         // Register the face's send seam BEFORE moving `opened`
