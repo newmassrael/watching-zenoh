@@ -41022,6 +41022,46 @@
         "코드 LOCAL UNPUSHED: R311qf(route cache 2)+qg(routing-peer atom1 4)+qh(peer zid 세션노출 3)+qi(peer zid routing 배선 4)+qj(세션리뷰 remediation: wz_peer_mesh 코멘트, accept_loop faces BTreeSet, runner route_computations 로그+doc, routing.rs doc 2). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qj=qi 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311qk": {
+      "decision_summary": "R311qk: Layer E default-binary sweep에 --skip wz_peer 추가. qg가 wz_peer_mesh(E6)/wz_peer_reject(E4) 전용 레인은 배선했으나 Layer E 제외 누락→sweep의 routing-peer 변종 바이너리서 --peer가 서버로 떠 reject 테스트 무한 hang. full run-ci가 적발(4-에이전트 diff 리뷰는 못 잡음).",
+      "changes_bullets": [
+        "scripts/run-ci.sh: Layer E(layer_e_ap_demo_round_trip) default-binary sweep의 cargo test에 --skip wz_peer 추가(기존 --skip wz_e2e_/multicast/zenohd/wz_router 옆, wz_router 패턴 미러). 주석에 근본 설명: wz_peer_mesh는 --features routing-peer(E6), wz_peer_reject_without_feature는 DEFAULT 빌드 exit-2 단언(E4)이 필요한데, 이 sweep의 바이너리는 직전 레인이 마지막 빌드한 비결정 변종이라 routing-peer-enabled면 --peer가 peer SERVER로 기동(SIGTERM까지 실행)→reject 테스트의 .output()이 영원히 블록. R311qg가 전용 레인(E4 확장+E6 신설)은 배선했으나 Layer E sweep 제외를 누락한 갭."
+      ],
+      "verification_bullets": [
+        "근본: push 전 게이트로 full run-ci 실행 중 Layer E에서 wz_peer_without_feature_rejects_with_exit_2가 60초+ hang. 진단: Layer E sweep이 --ignored 통합테스트 전부를 default 바이너리로 돌리되 wz_e2e_/multicast/zenohd/wz_router만 --skip→신규 wz_peer_* 누락. 잔존 프로세스 3391224(wz-ap-demo --peer 127.0.0.1:0 서버)가 진단 확증=Layer E 시점 바이너리가 routing-peer 변종이라 --peer가 reject(exit 2) 대신 서버 기동, 테스트 .output()이 무한 블록.",
+        "수정: --skip wz_peer 추가(wz_router와 동일 처리; 둘 다 전용 레인 E4/E6가 변종 바이너리로 커버). 검증: cargo test --list로 카탈로그 확인(wz_peer 2 + wz_router 4) 후 sweep skip 패턴(wz_e2e_/multicast/zenohd/wz_router/wz_peer) 적용 시 peer/router 테스트 0개 남음=전부 제외 확인. bash -n 문법 OK.",
+        "메타 교훈: R311qj 4-에이전트 적대 리뷰가 diff/코드는 검증했으나 full run-ci 레인 상호작용(Layer E sweep이 신규 테스트를 잘못 픽업)은 못 잡음=diff 리뷰의 한계. full run-ci가 push 전 게이트로 실제 결함 적발=메모리의 \"full run-ci all host lanes before push\" 원칙 가치 재확인. 멈춘 run-ci 정리(run-ci.sh+cargo test+wz-ap-demo --peer 서버 PID kill) 후 작업트리 깨끗.",
+        "재실행 필요: 이 수정 후 full run-ci 재실행이 push 전 최종 게이트. Layer E 이전 레인(0~D, C4 preset-ap-full 포함)은 이번 run에서 전부 pass했으나 재실행으로 전체 그린 확인."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qk = R311qg run-ci 배선 갭 수정(full run-ci가 push 전 게이트에서 적발). Layer E default-binary sweep에 --skip wz_peer 추가=wz_peer_mesh(E6)/wz_peer_reject(E4) 전용 레인만 실행. 근본: sweep 바이너리가 비결정 변종이라 routing-peer-enabled면 --peer가 서버로 떠 reject 테스트 무한 hang. 메타: 4-에이전트 diff 리뷰(qj)가 못 잡고 full run-ci가 잡음=diff 리뷰 한계+full run-ci 게이트 가치.",
+        "즉시 다음: full run-ci 재실행이 push 전 최종 게이트(이 수정 반영). 그린이면 qf~qk 18+커밋 push(사용자 명시 동의 'push' 받음). run-ci는 QEMU(Q)·zenohd(Z)·MCU(G) 포함이라 시간 소요.",
+        "다음 기능 증분(linkstate 포팅 b단계): LinkState 와이어 메시지 코덱(zenoh commons/zenoh-protocol/src/network/linkstate.rs 미러)→Network 그래프→tree forwarding. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED: R311qf~qj(17커밋)+qk(run-ci.sh Layer E --skip wz_peer + 이 ledger). push 명시 동의 받음(사용자 'push')이나 run-ci 그린 확인 후 실행. 엔트리 ID qk=qj 정규 알파 후속."
+      ],
+      "publishable_decision_summary": "R311qk: Layer E default-binary sweep에 --skip wz_peer 추가. qg가 wz_peer_mesh(E6)/wz_peer_reject(E4) 전용 레인은 배선했으나 Layer E 제외 누락→sweep의 routing-peer 변종 바이너리서 --peer가 서버로 떠 reject 테스트 무한 hang. full run-ci가 적발(4-에이전트 diff 리뷰는 못 잡음).",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: Layer E(layer_e_ap_demo_round_trip) default-binary sweep의 cargo test에 --skip wz_peer 추가(기존 --skip wz_e2e_/multicast/zenohd/wz_router 옆, wz_router 패턴 미러). 주석에 근본 설명: wz_peer_mesh는 --features routing-peer(E6), wz_peer_reject_without_feature는 DEFAULT 빌드 exit-2 단언(E4)이 필요한데, 이 sweep의 바이너리는 직전 레인이 마지막 빌드한 비결정 변종이라 routing-peer-enabled면 --peer가 peer SERVER로 기동(SIGTERM까지 실행)→reject 테스트의 .output()이 영원히 블록. R311qg가 전용 레인(E4 확장+E6 신설)은 배선했으나 Layer E sweep 제외를 누락한 갭."
+      ],
+      "publishable_verification_bullets": [
+        "근본: push 전 게이트로 full run-ci 실행 중 Layer E에서 wz_peer_without_feature_rejects_with_exit_2가 60초+ hang. 진단: Layer E sweep이 --ignored 통합테스트 전부를 default 바이너리로 돌리되 wz_e2e_/multicast/zenohd/wz_router만 --skip→신규 wz_peer_* 누락. 잔존 프로세스 3391224(wz-ap-demo --peer 127.0.0.1:0 서버)가 진단 확증=Layer E 시점 바이너리가 routing-peer 변종이라 --peer가 reject(exit 2) 대신 서버 기동, 테스트 .output()이 무한 블록.",
+        "수정: --skip wz_peer 추가(wz_router와 동일 처리; 둘 다 전용 레인 E4/E6가 변종 바이너리로 커버). 검증: cargo test --list로 카탈로그 확인(wz_peer 2 + wz_router 4) 후 sweep skip 패턴(wz_e2e_/multicast/zenohd/wz_router/wz_peer) 적용 시 peer/router 테스트 0개 남음=전부 제외 확인. bash -n 문법 OK.",
+        "메타 교훈: R311qj 4-에이전트 적대 리뷰가 diff/코드는 검증했으나 full run-ci 레인 상호작용(Layer E sweep이 신규 테스트를 잘못 픽업)은 못 잡음=diff 리뷰의 한계. full run-ci가 push 전 게이트로 실제 결함 적발=메모리의 \"full run-ci all host lanes before push\" 원칙 가치 재확인. 멈춘 run-ci 정리(run-ci.sh+cargo test+wz-ap-demo --peer 서버 PID kill) 후 작업트리 깨끗.",
+        "재실행 필요: 이 수정 후 full run-ci 재실행이 push 전 최종 게이트. Layer E 이전 레인(0~D, C4 preset-ap-full 포함)은 이번 run에서 전부 pass했으나 재실행으로 전체 그린 확인."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qk = R311qg run-ci 배선 갭 수정(full run-ci가 push 전 게이트에서 적발). Layer E default-binary sweep에 --skip wz_peer 추가=wz_peer_mesh(E6)/wz_peer_reject(E4) 전용 레인만 실행. 근본: sweep 바이너리가 비결정 변종이라 routing-peer-enabled면 --peer가 서버로 떠 reject 테스트 무한 hang. 메타: 4-에이전트 diff 리뷰(qj)가 못 잡고 full run-ci가 잡음=diff 리뷰 한계+full run-ci 게이트 가치.",
+        "즉시 다음: full run-ci 재실행이 push 전 최종 게이트(이 수정 반영). 그린이면 qf~qk 18+커밋 push(사용자 명시 동의 'push' 받음). run-ci는 QEMU(Q)·zenohd(Z)·MCU(G) 포함이라 시간 소요.",
+        "다음 기능 증분(linkstate 포팅 b단계): LinkState 와이어 메시지 코덱(zenoh commons/zenoh-protocol/src/network/linkstate.rs 미러)→Network 그래프→tree forwarding. 로드맵=[[project-north-star-remaining-roadmap]].",
+        "코드 LOCAL UNPUSHED: R311qf~qj(17커밋)+qk(run-ci.sh Layer E --skip wz_peer + 이 ledger). push 명시 동의 받음(사용자 'push')이나 run-ci 그린 확인 후 실행. 엔트리 ID qk=qj 정규 알파 후속."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
