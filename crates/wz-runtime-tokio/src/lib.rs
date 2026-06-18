@@ -505,6 +505,18 @@ pub mod ws_pipeline;
 #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
 pub mod session_open;
 
+/// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
+/// foundation. Binds once and holds N concurrent peer faces (bind -> accept
+/// loop -> per-face open + drive), the increment zenoh's role-agnostic
+/// `accept_task` provides over the one-shot [`session_open`] accept. No
+/// forwarding yet (that is the sibling `routing-routes` atom). Gated on the
+/// `routing-accept` feature (which pulls `transport-link-tcp` + `transport-unicast`
+/// + `futures-util`) — a selectable atom both role features compose, not an
+/// always-on module, so a profile that selects neither role never compiles it
+/// (nor pays for `futures-util`).
+#[cfg(feature = "routing-accept")]
+pub mod accept_loop;
+
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions
 /// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs

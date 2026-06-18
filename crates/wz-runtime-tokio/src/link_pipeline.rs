@@ -127,12 +127,12 @@ pub async fn bind_tcp_host(host: &str) -> io::Result<TcpListener> {
 /// Listen backlog wz applies to every TCP listener — zenoh's `socket.listen(1024)`
 /// (`io/zenoh-link-commons/src/tcp.rs` `new_listener`), vs tokio/mio's hard-coded
 /// default of 128 (`mio` `TcpListener::bind`). The backlog is the kernel's queue
-/// of completed-but-not-yet-`accept`ed connections; it only bites a MULTI-peer
+/// of completed-but-not-yet-`accept`ed connections; it bites a MULTI-peer
 /// acceptor taking a burst of simultaneous dials before its accept loop drains
-/// them. wz's [`accept_tcp`] is one-shot today (single peer), so 128 vs 1024 is
-/// immaterial to the current model — this is set for zenoh construction parity
-/// and the future multi-peer router accept loop (north-star P4), not a present
-/// need.
+/// them. [`crate::accept_loop`] (R311qa) is exactly that loop — a burst of
+/// concurrent dials queues here until its `accept_tcp_on` drains them — so the
+/// deeper backlog is now a present need, not just zenoh construction parity. (The
+/// one-shot [`accept_tcp`] single-peer path is unaffected by the depth.)
 const LISTEN_BACKLOG: u32 = 1024;
 
 /// Build a listening [`TcpListener`] through `TcpSocket` — the SSOT both
@@ -161,20 +161,34 @@ fn bind_listener(addr: SocketAddr) -> io::Result<TcpListener> {
     socket.listen(LISTEN_BACKLOG)
 }
 
-/// Accept ONE inbound connection from a bound [`TcpListener`] — the accept-side
-/// completion of [`bind_tcp`] / [`bind_tcp_host`], returning the accepted
+/// Accept ONE inbound connection from a *borrowed* [`TcpListener`], applying the
+/// per-link TCP tuning ([`configure_tcp_stream`]) and returning the accepted
 /// [`TcpStream`] + its peer address. Quiet (no log): the caller owns the
-/// "listening on" / "accepted peer" lines, so the log prefix is the caller's
-/// (the demo tags `wz accept:`, the e2e harness tags its binary name) — the
-/// accept-side reason the dial primitives are also log-free.
+/// "listening on" / "accepted peer" lines (the demo tags `wz accept:`, the e2e
+/// harness tags its binary name) — the accept-side reason the dial primitives
+/// are also log-free.
 ///
-/// ONE-shot (not a loop): the session-open contract is a single peer link, the
-/// accept-side mirror of the single [`TcpStream`] [`dial_tcp`] returns. A
-/// multi-peer router composes its own accept loop over [`bind_tcp`] above this.
-pub async fn accept_tcp(listener: TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
+/// Borrowing (not consuming) the listener is what lets a multi-peer acceptor
+/// call this in a loop: the listener stays bound across accepts. This is the
+/// accept-side primitive the [`crate::accept_loop`] router/peer foundation
+/// composes (R311qa) — the same shape zenoh's `accept_task`
+/// (`io/zenoh-links/zenoh-link-tcp/src/unicast.rs`) runs: a per-listener task
+/// looping `accept()` and registering each new link. [`accept_tcp`] is the
+/// one-shot wrapper for the single-peer session-open contract.
+pub async fn accept_tcp_on(listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
     let (stream, peer) = listener.accept().await?;
     configure_tcp_stream(&stream);
     Ok((stream, peer))
+}
+
+/// Accept ONE inbound connection, *consuming* the [`TcpListener`] — the
+/// one-shot session-open contract (the accept-side mirror of the single
+/// [`TcpStream`] [`dial_tcp`] returns). Delegates to [`accept_tcp_on`], the SSOT
+/// for the accept + per-link tuning; the by-value signature is the one-shot
+/// marker (a single peer, then the listener drops). A multi-peer router holds
+/// the listener and loops [`accept_tcp_on`] instead ([`crate::accept_loop`]).
+pub async fn accept_tcp(listener: TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
+    accept_tcp_on(&listener).await
 }
 
 /// Apply zenoh's per-link TCP socket tuning to a freshly connected / accepted

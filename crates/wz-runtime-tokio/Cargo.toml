@@ -392,6 +392,17 @@ transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemf
 # Ws arm rides the tcp+unicast-gated `session_open` like the udp arm). NOT
 # default — pico ships WS as an optional link (Z_FEATURE_LINK_WS).
 transport-link-ws = ["dep:tokio-tungstenite", "dep:futures-util"]
+# R311qa — multi-peer accept-and-hold capability (the `routing-router` /
+# future `routing-peer` foundation). Gates `pub mod accept_loop` (lib.rs) and
+# pulls its prerequisites: the TCP listen path (`transport-link-tcp`), the
+# unicast session machinery it opens each face through (`transport-unicast`),
+# and `dep:futures-util` for the single-task `FuturesUnordered` hold. A SHARED
+# atom both role features compose (router now, peer later) rather than gating it
+# under `routing-router` directly — that keeps a future `routing-peer` from
+# depending on `routing-router`. Off by default (like `transport-link-ws`); the
+# `routing-accept` test lane (run-ci Layer C1w) and the facade `routing-router`
+# preset select it.
+routing-accept = ["transport-link-tcp", "transport-unicast", "dep:futures-util"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
@@ -706,7 +717,19 @@ base64 = { version = "0.22", optional = true }
 # directions, so unlike the UDP socket it cannot be shared by `Arc` — it is
 # split instead) plus `SinkExt::send` for the writer task.
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
-futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
+# R311qa — `futures-util` is OPTIONAL, activated by exactly its two consumers so a
+# profile selecting neither never pays for it (kconfig footprint invariant; the
+# R311qa review caught an unconditional base dep leaking into the multicast-only
+# profile that uses none of it):
+#   - `routing-accept` — the multi-peer `accept_loop` holds N peer faces via
+#     `FuturesUnordered`. The session drive future is `!Send` (the SCE `Engine`'s
+#     `Box<dyn FnMut>` callback fields), so `tokio::spawn` / `JoinSet` per face is
+#     impossible; `FuturesUnordered` is the textbook single-task poll-many for a
+#     dynamic non-`Send` set. `std` unlocks `FuturesUnordered` (it needs `alloc`).
+#   - `transport-link-ws` — `StreamExt::split` + `SinkExt::send` for the WS sink.
+# wz-runtime-tokio is AP/std-only (the MCU profile is wz-runtime-lwip), so the
+# `std` feature adds no no_std exposure.
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec
 # emit/include of every codec-* is governed strictly by the matching
 # `codec-*` forward above. Without disabling defaults the codec

@@ -422,10 +422,12 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
 /// union the dial path produces so [`accept_and_open_session`] consumes one
 /// concrete type whatever the role.
 ///
-/// The `Tcp` path mirrors dial's 3-layer seam: numeric [`bind_tcp`] / DNS
-/// [`bind_tcp_host`] (siblings of [`dial_tcp`] / [`dial_tcp_host`]) then
-/// [`accept_tcp`], wrapped by [`accept_bound`]. The NON-tcp handling is where
-/// the symmetry with [`dial_locator`] deliberately STOPS: dial_locator pairs
+/// R311qa — delegates to [`bind_locator`] (the bind half, the SSOT the
+/// multi-peer [`accept_loop`](crate::accept_loop) shares) then [`accept_bound`]
+/// (accept ONE), rather than inlining the bind. The non-tcp `Unsupported`
+/// surfaced here originates in `bind_locator`'s scheme match. The NON-tcp
+/// handling is where the symmetry with [`dial_locator`] deliberately STOPS:
+/// dial_locator pairs
 /// each non-tcp scheme with a `#[cfg(feature)]` wired arm + a `#[cfg(not)]`
 /// Unsupported arm, whereas accept_locator returns a single feature-blind
 /// `Unsupported` for ws/tls/udp REGARDLESS of feature. Wiring a real accept
@@ -439,21 +441,34 @@ pub async fn dial_endpoint(connect: &str, cfg: &DialConfig) -> io::Result<Dialed
 /// ([`accept_serial`](crate::serial_pipeline::accept_serial)) — both unwired
 /// until their responder caller lands.
 pub async fn accept_locator(locator: AnyLocator) -> io::Result<DialedLink> {
+    accept_bound(bind_locator(locator).await?).await
+}
+
+/// Bind a listening [`TcpListener`] for an [`AnyLocator`]'s scheme — the
+/// bind-only half of [`accept_locator`], split out so the multi-peer
+/// [`accept_loop`](crate::accept_loop) can hold the listener and loop accepts
+/// over it (R311qa), while the one-shot [`accept_locator`] binds-then-accepts a
+/// single peer. The `Tcp` path mirrors dial's 3-layer seam: numeric [`bind_tcp`]
+/// / DNS [`bind_tcp_host`]. Non-tcp schemes return a feature-blind typed
+/// `Unsupported` — the same not-yet-wired extension point [`accept_locator`]
+/// documents (ws/tls accept is `bind` + `accept` + handshake, udp is a
+/// `recv_from` peer-learn, serial is a tty open).
+pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
     fn unsupported(detail: &str) -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("accept is wired only for tcp; {detail}"),
+            format!("listen/accept is wired only for tcp; {detail}"),
         )
     }
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
-            Proto::Tcp => accept_bound(bind_tcp(ip.addr).await?).await,
+            Proto::Tcp => bind_tcp(ip.addr).await,
             other => Err(unsupported(&format!(
                 "{other:?} acceptor is a not-yet-wired extension point"
             ))),
         },
         AnyLocator::Named { proto, host, port } => match proto {
-            Proto::Tcp => accept_bound(bind_tcp_host(&format!("{host}:{port}")).await?).await,
+            Proto::Tcp => bind_tcp_host(&format!("{host}:{port}")).await,
             // A non-tcp NAME is unwired for two reasons (acceptor + non-tcp
             // name resolution), kept distinct from the numeric arm's message.
             other => Err(unsupported(&format!(
@@ -494,14 +509,30 @@ async fn accept_bound(listener: TcpListener) -> io::Result<DialedLink> {
 /// to the demo's `establish_link` Acceptor role, dissolving its inline
 /// `TcpListener::bind` into the same library seam the Initiator role already
 /// dials through.
+/// R311qa — composes [`bind_endpoint`] + [`accept_bound`] (the one-shot mirror
+/// of `bind_endpoint` + the multi-peer [`accept_loop`](crate::accept_loop)),
+/// so the `plan_endpoint` classify + error-map lives once in `bind_endpoint`,
+/// not duplicated here — the endpoint-layer analogue of
+/// `accept_locator = accept_bound ∘ bind_locator`.
 pub async fn accept_endpoint(listen: &str) -> io::Result<DialedLink> {
+    accept_bound(bind_endpoint(listen).await?).await
+}
+
+/// Bind a `--listen`-style endpoint string to a listening [`TcpListener`] — the
+/// bind-only seam symmetric to [`accept_endpoint`], consumed by the multi-peer
+/// [`accept_loop`](crate::accept_loop) (a router/peer binds once, then holds the
+/// listener and loops accepts). [`plan_endpoint`] classifies the string exactly
+/// as [`accept_endpoint`] does; [`bind_locator`] performs the bind. Splitting
+/// bind from the accept loop keeps `local_addr` observable before any peer
+/// connects — the race-free bind/accept split [`bind_tcp`] established.
+pub async fn bind_endpoint(listen: &str) -> io::Result<TcpListener> {
     let locator = plan_endpoint(listen).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("wz accept: malformed / unsupported --listen {listen:?}: {e:?}"),
+            format!("wz listen: malformed / unsupported --listen {listen:?}: {e:?}"),
         )
     })?;
-    accept_locator(locator).await
+    bind_locator(locator).await
 }
 
 /// Inbound read driver of a dialed link — the transport union on the read
@@ -636,6 +667,42 @@ pub struct OpenedSession {
     pub inbound: InboundLink,
     pub writer_handle: TokioJoinHandle<()>,
     pub clock: TokioTime,
+}
+
+/// Wall-clock budget for the terminal writer-drain — a wedged writer task
+/// (stalled peer, full kernel send buffer) is dropped via timeout rather than
+/// blocking teardown indefinitely. The single source for the figure the demo
+/// R292 [`teardown::drain_writer`](../../wz-ap-demo/src/teardown.rs) and the
+/// library [`OpenedSession::drain_to_close`] both apply.
+pub const WRITER_DRAIN_MS: u64 = 50;
+
+impl OpenedSession {
+    /// Terminal drain after the steady-state drive loop returns: drop the two
+    /// `Arc<SessionLinkActions>` holders of the outbound sender — the `engine`'s
+    /// `SessionActionsBinding` clone and the caller-held `actions` — so the
+    /// `writer_task`'s channel closes, then await that task BOUNDED by
+    /// [`WRITER_DRAIN_MS`]. Consuming `self` makes the engine-before-actions-
+    /// before-await order correct-by-construction instead of a doc-only invariant
+    /// (the regression the R292 `teardown` typestate was built to forbid); the
+    /// bounded await is the same wedged-writer defense as `teardown::drain_writer`
+    /// rather than an unbounded block. Callers that drive a session to terminal
+    /// and hold no Close-frame / liveliness obligation (e.g.
+    /// [`crate::accept_loop`] faces) drain through this single primitive; the demo
+    /// keeps its richer R292 chain (Close emit + token undeclare precede the same
+    /// drop+drain) for the single-session app path.
+    pub async fn drain_to_close(self) {
+        let OpenedSession {
+            engine,
+            actions,
+            inbound,
+            writer_handle,
+            clock,
+        } = self;
+        drop(inbound);
+        drop(engine);
+        drop(actions);
+        let _ = clock.timeout(WRITER_DRAIN_MS, writer_handle).await;
+    }
 }
 
 /// Why a session did not reach Established.

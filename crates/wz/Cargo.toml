@@ -396,7 +396,12 @@ query-timeout = ["wz-runtime-tokio?/query-timeout"]
 routing-client = []
 routing-failover = ["routing-router"]
 routing-peer = []
-routing-router = []
+# R311qa — routing-router now composes REAL library code: it forwards the
+# wz-runtime-tokio `routing-accept` atom (the multi-peer `accept_loop` foundation)
+# and pulls its transport prerequisites, so selecting `routing-router` cannot leave
+# the code it names un-gated (the marker is no longer a no-op). `?/` activates only
+# when the runtime-tokio profile already pulls wz-runtime-tokio (the AP path).
+routing-router = ["transport-link-tcp", "transport-unicast", "wz-runtime-tokio?/routing-accept"]
 routing-routes = ["routing-router"]
 routing-static-routes = ["routing-router"]
 
