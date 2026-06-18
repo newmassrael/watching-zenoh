@@ -40928,6 +40928,52 @@
         "코드 LOCAL UNPUSHED: R311qf(route cache 2커밋)+qg(routing-peer atom1 4커밋)+qh(session_actions remote_peer_zid+양방향 capture+accessor, 단위+실핸드셰이크 테스트). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qh=qg 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311qi": {
+      "decision_summary": "R311qi: peer zid를 routing/accept 레이어로 배선(qh의 routing 소비 시작). OpenedSession::peer_zid() + accept_loop Face.peer_zid(Copy->Clone, FaceUp서 채움) + 데모 face-up 로그 zid. 단위+e2e(handshake->Face->log 양방향).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_open.rs: OpenedSession::peer_zid()->Option<Vec<u8>> 위임(actions.peer_zid() = R311qh remote_peer_zid slot). Established 후 accept loop이 FaceUp서 읽는 공개 핸드셰이크 결과 표면.",
+        "crates/wz-runtime-tokio/src/accept_loop.rs: Face가 peer_zid:Option<Vec<u8>> 보유(remote peer 라우팅 신원). Face derive Copy 제거->Clone(owned Vec). Step::Opened arm이 opened.peer_zid()를 opened 이동 전 읽어 Face에 채움; FaceUp 이벤트엔 face.clone()(Copy 아니므로), 원본은 drive_face로 이동. 단위 추가 a_held_face_carries_the_peer_zid_from_the_handshake(acceptor가 initiator zid 0x07 InitSyn서 capture->Face.peer_zid==Some([0x07;4])).",
+        "crates/wz-ap-demo/src/runner.rs: zid_hex(Option<&[u8]>)->String 헬퍼(lowercase hex, None=?; cfg any(routing-router,routing-peer) 공용). run_router/run_peer FaceUp 로그에 zid 추가(face N UP (peer ADDR, zid HEX)).",
+        "crates/wz-integration-tests/tests/wz_peer_mesh.rs: peer-A 로그 \"zid 01020304\" 단언(데모 고정 zid). dial face(0)=InitAck capture=R311qh Initiating측 + accept face(1)=InitSyn 둘 다 handshake->Face->log end-to-end 검증."
+      ],
+      "verification_bullets": [
+        "근본: R311qh carry의 명시적 다음 조각(linkstate 포팅 2단계)=peer_zid를 routing 레이어로 배선해 소비 시작. qh가 세션 레이어에 remote_peer_zid 슬롯+peer_zid() accessor를 노출했고, 이번 라운드가 accept_loop Face + OpenedSession + 데모로 전달. zenoh linkstate 그래프가 face를 peer zid로 키잉하므로 Face가 zid를 보유하는 것이 그래프의 직접 선행.",
+        "설계: Face derive에서 Copy 제거->Clone(owned Vec<u8> zid 보유). 영향 최소=FaceUp 단 1곳만 face.clone()(이벤트는 &borrow, 원본은 drive_face로 move); Step::Driven은 FaceDown으로 move(마지막 use). faces 내부맵은 SocketAddr만 저장(zid 불요). 데모/테스트는 AcceptEvent를 &ref로 매치하므로 Copy 의존 없음. zid_hex는 router/peer 공용이라 cfg any(routing-router,routing-peer)로 dead_code 회피. 소비 시점=FaceUp(forwarder.register 직후, opened 이동 전 peer_zid 읽기).",
+        "검증: C1w routing-accept lib 5/5(accept 4 무변경 + peer_zid Face 단위) · C1y routing-peer 7/7 · 데모 빌드 routing-peer/routing-router/default 3변종 · fmt · clippy(tokio all-targets routing-accept/routing-peer + demo all-targets routing-peer/routing-router) · E6 peer mesh 1(zid 01020304 로그 단언=handshake->Face->log end-to-end, dial face의 InitAck capture까지 바이너리로 실증) · E3 router multi-peer 1(Face Copy->Clone behavior-preserving) · C1 default workspace 143 ok-block 전부 PASS. 판정=파이프 없는 $? 직접 캡처.",
+        "e2e가 qh+qi 전체 체인 실증: peer-A의 dial face(face 0=B로 dial=Initiating측)가 zid를 로그=qh의 InitAck capture가 실제 바이너리에서 동작 + qi의 Face 배선이 그걸 표면화. 단위(distinct zid 0x07 정확값 단언)가 더 강한 witness, e2e는 binary end-to-end."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qi = linkstate 포팅 2단계: peer_zid를 routing/accept 레이어로 배선(qh의 세션 슬롯을 소비 시작). OpenedSession::peer_zid() 위임 + accept_loop Face.peer_zid(Copy->Clone, FaceUp서 opened.peer_zid() 읽어 채움) + 데모 face-up 로그 zid(zid_hex 공용 헬퍼). 단위(acceptor가 initiator zid 정확 capture)+e2e(handshake->Face->log end-to-end, dial face의 InitAck capture=qh까지 바이너리 실증). routing-peer inventory reserved 유지(아직 forward 안 함).",
+        "다음 증분(linkstate 포팅, zenoh 한 조각씩): (3)LinkState 와이어 메시지 코덱=zenoh commons/zenoh-protocol/src/network/linkstate.rs 미러({psid,sn,zid,whatami,locators,links,link_weights}; 피어끼리 토폴로지 교환) -> (4)Network 그래프=zenoh net/protocol/network.rs(LinkState 수신->토폴로지 그래프 구축) -> (5)spanning-tree/최단경로 계산+트리 기반 forwarding=zenoh net/routing/hat/linkstate_peer(순환 mesh 무한루프 방지). 각 조각 zenoh 정본 직접 대조. routing-failover/static-routes/scouting-gossip은 mesh 완성 후.",
+        "defer(별도 라운드, routing 직교): wire-builder-SSOT(literal_wireexpr 21-site->WireexprOwned SSOT + FLAG_N_PUSH_N 17-site const + inline put_push 4).",
+        "코드 LOCAL UNPUSHED: R311qf(route cache 2커밋)+qg(routing-peer atom1 4커밋)+qh(peer zid 세션노출 3커밋)+qi(peer zid routing 배선: session_open OpenedSession::peer_zid, accept_loop Face.peer_zid+단위, runner zid_hex+로그, wz_peer_mesh zid 단언). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qi=qh 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311qi: peer zid를 routing/accept 레이어로 배선(qh의 routing 소비 시작). OpenedSession::peer_zid() + accept_loop Face.peer_zid(Copy->Clone, FaceUp서 채움) + 데모 face-up 로그 zid. 단위+e2e(handshake->Face->log 양방향).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_open.rs: OpenedSession::peer_zid()->Option<Vec<u8>> 위임(actions.peer_zid() = R311qh remote_peer_zid slot). Established 후 accept loop이 FaceUp서 읽는 공개 핸드셰이크 결과 표면.",
+        "crates/wz-runtime-tokio/src/accept_loop.rs: Face가 peer_zid:Option<Vec<u8>> 보유(remote peer 라우팅 신원). Face derive Copy 제거->Clone(owned Vec). Step::Opened arm이 opened.peer_zid()를 opened 이동 전 읽어 Face에 채움; FaceUp 이벤트엔 face.clone()(Copy 아니므로), 원본은 drive_face로 이동. 단위 추가 a_held_face_carries_the_peer_zid_from_the_handshake(acceptor가 initiator zid 0x07 InitSyn서 capture->Face.peer_zid==Some([0x07;4])).",
+        "crates/wz-ap-demo/src/runner.rs: zid_hex(Option<&[u8]>)->String 헬퍼(lowercase hex, None=?; cfg any(routing-router,routing-peer) 공용). run_router/run_peer FaceUp 로그에 zid 추가(face N UP (peer ADDR, zid HEX)).",
+        "crates/wz-integration-tests/tests/wz_peer_mesh.rs: peer-A 로그 \"zid 01020304\" 단언(데모 고정 zid). dial face(0)=InitAck capture=R311qh Initiating측 + accept face(1)=InitSyn 둘 다 handshake->Face->log end-to-end 검증."
+      ],
+      "publishable_verification_bullets": [
+        "근본: R311qh carry의 명시적 다음 조각(linkstate 포팅 2단계)=peer_zid를 routing 레이어로 배선해 소비 시작. qh가 세션 레이어에 remote_peer_zid 슬롯+peer_zid() accessor를 노출했고, 이번 라운드가 accept_loop Face + OpenedSession + 데모로 전달. zenoh linkstate 그래프가 face를 peer zid로 키잉하므로 Face가 zid를 보유하는 것이 그래프의 직접 선행.",
+        "설계: Face derive에서 Copy 제거->Clone(owned Vec<u8> zid 보유). 영향 최소=FaceUp 단 1곳만 face.clone()(이벤트는 &borrow, 원본은 drive_face로 move); Step::Driven은 FaceDown으로 move(마지막 use). faces 내부맵은 SocketAddr만 저장(zid 불요). 데모/테스트는 AcceptEvent를 &ref로 매치하므로 Copy 의존 없음. zid_hex는 router/peer 공용이라 cfg any(routing-router,routing-peer)로 dead_code 회피. 소비 시점=FaceUp(forwarder.register 직후, opened 이동 전 peer_zid 읽기).",
+        "검증: C1w routing-accept lib 5/5(accept 4 무변경 + peer_zid Face 단위) · C1y routing-peer 7/7 · 데모 빌드 routing-peer/routing-router/default 3변종 · fmt · clippy(tokio all-targets routing-accept/routing-peer + demo all-targets routing-peer/routing-router) · E6 peer mesh 1(zid 01020304 로그 단언=handshake->Face->log end-to-end, dial face의 InitAck capture까지 바이너리로 실증) · E3 router multi-peer 1(Face Copy->Clone behavior-preserving) · C1 default workspace 143 ok-block 전부 PASS. 판정=파이프 없는 $? 직접 캡처.",
+        "e2e가 qh+qi 전체 체인 실증: peer-A의 dial face(face 0=B로 dial=Initiating측)가 zid를 로그=qh의 InitAck capture가 실제 바이너리에서 동작 + qi의 Face 배선이 그걸 표면화. 단위(distinct zid 0x07 정확값 단언)가 더 강한 witness, e2e는 binary end-to-end."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qi = linkstate 포팅 2단계: peer_zid를 routing/accept 레이어로 배선(qh의 세션 슬롯을 소비 시작). OpenedSession::peer_zid() 위임 + accept_loop Face.peer_zid(Copy->Clone, FaceUp서 opened.peer_zid() 읽어 채움) + 데모 face-up 로그 zid(zid_hex 공용 헬퍼). 단위(acceptor가 initiator zid 정확 capture)+e2e(handshake->Face->log end-to-end, dial face의 InitAck capture=qh까지 바이너리 실증). routing-peer inventory reserved 유지(아직 forward 안 함).",
+        "다음 증분(linkstate 포팅, zenoh 한 조각씩): (3)LinkState 와이어 메시지 코덱=zenoh commons/zenoh-protocol/src/network/linkstate.rs 미러({psid,sn,zid,whatami,locators,links,link_weights}; 피어끼리 토폴로지 교환) -> (4)Network 그래프=zenoh net/protocol/network.rs(LinkState 수신->토폴로지 그래프 구축) -> (5)spanning-tree/최단경로 계산+트리 기반 forwarding=zenoh net/routing/hat/linkstate_peer(순환 mesh 무한루프 방지). 각 조각 zenoh 정본 직접 대조. routing-failover/static-routes/scouting-gossip은 mesh 완성 후.",
+        "defer(별도 라운드, routing 직교): wire-builder-SSOT(literal_wireexpr 21-site->WireexprOwned SSOT + FLAG_N_PUSH_N 17-site const + inline put_push 4).",
+        "코드 LOCAL UNPUSHED: R311qf(route cache 2커밋)+qg(routing-peer atom1 4커밋)+qh(peer zid 세션노출 3커밋)+qi(peer zid routing 배선: session_open OpenedSession::peer_zid, accept_loop Face.peer_zid+단위, runner zid_hex+로그, wz_peer_mesh zid 단언). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qi=qh 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
