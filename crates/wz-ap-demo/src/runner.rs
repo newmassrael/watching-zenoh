@@ -1189,13 +1189,18 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
     )
     .await;
 
+    // R311qj — `route_computations()` is logged here as a genuine cache-
+    // effectiveness ops signal (cumulative route scans; low relative to
+    // `forwarded` = good cache reuse), giving the `RouteTable`'s miss counter a
+    // production reader rather than a test-only one.
     #[cfg(feature = "routing-routes")]
     log::info!(
         "wz-ap-demo router: shutdown; served {} peer(s), peak {} concurrent \
-         face(s), forwarded {} sample(s)",
+         face(s), forwarded {} sample(s), computed {} route(s)",
         summary.established,
         summary.peak_concurrent,
-        forwarder.forwarded()
+        forwarder.forwarded(),
+        forwarder.route_computations()
     );
     #[cfg(not(feature = "routing-routes"))]
     log::info!(
@@ -1218,8 +1223,9 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 /// accepted split and the high-water concurrency.
 ///
 /// Runs until the graceful-shutdown signal (SIGTERM / SIGINT). The node identity
-/// is whatami Peer (`NodeKind::Router` maps to 0x02) — the well-tested accept /
-/// initiate directions; a distinct WhatAmI refinement is a later atom.
+/// is whatami Peer (`NodeKind::Peer` maps to 0x02) — which is genuinely correct
+/// for a peer (unlike the router, whose 0x02 is a documented stand-in for a true
+/// WhatAmI::Router); the well-tested accept / initiate directions drive it.
 #[cfg(feature = "routing-peer")]
 pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Result<()> {
     use crate::args::NodeKind;
