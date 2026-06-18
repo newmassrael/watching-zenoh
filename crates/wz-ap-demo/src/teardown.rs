@@ -46,6 +46,7 @@ use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
 use wz::runtime_tokio::session::LivelinessToken;
 use wz::runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
+use wz::runtime_tokio::session_open::WRITER_DRAIN_MS;
 
 /// Initial state. Every teardown input is owned by this struct;
 /// no step has run yet. `was_cancelled` distinguishes the
@@ -202,13 +203,15 @@ impl CloseEmitted {
     }
 }
 
-/// Local `actions` dropped. Step 7 gives the writer task a 50ms
-/// drain window to push any tail frame (e.g. a Close the FSM
-/// enqueued during the final transition, an UndeclToken from a
+/// Local `actions` dropped. Step 7 gives the writer task a
+/// [`WRITER_DRAIN_MS`] drain window to push any tail frame (e.g. a Close
+/// the FSM enqueued during the final transition, an UndeclToken from a
 /// late RAII Drop) to the peer before `run_demo` returns and the
 /// runtime shuts down. The timeout is intentionally short — the
-/// writer is a length-prefixed shim, not a blocking flush, so
-/// 50ms is generous on every link we test.
+/// writer is a length-prefixed shim, not a blocking flush, so the
+/// window is generous on every link we test; the figure is the single
+/// [`WRITER_DRAIN_MS`] the library `OpenedSession::drain_to_close`
+/// (the multi-peer face drain) shares.
 pub(crate) struct ActionsDropped {
     writer_handle: TokioJoinHandle<()>,
     clock: TokioTime,
@@ -216,7 +219,10 @@ pub(crate) struct ActionsDropped {
 
 impl ActionsDropped {
     pub(crate) async fn drain_writer(self) -> WriterDrained {
-        let _ = self.clock.timeout(50, self.writer_handle).await;
+        let _ = self
+            .clock
+            .timeout(WRITER_DRAIN_MS, self.writer_handle)
+            .await;
         WriterDrained
     }
 }

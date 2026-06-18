@@ -110,10 +110,38 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
 // unchanged. Production AP deployment will source these from
 // deploy.yaml once the topology-schema migration (R123b-pre
 // carry) lands.
-pub(crate) fn demo_session_init_params(role: &Role) -> SessionInitParams {
-    let whatami_api = match role {
-        Role::Acceptor { .. } => 0x02,  // Peer — R121b/c/d/e baseline
-        Role::Initiator { .. } => 0x04, // Client — R121f initiator path
+/// The session-init `whatami`-determining node kind. Distinct from [`Role`] (the
+/// single-session `--listen`/`--connect` discriminator) because R311qa's `--router`
+/// is a THIRD node kind that is not an Acceptor: it picks the Peer `whatami` like
+/// an acceptor but is modelled as its own kind rather than borrowing
+/// `Role::Acceptor` (whose `listen` payload `demo_session_init_params` never
+/// reads). [`Role::node_kind`] maps the single-session roles onto this.
+pub(crate) enum NodeKind {
+    Acceptor,
+    Initiator,
+    /// Only meaningful when the multi-peer router mode is compiled in.
+    #[cfg(feature = "routing-router")]
+    Router,
+}
+
+impl Role {
+    pub(crate) fn node_kind(&self) -> NodeKind {
+        match self {
+            Role::Acceptor { .. } => NodeKind::Acceptor,
+            Role::Initiator { .. } => NodeKind::Initiator,
+        }
+    }
+}
+
+pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
+    let whatami_api = match kind {
+        NodeKind::Acceptor => 0x02, // Peer — R121b/c/d/e baseline
+        // The router accepts via the same well-tested Client->Peer direction as
+        // the acceptor (a true WhatAmI::Router wire value is a later refinement,
+        // R311qa carry), so it also announces Peer.
+        #[cfg(feature = "routing-router")]
+        NodeKind::Router => 0x02,
+        NodeKind::Initiator => 0x04, // Client — R121f initiator path
     };
     SessionInitParams {
         version: 0x09,

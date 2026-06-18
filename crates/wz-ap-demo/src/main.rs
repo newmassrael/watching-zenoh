@@ -112,6 +112,26 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // R311qa — `--router <addr>` selects the multi-peer router mode (bind once,
+    // HOLD N concurrent peer faces — the routing-router foundation), handled
+    // before the single-session role parse below (which requires exactly one of
+    // --listen / --connect). Opt-in behind the `routing-router` feature: a build
+    // without it rejects the flag rather than silently no-op'ing, so the catalog
+    // claim and the binary stay in lockstep.
+    if let Some(router_addr) = parse_pair(rest, "--router") {
+        #[cfg(feature = "routing-router")]
+        return run_router_mode(router_addr);
+        #[cfg(not(feature = "routing-router"))]
+        {
+            let _ = router_addr;
+            eprintln!(
+                "wz-ap-demo: --router requires the `routing-router` feature \
+                 (build: cargo build -p wz-ap-demo --features routing-router)"
+            );
+            return ExitCode::from(2);
+        }
+    }
+
     // R121f — exactly one of --listen / --connect must be supplied.
     // The demo's session FSM role-start is hard-coded to one or
     // the other (Acceptor calls InboundStart on listen; Initiator
@@ -451,12 +471,7 @@ fn main() -> ExitCode {
     // poll loop. The outbound `TcpWriteDriver` is a non-blocking channel
     // enqueue (no `block_on`), so this flavor is for task concurrency,
     // not a block_on-deadlock workaround.
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_io()
-        .enable_time()
-        .build()
-    {
+    let runtime = match build_demo_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
@@ -534,6 +549,41 @@ fn main() -> ExitCode {
         .await
     });
     match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("wz-ap-demo: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The demo's multi-thread tokio runtime (2 workers + io + time) — the SSOT for
+/// both the single-session `run_demo` path and the `--router` multi-peer path.
+/// Multi-thread so the spawned writer tasks (per session, and per face in the
+/// router) run on workers alongside the drive loop.
+fn build_demo_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_io()
+        .enable_time()
+        .build()
+}
+
+/// R311qa — drive the `--router` multi-peer mode: init logging, build the
+/// runtime, and run the accept-and-hold loop ([`runner::run_router`]) to the
+/// graceful-shutdown signal. Separate from the single-session `run_demo` entry
+/// because a router has no per-face application behaviour — it only holds peers.
+#[cfg(feature = "routing-router")]
+fn run_router_mode(addr: String) -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
+    let runtime = match build_demo_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match runtime.block_on(crate::runner::run_router(&addr)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

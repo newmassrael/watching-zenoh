@@ -671,7 +671,7 @@ pub(crate) async fn run_demo(
     // into the open helper, install_observer_callbacks, Session::new, the drive
     // loop, and sweep_task (TokioTime is Copy, so every copy is the same epoch).
     let session_clock = TokioTime::new();
-    let params = demo_session_init_params(&role);
+    let params = demo_session_init_params(role.node_kind());
     // R311q1 — the long-lived (reconnect) lifecycle drives a PERIODIC publisher
     // that re-arms emission across reconnects (data-plane continuity past a
     // sever), vs the default one-shot finite burst. Derived from the role so
@@ -1097,5 +1097,72 @@ pub(crate) async fn run_demo(
     .drain_writer()
     .await;
 
+    Ok(())
+}
+
+/// R311qa — multi-peer ROUTER mode: bind once and hold N concurrent peer faces
+/// (the `routing-router` foundation), distinct from the one-shot `--listen`
+/// Acceptor. Binds the `--router` endpoint, then runs the library
+/// [`accept_loop`](wz::runtime_tokio::accept_loop) — every inbound peer is
+/// brought to Established and held as a *face* until it closes — logging each
+/// face up/down so the live hold set is observable. There is NO per-face
+/// application logic and NO forwarding between faces (that is the sibling
+/// `routing-routes` atom); this is the accept-and-hold transport foundation.
+///
+/// Runs until the graceful-shutdown signal (SIGTERM / SIGINT, the same
+/// [`shutdown_signal`] the single-session drive races), then reports how many
+/// peers were served and the high-water concurrency. The node identity is the
+/// Acceptor params (whatami Peer) — the well-tested accept direction; a true
+/// `WhatAmI::Router` wire value is a later refinement, not part of this atom.
+#[cfg(feature = "routing-router")]
+pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
+    use crate::args::NodeKind;
+    use wz::runtime_tokio::accept_loop::{accept_loop, AcceptEvent};
+    use wz::runtime_tokio::session_open::bind_endpoint;
+
+    let listener = bind_endpoint(listen).await?;
+    let local = listener.local_addr()?;
+    log::info!(
+        "wz-ap-demo router: listening on {local}; holding N concurrent peer \
+         faces (routing-router foundation, no forwarding)"
+    );
+
+    let params = demo_session_init_params(NodeKind::Router);
+
+    let summary = accept_loop(
+        listener,
+        params,
+        TokioTime::new(),
+        DEFAULT_OPEN_TICK_MS,
+        shutdown_signal(),
+        |event: &AcceptEvent| match event {
+            AcceptEvent::FaceUp(face) => {
+                log::info!(
+                    "wz-ap-demo router: face {} UP (peer {})",
+                    face.id.0,
+                    face.peer
+                )
+            }
+            AcceptEvent::FaceDown(face, outcome) => log::info!(
+                "wz-ap-demo router: face {} DOWN (peer {}, {outcome:?})",
+                face.id.0,
+                face.peer
+            ),
+            AcceptEvent::FaceFailed { id, peer, cause } => log::warn!(
+                "wz-ap-demo router: face {} FAILED (peer {peer}, {cause:?})",
+                id.0
+            ),
+            AcceptEvent::AcceptError(e) => {
+                log::warn!("wz-ap-demo router: accept error (continuing): {e}")
+            }
+        },
+    )
+    .await;
+
+    log::info!(
+        "wz-ap-demo router: shutdown; served {} peer(s), peak {} concurrent face(s)",
+        summary.established,
+        summary.peak_concurrent
+    );
     Ok(())
 }

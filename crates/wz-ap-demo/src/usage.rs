@@ -39,6 +39,11 @@ pub(crate) fn print_usage() {
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
     eprintln!("    --connect <addr>         initiator mode (HOST:PORT or tcp/|ws/HOST:PORT)");
+    eprintln!("    --router <addr>          multi-peer router mode: bind once, HOLD N concurrent");
+    eprintln!(
+        "                             peer faces (routing-router foundation, no forwarding)."
+    );
+    eprintln!("                             Requires the `routing-router` build feature.");
     eprintln!("    --reconnect              long-lived reconnect-supervised lifecycle for the");
     eprintln!("                             initiator (requires --connect): on link loss, re-dial");
     eprintln!("                             (re-resolving a hostname) + replay the declaration");

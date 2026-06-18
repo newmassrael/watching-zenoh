@@ -143,6 +143,15 @@ switchboard = ["dep:wz-ap-demo-app", "wz/switchboard"]
 # `connect-ws`: the WS transport is not Initiator-only (the library also
 # has `accept_ws`), so a connect-baked name would misdescribe it.
 ws = ["wz/locator-ws"]
+# R311qa — opt-in multi-peer ROUTER mode (`--router <addr>`): the catalog
+# `routing-router` atom's foundation (bind once, hold N concurrent peer faces,
+# no forwarding yet). Forwards the wz facade's `routing-router` marker feature,
+# which gates the demo's `run_router` path — the cfg site that makes the catalog
+# claim truthful (a binary now exercises router topology). NOT in `default`
+# (preset-ap-client is single-session client scope), so the footprint baseline
+# and every other lane build unchanged; only `--features routing-router`
+# compiles the multi-peer mode.
+routing-router = ["wz/routing-router"]
 
 [lints]
 workspace = true
