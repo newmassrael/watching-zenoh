@@ -32,19 +32,18 @@ path = "src/lib.rs"
 # The undirected, stable-index topology graph + Bellman-Ford / reachability
 # algorithms. Pinned to 0.6 to match zenoh's own petgraph 0.6.5.
 petgraph = "0.6"
-# The decoded `LinkstateListOwned` the graph ingests. `default-features =
-# false` + the explicit `codec-linkstate` / `alloc` forwards keep the codec
-# surface this crate pulls minimal and footprint-honest.
+# The `LinkstateListOwned` the graph ingests (c2b) AND builds for TX (c3b).
+# `default-features = false` + the explicit `codec-linkstate` / `alloc`
+# forwards keep the codec surface this crate pulls minimal and
+# footprint-honest.
 wz-codecs = { path = "../wz-codecs", default-features = false, features = [
     "alloc",
     "codec-linkstate",
 ] }
-
-[dev-dependencies]
-# The unit tests build `LinkstateListOwned` fixtures whose codec fields are
-# `SceBytes`; `sce-forge-runtime` supplies it (the same crate wz-codecs's
-# generated owned types are built from). `alloc` for the Vec-backed bytes.
-sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", features = [
+# Supplies `SceBytes` — the codec byte type the built LinkState's `zid`
+# field is (c3b `build_linkstate_list`). The same crate wz-codecs's
+# generated owned types are built from. `alloc` for the Vec-backed bytes.
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false, features = [
     "alloc",
 ] }
 

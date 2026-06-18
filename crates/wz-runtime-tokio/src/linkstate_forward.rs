@@ -36,9 +36,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use sce_forge_runtime::codec::CodecError;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_session_core::driver_loop::DriverLoopOutcome;
-use wz_session_core::linkstate_oam::{try_parse_linkstate_oam, LinkstateOam};
+use wz_session_core::linkstate_oam::{build_linkstate_oam, try_parse_linkstate_oam, LinkstateOam};
 use wz_session_core::network_message::NetworkMessage;
 
 use wz_routing_graph::{LinkId, LinkstateNetwork, Zid, WHATAMI_PEER};
@@ -110,6 +111,19 @@ impl LinkstateForwarder {
     /// query the driver owns.
     pub fn tree_children_of(&self, source: &Zid) -> Vec<Zid> {
         self.net.borrow().tree_children_of(source)
+    }
+
+    /// Build THIS peer's own link-state advertisement as `OAM_LINKSTATE`
+    /// wire bytes, ready to flood to faces — the TX seam. The graph builds
+    /// the full-topology `LinkStateList` (c3b
+    /// [`LinkstateNetwork::build_linkstate_list`]); `build_linkstate_oam`
+    /// (c1) wraps it in the OAM carrier. This is the graph -> wire step;
+    /// pushing the bytes onto each face's send path (on a periodic timer /
+    /// on `Changes`) is the flood-driver atom (c3d). Mirrors zenoh
+    /// `make_msg` + `send_on_links`.
+    pub fn self_linkstate_oam(&self) -> Result<Vec<u8>, CodecError> {
+        let list = self.net.borrow().build_linkstate_list();
+        build_linkstate_oam(&list)
     }
 }
 
@@ -215,5 +229,26 @@ mod tests {
         // the link mapping is gone; a later inbound on that face is dropped.
         fwd.on_inbound_linkstate(FaceId(7), list_with_node(11, 5, 0xBB));
         assert_eq!(fwd.ingested(), 0);
+    }
+
+    #[test]
+    fn self_linkstate_oam_reflects_the_graph() {
+        // the TX seam: the built OAM grows with the advertised topology.
+        let solo = LinkstateForwarder::new(zid(0x01), 2);
+        let solo_bytes = solo.self_linkstate_oam().expect("build solo OAM");
+        assert!(!solo_bytes.is_empty());
+
+        let with_peer = LinkstateForwarder::new(zid(0x01), 2);
+        with_peer.on_face_up(FaceId(7), zid(0xAA), 2);
+        let peer_bytes = with_peer
+            .self_linkstate_oam()
+            .expect("build OAM with a neighbour");
+        // advertising a neighbour adds its node + self's link to the message.
+        assert!(
+            peer_bytes.len() > solo_bytes.len(),
+            "a neighbour enlarges the link-state ({} vs {})",
+            peer_bytes.len(),
+            solo_bytes.len()
+        );
     }
 }

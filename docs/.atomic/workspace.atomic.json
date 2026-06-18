@@ -41582,6 +41582,46 @@
         "코드 LOCAL UNPUSHED 13커밋: qm(b2a4567)~qv(798e8f8) + qw. push 미동의=로컬 커밋만."
       ]
     },
+    "Round 311qx": {
+      "decision_summary": "R311qx: linkstate (c3b) self-linkstate TX — 그래프→LinkStateList 빌드(build_linkstate_list, zenoh make_link_state/make_msg 미러) + convert 2-pass 정정(single-pass라 같은 메시지 뒤 entry 참조 link를 drop하던 zenoh 발산 버그) + driver self_linkstate_oam(graph→OAM 바이트, flood 준비) + 2-peer/transitive convergence 테스트(build↔ingest round-trip 실증). LinkEdgeWeight::as_raw. flood 타이머=c3d, remove_detached_nodes=c3b2.",
+      "changes_bullets": [
+        "wz-routing-graph: build_linkstate_list(&self)→LinkstateListOwned 신설(c3b TX): 각 그래프 노드→LinkState(psid=NodeIndex.index(), zid[P 항상=수신자가 psid→zid 매핑 학습], whatami[W if known], links[neighbour zid→idx→psid 해석], weights[H if non-default]); locators deferred(L 미설정), full-state always. zenoh make_link_state+make_msg(network.rs:304-365) 미러. LinkEdgeWeight::as_raw()(wire 값, unset=0). OPT_P/W/H 상수.",
+        "convert_to_local_link_states 2-pass 정정: pass1=모든 entry의 psid→zid 먼저 등록, pass2=그다음 link psid 해석(zenoh network.rs:479-556 두 패스 미러). 기존 single-pass는 같은 메시지서 뒤 entry를 참조하는 link를 drop(self-flood에서 self entry가 뒤따르는 이웃 entry를 참조)=zenoh 발산 버그였음. ResolvedEntry type alias(type_complexity).",
+        "wz-runtime-tokio linkstate_forward: self_linkstate_oam()→build_linkstate_list+build_linkstate_oam(c1)로 OAM-LINKSTATE 바이트 생성(flood 준비; 실제 face send=c3d). doc_lazy_continuation 2건(선두 `+`를 markdown 리스트로 오인) 수정."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-routing-graph 21 PASS(기존 19 + 신규 2 convergence): two_peers_converge_via_build_then_ingest(A/B가 build↔ingest 왕복으로 A<->B edge+next_hop 양쪽 수렴=실제 mesh 속성), topology_propagates_transitively_over_a_line(A-B-C 라인: A가 직접 링크 없이 C를 B의 flood로 학습+B 경유 라우팅=multi-hop 전파). driver linkstate 5 PASS(self_linkstate_oam_reflects_the_graph=이웃 광고시 OAM 바이트 더 큼).",
+        "clippy -p wz-routing-graph + -p wz-runtime-tokio(routing-peer) all-targets -D warnings clean. fmt clean. wz-runtime-tokio default 빌드 무영향. 2-pass 정정이 기존 19 테스트 유지(strictly 더 permissive). 메타: -D warnings가 doc_lazy_continuation 2건+type_complexity 1건 적발=게이트 가치."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qx = linkstate (c3b) self-linkstate TX 완료. build_linkstate_list(graph→LinkStateList, zenoh make_link_state/make_msg 미러) + convert 2-pass 정정(single-pass 발산 버그=같은 메시지 뒤 entry 참조 link drop) + driver self_linkstate_oam(graph→OAM 바이트) + cross-peer convergence 실증(2-peer + transitive A-B-C). build↔ingest round-trip 동작=토폴로지 교환 코어 완성=리뷰가 지적한 \"inert in production\" 핵심 TX 갭 해소(단 자동 flood 타이머는 c3d).",
+        "다음: c3b2=remove_detached_nodes(self에서 advertisement 그래프 DFS reachability prune; 현재 단위테스트가 비현실 detached 노드 모델이라 함께 현실적 토폴로지로 재구성 필요=qv에서 명시 defer) → c3c=tree_children_of로 data(Push) forward → c3d=peer_loop이 LinkstateForwarder 사용(NoOpForwarder 대체)+주기 flood 타이머(self_linkstate_oam을 faces에 송신)+2-peer e2e.",
+        "추적 부채: Zid=Vec<u8>→fixed 16B newtype(wz-WIDE), drop 관측성(tracing dep), ENC_*/Z flag 6-site wire_const.",
+        "코드 LOCAL UNPUSHED 14커밋: qm(b2a4567)~qw(c7c7f3b) + qx. push 미동의=로컬 커밋만."
+      ],
+      "publishable_decision_summary": "R311qx: linkstate (c3b) self-linkstate TX — 그래프→LinkStateList 빌드(build_linkstate_list, zenoh make_link_state/make_msg 미러) + convert 2-pass 정정(single-pass라 같은 메시지 뒤 entry 참조 link를 drop하던 zenoh 발산 버그) + driver self_linkstate_oam(graph→OAM 바이트, flood 준비) + 2-peer/transitive convergence 테스트(build↔ingest round-trip 실증). LinkEdgeWeight::as_raw. flood 타이머=c3d, remove_detached_nodes=c3b2.",
+      "publishable_changes_bullets": [
+        "wz-routing-graph: build_linkstate_list(&self)→LinkstateListOwned 신설(c3b TX): 각 그래프 노드→LinkState(psid=NodeIndex.index(), zid[P 항상=수신자가 psid→zid 매핑 학습], whatami[W if known], links[neighbour zid→idx→psid 해석], weights[H if non-default]); locators deferred(L 미설정), full-state always. zenoh make_link_state+make_msg(network.rs:304-365) 미러. LinkEdgeWeight::as_raw()(wire 값, unset=0). OPT_P/W/H 상수.",
+        "convert_to_local_link_states 2-pass 정정: pass1=모든 entry의 psid→zid 먼저 등록, pass2=그다음 link psid 해석(zenoh network.rs:479-556 두 패스 미러). 기존 single-pass는 같은 메시지서 뒤 entry를 참조하는 link를 drop(self-flood에서 self entry가 뒤따르는 이웃 entry를 참조)=zenoh 발산 버그였음. ResolvedEntry type alias(type_complexity).",
+        "wz-runtime-tokio linkstate_forward: self_linkstate_oam()→build_linkstate_list+build_linkstate_oam(c1)로 OAM-LINKSTATE 바이트 생성(flood 준비; 실제 face send=c3d). doc_lazy_continuation 2건(선두 `+`를 markdown 리스트로 오인) 수정."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-routing-graph 21 PASS(기존 19 + 신규 2 convergence): two_peers_converge_via_build_then_ingest(A/B가 build↔ingest 왕복으로 A<->B edge+next_hop 양쪽 수렴=실제 mesh 속성), topology_propagates_transitively_over_a_line(A-B-C 라인: A가 직접 링크 없이 C를 B의 flood로 학습+B 경유 라우팅=multi-hop 전파). driver linkstate 5 PASS(self_linkstate_oam_reflects_the_graph=이웃 광고시 OAM 바이트 더 큼).",
+        "clippy -p wz-routing-graph + -p wz-runtime-tokio(routing-peer) all-targets -D warnings clean. fmt clean. wz-runtime-tokio default 빌드 무영향. 2-pass 정정이 기존 19 테스트 유지(strictly 더 permissive). 메타: -D warnings가 doc_lazy_continuation 2건+type_complexity 1건 적발=게이트 가치."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qx = linkstate (c3b) self-linkstate TX 완료. build_linkstate_list(graph→LinkStateList, zenoh make_link_state/make_msg 미러) + convert 2-pass 정정(single-pass 발산 버그=같은 메시지 뒤 entry 참조 link drop) + driver self_linkstate_oam(graph→OAM 바이트) + cross-peer convergence 실증(2-peer + transitive A-B-C). build↔ingest round-trip 동작=토폴로지 교환 코어 완성=리뷰가 지적한 \"inert in production\" 핵심 TX 갭 해소(단 자동 flood 타이머는 c3d).",
+        "다음: c3b2=remove_detached_nodes(self에서 advertisement 그래프 DFS reachability prune; 현재 단위테스트가 비현실 detached 노드 모델이라 함께 현실적 토폴로지로 재구성 필요=qv에서 명시 defer) → c3c=tree_children_of로 data(Push) forward → c3d=peer_loop이 LinkstateForwarder 사용(NoOpForwarder 대체)+주기 flood 타이머(self_linkstate_oam을 faces에 송신)+2-peer e2e.",
+        "추적 부채: Zid=Vec<u8>→fixed 16B newtype(wz-WIDE), drop 관측성(tracing dep), ENC_*/Z flag 6-site wire_const.",
+        "코드 LOCAL UNPUSHED 14커밋: qm(b2a4567)~qw(c7c7f3b) + qx. push 미동의=로컬 커밋만."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [

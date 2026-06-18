@@ -45,7 +45,11 @@ use std::num::NonZeroU16;
 
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableUnGraph;
+use sce_forge_runtime::codec::SceBytes;
+use wz_codecs::linkstate::LinkstateOwned;
+use wz_codecs::linkstate_link::LinkstateLink;
 use wz_codecs::linkstate_list::LinkstateListOwned;
+use wz_codecs::linkstate_weight::LinkstateWeight;
 
 /// WhatAmI role bytes (zenoh `WhatAmI`): a node advertises exactly one.
 /// The codec carries the raw byte; the ingest validates against this set
@@ -60,6 +64,13 @@ pub const WHATAMI_CLIENT: u8 = 4;
 fn is_valid_whatami(w: u8) -> bool {
     matches!(w, WHATAMI_ROUTER | WHATAMI_PEER | WHATAMI_CLIENT)
 }
+
+/// LinkState `options` flag bits (zenoh `linkstate.rs:20-23`): which optional
+/// fields a built LinkState carries. P=zid, W=whatami, H=link weights. L
+/// (locators, 0x04) is unused here — locator advertisement is deferred.
+const OPT_P: u8 = 0x01;
+const OPT_W: u8 = 0x02;
+const OPT_H: u8 = 0x08;
 
 /// The sub-1% tie-break budget the edge jitter rides on (zenoh
 /// `network.rs:453`): equal base-weight edges differ by at most this
@@ -91,6 +102,18 @@ pub type LinkId = usize;
 /// through the receiving [`Link`]'s mapping.
 pub type Psid = u64;
 
+/// A received link-state entry after pass 1 of
+/// `convert_to_local_link_states` (its own zid resolved + mapping
+/// registered), still carrying its raw psid-space `links` / `weights` for
+/// pass 2 to resolve: `(zid, whatami, sn, links, weights)`.
+type ResolvedEntry = (
+    Zid,
+    u8,
+    u64,
+    Vec<LinkstateLink>,
+    Option<Vec<LinkstateWeight>>,
+);
+
 /// An edge weight (zenoh `LinkEdgeWeight`, `net/protocol/linkstate.rs:54`):
 /// an optional explicit weight; absent means the default. A `NonZeroU16`
 /// makes "unset" (the default-weight case) unrepresentable as a stored 0.
@@ -110,6 +133,13 @@ impl LinkEdgeWeight {
     /// The effective weight — the explicit value, or [`DEFAULT`] if unset.
     pub fn value(&self) -> u16 {
         self.0.map(NonZeroU16::get).unwrap_or(Self::DEFAULT)
+    }
+
+    /// The raw wire value — the explicit value, or 0 (the "no weight"
+    /// sentinel) if unset. The TX inverse of [`from_raw`](Self::from_raw),
+    /// mirroring zenoh `LinkEdgeWeight::as_raw` (used by `make_link_state`).
+    pub fn as_raw(&self) -> u16 {
+        self.0.map(NonZeroU16::get).unwrap_or(0)
     }
 
     /// Whether an explicit weight was advertised.
@@ -392,6 +422,68 @@ impl LinkstateNetwork {
         self.process_linkstates(local)
     }
 
+    /// Build the `LinkStateList` advertising THIS peer's full known topology,
+    /// for flooding to neighbours (the TX counterpart of
+    /// [`ingest_linkstate_list`](Self::ingest_linkstate_list)). Each graph
+    /// node becomes a `LinkState` keyed by its local `psid` (the petgraph
+    /// `NodeIndex`), carrying its zid (so the receiver learns the
+    /// psid<->zid mapping), whatami, and its links (each resolved to the
+    /// neighbour's local psid) with weights. Mirrors zenoh
+    /// `make_link_state` and `make_msg` (`network.rs:304-365`); locators are
+    /// deferred (the graph does not populate them yet), so the L flag is
+    /// never set, and the "full state" details (zid plus links for every
+    /// node) are always emitted.
+    pub fn build_linkstate_list(&self) -> LinkstateListOwned {
+        let mut link_states = Vec::with_capacity(self.graph.node_count());
+        for idx in self.graph.node_indices() {
+            let node = &self.graph[idx];
+            // links: resolve each neighbour zid to its local psid, with a
+            // weight per link (zenoh make_link_state, `network.rs:308-325`).
+            let mut links = Vec::with_capacity(node.links.len());
+            let mut weights = Vec::with_capacity(node.links.len());
+            let mut has_weight = false;
+            for (dest_zid, weight) in &node.links {
+                if let Some(dest_idx) = self.get_idx(dest_zid) {
+                    links.push(LinkstateLink {
+                        psid: dest_idx.index() as u64,
+                    });
+                    weights.push(LinkstateWeight {
+                        weight: weight.as_raw(),
+                    });
+                    has_weight = has_weight || weight.is_set();
+                }
+                // a link to an unknown node is an internal inconsistency;
+                // skip it rather than emit an unresolvable psid.
+            }
+            // options: P (zid, always advertised so the receiver can map the
+            // psid) | W (if whatami known) | H (if any non-default weight).
+            let mut options = OPT_P;
+            if node.whatami.is_some() {
+                options |= OPT_W;
+            }
+            if has_weight {
+                options |= OPT_H;
+            }
+            link_states.push(LinkstateOwned {
+                options,
+                psid: idx.index() as u64,
+                sn: node.sn,
+                zid_len: Some(node.zid.len() as u64),
+                zid: Some(SceBytes::from_slice(&node.zid).expect("zid is <= 16 bytes")),
+                whatami: node.whatami,
+                num_locators: None,
+                locators: None,
+                links_len: links.len() as u64,
+                links,
+                weights: has_weight.then_some(weights),
+            });
+        }
+        LinkstateListOwned {
+            num_link_states: link_states.len() as u64,
+            link_states,
+        }
+    }
+
     /// Resolve a received list from psid-space to zid-space against the
     /// source link's mappings (registering newly-advertised psid->zid
     /// pairs), dropping entries whose node/whatami cannot be resolved.
@@ -403,62 +495,81 @@ impl LinkstateNetwork {
         src_link_id: LinkId,
         list: LinkstateListOwned,
     ) -> Vec<LocalLinkState> {
-        let src_link = match self.links.get_mut(&src_link_id) {
-            Some(link) => link,
-            // A list from an unknown link is dropped (zenoh logs + returns
-            // empty, `network.rs:469-476`).
-            None => return Vec::new(),
+        // A list from an unknown link is dropped (zenoh logs + returns
+        // empty, `network.rs:469-476`).
+        if !self.links.contains_key(&src_link_id) {
+            return Vec::new();
+        }
+
+        // Pass 1 — register EVERY entry's psid->zid mapping before resolving
+        // any link. zenoh is two-pass (`network.rs:479-517` register, then
+        // `:519-556` resolve) precisely so a link referencing a node whose
+        // entry appears LATER in the same list still resolves. A single-pass
+        // resolve would drop such a link (e.g. self's own flood, where self's
+        // entry lists links to neighbours whose entries follow it).
+        let resolved: Vec<ResolvedEntry> = {
+            let src_link = self
+                .links
+                .get_mut(&src_link_id)
+                .expect("link present (checked above)");
+            let mut resolved = Vec::with_capacity(list.link_states.len());
+            for entry in list.link_states {
+                // The entry's own zid: present (register the psid->zid
+                // mapping) or referenced by a previously-learned psid.
+                let zid = match entry.zid {
+                    Some(bytes) => {
+                        let zid = bytes.as_slice().to_vec();
+                        src_link.set_zid_mapping(entry.psid, zid.clone());
+                        zid
+                    }
+                    None => match src_link.get_zid(entry.psid) {
+                        Some(zid) => zid.clone(),
+                        None => continue, // unknown psid mapping -> drop entry
+                    },
+                };
+                // whatami: absent defaults to Router; an out-of-range value
+                // is dropped (the c2 host-validation obligation — zenoh
+                // rejects it at decode, the wz codec carries the raw byte).
+                let whatami = match entry.whatami {
+                    None => WHATAMI_ROUTER,
+                    Some(w) if is_valid_whatami(w) => w,
+                    Some(_) => continue,
+                };
+                resolved.push((zid, whatami, entry.sn, entry.links, entry.weights));
+            }
+            resolved
         };
 
-        let mut out = Vec::with_capacity(list.link_states.len());
-        for entry in list.link_states {
-            // The entry's own zid: present (register the psid->zid mapping)
-            // or referenced by a previously-learned psid.
-            let zid = match entry.zid {
-                Some(bytes) => {
-                    let zid = bytes.as_slice().to_vec();
-                    src_link.set_zid_mapping(entry.psid, zid.clone());
-                    zid
+        // Pass 2 — every mapping is now registered; resolve each entry's link
+        // psids to zids, attaching the advertised weight (or the default when
+        // no weights block). zenoh `network.rs:519-556`.
+        let src_link = self
+            .links
+            .get(&src_link_id)
+            .expect("link present (checked above)");
+        resolved
+            .into_iter()
+            .map(|(zid, whatami, sn, entry_links, weights)| {
+                let mut links = HashMap::with_capacity(entry_links.len());
+                for (i, link) in entry_links.iter().enumerate() {
+                    if let Some(dst) = src_link.get_zid(link.psid) {
+                        let weight = weights
+                            .as_ref()
+                            .and_then(|ws| ws.get(i))
+                            .map(|w| LinkEdgeWeight::from_raw(w.weight))
+                            .unwrap_or_default();
+                        links.insert(dst.clone(), weight);
+                    }
+                    // unknown link psid -> drop that edge (zenoh network.rs:544)
                 }
-                None => match src_link.get_zid(entry.psid) {
-                    Some(zid) => zid.clone(),
-                    None => continue, // unknown psid mapping -> drop entry
-                },
-            };
-
-            // whatami: absent defaults to Router; an out-of-range value is
-            // dropped (the c2 host-validation obligation — zenoh rejects it
-            // at decode, the wz codec carries the raw byte).
-            let whatami = match entry.whatami {
-                None => WHATAMI_ROUTER,
-                Some(w) if is_valid_whatami(w) => w,
-                Some(_) => continue,
-            };
-
-            // Resolve the entry's link psids to zids, attaching the
-            // advertised weight (or the default when no weights block).
-            let mut links = HashMap::with_capacity(entry.links.len());
-            for (i, link) in entry.links.iter().enumerate() {
-                if let Some(dst) = src_link.get_zid(link.psid) {
-                    let weight = entry
-                        .weights
-                        .as_ref()
-                        .and_then(|ws| ws.get(i))
-                        .map(|w| LinkEdgeWeight::from_raw(w.weight))
-                        .unwrap_or_default();
-                    links.insert(dst.clone(), weight);
+                LocalLinkState {
+                    sn,
+                    zid,
+                    whatami,
+                    links,
                 }
-                // unknown link psid -> drop that edge (zenoh, network.rs:544)
-            }
-
-            out.push(LocalLinkState {
-                sn: entry.sn,
-                zid,
-                whatami,
-                links,
-            });
-        }
-        out
+            })
+            .collect()
     }
 
     /// Apply zid-resolved link-states to the graph under the sn-staleness
@@ -1133,5 +1244,76 @@ mod tests {
         );
         assert_eq!(net.next_hop(&zid(0x01), &zid(0xAA)), Some(zid(0xAA)));
         assert_eq!(net.next_hop(&zid(0x01), &zid(0xBB)), Some(zid(0xBB)));
+    }
+
+    // ── c3b TX: build_linkstate_list + cross-peer convergence ───────
+
+    #[test]
+    fn two_peers_converge_via_build_then_ingest() {
+        // A and B are directly linked. Each builds its own link-state list
+        // (the TX path) and the other ingests it (the RX path); both must
+        // learn the A<->B edge from the round-trip — the real mesh property.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let la_b = a.add_link(zid(0x0B), 2);
+        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
+        let lb_a = b.add_link(zid(0x0A), 2);
+
+        // Two flood rounds (linkstate is idempotent under re-flood).
+        for _ in 0..2 {
+            let a_msg = a.build_linkstate_list();
+            b.ingest_linkstate_list(lb_a, a_msg);
+            let b_msg = b.build_linkstate_list();
+            a.ingest_linkstate_list(la_b, b_msg);
+        }
+        a.compute_trees();
+        b.compute_trees();
+
+        assert!(
+            a.edge_weight(&zid(0x0A), &zid(0x0B)).is_some(),
+            "A learned the A<->B edge"
+        );
+        assert!(
+            b.edge_weight(&zid(0x0A), &zid(0x0B)).is_some(),
+            "B learned the A<->B edge"
+        );
+        assert_eq!(a.next_hop(&zid(0x0A), &zid(0x0B)), Some(zid(0x0B)));
+        assert_eq!(b.next_hop(&zid(0x0B), &zid(0x0A)), Some(zid(0x0A)));
+    }
+
+    #[test]
+    fn topology_propagates_transitively_over_a_line() {
+        // Line A -- B -- C. A has NO direct link to C; it must learn C from
+        // B's flood (B advertises its C link + C's node), then route to C
+        // through B — multi-hop topology propagation over build/ingest.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let la_b = a.add_link(zid(0x0B), 2);
+        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
+        let lb_a = b.add_link(zid(0x0A), 2);
+        let lb_c = b.add_link(zid(0x0C), 2);
+        let mut c = LinkstateNetwork::new(zid(0x0C), 2);
+        let lc_b = c.add_link(zid(0x0B), 2);
+
+        // Flood until converged: neighbours feed B, then B feeds the far ends.
+        for _ in 0..3 {
+            let c_msg = c.build_linkstate_list();
+            b.ingest_linkstate_list(lb_c, c_msg);
+            let a_msg = a.build_linkstate_list();
+            b.ingest_linkstate_list(lb_a, a_msg);
+            let b_to_a = b.build_linkstate_list();
+            a.ingest_linkstate_list(la_b, b_to_a);
+            let b_to_c = b.build_linkstate_list();
+            c.ingest_linkstate_list(lc_b, b_to_c);
+        }
+        a.compute_trees();
+
+        assert!(
+            a.get_node(&zid(0x0C)).is_some(),
+            "A learned C transitively via B's flood"
+        );
+        assert_eq!(
+            a.next_hop(&zid(0x0A), &zid(0x0C)),
+            Some(zid(0x0B)),
+            "A routes to C through B"
+        );
     }
 }
