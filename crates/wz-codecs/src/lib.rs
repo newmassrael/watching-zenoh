@@ -462,6 +462,20 @@ pub mod wire_const {
     /// codec module is always present in wz-codecs (no codec-oam
     /// feature exists).
     pub const N_MID_OAM: u8 = 0x1F;
+    /// Network-MID ext-chain presence bit, shared across every `N_MID_*`
+    /// header (network.h `_Z_FLAG_N_Z = 0x80`) — the network-message
+    /// sibling of [`FLAG_T_Z`]. Set when a Z-gated extension chain
+    /// follows the envelope header (e.g. the OAM qos extension). Bare
+    /// `0x80` literals on network headers should reference this.
+    pub const FLAG_N_Z: u8 = 0x80;
+    /// `oam::id::OAM_LINKSTATE` (zenoh `commons/zenoh-protocol/src/
+    /// network/oam.rs:27`) — the OAM message id whose ZBuf body carries a
+    /// linkstate-peer topology `LinkStateList`. Carried on the wire as the
+    /// OAM `id:z16` (a VLE u16); the OAM codec models the id field as a
+    /// VLE `u64` (a superset), so this is `u64`-typed for direct use as
+    /// the `Oam.id` value. Gated on `codec-linkstate`.
+    #[cfg(feature = "codec-linkstate")]
+    pub const OAM_LINKSTATE_ID: u64 = 0x0001;
     /// INTEREST envelope MID (network.h:39). Unconditional — the
     /// `interest` codec module is always present in wz-codecs (no
     /// codec-interest feature exists).

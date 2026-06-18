@@ -9,18 +9,21 @@
 //! (`zenoh/src/net/protocol/network.rs:350-365`) encodes the list with
 //! the routing codec into a `ZBuf`, then builds
 //! `Oam { id: OAM_LINKSTATE, body: ZBuf(bytes), ext_qos: QoSType::OAM }`.
-//! This module is the wz bridge between the `wz-codecs` LinkStateList
+//!
+//! This module is the wz carrier between the `wz-codecs` LinkStateList
 //! codec (step b) and the `NetworkMessage::Oam` envelope:
 //!
 //! * [`build_linkstate_oam`] — LinkStateList -> OAM message wire bytes.
-//! * [`try_parse_linkstate_oam`] — a decoded OAM -> LinkStateList iff the
-//!   OAM id is `OAM_LINKSTATE` and the body is a ZBuf.
+//! * [`try_parse_linkstate_oam`] — a decoded OAM -> a [`LinkstateOam`]
+//!   outcome (not-mine / decoded / malformed).
 //!
-//! The carrier is `codec-linkstate`-gated (AP/full-node routing; absent
-//! from the MCU footprint). The transport `Frame` envelope is applied
-//! separately (`frame_encode`), same as the other network-message
-//! builders. The in-memory topology graph that consumes the parsed
-//! LinkStateList is step c2.
+//! The carrier is built but NOT yet attached to the RX/TX path: the
+//! inbound `parse_frame_payload` OAM arm (`network_message.rs:199`) still
+//! surfaces a generic `NetworkMessage::Oam`; wiring it to call
+//! [`try_parse_linkstate_oam`], and the graph-driven send path, is step
+//! c3. The in-memory topology graph that consumes a parsed LinkStateList
+//! is step c2. `codec-linkstate`-gated (AP/full-node routing; absent from
+//! the MCU footprint); owned `Vec` output (alloc-gated).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -33,28 +36,46 @@ use wz_codecs::linkstate_list::{LinkstateList, LinkstateListOwned};
 use wz_codecs::oam::{OamOwned, OamOwnedVariant};
 use wz_codecs::wire_const;
 
-/// zenoh `oam::id::OAM_LINKSTATE` (`commons/zenoh-protocol/src/network/
-/// oam.rs:27`) — the OAM message id carrying a topology `LinkStateList`.
-/// Carried as the OAM `id:z16` (a VLE u16); the wz OAM codec models the
-/// id field as a VLE `u64`, of which the OAM ids are a subset.
-pub const OAM_ID_LINKSTATE: u64 = 0x0001;
+/// Raw 2-bit body-encoding selectors (the value before it is shifted into
+/// an `enc` field at bits 5..6). ZBuf = `0b10`, Z64/ZInt = `0b01` (zenoh
+/// `common/extension.rs` ENC_*). The OAM/ext header builders below shift
+/// these into position so a header byte reads as `mid | (enc << 5) | ...`
+/// rather than an opaque packed literal.
+const ENC_ZBUF: u8 = 0b10;
+const ENC_ZINT: u8 = 0b01;
 
-/// OAM header byte for a linkstate message: `N_MID_OAM` (0x1F) in bits
-/// 0..4, `ENC_ZBUF` (0b10) in the enc bits 5..6 (= 0x40), and the
-/// extensions flag `Z` (0x80). Z is always set because the qos extension
-/// is always present (see [`OAM_QOS_EXT_HEADER`]).
-const OAM_LINKSTATE_HEADER: u8 = wire_const::N_MID_OAM | 0x40 | 0x80; // 0xDF
+/// The linkstate qos extension's id — zenoh `oam::ext::QoS::ID` = 0x1
+/// (`commons/zenoh-protocol/src/network/oam.rs:67`).
+const OAM_QOS_EXT_ID: u8 = 0x01;
 
-/// The qos extension every linkstate OAM carries. zenoh's `make_msg` sets
-/// `ext_qos: QoSType::OAM`, which is NOT `QoSType::DEFAULT`, so the OAM
-/// codec always serialises it (`commons/zenoh-codec/src/network/oam.rs:
-/// 56-69`). The ext header `0x21` = ext id `0x1` | enc `Z64` (0x20) |
-/// more-flag 0 (it is the only/last extension). The ext value 8 is
-/// `QoSType::OAM.inner` = `Priority::Control` (0) | `D_FLAG` (0x08, since
-/// `CongestionControl::DEFAULT_OAM` is `Block`), projected to a ZExtZ64
-/// value (`network/mod.rs:425,408,520`). Constant for every linkstate OAM.
-const OAM_QOS_EXT_HEADER: u8 = 0x21;
+/// `QoSType::OAM.inner` projected to a ZExtZ64 value: `Priority::Control`
+/// (0) | `D_FLAG` (0x08, since `CongestionControl::DEFAULT_OAM` is
+/// `Block`) = 8 (zenoh `network/mod.rs:425,408,434,520`). zenoh's OAM
+/// codec serialises the qos ext whenever it differs from
+/// `QoSType::DEFAULT` (`network/oam.rs` codec:56-69), and `QoSType::OAM`
+/// always does — so a linkstate OAM always carries exactly this one
+/// extension. Pinned by the byte-parity test.
 const OAM_QOS_EXT_VALUE: u64 = 0x08;
+
+/// Outcome of [`try_parse_linkstate_oam`] — a deliberate trichotomy so a
+/// malformed topology message is never silently indistinguishable from a
+/// routine non-linkstate OAM (which would drop a corrupt flood on the
+/// forwarding plane without a trace).
+#[derive(Debug)]
+pub enum LinkstateOam {
+    /// The OAM id is not `OAM_LINKSTATE` — not a topology carrier; the
+    /// caller leaves it to the generic `NetworkMessage::Oam` path.
+    NotLinkstate,
+    /// An `OAM_LINKSTATE`-addressed message whose ZBuf body decoded into a
+    /// topology `LinkStateList`.
+    Decoded(LinkstateListOwned),
+    /// An `OAM_LINKSTATE`-addressed message that is unusable: the body was
+    /// not a ZBuf (`None` — a wire-protocol violation, since zenoh always
+    /// uses ENC_ZBUF for linkstate), or the ZBuf bytes failed to decode as
+    /// a `LinkStateList` (`Some(err)`). The message is for us but corrupt;
+    /// the caller should drop + count it, not treat it as non-linkstate.
+    Malformed(Option<CodecError>),
+}
 
 /// Build the OAM network-message wire bytes carrying `list`. Mirrors
 /// zenoh `Network::make_msg`: encode the LinkStateList with the routing
@@ -65,23 +86,44 @@ const OAM_QOS_EXT_VALUE: u64 = 0x08;
 pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
     let list_bytes = list.try_as_borrowed()?.encode_to_vec();
     let value_len = list_bytes.len() as u64;
+
+    // The qos extension (QoSType::OAM). Its header is composed from named
+    // constants in `id | (enc << 5) | more` arithmetic form (the ext
+    // setters are borrowed-form-only, not on the owned ExtEntryOwned), so
+    // the byte is self-documenting rather than an opaque packed literal —
+    // the same composite style push_build uses for its ext headers. more=0
+    // because it is the only / last extension, so the chain terminates.
+    let qos_ext = ExtEntryOwned {
+        header: OAM_QOS_EXT_ID | (ENC_ZINT << 5),
+        body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
+            value: OAM_QOS_EXT_VALUE,
+        }),
+    };
+    let extensions = vec![qos_ext];
+
+    // The header's ext-chain Z bit is DERIVED from whether an extension
+    // chain follows (mirrors push_build's `z_flag`), so it cannot desync
+    // from the `extensions` field if a future edit drops the qos ext. The
+    // enc bits are ENC_ZBUF to match the ZBuf body constructed below.
+    let z = if extensions.is_empty() {
+        0
+    } else {
+        wire_const::FLAG_N_Z
+    };
+    let header = wire_const::N_MID_OAM | (ENC_ZBUF << 5) | z;
+
     let oam = OamOwned {
-        header: OAM_LINKSTATE_HEADER,
-        id: OAM_ID_LINKSTATE,
-        extensions: Some(vec![ExtEntryOwned {
-            header: OAM_QOS_EXT_HEADER,
-            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
-                value: OAM_QOS_EXT_VALUE,
-            }),
-        }]),
+        header,
+        id: wire_const::OAM_LINKSTATE_ID,
+        extensions: Some(extensions),
         body: OamOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len,
             // `owned_bytes` is the wz SSOT for the borrowed->owned bytes
-            // copy (the same helper the push source_info ext uses). Under
-            // `alloc` it is an infallible heap copy — the `ExtZbufOwned`
-            // `<32>` cap is the no_std heapless bound, and the linkstate
-            // carrier is alloc-only, so a multi-node payload larger than
-            // 32 bytes rides the heap copy without truncation.
+            // copy. Under `alloc` it is an infallible heap copy — the
+            // `ExtZbufOwned` `<32>` cap is the no_std heapless bound, and
+            // the linkstate carrier is alloc-only, so a multi-node payload
+            // larger than 32 bytes rides the heap copy without truncation
+            // (exercised by `round_trips_multinode_payload_over_32_bytes`).
             value: crate::codec_owned::owned_bytes(&list_bytes)?,
         }),
     };
@@ -89,30 +131,32 @@ pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecEr
     Ok(wire)
 }
 
-/// Decode the topology payload out of a received OAM message. Returns
-/// `None` when the OAM is not a linkstate carrier (a different `id`, or a
-/// non-ZBuf body — both leave the message to the generic
-/// `NetworkMessage::Oam` path); `Some(Ok(list))` / `Some(Err(..))` for an
-/// `OAM_LINKSTATE` ZBuf body that decodes / fails to decode as a
-/// `LinkStateList`. Decoding goes through the borrowed `LinkstateList`
-/// codec then projects to owned, so a payload exceeding the generic
-/// ext-ZBuf `<32>` owned cap is fine (the structured link-state records
-/// carry their own appropriately-bounded fields).
-pub fn try_parse_linkstate_oam(oam: &OamOwned) -> Option<Result<LinkstateListOwned, CodecError>> {
-    if oam.id != OAM_ID_LINKSTATE {
-        return None;
+/// Classify a decoded OAM message as a topology carrier. See
+/// [`LinkstateOam`] for the three outcomes. Decoding goes through the
+/// borrowed `LinkstateList` codec then projects to owned, so a payload
+/// exceeding the generic ext-ZBuf `<32>` owned cap is fine (the structured
+/// link-state records carry their own appropriately-bounded fields).
+pub fn try_parse_linkstate_oam(oam: &OamOwned) -> LinkstateOam {
+    if oam.id != wire_const::OAM_LINKSTATE_ID {
+        return LinkstateOam::NotLinkstate;
     }
     let body_bytes = match &oam.body {
         OamOwnedVariant::CodecZenohExtZbuf(zbuf) => zbuf.value.as_slice(),
-        _ => return None,
+        // OAM_LINKSTATE addressee, but the body is not a ZBuf: a
+        // wire-protocol violation, not a different OAM.
+        _ => return LinkstateOam::Malformed(None),
     };
     let mut cursor = SceCursor::new(body_bytes);
-    Some(LinkstateList::decode(&mut cursor).and_then(|list| list.try_into_owned()))
+    match LinkstateList::decode(&mut cursor).and_then(|list| list.try_into_owned()) {
+        Ok(list) => LinkstateOam::Decoded(list),
+        Err(e) => LinkstateOam::Malformed(Some(e)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_codecs::ext_unit::ExtUnit;
     use wz_codecs::oam::Oam;
 
     /// A LinkStateList wire of one minimal LinkState entry (the `MIN`
@@ -129,12 +173,46 @@ mod tests {
     ///   01 00 01 00 00   the LinkStateList bytes
     const OAM_WIRE: [u8; 10] = [0xDF, 0x01, 0x21, 0x08, 0x05, 0x01, 0x00, 0x01, 0x00, 0x00];
 
+    /// A LinkStateList wire of one WGT-bearing LinkState entry (the
+    /// `WEIGHTED` oracle): count=1, then options=WGT / psid=3 / sn=0 /
+    /// links_len=2 / links=[5,9] / weights=[100, 300] (300 = VLE 0xAC 0x02).
+    const WEIGHTED_LIST_WIRE: [u8; 10] =
+        [0x01, 0x08, 0x03, 0x00, 0x02, 0x05, 0x09, 0x64, 0xAC, 0x02];
+
     fn decode_list_owned(wire: &[u8]) -> LinkstateListOwned {
         let mut cursor = SceCursor::new(wire);
         LinkstateList::decode(&mut cursor)
             .expect("decode list")
             .try_into_owned()
             .expect("list to owned")
+    }
+
+    fn decode_oam_owned(wire: &[u8]) -> OamOwned {
+        let mut cursor = SceCursor::new(wire);
+        Oam::decode(&mut cursor)
+            .expect("decode oam")
+            .try_into_owned()
+            .expect("oam to owned")
+    }
+
+    /// build an OAM from a list wire, decode+parse it back, and return the
+    /// decoded list (asserting the round-trip reproduces the list bytes).
+    fn round_trip(list_wire: &[u8]) -> LinkstateListOwned {
+        let list = decode_list_owned(list_wire);
+        let oam_wire = build_linkstate_oam(&list).expect("build oam");
+        let oam = decode_oam_owned(&oam_wire);
+        match try_parse_linkstate_oam(&oam) {
+            LinkstateOam::Decoded(parsed) => {
+                assert_eq!(
+                    parsed.try_as_borrowed().unwrap().encode_to_vec(),
+                    list_wire,
+                    "round-trip must reproduce the inner list bytes"
+                );
+                parsed
+            }
+            LinkstateOam::NotLinkstate => panic!("expected Decoded, got NotLinkstate"),
+            LinkstateOam::Malformed(e) => panic!("expected Decoded, got Malformed({e:?})"),
+        }
     }
 
     #[test]
@@ -146,26 +224,23 @@ mod tests {
 
     #[test]
     fn parse_extracts_linkstate_list() {
-        let mut cursor = SceCursor::new(&OAM_WIRE);
-        let oam = Oam::decode(&mut cursor)
-            .expect("decode oam")
-            .try_into_owned()
-            .expect("oam to owned");
-        let list = try_parse_linkstate_oam(&oam)
-            .expect("OAM_LINKSTATE id recognised")
-            .expect("body decodes as LinkStateList");
-        // Re-encode the parsed list; it must reproduce the inner wire.
-        assert_eq!(list.try_as_borrowed().unwrap().encode_to_vec(), LIST_WIRE);
-        assert_eq!(list.num_link_states, 1);
-        assert_eq!(list.link_states.len(), 1);
-        assert_eq!(list.link_states[0].psid, 1);
+        let oam = decode_oam_owned(&OAM_WIRE);
+        match try_parse_linkstate_oam(&oam) {
+            LinkstateOam::Decoded(list) => {
+                assert_eq!(list.try_as_borrowed().unwrap().encode_to_vec(), LIST_WIRE);
+                assert_eq!(list.num_link_states, 1);
+                assert_eq!(list.link_states.len(), 1);
+                assert_eq!(list.link_states[0].psid, 1);
+            }
+            other => panic!("expected Decoded, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_ignores_non_linkstate_oam() {
-        // An OAM with a different id is not a linkstate carrier.
+    fn parse_returns_not_linkstate_for_other_id() {
+        // A well-formed OAM with a different id is not a topology carrier.
         let oam = OamOwned {
-            header: OAM_LINKSTATE_HEADER,
+            header: wire_const::N_MID_OAM | (ENC_ZBUF << 5),
             id: 0x0002,
             extensions: None,
             body: OamOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
@@ -173,16 +248,61 @@ mod tests {
                 value: crate::codec_owned::owned_bytes(&[]).unwrap(),
             }),
         };
-        assert!(try_parse_linkstate_oam(&oam).is_none());
+        assert!(matches!(
+            try_parse_linkstate_oam(&oam),
+            LinkstateOam::NotLinkstate
+        ));
     }
 
     #[test]
-    fn build_parse_round_trips() {
-        let list = decode_list_owned(&LIST_WIRE);
-        let wire = build_linkstate_oam(&list).unwrap();
-        let mut cursor = SceCursor::new(&wire);
-        let oam = Oam::decode(&mut cursor).unwrap().try_into_owned().unwrap();
-        let parsed = try_parse_linkstate_oam(&oam).unwrap().unwrap();
-        assert_eq!(parsed.try_as_borrowed().unwrap().encode_to_vec(), LIST_WIRE);
+    fn parse_returns_malformed_for_non_zbuf_body() {
+        // OAM_LINKSTATE id but a Unit body — a wire-protocol violation,
+        // distinct from a non-linkstate OAM.
+        let oam = OamOwned {
+            header: wire_const::N_MID_OAM,
+            id: wire_const::OAM_LINKSTATE_ID,
+            extensions: None,
+            body: OamOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+        };
+        assert!(matches!(
+            try_parse_linkstate_oam(&oam),
+            LinkstateOam::Malformed(None)
+        ));
+    }
+
+    #[test]
+    fn round_trips_empty_list() {
+        // A zero-entry LinkStateList ("I know of no peers"): count byte 0x00.
+        let list = round_trip(&[0x00]);
+        assert_eq!(list.num_link_states, 0);
+        assert_eq!(list.link_states.len(), 0);
+    }
+
+    #[test]
+    fn round_trips_weighted_list() {
+        let list = round_trip(&WEIGHTED_LIST_WIRE);
+        assert_eq!(list.link_states.len(), 1);
+        let weights = list.link_states[0]
+            .weights
+            .as_ref()
+            .expect("WGT set => weights present through the OAM carrier");
+        assert_eq!(weights.len(), 2);
+        assert_eq!(weights[1].weight, 300);
+    }
+
+    #[test]
+    fn round_trips_multinode_payload_over_32_bytes() {
+        // 10 minimal entries => list wire = 1 (count) + 10*4 = 41 bytes,
+        // well over the generic ext-ZBuf <32> owned cap. Proves the
+        // alloc-unbounded SceBytes path carries a multi-node payload
+        // without truncation.
+        let mut list_wire: Vec<u8> = vec![0x0A]; // count = 10
+        for _ in 0..10 {
+            list_wire.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+        }
+        assert!(list_wire.len() > 32, "payload must exceed the <32> cap");
+        let list = round_trip(&list_wire);
+        assert_eq!(list.num_link_states, 10);
+        assert_eq!(list.link_states.len(), 10);
     }
 }

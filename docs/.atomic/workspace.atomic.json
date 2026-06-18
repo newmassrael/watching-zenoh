@@ -41246,6 +41246,52 @@
         "코드 LOCAL UNPUSHED: qm(b2a4567 linkstate H=0)+pin(ee26e42 SCE 3078f8bf7)+qn(76221d7 weights)+qo(linkstate_oam 모듈+배선+ledger). push 미동의=로컬 커밋만. 엔트리 qo=qn 후속."
       ]
     },
+    "Round 311qp": {
+      "decision_summary": "R311qp: qm/qn/qo 4-에이전트 독립 적대 세션리뷰 remediation. 리뷰=0 CRITICAL/dropped-field/wrong-byte(byte-parity·SceBytes-unbounded 독립검증). 수정: error trichotomy enum(malformed 구분), 헤더 Z 유도, qos ext named-arithmetic, wire_const FLAG_N_Z/OAM_LINKSTATE_ID, 테스트 +4(malformed/empty/weighted/>32B), whatami divergence·stale·시제 정직화.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/linkstate_oam.rs: (a) try_parse→LinkstateOam enum{NotLinkstate/Decoded/Malformed(Option<CodecError>)}=malformed OAM_LINKSTATE를 silently None 안 함(C·D MAJOR, 무테스트였음); (b) 헤더 ext-chain Z를 extensions.is_empty()서 유도(push_build z_flag 미러, future edit desync 불가; C MAJOR item2); (c) qos ext header=named arithmetic OAM_QOS_EXT_ID|(ENC_ZINT<<5)=opaque 0x21 제거(setter는 borrowed-only라 owned엔 arithmetic 형태가 최선, push_build house style); (d) naming OAM_ID_LINKSTATE→wire_const::OAM_LINKSTATE_ID; module doc \"bridge connecting to wire\"→\"built not yet attached, c3 wires parse_frame_payload\" 시제 정정.",
+        "crates/wz-codecs/src/lib.rs wire_const: FLAG_N_Z(0x80, FLAG_T_Z의 network 형제)+OAM_LINKSTATE_ID(0x0001, codec-linkstate gate) 추가=wire 상수 SSOT(A finding1 부분).",
+        "crates/wz-session-core/src/linkstate_oam.rs 테스트 +4(C MAJOR item7): parse_returns_malformed_for_non_zbuf_body, round_trips_empty_list(count 0), round_trips_weighted_list(weights via OAM), round_trips_multinode_payload_over_32_bytes(41B>32 cap=무절단 주장 실증).",
+        "sources/codecs/linkstate.scxml: whatami divergence 명시(zenoh WhatAmI::try_from reject vs wz raw u8→range-validation은 c2 host 의무; D MINOR1) + stale \"DEFERRED below\"→\"WGT, see below\"(line 31). crates/wz-codecs/tests/linkstate.rs:12 stale \"deferred atom(b2)\"→weights 구현 반영(D NIT1)."
+      ],
+      "verification_bullets": [
+        "byte-parity 유지: 헤더 Z 유도 + qos named-arithmetic가 동일 zenoh 와이어(0xDF/0x21) 생성=build_matches_zenoh_oam_wire PASS. wz-codecs linkstate 4 + wz-session-core linkstate_oam 7(신규 malformed/empty/weighted/>32B 4 포함) + 전체 154+2 green.",
+        "리뷰 독립검증 결과(보존): 4-에이전트(SSOT·byte-parity·smell·honesty)가 byte-parity 모든 바이트 zenoh서 재유도 byte-exact, SceBytes<32> alloc-unbounded TRUE(거짓이면 multi-node silent break=CRITICAL이었음), 7필드 전부 구현, dropped/stub/dishonesty 0 확인. CRITICAL/MAJOR-codec 0=코덱(qm/qn) 골격 교과서적; 발견은 qo 캐리어 집중.",
+        "빌드: wz-codecs default+no-default(OAM_LINKSTATE_ID gated off, FLAG_N_Z 잔존), 호스트 소비자(wz/runtime-tokio/ap-demo) green. fmt --check + clippy --tests clean. validate_workspace orphan delta 0.",
+        "deferred(추적 부채): ENC_*/Z flag 전체 wire_const 통합은 6-site(sample/attachment/pubsub) 프로젝트 라운드(A finding1=별도 SSOT 라운드 권고, linkstate는 현 house style 일치)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qp = qm/qn/qo 4-에이전트 독립 적대 세션리뷰 remediation. 사용자 질문(hack/smell 없는 교과서적·비용무관·북극성·SSOT 부합?)에 자평 대신 독립 리뷰로 검증. 핵심교훈: 독립 리뷰가 자평 놓친 것 적발(error trichotomy·테스트 갭 특히 >32B 미테스트 주장·whatami divergence·stale 코멘트·헤더 Z desync 위험)=9번째 성급 self-assessment 보강 사례. CRITICAL/dropped-field/wrong-byte/dishonesty 0=코덱·캐리어 골격 건전, byte-parity 독립 byte-exact 확인.",
+        "다음(linkstate c2): Network 그래프 데이터구조(Node zid/whatami/locators/sn/links + per-link psid↔zid 매핑 + 수신 LinkStateList ingest sn-staleness). whatami range-validation=c2 host 의무(qp서 문서화). 표현 미정(사용자 정렬): petgraph 미러 권장 vs hand-roll adjacency+Dijkstra. 이후 c3=parse_frame_payload→try_parse_linkstate_oam 배선(NetworkMessage::LinkstateOam)+self-linkstate 송신, (d)spanning-tree forwarding.",
+        "추적 부채: ENC_*/Z flag 6-site wire_const 통합(별도 SSOT 라운드).",
+        "코드 LOCAL UNPUSHED: qm(b2a4567)+pin(ee26e42)+qn(76221d7)+qo(3470e46)+qp(remediation+ledger). push 미동의=로컬 커밋만, 사용자 'push' 대기. 엔트리 qp=qo 후속."
+      ],
+      "publishable_decision_summary": "R311qp: qm/qn/qo 4-에이전트 독립 적대 세션리뷰 remediation. 리뷰=0 CRITICAL/dropped-field/wrong-byte(byte-parity·SceBytes-unbounded 독립검증). 수정: error trichotomy enum(malformed 구분), 헤더 Z 유도, qos ext named-arithmetic, wire_const FLAG_N_Z/OAM_LINKSTATE_ID, 테스트 +4(malformed/empty/weighted/>32B), whatami divergence·stale·시제 정직화.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/linkstate_oam.rs: (a) try_parse→LinkstateOam enum{NotLinkstate/Decoded/Malformed(Option<CodecError>)}=malformed OAM_LINKSTATE를 silently None 안 함(C·D MAJOR, 무테스트였음); (b) 헤더 ext-chain Z를 extensions.is_empty()서 유도(push_build z_flag 미러, future edit desync 불가; C MAJOR item2); (c) qos ext header=named arithmetic OAM_QOS_EXT_ID|(ENC_ZINT<<5)=opaque 0x21 제거(setter는 borrowed-only라 owned엔 arithmetic 형태가 최선, push_build house style); (d) naming OAM_ID_LINKSTATE→wire_const::OAM_LINKSTATE_ID; module doc \"bridge connecting to wire\"→\"built not yet attached, c3 wires parse_frame_payload\" 시제 정정.",
+        "crates/wz-codecs/src/lib.rs wire_const: FLAG_N_Z(0x80, FLAG_T_Z의 network 형제)+OAM_LINKSTATE_ID(0x0001, codec-linkstate gate) 추가=wire 상수 SSOT(A finding1 부분).",
+        "crates/wz-session-core/src/linkstate_oam.rs 테스트 +4(C MAJOR item7): parse_returns_malformed_for_non_zbuf_body, round_trips_empty_list(count 0), round_trips_weighted_list(weights via OAM), round_trips_multinode_payload_over_32_bytes(41B>32 cap=무절단 주장 실증).",
+        "sources/codecs/linkstate.scxml: whatami divergence 명시(zenoh WhatAmI::try_from reject vs wz raw u8→range-validation은 c2 host 의무; D MINOR1) + stale \"DEFERRED below\"→\"WGT, see below\"(line 31). crates/wz-codecs/tests/linkstate.rs:12 stale \"deferred atom(b2)\"→weights 구현 반영(D NIT1)."
+      ],
+      "publishable_verification_bullets": [
+        "byte-parity 유지: 헤더 Z 유도 + qos named-arithmetic가 동일 zenoh 와이어(0xDF/0x21) 생성=build_matches_zenoh_oam_wire PASS. wz-codecs linkstate 4 + wz-session-core linkstate_oam 7(신규 malformed/empty/weighted/>32B 4 포함) + 전체 154+2 green.",
+        "리뷰 독립검증 결과(보존): 4-에이전트(SSOT·byte-parity·smell·honesty)가 byte-parity 모든 바이트 zenoh서 재유도 byte-exact, SceBytes<32> alloc-unbounded TRUE(거짓이면 multi-node silent break=CRITICAL이었음), 7필드 전부 구현, dropped/stub/dishonesty 0 확인. CRITICAL/MAJOR-codec 0=코덱(qm/qn) 골격 교과서적; 발견은 qo 캐리어 집중.",
+        "빌드: wz-codecs default+no-default(OAM_LINKSTATE_ID gated off, FLAG_N_Z 잔존), 호스트 소비자(wz/runtime-tokio/ap-demo) green. fmt --check + clippy --tests clean. validate_workspace orphan delta 0.",
+        "deferred(추적 부채): ENC_*/Z flag 전체 wire_const 통합은 6-site(sample/attachment/pubsub) 프로젝트 라운드(A finding1=별도 SSOT 라운드 권고, linkstate는 현 house style 일치)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qp = qm/qn/qo 4-에이전트 독립 적대 세션리뷰 remediation. 사용자 질문(hack/smell 없는 교과서적·비용무관·북극성·SSOT 부합?)에 자평 대신 독립 리뷰로 검증. 핵심교훈: 독립 리뷰가 자평 놓친 것 적발(error trichotomy·테스트 갭 특히 >32B 미테스트 주장·whatami divergence·stale 코멘트·헤더 Z desync 위험)=9번째 성급 self-assessment 보강 사례. CRITICAL/dropped-field/wrong-byte/dishonesty 0=코덱·캐리어 골격 건전, byte-parity 독립 byte-exact 확인.",
+        "다음(linkstate c2): Network 그래프 데이터구조(Node zid/whatami/locators/sn/links + per-link psid↔zid 매핑 + 수신 LinkStateList ingest sn-staleness). whatami range-validation=c2 host 의무(qp서 문서화). 표현 미정(사용자 정렬): petgraph 미러 권장 vs hand-roll adjacency+Dijkstra. 이후 c3=parse_frame_payload→try_parse_linkstate_oam 배선(NetworkMessage::LinkstateOam)+self-linkstate 송신, (d)spanning-tree forwarding.",
+        "추적 부채: ENC_*/Z flag 6-site wire_const 통합(별도 SSOT 라운드).",
+        "코드 LOCAL UNPUSHED: qm(b2a4567)+pin(ee26e42)+qn(76221d7)+qo(3470e46)+qp(remediation+ledger). push 미동의=로컬 커밋만, 사용자 'push' 대기. 엔트리 qp=qo 후속."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [

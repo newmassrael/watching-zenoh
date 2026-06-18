@@ -28,7 +28,7 @@
          whatami   if W : u8
          locators  if L : VLE count + count locators
          links     VLE count + count VLE u64            (always)
-         weights   if H : count u16, no own length      (DEFERRED below)
+         weights   if H : count u16, no own length      (WGT, see below)
 
      Field-by-field vs net/codec/linkstate.rs:39..79:
        options (line 55)  : zenoh writes the flag word as a VLE u64.
@@ -55,6 +55,14 @@
                             cbyte packing used by hello/join/init. Host
                             maps the byte to WhatAmI (1=router / 2=peer /
                             4=client); the codec carries the raw byte.
+                            DELIBERATE divergence from zenoh, which REJECTS
+                            an invalid value at decode (`WhatAmI::try_from`
+                            -> DidntRead, codec/linkstate.rs:104). wz keeps
+                            the raw byte, so range-validation is a contract
+                            obligation of the host/graph layer (step c2)
+                            before it trusts whatami — the codec will not
+                            reject whatami in {0,3,5,..,255} the way zenoh
+                            does.
        locators (67..69)  : `codec.write(locators.as_slice())` resolves to
                             `WCodec<&[Locator]>` (core/locator.rs:57..65) =
                             VLE count + count * locator (each locator =

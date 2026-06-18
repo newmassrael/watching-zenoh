@@ -9,9 +9,10 @@
 //! (`commons/zenoh-codec/src/core/zenohid.rs:36` = VLE len + bytes), an
 //! optional `whatami` u8, an optional `[Locator]` list (VLE count + each
 //! locator per `core/locator.rs:57-65`), and a `links` list (VLE count +
-//! count VLE u64). The H/WGT `link_weights` extension is the deferred
-//! atom (b2) — these vectors all carry H=0, the default-config zenoh
-//! wire (link weights are opt-in `TransportWeight` config).
+//! count VLE u64), and the optional H/WGT `link_weights` (a borrowed-count
+//! VLE-u16 repeat). RICH/MIN/list carry H=0 (the default-config zenoh
+//! wire); the WEIGHTED vector exercises H=1 with populated weights,
+//! including a multi-byte VLE weight (300 = 0xAC 0x02).
 //!
 //! Each vector is decoded field-by-field and re-encoded; the round-trip
 //! must reproduce the source bytes exactly, pinning the wire layout
