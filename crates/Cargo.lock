@@ -2093,6 +2093,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-routing-graph"
+version = "0.1.0"
+dependencies = [
+ "petgraph",
+ "sce-forge-runtime",
+ "wz-codecs",
+]
+
+[[package]]
 name = "wz-runtime-core"
 version = "0.1.0"
 
@@ -2117,7 +2126,6 @@ dependencies = [
  "getrandom 0.2.17",
  "hashbrown 0.15.5",
  "log",
- "petgraph",
  "portable-atomic",
  "rcgen",
  "rustls-pemfile",
@@ -2132,6 +2140,7 @@ dependencies = [
  "wz-codecs",
  "wz-codecs-test-support",
  "wz-codegen-build",
+ "wz-routing-graph",
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
  "wz-session-core",

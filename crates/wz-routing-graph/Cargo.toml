@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-routing-graph — the linkstate-peer routing topology graph (P4 routing,
+# the wz mirror of zenoh `net/protocol/network.rs`). Pure host logic (no
+# async, no tokio): the in-memory `Node`/`Link`/edge graph + the
+# Bellman-Ford spanning-tree computation a peer uses for loop-free
+# forwarding. Kept in its own crate (NOT wz-runtime-tokio) so the
+# runtime-agnostic topology kernel mirrors the data-plane kernel split —
+# `RouteTable` lives in wz-session-core, its `RoutingForwarder` driver in
+# wz-runtime-tokio. This kernel cannot live in the `#![no_std]`
+# wz-session-core because `petgraph` is std-only; a std-allowed dedicated
+# crate satisfies both constraints. The tokio driver (`linkstate_forward`,
+# the `FaceForwarder`) stays in wz-runtime-tokio and depends on this.
+
+[package]
+name = "wz-routing-graph"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Linkstate-peer routing topology graph + spanning-tree computation (zenoh net/protocol/network.rs mirror)."
+
+[lib]
+name = "wz_routing_graph"
+path = "src/lib.rs"
+
+[dependencies]
+# The undirected, stable-index topology graph + Bellman-Ford / reachability
+# algorithms. Pinned to 0.6 to match zenoh's own petgraph 0.6.5.
+petgraph = "0.6"
+# The decoded `LinkstateListOwned` the graph ingests. `default-features =
+# false` + the explicit `codec-linkstate` / `alloc` forwards keep the codec
+# surface this crate pulls minimal and footprint-honest.
+wz-codecs = { path = "../wz-codecs", default-features = false, features = [
+    "alloc",
+    "codec-linkstate",
+] }
+
+[dev-dependencies]
+# The unit tests build `LinkstateListOwned` fixtures whose codec fields are
+# `SceBytes`; `sce-forge-runtime` supplies it (the same crate wz-codecs's
+# generated owned types are built from). `alloc` for the Vec-backed bytes.
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", features = [
+    "alloc",
+] }
+
+[lints]
+workspace = true

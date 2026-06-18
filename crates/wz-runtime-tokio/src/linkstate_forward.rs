@@ -41,8 +41,9 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::linkstate_oam::{try_parse_linkstate_oam, LinkstateOam};
 use wz_session_core::network_message::NetworkMessage;
 
+use wz_routing_graph::{LinkId, LinkstateNetwork, Zid, WHATAMI_PEER};
+
 use crate::accept_loop::{FaceForwarder, FaceId};
-use crate::linkstate_network::{LinkId, LinkstateNetwork, Zid, WHATAMI_PEER};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology

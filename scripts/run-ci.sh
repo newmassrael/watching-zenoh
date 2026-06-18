@@ -913,7 +913,11 @@ layer_c1x_cargo_test_routing_routes() {
 # restores its coverage, the same shape C1w uses for `routing-accept`:
 #   1. runs the `accept_loop` lib units under `--features routing-peer` (the 4
 #      accept-and-hold units + the 2 new peer_loop dial+accept units);
-#   2. clippy-gates the `routing-peer` cfg (`--all-targets`);
+#   1b. R311qv/qw: runs the linkstate-peer routing tests — the topology-graph
+#      kernel crate `wz-routing-graph` (lifted out in R311qw) AND the
+#      `linkstate_forward` driver units in this crate (the `--lib linkstate`
+#      filter), which the `accept_loop` filter had silently excluded;
+#   2. clippy-gates `wz-routing-graph` + the `routing-peer` cfg (`--all-targets`);
 #   3. clippy-gates the LIB under `--no-default-features --features routing-peer`
 #      to prove `peer_loop` composes standalone (routing-peer pulls only
 #      routing-accept);
@@ -922,7 +926,9 @@ layer_c1x_cargo_test_routing_routes() {
 layer_c1y_cargo_test_routing_peer() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet \
+        && cargo test -p wz-routing-graph --quiet \
         && cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet \
+        && cargo clippy -p wz-routing-graph --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings)

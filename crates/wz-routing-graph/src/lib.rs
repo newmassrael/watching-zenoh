@@ -15,9 +15,10 @@
 //! loops drive it in step c3 (feeding it parsed LinkStateLists and the
 //! face lifecycle), and the spanning-tree / shortest-path computation over
 //! the edges built here is step d. Built so far: c2a the graph foundation
-//! + psid<->zid mappings, c2b the [`LinkstateNetwork::ingest_linkstate_list`]
-//! node update under the sn-staleness gate, c2c the mutual-link edge
-//! rebuild (`update_edge`), d the spanning-tree computation (`compute_trees`).
+//! with psid<->zid mappings, c2b the
+//! [`LinkstateNetwork::ingest_linkstate_list`] node update under the
+//! sn-staleness gate, c2c the mutual-link edge rebuild (`update_edge`), d
+//! the spanning-tree computation (`compute_trees`).
 //!
 //! EXPLICITLY DEFERRED (tracked, not silently dropped):
 //! - `remove_detached_nodes` — zenoh GC-prunes nodes no longer reachable
@@ -34,9 +35,10 @@
 //!   (zenoh `tracing::error!`s an unresolvable psid/link; wz drops silently
 //!   — wz-runtime-tokio has no `tracing` dep yet).
 //!
-//! `routing-peer`-gated (AP/full-node mesh routing; absent from the MCU
-//! footprint). Backed by `petgraph` 0.6 (`StableUnGraph`, matching
-//! zenoh's own petgraph), so node indices stay stable across removals.
+//! This crate is pulled only by wz-runtime-tokio's `routing-peer` feature
+//! (AP/full-node mesh routing; absent from the MCU footprint). Backed by
+//! `petgraph` 0.6 (`StableUnGraph`, matching zenoh's own petgraph), so node
+//! indices stay stable across removals.
 
 use std::collections::HashMap;
 use std::num::NonZeroU16;

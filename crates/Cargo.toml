@@ -44,6 +44,11 @@ members = [
     "wz-ap-demo-app",
     "zenoh-pico-sys",
     "wz-integration-tests",
+    # R311qw — the linkstate-peer routing topology graph, lifted out of
+    # wz-runtime-tokio so the runtime-agnostic kernel mirrors the
+    # RouteTable(wz-session-core)/RoutingForwarder(wz-runtime-tokio) split.
+    # std-allowed (petgraph is std-only), pulled only by routing-peer.
+    "wz-routing-graph",
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
     # R311mo (Level B) — isolated multicast-only test crate for the tokio

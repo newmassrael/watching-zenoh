@@ -41542,6 +41542,46 @@
         "코드 LOCAL UNPUSHED 11커밋: qm(b2a4567)~qu(507a560) + qv. push 미동의=로컬 커밋만."
       ]
     },
+    "Round 311qw": {
+      "decision_summary": "R311qw: qq~qu 세션리뷰 remediation 2(구조). linkstate graph kernel을 전용 crate wz-routing-graph로 분리(레이어링 MAJOR 해소). pure-std 토폴로지 kernel이 tokio crate에 있던 것을 RouteTable(session-core)/RoutingForwarder(tokio) 분리 미러로 자체 std crate에; petgraph std-only이 no_std session-core 차단=전용 std crate가 양 제약 충족. driver(linkstate_forward)는 tokio 잔류+wz_routing_graph 의존. 19 graph + 4 driver 테스트 분리, C1y가 graph crate 게이트.",
+      "changes_bullets": [
+        "crates/wz-routing-graph 신설(crate): linkstate_network.rs를 git mv→src/lib.rs(히스토리 보존). deps=petgraph 0.6 + wz-codecs(default-features=false, alloc, codec-linkstate). dev-dep=sce-forge-runtime(alloc; 테스트가 LinkstateListOwned fixture를 SceBytes로 구성). crate/Cargo doc=kernel(session-core RouteTable)/driver(tokio RoutingForwarder) 분리 미러 + petgraph std-only이 no_std session-core 차단이라 전용 std crate가 양 제약 충족하는 근거.",
+        "crates/Cargo.toml workspace members += wz-routing-graph. wz-runtime-tokio/Cargo.toml: petgraph optional dep→wz-routing-graph optional dep; routing-peer가 dep:petgraph→dep:wz-routing-graph(petgraph는 graph crate가 소유). lib.rs `pub mod linkstate_network` 제거(driver doc이 wz_routing_graph crate 참조로 갱신). linkstate_forward.rs import `crate::linkstate_network`→`wz_routing_graph`.",
+        "scripts/run-ci.sh C1y: `cargo test -p wz-routing-graph` + `cargo clippy -p wz-routing-graph --all-targets -D warnings` 추가(graph kernel 게이트). 잠복 doc_lazy_continuation 경고(crate doc의 선두 `+`를 markdown 리스트로 오인)가 crate doc 이동+-D warnings로 표면화→문구 수정."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-routing-graph 19 PASS(이동된 linkstate 전체: c2a 5+c2b 5+c2c 3+d 4+review 2). cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 4 PASS(forward driver). clippy: -p wz-routing-graph(all-targets,-D warnings) + -p wz-runtime-tokio(routing-peer all-targets + no-default,-D warnings) + -p wz-ap-demo(routing-peer) 전부 clean. fmt clean. wz-runtime-tokio default 빌드(routing-peer off) 무영향.",
+        "cargo tree 확인: wz-routing-graph는 sce-rust-runtime 미도달(`cargo check --workspace`가 sce-rust-runtime no_std compile_error로 실패하는 건 기존 members 다수[wz-session-core 등] 유발하는 사전 워크스페이스-monolith 이슈=CI가 targeted -p lane+--exclude 쓰는 이유; crate-move 무관). 메타: -D warnings 게이트가 qv서 잠복했던 doc 경고 적발."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qw = qq~qu 세션리뷰 remediation 2(구조). graph kernel을 전용 crate wz-routing-graph로 분리(레이어링 MAJOR 해소). pure-std 토폴로지 kernel이 tokio crate에 있던 것을 RouteTable(session-core)/RoutingForwarder(tokio) 분리 미러로 자체 std crate에(petgraph std-only이 no_std session-core 차단이 진짜 제약). linkstate_forward(driver)는 tokio 잔류+wz_routing_graph 의존. c3b 전 완료=Agent A 최우선 구조 충족. 19 graph + 4 driver 테스트 분리, C1y가 graph crate 게이트.",
+        "추적 부채 잔여(별도 라운드): (1) Zid=Vec<u8>→fixed 16B newtype(wz-WIDE: peer_zid 전역; jitter correctness는 qv 16-byte padding으로 이미 해결), (2) remove_detached_nodes 실구현+현실적 토폴로지 테스트(c3b TX와 함께; 현재 단위테스트는 비현실 detached 모델), (3) drop 관측성(tracing dep), (4) ENC_*/Z flag 6-site wire_const.",
+        "다음: c3b(self-linkstate TX) — 자기 그래프→build_linkstate_oam→주기 timer/Changes로 faces flood. 그래야 peer 토폴로지 양방향 교환(현재 RX만, TX 없음). 또는 push.",
+        "코드 LOCAL UNPUSHED 13커밋: qm(b2a4567)~qv(798e8f8) + qw. push 미동의=로컬 커밋만."
+      ],
+      "publishable_decision_summary": "R311qw: qq~qu 세션리뷰 remediation 2(구조). linkstate graph kernel을 전용 crate wz-routing-graph로 분리(레이어링 MAJOR 해소). pure-std 토폴로지 kernel이 tokio crate에 있던 것을 RouteTable(session-core)/RoutingForwarder(tokio) 분리 미러로 자체 std crate에; petgraph std-only이 no_std session-core 차단=전용 std crate가 양 제약 충족. driver(linkstate_forward)는 tokio 잔류+wz_routing_graph 의존. 19 graph + 4 driver 테스트 분리, C1y가 graph crate 게이트.",
+      "publishable_changes_bullets": [
+        "crates/wz-routing-graph 신설(crate): linkstate_network.rs를 git mv→src/lib.rs(히스토리 보존). deps=petgraph 0.6 + wz-codecs(default-features=false, alloc, codec-linkstate). dev-dep=sce-forge-runtime(alloc; 테스트가 LinkstateListOwned fixture를 SceBytes로 구성). crate/Cargo doc=kernel(session-core RouteTable)/driver(tokio RoutingForwarder) 분리 미러 + petgraph std-only이 no_std session-core 차단이라 전용 std crate가 양 제약 충족하는 근거.",
+        "crates/Cargo.toml workspace members += wz-routing-graph. wz-runtime-tokio/Cargo.toml: petgraph optional dep→wz-routing-graph optional dep; routing-peer가 dep:petgraph→dep:wz-routing-graph(petgraph는 graph crate가 소유). lib.rs `pub mod linkstate_network` 제거(driver doc이 wz_routing_graph crate 참조로 갱신). linkstate_forward.rs import `crate::linkstate_network`→`wz_routing_graph`.",
+        "scripts/run-ci.sh C1y: `cargo test -p wz-routing-graph` + `cargo clippy -p wz-routing-graph --all-targets -D warnings` 추가(graph kernel 게이트). 잠복 doc_lazy_continuation 경고(crate doc의 선두 `+`를 markdown 리스트로 오인)가 crate doc 이동+-D warnings로 표면화→문구 수정."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-routing-graph 19 PASS(이동된 linkstate 전체: c2a 5+c2b 5+c2c 3+d 4+review 2). cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 4 PASS(forward driver). clippy: -p wz-routing-graph(all-targets,-D warnings) + -p wz-runtime-tokio(routing-peer all-targets + no-default,-D warnings) + -p wz-ap-demo(routing-peer) 전부 clean. fmt clean. wz-runtime-tokio default 빌드(routing-peer off) 무영향.",
+        "cargo tree 확인: wz-routing-graph는 sce-rust-runtime 미도달(`cargo check --workspace`가 sce-rust-runtime no_std compile_error로 실패하는 건 기존 members 다수[wz-session-core 등] 유발하는 사전 워크스페이스-monolith 이슈=CI가 targeted -p lane+--exclude 쓰는 이유; crate-move 무관). 메타: -D warnings 게이트가 qv서 잠복했던 doc 경고 적발."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qw = qq~qu 세션리뷰 remediation 2(구조). graph kernel을 전용 crate wz-routing-graph로 분리(레이어링 MAJOR 해소). pure-std 토폴로지 kernel이 tokio crate에 있던 것을 RouteTable(session-core)/RoutingForwarder(tokio) 분리 미러로 자체 std crate에(petgraph std-only이 no_std session-core 차단이 진짜 제약). linkstate_forward(driver)는 tokio 잔류+wz_routing_graph 의존. c3b 전 완료=Agent A 최우선 구조 충족. 19 graph + 4 driver 테스트 분리, C1y가 graph crate 게이트.",
+        "추적 부채 잔여(별도 라운드): (1) Zid=Vec<u8>→fixed 16B newtype(wz-WIDE: peer_zid 전역; jitter correctness는 qv 16-byte padding으로 이미 해결), (2) remove_detached_nodes 실구현+현실적 토폴로지 테스트(c3b TX와 함께; 현재 단위테스트는 비현실 detached 모델), (3) drop 관측성(tracing dep), (4) ENC_*/Z flag 6-site wire_const.",
+        "다음: c3b(self-linkstate TX) — 자기 그래프→build_linkstate_oam→주기 timer/Changes로 faces flood. 그래야 peer 토폴로지 양방향 교환(현재 RX만, TX 없음). 또는 push.",
+        "코드 LOCAL UNPUSHED 13커밋: qm(b2a4567)~qv(798e8f8) + qw. push 미동의=로컬 커밋만."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
