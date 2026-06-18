@@ -132,6 +132,32 @@ fn main() -> ExitCode {
         }
     }
 
+    // R311qg — `--peer <listen>` selects the peer-MESH mode (dial the configured
+    // `--connect` peers AND accept inbound on `<listen>`, holding both — the
+    // routing-peer foundation), handled before the single-session role parse.
+    // The outbound dial targets come from `--connect` (comma-separated here,
+    // where in single-session mode it is one initiator address). Opt-in behind
+    // `routing-peer`: a build without it rejects the flag rather than silently
+    // no-op'ing, so the catalog claim and the binary stay in lockstep.
+    if let Some(peer_listen) = parse_pair(rest, "--peer") {
+        #[cfg(feature = "routing-peer")]
+        {
+            let dial_targets: Vec<String> = parse_pair(rest, "--connect")
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+                .unwrap_or_default();
+            return run_peer_mode(peer_listen, dial_targets);
+        }
+        #[cfg(not(feature = "routing-peer"))]
+        {
+            let _ = peer_listen;
+            eprintln!(
+                "wz-ap-demo: --peer requires the `routing-peer` feature \
+                 (build: cargo build -p wz-ap-demo --features routing-peer)"
+            );
+            return ExitCode::from(2);
+        }
+    }
+
     // R121f — exactly one of --listen / --connect must be supplied.
     // The demo's session FSM role-start is hard-coded to one or
     // the other (Acceptor calls InboundStart on listen; Initiator
@@ -584,6 +610,29 @@ fn run_router_mode(addr: String) -> ExitCode {
         }
     };
     match runtime.block_on(crate::runner::run_router(&addr)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("wz-ap-demo: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// R311qg — peer-MESH mode entry: bind `listen`, dial each `dial_targets` peer,
+/// and hold both directions' faces (the `routing-peer` foundation, hold-only).
+/// Mirrors [`run_router_mode`] — a router has no per-face application behaviour,
+/// and neither does a hold-only mesh peer.
+#[cfg(feature = "routing-peer")]
+fn run_peer_mode(listen: String, dial_targets: Vec<String>) -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
+    let runtime = match build_demo_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("wz-ap-demo: tokio runtime build failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match runtime.block_on(crate::runner::run_peer(&listen, &dial_targets)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

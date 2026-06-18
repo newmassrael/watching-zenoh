@@ -160,6 +160,13 @@ routing-router = ["wz/routing-router"]
 # Forwards the facade `routing-routes`. NOT in `default`; only
 # `--features routing-routes` compiles the forwarding router.
 routing-routes = ["routing-router", "wz/routing-routes"]
+# R311qg — opt-in peer-MESH mode (`--peer <listen> --connect <a,b>`): the catalog
+# `routing-peer` atom's foundation (dial a configured peer set AND accept
+# inbound, holding both — `peer_loop`, hold-only). Forwards the facade
+# `routing-peer`, which gates the demo's `run_peer` path — the cfg site that
+# makes the catalog claim truthful (a binary now exercises mesh topology). NOT in
+# `default`; only `--features routing-peer` compiles the peer mode.
+routing-peer = ["wz/routing-peer"]
 
 [lints]
 workspace = true

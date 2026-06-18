@@ -1193,3 +1193,96 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
     );
     Ok(())
 }
+
+/// R311qg — peer-MESH mode: bind once, DIAL each configured peer, and accept
+/// inbound — holding both directions' faces (the `routing-peer` foundation,
+/// hold-only). The dial+accept generalisation of [`run_router`]: where a router
+/// only accepts, a peer also dials out to form a mesh. Binds `listen`, parses the
+/// `dial_targets` (TCP socket addresses for this atom), then runs the library
+/// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) with a
+/// [`NoOpForwarder`] — a held mesh face routes nothing yet (mesh forwarding +
+/// zid-keyed loop suppression is the next atom). Each face up/down is logged so
+/// the live hold set is observable; the shutdown summary reports the dialed /
+/// accepted split and the high-water concurrency.
+///
+/// Runs until the graceful-shutdown signal (SIGTERM / SIGINT). The node identity
+/// is whatami Peer (`NodeKind::Router` maps to 0x02) — the well-tested accept /
+/// initiate directions; a distinct WhatAmI refinement is a later atom.
+#[cfg(feature = "routing-peer")]
+pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Result<()> {
+    use crate::args::NodeKind;
+    use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources, NoOpForwarder};
+    use wz::runtime_tokio::session_open::bind_endpoint;
+
+    let listener = bind_endpoint(listen).await?;
+    let local = listener.local_addr()?;
+
+    // Parse the outbound dial targets — TCP socket addresses for this atom (the
+    // accept side is also TCP-only). A malformed target fails fast rather than
+    // silently dropping a mesh link.
+    let mut dials = Vec::with_capacity(dial_targets.len());
+    for target in dial_targets {
+        match target.parse::<std::net::SocketAddr>() {
+            Ok(addr) => dials.push(addr),
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("wz-ap-demo peer: invalid --connect dial target {target:?}: {e}"),
+                ));
+            }
+        }
+    }
+
+    log::info!(
+        "wz-ap-demo peer: listening on {local}; dialing {} configured peer(s) \
+         and holding both directions' faces (routing-peer foundation, no forwarding)",
+        dials.len()
+    );
+
+    let params = demo_session_init_params(NodeKind::Peer);
+    let forwarder = NoOpForwarder;
+
+    let summary = peer_loop(
+        FaceSources {
+            listener,
+            dial_targets: dials,
+        },
+        params,
+        TokioTime::new(),
+        DEFAULT_OPEN_TICK_MS,
+        shutdown_signal(),
+        |event: &AcceptEvent| match event {
+            AcceptEvent::FaceUp(face) => {
+                log::info!(
+                    "wz-ap-demo peer: face {} UP (peer {})",
+                    face.id.0,
+                    face.peer
+                )
+            }
+            AcceptEvent::FaceDown(face, outcome) => log::info!(
+                "wz-ap-demo peer: face {} DOWN (peer {}, {outcome:?})",
+                face.id.0,
+                face.peer
+            ),
+            AcceptEvent::FaceFailed { id, peer, cause } => log::warn!(
+                "wz-ap-demo peer: face {} FAILED (peer {peer}, {cause:?})",
+                id.0
+            ),
+            AcceptEvent::AcceptError(e) => {
+                log::warn!("wz-ap-demo peer: accept error (continuing): {e}")
+            }
+        },
+        &forwarder,
+    )
+    .await;
+
+    log::info!(
+        "wz-ap-demo peer: shutdown; dialed {}, accepted {}, served {} peer(s), \
+         peak {} concurrent face(s)",
+        summary.dialed,
+        summary.accepted,
+        summary.established,
+        summary.peak_concurrent
+    );
+    Ok(())
+}

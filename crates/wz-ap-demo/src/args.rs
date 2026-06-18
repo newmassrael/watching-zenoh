@@ -122,6 +122,11 @@ pub(crate) enum NodeKind {
     /// Only meaningful when the multi-peer router mode is compiled in.
     #[cfg(feature = "routing-router")]
     Router,
+    /// Only meaningful when the peer-mesh mode is compiled in (R311qg). A peer
+    /// both dials and accepts; like the router it announces the Peer `whatami`
+    /// for now (a distinct WhatAmI refinement is a later atom).
+    #[cfg(feature = "routing-peer")]
+    Peer,
 }
 
 impl Role {
@@ -141,6 +146,9 @@ pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
         // R311qa carry), so it also announces Peer.
         #[cfg(feature = "routing-router")]
         NodeKind::Router => 0x02,
+        // A hold-only mesh peer announces Peer too (whatami refinement later).
+        #[cfg(feature = "routing-peer")]
+        NodeKind::Peer => 0x02,
         NodeKind::Initiator => 0x04, // Client — R121f initiator path
     };
     SessionInitParams {
