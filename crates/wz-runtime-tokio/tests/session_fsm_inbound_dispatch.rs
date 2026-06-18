@@ -847,6 +847,73 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     );
 }
 
+/// R311qh — the routing identity slot (`remote_peer_zid`, read via
+/// `peer_zid()`) captures the remote peer's zid from BOTH handshake directions,
+/// where the R86 `inbound_peer_zid` cookie slot captures only the Accepting-side
+/// InitSyn. The two slots are deliberately distinct (see the R86 tests above).
+#[test]
+fn r311qh_peer_zid_captures_the_remote_zid_both_directions() {
+    use wz_runtime_tokio::session_glue::InboundFrame;
+
+    // ── Accepting side: InitSyn (zid 0xB0..0xB3) ──
+    let acc_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
+    let acc = new_session_actions(acc_driver, fixture_session_init_params(), TokioTime::new());
+    assert!(acc.peer_zid().is_none(), "routing zid starts empty");
+    let initsyn = vec![
+        0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
+        0x05,
+        0x31, // version, cbyte (whatami Peer, zid_len 4)
+        0xB0,
+        0xB1,
+        0xB2,
+        0xB3, // zid
+        0x00,
+        0x00,
+        0x00, // sn_res, batch_size
+    ];
+    let frame = acc.handle_inbound(&initsyn).expect("InitSyn parses");
+    assert!(matches!(frame, InboundFrame::Init { is_ack: false, .. }));
+    assert_eq!(
+        acc.peer_zid(),
+        Some(vec![0xB0, 0xB1, 0xB2, 0xB3]),
+        "Accepting side captures the InitSyn zid into the routing identity slot"
+    );
+
+    // ── Initiating side: InitAck (zid 0xC0..0xC3) — the side R86 keeps OUT of
+    //    inbound_peer_zid, but which MUST still learn its peer's identity ──
+    let ini_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
+    let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new());
+    let initack = vec![
+        0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
+        0x05,
+        0x31, // version, cbyte
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3, // zid
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x04, // sn_res, batch_size, cookie_len VLE = 4
+        0xDE,
+        0xAD,
+        0xBE,
+        0xEF, // cookie
+    ];
+    let frame = ini.handle_inbound(&initack).expect("InitAck parses");
+    assert!(matches!(frame, InboundFrame::Init { is_ack: true, .. }));
+    assert_eq!(
+        ini.peer_zid(),
+        Some(vec![0xC0, 0xC1, 0xC2, 0xC3]),
+        "Initiating side captures the InitAck zid into the routing identity slot"
+    );
+    assert!(
+        ini.inbound_peer_zid.lock().unwrap().is_none(),
+        "the R86 cookie slot stays untouched on the Initiating side"
+    );
+}
+
 /// R311kv — handle_inbound captures the peer's OPEN-advertised lease
 /// into `peer_open_lease_ms` (pico adopts it at the same arrival
 /// points, unicast/transport.c:193/269). The wire rides the R311ku

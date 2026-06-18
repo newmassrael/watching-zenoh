@@ -80,6 +80,20 @@ async fn accept_and_open_reaches_established_against_wz_initiator() {
         opened.actions.trace_snapshot().record_established_at >= 1,
         "initiator OpenedSession is Established"
     );
+    // R311qh — after a REAL handshake, each side has learned the OTHER's zid as
+    // its routing identity: the acceptor captured the initiator's zid from the
+    // inbound InitSyn, the initiator captured the acceptor's zid from the
+    // inbound InitAck. `peer_zid()` exposes it for the peer-mesh routing layer.
+    assert_eq!(
+        accepted.actions.peer_zid(),
+        Some(vec![0x01; 4]),
+        "acceptor's peer_zid is the initiator's zid (from the InitSyn)"
+    );
+    assert_eq!(
+        opened.actions.peer_zid(),
+        Some(vec![0x02; 4]),
+        "initiator's peer_zid is the acceptor's zid (from the InitAck)"
+    );
 }
 
 /// R311fc — `initiate_and_open_session` opens the Initiator role from an
