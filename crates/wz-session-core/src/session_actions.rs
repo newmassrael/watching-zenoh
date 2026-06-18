@@ -293,6 +293,17 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// HMAC-only behavior must validate the slot before signalling
     /// `inbound.start`.
     pub inbound_peer_zid: R::Mutex<Option<Vec<u8>>>,
+    /// R311qh — the remote peer's zid learned at handshake, captured for the
+    /// ROUTING layer from BOTH the inbound InitSyn (Accepting side) and the
+    /// inbound InitAck (Initiating side) — the remote peer's stable network
+    /// identity, the key a peer-mesh routing graph keys faces on. Distinct from
+    /// [`inbound_peer_zid`](Self::inbound_peer_zid) by design: that slot is the
+    /// R86 Accepting-side cookie-HMAC capture (InitSyn only —
+    /// `r86_handle_inbound_init_ack_does_not_overwrite_peer_zid` forbids InitAck
+    /// touching it, to avoid cross-role confusion), whereas this slot is the
+    /// role-agnostic remote identity a face exposes once Established. Reset on
+    /// re-handshake alongside the other captured slots.
+    pub remote_peer_zid: R::Mutex<Option<Vec<u8>>>,
     /// R89 — `cookie` field captured from the most recent inbound
     /// `OpenSyn` frame (`InboundFrame::Open { is_ack: false, .. }`).
     /// Set by `handle_inbound` for the Accepting side; consumed by
@@ -670,6 +681,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             transport_available: R::new_mutex(true),
             clock,
             inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
+            remote_peer_zid: R::new_mutex(None::<Vec<u8>>),
             inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
             // R121f1 — default ext chains seed both Init roles with the
             // patch-extension entry that zenoh-pico's accept-side
@@ -808,6 +820,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => self.params.seq_num_res,
         };
         crate::sn::mask_from_res(res)
+    }
+
+    /// R311qh — the remote peer's zid as learned at handshake (from the inbound
+    /// InitSyn on the Accepting side, or the inbound InitAck on the Initiating
+    /// side), or `None` before the INIT exchange has populated it. The routing
+    /// layer's per-face peer identity — the key a peer-mesh graph keys faces on.
+    /// Reads [`remote_peer_zid`](Self::remote_peer_zid); see that field for why
+    /// it is distinct from the R86 cookie-HMAC slot.
+    pub fn peer_zid(&self) -> Option<Vec<u8>> {
+        R::with_mutex_mut(&self.remote_peer_zid, |slot| slot.clone())
     }
 
     /// R311kd — the session's effective outbound frame budget: the
@@ -954,6 +976,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             InboundFrame::Init {
                 is_ack: true, body, ..
             } => {
+                // R311qh — capture the acceptor's zid from the InitAck into the
+                // routing identity slot (NOT `inbound_peer_zid`: R86 scopes that
+                // slot to the Accepting-side cookie-HMAC capture, and
+                // `r86_handle_inbound_init_ack_does_not_overwrite_peer_zid`
+                // forbids InitAck touching it — cross-role confusion). The INIT
+                // body is wire-identical on InitSyn and InitAck (both carry
+                // `body.zid`), so this mirrors the `is_ack: false` capture below
+                // into `remote_peer_zid`, giving the routing layer the remote
+                // peer's identity for BOTH handshake directions.
+                R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+                    *slot = Some(body.zid.as_slice().to_vec());
+                });
                 if let Some(cookie) = &body.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
                         *slot = Some(cookie.as_slice().to_vec());
@@ -981,6 +1015,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 R::with_mutex_mut(&self.inbound_peer_zid, |slot| {
+                    *slot = Some(body.zid.as_slice().to_vec());
+                });
+                // R311qh — also capture it into the role-agnostic routing
+                // identity slot (the Initiating side captures the same from the
+                // InitAck above), so a held face exposes its remote peer's zid
+                // regardless of which side opened it.
+                R::with_mutex_mut(&self.remote_peer_zid, |slot| {
                     *slot = Some(body.zid.as_slice().to_vec());
                 });
                 // R121d — capture the peer's announced sizing caps
@@ -3328,6 +3369,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // initializes `_transmitted = 0`, unicast/transport.c:65).
             R::with_mutex_mut(&self.last_outbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
+            R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.
