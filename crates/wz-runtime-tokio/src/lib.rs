@@ -527,6 +527,15 @@ pub mod accept_loop;
 #[cfg(feature = "routing-routes")]
 pub mod routing_forward;
 
+/// P4 linkstate-peer routing — the topology graph (step c2). The wz
+/// mirror of zenoh `net/protocol/network.rs`: a petgraph of peer `Node`s
+/// plus the per-link psid<->zid mappings a received LinkStateList is
+/// decoded against. Pure host logic (no async); the accept / peer loops
+/// drive it in step c3, and the spanning-tree / shortest-path forwarding
+/// is step d. Gated on `routing-peer`.
+#[cfg(feature = "routing-peer")]
+pub mod linkstate_network;
+
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions
 /// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs

@@ -41292,6 +41292,50 @@
         "코드 LOCAL UNPUSHED: qm(b2a4567)+pin(ee26e42)+qn(76221d7)+qo(3470e46)+qp(remediation+ledger). push 미동의=로컬 커밋만, 사용자 'push' 대기. 엔트리 qp=qo 후속."
       ]
     },
+    "Round 311qq": {
+      "decision_summary": "R311qq: linkstate 포팅 (c) c2a Network 그래프 foundation. petgraph 기반 LinkstateNetwork(Node + Link psid↔zid 매핑 + self-node 생성자 + add_link/ensure_node/get_idx). zenoh net/protocol/network.rs 미러, pure host(no async). wz-runtime-tokio routing-peer gate, petgraph 0.6(zenoh와 동일). 5 unit PASS. ingest=c2b, trees/Dijkstra=d.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_network.rs 신설(P4 c2a): LinkstateNetwork = petgraph StableUnGraph<Node,f64> + self NodeIndex + HashMap<LinkId,Link>. 타입: LinkEdgeWeight(Option<NonZeroU16>, default 100, 0=unset=표현불가), Node(zid/whatami/locators/sn/links HashMap), Link(zid + psid→zid mappings). API: new(self_zid,whatami)+self_idx/zid+get_idx(node scan, zenoh 미러)+get_node+ensure_node(idempotent upsert)+add_link/get_link/get_link_mut/remove_link. zenoh net/protocol/network.rs:56-184,256-263 미러.",
+        "결정: zid=Vec<u8>(기존 wz peer_zid 일치), whatami u8 / locators Vec<String>(코덱 host 타입), get_idx=node 스캔(zenoh 미러, mesh 작음), Link.local_mappings는 forwarding atom으로 defer(YAGNI), Link.mappings(psid↔zid)만 c2a.",
+        "petgraph 0.6 optional dep(zenoh 0.6.5와 동일 메이저)+routing-peer가 dep:petgraph pull. lib.rs cfg(routing-peer) pub mod linkstate_network.",
+        "위치 결정: wz-runtime-tokio(기존 routing-peer 코드 cohesion 우선; 그래프는 pure-std/no-async지만 routing 단일 crate 유지 > SoC-purity 별도 crate)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 5/5 PASS: LinkEdgeWeight default(100)/explicit/0=unset, new_seeds_self_node(sn=1 zenoh parity), ensure_node_is_idempotent_upsert, link_psid_to_zid_mapping(set/get_zid), add_and_remove_link.",
+        "petgraph 0.6.5 오프라인 캐시서 컴파일(zenoh Cargo.lock pin과 동일 버전, 네트워크 fetch 불요). fmt --check + clippy --lib clean.",
+        "회귀: default 빌드(routing-peer off)=petgraph elided + 모듈 부재, 무영향(dep:petgraph라 non-peer 빌드는 petgraph 미pull=footprint 정직). validate_workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qq = linkstate 포팅 (c) c2a Network 그래프 foundation 완료. petgraph 기반 LinkstateNetwork(Node + psid↔zid Link 매핑 + self-node 생성자 + add/ensure/get/remove). pure host(no async), wz-runtime-tokio routing-peer gate. zenoh net/protocol/network.rs 미러. 5 unit PASS.",
+        "다음 c2b: LinkStateList ingest — 수신 list를 Link.mappings(psid→zid) 갱신 + ensure_node + 노드 state(sn/whatami/locators/links) 갱신, sn-staleness gate(stale sn drop). zenoh process_linkstates_peer_to_peer / link_states handler(network.rs:~455-700) 미러. whatami range-validation=ingest서 host 의무(qp 문서화).",
+        "이후: c2c=edge 유지(update_edge: node.links→petgraph edge weight), c3=accept/peer loop 배선(face up→add_link, OAM RX→try_parse_linkstate_oam→ingest, self-linkstate 주기 송신), (d)=spanning-tree/Dijkstra forwarding(zenoh trees/distances).",
+        "코드 LOCAL UNPUSHED: qm(b2a4567)+ee26e42(SCE핀)+qn(76221d7)+qo(3470e46)+qp(8c65a49)+qq(linkstate_network+petgraph 0.6+ledger). push 미동의=로컬 커밋만. 엔트리 qq=qp 후속."
+      ],
+      "publishable_decision_summary": "R311qq: linkstate 포팅 (c) c2a Network 그래프 foundation. petgraph 기반 LinkstateNetwork(Node + Link psid↔zid 매핑 + self-node 생성자 + add_link/ensure_node/get_idx). zenoh net/protocol/network.rs 미러, pure host(no async). wz-runtime-tokio routing-peer gate, petgraph 0.6(zenoh와 동일). 5 unit PASS. ingest=c2b, trees/Dijkstra=d.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_network.rs 신설(P4 c2a): LinkstateNetwork = petgraph StableUnGraph<Node,f64> + self NodeIndex + HashMap<LinkId,Link>. 타입: LinkEdgeWeight(Option<NonZeroU16>, default 100, 0=unset=표현불가), Node(zid/whatami/locators/sn/links HashMap), Link(zid + psid→zid mappings). API: new(self_zid,whatami)+self_idx/zid+get_idx(node scan, zenoh 미러)+get_node+ensure_node(idempotent upsert)+add_link/get_link/get_link_mut/remove_link. zenoh net/protocol/network.rs:56-184,256-263 미러.",
+        "결정: zid=Vec<u8>(기존 wz peer_zid 일치), whatami u8 / locators Vec<String>(코덱 host 타입), get_idx=node 스캔(zenoh 미러, mesh 작음), Link.local_mappings는 forwarding atom으로 defer(YAGNI), Link.mappings(psid↔zid)만 c2a.",
+        "petgraph 0.6 optional dep(zenoh 0.6.5와 동일 메이저)+routing-peer가 dep:petgraph pull. lib.rs cfg(routing-peer) pub mod linkstate_network.",
+        "위치 결정: wz-runtime-tokio(기존 routing-peer 코드 cohesion 우선; 그래프는 pure-std/no-async지만 routing 단일 crate 유지 > SoC-purity 별도 crate)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 5/5 PASS: LinkEdgeWeight default(100)/explicit/0=unset, new_seeds_self_node(sn=1 zenoh parity), ensure_node_is_idempotent_upsert, link_psid_to_zid_mapping(set/get_zid), add_and_remove_link.",
+        "petgraph 0.6.5 오프라인 캐시서 컴파일(zenoh Cargo.lock pin과 동일 버전, 네트워크 fetch 불요). fmt --check + clippy --lib clean.",
+        "회귀: default 빌드(routing-peer off)=petgraph elided + 모듈 부재, 무영향(dep:petgraph라 non-peer 빌드는 petgraph 미pull=footprint 정직). validate_workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qq = linkstate 포팅 (c) c2a Network 그래프 foundation 완료. petgraph 기반 LinkstateNetwork(Node + psid↔zid Link 매핑 + self-node 생성자 + add/ensure/get/remove). pure host(no async), wz-runtime-tokio routing-peer gate. zenoh net/protocol/network.rs 미러. 5 unit PASS.",
+        "다음 c2b: LinkStateList ingest — 수신 list를 Link.mappings(psid→zid) 갱신 + ensure_node + 노드 state(sn/whatami/locators/links) 갱신, sn-staleness gate(stale sn drop). zenoh process_linkstates_peer_to_peer / link_states handler(network.rs:~455-700) 미러. whatami range-validation=ingest서 host 의무(qp 문서화).",
+        "이후: c2c=edge 유지(update_edge: node.links→petgraph edge weight), c3=accept/peer loop 배선(face up→add_link, OAM RX→try_parse_linkstate_oam→ingest, self-linkstate 주기 송신), (d)=spanning-tree/Dijkstra forwarding(zenoh trees/distances).",
+        "코드 LOCAL UNPUSHED: qm(b2a4567)+ee26e42(SCE핀)+qn(76221d7)+qo(3470e46)+qp(8c65a49)+qq(linkstate_network+petgraph 0.6+ledger). push 미동의=로컬 커밋만. 엔트리 qq=qp 후속."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
