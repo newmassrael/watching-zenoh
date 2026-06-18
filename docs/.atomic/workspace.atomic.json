@@ -40832,6 +40832,56 @@
         "코드 LOCAL UNPUSHED: wz-session-core(routing.rs: RouteCache+generation+route_targets+invalidate_routes, behavior-preserving 리팩터)+wz-runtime-tokio(routing_forward.rs: witness 2 passthrough+캐시 단위 5)+inventory reason. push 명시 동의 필요(CLAUDE.md). 엔트리 ID qf=qe 정규 알파 후속(숫자 접미사 금지). zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/ net/routing/dispatcher."
       ]
     },
+    "Round 311qg": {
+      "decision_summary": "R311qg: routing-peer atom 1 — dial+accept mesh 노드 foundation. peer_loop가 accept_loop 코어(face_drive_loop SSOT)+dial-out source 재사용(FaceSources). hold-only(forward+zid dedup=atom 2). lib 6+e2e 2.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: routing-peer atom 1. 공유 face-drive 코어 추출=face_drive_loop(private SSOT): accept_loop은 dial 없는 얇은 래퍼(public API 불변), peer_loop(신규 pub, cfg routing-peer)은 dial+accept. 두 face source를 FaceSources{listener,dial_targets}로 묶음(too_many_arguments textbook fix이자 의미 있는 추상=노드의 face 출처; accept_loop 시그니처 보존). dial_face(신규)=open_face의 dial 쌍둥이(TcpStream::connect+initiate_and_open_session, OpenError::Dial로 connect 실패 매핑, TCP-only=accept측 대칭). opening set을 Pin<Box<dyn Future>>(OpenFuture)로 박싱(open_face/dial_face 이종 future 공존). AcceptLoopSummary에 dialed:usize 추가(additive, accepted의 dial 대칭). 모듈 doc R311qg 갱신. 단위 4->6: peer_loop_dials_a_configured_peer_and_holds_it(dial 단독 hold)+peer_loop_holds_a_dialed_and_an_accepted_face_at_once(mesh keystone: peak 2, dialed 1, accepted 1).",
+        "crates/wz-runtime-tokio/Cargo.toml + wz/Cargo.toml + wz-ap-demo/Cargo.toml: routing-peer 피처 3레벨. tokio routing-peer=[\"routing-accept\"](코어 재사용, dial-out만 net-new). facade routing-peer=[\"routing-router\",\"wz-runtime-tokio?/routing-peer\"](hold-only이라 routing-routes 미pull). demo routing-peer=[\"wz/routing-peer\"].",
+        "crates/wz-ap-demo: --peer <listen> [--connect a,b] 모드(routing-peer 게이트). main.rs dispatch(--router 다음, 미feature시 exit 2 거부)+run_peer_mode. runner.rs run_peer=bind+dial target 파싱(SocketAddr)+peer_loop(NoOpForwarder hold-only)+face up/down 로그+summary(dialed/accepted/peak). args.rs NodeKind::Peer(cfg routing-peer, whatami 0x02=Peer, router에 비커플링).",
+        "crates/wz-integration-tests/tests: wz_peer_mesh.rs(positive: peer-B 순수 acceptor + peer-A --connect B + client-C, A가 dialed+accepted face 동시 보유=peak 2/dialed 1/accepted 1)+wz_peer_reject_without_feature.rs(negative: 기본 빌드가 --peer를 exit 2 거부).",
+        "scripts/run-ci.sh: Layer C1y(routing-peer 단위+clippy 3종+demo clippy, C1w 미러)+E6(peer mesh e2e)+E4 확장(peer reject도 기본 바이너리로). dispatch에 C1y/E6 배선.",
+        "inventory(set_inventory_status): routing-peer reason 갱신(atom 1 foundation), status reserved 유지(아직 forward 안 함=routing-router qa 패턴). cascade decay 0."
+      ],
+      "verification_bullets": [
+        "근본: R311qf carry가 routing-routes 데이터플레인 완결 후 다음 트랙으로 routing-failover/static-routes/scouting-gossip(전부 mesh 선행 필요=단일 star에서 premature)+routing-peer(mesh 생성=나머지 unblock) 제시. 사용자 결정으로 routing-peer 선택. 조사(Explore)로 accept_loop(inbound hold)+dial 경로(initiate_and_open_session)는 이미 존재, zid-keyed mesh dedup 부재 확인=순환 mesh forwarding은 dedup 없이 루프(무결성 위험). 따라서 routing-router qa(accept-hold)->qc(forward) 분해 미러로 atom 1=dial+accept hold-only foundation(루프 불가능=correct/complete), forwarding+zid dedup=atom 2. zenoh 정본 대조: accept는 role-agnostic(io/zenoh-links accept_task, whatami 무관)이라 peer도 동일 accept seam 재사용=face_drive_loop SSOT 정당.",
+        "설계: FaceSources 묶음은 too_many_arguments(8/7) 해소의 textbook param-object이자 의미 있는 추상(노드 face 출처=listen+dial)이며 accept_loop public 시그니처 보존(blast-radius 최소). dial_face는 open_face 대칭(accept_and_open_session<->initiate_and_open_session). hold-only 정당성: 빈 face source는 무매칭이라 루프 불가; atom 1은 mesh 형성만, forwarding은 dedup 선행 필요. NodeKind::Peer는 router에 비커플링(독립 node kind, 둘 다 0x02 whatami).",
+        "검증: routing-peer lib 6/6(accept 4 무변경=behavior-preserving + peer 2). C1w(routing-accept 회귀=accept_loop 래퍼화 무변경)·C1(기본 워크스페이스 144 ok-block)·clippy(tokio all-targets/no-default routing-peer + demo all-targets routing-peer + routing-accept)·fmt PASS. E3(router multi-peer e2e 회귀=바이너리 동작 보존)·E4(peer reject exit 2)·E6(peer mesh: peer-A가 dialed+accepted 동시 보유, peak 2/dialed 1/accepted 1 실프로세스 witness) 전부 1 passed. 판정=파이프 없는 $? 직접 캡처.",
+        "자가-적발 버그+수정: wz_peer_mesh 초안이 PortReservation::pick()를 2회 연속 호출=전역 port-mutex 재진입 자기-데드락(MutexGuard가 reservation 수명 동안 보유; 첫 진단을 외부 cargo 경합으로 오인했으나 데모 자식 0개+futex_wait로 정정). 의도된 pick_pair()(한 락 두 포트)로 수정. lib 테스트가 이미 실세션 mesh를 증명했고 e2e는 바이너리 witness 추가."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qg = routing-peer 트랙 atom 1: dial+accept mesh-node foundation(hold-only). peer_loop가 accept_loop의 face-drive 코어(face_drive_loop SSOT 추출)+dial-out face source(dial_face) 재사용; FaceSources{listener,dial_targets}로 두 출처 묶음. AcceptLoopSummary.dialed 추가. 데모 --peer 모드(catalog truthfulness cfg site)+e2e 2(mesh peak 2 + reject exit 2). routing-router qa(accept-hold)->qc(forward) 분해 미러. zenoh accept role-agnostic 대조. 인벤토리 reserved 유지(아직 forward 안 함).",
+        "다음 증분(routing-peer 트랙 atom 2): mesh forwarding = RouteTable/RoutingForwarder를 peer_loop에 배선 + zid-keyed loop 억제(순환 mesh에서 Put이 링을 돌지 않도록; 현 star의 src_id!=dst face skip은 순환 무방비). FaceRoute에 zid 필드(핸드셰이크/Initiate에서 추출)+forward_push에 source-zid suppression. 이후 routing-failover(라우터 face 손실시 대체경로)·routing-static-routes(config 경로)·scouting-gossip(피어 discovery)=전부 mesh 의존이라 atom 2 후 해금. atom 2 착지시 routing-peer inventory active 재검토.",
+        "defer(별도 wire-builder-SSOT 라운드, routing과 직교): literal_wireexpr(s)->WireexprOwned SSOT(21-site)+FLAG_N_PUSH_N const(17-site)+inline put_push 4. R311qf의 route cache 후속(YAGNI): per-resource 세분 무효화/LRU.",
+        "코드 LOCAL UNPUSHED: R311qf(2커밋 978183c..6a591c3: route cache)+R311qg(accept_loop.rs face_drive_loop/dial_face/peer_loop/FaceSources/단위2, Cargo 3레벨, 데모 --peer/run_peer/NodeKind::Peer, e2e 2, run-ci C1y/E6/E4, inventory). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qg=qf 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311qg: routing-peer atom 1 — dial+accept mesh 노드 foundation. peer_loop가 accept_loop 코어(face_drive_loop SSOT)+dial-out source 재사용(FaceSources). hold-only(forward+zid dedup=atom 2). lib 6+e2e 2.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: routing-peer atom 1. 공유 face-drive 코어 추출=face_drive_loop(private SSOT): accept_loop은 dial 없는 얇은 래퍼(public API 불변), peer_loop(신규 pub, cfg routing-peer)은 dial+accept. 두 face source를 FaceSources{listener,dial_targets}로 묶음(too_many_arguments textbook fix이자 의미 있는 추상=노드의 face 출처; accept_loop 시그니처 보존). dial_face(신규)=open_face의 dial 쌍둥이(TcpStream::connect+initiate_and_open_session, OpenError::Dial로 connect 실패 매핑, TCP-only=accept측 대칭). opening set을 Pin<Box<dyn Future>>(OpenFuture)로 박싱(open_face/dial_face 이종 future 공존). AcceptLoopSummary에 dialed:usize 추가(additive, accepted의 dial 대칭). 모듈 doc R311qg 갱신. 단위 4->6: peer_loop_dials_a_configured_peer_and_holds_it(dial 단독 hold)+peer_loop_holds_a_dialed_and_an_accepted_face_at_once(mesh keystone: peak 2, dialed 1, accepted 1).",
+        "crates/wz-runtime-tokio/Cargo.toml + wz/Cargo.toml + wz-ap-demo/Cargo.toml: routing-peer 피처 3레벨. tokio routing-peer=[\"routing-accept\"](코어 재사용, dial-out만 net-new). facade routing-peer=[\"routing-router\",\"wz-runtime-tokio?/routing-peer\"](hold-only이라 routing-routes 미pull). demo routing-peer=[\"wz/routing-peer\"].",
+        "crates/wz-ap-demo: --peer <listen> [--connect a,b] 모드(routing-peer 게이트). main.rs dispatch(--router 다음, 미feature시 exit 2 거부)+run_peer_mode. runner.rs run_peer=bind+dial target 파싱(SocketAddr)+peer_loop(NoOpForwarder hold-only)+face up/down 로그+summary(dialed/accepted/peak). args.rs NodeKind::Peer(cfg routing-peer, whatami 0x02=Peer, router에 비커플링).",
+        "crates/wz-integration-tests/tests: wz_peer_mesh.rs(positive: peer-B 순수 acceptor + peer-A --connect B + client-C, A가 dialed+accepted face 동시 보유=peak 2/dialed 1/accepted 1)+wz_peer_reject_without_feature.rs(negative: 기본 빌드가 --peer를 exit 2 거부).",
+        "scripts/run-ci.sh: Layer C1y(routing-peer 단위+clippy 3종+demo clippy, C1w 미러)+E6(peer mesh e2e)+E4 확장(peer reject도 기본 바이너리로). dispatch에 C1y/E6 배선.",
+        "inventory(set_inventory_status): routing-peer reason 갱신(atom 1 foundation), status reserved 유지(아직 forward 안 함=routing-router qa 패턴). cascade decay 0."
+      ],
+      "publishable_verification_bullets": [
+        "근본: R311qf carry가 routing-routes 데이터플레인 완결 후 다음 트랙으로 routing-failover/static-routes/scouting-gossip(전부 mesh 선행 필요=단일 star에서 premature)+routing-peer(mesh 생성=나머지 unblock) 제시. 사용자 결정으로 routing-peer 선택. 조사(Explore)로 accept_loop(inbound hold)+dial 경로(initiate_and_open_session)는 이미 존재, zid-keyed mesh dedup 부재 확인=순환 mesh forwarding은 dedup 없이 루프(무결성 위험). 따라서 routing-router qa(accept-hold)->qc(forward) 분해 미러로 atom 1=dial+accept hold-only foundation(루프 불가능=correct/complete), forwarding+zid dedup=atom 2. zenoh 정본 대조: accept는 role-agnostic(io/zenoh-links accept_task, whatami 무관)이라 peer도 동일 accept seam 재사용=face_drive_loop SSOT 정당.",
+        "설계: FaceSources 묶음은 too_many_arguments(8/7) 해소의 textbook param-object이자 의미 있는 추상(노드 face 출처=listen+dial)이며 accept_loop public 시그니처 보존(blast-radius 최소). dial_face는 open_face 대칭(accept_and_open_session<->initiate_and_open_session). hold-only 정당성: 빈 face source는 무매칭이라 루프 불가; atom 1은 mesh 형성만, forwarding은 dedup 선행 필요. NodeKind::Peer는 router에 비커플링(독립 node kind, 둘 다 0x02 whatami).",
+        "검증: routing-peer lib 6/6(accept 4 무변경=behavior-preserving + peer 2). C1w(routing-accept 회귀=accept_loop 래퍼화 무변경)·C1(기본 워크스페이스 144 ok-block)·clippy(tokio all-targets/no-default routing-peer + demo all-targets routing-peer + routing-accept)·fmt PASS. E3(router multi-peer e2e 회귀=바이너리 동작 보존)·E4(peer reject exit 2)·E6(peer mesh: peer-A가 dialed+accepted 동시 보유, peak 2/dialed 1/accepted 1 실프로세스 witness) 전부 1 passed. 판정=파이프 없는 $? 직접 캡처.",
+        "자가-적발 버그+수정: wz_peer_mesh 초안이 PortReservation::pick()를 2회 연속 호출=전역 port-mutex 재진입 자기-데드락(MutexGuard가 reservation 수명 동안 보유; 첫 진단을 외부 cargo 경합으로 오인했으나 데모 자식 0개+futex_wait로 정정). 의도된 pick_pair()(한 락 두 포트)로 수정. lib 테스트가 이미 실세션 mesh를 증명했고 e2e는 바이너리 witness 추가."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qg = routing-peer 트랙 atom 1: dial+accept mesh-node foundation(hold-only). peer_loop가 accept_loop의 face-drive 코어(face_drive_loop SSOT 추출)+dial-out face source(dial_face) 재사용; FaceSources{listener,dial_targets}로 두 출처 묶음. AcceptLoopSummary.dialed 추가. 데모 --peer 모드(catalog truthfulness cfg site)+e2e 2(mesh peak 2 + reject exit 2). routing-router qa(accept-hold)->qc(forward) 분해 미러. zenoh accept role-agnostic 대조. 인벤토리 reserved 유지(아직 forward 안 함).",
+        "다음 증분(routing-peer 트랙 atom 2): mesh forwarding = RouteTable/RoutingForwarder를 peer_loop에 배선 + zid-keyed loop 억제(순환 mesh에서 Put이 링을 돌지 않도록; 현 star의 src_id!=dst face skip은 순환 무방비). FaceRoute에 zid 필드(핸드셰이크/Initiate에서 추출)+forward_push에 source-zid suppression. 이후 routing-failover(라우터 face 손실시 대체경로)·routing-static-routes(config 경로)·scouting-gossip(피어 discovery)=전부 mesh 의존이라 atom 2 후 해금. atom 2 착지시 routing-peer inventory active 재검토.",
+        "defer(별도 wire-builder-SSOT 라운드, routing과 직교): literal_wireexpr(s)->WireexprOwned SSOT(21-site)+FLAG_N_PUSH_N const(17-site)+inline put_push 4. R311qf의 route cache 후속(YAGNI): per-resource 세분 무효화/LRU.",
+        "코드 LOCAL UNPUSHED: R311qf(2커밋 978183c..6a591c3: route cache)+R311qg(accept_loop.rs face_drive_loop/dial_face/peer_loop/FaceSources/단위2, Cargo 3레벨, 데모 --peer/run_peer/NodeKind::Peer, e2e 2, run-ci C1y/E6/E4, inventory). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qg=qf 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
@@ -46613,7 +46663,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh peer mode",
-      "reason": "F=peer-to-peer routing; P=zenoh peer; C=alternative to routing-client"
+      "reason": "R311qg atom 1: dial+accept mesh-node foundation (peer_loop reuses the accept_loop face-drive core + a dial-out face source, hold-only). Demo --peer exercises it. Reserved until mesh forwarding + zid-keyed loop dedup land (atom 2). F=peer-to-peer routing; P=zenoh peer."
     },
     "routing-router": {
       "status": "active",
