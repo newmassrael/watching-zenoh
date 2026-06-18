@@ -427,7 +427,9 @@ routing-routes = [
 # R311qq — pulls `petgraph` for the linkstate-peer topology graph
 # (`linkstate_network`, the wz mirror of zenoh net/protocol/network.rs);
 # `dep:petgraph` keeps the graph dependency off every non-peer build.
-routing-peer = ["routing-accept", "dep:petgraph"]
+# R311qr — pulls `wz-codecs/codec-linkstate` so the graph's LinkStateList
+# ingest (c2b) can consume the decoded `LinkstateListOwned`.
+routing-peer = ["routing-accept", "dep:petgraph", "wz-codecs/codec-linkstate"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the

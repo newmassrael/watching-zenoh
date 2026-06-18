@@ -41336,6 +41336,46 @@
         "코드 LOCAL UNPUSHED: qm(b2a4567)+ee26e42(SCE핀)+qn(76221d7)+qo(3470e46)+qp(8c65a49)+qq(linkstate_network+petgraph 0.6+ledger). push 미동의=로컬 커밋만. 엔트리 qq=qp 후속."
       ]
     },
+    "Round 311qr": {
+      "decision_summary": "R311qr: linkstate 포팅 (c) c2b LinkStateList ingest. convert_to_local_link_states(psid→zid 해석+mapping 등록+links→edges, whatami host 검증) + process_linkstates(sn-staleness gate+노드 갱신) + ingest_linkstate_list. zenoh convert/process_linkstates_peer_to_peer 미러. 5 c2b unit. gossip/autoconnect/locators/set_local_psid_mapping=defer.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_network.rs c2b 추가: ingest_linkstate_list(src_link_id, LinkstateListOwned)→Changes = convert_to_local_link_states(psid→zid 해석: entry.zid 있으면 set_zid_mapping 등록·없으면 get_zid 조회, 미지 psid drop; whatami∈{1,2,4} 검증·아니면 entry drop=qp host 의무; entry.links psid→zid edges+weight 부착) + process_linkstates(sn-staleness gate: node.sn>=ls.sn면 무시=stale/dup drop; None→add_node, Some→sn+links 갱신). LocalLinkState 중간타입 + Changes{updated: Vec<Zid>}. zenoh network.rs:457-616 미러.",
+        "defer(forwarding/gossip atom으로): set_local_psid_mapping(forwarding table용 psid→local idx; convert에서 graph borrow 불요해짐), gossip propagation/autoconnect/connect_discovered_peer(c3 driver), locators ingest(node.locators=None until gossip/autoconnect atom).",
+        "crates/wz-runtime-tokio/Cargo.toml: routing-peer가 wz-codecs/codec-linkstate forward(ingest가 디코드된 LinkstateListOwned 소비)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 10/10 PASS(c2a 5 + c2b 5): ingest_adds_node_and_learns_mapping(zid+psid→zid 등록), ingest_sn_staleness_gate(dup sn 무시/strictly-newer 갱신), ingest_drops_entry_with_invalid_whatami(whatami host 검증), ingest_resolves_link_psids_to_zid_edges(links→edges, 동일 list 내 선행 entry 매핑 활용 default weight 100), ingest_from_unknown_link_is_dropped.",
+        "fmt --check + clippy --lib clean. default 빌드(routing-peer off, codec-linkstate 미forward) 무영향. sce_forge_runtime 접근 가능(테스트 SceBytes 구성). validate_workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qr = linkstate 포팅 (c) c2b LinkStateList ingest 완료. convert_to_local_link_states(psid→zid 해석 + whatami host 검증) + process_linkstates(sn-staleness gate) + ingest_linkstate_list. zenoh convert/process_linkstates_peer_to_peer 미러. 5 c2b unit PASS.",
+        "다음 c2c: update_edge — node.links(HashMap<zid,weight>)를 petgraph edge로 반영(zenoh update_edge network.rs:424, 양방향 weight 결합). 그래야 (d) Dijkstra/spanning-tree가 그래프 traverse 가능. 현재 node.links는 저장만 됐고 petgraph edge 미생성.",
+        "이후 c3: accept/peer loop 배선(face up→add_link, inbound OAM→try_parse_linkstate_oam→ingest_linkstate_list, self-linkstate make_msg 주기 송신 + Changes 기반 gossip propagate), (d) spanning-tree/Dijkstra forwarding(zenoh trees/distances). defer 추적: gossip/autoconnect/locators/set_local_psid_mapping(forwarding).",
+        "코드 LOCAL UNPUSHED 7커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr. push 미동의=로컬 커밋만. 추적부채: ENC_*/Z flag 6-site wire_const 통합."
+      ],
+      "publishable_decision_summary": "R311qr: linkstate 포팅 (c) c2b LinkStateList ingest. convert_to_local_link_states(psid→zid 해석+mapping 등록+links→edges, whatami host 검증) + process_linkstates(sn-staleness gate+노드 갱신) + ingest_linkstate_list. zenoh convert/process_linkstates_peer_to_peer 미러. 5 c2b unit. gossip/autoconnect/locators/set_local_psid_mapping=defer.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_network.rs c2b 추가: ingest_linkstate_list(src_link_id, LinkstateListOwned)→Changes = convert_to_local_link_states(psid→zid 해석: entry.zid 있으면 set_zid_mapping 등록·없으면 get_zid 조회, 미지 psid drop; whatami∈{1,2,4} 검증·아니면 entry drop=qp host 의무; entry.links psid→zid edges+weight 부착) + process_linkstates(sn-staleness gate: node.sn>=ls.sn면 무시=stale/dup drop; None→add_node, Some→sn+links 갱신). LocalLinkState 중간타입 + Changes{updated: Vec<Zid>}. zenoh network.rs:457-616 미러.",
+        "defer(forwarding/gossip atom으로): set_local_psid_mapping(forwarding table용 psid→local idx; convert에서 graph borrow 불요해짐), gossip propagation/autoconnect/connect_discovered_peer(c3 driver), locators ingest(node.locators=None until gossip/autoconnect atom).",
+        "crates/wz-runtime-tokio/Cargo.toml: routing-peer가 wz-codecs/codec-linkstate forward(ingest가 디코드된 LinkstateListOwned 소비)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 10/10 PASS(c2a 5 + c2b 5): ingest_adds_node_and_learns_mapping(zid+psid→zid 등록), ingest_sn_staleness_gate(dup sn 무시/strictly-newer 갱신), ingest_drops_entry_with_invalid_whatami(whatami host 검증), ingest_resolves_link_psids_to_zid_edges(links→edges, 동일 list 내 선행 entry 매핑 활용 default weight 100), ingest_from_unknown_link_is_dropped.",
+        "fmt --check + clippy --lib clean. default 빌드(routing-peer off, codec-linkstate 미forward) 무영향. sce_forge_runtime 접근 가능(테스트 SceBytes 구성). validate_workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qr = linkstate 포팅 (c) c2b LinkStateList ingest 완료. convert_to_local_link_states(psid→zid 해석 + whatami host 검증) + process_linkstates(sn-staleness gate) + ingest_linkstate_list. zenoh convert/process_linkstates_peer_to_peer 미러. 5 c2b unit PASS.",
+        "다음 c2c: update_edge — node.links(HashMap<zid,weight>)를 petgraph edge로 반영(zenoh update_edge network.rs:424, 양방향 weight 결합). 그래야 (d) Dijkstra/spanning-tree가 그래프 traverse 가능. 현재 node.links는 저장만 됐고 petgraph edge 미생성.",
+        "이후 c3: accept/peer loop 배선(face up→add_link, inbound OAM→try_parse_linkstate_oam→ingest_linkstate_list, self-linkstate make_msg 주기 송신 + Changes 기반 gossip propagate), (d) spanning-tree/Dijkstra forwarding(zenoh trees/distances). defer 추적: gossip/autoconnect/locators/set_local_psid_mapping(forwarding).",
+        "코드 LOCAL UNPUSHED 7커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr. push 미동의=로컬 커밋만. 추적부채: ENC_*/Z flag 6-site wire_const 통합."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
