@@ -28,6 +28,14 @@
 //!   partition heals). It lands with the c3b TX/flood atom, where a
 //!   realistic multi-node topology makes the prune testable (the current
 //!   unit tests model artificially-detached nodes).
+//! - `propagate_link_states` — zenoh re-floods a freshly-received (changed)
+//!   link-state onward to its OTHER links at the END of the receive path
+//!   (`network.rs:804`). This is the mechanism that carries topology
+//!   transitively across a >2-node mesh in production; without it, even a
+//!   wired forwarder only learns its direct neighbours' floods. It lands
+//!   with the flood/send path (c3d) — distinct from any periodic refresh.
+//!   (The `topology_propagates_transitively_over_a_line` test SIMULATES
+//!   this by hand-feeding each hop; production has no equivalent yet.)
 //! - gossip / autoconnect propagation, locator ingest, and the
 //!   `local_mappings` forwarding table.
 //! - the real handshake `whatami` (the driver currently records every
@@ -65,6 +73,15 @@ fn is_valid_whatami(w: u8) -> bool {
     matches!(w, WHATAMI_ROUTER | WHATAMI_PEER | WHATAMI_CLIENT)
 }
 
+/// Maximum zid length in bytes (zenoh `ZenohIdProto::MAX_SIZE`). zenoh
+/// rejects an oversized zid at DECODE (the zid codec caps at this); the wz
+/// codec carries the raw bytes without that check, so the ingest discharges
+/// the host-validation obligation (the same contract as the `whatami` range
+/// check) by dropping a longer zid. Keeping every `Node.zid` <= 16 by
+/// construction is also what makes the `build_linkstate_list` re-encode
+/// infallible.
+pub const ZENOHID_MAX_SIZE: usize = 16;
+
 /// LinkState `options` flag bits (zenoh `linkstate.rs:20-23`): which optional
 /// fields a built LinkState carries. P=zid, W=whatami, H=link weights. L
 /// (locators, 0x04) is unused here — locator advertisement is deferred.
@@ -90,6 +107,13 @@ fn zid_to_le_16(zid: &Zid) -> [u8; 16] {
     buf
 }
 
+/// The wire `psid` for a local node — its petgraph `NodeIndex` as the
+/// compact integer a peer references the node by (zenoh `idx.index()`).
+/// Named once so the TX build does not re-spell the `as u64` cast.
+fn local_psid(idx: NodeIndex) -> u64 {
+    idx.index() as u64
+}
+
 /// A routing identity — the raw zid bytes, matching the wz face / session
 /// `peer_zid` representation (`Vec<u8>`).
 pub type Zid = Vec<u8>;
@@ -105,14 +129,15 @@ pub type Psid = u64;
 /// A received link-state entry after pass 1 of
 /// `convert_to_local_link_states` (its own zid resolved + mapping
 /// registered), still carrying its raw psid-space `links` / `weights` for
-/// pass 2 to resolve: `(zid, whatami, sn, links, weights)`.
-type ResolvedEntry = (
-    Zid,
-    u8,
-    u64,
-    Vec<LinkstateLink>,
-    Option<Vec<LinkstateWeight>>,
-);
+/// pass 2 to resolve. A named struct (not a tuple) so the fields cannot be
+/// transposed — and to match [`LocalLinkState`], the pass-2 output.
+struct ResolvedEntry {
+    zid: Zid,
+    whatami: u8,
+    sn: u64,
+    links: Vec<LinkstateLink>,
+    weights: Option<Vec<LinkstateWeight>>,
+}
 
 /// An edge weight (zenoh `LinkEdgeWeight`, `net/protocol/linkstate.rs:54`):
 /// an optional explicit weight; absent means the default. A `NonZeroU16`
@@ -411,8 +436,12 @@ impl LinkstateNetwork {
     /// Ingest a `LinkStateList` received on link `src_link_id`: learn its
     /// psid<->zid mappings, then apply the (zid-resolved) link-states to
     /// the graph under the sn-staleness gate. Returns the nodes it changed.
-    /// Mirrors zenoh's receive path: `convert_to_local_link_states` ->
-    /// `process_linkstates_peer_to_peer` (`network.rs:457-616`).
+    /// Mirrors zenoh's receive path for the linkstate-peer (full-linkstate)
+    /// mode — `convert_to_local_link_states` (`network.rs:457`) then the
+    /// `link_states` full path (`network.rs:705-808`: node update + edge
+    /// rebuild). NOT the `!full_linkstate` `process_linkstates_peer_to_peer`
+    /// (that path does no edge rebuild); the linkstate-peer HAT sets
+    /// `full_linkstate = true` (`hat/linkstate_peer/mod.rs:203`).
     pub fn ingest_linkstate_list(
         &mut self,
         src_link_id: LinkId,
@@ -445,7 +474,7 @@ impl LinkstateNetwork {
             for (dest_zid, weight) in &node.links {
                 if let Some(dest_idx) = self.get_idx(dest_zid) {
                     links.push(LinkstateLink {
-                        psid: dest_idx.index() as u64,
+                        psid: local_psid(dest_idx),
                     });
                     weights.push(LinkstateWeight {
                         weight: weight.as_raw(),
@@ -466,10 +495,15 @@ impl LinkstateNetwork {
             }
             link_states.push(LinkstateOwned {
                 options,
-                psid: idx.index() as u64,
+                psid: local_psid(idx),
                 sn: node.sn,
                 zid_len: Some(node.zid.len() as u64),
-                zid: Some(SceBytes::from_slice(&node.zid).expect("zid is <= 16 bytes")),
+                // every graph zid is <= ZENOHID_MAX_SIZE by construction (the
+                // ingest drops an oversized wire zid; the handshake supplies a
+                // valid self/neighbour zid), so this never exceeds capacity.
+                zid: Some(
+                    SceBytes::from_slice(&node.zid).expect("graph zid is <= ZENOHID_MAX_SIZE"),
+                ),
                 whatami: node.whatami,
                 num_locators: None,
                 locators: None,
@@ -518,6 +552,13 @@ impl LinkstateNetwork {
                 // mapping) or referenced by a previously-learned psid.
                 let zid = match entry.zid {
                     Some(bytes) => {
+                        // host-validation obligation (like whatami below):
+                        // zenoh rejects a zid > MAX_SIZE at decode; the wz
+                        // codec carries raw bytes, so drop an oversized one
+                        // here rather than admit it to the graph.
+                        if bytes.as_slice().len() > ZENOHID_MAX_SIZE {
+                            continue;
+                        }
                         let zid = bytes.as_slice().to_vec();
                         src_link.set_zid_mapping(entry.psid, zid.clone());
                         zid
@@ -535,7 +576,13 @@ impl LinkstateNetwork {
                     Some(w) if is_valid_whatami(w) => w,
                     Some(_) => continue,
                 };
-                resolved.push((zid, whatami, entry.sn, entry.links, entry.weights));
+                resolved.push(ResolvedEntry {
+                    zid,
+                    whatami,
+                    sn: entry.sn,
+                    links: entry.links,
+                    weights: entry.weights,
+                });
             }
             resolved
         };
@@ -549,36 +596,46 @@ impl LinkstateNetwork {
             .expect("link present (checked above)");
         resolved
             .into_iter()
-            .map(|(zid, whatami, sn, entry_links, weights)| {
-                let mut links = HashMap::with_capacity(entry_links.len());
-                for (i, link) in entry_links.iter().enumerate() {
-                    if let Some(dst) = src_link.get_zid(link.psid) {
-                        let weight = weights
-                            .as_ref()
-                            .and_then(|ws| ws.get(i))
-                            .map(|w| LinkEdgeWeight::from_raw(w.weight))
-                            .unwrap_or_default();
-                        links.insert(dst.clone(), weight);
+            .map(
+                |ResolvedEntry {
+                     zid,
+                     whatami,
+                     sn,
+                     links: entry_links,
+                     weights,
+                 }| {
+                    let mut links = HashMap::with_capacity(entry_links.len());
+                    for (i, link) in entry_links.iter().enumerate() {
+                        if let Some(dst) = src_link.get_zid(link.psid) {
+                            let weight = weights
+                                .as_ref()
+                                .and_then(|ws| ws.get(i))
+                                .map(|w| LinkEdgeWeight::from_raw(w.weight))
+                                .unwrap_or_default();
+                            links.insert(dst.clone(), weight);
+                        }
+                        // unknown link psid -> drop that edge (zenoh network.rs:544)
                     }
-                    // unknown link psid -> drop that edge (zenoh network.rs:544)
-                }
-                LocalLinkState {
-                    sn,
-                    zid,
-                    whatami,
-                    links,
-                }
-            })
+                    LocalLinkState {
+                        sn,
+                        zid,
+                        whatami,
+                        links,
+                    }
+                },
+            )
             .collect()
     }
 
     /// Apply zid-resolved link-states to the graph under the sn-staleness
     /// gate, then rebuild the changed node's edges. A new node is added; an
     /// existing node is updated only if the advertised sn is strictly newer
-    /// (a stale or duplicate advertisement is ignored). Mirrors zenoh's
-    /// `link_states` node-update + edge-rebuild (`network.rs:559-616,
-    /// 728-783`) minus the gossip/autoconnect propagation (the c3 driver
-    /// concern). Returns the changed nodes' zids.
+    /// (a stale or duplicate advertisement is ignored). Mirrors the
+    /// `full_linkstate` `link_states` node-update + edge-rebuild
+    /// (`network.rs:728-783`) minus, for now, the trailing
+    /// `remove_detached_nodes` prune and the `propagate_link_states`
+    /// receive-side re-flood (both tracked deferrals — see the module doc).
+    /// Returns the changed nodes' zids.
     fn process_linkstates(&mut self, states: Vec<LocalLinkState>) -> Changes {
         let mut changes = Changes::default();
         for ls in states {
@@ -657,8 +714,9 @@ impl LinkstateNetwork {
     /// `network.rs:430-434`), NOT the trimmed wire bytes, so a sub-16-byte
     /// zid produces the byte-identical jitter zenohd computes — otherwise
     /// a mixed wz/zenohd mesh could pick different equal-cost next hops and
-    /// loop. `DefaultHasher::new()` is fixed-seed, so it is reproducible
-    /// across processes.
+    /// loop. Cross-process reproducibility relies on `DefaultHasher::new()`
+    /// being fixed-seed (std's SipHash with constant keys) — the same
+    /// implementation detail zenoh depends on, so wz and zenohd agree.
     fn update_edge(&mut self, idx1: NodeIndex, idx2: NodeIndex) {
         use std::hash::Hasher;
 
@@ -1314,6 +1372,54 @@ mod tests {
             a.next_hop(&zid(0x0A), &zid(0x0C)),
             Some(zid(0x0B)),
             "A routes to C through B"
+        );
+    }
+
+    #[test]
+    fn ingest_drops_entry_with_oversized_zid() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let link = net.add_link(zid(0x07), 2);
+        // a 17-byte zid exceeds ZENOHID_MAX_SIZE -> the entry is dropped (the
+        // host-validation obligation zenoh enforces at decode), so it never
+        // reaches the graph and the later build re-encode stays infallible.
+        let big = vec![0xAB_u8; ZENOHID_MAX_SIZE + 1];
+        let changes =
+            net.ingest_linkstate_list(link, list(vec![entry(11, 5, Some(&big), Some(2), &[])]));
+        assert!(changes.updated.is_empty(), "oversized-zid entry dropped");
+        assert!(net.get_node(&big).is_none(), "oversized zid not admitted");
+    }
+
+    #[test]
+    fn build_encode_decode_ingest_round_trips_through_the_wire() {
+        use sce_forge_runtime::codec::SceCursor;
+        use wz_codecs::linkstate_list::LinkstateList;
+        // A builds its list and serializes it through the REAL LinkStateList
+        // codec; B decodes the wire bytes and ingests — exercising the
+        // encode/decode round-trip the in-process convergence tests skip.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        a.add_link(zid(0x0B), 2);
+        let wire = a
+            .build_linkstate_list()
+            .try_as_borrowed()
+            .expect("borrow built list")
+            .encode_to_vec();
+
+        let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
+            .expect("decode list wire")
+            .try_into_owned()
+            .expect("into owned");
+
+        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
+        let lb_a = b.add_link(zid(0x0A), 2);
+        b.ingest_linkstate_list(lb_a, decoded);
+        b.compute_trees();
+        assert!(
+            b.get_node(&zid(0x0A)).is_some(),
+            "B learned A from the wire-decoded list"
+        );
+        assert!(
+            b.edge_weight(&zid(0x0A), &zid(0x0B)).is_some(),
+            "the A<->B edge formed from wire-decoded links"
         );
     }
 }

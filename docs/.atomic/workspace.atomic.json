@@ -41622,6 +41622,48 @@
         "코드 LOCAL UNPUSHED 14커밋: qm(b2a4567)~qw(c7c7f3b) + qx. push 미동의=로컬 커밋만."
       ]
     },
+    "Round 311qy": {
+      "decision_summary": "R311qy: qx(c3b) 4-에이전트 독립 적대 세션리뷰 remediation. CRITICAL zid 길이 검증 누락 수정(convert ingest서 zid>16 drop + ZENOHID_MAX_SIZE=zenoh decode-time cap의 host 의무 이행, build .expect unreachable화) + wire round-trip 테스트(build→encode→decode→ingest) + honesty 정정(qx의 'inert in production 해소'는 과장=프로덕션 여전히 inert, caller 0; propagate_link_states 수신 re-flood 누락을 deferral 명시) + MINOR(ResolvedEntry tuple→struct·psid helper·citation full_linkstate·DefaultHasher hedge). options-SSOT=SCE owned-flag-setter 리포트 추적.",
+      "changes_bullets": [
+        "CRITICAL zid 길이 검증: convert_to_local_link_states가 zid>ZENOHID_MAX_SIZE(16) entry를 drop(whatami와 동일 host-validation 의무; zenoh는 decode서 ZenohIdProto cap으로 거부, wz 코덱은 raw bytes 운반이라 ingest가 이행). ZENOHID_MAX_SIZE pub 상수. build_linkstate_list의 .expect는 이제 genuinely unreachable(모든 graph zid≤16 by construction=ingest drop + 핸드셰이크 valid zid). 테스트 ingest_drops_entry_with_oversized_zid(17B drop).",
+        "wire round-trip 테스트 build_encode_decode_ingest_round_trips_through_the_wire: build_linkstate_list→try_as_borrowed().encode_to_vec()→LinkstateList::decode().try_into_owned()→ingest. convergence 테스트가 우회하던 실제 LinkStateList 코덱 왕복을 검증.",
+        "honesty: 모듈 doc에 propagate_link_states(수신 시 onward re-flood, network.rs:804) EXPLICITLY DEFERRED 추가(>2-node mesh transitive 전파의 프로덕션 메커니즘; 없으면 배선돼도 직접 이웃만 학습; transitive 테스트는 이를 수동 재현). ingest/process_linkstates citation을 full_linkstate path(728-783; linkstate-peer=full_linkstate=true)로 정정(기존 559-616 p2p는 edge-rebuild 안 함). DefaultHasher 재현성을 std SipHash 구현 의존으로 hedge(zenoh와 동일 가정).",
+        "MINOR: ResolvedEntry tuple→named struct(필드 전치 불가, pass-2 출력 LocalLinkState와 일관). local_psid(idx) helper(.index() as u64 TX 2-site re-spell 제거)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-routing-graph 23 PASS(신규 2: oversized-zid drop, wire round-trip). driver linkstate 5 PASS. clippy -p wz-routing-graph + -p wz-runtime-tokio(routing-peer all-targets) -D warnings clean. cargo fmt --all --check exit 0. wz-runtime-tokio default 빌드 무영향.",
+        "4-에이전트 독립 적대 리뷰 결과: 알고리즘 faithful 재확인(build_linkstate_list=make_link_state/make_msg, 2-pass convert, whatami round-trip 모두 zenoh 일치). CRITICAL zid 검증 누락 + propagate_link_states 누락(deferral 미기재) + qx ledger 과장을 자평+직전 qq~qu 리뷰 모두 놓침. c2b single-pass convert 발산도 qq~qu 리뷰 통과 후 qx서 수정됐음."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qy = qx(c3b) 4-에이전트 독립 적대 세션리뷰 remediation. CRITICAL zid 길이 검증(convert ingest drop>16) + wire round-trip 테스트 + honesty(propagate_link_states 명시 defer·citation 정정) + MINOR(ResolvedEntry struct·psid helper·DefaultHasher hedge). 교훈: 반복 독립 리뷰가 correctness(zid)+honesty(inert/re-flood) 갭 적발=N번째 보강.",
+        "정정(frozen-ledger 신규 entry): qx carry \"self-linkstate TX 완료=inert in production 핵심 TX 갭 해소\"는 과장. 정확히는 graph→LinkStateList builder(build_linkstate_list) + OAM-encode helper(self_linkstate_oam) 추가; 프로덕션 토폴로지 교환은 여전히 INERT(self_linkstate_oam/build_linkstate_list 프로덕션 caller 0=c3d seam; flood/propagate_link_states 없음). 코드 doc은 정직했고 ledger 문구만 과장.",
+        "추적 부채: (1) options-SSOT=graph OPT_P/W/H가 코덱 정의 비트 재정의; 근본=LinkstateOwned flag setter 부재(borrowed만)=ENC_*/Z wire_const 부채와 동근; SCE owned-flag-setter 리포트→핀 bump→adopt 루프([[feedback-sce-codegen-issue-stop-first]]); 7+ site. (2) propagate_link_states 실구현(c3d flood와). (3) Zid=Vec<u8>→16B newtype(검증은 ingest로, 표현불가는 newtype). (4) drop 관측성(tracing). (5) remove_detached_nodes(c3d).",
+        "다음: c3d(forwarder를 peer_loop 배선+주기 flood+propagate_link_states+2-peer e2e)=프로덕션 토폴로지 교환 실작동. 또는 c3c data-forward. 코드 LOCAL UNPUSHED 1커밋: qy(qm~qx=PUSHED)."
+      ],
+      "publishable_decision_summary": "R311qy: qx(c3b) 4-에이전트 독립 적대 세션리뷰 remediation. CRITICAL zid 길이 검증 누락 수정(convert ingest서 zid>16 drop + ZENOHID_MAX_SIZE=zenoh decode-time cap의 host 의무 이행, build .expect unreachable화) + wire round-trip 테스트(build→encode→decode→ingest) + honesty 정정(qx의 'inert in production 해소'는 과장=프로덕션 여전히 inert, caller 0; propagate_link_states 수신 re-flood 누락을 deferral 명시) + MINOR(ResolvedEntry tuple→struct·psid helper·citation full_linkstate·DefaultHasher hedge). options-SSOT=SCE owned-flag-setter 리포트 추적.",
+      "publishable_changes_bullets": [
+        "CRITICAL zid 길이 검증: convert_to_local_link_states가 zid>ZENOHID_MAX_SIZE(16) entry를 drop(whatami와 동일 host-validation 의무; zenoh는 decode서 ZenohIdProto cap으로 거부, wz 코덱은 raw bytes 운반이라 ingest가 이행). ZENOHID_MAX_SIZE pub 상수. build_linkstate_list의 .expect는 이제 genuinely unreachable(모든 graph zid≤16 by construction=ingest drop + 핸드셰이크 valid zid). 테스트 ingest_drops_entry_with_oversized_zid(17B drop).",
+        "wire round-trip 테스트 build_encode_decode_ingest_round_trips_through_the_wire: build_linkstate_list→try_as_borrowed().encode_to_vec()→LinkstateList::decode().try_into_owned()→ingest. convergence 테스트가 우회하던 실제 LinkStateList 코덱 왕복을 검증.",
+        "honesty: 모듈 doc에 propagate_link_states(수신 시 onward re-flood, network.rs:804) EXPLICITLY DEFERRED 추가(>2-node mesh transitive 전파의 프로덕션 메커니즘; 없으면 배선돼도 직접 이웃만 학습; transitive 테스트는 이를 수동 재현). ingest/process_linkstates citation을 full_linkstate path(728-783; linkstate-peer=full_linkstate=true)로 정정(기존 559-616 p2p는 edge-rebuild 안 함). DefaultHasher 재현성을 std SipHash 구현 의존으로 hedge(zenoh와 동일 가정).",
+        "MINOR: ResolvedEntry tuple→named struct(필드 전치 불가, pass-2 출력 LocalLinkState와 일관). local_psid(idx) helper(.index() as u64 TX 2-site re-spell 제거)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-routing-graph 23 PASS(신규 2: oversized-zid drop, wire round-trip). driver linkstate 5 PASS. clippy -p wz-routing-graph + -p wz-runtime-tokio(routing-peer all-targets) -D warnings clean. cargo fmt --all --check exit 0. wz-runtime-tokio default 빌드 무영향.",
+        "4-에이전트 독립 적대 리뷰 결과: 알고리즘 faithful 재확인(build_linkstate_list=make_link_state/make_msg, 2-pass convert, whatami round-trip 모두 zenoh 일치). CRITICAL zid 검증 누락 + propagate_link_states 누락(deferral 미기재) + qx ledger 과장을 자평+직전 qq~qu 리뷰 모두 놓침. c2b single-pass convert 발산도 qq~qu 리뷰 통과 후 qx서 수정됐음."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qy = qx(c3b) 4-에이전트 독립 적대 세션리뷰 remediation. CRITICAL zid 길이 검증(convert ingest drop>16) + wire round-trip 테스트 + honesty(propagate_link_states 명시 defer·citation 정정) + MINOR(ResolvedEntry struct·psid helper·DefaultHasher hedge). 교훈: 반복 독립 리뷰가 correctness(zid)+honesty(inert/re-flood) 갭 적발=N번째 보강.",
+        "정정(frozen-ledger 신규 entry): qx carry \"self-linkstate TX 완료=inert in production 핵심 TX 갭 해소\"는 과장. 정확히는 graph→LinkStateList builder(build_linkstate_list) + OAM-encode helper(self_linkstate_oam) 추가; 프로덕션 토폴로지 교환은 여전히 INERT(self_linkstate_oam/build_linkstate_list 프로덕션 caller 0=c3d seam; flood/propagate_link_states 없음). 코드 doc은 정직했고 ledger 문구만 과장.",
+        "추적 부채: (1) options-SSOT=graph OPT_P/W/H가 코덱 정의 비트 재정의; 근본=LinkstateOwned flag setter 부재(borrowed만)=ENC_*/Z wire_const 부채와 동근; SCE owned-flag-setter 리포트→핀 bump→adopt 루프([[feedback-sce-codegen-issue-stop-first]]); 7+ site. (2) propagate_link_states 실구현(c3d flood와). (3) Zid=Vec<u8>→16B newtype(검증은 ingest로, 표현불가는 newtype). (4) drop 관측성(tracing). (5) remove_detached_nodes(c3d).",
+        "다음: c3d(forwarder를 peer_loop 배선+주기 flood+propagate_link_states+2-peer e2e)=프로덕션 토폴로지 교환 실작동. 또는 c3c data-forward. 코드 LOCAL UNPUSHED 1커밋: qy(qm~qx=PUSHED)."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
