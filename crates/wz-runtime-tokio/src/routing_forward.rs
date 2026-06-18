@@ -63,6 +63,22 @@ impl RoutingForwarder {
     pub fn subscription_count(&self) -> usize {
         self.table.borrow().subscription_count()
     }
+
+    /// Number of currently-valid cached routes
+    /// ([`RouteTable::cached_route_count`]) — a route-cache state witness: a
+    /// route appears after a Put on a fresh keyexpr, and the count drops to 0
+    /// when a declaration / face change invalidates the cache.
+    pub fn cached_route_count(&self) -> usize {
+        self.table.borrow().cached_route_count()
+    }
+
+    /// Total route computations (cache misses) so far
+    /// ([`RouteTable::route_computations`]) — the cache-effectiveness witness: a
+    /// repeated Put on a cached keyexpr does not increment it, a Put after an
+    /// invalidation does.
+    pub fn route_computations(&self) -> u64 {
+        self.table.borrow().route_computations()
+    }
 }
 
 impl Default for RoutingForwarder {
@@ -521,6 +537,169 @@ mod tests {
         // Put (alias removal must not break a resolved route).
         publish(&fwd, 1, "home/temp");
         assert_eq!(fwd.forwarded(), 1, "the existing literal sub still routes");
+        assert_eq!(consumer_sink.frame_count(), 1);
+    }
+
+    #[test]
+    fn repeated_puts_on_one_keyexpr_are_served_from_the_route_cache() {
+        // R311qf: the first Put on a keyexpr computes the destination set (one
+        // declared_intersects scan) and caches it; a second Put on the SAME
+        // keyexpr is served from the cache — no second computation — and still
+        // forwards correctly. The cache hit path: same result, computed once.
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_sub(&fwd, 0, 1, "home/temp");
+        publish(&fwd, 1, "home/temp");
+        publish(&fwd, 1, "home/temp");
+
+        assert_eq!(fwd.forwarded(), 2, "both Puts forwarded");
+        assert_eq!(consumer_sink.frame_count(), 2, "subscriber received both");
+        assert_eq!(
+            fwd.route_computations(),
+            1,
+            "the second Put was served from cache — only one route computation"
+        );
+        assert_eq!(fwd.cached_route_count(), 1, "one keyexpr route cached");
+    }
+
+    #[test]
+    fn a_new_subscription_invalidates_the_route_cache() {
+        // R311qf: a Put caches a route; a subsequent DeclareSubscriber on the
+        // same keyexpr from another face must invalidate that cache, so the next
+        // Put recomputes (a fresh scan) and fans out to BOTH subscribers —
+        // proving the cache cannot serve a stale destination set across a
+        // subscription change.
+        let fwd = RoutingForwarder::new();
+        let (sub_a, sink_a) = recording_actions();
+        let (sub_b, sink_b) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &sub_a);
+        fwd.register(FaceId(1), &sub_b);
+        fwd.register(FaceId(2), &producer);
+
+        declare_sub(&fwd, 0, 1, "home/temp");
+        publish(&fwd, 2, "home/temp"); // caches {face 0}
+        assert_eq!(fwd.route_computations(), 1, "first Put computed the route");
+        assert_eq!(sink_a.frame_count(), 1);
+        assert_eq!(sink_b.frame_count(), 0);
+
+        // A new subscriber on the SAME keyexpr — invalidates the cache.
+        declare_sub(&fwd, 1, 1, "home/temp");
+        publish(&fwd, 2, "home/temp");
+
+        assert_eq!(
+            fwd.route_computations(),
+            2,
+            "the new subscription forced a recomputation"
+        );
+        assert_eq!(sink_a.frame_count(), 2, "first subscriber still routed");
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the recomputed route picked up the new subscriber"
+        );
+    }
+
+    #[test]
+    fn a_departed_face_invalidates_the_route_cache() {
+        // R311qf: a Put caches a route to a subscriber; when that subscriber's
+        // face leaves, the cache must invalidate so the next Put recomputes (and
+        // forwards to nobody) rather than serving the departed face from a stale
+        // entry.
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_sub(&fwd, 0, 1, "home/temp");
+        publish(&fwd, 1, "home/temp"); // caches {face 0}
+        assert_eq!(consumer_sink.frame_count(), 1);
+        assert_eq!(fwd.route_computations(), 1);
+
+        fwd.deregister(FaceId(0)); // the subscriber leaves
+        publish(&fwd, 1, "home/temp");
+
+        assert_eq!(
+            fwd.route_computations(),
+            2,
+            "the departed face invalidated the cache, forcing a recomputation"
+        );
+        assert_eq!(
+            consumer_sink.frame_count(),
+            1,
+            "no forward after the subscriber left (recomputed empty route)"
+        );
+        assert_eq!(
+            fwd.forwarded(),
+            1,
+            "total forwards unchanged by the second Put"
+        );
+    }
+
+    #[test]
+    fn an_alias_declaration_does_not_invalidate_the_route_cache() {
+        // R311qf: a DeclareKeyexpr only records an expr-id alias; it changes no
+        // subscription, so it must NOT invalidate the route cache. A Put after
+        // an unrelated alias declaration is still served from cache (no
+        // recomputation) — locking in that alias churn does not thrash the
+        // data-plane cache.
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_sub(&fwd, 0, 1, "home/temp");
+        publish(&fwd, 1, "home/temp"); // caches the route (one computation)
+        assert_eq!(fwd.route_computations(), 1);
+
+        // The producer declares an expr-id alias — no subscription delta.
+        declare_kexpr(&fwd, 1, 9, "home/other");
+        publish(&fwd, 1, "home/temp");
+
+        assert_eq!(
+            fwd.route_computations(),
+            1,
+            "an alias declaration left the route cache intact — the second Put hit it"
+        );
+        assert_eq!(consumer_sink.frame_count(), 2, "both Puts forwarded");
+    }
+
+    #[test]
+    fn a_subscription_after_an_unmatched_put_still_routes() {
+        // R311qf: a Put published before any matching subscriber caches an EMPTY
+        // route (a negative cache entry). A subsequent DeclareSubscriber must
+        // invalidate that empty entry so the next Put recomputes and forwards —
+        // a stale negative cache must not swallow a now-matching Put.
+        // Publisher-before-subscriber is a normal startup ordering.
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        publish(&fwd, 1, "home/temp"); // no subscriber yet -> caches empty
+        assert_eq!(fwd.forwarded(), 0, "nothing to route yet");
+        assert_eq!(
+            fwd.route_computations(),
+            1,
+            "computed the (empty) route once"
+        );
+
+        declare_sub(&fwd, 0, 1, "home/temp"); // invalidates the empty entry
+        publish(&fwd, 1, "home/temp");
+
+        assert_eq!(
+            fwd.route_computations(),
+            2,
+            "the subscription invalidated the negative cache, forcing a recompute"
+        );
+        assert_eq!(fwd.forwarded(), 1, "the now-matching Put routed");
         assert_eq!(consumer_sink.frame_count(), 1);
     }
 }

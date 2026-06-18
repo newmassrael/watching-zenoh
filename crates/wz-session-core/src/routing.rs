@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311qc/qd — the data-plane forwarding kernel: the `routing-routes` atom.
+//! R311qc/qd/qf — the data-plane forwarding kernel: the `routing-routes` atom.
 //!
 //! [`crate::switchboard`] turns an inbound Push into a *local* statechart
 //! event; the [`RouteTable`] here turns an inbound Push into *outbound Pushes
@@ -32,11 +32,27 @@
 //! forwarded Push is framed and SN-stamped by the *destination* face's own
 //! outbound (exactly as zenoh's egress `Mux` re-frames a forwarded message).
 //!
-//! Divergence from zenoh (documented, not yet matched): zenoh caches a
-//! computed `Route` on the resource and invalidates it on declaration change;
-//! this kernel recomputes the destination set per Put (an O(faces x subs) scan).
-//! Correct, but not zenoh's cached-route performance — a later increment can add
-//! a per-keyexpr route cache if the scan ever shows up in a profile.
+//! ## Route cache (R311qf, matching zenoh)
+//!
+//! [`forward_push`](RouteTable::forward_push) does not recompute the
+//! destination set on every Put. A resolved keyexpr's matching face set is
+//! cached (`RouteCache`) and reused until a *topology change* — a subscription
+//! declared / undeclared, or a face removed — bumps the table's `generation`
+//! epoch, after which the next lookup recomputes. This is zenoh's mechanism:
+//! `dispatcher/resource.rs` caches a `Routes<T> { version, .. }` on each
+//! resource and `dispatcher/pubsub.rs` `get_or_set_route` reads-or-computes it,
+//! gated by `tables.routes_version`; a generation/version stamp decides
+//! freshness, so an invalidation is one counter bump that touches no cache
+//! entry (lazy, self-healing on the next read).
+//!
+//! Remaining divergence (intentional, single-hop star): the cache is one
+//! global keyexpr-keyed map, not a per-resource cache split by the source's
+//! `whatami` / routing-context node. A star router has a single source class
+//! and no multi-hop routing context, so the node/whatami dimension zenoh keys
+//! on collapses to a point — one entry per keyexpr suffices, and it is
+//! source-independent (it holds every matching face, even the eventual ingress;
+//! [`forward_push`](RouteTable::forward_push) skips the ingress at send time),
+//! so a single entry serves every face that publishes the keyexpr.
 //!
 //! ## Keyexpr forms (literal + aliased)
 //!
@@ -64,8 +80,8 @@
 //! interest optimisation, not required for a single-hop star: a producer
 //! sends its Put unconditionally and the router routes it), zid-keyed mesh
 //! de-duplication (the `src != dst` skip suffices for the star topology; a
-//! mesh needs source-zid suppression), a cached route (the per-Put
-//! recompute above), and Queryable / liveliness routing (Push only).
+//! mesh needs source-zid suppression), and Queryable / liveliness routing
+//! (Push only).
 //! Self-echo cannot occur: a face never receives its own Put back (`src_id`
 //! is skipped).
 
@@ -77,6 +93,7 @@ mod imp {
     use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
+    use core::cell::{Cell, RefCell};
     use hashbrown::HashMap;
 
     use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
@@ -138,6 +155,56 @@ mod imp {
         }
     }
 
+    /// The per-keyexpr destination cache: a resolved keyexpr -> the set of face
+    /// ids whose subscriptions match it. Tagged with the
+    /// [`RouteTable::generation`] epoch it was computed at, so a topology change
+    /// (a generation bump) makes every entry stale without touching the map —
+    /// the next [`insert`](RouteCache::insert) at the new epoch physically drops
+    /// the stale entries first, bounding the map to the keyexprs published since
+    /// the last topology change. A direct mirror of zenoh's
+    /// `Routes<T> { version, .. }` (`dispatcher/resource.rs`): [`get`](RouteCache::get)
+    /// is zenoh's `get_route` (version-gated read), [`insert`](RouteCache::insert)
+    /// is `set_route` (clear-on-version-change, then store).
+    struct RouteCache {
+        version: u64,
+        routes: HashMap<String, Arc<[u64]>>,
+    }
+
+    impl RouteCache {
+        /// The cached destination set for `keyexpr`, but only if the cache is
+        /// still fresh at `generation`. A stale cache (version != generation)
+        /// reports a miss for every key — its entries are logically cleared
+        /// (and physically cleared on the next [`insert`](Self::insert)).
+        fn get(&self, keyexpr: &str, generation: u64) -> Option<Arc<[u64]>> {
+            if self.version != generation {
+                return None;
+            }
+            self.routes.get(keyexpr).cloned()
+        }
+
+        /// Store `ids` for `keyexpr`. If the cache is stale (its version
+        /// predates `generation`), clear the stale entries and adopt the new
+        /// version first, so the map only ever holds entries from one
+        /// generation. Mirrors zenoh's `set_route` clear-on-version-change.
+        fn insert(&mut self, keyexpr: &str, generation: u64, ids: Arc<[u64]>) {
+            if self.version != generation {
+                self.routes.clear();
+                self.version = generation;
+            }
+            self.routes.insert(keyexpr.into(), ids);
+        }
+
+        /// Number of entries valid at `generation` (0 if the cache is stale) —
+        /// the witness behind [`RouteTable::cached_route_count`].
+        fn valid_len(&self, generation: u64) -> usize {
+            if self.version == generation {
+                self.routes.len()
+            } else {
+                0
+            }
+        }
+    }
+
     /// The router's live routing table: the held faces keyed by the
     /// accept-loop [`FaceId`](../../wz_runtime_tokio/accept_loop/struct.FaceId.html)
     /// value. Single-task by construction (the accept loop holds every face on
@@ -146,6 +213,26 @@ mod imp {
     /// [`crate::switchboard::SwitchboardRegistry`]'s `!Sync` contract.
     pub struct RouteTable<R: SessionRuntime, T: TimeSource> {
         faces: HashMap<u64, FaceRoute<R, T>>,
+        /// The routing-topology epoch: bumped by every structural change (a
+        /// subscription declared / undeclared, a face removed) that can change
+        /// which faces a keyexpr routes to. Mirrors zenoh's
+        /// `tables.routes_version` (`dispatcher/tables.rs`); [`RouteCache`]
+        /// checks an entry's stored version against this to decide freshness, so
+        /// an invalidation ([`invalidate_routes`](RouteTable::invalidate_routes))
+        /// is a single counter bump that touches no cache entry (lazy,
+        /// self-healing on read).
+        generation: u64,
+        /// The per-keyexpr destination cache. Interior-mutable because
+        /// [`forward_push`](RouteTable::forward_push) reads `&self` yet must
+        /// populate it on a miss — exactly as zenoh's `get_or_set_route` writes
+        /// the per-resource `data_routes` from the read path. `RefCell`, not
+        /// `Mutex`, by the same single-task contract as the table itself.
+        route_cache: RefCell<RouteCache>,
+        /// Count of route computations (cache misses): the full
+        /// [`declared_intersects`] scan a miss runs. The cache-effectiveness
+        /// witness ([`route_computations`](RouteTable::route_computations)) — a
+        /// `Cell` for the same `&self`-on-miss reason as `route_cache`.
+        route_computations: Cell<u64>,
     }
 
     impl<R: SessionRuntime, T: TimeSource> Default for RouteTable<R, T> {
@@ -159,6 +246,12 @@ mod imp {
         pub fn new() -> Self {
             Self {
                 faces: HashMap::new(),
+                generation: 0,
+                route_cache: RefCell::new(RouteCache {
+                    version: 0,
+                    routes: HashMap::new(),
+                }),
+                route_computations: Cell::new(0),
             }
         }
 
@@ -167,6 +260,10 @@ mod imp {
         /// loop's `FaceUp` handling with an [`Arc`] clone of the face's
         /// actions.
         pub fn add_face(&mut self, id: u64, actions: Arc<SessionLinkActions<R, T>>) {
+            // No generation bump: a freshly added face has no subscriptions, so
+            // it matches no keyexpr and belongs to no cached route until it
+            // declares one — and that declaration bumps the generation. Adding a
+            // face therefore cannot stale any cached route.
             self.faces.insert(id, FaceRoute::new(actions));
         }
 
@@ -174,7 +271,12 @@ mod imp {
         /// be a destination, and its subscriptions are dropped with it. Called
         /// from the accept loop's `FaceDown` handling.
         pub fn remove_face(&mut self, id: u64) {
-            self.faces.remove(&id);
+            // A removed face may have carried subscriptions that fed cached
+            // routes (and its id must never resurface in one), so its departure
+            // invalidates the cache.
+            if self.faces.remove(&id).is_some() {
+                self.invalidate_routes();
+            }
         }
 
         /// Total subscriptions recorded across all faces — the witness the
@@ -183,6 +285,32 @@ mod imp {
         /// recorded), distinct from the observable forward count.
         pub fn subscription_count(&self) -> usize {
             self.faces.values().map(|f| f.subs.len()).sum()
+        }
+
+        /// Number of currently-valid cached routes — the cache-state witness a
+        /// test asserts to watch a route get cached (1 after a Put on a fresh
+        /// keyexpr) and an invalidation empty it (0 after a declare / undeclare /
+        /// face-removal, before the next Put recomputes).
+        pub fn cached_route_count(&self) -> usize {
+            self.route_cache.borrow().valid_len(self.generation)
+        }
+
+        /// Total route computations (cache misses) run so far — the
+        /// cache-effectiveness witness. A repeated Put on a cached keyexpr does
+        /// NOT increment it (served from cache); a Put after an invalidation
+        /// does (a fresh [`declared_intersects`] scan).
+        pub fn route_computations(&self) -> u64 {
+            self.route_computations.get()
+        }
+
+        /// Bump the routing-topology epoch so every cached route becomes stale
+        /// on its next lookup. The lazy counterpart to zenoh's
+        /// `disable_all_routes` (`dispatcher/tables.rs`): no cache entry is
+        /// touched here — freshness is decided on read against
+        /// [`generation`](Self::generation), and the stale entries are dropped
+        /// by the next insert at the new epoch.
+        fn invalidate_routes(&mut self) {
+            self.generation = self.generation.saturating_add(1);
         }
 
         /// Observe one inbound iteration event from face `src_id`: record any
@@ -221,7 +349,15 @@ mod imp {
             let Some(face) = self.faces.get_mut(&src_id) else {
                 return;
             };
-            match &declare.body {
+            // Whether this declaration changed the face's *subscription* set
+            // (and so which keyexprs route to it). Expr-id alias changes do NOT:
+            // an already-recorded subscription stores its resolved literal
+            // keyexpr, not the id, so a later DeclareKeyexpr / UndeclareKeyexpr
+            // cannot retroactively re-resolve it (record_declare resolves at
+            // declare time), and an inbound Put's keyexpr is resolved fresh per
+            // Put in `forward_push` before the cache is consulted. So only a
+            // subscription delta invalidates the route cache.
+            let subscriptions_changed = match &declare.body {
                 // R311qd — record the peer's expr-id -> literal-keyexpr mapping
                 // so a later aliased subscription / Put resolves through it.
                 // Resolved against the EXISTING aliases (a declare may chain off
@@ -232,9 +368,11 @@ mod imp {
                     {
                         face.peer_aliases.insert(decl.id, literal);
                     }
+                    false
                 }
                 DeclareOwnedVariant::CodecZenohUndeclKexpr(undecl) => {
                     face.peer_aliases.remove(&undecl.id);
+                    false
                 }
                 DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => {
                     // resolve_wireexpr returns an owned String, so the
@@ -246,18 +384,27 @@ mod imp {
                     match resolve_wireexpr(&sub.keyexpr.body, &face.peer_aliases) {
                         Some(keyexpr) => {
                             face.subs.insert(sub.id, keyexpr);
+                            true
                         }
-                        None => log::debug!(
-                            "RouteTable: face {src_id} declared subscriber id={} on an \
-                             expr-id with no prior DeclareKeyexpr mapping; not recorded",
-                            sub.id
-                        ),
+                        None => {
+                            log::debug!(
+                                "RouteTable: face {src_id} declared subscriber id={} on an \
+                                 expr-id with no prior DeclareKeyexpr mapping; not recorded",
+                                sub.id
+                            );
+                            false
+                        }
                     }
                 }
                 DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
-                    face.subs.remove(&undecl.id);
+                    face.subs.remove(&undecl.id).is_some()
                 }
-                _ => {}
+                _ => false,
+            };
+            // `face`'s borrow of `self.faces` ends with the match; bump the epoch
+            // after, so a stale cache is recomputed on the next Put.
+            if subscriptions_changed {
+                self.invalidate_routes();
             }
         }
 
@@ -278,19 +425,20 @@ mod imp {
                 );
                 return 0;
             };
-            // Collect matching destinations first (cloning the Arc send seams)
-            // so the table borrow is released before any send — a send only
-            // enqueues on the destination's outbound channel and never
-            // re-enters the table, but collecting keeps the borrow scope
-            // obviously non-overlapping.
-            let targets: Vec<Arc<SessionLinkActions<R, T>>> = self
-                .faces
-                .iter()
-                .filter(|(id, _)| **id != src_id)
-                .filter(|(_, face)| face.matches(&keyexpr))
-                .map(|(_, face)| face.actions.clone())
-                .collect();
-            if targets.is_empty() {
+            // The destination face-id set for this keyexpr, served from the
+            // route cache: a hit (same keyexpr, no topology change since)
+            // returns the previously computed set in O(1); a miss runs the
+            // O(faces x subs) `declared_intersects` scan once and caches it. The
+            // set is SOURCE-INDEPENDENT (it holds every matching face, even the
+            // eventual ingress), so one entry serves every face publishing the
+            // keyexpr; the ingress is skipped below. Mirrors zenoh's
+            // `get_or_set_route` over a resource's `data_routes`.
+            let targets = self.route_targets(&keyexpr);
+            // Any destination other than the source? A face may subscribe its
+            // own keyexpr; it must not receive its own Put — the `src_id` skip
+            // is the loop guard, identical to the pre-cache `**id != src_id`
+            // filter. (Skip the re-literalize work when only the source matches.)
+            if !targets.iter().any(|id| *id != src_id) {
                 return 0;
             }
             // Build the destination-facing Push ONCE via the wire-layer SSOT: a
@@ -312,15 +460,57 @@ mod imp {
                 }
             };
             let mut count = 0;
-            for actions in &targets {
+            for id in targets.iter() {
+                if *id == src_id {
+                    continue;
+                }
+                // A target id from a fresh cache entry is always still present
+                // (a face removal bumps the generation, invalidating the entry);
+                // the get-skip is a defensive guard, not a load-bearing path.
+                let Some(face) = self.faces.get(id) else {
+                    continue;
+                };
                 // The destination's own send seam mints the frame SN. `express`
                 // so an open batch window flushes (deliver-now forward).
                 let msg = NetworkMessage::Push(Box::new(forwarded.clone()));
-                if actions.send_network_message(msg, reliable, true).is_ok() {
+                if face
+                    .actions
+                    .send_network_message(msg, reliable, true)
+                    .is_ok()
+                {
                     count += 1;
                 }
             }
             count
+        }
+
+        /// The destination face-id set for `keyexpr`, served from
+        /// [`route_cache`](Self::route_cache). A fresh hit returns the cached
+        /// `Arc<[u64]>` directly; a miss runs the [`declared_intersects`] scan
+        /// over every face, caches it, and counts one route computation.
+        /// Source-independent (see [`forward_push`](Self::forward_push)) —
+        /// zenoh's `get_or_set_route` analog.
+        fn route_targets(&self, keyexpr: &str) -> Arc<[u64]> {
+            let generation = self.generation;
+            // Read borrow scoped so the miss path can re-borrow `route_cache`
+            // mutably; the scan below reads only `self.faces`, never the cache,
+            // so the two borrows never overlap.
+            if let Some(ids) = self.route_cache.borrow().get(keyexpr, generation) {
+                return ids;
+            }
+            let ids: Vec<u64> = self
+                .faces
+                .iter()
+                .filter(|(_, face)| face.matches(keyexpr))
+                .map(|(id, _)| *id)
+                .collect();
+            let ids: Arc<[u64]> = Arc::from(ids);
+            self.route_computations
+                .set(self.route_computations.get() + 1);
+            self.route_cache
+                .borrow_mut()
+                .insert(keyexpr, generation, ids.clone());
+            ids
         }
     }
 }
