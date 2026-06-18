@@ -152,6 +152,14 @@ ws = ["wz/locator-ws"]
 # and every other lane build unchanged; only `--features routing-router`
 # compiles the multi-peer mode.
 routing-router = ["wz/routing-router"]
+# R311qc — opt-in data-plane FORWARDING for `--router`: the catalog
+# `routing-routes` atom. On top of the `routing-router` accept-and-hold mode,
+# the router's `run_router` wires the `RoutingForwarder` so a Put received on
+# one peer face is forwarded to every other face that declared a matching
+# subscriber (vs `routing-router` alone, which holds faces but routes nothing).
+# Forwards the facade `routing-routes`. NOT in `default`; only
+# `--features routing-routes` compiles the forwarding router.
+routing-routes = ["routing-router", "wz/routing-routes"]
 
 [lints]
 workspace = true

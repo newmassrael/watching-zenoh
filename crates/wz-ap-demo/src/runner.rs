@@ -1105,9 +1105,12 @@ pub(crate) async fn run_demo(
 /// Acceptor. Binds the `--router` endpoint, then runs the library
 /// [`accept_loop`](wz::runtime_tokio::accept_loop) — every inbound peer is
 /// brought to Established and held as a *face* until it closes — logging each
-/// face up/down so the live hold set is observable. There is NO per-face
-/// application logic and NO forwarding between faces (that is the sibling
-/// `routing-routes` atom); this is the accept-and-hold transport foundation.
+/// face up/down so the live hold set is observable. With the `routing-routes`
+/// feature the held faces become *routes*: a [`RoutingForwarder`](wz::runtime_tokio::routing_forward::RoutingForwarder)
+/// forwards a Put received on one face to every other face that declared a
+/// matching subscriber (the data-plane atom). Without it (`routing-router`
+/// alone) the loop is the accept-and-hold transport foundation — faces are
+/// held but route nothing between them.
 ///
 /// Runs until the graceful-shutdown signal (SIGTERM / SIGINT, the same
 /// [`shutdown_signal`] the single-session drive races), then reports how many
@@ -1122,12 +1125,26 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 
     let listener = bind_endpoint(listen).await?;
     let local = listener.local_addr()?;
+    #[cfg(feature = "routing-routes")]
+    log::info!(
+        "wz-ap-demo router: listening on {local}; holding N concurrent peer \
+         faces and FORWARDING Puts to matching subscribers (routing-routes)"
+    );
+    #[cfg(not(feature = "routing-routes"))]
     log::info!(
         "wz-ap-demo router: listening on {local}; holding N concurrent peer \
          faces (routing-router foundation, no forwarding)"
     );
 
     let params = demo_session_init_params(NodeKind::Router);
+
+    // The forwarding seam: with `routing-routes` the router routes Puts between
+    // faces ([`RoutingForwarder`]); without it the accept-and-hold foundation
+    // holds faces but routes nothing ([`NoOpForwarder`]).
+    #[cfg(feature = "routing-routes")]
+    let forwarder = wz::runtime_tokio::routing_forward::RoutingForwarder::new();
+    #[cfg(not(feature = "routing-routes"))]
+    let forwarder = wz::runtime_tokio::accept_loop::NoOpForwarder;
 
     let summary = accept_loop(
         listener,
@@ -1156,9 +1173,19 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
                 log::warn!("wz-ap-demo router: accept error (continuing): {e}")
             }
         },
+        &forwarder,
     )
     .await;
 
+    #[cfg(feature = "routing-routes")]
+    log::info!(
+        "wz-ap-demo router: shutdown; served {} peer(s), peak {} concurrent \
+         face(s), forwarded {} sample(s)",
+        summary.established,
+        summary.peak_concurrent,
+        forwarder.forwarded()
+    );
+    #[cfg(not(feature = "routing-routes"))]
     log::info!(
         "wz-ap-demo router: shutdown; served {} peer(s), peak {} concurrent face(s)",
         summary.established,
