@@ -690,6 +690,18 @@ impl OpenedSession {
     /// [`crate::accept_loop`] faces) drain through this single primitive; the demo
     /// keeps its richer R292 chain (Close emit + token undeclare precede the same
     /// drop+drain) for the single-session app path.
+    /// R311qi — the remote peer's zid as learned at handshake (the routing
+    /// identity a peer-mesh graph keys faces on), or `None` if the INIT exchange
+    /// did not surface it. Delegates to
+    /// [`SessionLinkActions::peer_zid`](wz_session_core::session_actions::SessionLinkActions::peer_zid)
+    /// — captured from the inbound InitSyn (Accepting side) or InitAck
+    /// (Initiating side), so a face exposes it regardless of which side opened
+    /// it. Read once the session is Established (the accept loop reads it at
+    /// `FaceUp`).
+    pub fn peer_zid(&self) -> Option<Vec<u8>> {
+        self.actions.peer_zid()
+    }
+
     pub async fn drain_to_close(self) {
         let OpenedSession {
             engine,

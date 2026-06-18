@@ -101,13 +101,15 @@ const ACCEPT_ERROR_THROTTLE_MS: u64 = 100;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FaceId(pub u64);
 
-/// A held peer link: its [`FaceId`] and the remote socket address. The minimal
-/// face record for the accept-and-hold atom (no zid / routing state yet — those
-/// land with `routing-routes`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A held peer link: its [`FaceId`], the remote socket address, and the remote
+/// peer's zid (R311qi — the routing identity a peer-mesh graph keys faces on,
+/// read from the [`OpenedSession`] at `FaceUp`; `None` if the handshake did not
+/// surface it). Not `Copy` because the zid is an owned `Vec<u8>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Face {
     pub id: FaceId,
     pub peer: SocketAddr,
+    pub peer_zid: Option<Vec<u8>>,
 }
 
 /// Observable lifecycle events the accept loop emits to its caller (the demo
@@ -392,7 +394,14 @@ where
                 let (id, peer, result) = *opened;
                 match result {
                     Ok(opened) => {
-                        let face = Face { id, peer };
+                        // R311qi — capture the remote peer's zid (the routing
+                        // identity) from the established session before `opened`
+                        // is moved into the drive future.
+                        let face = Face {
+                            id,
+                            peer,
+                            peer_zid: opened.peer_zid(),
+                        };
                         faces.insert(id, peer);
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
@@ -400,7 +409,10 @@ where
                         // into the drive future, so a forwarder can route TO
                         // this face from the moment it is held.
                         forwarder.register(id, &opened.actions);
-                        on_event(&AcceptEvent::FaceUp(face));
+                        // `Face` is no longer `Copy` (it owns the zid), so clone
+                        // it for the borrowed FaceUp event; the original moves
+                        // into the drive future.
+                        on_event(&AcceptEvent::FaceUp(face.clone()));
                         driving.push(drive_face(face, opened, forwarder));
                     }
                     Err(cause) => {
@@ -839,6 +851,52 @@ mod tests {
             "it never established (shutdown fired mid-handshake)"
         );
         assert_eq!(summary.peak_concurrent, 0, "no face was ever held");
+    }
+
+    /// R311qi — a held face carries the remote peer's zid, captured from the
+    /// handshake (the acceptor learns the initiator's announced zid from its
+    /// InitSyn) and surfaced on the `FaceUp` event — the routing identity a
+    /// peer-mesh graph will key the face on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_held_face_carries_the_peer_zid_from_the_handshake() {
+        let (listener, addr) = bind_loopback().await;
+        let (go_tx, go_rx) = watch::channel(false);
+
+        // Capture the FaceUp event's peer_zid, then end the loop.
+        let captured: Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let on_event = {
+            let captured = captured.clone();
+            move |event: &AcceptEvent| {
+                if let AcceptEvent::FaceUp(face) = event {
+                    *captured.lock().unwrap() = face.peer_zid.clone();
+                    let _ = go_tx.send(true);
+                }
+            }
+        };
+        let acceptor = accept_loop(
+            listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+        // One initiator with a distinct, known zid (0x07) the acceptor captures.
+        let initiator = idle_initiator(addr, 0x07, go_rx.clone());
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let _ = tokio::join!(acceptor, initiator);
+        })
+        .await
+        .expect("handshake completes within 20s");
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(vec![0x07; 4]),
+            "the held face carries the initiator's announced zid (from the InitSyn)"
+        );
     }
 
     // ── routing-peer atom (R311qg): dial + accept mesh node ─────────────
