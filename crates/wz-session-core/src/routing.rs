@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311qc — the data-plane forwarding kernel: the `routing-routes` atom.
+//! R311qc/qd — the data-plane forwarding kernel: the `routing-routes` atom.
 //!
 //! [`crate::switchboard`] turns an inbound Push into a *local* statechart
 //! event; the [`RouteTable`] here turns an inbound Push into *outbound Pushes
@@ -38,33 +38,35 @@
 //! Correct, but not zenoh's cached-route performance — a later increment can add
 //! a per-keyexpr route cache if the scan ever shows up in a profile.
 //!
-//! ## Scope of this atom (literal keyexprs)
+//! ## Keyexpr forms (literal + aliased)
 //!
 //! A peer's default publish / declare path emits a **literal** keyexpr
-//! (`WireexprLocal { id: 0, suffix }`, see `push_build` / `declare_build`).
-//! This atom routes those: a subscription is keyed off the resolved literal,
-//! and a Put with a literal keyexpr is matched and forwarded **verbatim** (the
-//! cloned [`PushOwned`] is understood as-is by every destination, and all Put
-//! metadata — payload, encoding, attachment — is preserved). The per-face
-//! expr-id alias table ([`FaceRoute::peer_aliases`]) is the resolution seam
-//! [`resolve_wireexpr`] consumes; it is empty in this atom (so a
-//! DeclareKeyexpr-aliased `id != 0` keyexpr resolves to `None` and is not yet
-//! routed) and is populated by the sibling alias increment, which also switches
-//! [`forward_push`](RouteTable::forward_push) from verbatim to a re-literalized
-//! rebuild (a destination that never saw face A's mapping cannot decode an
-//! `id != 0` keyexpr). Keeping that one coupling explicit is why the alias
-//! handling is deferred as a unit rather than split.
+//! (`WireexprLocal { id: 0, suffix }`, see `push_build` / `declare_build`); a
+//! peer that opts into the bandwidth optimisation first sends a
+//! `Declare(DeclareKeyexpr)` mapping `id -> "K"`, then carries only `id` on
+//! subsequent records. R311qc routed the literal form; R311qd resolves the
+//! aliased form too: [`record_declare`](RouteTable::record_declare) records each
+//! `DeclareKeyexpr` into the source face's [`peer_aliases`](FaceRoute), and both
+//! an aliased subscription and an aliased Put resolve through it
+//! ([`resolve_wireexpr`]). A literal Put is still forwarded **verbatim** (all
+//! metadata preserved); an aliased Put is **re-literalized** for the
+//! destination ([`destination_push`]) — the destination never saw the source's
+//! expr-id mapping, so it receives the resolved keyexpr as a literal (`id = 0`)
+//! while the Put body (payload / encoding / attachment) is preserved. An
+//! expr-id with no prior `DeclareKeyexpr` resolves to `None` and is dropped with
+//! a debug trace.
 //!
 //! ## NON-goals (this atom)
 //!
 //! Multi-hop declaration propagation (a router forwarding a peer's
 //! DeclareSubscriber to the *other* peers so they gate their own emit — an
 //! interest optimisation, not required for a single-hop star: a producer
-//! sends its Put unconditionally and the router routes it), expr-id alias
-//! resolution (above), zid-keyed mesh de-duplication (the `src != dst` skip
-//! suffices for the star topology; a mesh needs source-zid suppression), and
-//! Queryable / liveliness routing (Push only). Self-echo cannot occur: a face
-//! never receives its own Put back (`src_id` is skipped).
+//! sends its Put unconditionally and the router routes it), zid-keyed mesh
+//! de-duplication (the `src != dst` skip suffices for the star topology; a
+//! mesh needs source-zid suppression), a cached route (the per-Put
+//! recompute above), and Queryable / liveliness routing (Push only).
+//! Self-echo cannot occur: a face never receives its own Put back (`src_id`
+//! is skipped).
 
 #[cfg(all(feature = "alloc", feature = "routing-routes"))]
 pub use imp::{FaceRoute, RouteTable};
@@ -76,10 +78,14 @@ mod imp {
     use alloc::vec::Vec;
     use hashbrown::HashMap;
 
+    use sce_forge_runtime::codec::CodecError;
     use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
     use wz_codecs::push::PushOwned;
+    use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+    use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::TimeSource;
 
+    use crate::codec_owned::owned_string;
     use crate::declare::declared_intersects;
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::link::SessionRuntime;
@@ -107,10 +113,12 @@ mod imp {
         /// decision are computed by one function and cannot disagree.
         subs: HashMap<u64, String>,
         /// Per-face expr-id -> literal-keyexpr alias table, the resolution
-        /// context [`resolve_wireexpr`] consumes. Empty in this atom (only
-        /// literal `id == 0` keyexprs resolve); the sibling alias increment
-        /// populates it from inbound DeclareKeyexpr records. Per-face because
-        /// each peer owns an independent expr-id namespace.
+        /// context [`resolve_wireexpr`] consumes. Populated from inbound
+        /// `DeclareKeyexpr` records (R311qd) and consulted when resolving both
+        /// an aliased subscription's keyexpr and an aliased Put's keyexpr.
+        /// Per-face because each peer owns an independent expr-id namespace —
+        /// the same per-session table [`crate::pubsub::SubscriberRegistry`]
+        /// keeps (`peer_keyexpr_table`).
         peer_aliases: HashMap<u64, String>,
     }
 
@@ -207,30 +215,44 @@ mod imp {
         }
 
         /// Apply an inbound `Declare` from `src_id` to that face's routing
-        /// state: a `DeclareSubscriber` adds a subscription, an
-        /// `UndeclareSubscriber` removes the one with the matching id. Other
-        /// declarations (Queryable / Token / Keyexpr) are not routed in this
-        /// atom (see the module scope note).
+        /// state: a `DeclareKeyexpr` records an expr-id -> literal alias, a
+        /// `DeclareSubscriber` adds a subscription (resolving any aliased
+        /// keyexpr through those aliases), and the `Undeclare*` counterparts
+        /// remove them. Other declarations (Queryable / Token) are not routed
+        /// (see the module scope note).
         fn record_declare(&mut self, src_id: u64, declare: &DeclareOwned) {
             let Some(face) = self.faces.get_mut(&src_id) else {
                 return;
             };
             match &declare.body {
+                // R311qd — record the peer's expr-id -> literal-keyexpr mapping
+                // so a later aliased subscription / Put resolves through it.
+                // Resolved against the EXISTING aliases (a declare may chain off
+                // a prior one), mirroring `SubscriberRegistry`'s peer table
+                // (pubsub.rs). An id referencing an unknown alias is dropped.
+                DeclareOwnedVariant::CodecZenohDeclKexpr(decl) => {
+                    if let Some(literal) = resolve_wireexpr(&decl.keyexpr.body, &face.peer_aliases)
+                    {
+                        face.peer_aliases.insert(decl.id, literal);
+                    }
+                }
+                DeclareOwnedVariant::CodecZenohUndeclKexpr(undecl) => {
+                    face.peer_aliases.remove(&undecl.id);
+                }
                 DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => {
                     // resolve_wireexpr returns an owned String, so the
                     // immutable borrow of `peer_aliases` ends before the
-                    // mutable insert into `subs`. An unresolved (aliased,
-                    // `id != 0`) keyexpr is dropped with a debug trace rather
-                    // than silently — an operator can see why a route never
-                    // formed (alias resolution is a later increment).
+                    // mutable insert into `subs`. A keyexpr that references an
+                    // expr-id with no prior DeclareKeyexpr is dropped with a
+                    // debug trace (not silently) — an operator can see why a
+                    // route never formed.
                     match resolve_wireexpr(&sub.keyexpr.body, &face.peer_aliases) {
                         Some(keyexpr) => {
                             face.subs.insert(sub.id, keyexpr);
                         }
                         None => log::debug!(
                             "RouteTable: face {src_id} declared subscriber id={} on an \
-                             unresolved expr-id keyexpr; not recorded (alias resolution \
-                             is a later increment)",
+                             expr-id with no prior DeclareKeyexpr mapping; not recorded",
                             sub.id
                         ),
                     }
@@ -246,16 +268,16 @@ mod imp {
         /// subscriptions match its keyexpr. Returns the number of forwards
         /// that the destination send seam accepted.
         fn forward_push(&self, src_id: u64, push: &PushOwned, reliable: bool) -> usize {
-            // Resolve the source keyexpr in the source face's alias context.
-            // In this atom only a literal (`id == 0`) keyexpr resolves; an
-            // aliased one yields None and is not routed yet (module scope).
+            // Resolve the source keyexpr in the source face's alias context
+            // (literal id=0 verbatim; aliased id!=0 via DeclareKeyexpr). An id
+            // with no prior mapping yields None and is dropped.
             let Some(src) = self.faces.get(&src_id) else {
                 return 0;
             };
             let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &src.peer_aliases) else {
                 log::debug!(
-                    "RouteTable: face {src_id} published on an unresolved expr-id keyexpr; \
-                     not forwarded (alias resolution is a later increment)"
+                    "RouteTable: face {src_id} published on an expr-id with no prior \
+                     DeclareKeyexpr mapping; not forwarded"
                 );
                 return 0;
             };
@@ -271,21 +293,69 @@ mod imp {
                 .filter(|(_, face)| face.matches(&keyexpr))
                 .map(|(_, face)| face.actions.clone())
                 .collect();
+            if targets.is_empty() {
+                return 0;
+            }
+            // Build the destination-facing Push ONCE: a literal (id=0) source is
+            // forwarded verbatim; an aliased (id!=0) source is RE-LITERALIZED so
+            // a destination that never saw the source's expr-id mapping can
+            // decode it. Fails only if the resolved keyexpr exceeds the wire
+            // bound (no_std heapless cap; unbounded in alloc) — dropped, logged.
+            let forwarded = match destination_push(push, &keyexpr) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::debug!(
+                        "RouteTable: face {src_id} keyexpr could not be re-literalized \
+                         for forwarding ({e:?}); not forwarded"
+                    );
+                    return 0;
+                }
+            };
             let mut count = 0;
             for actions in &targets {
-                // Forward verbatim: the source keyexpr is literal, so the
-                // cloned Push is decodable by every destination as-is, and the
-                // destination's own send seam mints the frame SN. `express` so
-                // an open batch window flushes (deliver-now forward).
-                let forwarded = NetworkMessage::Push(Box::new(push.clone()));
-                if actions
-                    .send_network_message(forwarded, reliable, true)
-                    .is_ok()
-                {
+                // The destination's own send seam mints the frame SN. `express`
+                // so an open batch window flushes (deliver-now forward).
+                let msg = NetworkMessage::Push(Box::new(forwarded.clone()));
+                if actions.send_network_message(msg, reliable, true).is_ok() {
                     count += 1;
                 }
             }
             count
         }
+    }
+
+    /// Whether a wireexpr is a literal (`id == 0`) — decodable by any peer
+    /// without an expr-id mapping. An aliased (`id != 0`) wireexpr is only
+    /// meaningful to the peer that declared the mapping.
+    fn wireexpr_is_literal(w: &WireexprOwned) -> bool {
+        match &w.body {
+            WireexprOwnedVariant::WireexprLocal(arm) => arm.id == 0,
+            WireexprOwnedVariant::WireexprNonlocal(arm) => arm.id == 0,
+        }
+    }
+
+    /// The Push a destination should receive: the source verbatim when its
+    /// keyexpr is already literal, else a clone re-keyed to the resolved literal
+    /// keyexpr (R311qd). Re-literalizing preserves the source's Put body
+    /// (payload / encoding / attachment) and only rewrites the keyexpr +
+    /// sets the Push `N` flag (a literal keyexpr carries a suffix), so a
+    /// destination that never saw the source's expr-id mapping can decode it.
+    fn destination_push(push: &PushOwned, resolved: &str) -> Result<PushOwned, CodecError> {
+        if wireexpr_is_literal(&push.keyexpr) {
+            return Ok(push.clone());
+        }
+        let mut fwd = push.clone();
+        fwd.keyexpr = WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                id: 0,
+                suffix_len: Some(resolved.len() as u64),
+                suffix: Some(owned_string(resolved)?),
+            }),
+        };
+        // Push.header N flag (bit 5, 0x20) = "suffix carrier present" — set
+        // because the re-literalized keyexpr now carries a suffix (the aliased
+        // source had it clear). Mirrors push_build::build_push_literal's header.
+        fwd.header |= 0x20;
+        Ok(fwd)
     }
 }
