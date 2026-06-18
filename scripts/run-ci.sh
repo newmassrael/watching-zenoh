@@ -922,6 +922,7 @@ layer_c1x_cargo_test_routing_routes() {
 layer_c1y_cargo_test_routing_peer() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet \
+        && cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings)

@@ -41498,6 +41498,50 @@
         "코드 LOCAL UNPUSHED 10커밋: qm(b2a4567)~qt(3edfeb8) + qu(linkstate_forward+ledger). push 미동의=로컬 커밋만. 추적부채: ENC_*/Z flag 6-site wire_const."
       ]
     },
+    "Round 311qv": {
+      "decision_summary": "R311qv: qq~qu 4-에이전트 독립 적대 세션리뷰 remediation 1차. CRITICAL jitter 버그 수정(16-byte zero-padded zid 해시=zenoh to_le_bytes 일치, 혼합 wz↔zenohd mesh forwarding loop 방지) + get_idx O(n)→HashMap 인덱스 + linkstate 테스트 CI 게이트 + honesty(remove_detached_nodes 명시 defer·forwarder 미배선·Changes narrowed) + bellman_ford expect + WHATAMI 단일소스 + 테스트 2(jitter 회귀·triangle acyclic). crate-move/Zid-newtype/prune-impl=추적.",
+      "changes_bullets": [
+        "linkstate_network.rs CRITICAL: update_edge jitter가 raw Vec<u8> 대신 16-byte zero-padded zid(zid_to_le_16=zenoh ZenohIdProto::to_le_bytes 일치) 해시→zid<16B서도 jitter byte-identical=wz↔zenohd 등가경로 tie-break 일치(혼합 mesh forwarding loop 방지). docstring 정정. JITTER_FRACTION 명명.",
+        "get_idx O(n) linear scan→idx_by_zid HashMap<Zid,NodeIndex> O(1)(insert_node 단일 삽입경로가 graph+index 동기 유지; new/ensure_node/add_link/process_linkstates add-site가 경유). rebuild_edges/ingest/accessor의 누적 O(n²/n³) 제거.",
+        "bellman_ford Err(_) continue→expect(positive weight 불변 loud assert, silent 빈 tree 회귀 마스킹 방지). WHATAMI_* pub 단일소스(linkstate_forward가 WHATAMI_PEER 재사용, FACE_WHATAMI_PEER 중복 제거).",
+        "honesty: 모듈 doc에 remove_detached_nodes EXPLICITLY DEFERRED(silent 누락→명시 추적)+whatami threading+drop 관측성. linkstate_forward doc \"not yet installed in any live loop, NoOpForwarder still used\"(seam 구현일 뿐). Changes doc narrowed-subset(removed_nodes 미포함 명시). scripts/run-ci.sh C1y에 cargo test --lib linkstate 레인 추가(필터 `accept_loop`가 linkstate 제외하던 갭 해소).",
+        "테스트 2: edge_jitter_hashes_16_byte_padded_zid(16-byte padding 회귀 핀=trimmed로 되돌리면 FAIL), spanning_tree_is_acyclic_on_a_triangle(3-cycle서 self tree children={A,B}, A-B edge 미사용=acyclic, loop-free 핵심 케이스)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 23/23 PASS(기존 21 + 신규 2). jitter 회귀 핀=16-byte padded 독립 재계산과 edge weight 일치 단언(trimmed-hash 복귀시 FAIL). triangle=3-edge cycle서 self tree children 정확히 {A,B}+next_hop 직접=acyclic 증명. fmt --check + clippy --lib clean. linkstate_forward 4 + default 빌드 무영향. run-ci C1y가 이제 linkstate 테스트 게이트.",
+        "4-에이전트 독립 적대 리뷰 결과: CRITICAL jitter 해시 발산(A·B 독립 적발, B가 diamond로 wz=B/zenoh=A 실증) + MAJOR remove_detached_nodes 누락(A·B·C·D)을 자평이 놓침. 알고리즘 코어(update_edge weight·compute_trees·sn-staleness·mutual-edge·LinkEdgeWeight)는 line-by-line 충실 확인. petgraph crates.io는 프로젝트 의존 철학과 일치(Rust dep 전부 crates.io). self.idx vs ==0는 zenoh보다 robust."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qv = qq~qu 4-에이전트 독립 적대 세션리뷰 remediation 1차. CRITICAL jitter(16-byte zero-padded zid 해시=zenoh 일치, 혼합 mesh loop 방지) + get_idx O(n)→HashMap 인덱스 + linkstate CI 게이트 + honesty(remove_detached_nodes 명시 defer·forwarder 미배선·Changes narrowed) + bellman_ford expect + WHATAMI 단일소스 + 테스트 2. 교훈: 독립 리뷰가 자평 놓친 correctness 버그(jitter)+dropped zenoh behavior(prune) 적발=N번째 보강.",
+        "추적 부채(별도 라운드): (1) graph→전용 crate wz-routing-graph(레이어링 MAJOR=kernel/driver 분리; petgraph std-only이 no_std session-core 차단이 진짜 제약; Agent A 최우선=c3b 전 권장), (2) Zid=Vec<u8>→fixed 16B newtype(wz-WIDE: peer_zid 전역 마이그레이션), (3) remove_detached_nodes 실구현+현실적 토폴로지 테스트(c3b TX와 함께; 현재 단위테스트는 비현실 detached 모델이라 prune시 깨짐), (4) drop 관측성(tracing dep 추가), (5) ENC_*/Z flag 6-site wire_const.",
+        "다음: 위 (1) crate-move OR c3b(self-linkstate TX). 리뷰 우선순위상 c3b 전 crate-move 권장.",
+        "코드 LOCAL UNPUSHED 11커밋: qm(b2a4567)~qu(507a560) + qv. push 미동의=로컬 커밋만."
+      ],
+      "publishable_decision_summary": "R311qv: qq~qu 4-에이전트 독립 적대 세션리뷰 remediation 1차. CRITICAL jitter 버그 수정(16-byte zero-padded zid 해시=zenoh to_le_bytes 일치, 혼합 wz↔zenohd mesh forwarding loop 방지) + get_idx O(n)→HashMap 인덱스 + linkstate 테스트 CI 게이트 + honesty(remove_detached_nodes 명시 defer·forwarder 미배선·Changes narrowed) + bellman_ford expect + WHATAMI 단일소스 + 테스트 2(jitter 회귀·triangle acyclic). crate-move/Zid-newtype/prune-impl=추적.",
+      "publishable_changes_bullets": [
+        "linkstate_network.rs CRITICAL: update_edge jitter가 raw Vec<u8> 대신 16-byte zero-padded zid(zid_to_le_16=zenoh ZenohIdProto::to_le_bytes 일치) 해시→zid<16B서도 jitter byte-identical=wz↔zenohd 등가경로 tie-break 일치(혼합 mesh forwarding loop 방지). docstring 정정. JITTER_FRACTION 명명.",
+        "get_idx O(n) linear scan→idx_by_zid HashMap<Zid,NodeIndex> O(1)(insert_node 단일 삽입경로가 graph+index 동기 유지; new/ensure_node/add_link/process_linkstates add-site가 경유). rebuild_edges/ingest/accessor의 누적 O(n²/n³) 제거.",
+        "bellman_ford Err(_) continue→expect(positive weight 불변 loud assert, silent 빈 tree 회귀 마스킹 방지). WHATAMI_* pub 단일소스(linkstate_forward가 WHATAMI_PEER 재사용, FACE_WHATAMI_PEER 중복 제거).",
+        "honesty: 모듈 doc에 remove_detached_nodes EXPLICITLY DEFERRED(silent 누락→명시 추적)+whatami threading+drop 관측성. linkstate_forward doc \"not yet installed in any live loop, NoOpForwarder still used\"(seam 구현일 뿐). Changes doc narrowed-subset(removed_nodes 미포함 명시). scripts/run-ci.sh C1y에 cargo test --lib linkstate 레인 추가(필터 `accept_loop`가 linkstate 제외하던 갭 해소).",
+        "테스트 2: edge_jitter_hashes_16_byte_padded_zid(16-byte padding 회귀 핀=trimmed로 되돌리면 FAIL), spanning_tree_is_acyclic_on_a_triangle(3-cycle서 self tree children={A,B}, A-B edge 미사용=acyclic, loop-free 핵심 케이스)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 23/23 PASS(기존 21 + 신규 2). jitter 회귀 핀=16-byte padded 독립 재계산과 edge weight 일치 단언(trimmed-hash 복귀시 FAIL). triangle=3-edge cycle서 self tree children 정확히 {A,B}+next_hop 직접=acyclic 증명. fmt --check + clippy --lib clean. linkstate_forward 4 + default 빌드 무영향. run-ci C1y가 이제 linkstate 테스트 게이트.",
+        "4-에이전트 독립 적대 리뷰 결과: CRITICAL jitter 해시 발산(A·B 독립 적발, B가 diamond로 wz=B/zenoh=A 실증) + MAJOR remove_detached_nodes 누락(A·B·C·D)을 자평이 놓침. 알고리즘 코어(update_edge weight·compute_trees·sn-staleness·mutual-edge·LinkEdgeWeight)는 line-by-line 충실 확인. petgraph crates.io는 프로젝트 의존 철학과 일치(Rust dep 전부 crates.io). self.idx vs ==0는 zenoh보다 robust."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qv = qq~qu 4-에이전트 독립 적대 세션리뷰 remediation 1차. CRITICAL jitter(16-byte zero-padded zid 해시=zenoh 일치, 혼합 mesh loop 방지) + get_idx O(n)→HashMap 인덱스 + linkstate CI 게이트 + honesty(remove_detached_nodes 명시 defer·forwarder 미배선·Changes narrowed) + bellman_ford expect + WHATAMI 단일소스 + 테스트 2. 교훈: 독립 리뷰가 자평 놓친 correctness 버그(jitter)+dropped zenoh behavior(prune) 적발=N번째 보강.",
+        "추적 부채(별도 라운드): (1) graph→전용 crate wz-routing-graph(레이어링 MAJOR=kernel/driver 분리; petgraph std-only이 no_std session-core 차단이 진짜 제약; Agent A 최우선=c3b 전 권장), (2) Zid=Vec<u8>→fixed 16B newtype(wz-WIDE: peer_zid 전역 마이그레이션), (3) remove_detached_nodes 실구현+현실적 토폴로지 테스트(c3b TX와 함께; 현재 단위테스트는 비현실 detached 모델이라 prune시 깨짐), (4) drop 관측성(tracing dep 추가), (5) ENC_*/Z flag 6-site wire_const.",
+        "다음: 위 (1) crate-move OR c3b(self-linkstate TX). 리뷰 우선순위상 c3b 전 crate-move 권장.",
+        "코드 LOCAL UNPUSHED 11커밋: qm(b2a4567)~qu(507a560) + qv. push 미동의=로컬 커밋만."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [

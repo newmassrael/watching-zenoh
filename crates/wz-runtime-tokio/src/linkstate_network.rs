@@ -17,8 +17,22 @@
 //! the edges built here is step d. Built so far: c2a the graph foundation
 //! + psid<->zid mappings, c2b the [`LinkstateNetwork::ingest_linkstate_list`]
 //! node update under the sn-staleness gate, c2c the mutual-link edge
-//! rebuild (`update_edge`). Deferred to later atoms: gossip / autoconnect
-//! propagation, locator ingest, and the `local_mappings` forwarding table.
+//! rebuild (`update_edge`), d the spanning-tree computation (`compute_trees`).
+//!
+//! EXPLICITLY DEFERRED (tracked, not silently dropped):
+//! - `remove_detached_nodes` — zenoh GC-prunes nodes no longer reachable
+//!   from self via the advertisement graph (`network.rs:786,990`). wz does
+//!   NOT yet prune, so a node that leaves the mesh lingers as a ghost
+//!   vertex (memory growth + topology divergence from zenoh after a
+//!   partition heals). It lands with the c3b TX/flood atom, where a
+//!   realistic multi-node topology makes the prune testable (the current
+//!   unit tests model artificially-detached nodes).
+//! - gossip / autoconnect propagation, locator ingest, and the
+//!   `local_mappings` forwarding table.
+//! - the real handshake `whatami` (the driver currently records every
+//!   peer-mesh neighbour as Peer), and observability for dropped entries
+//!   (zenoh `tracing::error!`s an unresolvable psid/link; wz drops silently
+//!   — wz-runtime-tokio has no `tracing` dep yet).
 //!
 //! `routing-peer`-gated (AP/full-node mesh routing; absent from the MCU
 //! footprint). Backed by `petgraph` 0.6 (`StableUnGraph`, matching
@@ -34,12 +48,33 @@ use wz_codecs::linkstate_list::LinkstateListOwned;
 /// WhatAmI role bytes (zenoh `WhatAmI`): a node advertises exactly one.
 /// The codec carries the raw byte; the ingest validates against this set
 /// (zenoh rejects an out-of-set value at decode — the c2 host obligation).
-const WHATAMI_ROUTER: u8 = 1;
-const WHATAMI_PEER: u8 = 2;
-const WHATAMI_CLIENT: u8 = 4;
+/// Public so the single definition is shared (e.g. the `linkstate_forward`
+/// driver records a peer-mesh neighbour as [`WHATAMI_PEER`]) rather than
+/// re-spelling the literal.
+pub const WHATAMI_ROUTER: u8 = 1;
+pub const WHATAMI_PEER: u8 = 2;
+pub const WHATAMI_CLIENT: u8 = 4;
 
 fn is_valid_whatami(w: u8) -> bool {
     matches!(w, WHATAMI_ROUTER | WHATAMI_PEER | WHATAMI_CLIENT)
+}
+
+/// The sub-1% tie-break budget the edge jitter rides on (zenoh
+/// `network.rs:453`): equal base-weight edges differ by at most this
+/// fraction so Bellman-Ford breaks ties deterministically.
+const JITTER_FRACTION: f64 = 0.01;
+
+/// A zid as the fixed 16-byte zero-padded little-endian array zenoh hashes
+/// for the edge-jitter tie-break (`ZenohIdProto::to_le_bytes()`). The wz
+/// `Zid` carries the trimmed wire bytes (`to_le_bytes()[..size]`); padding
+/// back to 16 reproduces the full `to_le_bytes()` zenohd uses, so the
+/// jitter is byte-identical cross-implementation. A zid never exceeds 16
+/// bytes (`ZenohIdProto::MAX_SIZE`); a longer slice is truncated defensively.
+fn zid_to_le_16(zid: &Zid) -> [u8; 16] {
+    let mut buf = [0u8; 16];
+    let n = zid.len().min(16);
+    buf[..n].copy_from_slice(&zid[..n]);
+    buf
 }
 
 /// A routing identity — the raw zid bytes, matching the wz face / session
@@ -142,7 +177,11 @@ struct LocalLinkState {
 
 /// What a LinkStateList ingest changed — the zids of nodes added or
 /// updated. The driver (step c3) uses this to decide what to re-flood /
-/// autoconnect. Mirrors the role of zenoh `Changes` (`network.rs:110`).
+/// autoconnect. A NARROWED subset of zenoh `Changes` (`network.rs:110-114`,
+/// which carries `updated_nodes` + `removed_nodes` as `(NodeIndex, Node)`
+/// pairs): wz carries only the updated zids for now. The `removed_nodes`
+/// half lands with `remove_detached_nodes` (a tracked deferral), and the
+/// node payloads when gossip needs them.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
     pub updated: Vec<Zid>,
@@ -169,6 +208,12 @@ pub struct Tree {
 pub struct LinkstateNetwork {
     idx: NodeIndex,
     graph: StableUnGraph<Node, f64>,
+    /// Secondary index `zid -> NodeIndex` so `get_idx` is O(1) instead of
+    /// the O(n) scan zenoh does over its `Copy` 16-byte ids. Maintained as
+    /// an invariant by `insert_node` (the single node-insertion path); it
+    /// has no removal counterpart yet because node removal
+    /// (`remove_detached_nodes`) is a tracked deferral (see the module doc).
+    idx_by_zid: HashMap<Zid, NodeIndex>,
     links: HashMap<LinkId, Link>,
     next_link_id: LinkId,
     /// Per-root spanning trees from this peer's vantage, indexed by the
@@ -186,15 +231,18 @@ impl LinkstateNetwork {
     pub fn new(self_zid: Zid, self_whatami: u8) -> Self {
         let mut graph = StableUnGraph::default();
         let idx = graph.add_node(Node {
-            zid: self_zid,
+            zid: self_zid.clone(),
             whatami: Some(self_whatami),
             locators: None,
             sn: 1,
             links: HashMap::new(),
         });
+        let mut idx_by_zid = HashMap::new();
+        idx_by_zid.insert(self_zid, idx);
         LinkstateNetwork {
             idx,
             graph,
+            idx_by_zid,
             links: HashMap::new(),
             next_link_id: 0,
             // one (trivial) self-rooted tree + a zero self-distance, as in
@@ -238,17 +286,26 @@ impl LinkstateNetwork {
         self.graph.edge_weight(edge).copied()
     }
 
-    /// Find a node index by zid — a linear scan, mirroring zenoh `get_idx`
-    /// (`network.rs:256`); the learned mesh is small.
+    /// Find a node index by zid — an O(1) secondary-index lookup (the
+    /// `zid -> NodeIndex` map kept by `insert_node`). zenoh does an O(n)
+    /// scan (`network.rs:256`); the index avoids the compounding scan cost
+    /// across `rebuild_edges` / ingest / the per-query accessors.
     pub fn get_idx(&self, zid: &Zid) -> Option<NodeIndex> {
-        self.graph
-            .node_indices()
-            .find(|i| &self.graph[*i].zid == zid)
+        self.idx_by_zid.get(zid).copied()
     }
 
     /// Look up a node by zid.
     pub fn get_node(&self, zid: &Zid) -> Option<&Node> {
         self.get_idx(zid).map(|i| &self.graph[i])
+    }
+
+    /// The single node-insertion path: add the node to the petgraph AND the
+    /// `idx_by_zid` secondary index together, so the two never desync.
+    fn insert_node(&mut self, node: Node) -> NodeIndex {
+        let zid = node.zid.clone();
+        let idx = self.graph.add_node(node);
+        self.idx_by_zid.insert(zid, idx);
+        idx
     }
 
     /// Insert a node for `zid` if absent, returning its index (the upsert
@@ -259,7 +316,7 @@ impl LinkstateNetwork {
         if let Some(i) = self.get_idx(&zid) {
             return i;
         }
-        self.graph.add_node(Node {
+        self.insert_node(Node {
             zid,
             whatami: None,
             locators: None,
@@ -280,7 +337,7 @@ impl LinkstateNetwork {
         self.links.insert(id, Link::new(peer_zid.clone()));
 
         if self.get_idx(&peer_zid).is_none() {
-            self.graph.add_node(Node {
+            self.insert_node(Node {
                 zid: peer_zid.clone(),
                 whatami: Some(peer_whatami),
                 locators: None,
@@ -413,7 +470,7 @@ impl LinkstateNetwork {
         let mut changes = Changes::default();
         for ls in states {
             let idx = match self.get_idx(&ls.zid) {
-                None => self.graph.add_node(Node {
+                None => self.insert_node(Node {
                     zid: ls.zid.clone(),
                     whatami: Some(ls.whatami),
                     // locator ingest lands with the gossip/autoconnect atom.
@@ -481,9 +538,14 @@ impl LinkstateNetwork {
     /// weight is the stronger of the two advertised directions (or the
     /// default when neither is explicit), plus a deterministic sub-1%
     /// jitter derived from the ordered zid pair so equal-cost paths break
-    /// ties identically on every peer. Mirrors zenoh `update_edge`
-    /// (`network.rs:424-455`). `DefaultHasher::new()` is fixed-seed, so the
-    /// jitter is reproducible across processes.
+    /// ties identically on EVERY peer — including a zenohd peer. Mirrors
+    /// zenoh `update_edge` (`network.rs:424-455`); the jitter hashes the
+    /// fixed 16-byte zero-padded zid (zenoh's `ZenohIdProto::to_le_bytes()`,
+    /// `network.rs:430-434`), NOT the trimmed wire bytes, so a sub-16-byte
+    /// zid produces the byte-identical jitter zenohd computes — otherwise
+    /// a mixed wz/zenohd mesh could pick different equal-cost next hops and
+    /// loop. `DefaultHasher::new()` is fixed-seed, so it is reproducible
+    /// across processes.
     fn update_edge(&mut self, idx1: NodeIndex, idx2: NodeIndex) {
         use std::hash::Hasher;
 
@@ -492,11 +554,11 @@ impl LinkstateNetwork {
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         if zid1 > zid2 {
-            hasher.write(zid2.as_slice());
-            hasher.write(zid1.as_slice());
+            hasher.write(&zid_to_le_16(&zid2));
+            hasher.write(&zid_to_le_16(&zid1));
         } else {
-            hasher.write(zid1.as_slice());
-            hasher.write(zid2.as_slice());
+            hasher.write(&zid_to_le_16(&zid1));
+            hasher.write(&zid_to_le_16(&zid2));
         }
 
         let w1 = self.graph[idx1]
@@ -516,7 +578,7 @@ impl LinkstateNetwork {
             (Some(a), Some(b)) => a.max(b),
         };
 
-        let jitter = 1.0 + 0.01 * ((hasher.finish() as u32) as f64 / u32::MAX as f64);
+        let jitter = 1.0 + JITTER_FRACTION * ((hasher.finish() as u32) as f64 / u32::MAX as f64);
         self.graph.update_edge(idx1, idx2, w as f64 * jitter);
     }
 
@@ -540,11 +602,13 @@ impl LinkstateNetwork {
         self.trees.resize_with(max_idx.index() + 1, Tree::default);
 
         for tree_root_idx in &indexes {
-            let paths = match petgraph::algo::bellman_ford(&self.graph, *tree_root_idx) {
-                Ok(paths) => paths,
-                // positive weights => no negative cycle; unreachable.
-                Err(_) => continue,
-            };
+            // Every edge weight is `base * (1.0 + jitter)` with base >= 1 and
+            // jitter > 0, so all weights are strictly positive and
+            // Bellman-Ford cannot find a negative cycle. Assert it loudly
+            // rather than silently leaving an empty tree, so a future
+            // weight-model change that breaks the invariant fails fast.
+            let paths = petgraph::algo::bellman_ford(&self.graph, *tree_root_idx)
+                .expect("positive edge weights guarantee no negative cycle");
             if tree_root_idx.index() == self.idx.index() {
                 self.distances = paths.distances.clone();
             }
@@ -991,5 +1055,81 @@ mod tests {
         assert_eq!(net.edge_count(), 1);
         net.remove_link(l);
         assert_eq!(net.edge_count(), 0, "self<->A edge pruned on link removal");
+    }
+
+    /// Independently recompute the default-weight jittered edge weight the
+    /// way zenoh does — hashing the 16-byte zero-padded zids. Used to pin
+    /// that `update_edge` pads (not trims); a trimmed-bytes hash would
+    /// produce a different value and fail the assertion below.
+    fn expected_default_edge_weight(a: &Zid, b: &Zid) -> f64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let (lo, hi) = if a > b { (b, a) } else { (a, b) };
+        h.write(&super::zid_to_le_16(lo));
+        h.write(&super::zid_to_le_16(hi));
+        let jitter = 1.0 + 0.01 * ((h.finish() as u32) as f64 / u32::MAX as f64);
+        LinkEdgeWeight::DEFAULT as f64 * jitter
+    }
+
+    #[test]
+    fn edge_jitter_hashes_16_byte_padded_zid() {
+        // a mutual edge between two SHORT (4-byte) zids; the jitter must hash
+        // the 16-byte zero-padded form (zenoh's to_le_bytes), so wz agrees
+        // with zenohd on equal-cost tie-breaks.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]),
+            ]),
+        );
+        let w = net
+            .edge_weight(&zid(0x01), &zid(0xAA))
+            .expect("edge present");
+        let expected = expected_default_edge_weight(&zid(0x01), &zid(0xAA));
+        assert!(
+            (w - expected).abs() < 1e-9,
+            "edge weight {w} must match the 16-byte-padded jitter {expected}"
+        );
+    }
+
+    #[test]
+    fn spanning_tree_is_acyclic_on_a_triangle() {
+        // self -- A, self -- B, A -- B (a 3-cycle). self's own tree must be
+        // acyclic: A and B are both direct children; the A-B edge is unused.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let la = net.add_link(zid(0xAA), 2);
+        let lb = net.add_link(zid(0xBB), 2);
+        // A floods (its link): teach self/A/B zids, A links to self + B.
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(12, 0, Some(&zid(0xBB)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12]),
+            ]),
+        );
+        // B floods (its own link): B links to self + A.
+        net.ingest_linkstate_list(
+            lb,
+            list(vec![
+                entry(20, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(21, 0, Some(&zid(0xAA)), Some(2), &[]),
+                entry(22, 5, Some(&zid(0xBB)), Some(2), &[20, 21]),
+            ]),
+        );
+        net.compute_trees();
+        assert_eq!(net.edge_count(), 3, "triangle has 3 edges (the cycle)");
+        let mut children = net.tree_children_of(&zid(0x01));
+        children.sort();
+        assert_eq!(
+            children,
+            vec![zid(0xAA), zid(0xBB)],
+            "both neighbours are direct children; the tree does not use A-B"
+        );
+        assert_eq!(net.next_hop(&zid(0x01), &zid(0xAA)), Some(zid(0xAA)));
+        assert_eq!(net.next_hop(&zid(0x01), &zid(0xBB)), Some(zid(0xBB)));
     }
 }

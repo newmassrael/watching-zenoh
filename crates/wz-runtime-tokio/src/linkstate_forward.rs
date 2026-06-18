@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Linkstate-peer routing driver (P4 routing, step c3a) — the bridge that
-//! wires the [`LinkstateNetwork`] topology graph into the
-//! [`accept_loop`](crate::accept_loop) / [`peer_loop`](crate::accept_loop::peer_loop)
-//! face lifecycle.
+//! Linkstate-peer routing driver (P4 routing, step c3a) — the
+//! [`FaceForwarder`] SEAM that connects the [`LinkstateNetwork`] topology
+//! graph to the [`accept_loop`](crate::accept_loop) /
+//! [`peer_loop`](crate::accept_loop::peer_loop) face lifecycle.
+//!
+//! IMPORTANT — not yet installed: [`LinkstateForwarder`] *implements* the
+//! seam but no live loop passes it yet (every `peer_loop` call still uses
+//! [`NoOpForwarder`](crate::accept_loop::NoOpForwarder), e.g. the demo's
+//! `run_peer`). Installing it into `peer_loop` is the c3d atom; combined
+//! with the absent self-link-state TX (below) the subsystem does not yet
+//! exchange topology in production. So far this is unit-test-only.
 //!
 //! [`LinkstateForwarder`] is a [`FaceForwarder`]: as peer faces come and
 //! go it connects/disconnects them in the graph
@@ -12,8 +19,6 @@
 //! and on each inbound iteration event it extracts an `OAM_LINKSTATE`
 //! message and feeds the decoded `LinkStateList` to the graph ingest,
 //! recomputing the spanning trees ([`forward`](FaceForwarder::forward)).
-//! The hold-only [`NoOpForwarder`](crate::accept_loop::NoOpForwarder) is
-//! replaced by this once a node should actually learn the mesh topology.
 //!
 //! Single-task model: like [`RoutingForwarder`](crate::routing_forward),
 //! the whole loop is one `!Send` task, so the graph is held behind a plain
@@ -37,15 +42,8 @@ use wz_session_core::linkstate_oam::{try_parse_linkstate_oam, LinkstateOam};
 use wz_session_core::network_message::NetworkMessage;
 
 use crate::accept_loop::{FaceForwarder, FaceId};
-use crate::linkstate_network::{LinkId, LinkstateNetwork, Zid};
+use crate::linkstate_network::{LinkId, LinkstateNetwork, Zid, WHATAMI_PEER};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
-
-/// The whatami a peer-mesh face is recorded with. The linkstate-peer mesh
-/// is a mesh of peers; the handshake whatami is not yet threaded onto the
-/// face, so a registered neighbour defaults to Peer. (Spanning-tree
-/// forwarding does not depend on whatami; it is gossip/autoconnect that
-/// would — a later atom that will thread the real value.)
-const FACE_WHATAMI_PEER: u8 = 2;
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -118,9 +116,13 @@ impl FaceForwarder for LinkstateForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
         // The peer's routing zid is read from the handshake at FaceUp
         // (R311qi). Without it there is no graph identity to key on, so the
-        // face is held but not connected (it cannot route topology).
+        // face is held but not connected (it cannot route topology). The
+        // peer-mesh is a mesh of peers; the real handshake whatami is not
+        // yet threaded onto the face (a tracked deferral — spanning-tree
+        // forwarding is whatami-agnostic; only gossip/autoconnect would
+        // need the true role), so a neighbour is recorded as Peer.
         if let Some(peer_zid) = actions.peer_zid() {
-            self.on_face_up(id, peer_zid, FACE_WHATAMI_PEER);
+            self.on_face_up(id, peer_zid, WHATAMI_PEER);
         }
     }
 
