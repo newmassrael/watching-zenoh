@@ -438,6 +438,15 @@ routing-peer = [
     "dep:wz-routing-graph",
     "wz-codecs/codec-linkstate",
     "wz-session-core/codec-linkstate",
+    # R311rd — a routing peer is a full mesh node: it carries the data plane
+    # (`codec-push`), so the OAM-LINKSTATE TX seam co-gated on `codec-push`
+    # is always present (a routing-peer build can never be the degenerate
+    # "topology relay with no send path" that silently no-ops the flood).
+    "codec-push",
+    # R311rd — and it must FRAGMENT an oversize link-state flood: a large
+    # mesh's full-topology OAM exceeds the link MTU (and the u16 frame cap),
+    # so without this the flood is silently dropped at the stream guard.
+    "transport-fragmentation",
 ]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM

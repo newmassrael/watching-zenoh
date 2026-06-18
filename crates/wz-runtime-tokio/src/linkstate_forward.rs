@@ -111,31 +111,46 @@ impl LinkstateForwarder {
         changes
     }
 
-    /// Re-flood the nodes an ingest changed to every face EXCEPT the one it
-    /// arrived on — zenoh `propagate_link_states` (`network.rs:636-678`,
-    /// called at the tail of the receive path `:804`). This is what carries
-    /// topology TRANSITIVELY across a >2-node mesh: a node B learns from face
-    /// A is advertised onward to face C. The source is excluded (it sent the
-    /// state); sn-staleness on each receiver drops a re-flood of unchanged
-    /// state, so the propagation converges rather than storming. Returns the
-    /// number of faces propagated to. (zenoh's full-state-for-new /
-    /// links-only-for-updated `Details` split is the deferred optimisation;
-    /// wz sends the changed nodes full-state.)
+    /// Re-flood the nodes an ingest changed to every face EXCEPT (a) the one
+    /// it arrived on and (b), per face, the node whose own state it is —
+    /// zenoh `propagate_link_states` (`network.rs:636-678`, called at the
+    /// receive tail `:804`; the per-node exclusion is `:663`
+    /// `link.zid != self.graph[idx].zid` — a peer never receives its own
+    /// link-state echoed back). This is what carries topology TRANSITIVELY
+    /// across a multi-hop mesh: a node B learns from face A is advertised
+    /// onward to face C. sn-staleness on each receiver drops a re-flood of
+    /// unchanged state, so the propagation converges rather than storming.
+    /// Returns the number of faces propagated to. (zenoh's
+    /// full-state-for-new / links-only-for-updated `Details` split is the
+    /// deferred optimisation; wz sends the changed nodes full-state.)
     pub fn propagate(&self, source: FaceId, changes: &Changes) -> Result<usize, CodecError> {
         if changes.updated.is_empty() {
             return Ok(0);
         }
-        let oam = {
-            let net = self.net.borrow();
-            build_linkstate_oam_owned(&net.build_linkstate_for(&changes.updated))?
-        };
+        let net = self.net.borrow();
         let mut sent = 0;
         for (id, actions) in self.faces.borrow().iter() {
             if *id == source {
                 continue;
             }
-            let msg = NetworkMessage::Oam(oam.clone());
-            if actions.send_network_message(msg, true, false).is_ok() {
+            // Drop the node whose own state this is from the list sent to ITS
+            // face (zenoh `network.rs:663`) — the per-face payload differs, so
+            // each face gets its own built carrier.
+            let peer_zid = actions.peer_zid();
+            let to_send: Vec<Zid> = changes
+                .updated
+                .iter()
+                .filter(|z| peer_zid.as_deref() != Some(z.as_slice()))
+                .cloned()
+                .collect();
+            if to_send.is_empty() {
+                continue;
+            }
+            let oam = build_linkstate_oam_owned(&net.build_linkstate_for(&to_send))?;
+            if actions
+                .send_network_message(NetworkMessage::Oam(oam), true, false)
+                .is_ok()
+            {
                 sent += 1;
             }
         }
@@ -357,5 +372,34 @@ mod tests {
             .expect("propagate empty");
         assert_eq!(sent, 0, "an empty change set floods nothing");
         assert_eq!(other_sink.frame_count(), 0);
+    }
+
+    #[test]
+    fn propagate_excludes_a_node_from_its_own_face() {
+        // zenoh network.rs:663 — a peer never receives its OWN link-state
+        // echoed. With faces to A (zid 0x0A) and C (zid 0x0C) held, a change
+        // to A's state propagates to C but NOT back to A's own face.
+        use crate::runtime_impl::TokioRuntime;
+        use wz_runtime_core::runtime::Runtime;
+        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let (peer_a, sink_a) = recording_actions();
+        let (peer_c, sink_c) = recording_actions();
+        TokioRuntime::with_mutex_mut(&peer_a.remote_peer_zid, |s| *s = Some(zid(0x0A)));
+        TokioRuntime::with_mutex_mut(&peer_c.remote_peer_zid, |s| *s = Some(zid(0x0C)));
+        fwd.register(FaceId(1), &peer_a); // graph gains node 0x0A
+        fwd.register(FaceId(2), &peer_c); // graph gains node 0x0C
+
+        // A's state changed; source is an unregistered face so both A and C
+        // are propagation candidates.
+        let changes = Changes {
+            updated: vec![zid(0x0A)],
+        };
+        fwd.propagate(FaceId(99), &changes).expect("propagate");
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "A's own state is not echoed back to A's face"
+        );
+        assert_eq!(sink_c.frame_count(), 1, "C receives A's changed state");
     }
 }

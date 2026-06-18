@@ -41878,6 +41878,42 @@
         "코드 LOCAL UNPUSHED 4커밋: qz(c3d-1)+ra(c3d-2)+rb(c3d-3)+rc(c3d-4). qm~qy=PUSHED origin/main=14df94d. 이번 세션 매우 김(linkstate 포팅 codec→e2e 전체)."
       ]
     },
+    "Round 311rd": {
+      "decision_summary": "R311rd: c3d 4-에이전트 독립 적대 세션리뷰 remediation 1차(correctness). routing-peer가 codec-push pull(MAJOR: routing-peer 미pull로 no-default 빌드서 Oam arm cfg-out→flood silent no-op, run-ci:933이 green으로 통과시킨 깨진 빌드 해소) + transport-fragmentation pull(MAJOR: oversize OAM가 u16 stream guard서 silent drop 해소) + propagate per-face own-face 제외(zenoh network.rs:663: 노드 자기 state를 그 face로 echo 안 함; 기존 source-only 제외=발산). 9 driver unit.",
+      "changes_bullets": [
+        "wz-runtime-tokio Cargo.toml routing-peer += codec-push: routing peer는 full mesh node로 데이터면(codec-push) 보유→OAM-TX co-gate all(codec-linkstate,codec-push) 항상 충족=silent no-op 해소. (이전: routing-peer가 codec-push 미pull→`--no-default-features routing-peer` 빌드서 Oam arm cfg-out→flood이 send_network_message _=>FeatureDisabled로 0 송신; run-ci:933 clippy가 이 깨진 빌드를 green으로 통과.) += transport-fragmentation: large mesh full-topology OAM(>MTU/u16 frame cap)을 fragment; 없으면 u16 stream guard서 silent drop. session_actions Oam arm + dispatch_oam doc 정정(transport-fragmentation 의존 명시; \"always carries data plane\"=routing-peer가 codec-push pull로 구조적 참).",
+        "linkstate_forward propagate per-face own-face 제외(zenoh network.rs:663 link.zid!=self.graph[idx].zid 미러): 기존=source face만 제외하고 single OAM을 전 non-source face에 송신→노드 자기 state를 그 노드 face로 echo(≥3-peer서 발산; sn-staleness가 loop는 막지만 자기 state 되받음). 신규=face별 to_send(changes.updated에서 그 face의 peer_zid 노드 제외)→face별 build_linkstate_for+build. 노드는 자기 state echo 안 받음. 테스트 propagate_excludes_a_node_from_its_own_face."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 9 PASS(propagate_excludes 1 신규), graph 23 PASS, accept_loop 7 PASS(codec-push on 무영향). Layer E6 e2e 1 PASS(propagate+feature 변경 무회귀). clippy rt-tokio(routing-peer all-targets + no-default-features)+session-core(codec-linkstate)+ap-demo(routing-peer) -D warnings clean. fmt --all --check exit 0. cargo tree -p wz-runtime-tokio --no-default-features --features routing-peer 확인=codec-push 이제 pull됨(이전엔 미pull로 Oam arm 부재).",
+        "적대 리뷰 적발 3건 모두 c3d서 도입: (1) codec-push gate가 no-default routing-peer 빌드를 silent no-op로(run-ci:933이 green으로 ship), (2) transport-fragmentation 부재로 oversize OAM drop(doc \"fragments correctly\" 거짓), (3) propagate가 zenoh :663 per-node own-face 제외 누락."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rd = c3d 4-에이전트 독립 적대 세션리뷰 remediation 1차(correctness). routing-peer += codec-push(no-op flood 해소=run-ci:933이 green으로 통과시킨 깨진 빌드)+transport-fragmentation(oversize OAM u16-guard drop 해소). propagate per-face own-face 제외(zenoh network.rs:663). 9 driver unit. 교훈: 독립 리뷰가 feature-gate 커플링(CI green broken build)+fragmentation OFF+propagate 발산 적발.",
+        "남은 c3d 리뷰 remediation: honesty(re) — e2e가 graph-state 아닌 log+ingest-count 단언(ingested는 zero-effect ingest서도 증가); fixed 1s whole-graph flood≠zenoh(event-driven, periodic timer 없음); \"c3d 핵심 완료\" 과장(c3c data-forward 미구축); E6 one-directional(A←B만, propagate/transitive e2e 0); remove_detached_nodes ghost 결과 understated. + 구조(rf) — 주기 flood이 demo에 있음=非-demo peer_loop caller 미수렴→FaceForwarder::tick()로 seam에; on-face-up bootstrap. + cheap — 0x02→WHATAMI_PEER const, 0x7072 named const, two-maps(face_links+faces)→1 struct, 주석 정정.",
+        "코드 LOCAL UNPUSHED 5커밋: qz(c3d-1)/ra(c3d-2)/rb(c3d-3)/rc(c3d-4)/rd(리뷰 correctness). qm~qy=PUSHED origin/main=14df94d."
+      ],
+      "publishable_decision_summary": "R311rd: c3d 4-에이전트 독립 적대 세션리뷰 remediation 1차(correctness). routing-peer가 codec-push pull(MAJOR: routing-peer 미pull로 no-default 빌드서 Oam arm cfg-out→flood silent no-op, run-ci:933이 green으로 통과시킨 깨진 빌드 해소) + transport-fragmentation pull(MAJOR: oversize OAM가 u16 stream guard서 silent drop 해소) + propagate per-face own-face 제외(zenoh network.rs:663: 노드 자기 state를 그 face로 echo 안 함; 기존 source-only 제외=발산). 9 driver unit.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio Cargo.toml routing-peer += codec-push: routing peer는 full mesh node로 데이터면(codec-push) 보유→OAM-TX co-gate all(codec-linkstate,codec-push) 항상 충족=silent no-op 해소. (이전: routing-peer가 codec-push 미pull→`--no-default-features routing-peer` 빌드서 Oam arm cfg-out→flood이 send_network_message _=>FeatureDisabled로 0 송신; run-ci:933 clippy가 이 깨진 빌드를 green으로 통과.) += transport-fragmentation: large mesh full-topology OAM(>MTU/u16 frame cap)을 fragment; 없으면 u16 stream guard서 silent drop. session_actions Oam arm + dispatch_oam doc 정정(transport-fragmentation 의존 명시; \"always carries data plane\"=routing-peer가 codec-push pull로 구조적 참).",
+        "linkstate_forward propagate per-face own-face 제외(zenoh network.rs:663 link.zid!=self.graph[idx].zid 미러): 기존=source face만 제외하고 single OAM을 전 non-source face에 송신→노드 자기 state를 그 노드 face로 echo(≥3-peer서 발산; sn-staleness가 loop는 막지만 자기 state 되받음). 신규=face별 to_send(changes.updated에서 그 face의 peer_zid 노드 제외)→face별 build_linkstate_for+build. 노드는 자기 state echo 안 받음. 테스트 propagate_excludes_a_node_from_its_own_face."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 9 PASS(propagate_excludes 1 신규), graph 23 PASS, accept_loop 7 PASS(codec-push on 무영향). Layer E6 e2e 1 PASS(propagate+feature 변경 무회귀). clippy rt-tokio(routing-peer all-targets + no-default-features)+session-core(codec-linkstate)+ap-demo(routing-peer) -D warnings clean. fmt --all --check exit 0. cargo tree -p wz-runtime-tokio --no-default-features --features routing-peer 확인=codec-push 이제 pull됨(이전엔 미pull로 Oam arm 부재).",
+        "적대 리뷰 적발 3건 모두 c3d서 도입: (1) codec-push gate가 no-default routing-peer 빌드를 silent no-op로(run-ci:933이 green으로 ship), (2) transport-fragmentation 부재로 oversize OAM drop(doc \"fragments correctly\" 거짓), (3) propagate가 zenoh :663 per-node own-face 제외 누락."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rd = c3d 4-에이전트 독립 적대 세션리뷰 remediation 1차(correctness). routing-peer += codec-push(no-op flood 해소=run-ci:933이 green으로 통과시킨 깨진 빌드)+transport-fragmentation(oversize OAM u16-guard drop 해소). propagate per-face own-face 제외(zenoh network.rs:663). 9 driver unit. 교훈: 독립 리뷰가 feature-gate 커플링(CI green broken build)+fragmentation OFF+propagate 발산 적발.",
+        "남은 c3d 리뷰 remediation: honesty(re) — e2e가 graph-state 아닌 log+ingest-count 단언(ingested는 zero-effect ingest서도 증가); fixed 1s whole-graph flood≠zenoh(event-driven, periodic timer 없음); \"c3d 핵심 완료\" 과장(c3c data-forward 미구축); E6 one-directional(A←B만, propagate/transitive e2e 0); remove_detached_nodes ghost 결과 understated. + 구조(rf) — 주기 flood이 demo에 있음=非-demo peer_loop caller 미수렴→FaceForwarder::tick()로 seam에; on-face-up bootstrap. + cheap — 0x02→WHATAMI_PEER const, 0x7072 named const, two-maps(face_links+faces)→1 struct, 주석 정정.",
+        "코드 LOCAL UNPUSHED 5커밋: qz(c3d-1)/ra(c3d-2)/rb(c3d-3)/rc(c3d-4)/rd(리뷰 correctness). qm~qy=PUSHED origin/main=14df94d."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

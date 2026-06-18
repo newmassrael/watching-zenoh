@@ -1616,9 +1616,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Declare/Interest it carries no express batch window —
             // `dispatch_oam` mints the SN, frames, and batch-absorbs
             // reliably. Co-gated `codec-linkstate` (the OAM TX consumer) +
-            // `codec-push` (the send infrastructure `dispatch_oam` rides);
-            // a build with codec-linkstate but no send path routes Oam to the
-            // no-emit catch arm instead of an absent `dispatch_oam`.
+            // `codec-push` (the send infrastructure `dispatch_oam` rides). The
+            // `routing-peer` feature PULLS `codec-push` (R311rd), so a routing
+            // peer always compiles this arm; a `codec-linkstate`-only build
+            // with no send path routes Oam to the no-emit catch arm instead
+            // of an absent `dispatch_oam`.
             #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
             crate::network_message::NetworkMessage::Oam(oam) => {
                 let _ = express;
@@ -1667,9 +1669,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Oam::MAX_ENCODED_BYTES`; the variable LinkStateList ZBuf payload
     /// grows the `VecSink` past it, and the oversize / fragment decision
     /// keys off the ACTUAL encoded length (not this hint), so a large
-    /// multi-node flood fragments correctly. Co-gated on `codec-push`: the
-    /// OAM TX rides the `dispatch_network_message` send infrastructure the
-    /// data plane brings (a routing peer always carries the data plane), so
+    /// multi-node flood fragments correctly — PROVIDED `transport-fragmentation`
+    /// is on, which the `routing-peer` feature PULLS (R311rd); without it an
+    /// oversize OAM is dropped at the `u16` stream guard. Co-gated on
+    /// `codec-push`: the OAM TX rides the `dispatch_network_message` send
+    /// infrastructure the data plane brings (`routing-peer` pulls codec-push), so
     /// `codec-linkstate` alone — an encode-only build — does not pull this
     /// send path (which would orphan it without `dispatch_network_message`).
     #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
