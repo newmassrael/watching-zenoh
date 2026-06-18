@@ -316,6 +316,20 @@ jobs:
       - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
         run: bash scripts/run-ci.sh --layer E
 
+      - name: Layer E3 — multi-peer router e2e (routing-router foundation)
+        # R311qa — builds wz-ap-demo with --features routing-router (additive)
+        # and runs the self-contained wz<->wz router e2e (one router + two
+        # initiators); host-only, no external binary, so it gates on the primary
+        # runner like Layer E / F.
+        run: bash scripts/run-ci.sh --layer E3
+
+      - name: Layer E4 — routing-router reject gate (default build rejects --router)
+        # R311qa — the negative catalog-truthfulness gate: builds the DEFAULT
+        # wz-ap-demo and asserts it rejects --router with exit 2. Rebuilds the
+        # default binary after E3's --features routing-router build, so the
+        # binary at the shared path matches the variant each lane asserts.
+        run: bash scripts/run-ci.sh --layer E4
+
       - name: Layer F — codec-footprint catalog truthfulness gate
         # R311pt — F is host-only (python3 + cargo; no cross-toolchain),
         # so it runs on the primary runner. Default-on in run-ci.sh now,

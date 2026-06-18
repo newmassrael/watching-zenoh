@@ -855,6 +855,26 @@ layer_c1v_cargo_test_ws() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-ws --quiet -- -D warnings)
 }
 
+# ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
+#
+# R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
+# on the off-default `routing-accept` feature, so the default Layer C1
+# (`cargo test --workspace`) does NOT compile it — this lane restores the unit
+# coverage, the same shape C1v uses for the off-default `transport-link-ws`:
+#   1. runs the in-crate `accept_loop_holds_three_concurrent_peers` unit
+#      (real 3-session handshake, peak == 3) under `--features routing-accept`;
+#   2. clippy-gates the `routing-accept` cfg (`--all-targets`);
+#   3. clippy-gates the LIB under `--no-default-features --features routing-accept`
+#      to prove `accept_loop` composes standalone (routing-accept pulls only
+#      transport-link-tcp + transport-unicast + futures-util, nothing else).
+# The demo-binary multi-peer e2e is Layer E3 (separate, --features routing-router).
+layer_c1w_cargo_test_routing_accept() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --features routing-accept --lib accept_loop --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-accept --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-accept --quiet -- -D warnings)
+}
+
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
 #
 # R311du: same shape as C1c. The pubsub SubscriberRegistry test module
@@ -1998,8 +2018,15 @@ layer_e_ap_demo_round_trip() {
     # (where the env + external binary are explicitly provisioned), which is
     # their `#[ignore]`-declared home. The `zenohd` substring keeps every future
     # zenohd interop test out of this default sweep with one pattern.
+    # R311qa — also exclude `wz_router`: the router e2es need a SPECIFIC binary
+    # VARIANT this default-binary sweep does not provide. wz_router_multi_peer
+    # needs `--features routing-router` (Layer E3 builds it); wz_router_reject
+    # needs the DEFAULT build to assert the exit-2 reject (Layer E4 rebuilds it).
+    # Each owns its variant in its dedicated lane, so both stay out of this sweep
+    # (whose binary is whichever variant a prior lane last built — not assertable
+    # here). The `wz_router` substring covers both with one pattern.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
-        --skip wz_e2e_ --skip multicast --skip zenohd)
+        --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
@@ -2948,6 +2975,38 @@ layer_z_zenohd_interop() {
         --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
 }
 
+# ─── Layer E3 — multi-peer ROUTER e2e (R311qa) ─────────────────────
+# wz-ap-demo `--router` binds ONCE and HOLDS N concurrent peer faces (the
+# `routing-router` catalog atom's foundation), vs the one-shot `--listen`
+# acceptor that serves a single peer. Built with `--features routing-router`
+# (additive — the `--router` arg is opt-in behind it; the TCP `--listen` /
+# `--connect` paths are unchanged, so the binary is a superset). The lane is
+# self-contained wz<->wz (one router + two initiators, no external zenohd /
+# pico CLI), so unlike Layer E / Z there is no prereq to SKIP on — it always
+# builds + gates. `wz_router_multi_peer` asserts the router holds both peers at
+# once (summary `peak 2 concurrent`), the property a one-shot acceptor cannot
+# produce.
+layer_e3_router_multi_peer() {
+    (cd crates && cargo build -p wz-ap-demo --features routing-router --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_multi_peer -- --ignored --quiet) || return 1
+}
+
+# ─── Layer E4 — routing-router catalog-truthfulness reject gate (R311qa) ─
+#
+# The NEGATIVE counterpart to Layer E3: a DEFAULT `wz-ap-demo` (no
+# `routing-router`) must reject `--router` with exit 2, proving the feature
+# claim and the binary stay in lockstep. Self-contained — it builds the DEFAULT
+# binary immediately before the test (no `--features`), so it never shares a
+# binary build with E3's `--features routing-router` one; each lane builds the
+# variant it asserts, and the other Layer E tests are feature-independent (the
+# routing-router binary is a superset), so neither clobbers them.
+layer_e4_router_reject() {
+    (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_router_reject_without_feature -- --ignored --quiet) || return 1
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -2962,6 +3021,7 @@ run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1t layer_c1t_cargo_test_serial || overall=1
 run_layer C1u layer_c1u_cargo_test_tls || overall=1
 run_layer C1v layer_c1v_cargo_test_ws || overall=1
+run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
@@ -2988,6 +3048,8 @@ run_layer C4e layer_c4e_transport_axis_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1
+run_layer E3 layer_e3_router_multi_peer || overall=1
+run_layer E4 layer_e4_router_reject || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
