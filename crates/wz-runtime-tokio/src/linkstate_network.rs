@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Linkstate-peer routing topology graph (P4 routing, step c2a).
+//! Linkstate-peer routing topology graph (P4 routing, step c2).
 //!
 //! The wz mirror of zenoh `net/protocol/network.rs` — the in-memory graph
 //! a peer maintains of the mesh it has learned about, so it can later
@@ -13,10 +13,12 @@
 //!
 //! This is pure host logic with no async coupling: the accept / peer
 //! loops drive it in step c3 (feeding it parsed LinkStateLists and the
-//! face lifecycle), and the spanning-tree / shortest-path computation is
-//! step d. This atom (c2a) is the graph foundation + the psid<->zid
-//! mappings; LinkStateList ingest (updating nodes from a decoded list,
-//! with sn-staleness) is step c2b.
+//! face lifecycle), and the spanning-tree / shortest-path computation over
+//! the edges built here is step d. Built so far: c2a the graph foundation
+//! + psid<->zid mappings, c2b the [`LinkstateNetwork::ingest_linkstate_list`]
+//! node update under the sn-staleness gate, c2c the mutual-link edge
+//! rebuild (`update_edge`). Deferred to later atoms: gossip / autoconnect
+//! propagation, locator ingest, and the `local_mappings` forwarding table.
 //!
 //! `routing-peer`-gated (AP/full-node mesh routing; absent from the MCU
 //! footprint). Backed by `petgraph` 0.6 (`StableUnGraph`, matching
@@ -193,6 +195,21 @@ impl LinkstateNetwork {
         self.graph.node_count()
     }
 
+    /// The number of edges (mutual links) in the topology graph.
+    pub fn edge_count(&self) -> usize {
+        self.graph.edge_count()
+    }
+
+    /// The weight of the edge between two nodes, if a mutual link exists.
+    /// Used by the spanning-tree / shortest-path computation (step d) and
+    /// by tests; the value carries the sub-1% tie-break jitter.
+    pub fn edge_weight(&self, a: &Zid, b: &Zid) -> Option<f64> {
+        let ia = self.get_idx(a)?;
+        let ib = self.get_idx(b)?;
+        let edge = self.graph.find_edge(ia, ib)?;
+        self.graph.edge_weight(edge).copied()
+    }
+
     /// Find a node index by zid — a linear scan, mirroring zenoh `get_idx`
     /// (`network.rs:256`); the learned mesh is small.
     pub fn get_idx(&self, zid: &Zid) -> Option<NodeIndex> {
@@ -333,27 +350,24 @@ impl LinkstateNetwork {
     }
 
     /// Apply zid-resolved link-states to the graph under the sn-staleness
-    /// gate: a new node is added; an existing node is updated only if the
-    /// advertised sn is strictly newer (a stale or duplicate advertisement
-    /// is ignored). Mirrors zenoh `process_linkstates_peer_to_peer`
-    /// (`network.rs:559-616`) minus the gossip/autoconnect propagation
-    /// (the c3 driver concern). Returns the changed nodes' zids.
+    /// gate, then rebuild the changed node's edges. A new node is added; an
+    /// existing node is updated only if the advertised sn is strictly newer
+    /// (a stale or duplicate advertisement is ignored). Mirrors zenoh's
+    /// `link_states` node-update + edge-rebuild (`network.rs:559-616,
+    /// 728-783`) minus the gossip/autoconnect propagation (the c3 driver
+    /// concern). Returns the changed nodes' zids.
     fn process_linkstates(&mut self, states: Vec<LocalLinkState>) -> Changes {
         let mut changes = Changes::default();
         for ls in states {
-            match self.get_idx(&ls.zid) {
-                None => {
-                    let zid = ls.zid.clone();
-                    self.graph.add_node(Node {
-                        zid: ls.zid,
-                        whatami: Some(ls.whatami),
-                        // locator ingest lands with the gossip/autoconnect atom.
-                        locators: None,
-                        sn: ls.sn,
-                        links: ls.links,
-                    });
-                    changes.updated.push(zid);
-                }
+            let idx = match self.get_idx(&ls.zid) {
+                None => self.graph.add_node(Node {
+                    zid: ls.zid.clone(),
+                    whatami: Some(ls.whatami),
+                    // locator ingest lands with the gossip/autoconnect atom.
+                    locators: None,
+                    sn: ls.sn,
+                    links: ls.links,
+                }),
                 Some(idx) => {
                     let node = &mut self.graph[idx];
                     // sn-staleness gate (zenoh network.rs:580): ignore a
@@ -363,11 +377,94 @@ impl LinkstateNetwork {
                     }
                     node.sn = ls.sn;
                     node.links = ls.links;
-                    changes.updated.push(ls.zid);
+                    idx
+                }
+            };
+            self.rebuild_edges(idx);
+            changes.updated.push(self.graph[idx].zid.clone());
+        }
+        changes
+    }
+
+    /// Rebuild node `idx1`'s edges from its (just-updated) `links`: add or
+    /// update an edge to every advertised destination that ALSO advertises
+    /// `idx1` back (a mutual link), introducing a placeholder node for a
+    /// not-yet-known destination, and pruning edges `idx1` no longer
+    /// advertises. Mirrors zenoh's edge-rebuild loop (`network.rs:742-783`):
+    /// an edge exists iff both endpoints advertise the link.
+    fn rebuild_edges(&mut self, idx1: NodeIndex) {
+        let zid1 = self.graph[idx1].zid.clone();
+        let link_zids: Vec<Zid> = self.graph[idx1].links.keys().cloned().collect();
+
+        // add / update mutual edges; introduce unknown destinations so a
+        // later mutual advertisement can complete the edge.
+        for dest in &link_zids {
+            match self.get_idx(dest) {
+                Some(idx2) => {
+                    if idx2 != idx1 && self.graph[idx2].links.contains_key(&zid1) {
+                        self.update_edge(idx1, idx2);
+                    }
+                }
+                None => {
+                    self.ensure_node(dest.clone());
                 }
             }
         }
-        changes
+
+        // prune edges to neighbours `idx1` no longer advertises.
+        let mut stale = Vec::new();
+        let mut walker = self.graph.neighbors_undirected(idx1).detach();
+        while let Some((edge, neighbour)) = walker.next(&self.graph) {
+            if !link_zids.contains(&self.graph[neighbour].zid) {
+                stale.push(edge);
+            }
+        }
+        for edge in stale {
+            self.graph.remove_edge(edge);
+        }
+    }
+
+    /// Set the petgraph edge weight between two mutually-linked nodes. The
+    /// weight is the stronger of the two advertised directions (or the
+    /// default when neither is explicit), plus a deterministic sub-1%
+    /// jitter derived from the ordered zid pair so equal-cost paths break
+    /// ties identically on every peer. Mirrors zenoh `update_edge`
+    /// (`network.rs:424-455`). `DefaultHasher::new()` is fixed-seed, so the
+    /// jitter is reproducible across processes.
+    fn update_edge(&mut self, idx1: NodeIndex, idx2: NodeIndex) {
+        use std::hash::Hasher;
+
+        let zid1 = self.graph[idx1].zid.clone();
+        let zid2 = self.graph[idx2].zid.clone();
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if zid1 > zid2 {
+            hasher.write(zid2.as_slice());
+            hasher.write(zid1.as_slice());
+        } else {
+            hasher.write(zid1.as_slice());
+            hasher.write(zid2.as_slice());
+        }
+
+        let w1 = self.graph[idx1]
+            .links
+            .get(&zid2)
+            .filter(|w| w.is_set())
+            .map(LinkEdgeWeight::value);
+        let w2 = self.graph[idx2]
+            .links
+            .get(&zid1)
+            .filter(|w| w.is_set())
+            .map(LinkEdgeWeight::value);
+        let w = match (w1, w2) {
+            (None, None) => LinkEdgeWeight::DEFAULT,
+            (None, Some(b)) => b,
+            (Some(a), None) => a,
+            (Some(a), Some(b)) => a.max(b),
+        };
+
+        let jitter = 1.0 + 0.01 * ((hasher.finish() as u32) as f64 / u32::MAX as f64);
+        self.graph.update_edge(idx1, idx2, w as f64 * jitter);
     }
 }
 
@@ -551,5 +648,101 @@ mod tests {
             net.ingest_linkstate_list(99, list(vec![entry(10, 5, Some(&zid(0xAA)), None, &[])]));
         assert!(changes.updated.is_empty());
         assert!(net.get_node(&zid(0xAA)).is_none());
+    }
+
+    // ── c2c edge rebuild ────────────────────────────────────────────
+
+    use wz_codecs::linkstate_weight::LinkstateWeight;
+
+    fn entry_weighted(
+        psid: u64,
+        sn: u64,
+        zid: Option<&[u8]>,
+        whatami: Option<u8>,
+        links: &[u64],
+        weights: &[u16],
+    ) -> LinkstateOwned {
+        let mut e = entry(psid, sn, zid, whatami, links);
+        e.weights = Some(
+            weights
+                .iter()
+                .map(|&w| LinkstateWeight { weight: w })
+                .collect(),
+        );
+        e
+    }
+
+    #[test]
+    fn edge_forms_only_on_mutual_advertisement() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let link = net.add_link(zid(0x07));
+        // learn psid 2 -> 0xBB (B, no links yet)
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
+        );
+        // A advertises a link to B, but B has not advertised A back.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(1, 1, Some(&zid(0xAA)), Some(2), &[2])]),
+        );
+        assert_eq!(net.edge_count(), 0, "one-sided link => no edge");
+        // B advertises a link back to A => mutual => the edge forms.
+        net.ingest_linkstate_list(link, list(vec![entry(2, 2, None, Some(2), &[1])]));
+        assert_eq!(net.edge_count(), 1, "mutual link => edge");
+        assert!(net.edge_weight(&zid(0xAA), &zid(0xBB)).is_some());
+    }
+
+    #[test]
+    fn edge_pruned_when_link_no_longer_advertised() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let link = net.add_link(zid(0x07));
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
+        );
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(1, 1, Some(&zid(0xAA)), Some(2), &[2])]),
+        );
+        net.ingest_linkstate_list(link, list(vec![entry(2, 2, None, Some(2), &[1])]));
+        assert_eq!(net.edge_count(), 1);
+        // A re-advertises with no links => the edge is pruned.
+        net.ingest_linkstate_list(link, list(vec![entry(1, 2, None, Some(2), &[])]));
+        assert_eq!(net.edge_count(), 0, "dropped link => edge pruned");
+    }
+
+    #[test]
+    fn edge_weight_is_max_of_both_directions() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let link = net.add_link(zid(0x07));
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
+        );
+        // A->B weight 50.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry_weighted(
+                1,
+                1,
+                Some(&zid(0xAA)),
+                Some(2),
+                &[2],
+                &[50],
+            )]),
+        );
+        // B->A weight 80 => mutual; the edge takes max(50, 80) = 80 + jitter.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry_weighted(2, 2, None, Some(2), &[1], &[80])]),
+        );
+        let w = net
+            .edge_weight(&zid(0xAA), &zid(0xBB))
+            .expect("edge present");
+        assert!(
+            (80.0..=80.8).contains(&w),
+            "max(50,80)=80 plus sub-1% jitter, got {w}"
+        );
     }
 }

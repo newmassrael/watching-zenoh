@@ -41376,6 +41376,48 @@
         "코드 LOCAL UNPUSHED 7커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr. push 미동의=로컬 커밋만. 추적부채: ENC_*/Z flag 6-site wire_const 통합."
       ]
     },
+    "Round 311qs": {
+      "decision_summary": "R311qs: linkstate 포팅 (c) c2c update_edge — node.links를 petgraph mutual-link edge로 반영. rebuild_edges(양쪽 광고시만 edge + ensure target + prune) + update_edge(max/default weight + DefaultHasher jitter<1% 결정적 tiebreak)를 process_linkstates 통합. edge_count/edge_weight accessor. zenoh update_edge+edge-rebuild 미러. 3 c2c unit(13 total). 그래프 traversable=(d) 준비.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_network.rs c2c: process_linkstates에 rebuild_edges 통합(노드 갱신 후 idx의 edge 재구성). rebuild_edges(idx1): 각 advertised dest에 대해 양쪽 상호광고(graph[dest].links.contains(zid1))일 때만 update_edge로 edge 추가; 미지 dest는 ensure_node(placeholder sn=0, 후속 상호광고시 edge 완성); idx1이 더는 광고 안 하는 neighbor edge는 prune(neighbors_undirected walker로 enumerate).",
+        "update_edge(idx1,idx2): weight=양방향 advertised의 (Some,Some)→max / 단방향 / 둘다None→default(100), × DefaultHasher(ordered zid pair) jitter(1+0.01*hash/u32::MAX, <1%; fixed-seed라 cross-process 결정적 tiebreak). zenoh network.rs:424-455,742-783 미러.",
+        "accessor edge_count()/edge_weight(a,b)=petgraph find_edge+edge_weight((d) Dijkstra+테스트 관찰용). 모듈 doc \"step c2a\"→\"step c2\"(c2a foundation+c2b ingest+c2c edge 포함) 갱신."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 13/13 PASS(c2a 5 + c2b 5 + c2c 3): edge_forms_only_on_mutual_advertisement(한쪽광고=edge 0, 상호=edge 1), edge_pruned_when_link_no_longer_advertised(link drop→edge prune), edge_weight_is_max_of_both_directions(max(50,80)=80 + sub-1% jitter ∈ [80,80.8]).",
+        "fmt --check + clippy --lib clean(workspace warnings=deny라 doc 경고도 0). default 빌드(routing-peer off) 무영향. validate_workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qs = linkstate 포팅 (c) c2c update_edge 완료. node.links를 petgraph mutual-link edge로 반영(rebuild_edges: 양쪽 광고시만 edge + ensure target + prune; update_edge: max/default weight + DefaultHasher jitter). 그래프가 이제 traversable=(d) Dijkstra/spanning-tree 준비. zenoh edge-rebuild 미러. 3 c2c unit(13 total).",
+        "다음 (d): spanning-tree/shortest-path forwarding — zenoh compute_trees(network.rs:1015, self 기준 Dijkstra 최단경로 tree→trees/distances) + tree 기반 forwarding(순환 mesh 무한루프 방지). petgraph가 dijkstra 제공.",
+        "대안 c3: accept/peer loop 배선(face up→add_link, inbound OAM→try_parse_linkstate_oam→ingest_linkstate_list, self-linkstate make_msg 주기 송신 + Changes 기반 gossip). c3와 (d)는 독립적이라 어느 순서든 가능.",
+        "defer 추적: gossip/autoconnect/locators/set_local_psid_mapping(forwarding table). 추적부채: ENC_*/Z flag 6-site wire_const 통합.",
+        "코드 LOCAL UNPUSHED 8커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr(24b151f)/qs. push 미동의=로컬 커밋만."
+      ],
+      "publishable_decision_summary": "R311qs: linkstate 포팅 (c) c2c update_edge — node.links를 petgraph mutual-link edge로 반영. rebuild_edges(양쪽 광고시만 edge + ensure target + prune) + update_edge(max/default weight + DefaultHasher jitter<1% 결정적 tiebreak)를 process_linkstates 통합. edge_count/edge_weight accessor. zenoh update_edge+edge-rebuild 미러. 3 c2c unit(13 total). 그래프 traversable=(d) 준비.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/linkstate_network.rs c2c: process_linkstates에 rebuild_edges 통합(노드 갱신 후 idx의 edge 재구성). rebuild_edges(idx1): 각 advertised dest에 대해 양쪽 상호광고(graph[dest].links.contains(zid1))일 때만 update_edge로 edge 추가; 미지 dest는 ensure_node(placeholder sn=0, 후속 상호광고시 edge 완성); idx1이 더는 광고 안 하는 neighbor edge는 prune(neighbors_undirected walker로 enumerate).",
+        "update_edge(idx1,idx2): weight=양방향 advertised의 (Some,Some)→max / 단방향 / 둘다None→default(100), × DefaultHasher(ordered zid pair) jitter(1+0.01*hash/u32::MAX, <1%; fixed-seed라 cross-process 결정적 tiebreak). zenoh network.rs:424-455,742-783 미러.",
+        "accessor edge_count()/edge_weight(a,b)=petgraph find_edge+edge_weight((d) Dijkstra+테스트 관찰용). 모듈 doc \"step c2a\"→\"step c2\"(c2a foundation+c2b ingest+c2c edge 포함) 갱신."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_network 13/13 PASS(c2a 5 + c2b 5 + c2c 3): edge_forms_only_on_mutual_advertisement(한쪽광고=edge 0, 상호=edge 1), edge_pruned_when_link_no_longer_advertised(link drop→edge prune), edge_weight_is_max_of_both_directions(max(50,80)=80 + sub-1% jitter ∈ [80,80.8]).",
+        "fmt --check + clippy --lib clean(workspace warnings=deny라 doc 경고도 0). default 빌드(routing-peer off) 무영향. validate_workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qs = linkstate 포팅 (c) c2c update_edge 완료. node.links를 petgraph mutual-link edge로 반영(rebuild_edges: 양쪽 광고시만 edge + ensure target + prune; update_edge: max/default weight + DefaultHasher jitter). 그래프가 이제 traversable=(d) Dijkstra/spanning-tree 준비. zenoh edge-rebuild 미러. 3 c2c unit(13 total).",
+        "다음 (d): spanning-tree/shortest-path forwarding — zenoh compute_trees(network.rs:1015, self 기준 Dijkstra 최단경로 tree→trees/distances) + tree 기반 forwarding(순환 mesh 무한루프 방지). petgraph가 dijkstra 제공.",
+        "대안 c3: accept/peer loop 배선(face up→add_link, inbound OAM→try_parse_linkstate_oam→ingest_linkstate_list, self-linkstate make_msg 주기 송신 + Changes 기반 gossip). c3와 (d)는 독립적이라 어느 순서든 가능.",
+        "defer 추적: gossip/autoconnect/locators/set_local_psid_mapping(forwarding table). 추적부채: ENC_*/Z flag 6-site wire_const 통합.",
+        "코드 LOCAL UNPUSHED 8커밋: qm(b2a4567)/ee26e42/qn(76221d7)/qo(3470e46)/qp(8c65a49)/qq(752eddf)/qr(24b151f)/qs. push 미동의=로컬 커밋만."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
