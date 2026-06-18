@@ -1269,7 +1269,15 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
         dials.len()
     );
 
-    let params = demo_session_init_params(NodeKind::Peer);
+    let mut params = demo_session_init_params(NodeKind::Peer);
+    // R311rc (c3d-4) — derive a DISTINCT zid per peer from its listen port.
+    // The mesh routing graph keys on the zid, so two peers MUST NOT share one
+    // (the demo's single hardcoded 0x01020304 would collide — a node would
+    // ingest a remote link-state under its OWN zid). Production supplies a
+    // real per-process zid; the demo derives a deterministic distinct one.
+    let port = local.port();
+    params.zid = vec![0x70, 0x72, (port >> 8) as u8, (port & 0xff) as u8];
+
     // R311rb (c3d-3) — the peer now maintains a linkstate-peer routing graph:
     // each held face feeds the topology graph ([`LinkstateForwarder`]), and
     // the peer periodically floods its own link-state (below) so the mesh
@@ -1318,11 +1326,23 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
     // single-task interleave is sound (the loop's own forwarder hooks follow
     // the same discipline). The first `interval` tick fires immediately.
     let mut flood = tokio::time::interval(Duration::from_millis(LINKSTATE_FLOOD_MS));
+    let mut last_ingested = 0usize;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
             _ = flood.tick() => {
                 let _ = forwarder.flood_self();
+                // Surface mesh convergence: log the first time (and each rise)
+                // an inbound link-state is ingested — the e2e witnesses this to
+                // prove two peers actually exchanged topology, not just held a
+                // face.
+                let now = forwarder.ingested();
+                if now > last_ingested {
+                    last_ingested = now;
+                    log::info!(
+                        "wz-ap-demo peer: learned mesh topology (ingested {now} link-state(s))"
+                    );
+                }
             }
         }
     };

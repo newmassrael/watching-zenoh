@@ -41840,6 +41840,44 @@
         "코드 LOCAL UNPUSHED 3커밋: qz(c3d-1)+ra(c3d-2)+rb(c3d-3). qm~qy=PUSHED origin/main=14df94d."
       ]
     },
+    "Round 311rc": {
+      "decision_summary": "R311rc: linkstate (c3d-4) 2-peer 수렴 e2e — full stack 실증, 프로덕션 inert 완전 탈출. demo peer가 listen port서 distinct zid 유도(고정 0x01020304 collision 해소) + flood select가 ingest 증가시 'learned mesh topology' 로그. E6 wz_peer_mesh upgrade: A가 B의 OAM-LINKSTATE flood를 실제 wire transport로 ingest(수렴) 단언 + source witness(A face가 B의 distinct 7072 zid). 5/5 무flake. c3d 전체 완료(qz/ra/rb/rc).",
+      "changes_bullets": [
+        "wz-ap-demo run_peer: params.zid를 listen port서 유도(vec![0x70,0x72,port_hi,port_lo])=distinct per-peer. 라우팅 그래프가 zid로 keying하므로 두 peer가 zid 공유 불가(demo 고정 0x01020304면 한 노드가 remote link-state를 자기 zid로 ingest=collision). flood select가 forwarder.ingested() 증가 추적→증가시 \"learned mesh topology (ingested N link-state(s))\" 로그=수렴 신호(robust 관측점).",
+        "wz-integration-tests wz_peer_mesh(E6) upgrade: a_face1 후 wait_for_substring \"learned mesh topology\"(15s timeout; A가 B의 flood를 실제 wire로 ingest=토폴로지 수렴). zid 단언 \"zid 01020304\"→\"zid 7072\"(B의 distinct 유도 zid=source witness; A face-0가 B id 운반, 옛 shared hardcode 아님). E6 코드가 예견했던(\"atom 2가 zid load-bearing→distinct zid→source witness upgrade\") 실현. 첫 flood tick=t=0(face 없음)→다음 ~1s(face up 후 ingest)라 수렴 로그는 face1 후."
+      ],
+      "verification_bullets": [
+        "Layer E6(wz_peer_mesh, --ignored binary-dep e2e) 5회 연속 PASS(일관 1.11s, 무flake=[[feedback-no-flaky-ever]] 준수; 수렴 ~1s, 15s timeout 여유). 2 real peer over TCP loopback + distinct port-유도 zid + peer-A가 peer-B의 link-state flood ingest(\"learned mesh topology\") + source witness(A face-0가 B의 7072 zid). cargo build -p wz-ap-demo --features routing-peer clean, clippy(ap-demo routing-peer + integration-tests) -D warnings clean, fmt --all exit 0.",
+        "full stack 경로 e2e 실증: build_linkstate_list→build_linkstate_oam_owned→send_network_message Oam arm→frame→TCP→decode→forward→try_parse_linkstate_oam→ingest+compute_trees. 단위/그래프 테스트가 조각별 검증한 것을 e2e가 실제 transport로 전체 연결."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rc = linkstate (c3d-4) 2-peer 수렴 e2e 완료 = full stack 실증 = 프로덕션 inert 완전 탈출. demo distinct zid(listen port 유도) + E6 upgrade(수렴 단언 \"learned mesh topology\" + source witness \"zid 7072\"). 5/5 무flake. **c3d 전체 완료**: c3d-1 OAM send seam(qz)·c3d-2 propagate_link_states(ra)·c3d-3 peer_loop 배선+주기 flood(rb)·c3d-4 e2e(rc). 두 real peer가 실제 TCP transport로 토폴로지 교환.",
+        "linkstate 포팅 핵심 완료: (a)peer zid·(b)wire codec(qm/qn)·(c)graph+ingest+edge(qq/qr/qs)·(d)spanning-tree(qt)·(c3)async 통합(c3a driver qu+send seam qz+propagate ra+배선 rb+e2e rc). 적대 리뷰가 반복 지적한 \"inert in production\" 완전 해소.",
+        "남은: c3c(tree_children_of로 data Push forward), change-triggered flood(고정-tick→delta시), options-SSOT(SCE owned-flag-setter), Zid=Vec<u8>→16B newtype, remove_detached_nodes, gossip/autoconnect/locators.",
+        "코드 LOCAL UNPUSHED 4커밋: qz(c3d-1)+ra(c3d-2)+rb(c3d-3)+rc(c3d-4). qm~qy=PUSHED origin/main=14df94d. 이번 세션 매우 김(linkstate 포팅 codec→e2e 전체)."
+      ],
+      "publishable_decision_summary": "R311rc: linkstate (c3d-4) 2-peer 수렴 e2e — full stack 실증, 프로덕션 inert 완전 탈출. demo peer가 listen port서 distinct zid 유도(고정 0x01020304 collision 해소) + flood select가 ingest 증가시 'learned mesh topology' 로그. E6 wz_peer_mesh upgrade: A가 B의 OAM-LINKSTATE flood를 실제 wire transport로 ingest(수렴) 단언 + source witness(A face가 B의 distinct 7072 zid). 5/5 무flake. c3d 전체 완료(qz/ra/rb/rc).",
+      "publishable_changes_bullets": [
+        "wz-ap-demo run_peer: params.zid를 listen port서 유도(vec![0x70,0x72,port_hi,port_lo])=distinct per-peer. 라우팅 그래프가 zid로 keying하므로 두 peer가 zid 공유 불가(demo 고정 0x01020304면 한 노드가 remote link-state를 자기 zid로 ingest=collision). flood select가 forwarder.ingested() 증가 추적→증가시 \"learned mesh topology (ingested N link-state(s))\" 로그=수렴 신호(robust 관측점).",
+        "wz-integration-tests wz_peer_mesh(E6) upgrade: a_face1 후 wait_for_substring \"learned mesh topology\"(15s timeout; A가 B의 flood를 실제 wire로 ingest=토폴로지 수렴). zid 단언 \"zid 01020304\"→\"zid 7072\"(B의 distinct 유도 zid=source witness; A face-0가 B id 운반, 옛 shared hardcode 아님). E6 코드가 예견했던(\"atom 2가 zid load-bearing→distinct zid→source witness upgrade\") 실현. 첫 flood tick=t=0(face 없음)→다음 ~1s(face up 후 ingest)라 수렴 로그는 face1 후."
+      ],
+      "publishable_verification_bullets": [
+        "Layer E6(wz_peer_mesh, --ignored binary-dep e2e) 5회 연속 PASS(일관 1.11s, 무flake=[[feedback-no-flaky-ever]] 준수; 수렴 ~1s, 15s timeout 여유). 2 real peer over TCP loopback + distinct port-유도 zid + peer-A가 peer-B의 link-state flood ingest(\"learned mesh topology\") + source witness(A face-0가 B의 7072 zid). cargo build -p wz-ap-demo --features routing-peer clean, clippy(ap-demo routing-peer + integration-tests) -D warnings clean, fmt --all exit 0.",
+        "full stack 경로 e2e 실증: build_linkstate_list→build_linkstate_oam_owned→send_network_message Oam arm→frame→TCP→decode→forward→try_parse_linkstate_oam→ingest+compute_trees. 단위/그래프 테스트가 조각별 검증한 것을 e2e가 실제 transport로 전체 연결."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rc = linkstate (c3d-4) 2-peer 수렴 e2e 완료 = full stack 실증 = 프로덕션 inert 완전 탈출. demo distinct zid(listen port 유도) + E6 upgrade(수렴 단언 \"learned mesh topology\" + source witness \"zid 7072\"). 5/5 무flake. **c3d 전체 완료**: c3d-1 OAM send seam(qz)·c3d-2 propagate_link_states(ra)·c3d-3 peer_loop 배선+주기 flood(rb)·c3d-4 e2e(rc). 두 real peer가 실제 TCP transport로 토폴로지 교환.",
+        "linkstate 포팅 핵심 완료: (a)peer zid·(b)wire codec(qm/qn)·(c)graph+ingest+edge(qq/qr/qs)·(d)spanning-tree(qt)·(c3)async 통합(c3a driver qu+send seam qz+propagate ra+배선 rb+e2e rc). 적대 리뷰가 반복 지적한 \"inert in production\" 완전 해소.",
+        "남은: c3c(tree_children_of로 data Push forward), change-triggered flood(고정-tick→delta시), options-SSOT(SCE owned-flag-setter), Zid=Vec<u8>→16B newtype, remove_detached_nodes, gossip/autoconnect/locators.",
+        "코드 LOCAL UNPUSHED 4커밋: qz(c3d-1)+ra(c3d-2)+rb(c3d-3)+rc(c3d-4). qm~qy=PUSHED origin/main=14df94d. 이번 세션 매우 김(linkstate 포팅 codec→e2e 전체)."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

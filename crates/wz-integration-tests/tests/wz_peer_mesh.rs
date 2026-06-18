@@ -132,6 +132,19 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
     // (from C, id 1). Waiting for both UP lines guarantees peak 2.
     let a_face1 = wait_for_substring(&mut a_reader, "peer: face 1 UP", Duration::from_secs(10));
 
+    // c3d-4 — beyond HOLDING the face, peer A must INGEST peer B's link-state
+    // flood: real topology convergence over the wire (the OAM_LINKSTATE carrier
+    // through the live session transport), not just a held face. With distinct
+    // per-peer zids (each derived from its listen port) the routing graph keys
+    // correctly, so A learns B's node. The first flood tick fires at t=0 (no
+    // face yet); the next (~1s) lands after both faces are up, so this log
+    // follows the `face 1 UP` line.
+    let a_converged = wait_for_substring(
+        &mut a_reader,
+        "learned mesh topology",
+        Duration::from_secs(15),
+    );
+
     // Graceful-shutdown peer A → it logs its peer-loop summary.
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
     let a_captured = read_captured(&mut a_reader);
@@ -159,6 +172,13 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
     a_face1.unwrap_or_else(|c| {
         panic!("peer-A did not log 'face 1 UP' (accepted from C) within 10s\n--- peer-A ---\n{c}")
     });
+    a_converged.unwrap_or_else(|c| {
+        panic!(
+            "peer-A did not log 'learned mesh topology' within 15s — it held the \
+             face to B but never INGESTED B's link-state flood (topology did not \
+             converge over the wire)\n--- peer-A ---\n{c}"
+        )
+    });
 
     assert!(
         a_captured.contains("peak 2 concurrent"),
@@ -170,20 +190,18 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
         "peer-A summary must report the dial+accept split (dialed 1, accepted 1)\n\
          --- peer-A stderr ---\n{a_captured}"
     );
-    // R311qi — SMOKE check (not a source-correctness proof): every held face
-    // logs a non-`?` zid, so `zid_hex` is wired into the face log AND the
-    // handshake surfaced a remote zid for a dialed face too (R311qh's
-    // Initiating-side InitAck capture, exercised through the real binary). It
-    // does NOT prove each face carries the OTHER peer's distinct zid — all demo
-    // nodes share the one hardcoded zid 0x01020304 (args.rs), so a wrong-source
-    // bug would still pass here. That distinction IS proven, with DISTINCT zids,
-    // by the unit test r311qh_peer_zid_captures_the_remote_zid_both_directions
-    // and the accept_and_open_session integration test (0x01 vs 0x02). When
-    // atom 2 makes the zid load-bearing (the LinkState graph keys on it), the
-    // demo nodes gain distinct zids and this e2e upgrades to a source witness.
+    // R311rc (c3d-4) — SOURCE WITNESS (the anticipated upgrade): now that the
+    // LinkState routing graph keys on the zid, each peer derives a DISTINCT zid
+    // from its listen port (`0x7072` + port). So peer-A's face to B carries B's
+    // distinct `7072…` zid — NOT A's own, NOT the old shared hardcode. A
+    // wrong-source bug (logging the local zid, or all-share-one) would no longer
+    // pass. (The single-session client C is not a `--peer`, so it keeps the
+    // fixed demo zid `01020304`; A's face-1 log carries that, A's face-0 log
+    // carries B's `7072…` — both distinct from A's own.)
     assert!(
-        a_captured.contains("zid 01020304"),
-        "peer-A face logs must carry a captured zid (zid_hex wired; InitAck \
-         capture reached the binary)\n--- peer-A stderr ---\n{a_captured}"
+        a_captured.contains("zid 7072"),
+        "peer-A face-0 log must carry B's DISTINCT derived zid (7072…) — proving \
+         the handshake surfaced the remote's id, not a shared hardcode\n\
+         --- peer-A stderr ---\n{a_captured}"
     );
 }
