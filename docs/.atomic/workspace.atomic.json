@@ -40882,6 +40882,52 @@
         "코드 LOCAL UNPUSHED: R311qf(2커밋 978183c..6a591c3: route cache)+R311qg(accept_loop.rs face_drive_loop/dial_face/peer_loop/FaceSources/단위2, Cargo 3레벨, 데모 --peer/run_peer/NodeKind::Peer, e2e 2, run-ci C1y/E6/E4, inventory). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qg=qf 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
       ]
     },
+    "Round 311qh": {
+      "decision_summary": "R311qh: peer-mesh routing 기반 — negotiated remote peer zid를 핸드셰이크 양방향(InitSyn accept측 + InitAck initiate측)에서 별도 remote_peer_zid 슬롯에 capture, SessionLinkActions::peer_zid()로 노출. R86 cookie 슬롯 불간섭. 단위+실핸드셰이크 테스트.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: peer-mesh 라우팅의 peer-identity 기반. SessionLinkActions에 remote_peer_zid:R::Mutex<Option<Vec<u8>>> 신규 슬롯(remote peer zid=routing 신원). handle_inbound이 양방향에서 capture: is_ack:false(InitSyn, Accepting측)+is_ack:true(InitAck, Initiating측) 둘 다 body.zid를 remote_peer_zid에 기록(INIT body가 InitSyn/InitAck 와이어 동일). 재핸드셰이크 reset에 remote_peer_zid 추가(다른 슬롯과 함께). peer_zid()->Option<Vec<u8>> accessor(negotiated_sn_mask 옆). R86 inbound_peer_zid(cookie HMAC, Accepting측 InitSyn 전용) 불간섭=별도 슬롯(r86_..._does_not_overwrite_peer_zid가 InitAck의 cookie슬롯 접근 금지하므로 cross-role confusion 회피).",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: r311qh_peer_zid_captures_the_remote_zid_both_directions 단위(hand-crafted InitSyn zid 0xB0..B3->Accepting peer_zid + InitAck zid 0xC0..C3->Initiating peer_zid, initiating측 inbound_peer_zid는 empty 유지=R86 보존).",
+        "crates/wz-runtime-tokio/tests/accept_and_open_session.rs: 기존 실-핸드셰이크 loopback open-pair 테스트에 cross-zid 단언 추가(acceptor zid 0x02 + initiator zid 0x01 실제 핸드셰이크 후 acceptor.peer_zid()==initiator zid, initiator.peer_zid()==acceptor zid)."
+      ],
+      "verification_bullets": [
+        "근본: 사용자 redirect(\"zenoh에 이미 있는 걸 그대로 포팅하는 것\")로 routing-peer atom 2(mesh forwarding) 트랙 진입. 조사로 zenoh peer 라우팅=linkstate(spanning-tree, hat/linkstate_peer; robust)이고 flood-dedup은 source_info optional이라 fragile=zenoh가 안 씀 확인 -> 미러 대상은 linkstate로 확정(분기 아님). linkstate 그래프는 노드를 zid로 식별하므로 peer zid 노출이 fork-independent 선행조건. 조사로 wz는 핸드셰이크에서 상대 zid를 잡으나(inbound_peer_zid) accept측만+노출 안 됨 확인. 따라서 이 라운드=peer zid 노출(세션 레이어).",
+        "적발+정정: 첫 시도는 inbound_peer_zid를 InitAck에도 쓰려 했으나 기존 R86 테스트(r86_handle_inbound_init_ack_does_not_overwrite_peer_zid)가 FAIL=그 슬롯은 의도적으로 Accepting측 cookie-HMAC 전용(InitAck 접근=cross-role confusion 금지). 테스트가 올바르게 적발. 정정=별도 remote_peer_zid 슬롯(routing 신원, 양방향)으로 separation-of-concerns 준수, inbound_peer_zid 불간섭.",
+        "검증: session_fsm_inbound_dispatch 24/24(R86 invariant green 유지 + r311qh 양방향 capture). accept_and_open_session 실 loopback 핸드셰이크에서 cross-zid 노출 양방향 단언(handshake->peer_zid end-to-end). C1l reassembly 74 ok(별도 슬롯이라 initiator reassembly chain-key 무변경=behavior-preserving; 첫 시도였다면 chain-key가 empty->zid로 바뀔 뻔). C1 default workspace 143 ok-block(additive 필드 wide build 안전). fmt·clippy(session-core+tokio all-targets) clean. 판정=파이프 없는 $? 직접 캡처.",
+        "설계: 별도 슬롯이 textbook(R86 cookie 슬롯과 routing 신원 슬롯은 distinct 관심사; 같은 zid를 accept측이 2슬롯에 쓰지만 의미 분리가 SSOT보다 우선=R86이 명시). 소비자 없는 단계라 accept_loop Face/데모 배선은 다음 atom(YAGNI=routing 그래프가 소비할 때)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qh = routing-peer atom 2 트랙(=zenoh linkstate peer 라우팅 포팅)의 첫 조각: peer zid 노출. negotiated remote peer zid를 핸드셰이크 양방향(InitSyn Accepting측 + InitAck Initiating측)에서 별도 remote_peer_zid 슬롯에 capture하고 SessionLinkActions::peer_zid()로 노출=peer-mesh 라우팅 그래프가 face를 키잉할 peer 신원. R86 cookie 슬롯(inbound_peer_zid)과 분리(별도 관심사). 단위(hand-crafted 양방향)+실-핸드셰이크(loopback cross-zid) 검증.",
+        "다음 증분(linkstate 포팅, zenoh를 한 조각씩): (a)peer_zid를 accept_loop Face + OpenedSession::peer_zid()로 배선 + 데모 로그(routing 소비 시작) → (b)LinkState 와이어 메시지 코덱(zenoh commons/zenoh-protocol/src/network/linkstate.rs 미러: {psid,sn,zid,whatami,locators,links,link_weights}) → (c)Network 그래프(zenoh net/protocol/network.rs: 토폴로지 그래프) → (d)spanning-tree/최단경로 계산 + 트리 기반 forwarding(zenoh net/routing/hat/linkstate_peer)=순환 mesh 무한루프 방지. 각 조각 zenoh 정본 직접 대조.",
+        "핵심: mesh forwarding loop 억제는 linkstate(zenoh 방식)로 확정=flood-dedup 아님(source_info optional이라 fragile, zenoh 미사용). zenoh가 이미 구현=발명 아니라 포팅; 다만 서브시스템이라 다라운드.",
+        "defer(여전히 별도 라운드, routing 직교): wire-builder-SSOT(literal_wireexpr 21-site->WireexprOwned SSOT + FLAG_N_PUSH_N 17-site const + inline put_push 4).",
+        "코드 LOCAL UNPUSHED: R311qf(route cache 2커밋)+qg(routing-peer atom1 4커밋)+qh(session_actions remote_peer_zid+양방향 capture+accessor, 단위+실핸드셰이크 테스트). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qh=qg 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ],
+      "publishable_decision_summary": "R311qh: peer-mesh routing 기반 — negotiated remote peer zid를 핸드셰이크 양방향(InitSyn accept측 + InitAck initiate측)에서 별도 remote_peer_zid 슬롯에 capture, SessionLinkActions::peer_zid()로 노출. R86 cookie 슬롯 불간섭. 단위+실핸드셰이크 테스트.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: peer-mesh 라우팅의 peer-identity 기반. SessionLinkActions에 remote_peer_zid:R::Mutex<Option<Vec<u8>>> 신규 슬롯(remote peer zid=routing 신원). handle_inbound이 양방향에서 capture: is_ack:false(InitSyn, Accepting측)+is_ack:true(InitAck, Initiating측) 둘 다 body.zid를 remote_peer_zid에 기록(INIT body가 InitSyn/InitAck 와이어 동일). 재핸드셰이크 reset에 remote_peer_zid 추가(다른 슬롯과 함께). peer_zid()->Option<Vec<u8>> accessor(negotiated_sn_mask 옆). R86 inbound_peer_zid(cookie HMAC, Accepting측 InitSyn 전용) 불간섭=별도 슬롯(r86_..._does_not_overwrite_peer_zid가 InitAck의 cookie슬롯 접근 금지하므로 cross-role confusion 회피).",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: r311qh_peer_zid_captures_the_remote_zid_both_directions 단위(hand-crafted InitSyn zid 0xB0..B3->Accepting peer_zid + InitAck zid 0xC0..C3->Initiating peer_zid, initiating측 inbound_peer_zid는 empty 유지=R86 보존).",
+        "crates/wz-runtime-tokio/tests/accept_and_open_session.rs: 기존 실-핸드셰이크 loopback open-pair 테스트에 cross-zid 단언 추가(acceptor zid 0x02 + initiator zid 0x01 실제 핸드셰이크 후 acceptor.peer_zid()==initiator zid, initiator.peer_zid()==acceptor zid)."
+      ],
+      "publishable_verification_bullets": [
+        "근본: 사용자 redirect(\"zenoh에 이미 있는 걸 그대로 포팅하는 것\")로 routing-peer atom 2(mesh forwarding) 트랙 진입. 조사로 zenoh peer 라우팅=linkstate(spanning-tree, hat/linkstate_peer; robust)이고 flood-dedup은 source_info optional이라 fragile=zenoh가 안 씀 확인 -> 미러 대상은 linkstate로 확정(분기 아님). linkstate 그래프는 노드를 zid로 식별하므로 peer zid 노출이 fork-independent 선행조건. 조사로 wz는 핸드셰이크에서 상대 zid를 잡으나(inbound_peer_zid) accept측만+노출 안 됨 확인. 따라서 이 라운드=peer zid 노출(세션 레이어).",
+        "적발+정정: 첫 시도는 inbound_peer_zid를 InitAck에도 쓰려 했으나 기존 R86 테스트(r86_handle_inbound_init_ack_does_not_overwrite_peer_zid)가 FAIL=그 슬롯은 의도적으로 Accepting측 cookie-HMAC 전용(InitAck 접근=cross-role confusion 금지). 테스트가 올바르게 적발. 정정=별도 remote_peer_zid 슬롯(routing 신원, 양방향)으로 separation-of-concerns 준수, inbound_peer_zid 불간섭.",
+        "검증: session_fsm_inbound_dispatch 24/24(R86 invariant green 유지 + r311qh 양방향 capture). accept_and_open_session 실 loopback 핸드셰이크에서 cross-zid 노출 양방향 단언(handshake->peer_zid end-to-end). C1l reassembly 74 ok(별도 슬롯이라 initiator reassembly chain-key 무변경=behavior-preserving; 첫 시도였다면 chain-key가 empty->zid로 바뀔 뻔). C1 default workspace 143 ok-block(additive 필드 wide build 안전). fmt·clippy(session-core+tokio all-targets) clean. 판정=파이프 없는 $? 직접 캡처.",
+        "설계: 별도 슬롯이 textbook(R86 cookie 슬롯과 routing 신원 슬롯은 distinct 관심사; 같은 zid를 accept측이 2슬롯에 쓰지만 의미 분리가 SSOT보다 우선=R86이 명시). 소비자 없는 단계라 accept_loop Face/데모 배선은 다음 atom(YAGNI=routing 그래프가 소비할 때)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qh = routing-peer atom 2 트랙(=zenoh linkstate peer 라우팅 포팅)의 첫 조각: peer zid 노출. negotiated remote peer zid를 핸드셰이크 양방향(InitSyn Accepting측 + InitAck Initiating측)에서 별도 remote_peer_zid 슬롯에 capture하고 SessionLinkActions::peer_zid()로 노출=peer-mesh 라우팅 그래프가 face를 키잉할 peer 신원. R86 cookie 슬롯(inbound_peer_zid)과 분리(별도 관심사). 단위(hand-crafted 양방향)+실-핸드셰이크(loopback cross-zid) 검증.",
+        "다음 증분(linkstate 포팅, zenoh를 한 조각씩): (a)peer_zid를 accept_loop Face + OpenedSession::peer_zid()로 배선 + 데모 로그(routing 소비 시작) → (b)LinkState 와이어 메시지 코덱(zenoh commons/zenoh-protocol/src/network/linkstate.rs 미러: {psid,sn,zid,whatami,locators,links,link_weights}) → (c)Network 그래프(zenoh net/protocol/network.rs: 토폴로지 그래프) → (d)spanning-tree/최단경로 계산 + 트리 기반 forwarding(zenoh net/routing/hat/linkstate_peer)=순환 mesh 무한루프 방지. 각 조각 zenoh 정본 직접 대조.",
+        "핵심: mesh forwarding loop 억제는 linkstate(zenoh 방식)로 확정=flood-dedup 아님(source_info optional이라 fragile, zenoh 미사용). zenoh가 이미 구현=발명 아니라 포팅; 다만 서브시스템이라 다라운드.",
+        "defer(여전히 별도 라운드, routing 직교): wire-builder-SSOT(literal_wireexpr 21-site->WireexprOwned SSOT + FLAG_N_PUSH_N 17-site const + inline put_push 4).",
+        "코드 LOCAL UNPUSHED: R311qf(route cache 2커밋)+qg(routing-peer atom1 4커밋)+qh(session_actions remote_peer_zid+양방향 capture+accessor, 단위+실핸드셰이크 테스트). push 명시 동의 필요(CLAUDE.md). 엔트리 ID qh=qg 정규 알파 후속. zenoh 정본=.cargo/git/checkouts/zenoh-*/49c8a53/."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [
