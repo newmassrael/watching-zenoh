@@ -402,7 +402,12 @@ routing-peer = []
 # the code it names un-gated (the marker is no longer a no-op). `?/` activates only
 # when the runtime-tokio profile already pulls wz-runtime-tokio (the AP path).
 routing-router = ["transport-link-tcp", "transport-unicast", "wz-runtime-tokio?/routing-accept"]
-routing-routes = ["routing-router"]
+# R311qc — routing-routes now composes REAL library code (the data-plane
+# forwarding kernel + the tokio RoutingForwarder), no longer a hollow marker:
+# it forwards the wz-runtime-tokio `routing-routes` atom on top of the
+# `routing-router` accept-and-hold foundation. `?/` activates only on the AP
+# path (runtime-tokio profile pulls wz-runtime-tokio).
+routing-routes = ["routing-router", "wz-runtime-tokio?/routing-routes"]
 routing-static-routes = ["routing-router"]
 
 # ----- domain: runtime (6 atomic, 2 active / 4 reserved) -----

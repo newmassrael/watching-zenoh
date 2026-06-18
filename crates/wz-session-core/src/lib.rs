@@ -126,6 +126,16 @@ pub mod sink;
 /// cross-check land in later sub-rounds (gc-2b / gc-3).
 pub mod switchboard;
 
+/// R311qc — the data-plane forwarding kernel (`routing-routes`): the
+/// [`routing::RouteTable`] a router uses to forward a Put received on one peer
+/// face to every other face that declared a matching subscriber. Sibling to
+/// the `routing-router` accept-and-hold foundation; the table is generic over
+/// the runtime/clock and wrapped single-task by the tokio forwarder. Gated on
+/// `all(alloc, routing-routes)` (AP router); the kernel reuses the
+/// [`wireexpr_resolve`] / [`keyexpr_match`] SSOTs the subscriber path uses.
+#[cfg(all(feature = "alloc", feature = "routing-routes"))]
+pub mod routing;
+
 /// R311gb-3 — query-dispatch seam (`QueryView` inbound accessor contract
 /// + `ReplyOut` outbound emit contract + `QuerySink` DIP trait + the
 /// `alloc`-only `BoxedQuerySink` closure adapter). The request/response

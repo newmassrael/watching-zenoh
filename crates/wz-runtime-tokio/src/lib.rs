@@ -517,6 +517,16 @@ pub mod session_open;
 #[cfg(feature = "routing-accept")]
 pub mod accept_loop;
 
+/// R311qc — the data-plane forwarding atom: the [`routing_forward::RoutingForwarder`]
+/// that backs the [`accept_loop`]'s `FaceForwarder` seam with the
+/// [`wz_session_core::routing::RouteTable`] kernel, turning a held face into a
+/// route (a Put on one face forwarded to every other face that declared a
+/// matching subscriber). Gated on `routing-routes` (which pulls `routing-accept`
+/// + the kernel + the Push / DeclareSubscriber codecs); the hold-only
+/// foundation builds without it (it uses `accept_loop::NoOpForwarder`).
+#[cfg(feature = "routing-routes")]
+pub mod routing_forward;
+
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions
 /// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs

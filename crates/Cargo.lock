@@ -2118,6 +2118,7 @@ dependencies = [
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
+ "wz-session-core-test-support",
  "wz-session-wire-fixtures",
  "wz-statechart-bridge",
  "zeroize",

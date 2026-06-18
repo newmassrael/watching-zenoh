@@ -60,6 +60,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -69,7 +70,8 @@ use wz_runtime_core::TimeSource;
 use crate::link_pipeline::accept_tcp_on;
 use crate::runtime_impl::TokioTime;
 use crate::session_glue::{
-    drive_session_until_terminal, DriverOutcome, SessionInitParams, SessionTimeouts,
+    drive_session_until_terminal, DriverOutcome, IterationEvent, SessionInitParams,
+    SessionLinkActions, SessionTimeouts,
 };
 use crate::session_open::{accept_and_open_session, DialedLink, OpenError, OpenedSession};
 
@@ -125,6 +127,48 @@ pub enum AcceptEvent {
     AcceptError(io::Error),
 }
 
+/// The forwarding seam the [`accept_loop`] threads its held faces through —
+/// the data-plane injection point that keeps the loop itself
+/// forwarding-AGNOSTIC (its job is accept-and-hold; whether held faces route
+/// traffic to each other is this hook's concern). The loop reports three
+/// things per face: it entered the live set ([`register`](Self::register),
+/// with the face's transport send seam so a forwarder can later send TO it),
+/// each inbound iteration event ([`forward`](Self::forward), the per-face
+/// `drive_session_until_terminal` observer), and it left the set
+/// ([`deregister`](Self::deregister)).
+///
+/// The hold-only path (the `routing-router` foundation with no `routing-routes`
+/// forwarding) passes [`NoOpForwarder`]; the `routing-routes` atom passes a
+/// forwarder backed by the [`RouteTable`](wz_session_core::routing::RouteTable)
+/// (see [`crate::routing_forward`]). Taken as `&dyn` so the loop carries one
+/// concrete future type in its [`FuturesUnordered`] regardless of which
+/// forwarder is wired, and `!Send` is fine — the whole loop is single-task.
+/// A future routing-peer reuses this same seam.
+pub trait FaceForwarder {
+    /// A face reached Established and entered the live set. `actions` is its
+    /// transport send seam; a forwarder that routes clones it (an `Arc`) so it
+    /// can forward TO this face later.
+    fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>);
+    /// A held face left the live set (peer Close / link loss). It can no
+    /// longer be a forward destination.
+    fn deregister(&self, id: FaceId);
+    /// One inbound iteration event from the face `id` — the per-face observer
+    /// the loop installs on each held session's drive loop. A routing
+    /// forwarder inspects it for declarations / Puts to route.
+    fn forward(&self, id: FaceId, event: IterationEvent<'_>);
+}
+
+/// The hold-only [`FaceForwarder`]: the `routing-router` foundation holds
+/// faces but routes nothing between them, so every hook is a no-op. The
+/// unit-struct default for an [`accept_loop`] that is not a forwarding router.
+pub struct NoOpForwarder;
+
+impl FaceForwarder for NoOpForwarder {
+    fn register(&self, _id: FaceId, _actions: &Arc<SessionLinkActions>) {}
+    fn deregister(&self, _id: FaceId) {}
+    fn forward(&self, _id: FaceId, _event: IterationEvent<'_>) {}
+}
+
 /// What an [`accept_loop`] run accomplished, returned when the shutdown future
 /// completes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -155,13 +199,19 @@ async fn open_face(
     (id, peer, result)
 }
 
-/// Drive one Established face to terminal, then drain it. No application observer
-/// (`|_| {}`): this atom holds the transport-level session, not any pub/sub logic
-/// on it. The borrow-then-consume shape — borrow `opened`'s fields for the drive,
-/// then [`OpenedSession::drain_to_close`] consumes `opened` — keeps the
-/// drop-order + bounded writer-drain a single typed primitive (the R292 drain
-/// contract), not a hand-ordered sequence re-copied here.
-async fn drive_face(face: Face, mut opened: OpenedSession) -> (Face, DriverOutcome) {
+/// Drive one Established face to terminal, then drain it. The per-iteration
+/// observer threads each inbound event to `forwarder.forward(face.id, …)` — the
+/// data-plane seam: the hold-only [`NoOpForwarder`] discards it (this atom just
+/// holds the transport session), a routing forwarder routes it. The
+/// borrow-then-consume shape — borrow `opened`'s fields for the drive, then
+/// [`OpenedSession::drain_to_close`] consumes `opened` — keeps the drop-order +
+/// bounded writer-drain a single typed primitive (the R292 drain contract), not
+/// a hand-ordered sequence re-copied here.
+async fn drive_face(
+    face: Face,
+    mut opened: OpenedSession,
+    forwarder: &dyn FaceForwarder,
+) -> (Face, DriverOutcome) {
     let timeouts = SessionTimeouts::spec_defaults();
     let outcome = drive_session_until_terminal(
         &mut opened.inbound,
@@ -170,7 +220,7 @@ async fn drive_face(face: Face, mut opened: OpenedSession) -> (Face, DriverOutco
         None,
         &opened.clock,
         &timeouts,
-        |_event| {},
+        |event| forwarder.forward(face.id, event),
     )
     .await;
     opened.drain_to_close().await;
@@ -213,6 +263,7 @@ pub async fn accept_loop<S, F>(
     tick_interval_ms: u64,
     shutdown: S,
     mut on_event: F,
+    forwarder: &dyn FaceForwarder,
 ) -> AcceptLoopSummary
 where
     S: Future<Output = ()>,
@@ -247,8 +298,12 @@ where
                         faces.insert(id, peer);
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
+                        // Register the face's send seam BEFORE moving `opened`
+                        // into the drive future, so a forwarder can route TO
+                        // this face from the moment it is held.
+                        forwarder.register(id, &opened.actions);
                         on_event(&AcceptEvent::FaceUp(face));
-                        driving.push(drive_face(face, opened));
+                        driving.push(drive_face(face, opened, forwarder));
                     }
                     Err(cause) => {
                         on_event(&AcceptEvent::FaceFailed { id, peer, cause });
@@ -258,6 +313,7 @@ where
 
             Step::Driven((face, outcome)) => {
                 faces.remove(&face.id);
+                forwarder.deregister(face.id);
                 on_event(&AcceptEvent::FaceDown(face, outcome));
             }
 
@@ -395,6 +451,7 @@ mod tests {
             DEFAULT_OPEN_TICK_MS,
             shutdown_on(go_rx.clone()),
             on_event,
+            &NoOpForwarder,
         );
         let initiators = (0..N).map(|i| idle_initiator(addr, (i as u8) + 1, go_rx.clone()));
 
@@ -455,6 +512,7 @@ mod tests {
             DEFAULT_OPEN_TICK_MS,
             shutdown_on(go_rx.clone()),
             on_event,
+            &NoOpForwarder,
         );
 
         // Bad peer: connect, then drop the socket before sending InitSyn — the
@@ -533,6 +591,7 @@ mod tests {
             DEFAULT_OPEN_TICK_MS,
             shutdown_on(shut_rx.clone()),
             on_event,
+            &NoOpForwarder,
         );
 
         // The early peer releases (closes) once all N are up; the two holders
@@ -585,6 +644,7 @@ mod tests {
             DEFAULT_OPEN_TICK_MS,
             shutdown,
             |_event: &AcceptEvent| {},
+            &NoOpForwarder,
         );
 
         let summary = tokio::time::timeout(Duration::from_secs(10), async {

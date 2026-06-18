@@ -403,6 +403,20 @@ transport-link-ws = ["dep:tokio-tungstenite", "dep:futures-util"]
 # `routing-accept` test lane (run-ci Layer C1w) and the facade `routing-router`
 # preset select it.
 routing-accept = ["transport-link-tcp", "transport-unicast", "dep:futures-util"]
+# R311qc — the data-plane forwarding atom: gates `pub mod routing_forward`
+# (lib.rs) — the `RoutingForwarder` that backs the `accept_loop`'s
+# `FaceForwarder` seam with the `wz-session-core` `routing::RouteTable`. Pulls
+# the accept-and-hold foundation it forwards on top of (`routing-accept`), the
+# kernel (`wz-session-core/routing-routes`), and the Push / DeclareSubscriber
+# codecs the forward + route-build read (`codec-push` / `declare-subscriber`).
+# Off by default; the facade `routing-routes` preset and the run-ci forwarding
+# lanes select it.
+routing-routes = [
+    "routing-accept",
+    "wz-session-core/routing-routes",
+    "codec-push",
+    "declare-subscriber",
+]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the
@@ -852,7 +866,14 @@ wz-statechart-bridge = { path = "../wz-statechart-bridge" }
 # R311ds — the wz-session-core-test-support dev-dep moved to
 # wz-session-core: the declare/* shells no longer host the behavioural
 # tests (they migrated to wz-session-core next to the registry code),
-# so this crate no longer consumes the four-registry fixture builders.
+# so this crate stopped consuming the four-registry fixture builders.
+# R311qc — re-added: the `routing_forward` kernel tests are a new consumer
+# of the DeclareSubscriber / UndeclareSubscriber envelope builders (the
+# router records subscriptions from inbound Declares), and these construct
+# `wz-session-core` codec types shared across both `wz-runtime-tokio` copies
+# in the dev-dep-cycle graph (like `fixture_session_init_params`), so
+# importing them across the boundary is sound.
+wz-session-core-test-support = { path = "../wz-session-core-test-support" }
 # R311fu — the owned->wire `TestWire` projection SSOT (used by the
 # session_glue byte-compare tests for all five emitted message
 # mirrors). Distinct from the removed session-core dev-dep above: this
