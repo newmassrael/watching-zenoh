@@ -170,4 +170,13 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
         "peer-A summary must report the dial+accept split (dialed 1, accepted 1)\n\
          --- peer-A stderr ---\n{a_captured}"
     );
+    // R311qi — each held face logs the remote peer's zid, captured at handshake
+    // (the demo nodes all announce zid 0x01020304). Its presence proves the zid
+    // flowed handshake -> Face -> log end-to-end for BOTH a dialed face (the zid
+    // from the InitAck, R311qh's Initiating-side capture) and an accepted one.
+    assert!(
+        a_captured.contains("zid 01020304"),
+        "peer-A face logs must carry the remote peer's zid (handshake -> Face)\n\
+         --- peer-A stderr ---\n{a_captured}"
+    );
 }
