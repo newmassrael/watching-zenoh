@@ -1531,7 +1531,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-push",
         feature = "codec-request",
         feature = "codec-declare",
-        feature = "declare-interest"
+        feature = "declare-interest",
+        feature = "codec-linkstate"
     ))]
     pub fn send_network_message(
         &self,
@@ -1610,6 +1611,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let _ = express;
                 self.dispatch_interest(interest, reliable)
             }
+            // OAM-LINKSTATE arm (R311qz, c3d): the linkstate-peer routing TX
+            // path. The forwarder floods a self-built topology carrier; like
+            // Declare/Interest it carries no express batch window —
+            // `dispatch_oam` mints the SN, frames, and batch-absorbs
+            // reliably. Co-gated `codec-linkstate` (the OAM TX consumer) +
+            // `codec-push` (the send infrastructure `dispatch_oam` rides);
+            // a build with codec-linkstate but no send path routes Oam to the
+            // no-emit catch arm instead of an absent `dispatch_oam`.
+            #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+            crate::network_message::NetworkMessage::Oam(oam) => {
+                let _ = express;
+                self.dispatch_oam(oam, reliable)
+            }
             // Not yet routed through the seam (or inbound-only). Honest no-emit
             // reject, never a panic — symmetric with the multicast arm. The
             // `reliable` discard keeps the param used when this is the only arm
@@ -1645,6 +1659,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             reliable,
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             crate::frame_encode::declare_body(&declare),
+        )
+    }
+
+    /// See [`Self::dispatch_push`]. The OAM-LINKSTATE TX path (c3d
+    /// linkstate-peer flood). The reserve hint is the fixed
+    /// `Oam::MAX_ENCODED_BYTES`; the variable LinkStateList ZBuf payload
+    /// grows the `VecSink` past it, and the oversize / fragment decision
+    /// keys off the ACTUAL encoded length (not this hint), so a large
+    /// multi-node flood fragments correctly. Co-gated on `codec-push`: the
+    /// OAM TX rides the `dispatch_network_message` send infrastructure the
+    /// data plane brings (a routing peer always carries the data plane), so
+    /// `codec-linkstate` alone — an encode-only build — does not pull this
+    /// send path (which would orphan it without `dispatch_network_message`).
+    #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+    fn dispatch_oam(
+        &self,
+        oam: wz_codecs::oam::OamOwned,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
+        self.dispatch_network_message(
+            reliable,
+            wz_codecs::oam::Oam::MAX_ENCODED_BYTES,
+            crate::frame_encode::oam_body(&oam),
         )
     }
 

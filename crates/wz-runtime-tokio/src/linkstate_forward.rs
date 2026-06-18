@@ -39,7 +39,9 @@ use std::sync::Arc;
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_session_core::driver_loop::DriverLoopOutcome;
-use wz_session_core::linkstate_oam::{build_linkstate_oam, try_parse_linkstate_oam, LinkstateOam};
+use wz_session_core::linkstate_oam::{
+    build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
+};
 use wz_session_core::network_message::NetworkMessage;
 
 use wz_routing_graph::{LinkId, LinkstateNetwork, Zid, WHATAMI_PEER};
@@ -57,6 +59,11 @@ pub struct LinkstateForwarder {
     /// Face -> graph link id, so an inbound list is ingested against the
     /// link it arrived on (whose psid<->zid mappings resolve it).
     face_links: RefCell<HashMap<FaceId, LinkId>>,
+    /// Face -> its transport send seam, so [`flood_self`](Self::flood_self)
+    /// can push the local link-state out on every held face (the `Arc`
+    /// clone of the face's `SessionLinkActions`, as `RoutingForwarder` keeps
+    /// for the data plane).
+    faces: RefCell<HashMap<FaceId, Arc<SessionLinkActions>>>,
     /// Running total of link-state lists ingested — the control-plane work
     /// witness (the linkstate analogue of `RoutingForwarder::forwarded`).
     ingested: Cell<usize>,
@@ -68,6 +75,7 @@ impl LinkstateForwarder {
         Self {
             net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
             face_links: RefCell::new(HashMap::new()),
+            faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
         }
     }
@@ -113,22 +121,38 @@ impl LinkstateForwarder {
         self.net.borrow().tree_children_of(source)
     }
 
-    /// Build THIS peer's own link-state advertisement as `OAM_LINKSTATE`
-    /// wire bytes, ready to flood to faces — the TX seam. The graph builds
-    /// the full-topology `LinkStateList` (c3b
-    /// [`LinkstateNetwork::build_linkstate_list`]); `build_linkstate_oam`
-    /// (c1) wraps it in the OAM carrier. This is the graph -> wire step;
-    /// pushing the bytes onto each face's send path (on a periodic timer /
-    /// on `Changes`) is the flood-driver atom (c3d). Mirrors zenoh
-    /// `make_msg` + `send_on_links`.
-    pub fn self_linkstate_oam(&self) -> Result<Vec<u8>, CodecError> {
+    /// Flood THIS peer's own link-state to every held face — the TX seam
+    /// (c3d). The graph builds the full-topology `LinkStateList` (c3b
+    /// [`LinkstateNetwork::build_linkstate_list`]); `build_linkstate_oam_owned`
+    /// (c1) wraps it in the `OAM_LINKSTATE` carrier; each face's
+    /// [`SessionLinkActions::send_network_message`] puts it on the wire
+    /// (reliably — topology is control traffic). Returns the number of faces
+    /// the message reached. Mirrors zenoh `make_msg` + `send_on_links`. The
+    /// WHEN — a periodic timer / on a `Changes`-driven re-flood — is the
+    /// caller's (the peer loop's) concern.
+    pub fn flood_self(&self) -> Result<usize, CodecError> {
         let list = self.net.borrow().build_linkstate_list();
-        build_linkstate_oam(&list)
+        // `NetworkMessage` is not `Clone`, but `OamOwned` is — build the
+        // carrier once and re-wrap a clone per face.
+        let oam = build_linkstate_oam_owned(&list)?;
+        let mut sent = 0;
+        for actions in self.faces.borrow().values() {
+            // a per-face send failure (link gone mid-flood) is skipped, not
+            // fatal to the rest of the flood — the face's own driver will
+            // surface its teardown via deregister.
+            let msg = NetworkMessage::Oam(oam.clone());
+            if actions.send_network_message(msg, true, false).is_ok() {
+                sent += 1;
+            }
+        }
+        Ok(sent)
     }
 }
 
 impl FaceForwarder for LinkstateForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
+        // Keep the face's send seam so flood_self can reach it.
+        self.faces.borrow_mut().insert(id, actions.clone());
         // The peer's routing zid is read from the handshake at FaceUp
         // (R311qi). Without it there is no graph identity to key on, so the
         // face is held but not connected (it cannot route topology). The
@@ -142,6 +166,7 @@ impl FaceForwarder for LinkstateForwarder {
     }
 
     fn deregister(&self, id: FaceId) {
+        self.faces.borrow_mut().remove(&id);
         self.on_face_down(id);
     }
 
@@ -165,6 +190,7 @@ impl FaceForwarder for LinkstateForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::recording_actions;
     use sce_forge_runtime::codec::SceBytes;
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
@@ -232,23 +258,29 @@ mod tests {
     }
 
     #[test]
-    fn self_linkstate_oam_reflects_the_graph() {
-        // the TX seam: the built OAM grows with the advertised topology.
-        let solo = LinkstateForwarder::new(zid(0x01), 2);
-        let solo_bytes = solo.self_linkstate_oam().expect("build solo OAM");
-        assert!(!solo_bytes.is_empty());
+    fn flood_self_sends_link_state_to_every_face() {
+        // the TX seam: flood_self pushes the local link-state out on each
+        // held face's send seam (the OAM landing as one frame per face).
+        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let (face_a, sink_a) = recording_actions();
+        let (face_b, sink_b) = recording_actions();
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
 
-        let with_peer = LinkstateForwarder::new(zid(0x01), 2);
-        with_peer.on_face_up(FaceId(7), zid(0xAA), 2);
-        let peer_bytes = with_peer
-            .self_linkstate_oam()
-            .expect("build OAM with a neighbour");
-        // advertising a neighbour adds its node + self's link to the message.
-        assert!(
-            peer_bytes.len() > solo_bytes.len(),
-            "a neighbour enlarges the link-state ({} vs {})",
-            peer_bytes.len(),
-            solo_bytes.len()
-        );
+        let sent = fwd.flood_self().expect("flood self");
+        assert_eq!(sent, 2, "flooded both held faces");
+        assert_eq!(sink_a.frame_count(), 1, "face A received the link-state");
+        assert_eq!(sink_b.frame_count(), 1, "face B received the link-state");
+    }
+
+    #[test]
+    fn deregister_stops_flooding_a_face() {
+        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let (face_a, sink_a) = recording_actions();
+        fwd.register(FaceId(0), &face_a);
+        fwd.deregister(FaceId(0));
+        let sent = fwd.flood_self().expect("flood self after deregister");
+        assert_eq!(sent, 0, "the deregistered face is no longer flooded");
+        assert_eq!(sink_a.frame_count(), 0);
     }
 }

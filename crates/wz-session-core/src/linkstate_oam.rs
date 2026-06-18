@@ -84,6 +84,16 @@ pub enum LinkstateOam {
 /// separately. Owned input (the topology graph in step c2 holds owned
 /// link-state records); `alloc`-only, like the sibling builders.
 pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
+    Ok(build_linkstate_oam_owned(list)?
+        .try_as_borrowed()?
+        .encode_to_vec())
+}
+
+/// Build the OAM-LINKSTATE carrier as an OWNED message — the send-path form.
+/// The driver wraps this in `NetworkMessage::Oam` and floods it on its faces
+/// via `send_network_message` (c3d). [`build_linkstate_oam`] is the same
+/// message rendered to wire bytes (for inspection / byte-parity tests).
+pub fn build_linkstate_oam_owned(list: &LinkstateListOwned) -> Result<OamOwned, CodecError> {
     let list_bytes = list.try_as_borrowed()?.encode_to_vec();
     let value_len = list_bytes.len() as u64;
 
@@ -127,8 +137,7 @@ pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecEr
             value: crate::codec_owned::owned_bytes(&list_bytes)?,
         }),
     };
-    let wire = oam.try_as_borrowed()?.encode_to_vec();
-    Ok(wire)
+    Ok(oam)
 }
 
 /// Classify a decoded OAM message as a topology carrier. See

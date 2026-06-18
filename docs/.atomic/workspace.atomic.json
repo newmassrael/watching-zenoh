@@ -41664,6 +41664,46 @@
         "다음: c3d(forwarder를 peer_loop 배선+주기 flood+propagate_link_states+2-peer e2e)=프로덕션 토폴로지 교환 실작동. 또는 c3c data-forward. 코드 LOCAL UNPUSHED 1커밋: qy(qm~qx=PUSHED)."
       ]
     },
+    "Round 311qz": {
+      "decision_summary": "R311qz: linkstate (c3d-1) OAM send seam + flood_self — forwarder가 self link-state를 faces에 실제 송신. session_actions::send_network_message에 Oam arm + dispatch_oam 신설(OAM TX가 _=>FeatureDisabled로 거부되던 미배선 통합 갭 해소; all(codec-linkstate,codec-push) co-gate=send 인프라 동반) + frame_encode::oam_body + build_linkstate_oam_owned(OamOwned builder) + LinkstateForwarder.flood_self(faces별 send seam→NetworkMessage::Oam 송신). recording_actions 검증.",
+      "changes_bullets": [
+        "wz-session-core: send_network_message에 NetworkMessage::Oam arm 추가(기존엔 Oam이 _=>FeatureDisabled로 거부=OAM TX 경로 미배선=통합 갭) → dispatch_oam(dispatch_network_message로 SN mint+frame+batch, declare arm 미러). fn-gate에 codec-linkstate 추가(flood_self가 routing-peer 전 빌드서 호출하므로 fn 존재 필요). dispatch_oam/Oam-arm/frame_encode::oam_body는 all(codec-linkstate, codec-push) co-gate=OAM TX는 dispatch_network_message send 인프라(codec-push 동반) 필요; codec-linkstate-only encode 빌드선 미컴파일(orphan/dead-code 방지). linkstate_oam: build_linkstate_oam_owned(OamOwned=send-path 형태) 추출, build_linkstate_oam(bytes)이 이를 호출+encode.",
+        "wz-runtime-tokio linkstate_forward: LinkstateForwarder에 faces: HashMap<FaceId, Arc<SessionLinkActions>> 필드(register서 send seam 저장, deregister 제거) + flood_self()→build_linkstate_list→build_linkstate_oam_owned→면별 NetworkMessage::Oam(oam.clone())을 send_network_message(reliable=true). qx self_linkstate_oam(bytes, 미배선)→flood_self 대체.",
+        "테스트: flood_self_sends_link_state_to_every_face(recording_actions 2면 register→flood→각 sink frame_count=1, sent=2), deregister_stops_flooding_a_face(deregister 후 sent=0)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_forward 6 PASS(flood 2 신규). wz-session-core default 147 PASS(core 회귀 무변) + codec-linkstate linkstate_oam 7 PASS(OAM 라운드트립=build_linkstate_oam 리팩터 무영향) + codec-declare 2 PASS.",
+        "핵심 feature-combo 3 검증: (1) codec-linkstate-isolated 빌드=OAM-send 헬퍼 absent→dead-code 없음, (2) --no-default-features --features routing-peer clippy=codec-push 없어 OAM-TX absent→emit_frame_or_fragments E0599 없음(co-gate가 send 인프라와 정합), (3) full routing-peer=flood 실동작. fmt --all + clippy(rt-tokio routing-peer all-targets+no-default, wz-ap-demo, wz-routing-graph, wz-session-core) 전부 -D warnings clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311qz = linkstate (c3d-1) OAM send seam + flood_self 완료. forwarder가 self link-state를 faces에 실제 송신. session_actions::send_network_message에 Oam arm + dispatch_oam 신설=OAM TX가 미배선(_=>FeatureDisabled)이던 통합 갭 해소=적대 리뷰 \"inert in production\"의 실제 send 차단점. recording_actions로 검증. co-gate all(codec-linkstate, codec-push)=OAM TX는 send 인프라 동반.",
+        "다음 c3d-2: propagate_link_states(수신 changed list를 source 외 OTHER faces에 re-flood; zenoh network.rs:636-680,804; >2-node mesh transitive 전파의 프로덕션 메커니즘=qy서 defer 명시) → c3d-3: peer_loop이 LinkstateForwarder 사용(NoOpForwarder 대체)+주기 flood 타이머(flood_self 주기 호출) → c3d-4: 2-peer e2e(실제 transport 토폴로지 교환). 이들 끝나면 프로덕션 inert 완전 탈출.",
+        "추적 부채: options-SSOT(SCE owned-flag-setter 리포트), Zid=Vec<u8>→16B newtype, remove_detached_nodes, drop 관측성(tracing dep).",
+        "코드 LOCAL UNPUSHED 1커밋: qz(qm~qy=PUSHED origin/main=14df94d)."
+      ],
+      "publishable_decision_summary": "R311qz: linkstate (c3d-1) OAM send seam + flood_self — forwarder가 self link-state를 faces에 실제 송신. session_actions::send_network_message에 Oam arm + dispatch_oam 신설(OAM TX가 _=>FeatureDisabled로 거부되던 미배선 통합 갭 해소; all(codec-linkstate,codec-push) co-gate=send 인프라 동반) + frame_encode::oam_body + build_linkstate_oam_owned(OamOwned builder) + LinkstateForwarder.flood_self(faces별 send seam→NetworkMessage::Oam 송신). recording_actions 검증.",
+      "publishable_changes_bullets": [
+        "wz-session-core: send_network_message에 NetworkMessage::Oam arm 추가(기존엔 Oam이 _=>FeatureDisabled로 거부=OAM TX 경로 미배선=통합 갭) → dispatch_oam(dispatch_network_message로 SN mint+frame+batch, declare arm 미러). fn-gate에 codec-linkstate 추가(flood_self가 routing-peer 전 빌드서 호출하므로 fn 존재 필요). dispatch_oam/Oam-arm/frame_encode::oam_body는 all(codec-linkstate, codec-push) co-gate=OAM TX는 dispatch_network_message send 인프라(codec-push 동반) 필요; codec-linkstate-only encode 빌드선 미컴파일(orphan/dead-code 방지). linkstate_oam: build_linkstate_oam_owned(OamOwned=send-path 형태) 추출, build_linkstate_oam(bytes)이 이를 호출+encode.",
+        "wz-runtime-tokio linkstate_forward: LinkstateForwarder에 faces: HashMap<FaceId, Arc<SessionLinkActions>> 필드(register서 send seam 저장, deregister 제거) + flood_self()→build_linkstate_list→build_linkstate_oam_owned→면별 NetworkMessage::Oam(oam.clone())을 send_network_message(reliable=true). qx self_linkstate_oam(bytes, 미배선)→flood_self 대체.",
+        "테스트: flood_self_sends_link_state_to_every_face(recording_actions 2면 register→flood→각 sink frame_count=1, sent=2), deregister_stops_flooding_a_face(deregister 후 sent=0)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_forward 6 PASS(flood 2 신규). wz-session-core default 147 PASS(core 회귀 무변) + codec-linkstate linkstate_oam 7 PASS(OAM 라운드트립=build_linkstate_oam 리팩터 무영향) + codec-declare 2 PASS.",
+        "핵심 feature-combo 3 검증: (1) codec-linkstate-isolated 빌드=OAM-send 헬퍼 absent→dead-code 없음, (2) --no-default-features --features routing-peer clippy=codec-push 없어 OAM-TX absent→emit_frame_or_fragments E0599 없음(co-gate가 send 인프라와 정합), (3) full routing-peer=flood 실동작. fmt --all + clippy(rt-tokio routing-peer all-targets+no-default, wz-ap-demo, wz-routing-graph, wz-session-core) 전부 -D warnings clean."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311qz = linkstate (c3d-1) OAM send seam + flood_self 완료. forwarder가 self link-state를 faces에 실제 송신. session_actions::send_network_message에 Oam arm + dispatch_oam 신설=OAM TX가 미배선(_=>FeatureDisabled)이던 통합 갭 해소=적대 리뷰 \"inert in production\"의 실제 send 차단점. recording_actions로 검증. co-gate all(codec-linkstate, codec-push)=OAM TX는 send 인프라 동반.",
+        "다음 c3d-2: propagate_link_states(수신 changed list를 source 외 OTHER faces에 re-flood; zenoh network.rs:636-680,804; >2-node mesh transitive 전파의 프로덕션 메커니즘=qy서 defer 명시) → c3d-3: peer_loop이 LinkstateForwarder 사용(NoOpForwarder 대체)+주기 flood 타이머(flood_self 주기 호출) → c3d-4: 2-peer e2e(실제 transport 토폴로지 교환). 이들 끝나면 프로덕션 inert 완전 탈출.",
+        "추적 부채: options-SSOT(SCE owned-flag-setter 리포트), Zid=Vec<u8>→16B newtype, remove_detached_nodes, drop 관측성(tracing dep).",
+        "코드 LOCAL UNPUSHED 1커밋: qz(qm~qy=PUSHED origin/main=14df94d)."
+      ]
+    },
     "Round 311r": {
       "decision_summary": "R311r Queryable cascade — new QueryEvent + ReplyEmitter wrappers decouple consumer API from wz-codecs; module / handle / observer / AliasError ungated; declare_queryable Result form + FeatureDisabled.",
       "changes_bullets": [

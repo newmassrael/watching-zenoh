@@ -23,6 +23,8 @@ use wz_codecs::wire_const;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareOwned};
 use wz_codecs::interest::{Interest, InterestOwned};
+#[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+use wz_codecs::oam::OamOwned;
 #[cfg(feature = "codec-push")]
 use wz_codecs::push::{Push, PushOwned};
 #[cfg(feature = "codec-request")]
@@ -131,6 +133,21 @@ pub(crate) fn push_body(
 ) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
         push.try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
+    }
+}
+
+/// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
+/// (c3d) floods a self-built OAM carrier through the same
+/// `dispatch_network_message` chokepoint as the data-plane senders. Same
+/// `try_as_borrowed().encode(sink)` projection as [`push_body`]. Co-gated on
+/// `codec-push` (the send path it feeds), so an encode-only `codec-linkstate`
+/// build does not compile this orphaned.
+#[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
+pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut VecSink<'_>) -> Result<(), CodecError> + '_ {
+    move |sink| {
+        oam.try_as_borrowed()
             .expect("wz builders emit <=N exts by construction")
             .encode(sink)
     }
