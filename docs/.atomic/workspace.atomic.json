@@ -43042,6 +43042,52 @@
         "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd)=2커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
       ]
     },
+    "Round 311se": {
+      "decision_summary": "R311se: c3c-3 D2 children-delta — re_advertise_subscriptions를 zenoh pubsub_tree_change처럼 new-children delta로(전 children 재flood→신규 child만). compute_trees가 Vec<(Zid,Vec<Zid>)> delta 반환(old_children diff; architect signature-cost 권고대로 지금), on_inbound이 (Changes,delta) thread, flood_to_children SSOT. deregister는 self-link drop이 self children(⊆neighbours) SHRINK만 하므로 delta provably empty=recompute만(dead no-op 회피). D2b event-flood/D2c batching은 SRP 분리 defer.",
+      "changes_bullets": [
+        "zenoh 조사(Explore, file:line): compute_trees -> Vec<Vec<NodeIndex>> new_children delta(network.rs:1015-1113, old_children 캡처→diff); pubsub_tree_change(new_children)가 source==tree_id sub를 delta children에만 재광고(pubsub.rs:641-678); TreesComputationWorker(mod.rs:122, 100ms bounded(1)) 배치; flood은 순수 event-driven(주기 timer 전무; add_link/remove_link이 즉시 send_on_links). D2=3개 분리 개선; architect signature-cost로 children-delta 우선.",
+        "wz-routing-graph compute_trees() -> Vec<(Zid,Vec<Zid>)>: rebuild 전 old_children 스냅샷→diff로 tree별 new-children delta 반환(wz idiom=Zid; zenoh는 NodeIndex). children 안 늘어난 tree는 제외. 반환은 ignorable(topology-query는 self.trees 직접 read). +graph unit(신규 child만 delta).",
+        "linkstate_forward re_advertise_subscriptions(&new_children): zenoh pubsub_tree_change 구조 미러 — outer=new_children(source+delta), inner=source 매칭 sub, flood_to_children(delta)로 재광고(이전: 매 recompute 전 sub를 전 children에 재flood, receiver change-gate가 redundant dedup). flood_to_children SSOT 추출(flood_to_tree_children=full set 위임, re_advertise=delta).",
+        "on_inbound_linkstate가 (Changes, new_children) 반환(ingest+recompute 1회서 둘 다); forward() OAM arm이 delta를 re_advertise에 thread(이전 changes.updated gate→delta empty시 자연 no-op). deregister는 self-link drop이 self children(⊆neighbours)을 SHRINK만 하므로 delta 항상 empty=recompute(stale route purge)만, re_advertise 미호출(dead no-op 회피; re-home은 다음 inbound forward-path가 수렴). 4 unit 재작성/추가(new-child only delta / forward-hook positive new-child / deregister no-spurious-reflood / late-joiner)."
+      ],
+      "verification_bullets": [
+        "wz-routing-graph 27 PASS(+1 compute_trees_returns_only_the_newly_added_children: 2번째 neighbour B 합류 시 self tree delta=[B]만, A 제외; full tree는 [A,B]). 기존 tree/forward 무회귀.",
+        "wz-runtime-tokio(routing-peer) lib 344 PASS(+1 net; re_advertise_floods_only_the_new_child_not_an_existing_one=신규 D만 demo/x, 기존 B 제외; forward_hook_re_advertises_to_a_new_child=forward() OAM이 신규 child C에 재광고; deregister_does_not_re_advertise_to_an_already_converged_survivor=leaf drop 시 C 미수신; late-joiner 2개 delta-threaded). 기존 무회귀.",
+        "E6 e2e 3/3(line forward/withdraw + 4-peer selectivity) PASS=delta로도 late-joiner 수렴(publisher가 subscriber 선언 후 합류→신규 child에 재광고 전달) 보존. clippy(graph/runtime-tokio --tests) -D clean. fmt clean.",
+        "full run-ci RUNCI_EXIT=0(idle 후 1차, 전 host lane 실패 0). production 변경(graph compute_trees signature + forwarder)이라 full 게이트."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311se = c3c-3 D2 children-delta 완결: re_advertise를 zenoh pubsub_tree_change처럼 new-children delta로(전 children 재flood→신규 child만; receiver change-gate redundant 제거). compute_trees가 delta 반환(signature change=architect 권고대로 지금; on_inbound/deregister/test caller thread). flood_to_children SSOT. deregister는 delta provably empty(self children shrink)=recompute만.",
+        "D2 잔여 분리 atom(zenoh 정본 명확): D2b event-driven flood(register/deregister 시 self 변경 link-state를 기존 face에 즉시 flood; zenoh add_link send_on_links 즉시, 주기 timer 전무→LINKSTATE_FLOOD_PERIOD 1000ms 제거/완화) + D2c TreesComputationWorker 배치(100ms bounded(1) coalesce; 현재 매 inbound inline recompute). 둘 다 SRP로 분리.",
+        "다음 부채(project_c3c3_debt_paydown): D2b/D2c(위) → B1 alias keyexpr → D3 remove_detached_nodes → B2 wildcard → E/F.",
+        "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd=8269900)+D2(se)=3커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ],
+      "publishable_decision_summary": "R311se: c3c-3 D2 children-delta — re_advertise_subscriptions를 zenoh pubsub_tree_change처럼 new-children delta로(전 children 재flood→신규 child만). compute_trees가 Vec<(Zid,Vec<Zid>)> delta 반환(old_children diff; architect signature-cost 권고대로 지금), on_inbound이 (Changes,delta) thread, flood_to_children SSOT. deregister는 self-link drop이 self children(⊆neighbours) SHRINK만 하므로 delta provably empty=recompute만(dead no-op 회피). D2b event-flood/D2c batching은 SRP 분리 defer.",
+      "publishable_changes_bullets": [
+        "zenoh 조사(Explore, file:line): compute_trees -> Vec<Vec<NodeIndex>> new_children delta(network.rs:1015-1113, old_children 캡처→diff); pubsub_tree_change(new_children)가 source==tree_id sub를 delta children에만 재광고(pubsub.rs:641-678); TreesComputationWorker(mod.rs:122, 100ms bounded(1)) 배치; flood은 순수 event-driven(주기 timer 전무; add_link/remove_link이 즉시 send_on_links). D2=3개 분리 개선; architect signature-cost로 children-delta 우선.",
+        "wz-routing-graph compute_trees() -> Vec<(Zid,Vec<Zid>)>: rebuild 전 old_children 스냅샷→diff로 tree별 new-children delta 반환(wz idiom=Zid; zenoh는 NodeIndex). children 안 늘어난 tree는 제외. 반환은 ignorable(topology-query는 self.trees 직접 read). +graph unit(신규 child만 delta).",
+        "linkstate_forward re_advertise_subscriptions(&new_children): zenoh pubsub_tree_change 구조 미러 — outer=new_children(source+delta), inner=source 매칭 sub, flood_to_children(delta)로 재광고(이전: 매 recompute 전 sub를 전 children에 재flood, receiver change-gate가 redundant dedup). flood_to_children SSOT 추출(flood_to_tree_children=full set 위임, re_advertise=delta).",
+        "on_inbound_linkstate가 (Changes, new_children) 반환(ingest+recompute 1회서 둘 다); forward() OAM arm이 delta를 re_advertise에 thread(이전 changes.updated gate→delta empty시 자연 no-op). deregister는 self-link drop이 self children(⊆neighbours)을 SHRINK만 하므로 delta 항상 empty=recompute(stale route purge)만, re_advertise 미호출(dead no-op 회피; re-home은 다음 inbound forward-path가 수렴). 4 unit 재작성/추가(new-child only delta / forward-hook positive new-child / deregister no-spurious-reflood / late-joiner)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-routing-graph 27 PASS(+1 compute_trees_returns_only_the_newly_added_children: 2번째 neighbour B 합류 시 self tree delta=[B]만, A 제외; full tree는 [A,B]). 기존 tree/forward 무회귀.",
+        "wz-runtime-tokio(routing-peer) lib 344 PASS(+1 net; re_advertise_floods_only_the_new_child_not_an_existing_one=신규 D만 demo/x, 기존 B 제외; forward_hook_re_advertises_to_a_new_child=forward() OAM이 신규 child C에 재광고; deregister_does_not_re_advertise_to_an_already_converged_survivor=leaf drop 시 C 미수신; late-joiner 2개 delta-threaded). 기존 무회귀.",
+        "E6 e2e 3/3(line forward/withdraw + 4-peer selectivity) PASS=delta로도 late-joiner 수렴(publisher가 subscriber 선언 후 합류→신규 child에 재광고 전달) 보존. clippy(graph/runtime-tokio --tests) -D clean. fmt clean.",
+        "full run-ci RUNCI_EXIT=0(idle 후 1차, 전 host lane 실패 0). production 변경(graph compute_trees signature + forwarder)이라 full 게이트."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311se = c3c-3 D2 children-delta 완결: re_advertise를 zenoh pubsub_tree_change처럼 new-children delta로(전 children 재flood→신규 child만; receiver change-gate redundant 제거). compute_trees가 delta 반환(signature change=architect 권고대로 지금; on_inbound/deregister/test caller thread). flood_to_children SSOT. deregister는 delta provably empty(self children shrink)=recompute만.",
+        "D2 잔여 분리 atom(zenoh 정본 명확): D2b event-driven flood(register/deregister 시 self 변경 link-state를 기존 face에 즉시 flood; zenoh add_link send_on_links 즉시, 주기 timer 전무→LINKSTATE_FLOOD_PERIOD 1000ms 제거/완화) + D2c TreesComputationWorker 배치(100ms bounded(1) coalesce; 현재 매 inbound inline recompute). 둘 다 SRP로 분리.",
+        "다음 부채(project_c3c3_debt_paydown): D2b/D2c(위) → B1 alias keyexpr → D3 remove_detached_nodes → B2 wildcard → E/F.",
+        "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd=8269900)+D2(se)=3커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [

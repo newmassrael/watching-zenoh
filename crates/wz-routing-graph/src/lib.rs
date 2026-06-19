@@ -790,14 +790,34 @@ impl LinkstateNetwork {
     /// per-destination next hop in that root's tree. Forwarding a message
     /// along its source's tree is loop-free (a tree has no cycles) — the
     /// whole point of linkstate-peer routing. Mirrors zenoh `compute_trees`
-    /// (`network.rs:1015-1095`). Call after the topology changes (add_link
+    /// (`network.rs:1015-1113`). Call after the topology changes (add_link
     /// / ingest) and before querying the trees.
-    pub fn compute_trees(&mut self) {
+    ///
+    /// Returns the per-tree `new_children` DELTA: each `(root_zid, [child_zid,
+    /// ..])` names a tree root whose set of this-peer children GAINED members
+    /// vs the previous trees, with only the newly-added children — zenoh's
+    /// `compute_trees -> Vec<Vec<NodeIndex>>` (`network.rs:1097-1111`, children
+    /// filtered to those not in `old_children`). A tree whose children did not
+    /// grow contributes nothing. The subscription re-advertise
+    /// (`pubsub_tree_change`) floods a sourced declaration only to a source
+    /// tree's NEW children, not all of them — so a recompute that adds one child
+    /// re-advertises to that child alone, not the whole subtree. The return is
+    /// ignorable by callers that only need the recompute (the topology-query
+    /// methods read `self.trees` directly).
+    pub fn compute_trees(&mut self) -> Vec<(Zid, Vec<Zid>)> {
         let indexes: Vec<NodeIndex> = self.graph.node_indices().collect();
         let max_idx = match indexes.iter().max() {
             Some(m) => *m,
-            None => return,
+            None => return Vec::new(),
         };
+
+        // Snapshot each tree's children BEFORE the rebuild so the post-rebuild
+        // diff yields the new-children delta (zenoh captures `old_children`
+        // ahead of the recompute, `network.rs:1019-1020`). A tree index absent
+        // from the old set (a node that did not exist before) has every child
+        // counted new — zenoh's `else { children.clone() }` arm.
+        let old_children: Vec<Vec<NodeIndex>> =
+            self.trees.iter().map(|t| t.children.clone()).collect();
 
         self.trees.clear();
         self.trees.resize_with(max_idx.index() + 1, Tree::default);
@@ -852,6 +872,25 @@ impl LinkstateNetwork {
                     direction.or(parent);
             }
         }
+
+        // Per-tree new-children delta: children present now but not in the
+        // pre-rebuild snapshot (zenoh `network.rs:1101-1107`). A tree that did
+        // not gain a child contributes nothing, so an unchanged topology (a
+        // sn-stale re-flood) yields an empty delta and re-advertises nothing.
+        let mut new_children = Vec::new();
+        for tree_root_idx in &indexes {
+            let old = old_children.get(tree_root_idx.index());
+            let delta: Vec<Zid> = self.trees[tree_root_idx.index()]
+                .children
+                .iter()
+                .filter(|child| old.map_or(true, |o| !o.contains(child)))
+                .map(|child| self.graph[*child].zid.clone())
+                .collect();
+            if !delta.is_empty() {
+                new_children.push((self.graph[*tree_root_idx].zid.clone(), delta));
+            }
+        }
+        new_children
     }
 
     /// This peer's children in the spanning tree rooted at `source` — the
@@ -1245,6 +1284,55 @@ mod tests {
         assert_eq!(net.tree_children_of(&zid(0x01)), vec![zid(0xAA)]);
         assert_eq!(net.distance_to(&zid(0x01)), Some(0.0), "self distance is 0");
         assert!(net.distance_to(&zid(0xAA)).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn compute_trees_returns_only_the_newly_added_children() {
+        // First compute: self gains child A (every child is new vs the empty
+        // initial trees). A second neighbour B then joins; the next recompute's
+        // delta for self's tree is JUST B — A is an existing child, not re-emitted.
+        // This is the new-children delta the subscription re-advertise floods to.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let la = net.add_link(zid(0xAA), 2);
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]),
+            ]),
+        );
+        let first = net.compute_trees();
+        assert_eq!(
+            first
+                .iter()
+                .find(|(root, _)| *root == zid(0x01))
+                .map(|(_, c)| c.clone()),
+            Some(vec![zid(0xAA)]),
+            "first compute: A is a new child of self"
+        );
+
+        // B joins as a second direct neighbour of self.
+        let lb = net.add_link(zid(0xBB), 2);
+        net.ingest_linkstate_list(
+            lb,
+            list(vec![
+                entry(20, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(21, 5, Some(&zid(0xBB)), Some(2), &[20]),
+            ]),
+        );
+        let second = net.compute_trees();
+        assert_eq!(
+            second
+                .iter()
+                .find(|(root, _)| *root == zid(0x01))
+                .map(|(_, c)| c.clone()),
+            Some(vec![zid(0xBB)]),
+            "second compute: only the NEW child B is in self's tree delta, not A"
+        );
+        // The full tree DOES include both — the delta is only the new ones.
+        let mut children = net.tree_children_of(&zid(0x01));
+        children.sort();
+        assert_eq!(children, vec![zid(0xAA), zid(0xBB)]);
     }
 
     #[test]
