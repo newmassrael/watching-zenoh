@@ -36,7 +36,10 @@
 //! which this full-node routing module never instantiates. `build` stays
 //! fallible purely by `owned_bytes`'s profile-generic signature.
 
+use alloc::string::String;
 use alloc::vec::Vec;
+
+use hashbrown::HashMap;
 
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -115,6 +118,71 @@ pub fn read_ext_keyexpr(exts: Option<&Vec<ExtEntryOwned>>) -> Option<&str> {
     None
 }
 
+/// Decode the leading zenoh VLE (varint) `u64` from `bytes`, returning the value
+/// and the bytes after it. `None` on truncation or an over-long encoding (a VLE
+/// wider than a `u64`). The inner mapping-id of an `ext_keyexpr` ZBuf body is
+/// VLE-encoded — a literal is the single byte `0x00`, an alias is the sender's
+/// (multi-byte-capable) mapping id.
+fn decode_vle(bytes: &[u8]) -> Option<(u64, &[u8])> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    let mut i = 0usize;
+    loop {
+        let byte = *bytes.get(i)?;
+        i += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, &bytes[i..]));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None; // malformed: a VLE wider than a u64
+        }
+    }
+}
+
+/// Resolve the keyexpr an `ext_keyexpr` extension carries against a peer mapping
+/// `table` (c3c-3 B1b) — the
+/// [`resolve_wireexpr`](crate::wireexpr_resolve::resolve_wireexpr) analogue for
+/// the `UndeclareSubscriber` ext form. `id == 0` is the literal suffix verbatim;
+/// `id != 0` is `table[id] + suffix`. `None` when the ext is absent / malformed,
+/// or when an aliased id has no table entry (the peer referenced a mapping it
+/// never declared on this link). Unlike [`read_ext_keyexpr`] (literal-only) this
+/// resolves an ALIASED ext, so a transit linkstate peer can withdraw the right
+/// interest for an aliased undeclare (the withdrawal twin of the declare side's
+/// `resolve_wireexpr`).
+pub fn resolve_ext_keyexpr(
+    exts: Option<&Vec<ExtEntryOwned>>,
+    table: &HashMap<u64, String>,
+) -> Option<String> {
+    let exts = exts?;
+    for ext in exts {
+        if ext_id(ext.header) != KEYEXPR_EXT_ID {
+            continue;
+        }
+        let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body else {
+            continue;
+        };
+        // [inner_header, mapping-id VLE, suffix].
+        let body = z.value.as_slice();
+        let (&inner_header, rest) = body.split_first()?;
+        let (id, suffix_bytes) = decode_vle(rest)?;
+        let suffix = if inner_header & INNER_HAS_SUFFIX != 0 {
+            core::str::from_utf8(suffix_bytes).ok()?
+        } else {
+            ""
+        };
+        return Some(if id == 0 {
+            String::from(suffix)
+        } else {
+            let mut out = table.get(&id)?.clone();
+            out.push_str(suffix);
+            out
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +246,49 @@ mod tests {
         let long = "x".repeat(45);
         let ext = build_ext_keyexpr(&long).expect("alloc carrier is unbounded");
         assert_eq!(read_ext_keyexpr(Some(&vec![ext])), Some(long.as_str()));
+    }
+
+    #[test]
+    fn resolve_recovers_a_literal_with_an_empty_table() {
+        // id == 0 resolves to the suffix verbatim, no table lookup (B1b).
+        let ext = build_ext_keyexpr("demo/sub").unwrap();
+        let table = HashMap::new();
+        assert_eq!(
+            resolve_ext_keyexpr(Some(&vec![ext]), &table),
+            Some(String::from("demo/sub"))
+        );
+    }
+
+    #[test]
+    fn resolve_composes_an_aliased_ext_via_the_table() {
+        // Aliased ext: inner_header 0x03 (local + suffix), VLE id 0x07, suffix "x".
+        // table{7 -> "demo/"} resolves it to "demo/x" (table base + per-msg suffix).
+        let aliased = ExtEntryOwned {
+            header: KEYEXPR_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 3,
+                value: crate::codec_owned::owned_bytes(&[0x03, 0x07, b'x']).unwrap(),
+            }),
+        };
+        let mut table = HashMap::new();
+        table.insert(7u64, String::from("demo/"));
+        assert_eq!(
+            resolve_ext_keyexpr(Some(&vec![aliased]), &table),
+            Some(String::from("demo/x"))
+        );
+    }
+
+    #[test]
+    fn resolve_an_unknown_alias_is_none() {
+        // An aliased id with no table entry (never declared on this link) is None.
+        let aliased = ExtEntryOwned {
+            header: KEYEXPR_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 3,
+                value: crate::codec_owned::owned_bytes(&[0x03, 0x09, b'x']).unwrap(),
+            }),
+        };
+        let table = HashMap::new();
+        assert_eq!(resolve_ext_keyexpr(Some(&vec![aliased]), &table), None);
     }
 }

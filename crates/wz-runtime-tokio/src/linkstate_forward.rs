@@ -64,10 +64,12 @@
 //! a `Push` carrying that alias is resolved via the shared `resolve_wireexpr`
 //! SSOT, and the forward NORMALIZES the keyexpr to a literal so the downstream
 //! link (which does not share the inbound link's alias table) can resolve it.
-//! Still deferred: the same alias resolution on the CONTROL plane (an aliased
-//! `DeclareSubscriber` keyexpr, B1b), the `Details` topology optimisation (D4),
-//! and wildcard keyexpr intersection (the filter is exact-match, B2).
-//! `routing-peer`-gated.
+//! The CONTROL plane resolves aliases too (c3c-3 B1b): a `DeclareSubscriber` /
+//! `UndeclareSubscriber` whose keyexpr (or `ext_keyexpr`) is aliased is resolved
+//! against the inbound face's table and re-flooded NORMALIZED to a literal, so
+//! the data and control planes share the alias machinery. Still deferred: the
+//! `Details` topology optimisation (D4) and wildcard keyexpr intersection (the
+//! filter is exact-match, B2). `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -84,7 +86,7 @@ use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_session_core::declare_build::{
     build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
 };
-use wz_session_core::declare_ext_keyexpr::read_ext_keyexpr;
+use wz_session_core::declare_ext_keyexpr::{read_ext_keyexpr, resolve_ext_keyexpr};
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::linkstate_oam::{
@@ -703,18 +705,23 @@ impl LinkstateForwarder {
     /// `propagate_sourced_subscription` uses the tree `children`), not the
     /// data-plane interest-filtered directions.
     fn forward_subscription(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
-        // Only a DeclareSubscriber body carries mesh interest (and only the MVP
-        // literal keyexpr form). A non-subscriber Declare / non-literal
-        // wireexpr is left alone.
-        let Some(keyexpr) = declare_subscriber_keyexpr(declare) else {
+        // Only a DeclareSubscriber body carries mesh interest. Its keyexpr may be
+        // aliased (c3c-3 B1b) — resolved below against the inbound face's table.
+        let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
             return;
         };
-        let (inbound_zid, inbound_link) = {
+        let was_aliased = keyexpr_is_aliased(wireexpr);
+        // The inbound face's zid + graph link AND the RESOLVED keyexpr, in one
+        // scoped borrow (an unresolvable alias drops the declaration).
+        let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            match faces.get(&inbound) {
-                Some(s) => (s.actions.peer_zid(), s.link),
-                None => return,
-            }
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
+                return;
+            };
+            (s.actions.peer_zid(), s.link, keyexpr)
         };
         let Some((source_zid, out_node_id)) = self.resolve_source(
             inbound_zid.as_ref(),
@@ -723,18 +730,31 @@ impl LinkstateForwarder {
         ) else {
             return;
         };
-        // Register the source's interest; re-flood ONLY on a new registration
-        // (the loop-bounding change-gate). `register` borrows `keyexpr` (a view
-        // into `declare`); the subsequent `declare.clone()` re-borrows after it
-        // returns.
-        if !self.subs.borrow_mut().register(keyexpr, source_zid.clone()) {
+        // Register the resolved interest; re-flood ONLY on a new registration
+        // (the loop-bounding change-gate).
+        if !self
+            .subs
+            .borrow_mut()
+            .register(&keyexpr, source_zid.clone())
+        {
             return;
         }
         let children = self.net.borrow().tree_children_of(&source_zid);
         if children.is_empty() {
             return;
         }
-        let mut carrier = declare.clone();
+        // Re-flood: a literal declare is re-flooded verbatim; an aliased one is
+        // rebuilt as a clean literal sourced DeclareSubscriber so the downstream
+        // link (no shared alias table) registers the resolved literal (B1b
+        // normalize — the control-plane twin of forward_push's keyexpr normalize).
+        let mut carrier = if was_aliased {
+            let Ok(c) = build_declare_subscriber(0, 0, Some(&keyexpr)) else {
+                return;
+            };
+            c
+        } else {
+            declare.clone()
+        };
         set_declare_source(&mut carrier, out_node_id);
         // Re-flood to self's children in the source's tree — the same shared
         // re-forward predicate forward_push uses (excludes the inbound face and
@@ -763,18 +783,26 @@ impl LinkstateForwarder {
     /// through the same shared [`resolve_source`](Self::resolve_source) seam the
     /// declare path uses.
     fn forward_unsubscription(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
-        // The retracted keyexpr rides the ext_keyexpr extension. A non-undeclare
-        // body, or an absent / aliased keyexpr ext, is left alone (the same
-        // literal-only MVP deferral as the declare side).
-        let Some(keyexpr) = undeclare_subscriber_keyexpr(declare) else {
-            return;
+        // The retracted keyexpr rides the ext_keyexpr extension, which may be
+        // aliased (c3c-3 B1b) — resolved below against the inbound face's table
+        // (the withdrawal twin of the declare side). The forward() dispatch
+        // guarantees an UndeclareSubscriber body here.
+        let exts = match &declare.body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => u.extensions.as_ref(),
+            _ => return,
         };
-        let (inbound_zid, inbound_link) = {
+        // An already-literal (id 0) ext is re-flooded verbatim; an aliased one is
+        // rebuilt below. `read_ext_keyexpr` returns Some only for a literal.
+        let was_literal = read_ext_keyexpr(exts).is_some();
+        let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            match faces.get(&inbound) {
-                Some(s) => (s.actions.peer_zid(), s.link),
-                None => return,
-            }
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
+                return;
+            };
+            (s.actions.peer_zid(), s.link, keyexpr)
         };
         let Some((source_zid, out_node_id)) = self.resolve_source(
             inbound_zid.as_ref(),
@@ -783,18 +811,26 @@ impl LinkstateForwarder {
         ) else {
             return;
         };
-        // Withdraw the source's interest; re-flood ONLY on a real removal (the
-        // loop-bounding change-gate). `withdraw` borrows `keyexpr` (a view into
-        // `declare`); the subsequent `declare.clone()` re-borrows after it
-        // returns.
-        if !self.subs.borrow_mut().withdraw(keyexpr, &source_zid) {
+        // Withdraw the resolved interest; re-flood ONLY on a real removal (the
+        // loop-bounding change-gate).
+        if !self.subs.borrow_mut().withdraw(&keyexpr, &source_zid) {
             return;
         }
         let children = self.net.borrow().tree_children_of(&source_zid);
         if children.is_empty() {
             return;
         }
-        let mut carrier = declare.clone();
+        // Re-flood: a literal undeclare verbatim; an aliased one rebuilt as a
+        // clean literal sourced UndeclareSubscriber so the downstream link can
+        // withdraw the resolved literal (B1b normalize).
+        let mut carrier = if was_literal {
+            declare.clone()
+        } else {
+            let Ok(c) = build_undeclare_subscriber_with_keyexpr(&keyexpr) else {
+                return;
+            };
+            c
+        };
         set_declare_source(&mut carrier, out_node_id);
         // Re-flood to self's children in the source's tree — the same shared
         // re-forward predicate forward_subscription uses; only the carrier (an
@@ -959,40 +995,26 @@ fn is_tree_forward_target(
     id != inbound && inbound_zid != Some(zid) && is_child(children, zid)
 }
 
-/// Extract a literal keyexpr from a `WireexprOwned` — the wz MVP literal form
-/// (`WireexprLocal { id: 0, suffix }`, what `push_build` / `declare_build`
-/// emit), shared by the subscription ([`declare_subscriber_keyexpr`]) and data
-/// ([`push_keyexpr`]) sides. Returns `None` for a non-literal wireexpr: an
-/// aliased (`id != 0`) keyexpr needs a peer keyexpr-mapping table to resolve —
-/// the alias-aware superset is `wz_session_core::wireexpr_resolve::resolve_wireexpr`
-/// (the routing-routes HAT's path); the linkstate-peer HAT is literal-only in
-/// the MVP (keyexpr-mapping + wildcard intersection are tracked deferrals).
-fn literal_keyexpr(wireexpr: &WireexprOwned) -> Option<&str> {
+/// Whether a `WireexprOwned` is ALIASED (a non-zero mapping id) rather than a
+/// literal. Decides whether a forwarded carrier must be NORMALIZED to a literal:
+/// an aliased keyexpr is unresolvable on a downstream link that never saw the
+/// alias declaration. The literal form is `WireexprLocal { id: 0 }` (what
+/// `push_build` / `declare_build` emit); any non-zero id (local or non-local) is
+/// an alias resolved via the inbound face's keyexpr table (c3c-3 B1).
+fn keyexpr_is_aliased(wireexpr: &WireexprOwned) -> bool {
     match &wireexpr.body {
-        WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => w.suffix.as_deref(),
-        _ => None,
+        WireexprOwnedVariant::WireexprLocal(w) => w.id != 0,
+        WireexprOwnedVariant::WireexprNonlocal(w) => w.id != 0,
     }
 }
 
-/// The literal keyexpr a `DeclareSubscriber` declares interest in — `None` for
-/// a non-subscriber Declare body or a non-literal keyexpr.
-fn declare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
+/// The keyexpr `Wireexpr` a `DeclareSubscriber` declares interest in — `None` for
+/// a non-subscriber Declare body. Returns the raw `Wireexpr` (literal OR aliased)
+/// so the caller resolves it against the inbound face's alias table (B1b), rather
+/// than a pre-resolved literal string.
+fn declare_subscriber_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
     match &declare.body {
-        DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => literal_keyexpr(&sub.keyexpr),
-        _ => None,
-    }
-}
-
-/// The literal keyexpr a sourced `UndeclareSubscriber` retracts — read from its
-/// `ext_keyexpr` extension (a sourced undeclare carries no id, so the keyexpr is
-/// the subscription identity). `None` for a non-undeclare-subscriber body or an
-/// absent / aliased keyexpr ext (the literal-only MVP deferral, the retraction
-/// twin of [`declare_subscriber_keyexpr`]).
-fn undeclare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
-    match &declare.body {
-        DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
-            read_ext_keyexpr(u.extensions.as_ref())
-        }
+        DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => Some(&sub.keyexpr),
         _ => None,
     }
 }
@@ -1531,9 +1553,65 @@ mod tests {
         };
         let msgs = parse_frame_payload(&payload).expect("parse frame payload");
         match msgs.first() {
-            Some(NetworkMessage::Push(p)) => literal_keyexpr(&p.keyexpr).map(str::to_string),
+            Some(NetworkMessage::Push(p)) => match &p.keyexpr.body {
+                WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => {
+                    w.suffix.as_deref().map(str::to_string)
+                }
+                _ => None,
+            },
             other => panic!("expected a forwarded Push, got {other:?}"),
         }
+    }
+
+    /// The LITERAL keyexpr of the single forwarded DeclareSubscriber in a frame,
+    /// or `None` if aliased — the control-plane twin of [`forwarded_keyexpr`]
+    /// (B1b), proving the re-flooded subscription was normalized to a literal.
+    fn forwarded_declare_keyexpr(frame: &[u8]) -> Option<String> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => match &d.body {
+                DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => match &sub.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => {
+                        w.suffix.as_deref().map(str::to_string)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
+    /// A PURE-ALIASED sourced `UndeclareSubscriber` whose `ext_keyexpr` references
+    /// mapping `id` (no per-message suffix) — there is no aliased-undeclare
+    /// builder (wz originates only literals), so a B1b test hand-builds the ext by
+    /// reusing a literal undeclare scaffold and swapping in an aliased ZBuf body.
+    fn aliased_undeclare(id: u8) -> DeclareOwned {
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_zbuf::ExtZbufOwned;
+        let mut declare =
+            wz_session_core::declare_build::build_undeclare_subscriber_with_keyexpr("x")
+                .expect("build undeclare scaffold");
+        let DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) = &mut declare.body else {
+            unreachable!("scaffold is an UndeclareSubscriber");
+        };
+        // ext_keyexpr ZBuf body [inner_header 0x02 (local, no suffix), VLE(id)] ->
+        // resolves to table[id] (B1b). ext header 0x5f = id 0x0f | M 0x10 | ZBuf 0x40.
+        let body: Vec<u8> = vec![0x02u8, id];
+        u.extensions = Some(vec![ExtEntryOwned {
+            header: 0x5f,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: body.len() as u64,
+                value: SceBytes::from_slice(&body).unwrap(),
+            }),
+        }]);
+        declare
     }
 
     // ── c3c-3 B1: data-plane keyexpr alias resolution (DeclKexpr) ────
@@ -1627,6 +1705,80 @@ mod tests {
             sink_b.frame_count(),
             0,
             "unknown alias -> dropped, not forwarded"
+        );
+    }
+
+    // ── c3c-3 B1b: control-plane keyexpr alias resolution ────────────
+
+    #[test]
+    fn an_aliased_subscription_resolves_and_re_floods_a_literal() {
+        // A declares alias 7 -> "demo/sub" on its link, then subscribes with a
+        // PURE-ALIASED DeclareSubscriber (mapping id 7, no suffix). self resolves
+        // it via A's table, registers the RESOLVED literal interest, and re-floods
+        // a LITERAL declare to its child B (B1b, the control-plane twin of B1a's
+        // forward_push normalize).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B (child)
+        let decl = wz_session_core::declare_build::build_declare_kexpr(7, "demo/sub")
+            .expect("build decl kexpr");
+        fwd.absorb_keyexpr_declaration(FaceId(0), &decl);
+        sink_b.reset();
+
+        let aliased_sub = wz_session_core::declare_build::build_declare_subscriber(0, 7, None)
+            .expect("build aliased declare subscriber");
+        fwd.forward_subscription(FaceId(0), true, &aliased_sub);
+
+        assert_eq!(
+            fwd.interested("demo/sub"),
+            vec![zid(0x0A)],
+            "the aliased subscription resolved to the literal and registered A's interest",
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "re-flooded the subscription to the child B"
+        );
+        assert_eq!(
+            forwarded_declare_keyexpr(&sink_b.frame_bytes(0)),
+            Some("demo/sub".to_string()),
+            "the re-flooded DeclareSubscriber keyexpr is normalized to a literal",
+        );
+    }
+
+    #[test]
+    fn an_aliased_unsubscription_resolves_and_withdraws_the_interest() {
+        // Symmetry: an aliased subscribe must be cleanly undoable by an aliased
+        // unsubscribe. A aliases 7 -> "demo/sub", subscribes (aliased), then sends
+        // a PURE-ALIASED UndeclareSubscriber (ext_keyexpr id 7). self resolves the
+        // ext alias via A's table and withdraws the resolved literal interest.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, _sb) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        let decl = wz_session_core::declare_build::build_declare_kexpr(7, "demo/sub")
+            .expect("build decl kexpr");
+        fwd.absorb_keyexpr_declaration(FaceId(0), &decl);
+        let aliased_sub = wz_session_core::declare_build::build_declare_subscriber(0, 7, None)
+            .expect("build aliased declare subscriber");
+        fwd.forward_subscription(FaceId(0), true, &aliased_sub);
+        assert_eq!(
+            fwd.interested("demo/sub"),
+            vec![zid(0x0A)],
+            "interest registered before the unsubscribe"
+        );
+
+        fwd.forward_unsubscription(FaceId(0), true, &aliased_undeclare(7));
+        assert!(
+            fwd.interested("demo/sub").is_empty(),
+            "the aliased unsubscription resolved the ext alias and withdrew the interest",
         );
     }
 
