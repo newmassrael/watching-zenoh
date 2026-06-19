@@ -22,11 +22,14 @@
 //! `interest_id` and the declaration body (`commons/zenoh-codec/src/network/
 //! declare.rs:117-132` — exts before body, unlike most network messages),
 //! gated by the Declare header `Z` bit (`declare::flag::Z = 0x80`). The wz
-//! codec mirrors that order, so a stamped `ext_nodeid` round-trips
-//! byte-faithfully (the `set_then_read_round_trips_through_the_wire` test
-//! pins it). The ext header itself is identical to Push's `ext_nodeid`:
-//! `id(0x3) | M(0x10) | Z64(0x20) = 0x33` terminal, `FLAG_Z(0x80)` when
-//! another ext follows.
+//! codec mirrors that order, so a stamped `ext_nodeid` SURVIVES the codec
+//! encode -> decode round-trip (the `set_then_read_round_trips_through_the_wire`
+//! test pins that the value comes back, exercising the Declare extension path
+//! the build helpers never did). Note that is value-survival, not byte-parity
+//! against a zenoh golden vector — that golden-vector compare is a tracked gap,
+//! the same as on the Push side. The ext header itself is identical to Push's
+//! `ext_nodeid`: `id(0x3) | M(0x10) | Z64(0x20) = 0x33` terminal, `FLAG_Z(0x80)`
+//! when another ext follows.
 //!
 //! The `ext_nodeid` id / flags / chain edit + `node_id` read/build live in the
 //! shared [`ext_nodeid`](crate::ext_nodeid) SSOT (R311ru consolidated the prior

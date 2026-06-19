@@ -884,23 +884,31 @@ impl LinkstateNetwork {
     }
 
     /// The deduped set of first-hop children of this peer toward ANY of
-    /// `dests` along `source`'s tree — the subscription-filtered data-route
-    /// primitive (c3c-3). For each `dest`, [`next_hop`](Self::next_hop) gives
-    /// the child to forward toward; the children are DEDUPED, so several
-    /// destinations sharing one subtree yield that child once. A Push
-    /// replicated to this set reaches every `dest`'s subtree exactly once
-    /// instead of flooding every tree child ([`tree_children_of`](Self::tree_children_of)
-    /// is the unfiltered broadcast). This is the multicast generalisation of
-    /// the unicast `next_hop`: pass the interested-subscriber set, get the
-    /// minimal outbound child set.
+    /// `dests` along `source`'s tree — the per-`dest` topology successor query
+    /// the data-route filter (c3c-3) builds on. For each `dest`,
+    /// [`next_hop`](Self::next_hop) gives the child to forward toward (zenoh's
+    /// `route_successor`, i.e. `trees[source].directions[dest]`); the children
+    /// are DEDUPED, so several destinations sharing one subtree yield that child
+    /// once. A Push replicated to this set reaches every `dest`'s subtree
+    /// exactly once instead of flooding every tree child
+    /// ([`tree_children_of`](Self::tree_children_of) is the unfiltered
+    /// broadcast). This is the multicast generalisation of the unicast
+    /// `next_hop`.
     ///
-    /// Mirrors zenoh `insert_faces_for_subs` (`pubsub.rs:909-944`):
-    /// `trees[source].directions[sub]` per interested peer, collected into the
-    /// unique output-face set. A `dest` that is unknown, unreachable in
-    /// `source`'s tree, or whose direction is `None` (e.g. `dest == source`,
-    /// upstream of self) contributes nothing — the caller's inbound-face
-    /// exclusion handles the upstream direction. Output order is
-    /// first-seen-deterministic over `dests`.
+    /// Placement: this is a pure TOPOLOGY query — it knows nothing of
+    /// subscriptions (the caller passes the interested-peer set). zenoh's
+    /// data-route ASSEMBLY `insert_faces_for_subs` (the HAT, `pubsub.rs:909-944`)
+    /// is mirrored by the forwarder's `forward_push`, which supplies the
+    /// interested set and resolves children to faces; the per-`sub`
+    /// `directions[sub]` lookup it performs is exactly this method's body.
+    ///
+    /// A `dest` unknown or unreachable in `source`'s tree contributes nothing.
+    /// A `dest` UPSTREAM of self toward the source (including `dest == source`)
+    /// resolves to self's PARENT direction — zenoh's
+    /// `directions[dest] = direction.or(parent)` — so it DOES appear in the
+    /// output (it is not dropped here); the caller's inbound-face exclusion
+    /// (`forward_push`) is what suppresses actually sending upstream. Output
+    /// order is first-seen-deterministic over `dests`.
     pub fn directions_toward(&self, source: &Zid, dests: &[Zid]) -> Vec<Zid> {
         let mut out: Vec<Zid> = Vec::new();
         for dest in dests {

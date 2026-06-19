@@ -1365,6 +1365,94 @@ mod tests {
     }
 
     #[test]
+    fn forward_push_to_two_interested_subtrees() {
+        // R311rv review coverage — multi-direction fan-out at the forward level
+        // (the graph unit covers the split; this proves forward_push honours
+        // it). S has neighbours A, B, C; a Push from A has B and C both as self's
+        // children. BOTH subscribe -> the filter forwards to BOTH.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        declare_interest(&fwd, FaceId(2), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        fwd.forward_push(FaceId(0), true, &data_push());
+        assert_eq!(sink_b.frame_count(), 1, "B (interested subtree) forwarded");
+        assert_eq!(sink_c.frame_count(), 1, "C (interested subtree) forwarded");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    #[test]
+    fn forward_push_routes_by_keyexpr() {
+        // R311rv review coverage — keyexpr-keyed routing through the real
+        // forward path (the registry unit covers key isolation; this proves the
+        // forward filter honours it). B subscribes demo/a, C subscribes demo/b;
+        // a Push for demo/a reaches only B.
+        use wz_session_core::push_build::build_push_literal;
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/a");
+        declare_interest(&fwd, FaceId(2), "demo/b");
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        let push = build_push_literal("demo/a", b"payload").expect("push demo/a");
+        fwd.forward_push(FaceId(0), true, &push);
+        assert_eq!(sink_b.frame_count(), 1, "B subscribed demo/a -> receives");
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "C subscribed demo/b -> not a demo/a destination"
+        );
+    }
+
+    #[test]
+    fn forward_push_does_not_echo_to_an_interested_source() {
+        // R311rv review coverage — the source A is ALSO a subscriber, plus B is
+        // the far subscriber. A Push from A must reach B but NOT echo back to A:
+        // A's own interest resolves to the upstream (inbound) direction, which
+        // the inbound-face exclusion drops.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(0), "demo/data"); // A (the source) subscribes
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
+        sink_a.reset();
+        sink_b.reset();
+
+        fwd.forward_push(FaceId(0), true, &data_push());
+        assert_eq!(sink_b.frame_count(), 1, "B (far subscriber) receives");
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "A is source/inbound: its own interest routes upstream, excluded"
+        );
+    }
+
+    #[test]
     fn deregister_purges_the_departed_peers_interest() {
         // R311rt review remediation — a subscriber's interest must not outlive
         // its face. A declares interest, then its face deregisters: the table

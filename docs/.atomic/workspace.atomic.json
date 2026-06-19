@@ -42600,6 +42600,46 @@
         "LOCAL UNPUSHED 10커밋: rm/rn/ro/rp/rq/rr/rs/rt/ru(+rt). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci."
       ]
     },
+    "Round 311rv": {
+      "decision_summary": "R311rv: c3c-3 적대 리뷰 remediation 3(honesty/coverage, 최종). directions_toward doc 정정(자평 'mirrors insert_faces_for_subs' 부정확→실제는 순수 topology per-dest successor 쿼리[route_successor 확장; interest 무지]; forward_push가 insert_faces_for_subs HAT 로직)+dest==source 'contributes nothing' 모순 정정(실제 parent hop 반환). declare 'byte-faithful' 과장→value-survival 정직화. forward 레벨 커버리지 3 테스트(multi-subtree fan-out/keyexpr isolation/source-is-subscriber). 4-에이전트 리뷰 remediation 전 트랙 완료.",
+      "changes_bullets": [
+        "wz-routing-graph directions_toward doc 정정: 'Mirrors insert_faces_for_subs'(부정확—그건 HAT)→순수 topology per-dest successor 쿼리(=route_successor/directions[dest] 확장; interest 무지); forward_push가 interest set 공급+face 해석=insert_faces_for_subs. dest==source 'whose direction None contributes nothing' 모순(실제 directions[dest]=direction.or(parent)라 parent hop 반환; 테스트가 [A]→[A] 단언)→정직 정정(upstream=parent 방향 출력에 포함, forward_push inbound 제외가 실제 억제).",
+        "declare_routing_context doc 'round-trips byte-faithfully'→'codec encode→decode 값 생존' 정직화(golden-vector byte-parity는 Push 측과 동일 tracked gap).",
+        "linkstate_forward +3 forward 레벨 테스트: forward_push_to_two_interested_subtrees(star서 B+C 둘 다 sub→둘 다 forward=multi-direction fan-out), forward_push_routes_by_keyexpr(B=demo/a/C=demo/b, demo/a Push→B만=keyexpr isolation), forward_push_does_not_echo_to_an_interested_source(source A도 sub지만 upstream=inbound라 제외, B만)."
+      ],
+      "verification_bullets": [
+        "cargo test graph 26 + tokio routing-peer lib 322(+3 forward 커버리지) + session-core push/declare 264 PASS. clippy 전 crate(graph/tokio routing-peer/session-core) -D warnings clean. fmt clean. doc 정정=comment-only(무동작). 신규 3 테스트는 filter/keyexpr/source 분기 실증(filter 제거 시 실패하는 적대 테스트).",
+        "리뷰 F-D(directions_toward doc 부정확/배치)+F-F(dest==source 모순·byte-faithful 과장) 정직 해소: 배치는 변호(순수 topology 쿼리=route_successor 확장)+doc이 실제 분담(graph=successor 쿼리/forward_push=insert_faces_for_subs HAT) 반영. 커버리지 m3(multi-subtree/multi-keyexpr/source-sub) forward 레벨 추가. 4-에이전트 적대 리뷰 remediation 전 트랙(rt correctness/ru SSOT/rv honesty+coverage) 완료."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rv = c3c-3 적대 리뷰 remediation 3(honesty/coverage, 최종): directions_toward doc 정정(순수 topology successor 쿼리 vs insert_faces_for_subs HAT; dest==source=parent hop 반환)+declare byte-faithful→value-survival+forward 레벨 3 테스트(multi-subtree/keyexpr isolation/source-is-subscriber). 4-에이전트 적대 리뷰 remediation 전 트랙 완료(rt/ru/rv).",
+        "c3c-3 subscription-filter + 4-에이전트 적대 리뷰 remediation 완결. LOCAL UNPUSHED 11커밋: rm/rn/ro/rp/rq/rr/rs(atom)+rt/ru/rv(remediation). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci(pre-push). 11커밋=일관 단위(c3c-3 구독필터 originate→propagate→filter→e2e + 리뷰 remediation).",
+        "남은 추적부채(리뷰서 honest defer, 별도 atom): UndeclareSubscriber 전파(undecl codec+propagate+withdraw 재도입), pubsub_tree_change(트리변경 시 기존 구독 재광고; keys() 재도입), interest 모델 resource-tree(wildcard keyexpr intersection seam=현재 flat exact-match), e2e selectivity 4-peer(unit이 selectivity 커버), golden-vector byte-parity(push/declare nodeid), (source,sn) seen-set, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "리뷰 calibration 건전분: correctness 무결(root-cause=misroute/loop 없음)·crate 의존 clean·resolve_source/fan_out/ext_nodeid SSOT·신규 필터 테스트 적대적. 교훈: 자가감사 과신을 독립 4-에이전트가 교정(F-A 4개 전부 적발=가장 강한 신호; 패턴 재확인)."
+      ],
+      "publishable_decision_summary": "R311rv: c3c-3 적대 리뷰 remediation 3(honesty/coverage, 최종). directions_toward doc 정정(자평 'mirrors insert_faces_for_subs' 부정확→실제는 순수 topology per-dest successor 쿼리[route_successor 확장; interest 무지]; forward_push가 insert_faces_for_subs HAT 로직)+dest==source 'contributes nothing' 모순 정정(실제 parent hop 반환). declare 'byte-faithful' 과장→value-survival 정직화. forward 레벨 커버리지 3 테스트(multi-subtree fan-out/keyexpr isolation/source-is-subscriber). 4-에이전트 리뷰 remediation 전 트랙 완료.",
+      "publishable_changes_bullets": [
+        "wz-routing-graph directions_toward doc 정정: 'Mirrors insert_faces_for_subs'(부정확—그건 HAT)→순수 topology per-dest successor 쿼리(=route_successor/directions[dest] 확장; interest 무지); forward_push가 interest set 공급+face 해석=insert_faces_for_subs. dest==source 'whose direction None contributes nothing' 모순(실제 directions[dest]=direction.or(parent)라 parent hop 반환; 테스트가 [A]→[A] 단언)→정직 정정(upstream=parent 방향 출력에 포함, forward_push inbound 제외가 실제 억제).",
+        "declare_routing_context doc 'round-trips byte-faithfully'→'codec encode→decode 값 생존' 정직화(golden-vector byte-parity는 Push 측과 동일 tracked gap).",
+        "linkstate_forward +3 forward 레벨 테스트: forward_push_to_two_interested_subtrees(star서 B+C 둘 다 sub→둘 다 forward=multi-direction fan-out), forward_push_routes_by_keyexpr(B=demo/a/C=demo/b, demo/a Push→B만=keyexpr isolation), forward_push_does_not_echo_to_an_interested_source(source A도 sub지만 upstream=inbound라 제외, B만)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test graph 26 + tokio routing-peer lib 322(+3 forward 커버리지) + session-core push/declare 264 PASS. clippy 전 crate(graph/tokio routing-peer/session-core) -D warnings clean. fmt clean. doc 정정=comment-only(무동작). 신규 3 테스트는 filter/keyexpr/source 분기 실증(filter 제거 시 실패하는 적대 테스트).",
+        "리뷰 F-D(directions_toward doc 부정확/배치)+F-F(dest==source 모순·byte-faithful 과장) 정직 해소: 배치는 변호(순수 topology 쿼리=route_successor 확장)+doc이 실제 분담(graph=successor 쿼리/forward_push=insert_faces_for_subs HAT) 반영. 커버리지 m3(multi-subtree/multi-keyexpr/source-sub) forward 레벨 추가. 4-에이전트 적대 리뷰 remediation 전 트랙(rt correctness/ru SSOT/rv honesty+coverage) 완료."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rv = c3c-3 적대 리뷰 remediation 3(honesty/coverage, 최종): directions_toward doc 정정(순수 topology successor 쿼리 vs insert_faces_for_subs HAT; dest==source=parent hop 반환)+declare byte-faithful→value-survival+forward 레벨 3 테스트(multi-subtree/keyexpr isolation/source-is-subscriber). 4-에이전트 적대 리뷰 remediation 전 트랙 완료(rt/ru/rv).",
+        "c3c-3 subscription-filter + 4-에이전트 적대 리뷰 remediation 완결. LOCAL UNPUSHED 11커밋: rm/rn/ro/rp/rq/rr/rs(atom)+rt/ru/rv(remediation). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci(pre-push). 11커밋=일관 단위(c3c-3 구독필터 originate→propagate→filter→e2e + 리뷰 remediation).",
+        "남은 추적부채(리뷰서 honest defer, 별도 atom): UndeclareSubscriber 전파(undecl codec+propagate+withdraw 재도입), pubsub_tree_change(트리변경 시 기존 구독 재광고; keys() 재도입), interest 모델 resource-tree(wildcard keyexpr intersection seam=현재 flat exact-match), e2e selectivity 4-peer(unit이 selectivity 커버), golden-vector byte-parity(push/declare nodeid), (source,sn) seen-set, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "리뷰 calibration 건전분: correctness 무결(root-cause=misroute/loop 없음)·crate 의존 clean·resolve_source/fan_out/ext_nodeid SSOT·신규 필터 테스트 적대적. 교훈: 자가감사 과신을 독립 4-에이전트가 교정(F-A 4개 전부 적발=가장 강한 신호; 패턴 재확인)."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
