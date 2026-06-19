@@ -42202,6 +42202,44 @@
         "코드 LOCAL UNPUSHED 7커밋: rf/re/rg/rh/ri/rj/rk. qm~rd=PUSHED origin/main=5049fe0. rl(honesty) 후 push 권고."
       ]
     },
+    "Round 311rl": {
+      "decision_summary": "R311rl: c3c 적대 리뷰 remediation 3차(honesty, 최종). children-flood loop-freedom 주장을 '수렴 일관 트리 한정'으로 정직 정정(jitter 결정적-대칭이라 수렴 후 loop-free; 전이/flapping시 dedup/TTL 없음=(source,sn) seen-set 추적부채). 순환 mesh 단위 테스트 추가(triangle S-A-B+S-C서 S가 tree child만 forward, cycle edge 제외=loop 없음; e2e line만 갭 닫음). 적대 리뷰 remediation 전 트랙(rj/rk/rl) 완료.",
+      "changes_bullets": [
+        "linkstate_forward.rs forward_push doc 정직 정정: '트리는 사이클 없어 flooding이 loop 안 함' 무조건 주장→'모든 노드가 같은 트리 계산 시(수렴+결정적 zid-대칭 jitter) loop-free; 전이 불일치/flapping시 dedup(per-source seen-set)/TTL 없어 중복/단기 loop 가능, 수렴이 self-heal하나 지속 flapping은 unbounded'. (source,sn) seen-set=추적 방어; subscription-filter(zenoh directions[sub])=c3c-3.",
+        "순환 mesh 단위 테스트 forwards_along_the_tree_not_the_cycle_edge_in_a_mesh: 수렴된 triangle S-A-B + S-C. A의 Push가 A 트리 따라 flood — B는 A의 child(A-B edge), C는 S의 child. S는 tree child C로만 forward, S-B cycle edge 제외(loop S→B→A→S 없음). 리뷰 'loop-freedom 순환 mesh 미검증(e2e line만)' 갭 닫음. 20 linkstate unit."
+      ],
+      "verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 308 PASS(순환 mesh 테스트 1 신규). clippy rt-tokio(routing-peer all-targets) -D warnings clean. fmt --all --check exit 0. 순환 mesh 단위 테스트가 수렴 cycle서 cycle-edge 제외=loop-freedom 실증(전이-불일치 dedup은 honest defer).",
+        "리뷰 root-cause C1 적발('children-flood loop-freedom 수렴 일관 트리 가정인데 미강제·미검증; e2e line만') 정직 대응: 수렴 케이스는 테스트로 검증, 전이/flapping은 doc/ledger서 dedup defer 명시. distributed multi-node no-loop 시뮬은 추가 추적부채."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rl = c3c 적대 리뷰 remediation 3차(honesty, 최종). children-flood loop-freedom를 '수렴 일관 트리 한정'으로 정직 정정 + 순환 mesh 단위 테스트(cycle edge 제외 실증, e2e line만 갭 닫음). 20 unit. c3c 적대 리뷰 remediation 전 트랙 완료(rj correctness·rk 구조·rl honesty).",
+        "c3c 데이터면 + 적대 리뷰 remediation 완결. LOCAL UNPUSHED 8커밋: rf/re/rg/rh/ri/rj/rk/rl. qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push) 필요. 이 8커밋=일관 단위(c3c 데이터면 originate→forward→e2e + 4-에이전트 리뷰 remediation).",
+        "남은 추적부채(리뷰서 honest defer): (source,sn) seen-set dedup/TTL(전이-불일치 방어), c3c-3 subscription-filter(directions[sub]; broadcast→interested-subtree), distributed multi-node no-loop 시뮬, chain_z 중복(MINOR multi-crate), publish session-layer seam, change-triggered flood, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "리뷰 calibration 건전분: NodeId wire 0x33·재stamp 값·rh wire-decode·rf tick-seam·E6(부하 20/20)·borrow 규율·bellman_ford expect 도달불가 OK. 자가감사 과신을 독립 4-에이전트 리뷰가 교정=패턴 재확인."
+      ],
+      "publishable_decision_summary": "R311rl: c3c 적대 리뷰 remediation 3차(honesty, 최종). children-flood loop-freedom 주장을 '수렴 일관 트리 한정'으로 정직 정정(jitter 결정적-대칭이라 수렴 후 loop-free; 전이/flapping시 dedup/TTL 없음=(source,sn) seen-set 추적부채). 순환 mesh 단위 테스트 추가(triangle S-A-B+S-C서 S가 tree child만 forward, cycle edge 제외=loop 없음; e2e line만 갭 닫음). 적대 리뷰 remediation 전 트랙(rj/rk/rl) 완료.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs forward_push doc 정직 정정: '트리는 사이클 없어 flooding이 loop 안 함' 무조건 주장→'모든 노드가 같은 트리 계산 시(수렴+결정적 zid-대칭 jitter) loop-free; 전이 불일치/flapping시 dedup(per-source seen-set)/TTL 없어 중복/단기 loop 가능, 수렴이 self-heal하나 지속 flapping은 unbounded'. (source,sn) seen-set=추적 방어; subscription-filter(zenoh directions[sub])=c3c-3.",
+        "순환 mesh 단위 테스트 forwards_along_the_tree_not_the_cycle_edge_in_a_mesh: 수렴된 triangle S-A-B + S-C. A의 Push가 A 트리 따라 flood — B는 A의 child(A-B edge), C는 S의 child. S는 tree child C로만 forward, S-B cycle edge 제외(loop S→B→A→S 없음). 리뷰 'loop-freedom 순환 mesh 미검증(e2e line만)' 갭 닫음. 20 linkstate unit."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 308 PASS(순환 mesh 테스트 1 신규). clippy rt-tokio(routing-peer all-targets) -D warnings clean. fmt --all --check exit 0. 순환 mesh 단위 테스트가 수렴 cycle서 cycle-edge 제외=loop-freedom 실증(전이-불일치 dedup은 honest defer).",
+        "리뷰 root-cause C1 적발('children-flood loop-freedom 수렴 일관 트리 가정인데 미강제·미검증; e2e line만') 정직 대응: 수렴 케이스는 테스트로 검증, 전이/flapping은 doc/ledger서 dedup defer 명시. distributed multi-node no-loop 시뮬은 추가 추적부채."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rl = c3c 적대 리뷰 remediation 3차(honesty, 최종). children-flood loop-freedom를 '수렴 일관 트리 한정'으로 정직 정정 + 순환 mesh 단위 테스트(cycle edge 제외 실증, e2e line만 갭 닫음). 20 unit. c3c 적대 리뷰 remediation 전 트랙 완료(rj correctness·rk 구조·rl honesty).",
+        "c3c 데이터면 + 적대 리뷰 remediation 완결. LOCAL UNPUSHED 8커밋: rf/re/rg/rh/ri/rj/rk/rl. qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push) 필요. 이 8커밋=일관 단위(c3c 데이터면 originate→forward→e2e + 4-에이전트 리뷰 remediation).",
+        "남은 추적부채(리뷰서 honest defer): (source,sn) seen-set dedup/TTL(전이-불일치 방어), c3c-3 subscription-filter(directions[sub]; broadcast→interested-subtree), distributed multi-node no-loop 시뮬, chain_z 중복(MINOR multi-crate), publish session-layer seam, change-triggered flood, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "리뷰 calibration 건전분: NodeId wire 0x33·재stamp 값·rh wire-decode·rf tick-seam·E6(부하 20/20)·borrow 규율·bellman_ford expect 도달불가 OK. 자가감사 과신을 독립 4-에이전트 리뷰가 교정=패턴 재확인."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

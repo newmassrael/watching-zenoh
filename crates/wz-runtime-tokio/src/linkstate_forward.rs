@@ -286,14 +286,25 @@ impl LinkstateForwarder {
     /// data-route tree root): `node_id == 0` means the inbound neighbour
     /// itself originated it, otherwise the node_id is the source's psid in the
     /// inbound link's space, resolved via that link's `psid -> zid` mapping.
-    /// Self's CHILDREN in the source-rooted tree are the next hops — a tree
-    /// has no cycles, so flooding to children never loops — and the inbound
-    /// face (self's parent toward the source) is excluded. Each outbound copy
-    /// is re-stamped with THIS node's psid for the source (the same value for
-    /// every face; each child remaps it via its own link, zenoh
-    /// `get_local_context`). Subscription-filtered routing (only toward
-    /// interested subtrees) is the deferred c3c-3 step; this floods every tree
-    /// child.
+    /// Self's CHILDREN in the source-rooted tree are the next hops, and the
+    /// inbound face (self's parent toward the source) is excluded. Each
+    /// outbound copy is re-stamped with THIS node's psid for the source (the
+    /// same value for every face; each child remaps it via its own link, zenoh
+    /// `get_local_context`).
+    ///
+    /// Loop-freedom — the honest scope: it holds WHEN every node computes the
+    /// SAME tree for the source. They do once topology has converged, because
+    /// every node runs the same Bellman-Ford over the same graph with the same
+    /// deterministic (zid-symmetric) edge jitter — so the per-source tree is
+    /// globally consistent and a flood descends it exactly once per node. Under
+    /// TRANSIENT disagreement (mid-convergence / a flapping link) two nodes can
+    /// briefly disagree on the tree, and there is NO message dedup (no
+    /// per-source seen-set) or TTL to break a resulting duplicate/short loop —
+    /// the convergence window self-heals it, but a persistently flapping mesh
+    /// is unbounded. A `(source, sn)` seen-set is the tracked defence;
+    /// subscription-filtered routing (zenoh forwards along `directions[sub]`
+    /// toward interested subscribers rather than flooding every tree child) is
+    /// the deferred c3c-3 step that also bounds the fan-out.
     fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         // The inbound face's zid + graph link — the only state the source
         // resolution needs from the faces set, taken in a SCOPED borrow so the
@@ -985,6 +996,60 @@ mod tests {
         assert!(
             fwd.tree_children_of(&zid(0x0B)).is_empty(),
             "deregister recomputed: A/C left B's tree (a stale tree would keep A)"
+        );
+    }
+
+    #[test]
+    fn forwards_along_the_tree_not_the_cycle_edge_in_a_mesh() {
+        // R311rl — loop-freedom on a CYCLIC mesh (the e2e only exercises a
+        // line). Converged topology: triangle S-A-B (self S is linked to A and
+        // B, and A-B are linked to each other) plus S-C. A Push from A floods
+        // along A's spanning tree, in which B is A's DIRECT child (via the A-B
+        // edge) while C is self's. So self forwards ONLY to its tree child C —
+        // NOT across the S-B cycle edge — and the message cannot loop
+        // S->B->A->S. The cycle edge is excluded because the (converged,
+        // deterministic-jitter) tree is consistent and acyclic.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
+        let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 3
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        // A advertises links to S + B (authoritative); A-B closes the triangle.
+        fwd.on_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 2]),
+                entry(2, 5, 0x0B, &[1]),
+            ]),
+        );
+        // B advertises links to S + A (authoritative, higher sn so it is not
+        // stale-gated); S and A are stale references for the psid mapping only.
+        fwd.on_inbound_linkstate(
+            FaceId(1),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(2, 1, 0x0A, &[]),
+                entry(1, 10, 0x0B, &[0, 2]),
+            ]),
+        );
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05); // edge S-C
+                                                          // C is self's child in A's tree; B is A's child (reached via A-B), so
+                                                          // self does not forward toward B.
+        assert_eq!(fwd.tree_children_of(&zid(0x0A)), vec![zid(0x0C)]);
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        fwd.forward_push(FaceId(0), true, &data_push()); // Push from A (source A)
+        assert_eq!(sink_c.frame_count(), 1, "forwarded to the tree child C");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "the S-B cycle edge is excluded by A's tree (B is A's child) — no loop"
         );
     }
 }
