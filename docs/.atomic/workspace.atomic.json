@@ -42280,6 +42280,46 @@
         "추적부채(불변): (source,sn) seen-set dedup/TTL, 와일드카드 keyexpr matching(resource tree), distributed multi-node no-loop 시뮬, change-triggered flood, remove_detached_nodes, Zid=Vec<u8>->16B newtype, gossip/autoconnect/locators, chain_z 상수 중복."
       ]
     },
+    "Round 311rn": {
+      "decision_summary": "R311rn: c3c-3 구독필터 atom2(구독 레지스트리). wz-runtime-tokio/src/linkstate_subs.rs::LinkstatepeerSubs=keyexpr→interested peer zid HashSet=zenoh HatContext.linkstatepeer_subs(hat/linkstate_peer/mod.rs:515) 미러. zenoh가 sub set을 Network(topology)서 분리해 Resource/HAT에 두므로 wz도 분리: topology=wz-routing-graph, interest=forwarder crate(HAT-analogue). register/withdraw/remove_peer/interested/any_interest/keys. exact-match MVP, wildcard keyexpr intersection=별도 부채.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/linkstate_subs.rs 신규(routing-peer 게이트): LinkstatepeerSubs{by_key: HashMap<String,HashSet<Zid>>}. register(keyexpr,peer)->bool(신규=change; zenoh linkstatepeer_subs.insert 미러) / withdraw(undeclare, emptied key prune) / remove_peer(face-down시 전 key 정리, 반환=dropped 수) / interested(keyexpr)->Vec<Zid>(directions_toward에 줄 스냅샷) / any_interest(forward 전 cheap 게이트) / keys(tree-change 재광고용).",
+        "lib.rs: pub mod linkstate_subs(routing-peer 게이트, linkstate_forward 뒤). zenoh 분리 충실—Network(wz-routing-graph=network.rs 미러)서 sub set 제외, HAT-analogue forwarder crate에 interest 별도(zenoh hat/linkstate_peer/mod.rs:515).",
+        "4 unit: idempotent+change-report, exact-key-not-prefix(MVP 정직), withdraw+emptied-key-prune, remove_peer cross-key(sole-sub key prune+shared 생존)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 312 PASS(linkstate_subs 4 신규, 308 무회귀). clippy(routing-peer all-targets) -D warnings clean. fmt --check clean(register entry/or_default/insert 체인 재포맷 적용).",
+        "순수 host 데이터(no async)라 forwarder 없이 단위 검증. 모듈 routing-peer 게이트라 default 빌드 무영향. exact-match MVP 정직(demo/** sub가 demo/data 안 끌어옴—wildcard intersection=resource-tree 부채). 라이브 미배선=atom3(Declare 전파가 register 구동)+atom4(forward_push가 interested 소비)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rn = c3c-3 atom2: LinkstatepeerSubs(keyexpr->interested peer zid HashSet)=zenoh HatContext.linkstatepeer_subs 미러. zenoh 분리(Network=topology / Resource-HAT=interest) 충실: graph crate서 제외, forwarder crate(HAT-analogue) wz-runtime-tokio/src/linkstate_subs.rs에 둠. register/withdraw/remove_peer/interested/any_interest/keys. 4 unit. exact-match MVP.",
+        "c3c-3 남은: atom3=Declare(Subscriber) wire codec + sourced 전파(트리 따라 flood, 수신시 LinkstatepeerSubs.register; zenoh propagate_sourced_subscription/pubsub_tree_change). atom4=forward_push가 tree_children_of broadcast->directions_toward(source, subs.interested(ke)) 전환 + any_interest 게이트 + publish 동일 + 3-peer e2e(C subscribe->A publish->C-ward 서브트리만).",
+        "LOCAL UNPUSHED 2커밋: rm(76799ad directions_toward graph 선택자)+rn(linkstate_subs 레지스트리). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci(pre-push) 필요.",
+        "atom2 결정: 레지스트리 위치=wz-runtime-tokio(HAT-analogue)—graph crate는 zenoh network.rs(순수 topology) 미러라 sub set 두면 분리 위반. interested()->Vec 스냅샷(directions_toward &[Zid]에 맞춤; 작은 set이라 alloc 무관). exact-match=keyexpr intersection(resource-tree) 부채. 추적부채 불변: (source,sn) seen-set, wildcard keyexpr, remove_detached_nodes, Zid newtype, gossip/autoconnect."
+      ],
+      "publishable_decision_summary": "R311rn: c3c-3 구독필터 atom2(구독 레지스트리). wz-runtime-tokio/src/linkstate_subs.rs::LinkstatepeerSubs=keyexpr→interested peer zid HashSet=zenoh HatContext.linkstatepeer_subs(hat/linkstate_peer/mod.rs:515) 미러. zenoh가 sub set을 Network(topology)서 분리해 Resource/HAT에 두므로 wz도 분리: topology=wz-routing-graph, interest=forwarder crate(HAT-analogue). register/withdraw/remove_peer/interested/any_interest/keys. exact-match MVP, wildcard keyexpr intersection=별도 부채.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/linkstate_subs.rs 신규(routing-peer 게이트): LinkstatepeerSubs{by_key: HashMap<String,HashSet<Zid>>}. register(keyexpr,peer)->bool(신규=change; zenoh linkstatepeer_subs.insert 미러) / withdraw(undeclare, emptied key prune) / remove_peer(face-down시 전 key 정리, 반환=dropped 수) / interested(keyexpr)->Vec<Zid>(directions_toward에 줄 스냅샷) / any_interest(forward 전 cheap 게이트) / keys(tree-change 재광고용).",
+        "lib.rs: pub mod linkstate_subs(routing-peer 게이트, linkstate_forward 뒤). zenoh 분리 충실—Network(wz-routing-graph=network.rs 미러)서 sub set 제외, HAT-analogue forwarder crate에 interest 별도(zenoh hat/linkstate_peer/mod.rs:515).",
+        "4 unit: idempotent+change-report, exact-key-not-prefix(MVP 정직), withdraw+emptied-key-prune, remove_peer cross-key(sole-sub key prune+shared 생존)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 312 PASS(linkstate_subs 4 신규, 308 무회귀). clippy(routing-peer all-targets) -D warnings clean. fmt --check clean(register entry/or_default/insert 체인 재포맷 적용).",
+        "순수 host 데이터(no async)라 forwarder 없이 단위 검증. 모듈 routing-peer 게이트라 default 빌드 무영향. exact-match MVP 정직(demo/** sub가 demo/data 안 끌어옴—wildcard intersection=resource-tree 부채). 라이브 미배선=atom3(Declare 전파가 register 구동)+atom4(forward_push가 interested 소비)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rn = c3c-3 atom2: LinkstatepeerSubs(keyexpr->interested peer zid HashSet)=zenoh HatContext.linkstatepeer_subs 미러. zenoh 분리(Network=topology / Resource-HAT=interest) 충실: graph crate서 제외, forwarder crate(HAT-analogue) wz-runtime-tokio/src/linkstate_subs.rs에 둠. register/withdraw/remove_peer/interested/any_interest/keys. 4 unit. exact-match MVP.",
+        "c3c-3 남은: atom3=Declare(Subscriber) wire codec + sourced 전파(트리 따라 flood, 수신시 LinkstatepeerSubs.register; zenoh propagate_sourced_subscription/pubsub_tree_change). atom4=forward_push가 tree_children_of broadcast->directions_toward(source, subs.interested(ke)) 전환 + any_interest 게이트 + publish 동일 + 3-peer e2e(C subscribe->A publish->C-ward 서브트리만).",
+        "LOCAL UNPUSHED 2커밋: rm(76799ad directions_toward graph 선택자)+rn(linkstate_subs 레지스트리). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci(pre-push) 필요.",
+        "atom2 결정: 레지스트리 위치=wz-runtime-tokio(HAT-analogue)—graph crate는 zenoh network.rs(순수 topology) 미러라 sub set 두면 분리 위반. interested()->Vec 스냅샷(directions_toward &[Zid]에 맞춤; 작은 set이라 alloc 무관). exact-match=keyexpr intersection(resource-tree) 부채. 추적부채 불변: (source,sn) seen-set, wildcard keyexpr, remove_detached_nodes, Zid newtype, gossip/autoconnect."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

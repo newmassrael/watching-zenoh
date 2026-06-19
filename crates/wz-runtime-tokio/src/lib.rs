@@ -536,6 +536,17 @@ pub mod routing_forward;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_forward;
 
+/// P4 linkstate-peer routing (step c3c-3 atom2) — the subscription interest
+/// table [`linkstate_subs::LinkstatepeerSubs`]: which peers are interested in
+/// which key expression. zenoh keeps this OFF the topology `Network` (it
+/// hangs on the routing `Resource`), so wz mirrors that separation — the
+/// graph is [`wz_routing_graph`], this interest set is the HAT-analogue state
+/// the forwarder owns. Drives the subscription-filtered data route (atom4) by
+/// feeding the interested-peer set to `directions_toward`. Gated on
+/// `routing-peer`.
+#[cfg(feature = "routing-peer")]
+pub mod linkstate_subs;
+
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions
 /// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs
