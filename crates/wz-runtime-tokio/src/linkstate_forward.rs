@@ -32,21 +32,21 @@
 //! `.await`.
 //!
 //! Data forwarding (c3c): [`forward_push`](LinkstateForwarder::forward_push)
-//! floods a received Push along the source's spanning tree
-//! ([`tree_children_of`](wz_routing_graph::LinkstateNetwork::tree_children_of)),
-//! and [`publish`](LinkstateForwarder::publish) originates one. Subscription
-//! INTEREST now propagates across the mesh (c3c-3 atom3):
+//! re-forwards a received Push, and [`publish`](LinkstateForwarder::publish)
+//! originates one — both subscription-FILTERED (c3c-3 atom4): the next hops are
+//! [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward)
+//! the INTERESTED subscribers, not every tree child, so a keyexpr no peer
+//! subscribes to forwards nowhere. Subscription INTEREST propagates across the
+//! mesh (c3c-3 atom3):
 //! [`declare_subscription`](LinkstateForwarder::declare_subscription) floods a
 //! sourced `DeclareSubscriber`, and
 //! [`forward_subscription`](LinkstateForwarder::forward_subscription) registers
 //! the source peer's interest + re-floods it, so each peer learns who is
-//! interested in what ([`interested`](LinkstateForwarder::interested)). What is
-//! NOT here yet: the data-route FILTER — `forward_push` still floods EVERY tree
-//! child, whereas zenoh forwards only along `directions[sub]` toward interested
-//! subscribers (the remaining c3c-3 atom4 step wires
-//! [`interested`](LinkstateForwarder::interested) into
-//! [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward))
-//! — and the change-triggered-flood / `Details` optimisations.
+//! interested in what ([`interested`](LinkstateForwarder::interested)). Still
+//! deferred: the `pubsub_tree_change` re-advertise (a subscription declared
+//! before a peer joined is not re-flooded to the new subtree until the next
+//! declaration), the change-triggered-flood / `Details` topology optimisations,
+//! and alias / wildcard keyexprs (the filter is literal-keyexpr exact-match).
 //! `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
@@ -60,7 +60,7 @@ use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::push::PushOwned;
-use wz_codecs::wireexpr::WireexprOwnedVariant;
+use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_session_core::declare_build::build_declare_subscriber;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
@@ -350,11 +350,16 @@ impl LinkstateForwarder {
     /// data-route tree root), resolved by [`resolve_source`](Self::resolve_source):
     /// `node_id == 0` means the inbound neighbour itself originated it,
     /// otherwise the node_id is the source's psid in the inbound link's space.
-    /// Self's CHILDREN in the source-rooted tree are the next hops, and the
-    /// inbound face (self's parent toward the source) is excluded. Each
-    /// outbound copy is re-stamped with THIS node's psid for the source (the
-    /// same value for every face; each child remaps it via its own link, zenoh
-    /// `get_local_context`).
+    /// The next hops are self's children in the source-rooted tree that lead
+    /// toward an INTERESTED subscriber — the data-route filter (c3c-3 atom4):
+    /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward)
+    /// over the keyexpr's interested-peer set
+    /// ([`LinkstatepeerSubs`](crate::linkstate_subs::LinkstatepeerSubs)), NOT
+    /// every tree child (the pre-atom4 broadcast). A keyexpr no peer subscribes
+    /// to forwards nowhere (the any-interest gate). The inbound face (self's
+    /// parent toward the source) is excluded, and each outbound copy is
+    /// re-stamped with THIS node's psid for the source (the same value for every
+    /// face; each child remaps it via its own link, zenoh `get_local_context`).
     ///
     /// Loop-freedom — the honest scope: it holds WHEN every node computes the
     /// SAME tree for the source. They do once topology has converged, because
@@ -365,10 +370,7 @@ impl LinkstateForwarder {
     /// briefly disagree on the tree, and there is NO message dedup (no
     /// per-source seen-set) or TTL to break a resulting duplicate/short loop —
     /// the convergence window self-heals it, but a persistently flapping mesh
-    /// is unbounded. A `(source, sn)` seen-set is the tracked defence;
-    /// subscription-filtered routing (zenoh forwards along `directions[sub]`
-    /// toward interested subscribers rather than flooding every tree child) is
-    /// the deferred c3c-3 step that also bounds the fan-out.
+    /// is unbounded. A `(source, sn)` seen-set is the tracked defence.
     fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         // The inbound face's zid + graph link — the only state the source
         // resolution needs from the faces set, taken in a SCOPED borrow so the
@@ -389,18 +391,32 @@ impl LinkstateForwarder {
         else {
             return;
         };
-        let children = self.net.borrow().tree_children_of(&source_zid);
-
+        // The data-route filter (c3c-3 atom4): forward only toward subtrees
+        // that hold an interested subscriber — `directions_toward` over the
+        // keyexpr's interested-peer set — not every tree child (the pre-atom4
+        // broadcast). A keyexpr no peer subscribes to forwards nowhere.
+        let Some(keyexpr) = push_keyexpr(push) else {
+            return;
+        };
+        let interested = self.subs.borrow().interested(keyexpr);
+        if interested.is_empty() {
+            return;
+        }
+        let children = self
+            .net
+            .borrow()
+            .directions_toward(&source_zid, &interested);
         if children.is_empty() {
             return;
         }
         // `out_node_id` is the same for every face, so build the re-stamped
-        // carrier once; fan_out clones it to each tree child.
+        // carrier once; fan_out clones it to each interested child.
         let mut carrier = push.clone();
         set_push_source(&mut carrier, out_node_id);
 
-        // Forward to self's children in the source's tree — never to the inbound
-        // face, nor back toward the source's own neighbour (a parallel link).
+        // Forward to the interested children in the source's tree — never to the
+        // inbound face, nor back toward the source's own neighbour (a parallel
+        // link).
         let _ = self.fan_out(reliable, |id, zid| {
             if id == inbound {
                 return Ok(None);
@@ -419,19 +435,28 @@ impl LinkstateForwarder {
     }
 
     /// Originate a data Put INTO the mesh from this node (a publishing peer) —
-    /// build the carrier and flood it to self's CHILDREN in self's own
-    /// spanning tree (this node is the source). `build_push_literal` emits no
-    /// `ext_nodeid`, so the carrier is self-originated (node_id 0, zenoh
-    /// DEFAULT) as built; each child resolves the source to this node (its
-    /// inbound neighbour) and re-forwards via [`forward_push`](Self::forward_push).
-    /// The publishing counterpart to `forward_push` (which re-forwards a
-    /// RECEIVED Push). Returns the number of tree-child faces the Put reached.
+    /// build the carrier and flood it toward the INTERESTED subscribers in
+    /// self's own spanning tree (this node is the source). The data-route
+    /// filter (c3c-3 atom4): the next hops are
+    /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward)
+    /// the keyexpr's interested-peer set, not every tree child — a keyexpr no
+    /// peer subscribes to publishes nowhere (returns `Ok(0)`).
+    /// `build_push_literal` emits no `ext_nodeid`, so the carrier is
+    /// self-originated (node_id 0, zenoh DEFAULT) as built; each child resolves
+    /// the source to this node (its inbound neighbour) and re-forwards via
+    /// [`forward_push`](Self::forward_push). The publishing counterpart to
+    /// `forward_push` (which re-forwards a RECEIVED Push). Returns the number of
+    /// interested-child faces the Put reached.
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
+        let interested = self.subs.borrow().interested(keyexpr);
+        if interested.is_empty() {
+            return Ok(0); // no subscriber for this keyexpr -> nothing to send
+        }
         let push = build_push_literal(keyexpr, payload)?;
         let children = {
             let net = self.net.borrow();
             let self_zid = net.self_zid().clone();
-            net.tree_children_of(&self_zid)
+            net.directions_toward(&self_zid, &interested)
         };
         if children.is_empty() {
             return Ok(0);
@@ -553,20 +578,35 @@ impl LinkstateForwarder {
     }
 }
 
-/// Extract the literal keyexpr from a `DeclareSubscriber` declaration — the wz
-/// MVP literal form (`WireexprLocal { id: 0, suffix }`, what `push_build` /
-/// `declare_build` emit). Returns `None` for a non-subscriber Declare body or
-/// a non-literal wireexpr: an aliased (`id != 0`) keyexpr needs a peer
-/// keyexpr-mapping table to resolve (the keyexpr-mapping deferral), and
-/// wildcard intersection is the further `linkstatepeer_subs` exact-match debt.
-fn declare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
-    let DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) = &declare.body else {
-        return None;
-    };
-    match &sub.keyexpr.body {
+/// Extract a literal keyexpr from a `WireexprOwned` — the wz MVP literal form
+/// (`WireexprLocal { id: 0, suffix }`, what `push_build` / `declare_build`
+/// emit), shared by the subscription ([`declare_subscriber_keyexpr`]) and data
+/// ([`push_keyexpr`]) sides. Returns `None` for a non-literal wireexpr: an
+/// aliased (`id != 0`) keyexpr needs a peer keyexpr-mapping table to resolve —
+/// the alias-aware superset is `wz_session_core::wireexpr_resolve::resolve_wireexpr`
+/// (the routing-routes HAT's path); the linkstate-peer HAT is literal-only in
+/// the MVP (keyexpr-mapping + wildcard intersection are tracked deferrals).
+fn literal_keyexpr(wireexpr: &WireexprOwned) -> Option<&str> {
+    match &wireexpr.body {
         WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => w.suffix.as_deref(),
         _ => None,
     }
+}
+
+/// The literal keyexpr a `DeclareSubscriber` declares interest in — `None` for
+/// a non-subscriber Declare body or a non-literal keyexpr.
+fn declare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
+    match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => literal_keyexpr(&sub.keyexpr),
+        _ => None,
+    }
+}
+
+/// The literal keyexpr a data `Push` carries — the key the data-route filter
+/// (c3c-3 atom4) looks the interested-peer set up by. `None` for a non-literal
+/// keyexpr.
+fn push_keyexpr(push: &PushOwned) -> Option<&str> {
+    literal_keyexpr(&push.keyexpr)
 }
 
 impl FaceForwarder for LinkstateForwarder {
@@ -918,6 +958,17 @@ mod tests {
         );
     }
 
+    /// Register (via the real sourced-declare path) that the peer on `face` is
+    /// interested in `keyexpr` — a sourced `DeclareSubscriber` the neighbour
+    /// sent (node_id 0 = that neighbour is the source). The data-route filter
+    /// (c3c-3 atom4) forwards a Push only toward such interested peers, so the
+    /// forwarding tests establish interest first. A caller resets sinks
+    /// afterwards to drop the registration's own re-flood.
+    fn declare_interest(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
+        let declare = build_declare_subscriber(0, 0, Some(keyexpr)).expect("build sub");
+        fwd.forward_subscription(face, true, &declare);
+    }
+
     /// Decode the routing-context `node_id` of the single forwarded Push in a
     /// recorded wire frame — proves the re-stamp landed ON THE WIRE (the Push
     /// codec carried the ext_nodeid), not merely that a frame went out.
@@ -937,9 +988,10 @@ mod tests {
 
     #[test]
     fn forwards_a_push_along_the_source_tree_to_a_child() {
-        // Line A - S(self) - B (A and B each link only to S). A Push
-        // self-originated by neighbour A (node_id 0) floods along A's tree:
-        // self's only child is B, so it reaches B and never goes back to A.
+        // Line A - S(self) - B (A and B each link only to S). B subscribes to
+        // the Push's keyexpr. A Push self-originated by neighbour A (node_id 0)
+        // floods along A's tree toward the interested subscriber B: self's only
+        // child toward B is B, so it reaches B and never goes back to A.
         let fwd = LinkstateForwarder::new(zid(0x05), 2); // self -> idx 0
         let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
         let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
@@ -947,12 +999,17 @@ mod tests {
         fwd.register(FaceId(1), &face_b);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
         advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
         sink_a.reset();
         sink_b.reset();
 
         fwd.forward_push(FaceId(0), true, &data_push());
 
-        assert_eq!(sink_b.frame_count(), 1, "forwarded to the tree child B");
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "forwarded to the interested child B"
+        );
         assert_eq!(sink_a.frame_count(), 0, "never back toward the source A");
         // Re-stamped with THIS node's psid for the source A (its idx, 1).
         assert_eq!(forwarded_source(&sink_b.frame_bytes(0)), 1);
@@ -961,14 +1018,17 @@ mod tests {
     #[test]
     fn does_not_forward_a_push_to_a_face_outside_the_source_tree() {
         // self holds A (connected, edge S<->A) and B (held but never advertised
-        // back, so it is an isolated node with no edge). A Push from A reaches
-        // self only — B is not in A's spanning tree, so it gets nothing.
+        // back, so it is an isolated node with no edge). B subscribes, yet a
+        // Push from A still does not reach it: B is not in A's spanning tree, so
+        // `directions_toward` finds no hop toward it (interest alone is not
+        // enough — the subscriber must be reachable in the source's tree).
         let fwd = LinkstateForwarder::new(zid(0x05), 2);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
         fwd.register(FaceId(1), &face_b);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // only S<->A
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes (but isolated)
         sink_a.reset();
         sink_b.reset();
 
@@ -977,7 +1037,7 @@ mod tests {
         assert_eq!(
             sink_b.frame_count(),
             0,
-            "B is not in A's tree -> no forward"
+            "B is interested but not in A's tree -> no hop, no forward"
         );
     }
 
@@ -1007,6 +1067,7 @@ mod tests {
             ]),
         );
         advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S-C
+        declare_interest(&fwd, FaceId(1), "demo/data"); // C subscribes
         sink_a.reset();
         sink_c.reset();
 
@@ -1021,21 +1082,37 @@ mod tests {
     }
 
     #[test]
-    fn publish_floods_self_originated_data_to_tree_children() {
-        // self(S) publishes its OWN data: it is the source, so the Put floods
-        // to self's children in self's tree (here the single neighbour A),
-        // stamped self-originated (node_id 0).
+    fn publish_sends_self_originated_data_to_an_interested_tree_child() {
+        // self(S) publishes its OWN data toward an interested subscriber: A
+        // subscribes, so the Put reaches A (self's child toward A in self's
+        // tree), stamped self-originated (node_id 0).
         let fwd = LinkstateForwarder::new(zid(0x05), 2);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        declare_interest(&fwd, FaceId(0), "demo/data"); // A subscribes
         sink_a.reset();
 
         let sent = fwd.publish("demo/data", b"v").expect("publish");
-        assert_eq!(sent, 1, "flooded to the one tree child");
+        assert_eq!(sent, 1, "sent to the one interested tree child");
         assert_eq!(sink_a.frame_count(), 1, "A received the published Put");
         // self-originated -> node_id 0 on the wire (zenoh DEFAULT).
         assert_eq!(forwarded_source(&sink_a.frame_bytes(0)), 0);
+    }
+
+    #[test]
+    fn publish_to_an_unsubscribed_keyexpr_sends_nothing() {
+        // The any-interest gate on the publish path: with no subscriber for the
+        // keyexpr, originating a Put reaches no face (and allocates no carrier).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        sink_a.reset();
+
+        let sent = fwd.publish("demo/data", b"v").expect("publish");
+        assert_eq!(sent, 0, "no subscriber -> nothing sent");
+        assert_eq!(sink_a.frame_count(), 0, "A receives no unsubscribed data");
     }
 
     #[test]
@@ -1160,12 +1237,14 @@ mod tests {
     fn forwards_along_the_tree_not_the_cycle_edge_in_a_mesh() {
         // R311rl — loop-freedom on a CYCLIC mesh (the e2e only exercises a
         // line). Converged topology: triangle S-A-B (self S is linked to A and
-        // B, and A-B are linked to each other) plus S-C. A Push from A floods
-        // along A's spanning tree, in which B is A's DIRECT child (via the A-B
-        // edge) while C is self's. So self forwards ONLY to its tree child C —
-        // NOT across the S-B cycle edge — and the message cannot loop
-        // S->B->A->S. The cycle edge is excluded because the (converged,
-        // deterministic-jitter) tree is consistent and acyclic.
+        // B, and A-B are linked to each other) plus S-C. BOTH B and C subscribe.
+        // A Push from A floods along A's spanning tree, in which B is A's DIRECT
+        // child (via the A-B edge) while C is self's. So even though B is
+        // interested, the route toward B runs S->A (B is A's child), and A is
+        // the inbound face (excluded) — self forwards ONLY to its tree child C,
+        // NEVER across the S-B cycle edge, so the message cannot loop S->B->A->S.
+        // The cycle edge is excluded because the (converged, deterministic-
+        // jitter) tree is consistent and acyclic — interest does not override it.
         let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
         let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
         let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
@@ -1196,18 +1275,77 @@ mod tests {
                                                           // C is self's child in A's tree; B is A's child (reached via A-B), so
                                                           // self does not forward toward B.
         assert_eq!(fwd.tree_children_of(&zid(0x0A)), vec![zid(0x0C)]);
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
+        declare_interest(&fwd, FaceId(2), "demo/data"); // C subscribes
         sink_a.reset();
         sink_b.reset();
         sink_c.reset();
 
         fwd.forward_push(FaceId(0), true, &data_push()); // Push from A (source A)
-        assert_eq!(sink_c.frame_count(), 1, "forwarded to the tree child C");
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "forwarded to the interested child C"
+        );
         assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
         assert_eq!(
             sink_b.frame_count(),
             0,
-            "the S-B cycle edge is excluded by A's tree (B is A's child) — no loop"
+            "interested B is reached via A (inbound, excluded); the S-B cycle \
+             edge is never used — no loop"
         );
+    }
+
+    // ── c3c-3 atom4: subscription-filtered data route ────────────────
+
+    #[test]
+    fn forward_push_to_the_interested_subtree_only() {
+        // S has neighbours A, B, C (a star). A Push from A floods along A's
+        // tree, where B and C are both self's children. Only B subscribes, so
+        // the filter forwards to B ALONE — never to the uninterested C (the
+        // pre-atom4 broadcast would have hit both). This is the point of c3c-3.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S-B
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05); // edge S-C
+        declare_interest(&fwd, FaceId(1), "demo/data"); // only B subscribes
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        fwd.forward_push(FaceId(0), true, &data_push());
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "forwarded to the interested child B"
+        );
+        assert_eq!(sink_c.frame_count(), 0, "NOT to the uninterested child C");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    #[test]
+    fn forward_push_with_no_interest_forwards_nothing() {
+        // The any-interest gate: a Push whose keyexpr no peer subscribes to is
+        // not forwarded at all (the pre-atom4 broadcast would have flooded B).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        sink_a.reset();
+        sink_b.reset();
+
+        fwd.forward_push(FaceId(0), true, &data_push());
+        assert_eq!(sink_b.frame_count(), 0, "no subscriber -> no forward");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source either");
     }
 
     // ── c3c-3 atom3b-ii: subscription declaration propagation ────────

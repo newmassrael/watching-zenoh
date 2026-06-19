@@ -42442,6 +42442,48 @@
         "LOCAL UNPUSHED 5커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source refactor)+rq(전파 driver). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect."
       ]
     },
+    "Round 311rr": {
+      "decision_summary": "R311rr: c3c-3 구독필터 atom4-i(데이터 라우트, feature). forward_push/publish가 tree_children_of broadcast→directions_toward(source, subs.interested(keyexpr)) 전환=zenoh insert_faces_for_subs 데이터 라우트. any_interest 게이트(no subscriber→no forward). literal_keyexpr SSOT(declare/push 양쪽 위임; atom3b 인라인 dup 정리)+push_keyexpr. 기존 데이터 테스트 5건 interest 등록 갱신+신규 필터 3건. atom1~3 조각 전부 연결=동작 구독필터 메시. e2e=atom4-ii.",
+      "changes_bullets": [
+        "linkstate_forward.rs: forward_push가 source 해석 후 push_keyexpr→subs.interested(ke)[any_interest 게이트: no sub→no forward]→net.directions_toward(source, interested) 필터(tree_children_of broadcast 대체)=interested 서브트리로만. publish 동일(self source). literal_keyexpr(WireexprOwned) SSOT=declare_subscriber_keyexpr+push_keyexpr 위임(atom3b 인라인 dup 정리; alias-aware superset=wz_session_core wireexpr_resolve 명시).",
+        "기존 데이터 테스트 5건 interest 등록 갱신(declare_interest 헬퍼=실 forward_subscription 경로, backdoor 아님): forwards_a_push(B sub), outside_tree(B sub but isolated=no hop), transit(C sub), publish(A sub→rename), cycle_mesh(B+C sub=interested B도 inbound A 경유라 S-B cycle edge 미사용 실증).",
+        "신규 3건: forward_push_to_the_interested_subtree_only(star S-A/B/C, A publish, B만 sub→B 1프레임/C 0=broadcast였으면 둘 다=atom4 핵심), no_interest_forwards_nothing(게이트), publish_to_unsubscribed_sends_nothing(게이트). 모듈 doc+forward_push/publish doc 필터 완료 갱신."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 319 PASS(linkstate_forward 27=24+3 신규, 5 기존 interest 갱신/1 rename, 292 무회귀). clippy(routing-peer all-targets) -D warnings clean. fmt clean.",
+        "interested_subtree_only=atom4 핵심 실증(star S-A/B/C, A publish, B만 sub→B 1프레임/C 0; broadcast였으면 둘 다). directions_toward(source, interested)=zenoh insert_faces_for_subs(trees[source].directions[sub] per peer→unique face) 미러. literal_keyexpr SSOT로 declare/push keyexpr 추출 단일화(atom3b dup 제거).",
+        "e2e(real TCP 3-peer subscription-gated delivery)=atom4-ii. 정직: pubsub_tree_change(트리 변경 시 기존 구독 재광고) 미구현=늦은 합류 갭(keys() 준비됨). 필터=literal exact-match(alias/wildcard 부채)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rr = c3c-3 atom4-i: forward_push/publish가 directions_toward(source, subs.interested(ke))+any_interest 게이트=구독필터 데이터 라우트(zenoh insert_faces_for_subs). literal_keyexpr SSOT(declare/push 위임, atom3b dup 정리). 27 linkstate_forward unit(필터 핵심 interested_subtree_only 3 신규+기존 5 interest 갱신). atom1(directions_toward)~atom3(전파) 전부 연결=동작하는 구독필터 메시.",
+        "c3c-3 남은 atom4-ii(최종 완결): 3-peer e2e(real TCP)=C declare_subscription→A publish→C만 data_seen 상승(subscription-gated delivery 실증). 기존 wz_peer_data_forward(ri, 3-peer line) 갱신=C 구독+전파 수렴 후 A publish(현재는 broadcast 가정이라 무구독 수신). 타이밍 witness 필요.",
+        "정직 defer: pubsub_tree_change(트리 변경 시 기존 구독 재광고) 미구현=늦은 합류 서브트리가 interest 놓침(keys() 준비됨; topology change-flood와 동급). 데이터 필터=literal exact-match(alias=wireexpr_resolve superset/wildcard intersection=부채).",
+        "LOCAL UNPUSHED 6커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source)+rq(전파)+rr(필터). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect/locators."
+      ],
+      "publishable_decision_summary": "R311rr: c3c-3 구독필터 atom4-i(데이터 라우트, feature). forward_push/publish가 tree_children_of broadcast→directions_toward(source, subs.interested(keyexpr)) 전환=zenoh insert_faces_for_subs 데이터 라우트. any_interest 게이트(no subscriber→no forward). literal_keyexpr SSOT(declare/push 양쪽 위임; atom3b 인라인 dup 정리)+push_keyexpr. 기존 데이터 테스트 5건 interest 등록 갱신+신규 필터 3건. atom1~3 조각 전부 연결=동작 구독필터 메시. e2e=atom4-ii.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs: forward_push가 source 해석 후 push_keyexpr→subs.interested(ke)[any_interest 게이트: no sub→no forward]→net.directions_toward(source, interested) 필터(tree_children_of broadcast 대체)=interested 서브트리로만. publish 동일(self source). literal_keyexpr(WireexprOwned) SSOT=declare_subscriber_keyexpr+push_keyexpr 위임(atom3b 인라인 dup 정리; alias-aware superset=wz_session_core wireexpr_resolve 명시).",
+        "기존 데이터 테스트 5건 interest 등록 갱신(declare_interest 헬퍼=실 forward_subscription 경로, backdoor 아님): forwards_a_push(B sub), outside_tree(B sub but isolated=no hop), transit(C sub), publish(A sub→rename), cycle_mesh(B+C sub=interested B도 inbound A 경유라 S-B cycle edge 미사용 실증).",
+        "신규 3건: forward_push_to_the_interested_subtree_only(star S-A/B/C, A publish, B만 sub→B 1프레임/C 0=broadcast였으면 둘 다=atom4 핵심), no_interest_forwards_nothing(게이트), publish_to_unsubscribed_sends_nothing(게이트). 모듈 doc+forward_push/publish doc 필터 완료 갱신."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 319 PASS(linkstate_forward 27=24+3 신규, 5 기존 interest 갱신/1 rename, 292 무회귀). clippy(routing-peer all-targets) -D warnings clean. fmt clean.",
+        "interested_subtree_only=atom4 핵심 실증(star S-A/B/C, A publish, B만 sub→B 1프레임/C 0; broadcast였으면 둘 다). directions_toward(source, interested)=zenoh insert_faces_for_subs(trees[source].directions[sub] per peer→unique face) 미러. literal_keyexpr SSOT로 declare/push keyexpr 추출 단일화(atom3b dup 제거).",
+        "e2e(real TCP 3-peer subscription-gated delivery)=atom4-ii. 정직: pubsub_tree_change(트리 변경 시 기존 구독 재광고) 미구현=늦은 합류 갭(keys() 준비됨). 필터=literal exact-match(alias/wildcard 부채)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rr = c3c-3 atom4-i: forward_push/publish가 directions_toward(source, subs.interested(ke))+any_interest 게이트=구독필터 데이터 라우트(zenoh insert_faces_for_subs). literal_keyexpr SSOT(declare/push 위임, atom3b dup 정리). 27 linkstate_forward unit(필터 핵심 interested_subtree_only 3 신규+기존 5 interest 갱신). atom1(directions_toward)~atom3(전파) 전부 연결=동작하는 구독필터 메시.",
+        "c3c-3 남은 atom4-ii(최종 완결): 3-peer e2e(real TCP)=C declare_subscription→A publish→C만 data_seen 상승(subscription-gated delivery 실증). 기존 wz_peer_data_forward(ri, 3-peer line) 갱신=C 구독+전파 수렴 후 A publish(현재는 broadcast 가정이라 무구독 수신). 타이밍 witness 필요.",
+        "정직 defer: pubsub_tree_change(트리 변경 시 기존 구독 재광고) 미구현=늦은 합류 서브트리가 interest 놓침(keys() 준비됨; topology change-flood와 동급). 데이터 필터=literal exact-match(alias=wireexpr_resolve superset/wildcard intersection=부채).",
+        "LOCAL UNPUSHED 6커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source)+rq(전파)+rr(필터). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect/locators."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
