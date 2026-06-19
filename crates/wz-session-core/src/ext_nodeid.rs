@@ -70,42 +70,48 @@ pub fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
     }
 }
 
-/// Read the routing-context source `node_id` from an extension chain. Returns
-/// `0` when the `ext_nodeid` is absent — zenoh's DEFAULT, meaning the message
-/// was originated by the SENDING node itself, so a forwarder treats `0` as
-/// "the inbound neighbour is the source".
-pub fn read_source(exts: Option<&Vec<ExtEntryOwned>>) -> u16 {
-    let Some(exts) = exts else {
-        return 0;
-    };
+/// Read a `Z64`-bodied extension's value by `id` from a chain — the generic
+/// chain read the per-id routing-context readers share ([`read_source`] for the
+/// `ext_nodeid`, [`push_routing_context`](crate::push_routing_context)'s
+/// hop-limit). `None` when no entry with `id` is present (or its body is not a
+/// `Z64` zint). The id-keyed scan + body-variant match lives here ONCE so each
+/// per-id reader is a one-line projection.
+pub fn read_z64_ext(exts: Option<&Vec<ExtEntryOwned>>, id: u8) -> Option<u64> {
+    let exts = exts?;
     for ext in exts {
-        if ext_id(ext.header) == NODEID_EXT_ID {
+        if ext_id(ext.header) == id {
             if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
-                return z.value as u16;
+                return Some(z.value);
             }
         }
     }
-    0
+    None
 }
 
-/// Set / replace / remove the `ext_nodeid` in an extension chain, mirroring
-/// zenoh's omit-on-DEFAULT encoding: `node_id == 0` (the "self-originated"
-/// default) REMOVES it, a non-zero id inserts or replaces it. The per-entry
-/// chain-continuation `Z` bits are normalised, and an emptied chain collapses
-/// to `None`. Returns whether the chain is now NON-EMPTY, so the caller can
-/// sync its message-level header `Z` flag (the one field that differs per
-/// message type — Push header vs Declare header).
-pub fn set_source(exts: &mut Option<Vec<ExtEntryOwned>>, node_id: u16) -> bool {
-    // Replace semantics: drop any existing ext_nodeid before (maybe) re-adding.
+/// Insert / replace / remove a `Z64`-bodied extension by `id` in a chain — the
+/// generic chain EDIT the per-id routing-context setters share ([`set_source`],
+/// the Push hop-limit). `value == None` REMOVES any existing entry with `id`;
+/// `Some(v)` inserts or replaces it with header `header` and a `Z64` body of
+/// `v`. The per-entry chain-continuation `Z` bits are renormalised and an
+/// emptied chain collapses to `None`. Returns whether the chain is now
+/// NON-EMPTY, so the caller can sync its message-level header `Z` flag (the one
+/// field that differs per message type — Push header vs Declare header). The
+/// retain-drop / push / `Z`-normalise mechanics live here ONCE; a per-id setter
+/// supplies only its id, header, and value.
+pub fn set_z64_ext(
+    exts: &mut Option<Vec<ExtEntryOwned>>,
+    id: u8,
+    header: u8,
+    value: Option<u64>,
+) -> bool {
+    // Replace semantics: drop any existing entry with this id before re-adding.
     if let Some(list) = exts.as_mut() {
-        list.retain(|e| ext_id(e.header) != NODEID_EXT_ID);
+        list.retain(|e| ext_id(e.header) != id);
     }
-    if node_id != 0 {
+    if let Some(v) = value {
         let entry = ExtEntryOwned {
-            header: NODEID_EXT_HEADER,
-            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
-                value: node_id as u64,
-            }),
+            header,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: v }),
         };
         exts.get_or_insert_with(Vec::new).push(entry);
     }
@@ -117,6 +123,30 @@ pub fn set_source(exts: &mut Option<Vec<ExtEntryOwned>>, node_id: u16) -> bool {
         apply_chain_z_bits(exts.as_mut().expect("non-empty => Some"));
         true
     }
+}
+
+/// Read the routing-context source `node_id` from an extension chain. Returns
+/// `0` when the `ext_nodeid` is absent — zenoh's DEFAULT, meaning the message
+/// was originated by the SENDING node itself, so a forwarder treats `0` as
+/// "the inbound neighbour is the source". A thin projection of the shared
+/// [`read_z64_ext`] over the `ext_nodeid` id.
+pub fn read_source(exts: Option<&Vec<ExtEntryOwned>>) -> u16 {
+    read_z64_ext(exts, NODEID_EXT_ID).map_or(0, |v| v as u16)
+}
+
+/// Set / replace / remove the `ext_nodeid` in an extension chain, mirroring
+/// zenoh's omit-on-DEFAULT encoding: `node_id == 0` (the "self-originated"
+/// default) REMOVES it, a non-zero id inserts or replaces it. Returns whether
+/// the chain is now NON-EMPTY, so the caller can sync its message-level header
+/// `Z` flag. A thin projection of the shared [`set_z64_ext`] over the
+/// `ext_nodeid` id/header, supplying `None` (remove) for the DEFAULT 0.
+pub fn set_source(exts: &mut Option<Vec<ExtEntryOwned>>, node_id: u16) -> bool {
+    set_z64_ext(
+        exts,
+        NODEID_EXT_ID,
+        NODEID_EXT_HEADER,
+        (node_id != 0).then_some(node_id as u64),
+    )
 }
 
 #[cfg(test)]

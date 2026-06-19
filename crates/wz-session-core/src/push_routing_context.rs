@@ -24,7 +24,7 @@
 
 use wz_codecs::push::PushOwned;
 
-use crate::ext_nodeid;
+use crate::ext_nodeid::{self, EXT_ENC_Z64};
 
 /// The Push-level header `Z` bit (zenoh `push.rs` `Z = 1 << 7`): the extension
 /// chain is present. The ONE field that differs from the Declare twin — every
@@ -47,6 +47,61 @@ pub fn read_push_source(push: &PushOwned) -> u16 {
 /// Push-level header `Z` flag to the resulting chain.
 pub fn set_push_source(push: &mut PushOwned, node_id: u16) {
     if ext_nodeid::set_source(&mut push.extensions, node_id) {
+        push.header |= PUSH_FLAG_Z;
+    } else {
+        push.header &= !PUSH_FLAG_Z;
+    }
+}
+
+/// The wz-proprietary mesh-internal HOP-LIMIT extension id — `0x0a`, a FREE id
+/// in zenoh's 4-bit ext-id space (zenoh allocates `0x1`-`0x6` and `0x0f` across
+/// its network messages; `0x07`-`0x0e` are unused). It is NON-mandatory
+/// (`FLAG_M` clear), so a peer that does not understand it SKIPS it rather than
+/// rejecting the Push — a zenoh / zenoh-pico CLIENT therefore reads the Push
+/// unchanged.
+///
+/// This is a DELIBERATE divergence beyond zenoh's data plane, which is
+/// structural-spanning-tree-only with NO data-message loop bound (zenoh
+/// `route_data` carries no seen-set / sequence / TTL; transient-convergence
+/// loops self-heal on its ~100 ms tree recompute). The hop-limit rides ONLY
+/// mesh-internal wz<->wz forwards — a publishing peer stamps it, each transit
+/// hop decrements it (in the linkstate-peer forwarder's `forward_push`) — so it
+/// bounds a transient loop BY CONSTRUCTION (a Push outliving its hop
+/// budget is dropped) WITHOUT changing the wire a client sees. The linkstate
+/// peer mesh is wz-only (zenoh-pico is client-only and never routes), so this id
+/// can never be mis-read by a zenoh node participating in the mesh. The control
+/// plane needs no hop-limit: a sourced subscription flood is bounded by the
+/// `LinkstatepeerSubs` register change-gate (re-flood only on a NEW interest),
+/// the state-convergent zenoh-parity loop bound.
+pub const HOPLIMIT_EXT_ID: u8 = 0x0a;
+/// The hop-limit ext header with no further extension following: `id (0x0a) |
+/// ENC_Z64 (0x20)` = `0x2a`. NON-mandatory (no `FLAG_M`). The chain-continuation
+/// `FLAG_Z` is layered on by [`ext_nodeid::apply_chain_z_bits`] when the entry
+/// is not the last (e.g. when the `ext_nodeid` source rides alongside it).
+pub const HOPLIMIT_EXT_HEADER: u8 = HOPLIMIT_EXT_ID | EXT_ENC_Z64;
+
+/// Read the hop-limit (remaining forward budget) from a Push's hop-limit
+/// extension. `None` when absent — an un-stamped Push (one that did not enter
+/// the mesh through a hop-stamping peer), which a forwarder treats as a fresh
+/// budget. Delegates to the shared [`ext_nodeid::read_z64_ext`].
+pub fn read_push_hoplimit(push: &PushOwned) -> Option<u16> {
+    ext_nodeid::read_z64_ext(push.extensions.as_ref(), HOPLIMIT_EXT_ID).map(|v| v as u16)
+}
+
+/// Set / replace the hop-limit (remaining forward budget) on a Push's hop-limit
+/// extension, syncing the Push-level header `Z` flag to the resulting chain. The
+/// shared [`ext_nodeid::set_z64_ext`] owns the chain edit (replace / per-entry
+/// `Z` normalisation); `Some(hop)` always inserts (a hop budget is always a
+/// meaningful value, unlike the `ext_nodeid`'s omit-on-zero). Co-exists with the
+/// `ext_nodeid` source on the same chain — the two ride distinct ids — and the
+/// resulting chain is id-ascending `[nodeid, hoplimit]` when both are present.
+pub fn set_push_hoplimit(push: &mut PushOwned, hop: u16) {
+    if ext_nodeid::set_z64_ext(
+        &mut push.extensions,
+        HOPLIMIT_EXT_ID,
+        HOPLIMIT_EXT_HEADER,
+        Some(hop as u64),
+    ) {
         push.header |= PUSH_FLAG_Z;
     } else {
         push.header &= !PUSH_FLAG_Z;
@@ -182,6 +237,121 @@ mod tests {
             &wire[EXT_OFFSET..EXT_OFFSET + 2],
             &[0x33, 0x07],
             "ext_nodeid header 0x33 (id 0x3 | M | ENC_Z64) + VLE(7), after the wireexpr",
+        );
+        assert_eq!(
+            &wire[EXT_OFFSET + 2..],
+            &base_wire[EXT_OFFSET..],
+            "the msg_put body is byte-identical, shifted past the inserted ext",
+        );
+    }
+
+    // ── c3c-3 debt D1 — the Push hop-limit ext (wz-proprietary, id 0x0a) ──────
+
+    #[test]
+    fn set_then_read_hoplimit_round_trips() {
+        let mut p = push();
+        assert_eq!(read_push_hoplimit(&p), None, "absent before any set");
+        set_push_hoplimit(&mut p, 5);
+        assert_eq!(read_push_hoplimit(&p), Some(5));
+        assert_eq!(p.header & PUSH_FLAG_Z, PUSH_FLAG_Z, "chain now present");
+    }
+
+    #[test]
+    fn hoplimit_header_is_id_z64_nonmandatory_terminal() {
+        let mut p = push();
+        set_push_hoplimit(&mut p, 4);
+        let exts = p.extensions.as_ref().expect("ext present");
+        assert_eq!(exts.len(), 1, "only the hoplimit ext");
+        // 0x0a (id) | 0x20 (Z64), NO 0x10 (M — non-mandatory), Z clear (sole).
+        assert_eq!(exts[0].header, 0x2a);
+    }
+
+    #[test]
+    fn hoplimit_replaces_not_duplicates() {
+        let mut p = push();
+        set_push_hoplimit(&mut p, 4);
+        set_push_hoplimit(&mut p, 3);
+        assert_eq!(read_push_hoplimit(&p), Some(3));
+        assert_eq!(p.extensions.as_ref().unwrap().len(), 1, "replaced in place");
+    }
+
+    #[test]
+    fn hoplimit_coexists_with_nodeid_in_canonical_order() {
+        let mut p = push();
+        // The forwarder stamps source THEN hop -> id-ascending [nodeid, hoplimit].
+        set_push_source(&mut p, 7);
+        set_push_hoplimit(&mut p, 4);
+        let exts = p.extensions.as_ref().expect("chain present");
+        assert_eq!(exts.len(), 2, "nodeid + hoplimit ride the same chain");
+        // nodeid (id 0x3) is non-last -> Z continuation; hoplimit terminates.
+        assert_eq!(
+            exts[0].header,
+            0x33 | EXT_FLAG_Z,
+            "nodeid, Z continuation set"
+        );
+        assert_eq!(exts[1].header, 0x2a, "hoplimit terminal");
+        assert_eq!(read_push_source(&p), 7);
+        assert_eq!(read_push_hoplimit(&p), Some(4));
+    }
+
+    /// The decisive proof that the wz-proprietary hop-limit ext id (0x0a)
+    /// survives a full wire ENCODE -> DECODE. The SCE ext-entry codec is
+    /// ENCODING-driven (it parses each entry's body by its 2-bit `ENC` field and
+    /// stores the header verbatim — `ext_entry.scxml` arm coverage mirrors
+    /// `_Z_MSG_EXT_ENC_*`), so an id zenoh never allocates round-trips
+    /// generically rather than being dropped. Without this, a stamped hop budget
+    /// would never reach the next mesh hop's `read_push_hoplimit`, and the
+    /// loop-bound would silently no-op.
+    #[test]
+    fn push_hoplimit_survives_a_full_wire_round_trip() {
+        use wz_codecs_test_support::TestWire;
+
+        let mut p = build_push_literal("demo/hop", b"v").expect("build");
+        // Both routing-context exts on one Push (the transit-forward shape).
+        set_push_source(&mut p, 7);
+        set_push_hoplimit(&mut p, 4);
+        let encoded = p.wire();
+
+        let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
+        let decoded = wz_codecs::push::Push::decode(&mut cursor)
+            .expect("Push round-trip decode")
+            .try_into_owned()
+            .expect("into owned");
+
+        assert_eq!(read_push_source(&decoded), 7, "ext_nodeid source survives");
+        assert_eq!(
+            read_push_hoplimit(&decoded),
+            Some(4),
+            "wz hop-limit ext (id 0x0a) survives the id-agnostic wire decode",
+        );
+    }
+
+    /// c3c-3 debt D1 — DIFFERENTIAL byte check for the hop-limit ext (mirrors the
+    /// `push_with_nodeid_matches_zenoh_golden_bytes` shape): the ext-bearing wire
+    /// differs from the same Push with NO ext only by the Push header `Z` bit and
+    /// the inserted `[0x2a, VLE(hop)]` chain after the wireexpr.
+    #[test]
+    fn push_hoplimit_ext_wire_shape() {
+        use wz_codecs_test_support::TestWire;
+
+        let base_wire = build_push_literal("demo/hop", b"v").expect("build").wire();
+        let mut p = build_push_literal("demo/hop", b"v").expect("build");
+        set_push_hoplimit(&mut p, 4);
+        let wire = p.wire();
+
+        // header(1) + literal "demo/hop" (mapping-id VLE 1 + suffix_len VLE 1 +
+        // 8 suffix) = 10 -> the ext chain begins at byte 11.
+        const EXT_OFFSET: usize = 1 + 10;
+        assert_eq!(base_wire[0] & 0x80, 0, "base Push carries no ext chain");
+        assert_eq!(
+            wire[0],
+            base_wire[0] | 0x80,
+            "hop-limit sets the Push Z bit"
+        );
+        assert_eq!(
+            &wire[EXT_OFFSET..EXT_OFFSET + 2],
+            &[0x2a, 0x04],
+            "hop-limit header 0x2a (id 0x0a | ENC_Z64, non-mandatory) + VLE(4)",
         );
         assert_eq!(
             &wire[EXT_OFFSET + 2..],

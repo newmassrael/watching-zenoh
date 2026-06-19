@@ -72,7 +72,9 @@ use wz_session_core::linkstate_oam::{
 };
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::push_build::build_push_literal;
-use wz_session_core::push_routing_context::{read_push_source, set_push_source};
+use wz_session_core::push_routing_context::{
+    read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
+};
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Zid};
 
@@ -368,16 +370,29 @@ impl LinkstateForwarder {
     /// re-stamped with THIS node's psid for the source (the same value for every
     /// face; each child remaps it via its own link, zenoh `get_local_context`).
     ///
-    /// Loop-freedom — the honest scope: it holds WHEN every node computes the
-    /// SAME tree for the source. They do once topology has converged, because
-    /// every node runs the same Bellman-Ford over the same graph with the same
-    /// deterministic (zid-symmetric) edge jitter — so the per-source tree is
-    /// globally consistent and a flood descends it exactly once per node. Under
-    /// TRANSIENT disagreement (mid-convergence / a flapping link) two nodes can
-    /// briefly disagree on the tree, and there is NO message dedup (no
-    /// per-source seen-set) or TTL to break a resulting duplicate/short loop —
-    /// the convergence window self-heals it, but a persistently flapping mesh
-    /// is unbounded. A `(source, sn)` seen-set is the tracked defence.
+    /// Loop-freedom — two complementary layers:
+    /// 1. STRUCTURAL (by construction, when converged): when every node computes
+    ///    the SAME tree for the source — true once topology has converged, because
+    ///    every node runs the same Bellman-Ford over the same graph with the same
+    ///    deterministic (zid-symmetric) edge jitter — the per-source tree is
+    ///    globally consistent and a flood descends it exactly once per node.
+    /// 2. TRANSIENT BOUND (by construction, always): under mid-convergence / a
+    ///    flapping link two nodes can briefly disagree on the tree, lapsing the
+    ///    structural guarantee. The HOP-LIMIT (c3c-3 D1) bounds any resulting loop:
+    ///    [`publish`](Self::publish) stamps a budget = `node_count`, each transit
+    ///    hop decrements it, and a Push arriving with the budget exhausted is NOT
+    ///    re-forwarded. A Push outliving `node_count` hops is provably looping (an
+    ///    acyclic path visits <= `node_count` nodes), so the loop is cut after a
+    ///    bounded hop count rather than circulating until convergence.
+    ///
+    /// The second layer is a DELIBERATE step beyond zenoh, whose data plane is
+    /// structural-ONLY: zenoh `route_data` carries no seen-set / sequence / TTL,
+    /// and transient loops self-heal on its ~100 ms tree recompute. The wz mesh is
+    /// wz-only (zenoh-pico is client-only and never routes), so the hop-limit ext
+    /// (id `0x0a`, non-mandatory) rides only mesh-internal wz<->wz forwards and is
+    /// invisible to a client. The CONTROL plane (a sourced subscription flood)
+    /// needs no hop-limit — it is bounded by the [`LinkstatepeerSubs`] register
+    /// change-gate (re-flood only on a NEW interest), the state-convergent bound.
     fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         // The inbound face's zid + graph link — the only state the source
         // resolution needs from the faces set, taken in a SCOPED borrow so the
@@ -419,10 +434,24 @@ impl LinkstateForwarder {
         if children.is_empty() {
             return;
         }
+        // Hop-limit (c3c-3 D1): a Push that has exhausted its forward budget is
+        // NOT re-forwarded — the by-construction transient-convergence loop bound.
+        // Absent = an un-stamped Push entering the mesh from a non-stamping origin;
+        // treat it as a fresh budget (this node's node_count) so it is bounded from
+        // this hop on. `hop <= 1` means the last unit of budget arrived here: this
+        // node still received + locally delivered the data (counted in `forward`),
+        // it just stops the onward flood — so a loop is cut after a bounded count.
+        let budget = self.net.borrow().node_count() as u16;
+        let hop = read_push_hoplimit(push).unwrap_or(budget);
+        if hop <= 1 {
+            return;
+        }
         // `out_node_id` is the same for every face, so build the re-stamped
-        // carrier once; fan_out clones it to each interested child.
+        // carrier once; fan_out clones it to each interested child. The hop budget
+        // is decremented on the outbound copy (the next hop sees `hop - 1`).
         let mut carrier = push.clone();
         set_push_source(&mut carrier, out_node_id);
+        set_push_hoplimit(&mut carrier, hop - 1);
 
         // Forward to the interested children in the source's tree — never to the
         // inbound face, nor back toward the source's own neighbour (the shared
@@ -456,7 +485,13 @@ impl LinkstateForwarder {
         if interested.is_empty() {
             return Ok(0); // no remote subscriber for this keyexpr -> nothing to send
         }
-        let push = build_push_literal(keyexpr, payload)?;
+        let mut push = build_push_literal(keyexpr, payload)?;
+        // Stamp the hop-limit budget = node_count (c3c-3 D1, the transient-loop
+        // bound): a Push descends an acyclic tree path of at most node_count-1
+        // edges, so the budget is generous enough never to false-drop a legitimate
+        // forward yet finite, so any copy that outlives node_count hops is provably
+        // looping (pigeonhole) and is dropped at the exhausting hop's `forward_push`.
+        set_push_hoplimit(&mut push, self.net.borrow().node_count() as u16);
         let children = self.net.borrow().directions_toward(&self_zid, &interested);
         if children.is_empty() {
             return Ok(0);
@@ -1489,6 +1524,131 @@ mod tests {
             sink_b.frame_count(),
             0,
             "unresolvable source -> dropped, not forwarded"
+        );
+    }
+
+    /// Decode the hop-limit (remaining forward budget) of the single forwarded
+    /// Push in a recorded wire frame — proves the budget landed ON THE WIRE (the
+    /// wz-proprietary `0x0a` ext survived the codec), the c3c-3 D1 twin of
+    /// [`forwarded_source`]. `None` when the forwarded Push carried no hop ext.
+    fn forwarded_hoplimit(frame: &[u8]) -> Option<u16> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Push(p)) => read_push_hoplimit(p),
+            other => panic!("expected a forwarded Push, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_stamps_the_hop_limit_budget_as_node_count() {
+        // c3c-3 D1 — a published Put carries a hop-limit budget = node_count (the
+        // transient-loop bound). With self + A in the graph, node_count is 2, so
+        // the Put A receives is stamped with budget 2.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A (2 nodes)
+        declare_interest(&fwd, FaceId(0), "demo/data");
+        sink_a.reset();
+        assert_eq!(fwd.node_count(), 2);
+
+        fwd.publish("demo/data", b"v").expect("publish");
+        assert_eq!(sink_a.frame_count(), 1);
+        assert_eq!(
+            forwarded_hoplimit(&sink_a.frame_bytes(0)),
+            Some(2),
+            "published Put stamped with hop budget = node_count",
+        );
+    }
+
+    #[test]
+    fn forward_push_decrements_the_hop_limit() {
+        // c3c-3 D1 — a transit forward decrements the budget by one (the next hop
+        // sees one less). Line A - S - B, B subscribes; a Push from A arrives with
+        // hop 5 and is re-forwarded to B with hop 4.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+
+        let mut push = data_push();
+        set_push_hoplimit(&mut push, 5);
+        fwd.forward_push(FaceId(0), true, &push);
+        assert_eq!(sink_b.frame_count(), 1, "forwarded to the interested child");
+        assert_eq!(
+            forwarded_hoplimit(&sink_b.frame_bytes(0)),
+            Some(4),
+            "the outbound copy carries hop - 1",
+        );
+    }
+
+    #[test]
+    fn forward_push_drops_an_exhausted_hop_budget() {
+        // c3c-3 D1 — the loop bound: a Push arriving with its budget exhausted
+        // (hop 1, the last unit) is NOT re-forwarded, even though B is an
+        // interested child in the source's tree. This is what cuts a transient
+        // convergence loop after a bounded number of hops.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+
+        let mut push = data_push();
+        set_push_hoplimit(&mut push, 1); // budget exhausted
+        fwd.forward_push(FaceId(0), true, &push);
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "an exhausted hop budget is not re-forwarded (the loop bound)",
+        );
+        assert_eq!(sink_a.frame_count(), 0, "nor back toward the source");
+    }
+
+    #[test]
+    fn forward_push_bounds_an_unstamped_push_from_node_count() {
+        // c3c-3 D1 — an un-stamped Push (no hop ext, e.g. entering from a
+        // non-stamping origin) is treated as a fresh budget = this node's
+        // node_count, then decremented, so it is bounded from its first mesh hop.
+        // Line A - S - B (3 nodes), B subscribes; an un-stamped Push from A is
+        // forwarded to B with hop = node_count - 1 = 2.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+        assert_eq!(fwd.node_count(), 3);
+
+        let push = data_push(); // carries no hop ext
+        assert_eq!(read_push_hoplimit(&push), None, "un-stamped");
+        fwd.forward_push(FaceId(0), true, &push);
+        assert_eq!(sink_b.frame_count(), 1);
+        assert_eq!(
+            forwarded_hoplimit(&sink_b.frame_bytes(0)),
+            Some(2),
+            "absent hop treated as node_count budget, then decremented",
         );
     }
 

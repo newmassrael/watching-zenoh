@@ -42996,6 +42996,52 @@
         "LOCAL UNPUSHED: C1(sc) 1커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
       ]
     },
+    "Round 311sd": {
+      "decision_summary": "R311sd: c3c-3 부채 D1 재설계 — 전이-불일치 loop의 hop-limit by-construction BOUND. zenoh 조사가 (source,sn) seen-set을 뒤집음(zenoh 데이터평면=구조적-only, dedup/sn/TTL 전무; seen-set=런타임 band-aid로 unrepresentable-by-construction 역행)→hop-limit(IP TTL 교과서)으로 재설계. Push 전용 wz-proprietary ext 0x0a(mesh-internal, SCE-free=ENC-driven decode가 unknown id 보존), publish가 node_count 스탬프+forward_push가 hop<=1 drop/decrement. control-plane은 change-gate가 이미 bound.",
+      "changes_bullets": [
+        "zenoh 정본 조사(Explore, file:line)로 D1 재정의: zenoh 데이터 forward는 순수 구조적 spanning-tree loop-freedom — route_data(dispatcher/pubsub.rs:286-390)에 seen-set/sequence/TTL 전무, ext_nodeid는 node_id:u16뿐(network/mod.rs:571-592), sn은 topology staleness 전용(network.rs:580). 즉 로드맵의 (source,sn) seen-set은 zenoh 정본 없음 + 런타임 detect-drop(unrepresentable-by-construction 원칙 역행). hop-limit(IP TTL=데이터평면 교과서)으로 재설계.",
+        "wz-session-core/ext_nodeid.rs: chain-edit SSOT에 generic read_z64_ext/set_z64_ext 추출, read_source/set_source를 그 thin projection으로 리팩터(retain-drop/push/Z-normalise 단일홈). C2 골든이 byte-parity 보존 검증.",
+        "wz-session-core/push_routing_context.rs: HOPLIMIT_EXT_ID=0x0a(zenoh 4비트 ext공간 자유 id 0x7-0xe 중; non-mandatory M=0=미지원 peer skip), header 0x2a(id|ENC_Z64). read_push_hoplimit/set_push_hoplimit(ext_nodeid generic 재사용). Push 전용=mesh-internal wz<->wz forward에만; 클라이언트 wire 불변. SCE 불필요(ext_entry decode가 ENC-driven=unknown id generic 보존, ext_entry.scxml:44-49).",
+        "wz-runtime-tokio/linkstate_forward.rs: publish가 hop=node_count 스탬프(pigeonhole: 비순환 경로 <=node_count-1 edges→outliving=확정 loop), forward_push가 hop<=1 drop(loop bound)+재stamp 시 hop-1 decrement(absent=node_count fresh budget). forward_push doc를 2-layer(structural converged + hop-limit transient bound)로 정정; '(source,sn) seen-set is the tracked defence' 삭제. control-plane은 register change-gate가 이미 bound(zenoh parity)=hop-limit 불필요 명시."
+      ],
+      "verification_bullets": [
+        "wz-session-core(codec-declare,codec-push) 279 PASS(273+6 신규 hoplimit; push_hoplimit_survives_a_full_wire_round_trip=결정적 unknown-id 0x0a wire encode→decode 보존 실증; +golden byte 0x2a; C2 nodeid 골든 무회귀=ext_nodeid 리팩터 안전).",
+        "wz-runtime-tokio(routing-peer) lib 343 PASS(339+4 신규; publish_stamps_the_hop_limit_budget_as_node_count / forward_push_decrements_the_hop_limit / forward_push_drops_an_exhausted_hop_budget=loop bound / forward_push_bounds_an_unstamped_push_from_node_count). 기존 forward/selectivity 무회귀(hop ext 달고도 source/interest 라우팅 보존).",
+        "E6 e2e 3/3(line forward/withdraw + 4-peer selectivity) PASS=publish가 hop ext 달고도 far subscriber 2-hop 정상 수신+선택성 보존. clippy(session-core/runtime-tokio --tests) -D clean. fmt clean.",
+        "full run-ci RUNCI_EXIT=0(시스템 idle 확인 후 1차 통과, 전 host lane 실패 0). production 코드 변경(forwarder+codec)이라 full 게이트 적용."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sd = c3c-3 부채 D1 완결(재설계): 전이-불일치/flapping loop를 by-construction BOUND하는 hop-limit. zenoh 조사가 로드맵의 (source,sn) seen-set을 뒤집음=zenoh 데이터평면은 구조적-only(dedup/sn/TTL 전무), seen-set은 런타임 band-aid(unrepresentable-by-construction 역행). hop-limit(IP TTL 교과서, node_count budget=pigeonhole)으로 재설계. Push 전용 wz-proprietary ext 0x0a(mesh-internal, 클라이언트 wire 불변, SCE-free=ENC-driven decode가 unknown id 보존). control-plane은 change-gate가 이미 bound.",
+        "설계 결정(사용자 textbook-over-cost 지시): 정본 초과지만 북극성 2nd horizon 범위; \"수렴 시 structural by-construction + 전이 시 hop-limit by-construction BOUND\" 완전한 교과서 문장. structural tree 대체 아닌 보완. SSOT=ext_nodeid generic read_z64_ext/set_z64_ext.",
+        "다음 부채(project_c3c3_debt_paydown): D2(change-triggered flood + re_advertise children-delta; zenoh compute_trees new_children delta+TreesComputationWorker 배치=정본 명확) → B1 alias keyexpr → D3 remove_detached_nodes → B2 wildcard → E/F.",
+        "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd)=2커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ],
+      "publishable_decision_summary": "R311sd: c3c-3 부채 D1 재설계 — 전이-불일치 loop의 hop-limit by-construction BOUND. zenoh 조사가 (source,sn) seen-set을 뒤집음(zenoh 데이터평면=구조적-only, dedup/sn/TTL 전무; seen-set=런타임 band-aid로 unrepresentable-by-construction 역행)→hop-limit(IP TTL 교과서)으로 재설계. Push 전용 wz-proprietary ext 0x0a(mesh-internal, SCE-free=ENC-driven decode가 unknown id 보존), publish가 node_count 스탬프+forward_push가 hop<=1 drop/decrement. control-plane은 change-gate가 이미 bound.",
+      "publishable_changes_bullets": [
+        "zenoh 정본 조사(Explore, file:line)로 D1 재정의: zenoh 데이터 forward는 순수 구조적 spanning-tree loop-freedom — route_data(dispatcher/pubsub.rs:286-390)에 seen-set/sequence/TTL 전무, ext_nodeid는 node_id:u16뿐(network/mod.rs:571-592), sn은 topology staleness 전용(network.rs:580). 즉 로드맵의 (source,sn) seen-set은 zenoh 정본 없음 + 런타임 detect-drop(unrepresentable-by-construction 원칙 역행). hop-limit(IP TTL=데이터평면 교과서)으로 재설계.",
+        "wz-session-core/ext_nodeid.rs: chain-edit SSOT에 generic read_z64_ext/set_z64_ext 추출, read_source/set_source를 그 thin projection으로 리팩터(retain-drop/push/Z-normalise 단일홈). C2 골든이 byte-parity 보존 검증.",
+        "wz-session-core/push_routing_context.rs: HOPLIMIT_EXT_ID=0x0a(zenoh 4비트 ext공간 자유 id 0x7-0xe 중; non-mandatory M=0=미지원 peer skip), header 0x2a(id|ENC_Z64). read_push_hoplimit/set_push_hoplimit(ext_nodeid generic 재사용). Push 전용=mesh-internal wz<->wz forward에만; 클라이언트 wire 불변. SCE 불필요(ext_entry decode가 ENC-driven=unknown id generic 보존, ext_entry.scxml:44-49).",
+        "wz-runtime-tokio/linkstate_forward.rs: publish가 hop=node_count 스탬프(pigeonhole: 비순환 경로 <=node_count-1 edges→outliving=확정 loop), forward_push가 hop<=1 drop(loop bound)+재stamp 시 hop-1 decrement(absent=node_count fresh budget). forward_push doc를 2-layer(structural converged + hop-limit transient bound)로 정정; '(source,sn) seen-set is the tracked defence' 삭제. control-plane은 register change-gate가 이미 bound(zenoh parity)=hop-limit 불필요 명시."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core(codec-declare,codec-push) 279 PASS(273+6 신규 hoplimit; push_hoplimit_survives_a_full_wire_round_trip=결정적 unknown-id 0x0a wire encode→decode 보존 실증; +golden byte 0x2a; C2 nodeid 골든 무회귀=ext_nodeid 리팩터 안전).",
+        "wz-runtime-tokio(routing-peer) lib 343 PASS(339+4 신규; publish_stamps_the_hop_limit_budget_as_node_count / forward_push_decrements_the_hop_limit / forward_push_drops_an_exhausted_hop_budget=loop bound / forward_push_bounds_an_unstamped_push_from_node_count). 기존 forward/selectivity 무회귀(hop ext 달고도 source/interest 라우팅 보존).",
+        "E6 e2e 3/3(line forward/withdraw + 4-peer selectivity) PASS=publish가 hop ext 달고도 far subscriber 2-hop 정상 수신+선택성 보존. clippy(session-core/runtime-tokio --tests) -D clean. fmt clean.",
+        "full run-ci RUNCI_EXIT=0(시스템 idle 확인 후 1차 통과, 전 host lane 실패 0). production 코드 변경(forwarder+codec)이라 full 게이트 적용."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sd = c3c-3 부채 D1 완결(재설계): 전이-불일치/flapping loop를 by-construction BOUND하는 hop-limit. zenoh 조사가 로드맵의 (source,sn) seen-set을 뒤집음=zenoh 데이터평면은 구조적-only(dedup/sn/TTL 전무), seen-set은 런타임 band-aid(unrepresentable-by-construction 역행). hop-limit(IP TTL 교과서, node_count budget=pigeonhole)으로 재설계. Push 전용 wz-proprietary ext 0x0a(mesh-internal, 클라이언트 wire 불변, SCE-free=ENC-driven decode가 unknown id 보존). control-plane은 change-gate가 이미 bound.",
+        "설계 결정(사용자 textbook-over-cost 지시): 정본 초과지만 북극성 2nd horizon 범위; \"수렴 시 structural by-construction + 전이 시 hop-limit by-construction BOUND\" 완전한 교과서 문장. structural tree 대체 아닌 보완. SSOT=ext_nodeid generic read_z64_ext/set_z64_ext.",
+        "다음 부채(project_c3c3_debt_paydown): D2(change-triggered flood + re_advertise children-delta; zenoh compute_trees new_children delta+TreesComputationWorker 배치=정본 명확) → B1 alias keyexpr → D3 remove_detached_nodes → B2 wildcard → E/F.",
+        "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd)=2커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [
