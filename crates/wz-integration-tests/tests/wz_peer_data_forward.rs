@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R311ri — c3c e2e: linkstate-peer MESH DATA forwarding over a 3-peer LINE.
+//!
+//! Topology (all the `--features routing-peer` binary, ephemeral ports read
+//! back from each peer's listen log):
+//!   - peer C: `--peer 127.0.0.1:0` — a pure acceptor, the FAR peer (2 hops
+//!     from the publisher).
+//!   - peer B: `--peer 127.0.0.1:0 --connect <C>` — dials C (the transit hop).
+//!   - peer A: `--peer 127.0.0.1:0 --connect <B> --publish demo/mesh` — dials B
+//!     AND originates data into the mesh.
+//!
+//! So the linkstate edges are A<->B and B<->C (a line A-B-C). Once topology
+//! converges, A's spanning tree is A -> B -> C, so a Put A publishes floods to
+//! its child B; B re-forwards along A's tree to ITS child C (re-stamping the
+//! routing-context NodeId into B's psid space for C). C therefore RECEIVES data
+//! it has no direct link to the publisher for — the end-to-end proof of the
+//! multi-hop data forward (c3c-1 NodeId seam + c3c-2 forward) that the unit
+//! tests exercise piecewise.
+//!
+//! Requires the binary built with `--features routing-peer` (the `--peer` /
+//! `--publish` args are opt-in behind it). run-ci's Layer E builds it so this
+//! rides the same `--ignored` lane as the other binary-dep e2es.
+
+use std::fs::File;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use wz_integration_tests::common::{
+    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+};
+
+/// Parse the bound port from a peer's `listening on 127.0.0.1:<port>` log line
+/// — the ephemeral-port read-back that lets the next peer dial this one without
+/// a reserved-port allocation.
+fn listen_port(captured: &str) -> u16 {
+    let marker = "listening on 127.0.0.1:";
+    let rest = captured
+        .split(marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("no '{marker}' in:\n{captured}"));
+    rest.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|e| panic!("unparseable port after '{marker}': {e}\n{captured}"))
+}
+
+/// Spawn a `--peer` demo on an ephemeral port and wait until it binds, then read
+/// the bound port back from its listen log. Returns the guard, its stderr
+/// reader, and the port.
+fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
+    let stderr = tempfile::tempfile().expect("tempfile for peer stderr");
+    let writer = stderr.try_clone().expect("dup peer stderr handle");
+    let mut reader = stderr;
+    let mut guard = ChildGuard::wrap(
+        label.to_string(),
+        Command::new(wz_ap_demo_binary())
+            .args(args)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(writer))
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {label}: {e}")),
+    );
+    let captured = wait_for_substring(
+        &mut reader,
+        "peer: listening on 127.0.0.1:",
+        Duration::from_secs(5),
+    )
+    .unwrap_or_else(|c| {
+        let _ = guard.child_mut().kill();
+        let _ = guard.child_mut().wait();
+        panic!(
+            "{label} did not bind within 5s (is the binary built with \
+                     --features routing-peer?)\n--- {label} stderr ---\n{c}"
+        );
+    });
+    let port = listen_port(&captured);
+    (guard, reader, port)
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+fn wz_peer_mesh_forwards_data_two_hops() {
+    // C (far peer) binds first so B can dial it; then B binds so A can dial it.
+    let (mut c_guard, mut c_reader, p_c) = spawn_peer("peer-C", &["--peer", "127.0.0.1:0"]);
+    let addr_c = format!("127.0.0.1:{p_c}");
+    let (mut b_guard, mut b_reader, p_b) =
+        spawn_peer("peer-B", &["--peer", "127.0.0.1:0", "--connect", &addr_c]);
+    let addr_b = format!("127.0.0.1:{p_b}");
+    let (mut a_guard, mut a_reader, _p_a) = spawn_peer(
+        "peer-A",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_b,
+            "--publish",
+            "demo/mesh",
+        ],
+    );
+
+    // The FAR peer C must RECEIVE A's published data — flooded A -> B -> C along
+    // A's spanning tree, B re-stamping the routing-context NodeId for C. C has
+    // NO direct link to A, so receiving this proves the multi-hop forward.
+    let c_data = wait_for_substring(&mut c_reader, "received mesh data", Duration::from_secs(15));
+
+    // Graceful-shutdown all three, then read their captured logs.
+    graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(c_guard.child_mut(), Duration::from_secs(5));
+    let a_captured = read_captured(&mut a_reader);
+    let b_captured = read_captured(&mut b_reader);
+    let c_captured = read_captured(&mut c_reader);
+    eprintln!("--- peer-A stderr ---\n{a_captured}");
+    eprintln!("--- peer-B stderr ---\n{b_captured}");
+    eprintln!("--- peer-C stderr ---\n{c_captured}");
+
+    // Diagnostics printed; now assert.
+    c_data.unwrap_or_else(|c| {
+        panic!(
+            "peer-C (2 hops from the publisher) never logged 'received mesh data' within \
+             15s — A's published data did not flood through B to C (multi-hop forward \
+             did not reach the far peer)\n--- peer-C stderr ---\n{c}"
+        )
+    });
+    // The transit hop B must ALSO have received the data (it is what forwarded
+    // it onward to C) — distinguishing a true two-hop relay from a fluke.
+    assert!(
+        b_captured.contains("received mesh data"),
+        "peer-B (the transit hop) must have received and forwarded A's data\n\
+         --- peer-B stderr ---\n{b_captured}"
+    );
+}

@@ -1230,8 +1230,13 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 /// for a peer (unlike the router, whose 0x02 is a documented stand-in for a true
 /// WhatAmI::Router); the well-tested accept / initiate directions drive it.
 #[cfg(feature = "routing-peer")]
-pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Result<()> {
+pub(crate) async fn run_peer(
+    listen: &str,
+    dial_targets: &[String],
+    publish_key: Option<&str>,
+) -> io::Result<()> {
     use crate::args::NodeKind;
+    use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{LinkstateForwarder, WHATAMI_PEER};
     use wz::runtime_tokio::session_open::bind_endpoint;
@@ -1243,6 +1248,10 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
     // LinkstateForwarder itself — R311rf, on the FaceForwarder seam — so this
     // demo no longer owns a flood timer.)
     const PEER_ZID_PREFIX: u16 = 0x7072;
+    // Cadence of the DEMO APPLICATION driver (not the protocol flood): a
+    // `--publish` peer originates a data Put each tick, and every peer observes
+    // its received-data count. Fast enough to publish soon after convergence.
+    const APP_TICK_MS: u64 = 250;
 
     let listener = bind_endpoint(listen).await?;
     let local = listener.local_addr()?;
@@ -1264,9 +1273,15 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
     }
 
     log::info!(
-        "wz-ap-demo peer: listening on {local}; dialing {} configured peer(s) \
-         and holding both directions' faces (routing-peer foundation, no forwarding)",
-        dials.len()
+        "wz-ap-demo peer: listening on {local}; dialing {} configured peer(s), \
+         holding both directions' faces and forwarding mesh data along the \
+         linkstate spanning tree{}",
+        dials.len(),
+        if publish_key.is_some() {
+            " (publishing)"
+        } else {
+            ""
+        }
     );
 
     let mut params = demo_session_init_params(NodeKind::Peer);
@@ -1324,22 +1339,44 @@ pub(crate) async fn run_peer(listen: &str, dial_targets: &[String]) -> io::Resul
         },
         &forwarder,
     );
-    // The peer loop drives the periodic self-flood itself now (R311rf — the
-    // cadence is the LinkstateForwarder's own obligation, on the FaceForwarder
-    // seam), so this is a single await with no hand-rolled flood select. That
-    // is what makes EVERY peer_loop caller converge, not only this demo.
-    let summary = loop_fut.await;
+    tokio::pin!(loop_fut);
+
+    // R311ri (c3c e2e) — a DEMO APPLICATION driver, distinct from the protocol
+    // flood (which lives on the FaceForwarder seam, R311rf): on each tick a
+    // `--publish` peer ORIGINATES a data Put into the mesh (flooded along its
+    // own spanning tree by the forwarder), and EVERY peer observes how many
+    // data Pushes it has received, logging the first rise so the e2e witnesses
+    // multi-hop delivery. Topology `flood_self` is NOT here — only the demo's
+    // application I/O (publish + observe). The peer loop still drives the flood.
+    let mut app_tick = tokio::time::interval(Duration::from_millis(APP_TICK_MS));
+    let mut last_data_seen = 0usize;
+    let summary = loop {
+        tokio::select! {
+            done = &mut loop_fut => break done,
+            _ = app_tick.tick() => {
+                if let Some(key) = publish_key {
+                    let _ = forwarder.publish(key, b"wz-mesh-data");
+                }
+                let seen = forwarder.data_seen();
+                if seen > last_data_seen {
+                    last_data_seen = seen;
+                    log::info!("wz-ap-demo peer: received mesh data ({seen} push(es))");
+                }
+            }
+        }
+    };
 
     log::info!(
         "wz-ap-demo peer: shutdown; dialed {}, accepted {}, served {} peer(s), \
          peak {} concurrent face(s), ingested {} link-state(s), \
-         {} node(s) in topology graph",
+         {} node(s) in topology graph, {} data push(es) received",
         summary.dialed,
         summary.accepted,
         summary.established,
         summary.peak_concurrent,
         forwarder.ingested(),
-        forwarder.node_count()
+        forwarder.node_count(),
+        forwarder.data_seen()
     );
     // Convergence witness the e2e asserts on: emitted ONLY when this peer
     // actually INGESTED a neighbour's link-state flood — proof topology

@@ -145,7 +145,11 @@ fn main() -> ExitCode {
             let dial_targets: Vec<String> = parse_pair(rest, "--connect")
                 .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
                 .unwrap_or_default();
-            return run_peer_mode(peer_listen, dial_targets);
+            // R311ri (c3c e2e) — `--publish <key>` makes this peer ORIGINATE
+            // data into the mesh (flooded along its spanning tree); absent, the
+            // peer only forwards others' data.
+            let publish_key = parse_pair(rest, "--publish");
+            return run_peer_mode(peer_listen, dial_targets, publish_key);
         }
         #[cfg(not(feature = "routing-peer"))]
         {
@@ -623,7 +627,11 @@ fn run_router_mode(addr: String) -> ExitCode {
 /// Mirrors [`run_router_mode`] — a router has no per-face application behaviour,
 /// and neither does a hold-only mesh peer.
 #[cfg(feature = "routing-peer")]
-fn run_peer_mode(listen: String, dial_targets: Vec<String>) -> ExitCode {
+fn run_peer_mode(
+    listen: String,
+    dial_targets: Vec<String>,
+    publish_key: Option<String>,
+) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
         Ok(rt) => rt,
@@ -632,7 +640,11 @@ fn run_peer_mode(listen: String, dial_targets: Vec<String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(crate::runner::run_peer(&listen, &dial_targets)) {
+    match runtime.block_on(crate::runner::run_peer(
+        &listen,
+        &dial_targets,
+        publish_key.as_deref(),
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wz-ap-demo: {e}");

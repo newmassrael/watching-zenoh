@@ -50,6 +50,7 @@ use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::push_build::build_push_literal;
 use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Zid};
@@ -103,6 +104,11 @@ pub struct LinkstateForwarder {
     /// Running total of link-state lists ingested — the control-plane work
     /// witness (the linkstate analogue of `RoutingForwarder::forwarded`).
     ingested: Cell<usize>,
+    /// Running total of data `Push` messages received on a face — the
+    /// data-plane reception witness. A far peer's count rising above zero is
+    /// the end-to-end proof that mesh data forwarding reached it (the data
+    /// counterpart of `ingested`).
+    data_seen: Cell<usize>,
 }
 
 impl LinkstateForwarder {
@@ -112,6 +118,7 @@ impl LinkstateForwarder {
             net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
+            data_seen: Cell::new(0),
         }
     }
 
@@ -183,6 +190,13 @@ impl LinkstateForwarder {
     /// Total link-state lists ingested so far — the control-plane witness.
     pub fn ingested(&self) -> usize {
         self.ingested.get()
+    }
+
+    /// Total data `Push` messages received on a face so far — the data-plane
+    /// reception witness. On a far peer this rising above zero proves mesh
+    /// data forwarding reached it end to end.
+    pub fn data_seen(&self) -> usize {
+        self.data_seen.get()
     }
 
     /// Number of nodes in the topology graph (self + every learned peer) —
@@ -320,6 +334,39 @@ impl LinkstateForwarder {
             let _ = state.actions.send_network_message(msg, reliable, false);
         }
     }
+
+    /// Originate a data Put INTO the mesh from this node (a publishing peer) —
+    /// build the carrier and flood it to self's CHILDREN in self's own
+    /// spanning tree (this node is the source). `build_push_literal` emits no
+    /// `ext_nodeid`, so the carrier is self-originated (node_id 0, zenoh
+    /// DEFAULT) as built; each child resolves the source to this node (its
+    /// inbound neighbour) and re-forwards via [`forward_push`](Self::forward_push).
+    /// The publishing counterpart to `forward_push` (which re-forwards a
+    /// RECEIVED Push). Returns the number of tree-child faces the Put reached.
+    pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
+        let push = build_push_literal(keyexpr, payload)?;
+        let net = self.net.borrow();
+        let self_zid = net.self_zid().clone();
+        let children = net.tree_children_of(&self_zid);
+        drop(net);
+        if children.is_empty() {
+            return Ok(0);
+        }
+        let mut sent = 0;
+        for state in self.faces.borrow().values() {
+            let Some(child_zid) = state.actions.peer_zid() else {
+                continue;
+            };
+            if !children.contains(&child_zid) {
+                continue;
+            }
+            let msg = NetworkMessage::Push(Box::new(push.clone()));
+            if state.actions.send_network_message(msg, true, false).is_ok() {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
 }
 
 impl FaceForwarder for LinkstateForwarder {
@@ -393,9 +440,13 @@ impl FaceForwarder for LinkstateForwarder {
                     // left alone (the generic OAM path / a logged drop).
                     LinkstateOam::Malformed(_) | LinkstateOam::NotLinkstate => {}
                 },
-                // c3c-2 — a data Push: flood it onward along the SOURCE's
-                // spanning tree (loop-free), excluding the inbound face.
-                NetworkMessage::Push(push) => self.forward_push(id, *reliable, push),
+                // c3c-2 — a data Push: count the reception (the data-plane
+                // witness) then flood it onward along the SOURCE's spanning
+                // tree (loop-free), excluding the inbound face.
+                NetworkMessage::Push(push) => {
+                    self.data_seen.set(self.data_seen.get() + 1);
+                    self.forward_push(id, *reliable, push);
+                }
                 _ => {}
             }
         }
@@ -757,5 +808,44 @@ mod tests {
         assert_eq!(sink_b.frame_count(), 0, "B is the source root, not a child");
         // Re-stamped with self's psid for the RESOLVED source B (its idx, 2).
         assert_eq!(forwarded_source(&sink_c.frame_bytes(0)), 2);
+    }
+
+    #[test]
+    fn publish_floods_self_originated_data_to_tree_children() {
+        // self(S) publishes its OWN data: it is the source, so the Put floods
+        // to self's children in self's tree (here the single neighbour A),
+        // stamped self-originated (node_id 0).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        sink_a.reset();
+
+        let sent = fwd.publish("demo/data", b"v").expect("publish");
+        assert_eq!(sent, 1, "flooded to the one tree child");
+        assert_eq!(sink_a.frame_count(), 1, "A received the published Put");
+        // self-originated -> node_id 0 on the wire (zenoh DEFAULT).
+        assert_eq!(forwarded_source(&sink_a.frame_bytes(0)), 0);
+    }
+
+    #[test]
+    fn forward_counts_received_data_pushes() {
+        // The forward() seam counts every received data Push — the data-plane
+        // reception witness a far peer logs to prove end-to-end delivery.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        assert_eq!(fwd.data_seen(), 0);
+
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        assert_eq!(fwd.data_seen(), 1, "one received data Push counted");
     }
 }

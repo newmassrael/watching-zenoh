@@ -42080,6 +42080,46 @@
         "코드 LOCAL UNPUSHED 4커밋: rf(84647b2)+re(7c5ad96)+rg(662fb1d)+rh(이 커밋). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
       ]
     },
+    "Round 311ri": {
+      "decision_summary": "R311ri: c3c e2e (linkstate mesh 데이터 forward 멀티홉 실증). LinkstateForwarder.publish(self tree로 originate)+data_seen 카운터, demo --publish(app-timer로 publish+수신 관찰=protocol flood seam과 별개), 3-peer 라인 A→B→C e2e: A publish→B transit→C(2-hop) 수신. real TCP로 c3c-1/c3c-2 end-to-end 검증.",
+      "changes_bullets": [
+        "wz-runtime-tokio/linkstate_forward.rs: publish(keyexpr,payload)=build_push_literal Put를 self tree children에 flood(self=source, node_id 0 self-originated)+data_seen Cell(forward()서 Push당 증가)+data_seen() accessor. 2 unit(publish self-originated flood+forward data 카운트).",
+        "wz-ap-demo: run_peer(+publish_key) — app-timer select 재도입(rf가 뺀 flood select와 별개=protocol flood은 seam, application publish/observe는 demo). --publish peer는 tick마다 forwarder.publish; 전 peer가 data_seen rise시 'received mesh data' 로그+shutdown summary에 data count. main.rs peer 브랜치 --publish 파싱→run_peer_mode→run_peer.",
+        "wz-integration-tests/wz_peer_data_forward.rs(Layer E --ignored): 3-peer 라인 ephemeral 포트 순차 기동(C←B←A dial; listen 로그서 포트 read-back), A --publish→C(2-hop, A와 직접 링크 없음)가 'received mesh data' 단언+B transit 단언. multi-hop forward+per-link NodeId 재stamp를 real TCP로 실증."
+      ],
+      "verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 304 PASS(publish/data_seen 2 신규). wz_peer_data_forward 5/5 무flake(0.46s; A publish→B transit→C 2-hop 수신). E6 wz_peer_mesh 3/3(run_peer app-timer select 무회귀). 수동 스모크: C가 'received mesh data (1..10 push(es))' 실측.",
+        "clippy integration-tests+ap-demo(routing-peer)+rt-tokio(routing-peer all-targets+no-default) -D warnings clean. fmt --all --check exit 0. (ap-demo --no-default-features는 wz facade runtime_tokio 게이팅으로 빌드 불가=기존 제약, c3c 무관.)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ri = c3c e2e = linkstate mesh 데이터 forward 멀티홉 실증. forwarder.publish(self tree originate)+data_seen, demo --publish(app-timer=application; protocol flood은 seam 별개), 3-peer 라인 e2e(A publish→B transit→C 2-hop 수신). c3c-1/c3c-2를 real TCP end-to-end 검증='unit-only' 정직성 갭 해소.",
+        "c3c 데이터면 완결: c3c-1(NodeId wire seam rg)+c3c-2(forward rh)+c3c e2e(멀티홉 실증 ri). broadcast-along-tree loop-free 동작. 남은 c3c-3=subscription-filter(interested-subtree만; linkstatepeer_subs+Declare mesh 전파=별도 서브시스템, deferred).",
+        "다음 후보: c3c-3 subscription-filter, 또는 추적부채(change-triggered flood, Details split, remove_detached_nodes+3-peer transitive convergence, options-SSOT, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators). dense-mesh 중복 가능(broadcast가 비-parent 도착시; zenoh directions 정밀).",
+        "코드 LOCAL UNPUSHED 5커밋: rf(84647b2)+re(7c5ad96)+rg(662fb1d,c3c-1)+rh(44e8c98,c3c-2)+ri(이 커밋,c3c e2e). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
+      ],
+      "publishable_decision_summary": "R311ri: c3c e2e (linkstate mesh 데이터 forward 멀티홉 실증). LinkstateForwarder.publish(self tree로 originate)+data_seen 카운터, demo --publish(app-timer로 publish+수신 관찰=protocol flood seam과 별개), 3-peer 라인 A→B→C e2e: A publish→B transit→C(2-hop) 수신. real TCP로 c3c-1/c3c-2 end-to-end 검증.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/linkstate_forward.rs: publish(keyexpr,payload)=build_push_literal Put를 self tree children에 flood(self=source, node_id 0 self-originated)+data_seen Cell(forward()서 Push당 증가)+data_seen() accessor. 2 unit(publish self-originated flood+forward data 카운트).",
+        "wz-ap-demo: run_peer(+publish_key) — app-timer select 재도입(rf가 뺀 flood select와 별개=protocol flood은 seam, application publish/observe는 demo). --publish peer는 tick마다 forwarder.publish; 전 peer가 data_seen rise시 'received mesh data' 로그+shutdown summary에 data count. main.rs peer 브랜치 --publish 파싱→run_peer_mode→run_peer.",
+        "wz-integration-tests/wz_peer_data_forward.rs(Layer E --ignored): 3-peer 라인 ephemeral 포트 순차 기동(C←B←A dial; listen 로그서 포트 read-back), A --publish→C(2-hop, A와 직접 링크 없음)가 'received mesh data' 단언+B transit 단언. multi-hop forward+per-link NodeId 재stamp를 real TCP로 실증."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 304 PASS(publish/data_seen 2 신규). wz_peer_data_forward 5/5 무flake(0.46s; A publish→B transit→C 2-hop 수신). E6 wz_peer_mesh 3/3(run_peer app-timer select 무회귀). 수동 스모크: C가 'received mesh data (1..10 push(es))' 실측.",
+        "clippy integration-tests+ap-demo(routing-peer)+rt-tokio(routing-peer all-targets+no-default) -D warnings clean. fmt --all --check exit 0. (ap-demo --no-default-features는 wz facade runtime_tokio 게이팅으로 빌드 불가=기존 제약, c3c 무관.)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ri = c3c e2e = linkstate mesh 데이터 forward 멀티홉 실증. forwarder.publish(self tree originate)+data_seen, demo --publish(app-timer=application; protocol flood은 seam 별개), 3-peer 라인 e2e(A publish→B transit→C 2-hop 수신). c3c-1/c3c-2를 real TCP end-to-end 검증='unit-only' 정직성 갭 해소.",
+        "c3c 데이터면 완결: c3c-1(NodeId wire seam rg)+c3c-2(forward rh)+c3c e2e(멀티홉 실증 ri). broadcast-along-tree loop-free 동작. 남은 c3c-3=subscription-filter(interested-subtree만; linkstatepeer_subs+Declare mesh 전파=별도 서브시스템, deferred).",
+        "다음 후보: c3c-3 subscription-filter, 또는 추적부채(change-triggered flood, Details split, remove_detached_nodes+3-peer transitive convergence, options-SSOT, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators). dense-mesh 중복 가능(broadcast가 비-parent 도착시; zenoh directions 정밀).",
+        "코드 LOCAL UNPUSHED 5커밋: rf(84647b2)+re(7c5ad96)+rg(662fb1d,c3c-1)+rh(44e8c98,c3c-2)+ri(이 커밋,c3c e2e). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
