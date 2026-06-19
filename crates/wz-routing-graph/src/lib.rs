@@ -1336,6 +1336,87 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_self_link_can_add_a_child_via_re_homing() {
+        // R311sg session-review counterexample: a self-link drop does NOT always
+        // shrink self's tree children — under non-uniform weights it can RE-HOME a
+        // node THROUGH self, ADDING a child to a remote root's tree. This refutes
+        // the retracted "deregister delta is provably empty" claim.
+        //
+        // Topology rooted at R (self = S): R-S(100), S-F(250), S-M(100), M-F(100).
+        // F's cheapest path from R is R-S-M-F (300) < R-S-F (350), so F is M's
+        // child, NOT S's — S's children in R's tree = [M]. Dropping S-M forces
+        // F onto R-S-F, so F RE-HOMES as S's child — a NEW child of S in R's tree.
+        let s = zid(0x05); // self
+        let r = zid(0x0D); // root (a remote node, e.g. a subscription source)
+        let m = zid(0x0B); // the detour relay
+        let f = zid(0x0F); // the node that re-homes
+        let mut net = LinkstateNetwork::new(s.clone(), 2);
+        let lr = net.add_link(r.clone(), 2);
+        let lf = net.add_link(f.clone(), 2);
+        let lm = net.add_link(m.clone(), 2);
+
+        // Pass 1 — teach each link's psid -> zid mappings (low sn, no links).
+        net.ingest_linkstate_list(lr, list(vec![entry(0, 1, Some(&s), Some(2), &[])]));
+        net.ingest_linkstate_list(
+            lf,
+            list(vec![
+                entry(0, 1, Some(&s), Some(2), &[]),
+                entry(2, 1, Some(&m), Some(2), &[]),
+            ]),
+        );
+        net.ingest_linkstate_list(
+            lm,
+            list(vec![
+                entry(0, 1, Some(&s), Some(2), &[]),
+                entry(2, 1, Some(&f), Some(2), &[]),
+            ]),
+        );
+        // Pass 2 — advertise links (high sn). R->S; F->{S w250, M default};
+        // M->{S default, F default}. The S-F edge takes 250, S-M / M-F take 100.
+        net.ingest_linkstate_list(lr, list(vec![entry(1, 5, Some(&r), Some(2), &[0])]));
+        net.ingest_linkstate_list(
+            lf,
+            list(vec![entry_weighted(
+                1,
+                5,
+                Some(&f),
+                Some(2),
+                &[0, 2],
+                &[250, 0],
+            )]),
+        );
+        net.ingest_linkstate_list(lm, list(vec![entry(1, 5, Some(&m), Some(2), &[0, 2])]));
+
+        net.compute_trees();
+        assert_eq!(
+            net.tree_children_of(&r),
+            vec![m.clone()],
+            "before the drop: F routes via the cheaper detour M, so S's only child \
+             in R's tree is M (F is M's child, not S's)"
+        );
+
+        // Drop the S-M link: F can now only reach R via R-S-F, so it re-homes as
+        // S's child. compute_trees must report F as a NEW child of S in R's tree.
+        net.remove_link(lm);
+        let delta = net.compute_trees();
+        assert_eq!(
+            net.tree_children_of(&r),
+            vec![f.clone()],
+            "after the drop: F re-homed as S's child in R's tree"
+        );
+        let r_delta = delta
+            .iter()
+            .find(|(root, _)| *root == r)
+            .map(|(_, c)| c.clone());
+        assert_eq!(
+            r_delta,
+            Some(vec![f.clone()]),
+            "the self-link drop ADDED F as a new child of R's tree — a non-empty \
+             delta deregister MUST re-advertise to (not discard as 'provably empty')"
+        );
+    }
+
+    #[test]
     fn next_hop_follows_shortest_path_over_a_line() {
         // Topology: self -- A -- B (a line). next hop self->B is A.
         let mut net = LinkstateNetwork::new(zid(0x01), 2);

@@ -21,6 +21,12 @@
 //! chain. So a terminal `ext_nodeid` header is `0x03 | 0x10 | 0x20 = 0x33`,
 //! and the body is the `Z64`-encoded `node_id`. The Push-level header `Z`
 //! bit (`push.rs:21`, `0x80`) signals that the extension chain is present.
+//!
+//! This module also owns the wz-PROPRIETARY hop-limit ext (D1, id `0x0a`) that
+//! rides the SAME Push routing-context chain — `read_push_hoplimit` /
+//! `set_push_hoplimit` next to the `node_id` seam. See [`HOPLIMIT_EXT_ID`] for
+//! why it is a deliberate, client-transparent divergence beyond zenoh's
+//! (loop-bound-less) data plane.
 
 use wz_codecs::push::PushOwned;
 

@@ -391,14 +391,23 @@ fn wz_peer_mesh_prunes_the_unsubscribed_branch_four_peers() {
          subscribed branch\n--- peer-B stderr ---\n{b_captured}"
     );
 
-    // The crux: D is a CONVERGED mesh member (it learned the topology), so its
-    // non-receipt is genuine SUBSCRIPTION PRUNING, not isolation. Without this the
-    // "D got nothing" assertion below would also pass for a D that simply never
-    // joined the mesh.
+    // The crux: D is a FULLY-CONVERGED mesh member, so its non-receipt is genuine
+    // SUBSCRIPTION PRUNING, not isolation. "learned mesh topology" alone only
+    // proves D ingested >= 1 link-state; the stronger anchor is that D's graph
+    // holds all FOUR peers (A, B, C, D) — which means the hub B genuinely holds D
+    // as a routable tree child at fan-out time, so D's exclusion is the filter's
+    // doing, not a missing B<->D edge (R311sg — the prior weaker anchor could pass
+    // for the wrong reason if B never formed the B<->D edge).
     assert!(
         d_captured.contains("learned mesh topology"),
         "peer-D never converged into the mesh, so its non-receipt would not prove \
          the filter pruned it (it could just be isolated)\n--- peer-D stderr ---\n{d_captured}"
+    );
+    assert!(
+        d_captured.contains("4 node(s) in topology graph"),
+        "peer-D's graph does not hold all 4 peers — it is not a fully-converged \
+         member, so its non-receipt could be topological (no B<->D edge) rather \
+         than the subscription filter pruning it\n--- peer-D stderr ---\n{d_captured}"
     );
     // The NON-subscriber D received NOTHING. Asserted DETERMINISTICALLY, never as
     // a flaky wait-for-absence: the shutdown summary unconditionally reports the

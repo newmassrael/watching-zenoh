@@ -429,6 +429,13 @@ impl LinkstateForwarder {
         // this hop on. `hop <= 1` means the last unit of budget arrived here: this
         // node still received + locally delivered the data (counted in `forward`),
         // it just stops the onward flood — so a loop is cut after a bounded count.
+        // NOTE the budget is each node's LOCAL `node_count`, not a global value:
+        // the originator stamps ITS count and each transit only decrements, so a
+        // stamped Push keeps its budget; an unstamped one is bounded by whatever
+        // the FIRST stamping hop knows. Mid-convergence these counts can differ,
+        // but any positive bound still cuts the loop — an under-count only cuts
+        // earlier (safe: at worst a transient missed delivery, self-healed by the
+        // 250ms re-publish), never under-bounds.
         let budget = self.net.borrow().node_count() as u16;
         let hop = read_push_hoplimit(push).unwrap_or(budget);
         if hop <= 1 {
@@ -895,7 +902,7 @@ impl FaceForwarder for LinkstateForwarder {
         // link until the next inbound link-state happened to trigger a recompute
         // — a misroute window after every face loss. zenoh recomputes on
         // link-down too (`hat/linkstate_peer/mod.rs` `schedule_compute_trees`).
-        let link_removed = if let Some(state) = self.faces.borrow_mut().remove(&id) {
+        let new_children = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             // Purge the departed peer's subscription interest — zenoh's
             // `pubsub_remove_node` on link-down (`hat/linkstate_peer/mod.rs`).
             // Without this a gone subscriber's interest lingers in the table,
@@ -907,30 +914,33 @@ impl FaceForwarder for LinkstateForwarder {
             if let Some(link) = state.link {
                 let mut net = self.net.borrow_mut();
                 net.remove_link(link);
-                // The recompute's job HERE is purging stale routes; its new-children
-                // delta is discarded because a self-link drop cannot ADD a tree
-                // child — this peer's children in any tree are a subset of its
-                // neighbours, and dropping a link only shrinks that set. So unlike
-                // the inbound path (c3c-3 D2, where a join makes a peer a new child
-                // to re-advertise to), deregister has no new child to re-advertise:
-                // the delta is always empty, so there is nothing to flood. A peer
-                // re-homing after the loss converges via the next inbound
-                // link-state's forward()-path re-advertise.
-                net.compute_trees();
-                true
+                Some(net.compute_trees())
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         };
-        // D2b — self LOST a routing link (its own link-state changed, sn bumped):
-        // flood self's updated full link-state to the surviving faces immediately
-        // (zenoh `remove_link`'s `send_on_links`, `network.rs:936-962`), so they
-        // drop the dead link from their topology NOW, not at a periodic tick.
-        // Outside the borrow blocks above (flood_self takes the faces / net borrows).
-        if link_removed {
+        if let Some(new_children) = new_children {
+            // D2b — self LOST a routing link (its own link-state changed, sn bumped):
+            // flood self's updated full link-state to the surviving faces immediately
+            // (zenoh `remove_link`'s `send_on_links`, `network.rs:936-962`), so they
+            // drop the dead link from their topology NOW, not at a periodic tick.
             let _ = self.flood_self();
+            // Session-review remediation (R311sg) — re-advertise known subscriptions
+            // to any NEW children the recompute produced, EXACTLY as the inbound
+            // forward() path does. A self-link drop USUALLY only shrinks self's tree
+            // children (an empty delta — the uniform-weight wz-only case), but that
+            // is NOT a general invariant: under non-uniform edge weights (e.g. a
+            // zenohd peer's `transport_weights` ingested into the graph) dropping a
+            // link can REMOVE a cheaper detour and RE-HOME a node so it becomes
+            // self's NEW child in some root's tree — and self is then the only node
+            // that can deliver that root's interest to it. zenoh feeds the link-down
+            // delta into `pubsub_tree_change` unconditionally; a prior "delta provably
+            // empty" short-circuit here silently dropped that re-advertise (the delta
+            // is non-empty exactly when re-homing occurs, so this no-ops on the common
+            // shrink-only case and fires only when a re-home actually happened).
+            self.re_advertise_subscriptions(&new_children);
         }
     }
 
@@ -1739,6 +1749,55 @@ mod tests {
     }
 
     #[test]
+    fn the_hop_limit_bounds_a_circulating_push_to_its_budget() {
+        // R311sg — D1's loop bound exercised as an ACTUAL multi-hop circulation
+        // (the prior hop tests only checked single-hop stamp/decrement/drop). A
+        // Push is forwarded, the decremented hop is taken off the forwarded copy
+        // and RE-INJECTED (as a circulating message would re-enter the node a hop
+        // later), and the round repeats. The forward count is BOUNDED by the
+        // initial budget — proving a transient loop terminates by construction
+        // rather than circulating forever. Line C(source) - S - A; A subscribes,
+        // so each round forwards toward A and decrements the budget.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // interested child
+        let (face_c, _sc) = peer_face(zid(0x0C)); // inbound source neighbour
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        declare_interest(&fwd, FaceId(0), "demo/data"); // A interested
+        sink_a.reset();
+
+        // Start with a budget LARGER than node_count (3) so the bound is the hop
+        // budget, not the graph size — a circulating message keeps its budget.
+        let mut hop = 8u16;
+        let mut forwards = 0u16;
+        loop {
+            let before = sink_a.frame_count();
+            let mut push = data_push();
+            set_push_source(&mut push, 0); // self-originated from the inbound C
+            set_push_hoplimit(&mut push, hop);
+            fwd.forward_push(FaceId(1), true, &push); // inbound = C (the source)
+            if sink_a.frame_count() == before {
+                break; // forward_push dropped it — the budget is exhausted
+            }
+            forwards += 1;
+            hop = forwarded_hoplimit(&sink_a.frame_bytes(sink_a.frame_count() - 1))
+                .expect("the forwarded copy carries the decremented budget");
+            assert!(
+                forwards <= 8,
+                "a circulating Push must not forward unboundedly"
+            );
+        }
+        // Budget 8 forwards at most 7 times (hop 8->7->...->2 each forward, then
+        // the round that receives hop=1 drops). The loop is CUT, never infinite.
+        assert_eq!(
+            forwards, 7,
+            "the circulating Push was bounded to budget-1 hops, then dropped"
+        );
+    }
+
+    #[test]
     fn deregister_recomputes_trees_dropping_the_dead_link() {
         // R311rj — after a face drops, the spanning trees must drop paths
         // through the dead link so a SURVIVING face is no longer routed toward
@@ -2427,14 +2486,16 @@ mod tests {
 
     #[test]
     fn deregister_does_not_re_advertise_the_subscription_to_a_survivor() {
-        // c3c-3 D2 — the delta on a face loss: a self-link drop can only SHRINK
-        // self's tree children (children are a subset of self's neighbours), so the
-        // recompute's new-children delta adds nothing, and an already-converged
-        // surviving child is NOT re-advertised the SUBSCRIPTION (the prior
-        // re-flood-to-all-children did this redundantly, leaning on the receiver
-        // change-gate to drop it). S has edges to A, B, C; A subscribes, so its
+        // c3c-3 D2 + R311sg — the delta on a face loss in the UNIFORM-WEIGHT case
+        // (every wz-originated edge has the default weight): dropping a leaf shrinks
+        // self's tree children with NO re-homing, so the recompute's new-children
+        // delta is empty and the surviving child is NOT re-advertised the
+        // subscription. deregister DOES feed the delta to re_advertise (no longer
+        // the retracted "provably empty" short-circuit — a re-home under non-uniform
+        // weights CAN add a child, see deregister re_advertise wiring), but here the
+        // delta is empty so it no-ops. S has edges to A, B, C; A subscribes, so its
         // declare reached children B and C. Dropping B's face recomputes the trees
-        // but adds no new child. C DOES receive the D2b topology flood (an OAM, so
+        // and adds no new child. C DOES receive the D2b topology flood (an OAM, so
         // it learns the dead link) — but NO subscription Declare.
         let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
         let (face_a, _sa) = peer_face(zid(0x0A));

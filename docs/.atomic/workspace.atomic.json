@@ -43132,6 +43132,52 @@
         "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd=8269900)+D2(se=05b5c60)+D2b(sf)=4커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
       ]
     },
+    "Round 311sg": {
+      "decision_summary": "R311sg: 4-에이전트 적대 세션리뷰(C1/D1/D2/D2b) remediation. F-1(CRITICAL, architect+root-cause 2-독립 적발): D2 deregister 'delta provably empty' 자가단정이 비균일 가중치(zenohd transport_weights ingest)서 거짓 — self-link drop이 노드 re-home→self 새 자식→re-advertise 누락. 수정: deregister가 delta를 re_advertise에 공급(zenoh pubsub_tree_change 무조건 공급 mirror)+re-homing 반례 graph 테스트. F-2 loop-bound 실제-loop 테스트, F-3 C1 4-node anchor, F-4 doc 정직. D2c defer 4-에이전트 확정. 자가감사 과신 패턴 재확인.",
+      "changes_bullets": [
+        "F-1(CRITICAL/MAJOR, architect+root-cause 2-에이전트 독립 적발=최강 신호): D2 deregister \"delta provably always empty\" 주장 반증. 비균일 가중치(zenohd transport_weights를 wz가 ingest+적용)서 self-link drop이 cheaper detour 제거→노드 re-home→self가 remote root tree서 새 자식 획득→non-empty delta→re-advertise 누락. zenoh는 link-down delta를 pubsub_tree_change에 무조건 공급(mod.rs:140-149). 수정: linkstate_forward.rs deregister가 compute_trees delta를 capture해 re_advertise_subscriptions에 공급(inbound forward() 경로와 동일; 균일 가중치선 empty=no-op, re-home시만 발화). \"provably empty\" 단정 doc 삭제.",
+        "F-1 회귀 테스트: wz-routing-graph dropping_a_self_link_can_add_a_child_via_re_homing(architect 반례: R-S-{S-F w250, S-M+M-F w100씩}; F는 detour M-F가 싸 M의 자식; S-M drop시 F가 S로 re-home→compute_trees가 (R,[F]) delta 반환). deregister 테스트 코멘트 정정(균일=empty의 common case, not provably).",
+        "F-2(MAJOR, quality): D1 loop-bound이 single-hop 기계만 테스트(실제 loop 미검증). the_hop_limit_bounds_a_circulating_push_to_its_budget 추가: forward된 Push의 decremented hop을 재주입 반복→budget-1회서 drop=순환 종료 실증(prose→tested property).",
+        "F-3(MAJOR, quality): C1 D-anchor 약함(\"learned mesh topology\"=ingested>0만). \"4 node(s) in topology graph\" 단언 추가=D가 전 4-peer 완전 수렴(B가 D를 routable child로 보유)=비수신이 필터 pruning이지 B<->D edge 부재 아님 pin.",
+        "F-4(MINOR): push_routing_context 모듈 doc에 hop-limit ext 소유 명시(node_id만 기술했음). forward_push budget doc에 local-vs-global node_count 정밀화(originator stamp+transit decrement; under-count는 early-cut=safe)."
+      ],
+      "verification_bullets": [
+        "wz-routing-graph 28 PASS(+1 re-homing 반례=compute_trees가 비균일 가중치 re-home시 (R,[F]) non-empty delta 반환 실증). wz-runtime-tokio lib 347 PASS(+1 loop-bound; deregister 수정 후 deregister_does_not_re_advertise=균일 leaf drop empty delta no-op 통과). E6 e2e 3/3(강화된 D-anchor 4-node 포함). clippy(graph/runtime-tokio --tests) -D clean. fmt clean. full run-ci RUNCI_EXIT=0(idle 후 1차, 전 host lane 실패 0).",
+        "리뷰 calibration 건전분(4-에이전트 확정): D1 hop-limit ext 0x0a wire-faithful(M=0 non-mandatory→zenoh/pico client skip, 정본 codec extension::skip 확인; 0x0a는 Push서 zenoh 미사용 free id)·레이어링 정확(ext codec=session-core, policy=runtime-tokio, 의존 하향)·별도-ext SRP·ext_nodeid SSOT byte-parity 보존(C2 골든 무회귀)·flood 계층 clean·flood_self_to/LINKSTATE_FLOOD_PERIOD 제거 완전·D2b timer 제거 수렴 안전(20/20 부하)·borrow 무panic·compute_trees delta index 안정(remove_node 없음).",
+        "D2c defer = 4-에이전트 전부 정당 확정(inline=staleness 0으로 zenoh보다 correct; batching 이득은 대규모 V만; correctness orthogonal=missing-call 아닌 batching 무관)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sg = 4-에이전트 적대 세션리뷰(C1/D1/D2/D2b) remediation. 핵심 F-1=D2 deregister \"provably empty delta\" 자가 단정이 비균일 가중치(zenohd interop)서 거짓(architect+root-cause 2-독립 적발)→deregister가 delta를 re_advertise에 공급(zenoh-aligned). 자가감사 과신 패턴 재확인(plausible-but-wrong by-construction)=라이프타임 프로젝트 핵심 교훈. +F-2 loop-bound 실제-loop 테스트, F-3 C1 4-node anchor, F-4 doc 정직.",
+        "tracked debt(리뷰 honest defer, 별도): dormant tick seam(D2b 후 무-consumer; YAGNI vs 확장점-유지 tension, 명시 추적), register flood_self O(N²) fan-out amplification(hub join; zenoh-faithful이나 Details split D4가 완화), ext_nodeid 모듈명 vs generic Z64 helpers(taste, documented), zenohd-transit hop-limit degradation(mesh-internal scope 명시됨), mandatory-bit interop(wz generic decoder론 skip-not-reject 직접 테스트 불가; cross-impl 갭).",
+        "다음 부채(project_c3c3_debt_paydown): D2c는 defer 확정(대형mesh 실수요시 batching)→B1 alias keyexpr→D3 remove_detached_nodes→D4 Details split→B2 wildcard→E/F.",
+        "LOCAL UNPUSHED: C1(sc)+D1(sd)+D2(se)+D2b(sf)+리뷰rem(sg)=5커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ],
+      "publishable_decision_summary": "R311sg: 4-에이전트 적대 세션리뷰(C1/D1/D2/D2b) remediation. F-1(CRITICAL, architect+root-cause 2-독립 적발): D2 deregister 'delta provably empty' 자가단정이 비균일 가중치(zenohd transport_weights ingest)서 거짓 — self-link drop이 노드 re-home→self 새 자식→re-advertise 누락. 수정: deregister가 delta를 re_advertise에 공급(zenoh pubsub_tree_change 무조건 공급 mirror)+re-homing 반례 graph 테스트. F-2 loop-bound 실제-loop 테스트, F-3 C1 4-node anchor, F-4 doc 정직. D2c defer 4-에이전트 확정. 자가감사 과신 패턴 재확인.",
+      "publishable_changes_bullets": [
+        "F-1(CRITICAL/MAJOR, architect+root-cause 2-에이전트 독립 적발=최강 신호): D2 deregister \"delta provably always empty\" 주장 반증. 비균일 가중치(zenohd transport_weights를 wz가 ingest+적용)서 self-link drop이 cheaper detour 제거→노드 re-home→self가 remote root tree서 새 자식 획득→non-empty delta→re-advertise 누락. zenoh는 link-down delta를 pubsub_tree_change에 무조건 공급(mod.rs:140-149). 수정: linkstate_forward.rs deregister가 compute_trees delta를 capture해 re_advertise_subscriptions에 공급(inbound forward() 경로와 동일; 균일 가중치선 empty=no-op, re-home시만 발화). \"provably empty\" 단정 doc 삭제.",
+        "F-1 회귀 테스트: wz-routing-graph dropping_a_self_link_can_add_a_child_via_re_homing(architect 반례: R-S-{S-F w250, S-M+M-F w100씩}; F는 detour M-F가 싸 M의 자식; S-M drop시 F가 S로 re-home→compute_trees가 (R,[F]) delta 반환). deregister 테스트 코멘트 정정(균일=empty의 common case, not provably).",
+        "F-2(MAJOR, quality): D1 loop-bound이 single-hop 기계만 테스트(실제 loop 미검증). the_hop_limit_bounds_a_circulating_push_to_its_budget 추가: forward된 Push의 decremented hop을 재주입 반복→budget-1회서 drop=순환 종료 실증(prose→tested property).",
+        "F-3(MAJOR, quality): C1 D-anchor 약함(\"learned mesh topology\"=ingested>0만). \"4 node(s) in topology graph\" 단언 추가=D가 전 4-peer 완전 수렴(B가 D를 routable child로 보유)=비수신이 필터 pruning이지 B<->D edge 부재 아님 pin.",
+        "F-4(MINOR): push_routing_context 모듈 doc에 hop-limit ext 소유 명시(node_id만 기술했음). forward_push budget doc에 local-vs-global node_count 정밀화(originator stamp+transit decrement; under-count는 early-cut=safe)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-routing-graph 28 PASS(+1 re-homing 반례=compute_trees가 비균일 가중치 re-home시 (R,[F]) non-empty delta 반환 실증). wz-runtime-tokio lib 347 PASS(+1 loop-bound; deregister 수정 후 deregister_does_not_re_advertise=균일 leaf drop empty delta no-op 통과). E6 e2e 3/3(강화된 D-anchor 4-node 포함). clippy(graph/runtime-tokio --tests) -D clean. fmt clean. full run-ci RUNCI_EXIT=0(idle 후 1차, 전 host lane 실패 0).",
+        "리뷰 calibration 건전분(4-에이전트 확정): D1 hop-limit ext 0x0a wire-faithful(M=0 non-mandatory→zenoh/pico client skip, 정본 codec extension::skip 확인; 0x0a는 Push서 zenoh 미사용 free id)·레이어링 정확(ext codec=session-core, policy=runtime-tokio, 의존 하향)·별도-ext SRP·ext_nodeid SSOT byte-parity 보존(C2 골든 무회귀)·flood 계층 clean·flood_self_to/LINKSTATE_FLOOD_PERIOD 제거 완전·D2b timer 제거 수렴 안전(20/20 부하)·borrow 무panic·compute_trees delta index 안정(remove_node 없음).",
+        "D2c defer = 4-에이전트 전부 정당 확정(inline=staleness 0으로 zenoh보다 correct; batching 이득은 대규모 V만; correctness orthogonal=missing-call 아닌 batching 무관)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sg = 4-에이전트 적대 세션리뷰(C1/D1/D2/D2b) remediation. 핵심 F-1=D2 deregister \"provably empty delta\" 자가 단정이 비균일 가중치(zenohd interop)서 거짓(architect+root-cause 2-독립 적발)→deregister가 delta를 re_advertise에 공급(zenoh-aligned). 자가감사 과신 패턴 재확인(plausible-but-wrong by-construction)=라이프타임 프로젝트 핵심 교훈. +F-2 loop-bound 실제-loop 테스트, F-3 C1 4-node anchor, F-4 doc 정직.",
+        "tracked debt(리뷰 honest defer, 별도): dormant tick seam(D2b 후 무-consumer; YAGNI vs 확장점-유지 tension, 명시 추적), register flood_self O(N²) fan-out amplification(hub join; zenoh-faithful이나 Details split D4가 완화), ext_nodeid 모듈명 vs generic Z64 helpers(taste, documented), zenohd-transit hop-limit degradation(mesh-internal scope 명시됨), mandatory-bit interop(wz generic decoder론 skip-not-reject 직접 테스트 불가; cross-impl 갭).",
+        "다음 부채(project_c3c3_debt_paydown): D2c는 defer 확정(대형mesh 실수요시 batching)→B1 alias keyexpr→D3 remove_detached_nodes→D4 Details split→B2 wildcard→E/F.",
+        "LOCAL UNPUSHED: C1(sc)+D1(sd)+D2(se)+D2b(sf)+리뷰rem(sg)=5커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [
