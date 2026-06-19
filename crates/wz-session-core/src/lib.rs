@@ -460,6 +460,14 @@ pub mod handshake_encode;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
+/// Push routing-context source `node_id` (P4 routing, linkstate port step
+/// c3c-1): `read_push_source` / `set_push_source` over the Push `ext_nodeid`
+/// extension — the data-plane forward seam naming the spanning-tree root a
+/// linkstate-peer floods a message along. `codec-push` gated (the data plane
+/// the routing context rides) and owned `Vec` output (alloc-gated).
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub mod push_routing_context;
+
 /// OAM carrier for the linkstate-peer topology exchange (P4 routing,
 /// linkstate port step c1): `build_linkstate_oam` wraps a `LinkStateList`
 /// as an `OAM_LINKSTATE` network message, `try_parse_linkstate_oam`
