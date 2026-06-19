@@ -22,114 +22,45 @@
 //! and the body is the `Z64`-encoded `node_id`. The Push-level header `Z`
 //! bit (`push.rs:21`, `0x80`) signals that the extension chain is present.
 
-use alloc::vec::Vec;
-
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::push::PushOwned;
 
-/// The `ext_nodeid` extension id (zenoh `Push::ext::NodeId`,
-/// `zextz64!(0x3, true)`) — bits 0-3 of the extension header.
-const NODEID_EXT_ID: u8 = 0x03;
-/// Mandatory flag, zenoh `iext::FLAG_M` (bit 4): a receiver that does not
-/// understand the extension must reject the message.
-const EXT_FLAG_M: u8 = 0x10;
-/// `Z64` encoding, zenoh `iext::ENC_Z64` (bits 5-6) — the `node_id` rides a
-/// zint body.
-const EXT_ENC_Z64: u8 = 0x20;
-/// Chain-continuation flag, zenoh `iext::FLAG_Z` (bit 7): another extension
-/// follows this one in the chain.
-const EXT_FLAG_Z: u8 = 0x80;
-/// The `ext_nodeid` header with no further extension following: `id | M |
-/// Z64` = `0x33`. `apply_chain_z_bits` re-adds `FLAG_Z` when it is not last.
-const NODEID_EXT_HEADER: u8 = NODEID_EXT_ID | EXT_FLAG_M | EXT_ENC_Z64;
-/// The Push-level header `Z` bit (zenoh `push.rs` `Z = 1 << 7`): the
-/// extension chain is present.
+use crate::ext_nodeid;
+
+/// The Push-level header `Z` bit (zenoh `push.rs` `Z = 1 << 7`): the extension
+/// chain is present. The ONE field that differs from the Declare twin — every
+/// other part of the `ext_nodeid` edit lives in the shared
+/// [`ext_nodeid`](crate::ext_nodeid) SSOT.
 const PUSH_FLAG_Z: u8 = 0x80;
 
-/// The extension id field (bits 0-3) of a header byte — zenoh `iext::mid`,
-/// dropping the mandatory / encoding / chain flags.
-fn ext_id(header: u8) -> u8 {
-    header & 0x0F
-}
-
-/// Set the chain-continuation `Z` bit on every entry except the last (which
-/// terminates the chain) — zenoh's per-entry `FLAG_Z` invariant
-/// (`push_build::apply_chain_z_bits`, replicated so this module is the
-/// self-contained owner of the `ext_nodeid` chain edits).
-fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
-    if entries.is_empty() {
-        return;
-    }
-    let last = entries.len() - 1;
-    for (i, entry) in entries.iter_mut().enumerate() {
-        if i == last {
-            entry.header &= !EXT_FLAG_Z;
-        } else {
-            entry.header |= EXT_FLAG_Z;
-        }
-    }
-}
-
 /// Read the routing-context source `node_id` from a Push's `ext_nodeid`
-/// extension. Returns `0` when the extension is absent — zenoh's DEFAULT,
-/// meaning the message was originated by the SENDING node itself — so a
-/// forwarder treats `0` as "the inbound neighbour is the source".
+/// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
+/// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
+/// the shared [`ext_nodeid::read_source`](crate::ext_nodeid::read_source).
 pub fn read_push_source(push: &PushOwned) -> u16 {
-    let Some(exts) = push.extensions.as_ref() else {
-        return 0;
-    };
-    for ext in exts {
-        if ext_id(ext.header) == NODEID_EXT_ID {
-            if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
-                return z.value as u16;
-            }
-        }
-    }
-    0
+    ext_nodeid::read_source(push.extensions.as_ref())
 }
 
-/// Set the routing-context source `node_id` on a Push's `ext_nodeid`
-/// extension, mirroring zenoh's omit-on-DEFAULT encoding: `node_id == 0`
-/// (the "self-originated" default) REMOVES the extension, a non-zero id
-/// inserts or replaces it. The per-entry chain-continuation `Z` bits and the
-/// Push-level header `Z` flag are kept consistent with the resulting chain,
-/// so the carrier re-encodes correctly whether or not other extensions
-/// (QoS, timestamp) coexist.
+/// Set the routing-context source `node_id` on a Push's `ext_nodeid` extension
+/// (`node_id == 0` removes it — zenoh's omit-on-DEFAULT). The shared
+/// [`ext_nodeid::set_source`](crate::ext_nodeid::set_source) owns the chain
+/// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
+/// Push-level header `Z` flag to the resulting chain.
 pub fn set_push_source(push: &mut PushOwned, node_id: u16) {
-    // Replace semantics: drop any existing ext_nodeid before (maybe) re-adding.
-    if let Some(exts) = push.extensions.as_mut() {
-        exts.retain(|e| ext_id(e.header) != NODEID_EXT_ID);
-    }
-    if node_id != 0 {
-        let entry = ExtEntryOwned {
-            header: NODEID_EXT_HEADER,
-            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
-                value: node_id as u64,
-            }),
-        };
-        push.extensions.get_or_insert_with(Vec::new).push(entry);
-    }
-    // Normalise the chain: an empty list collapses to `None` (Push `Z` clear);
-    // a non-empty list fixes the per-entry continuation bits and sets Push `Z`.
-    let empty = match push.extensions.as_ref() {
-        Some(exts) => exts.is_empty(),
-        None => true,
-    };
-    if empty {
-        push.extensions = None;
-        push.header &= !PUSH_FLAG_Z;
-    } else {
-        apply_chain_z_bits(push.extensions.as_mut().expect("non-empty => Some"));
+    if ext_nodeid::set_source(&mut push.extensions, node_id) {
         push.header |= PUSH_FLAG_Z;
+    } else {
+        push.header &= !PUSH_FLAG_Z;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z};
     use crate::push_build::build_push_literal;
     use alloc::vec;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_zint::ExtZint;
 
     fn push() -> PushOwned {
         build_push_literal("demo/c3c", b"v").expect("build push")

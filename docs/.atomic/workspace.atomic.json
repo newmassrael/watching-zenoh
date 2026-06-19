@@ -42562,6 +42562,44 @@
         "LOCAL UNPUSHED 8커밋: rm/rn/ro/rp/rq/rr/rs/rt. qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci."
       ]
     },
+    "Round 311ru": {
+      "decision_summary": "R311ru: c3c-3 적대 리뷰 remediation 2(SSOT). chain_z 와이어 codec 3중복(push_build/push_routing_context/declare_routing_context 바이트동일 ~40줄=refactoring-expert CRITICAL; 사용자 명시 비용무관 SSOT 위반)→공유 wz-session-core/ext_nodeid 모듈 SSOT 통합(consts/ext_id/apply_chain_z_bits/read_source/set_source; carrier 모듈은 header Z 1줄 sync만 잔류). forward_push/forward_subscription exclusion closure 중복→is_tree_forward_target 헬퍼+is_child(publish/declare_subscription 통일). 동작 보존(264+319 unit).",
+      "changes_bullets": [
+        "wz-session-core/src/ext_nodeid.rs 신규(alloc+any(codec-push,codec-declare) 게이트): NodeId ext SSOT=consts(ID/M/Z64/header)+ext_id+apply_chain_z_bits+read_source(exts)+set_source(exts,id)->bool(chain non-empty 반환=caller가 message header Z sync). 5 unit. push_routing_context/declare_routing_context=header Z 1줄 sync로 슬림화(각 ~90→~15줄, consts/helpers/read/set 전부 위임). push_build apply_chain_z_bits→ext_nodeid 리디렉트(로컬 fn 삭제). lib.rs pub mod ext_nodeid.",
+        "linkstate_forward.rs: is_tree_forward_target(id,zid,inbound,inbound_zid,children)=forward_push/forward_subscription 공유 re-forward predicate(inbound 제외+inbound_zid 제외+is_child). is_child(children,zid)=publish/declare_subscription/forward 공유 멤버십. 4 fan_out 클로저 중복 청산(fan_out은 기존 SSOT, selection predicate도 SSOT화)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features codec-push,codec-declare --lib 264 PASS(ext_nodeid 5 신규; push/declare routing-context 기존 13 무회귀=통합 동작 보존). -p wz-runtime-tokio --features routing-peer --lib 319 PASS(predicate 추출 28 linkstate_forward 무회귀). clippy 양 crate -D warnings clean. no-default-features routing-peer 빌드 OK(C1y 게이트). fmt clean.",
+        "리뷰 F-B(refactoring-expert CRITICAL=chain_z 3중복; 사용자 명시 비용무관 SSOT 위반) 해소: 3 site→1 ext_nodeid SSOT. 와이어 상수(0x33/per-entry Z invariant)가 단일 소유=zenoh iext 변경 시 1곳만 수정. F-C(MAJOR=exclusion closure 중복) 해소: is_tree_forward_target 단일 predicate. 기존 테스트 전부 무변경 통과=behavior-preserving 리팩터."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ru = c3c-3 적대 리뷰 remediation 2(SSOT): chain_z 와이어 codec 3중복(push_build/push_routing_context/declare_routing_context 바이트동일 ~40줄)→wz-session-core/ext_nodeid SSOT(consts+apply_chain_z_bits+read/set_source; carrier 모듈=header Z 1줄 sync만). forward_push/forward_subscription exclusion closure 중복→is_tree_forward_target+is_child 헬퍼. 동작 보존(264 session-core+319 tokio unit). F-B(CRITICAL)+F-C(MAJOR) 해소.",
+        "남은 remediation track: rl(honesty/coverage)=directions_toward doc 'mirrors insert_faces_for_subs'→정정(실제는 topology 다중-successor 쿼리=route_successor 확장; forward_push가 insert_faces_for_subs HAT 로직)+dest==source 'contributes nothing' 모순(실제 parent hop 반환) 정정+'byte-faithful' 과장(값 생존만 검증) 정정+forward 레벨 multi-subtree/multi-keyexpr/source-is-subscriber 커버리지 테스트 추가.",
+        "honest defer(리뷰 인정, 별도 atom): UndeclareSubscriber 전파, pubsub_tree_change(트리변경 재광고; keys() 제거됨=재도입 시 추가), interest 모델 flat map vs resource-tree(wildcard 재작성 seam; YAGNI tension), e2e selectivity 4-peer(unit이 selectivity 커버; e2e=gating 실증), e2e 15s budget(localhost 저위험).",
+        "LOCAL UNPUSHED 10커밋: rm/rn/ro/rp/rq/rr/rs/rt/ru(+rt). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci."
+      ],
+      "publishable_decision_summary": "R311ru: c3c-3 적대 리뷰 remediation 2(SSOT). chain_z 와이어 codec 3중복(push_build/push_routing_context/declare_routing_context 바이트동일 ~40줄=refactoring-expert CRITICAL; 사용자 명시 비용무관 SSOT 위반)→공유 wz-session-core/ext_nodeid 모듈 SSOT 통합(consts/ext_id/apply_chain_z_bits/read_source/set_source; carrier 모듈은 header Z 1줄 sync만 잔류). forward_push/forward_subscription exclusion closure 중복→is_tree_forward_target 헬퍼+is_child(publish/declare_subscription 통일). 동작 보존(264+319 unit).",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/ext_nodeid.rs 신규(alloc+any(codec-push,codec-declare) 게이트): NodeId ext SSOT=consts(ID/M/Z64/header)+ext_id+apply_chain_z_bits+read_source(exts)+set_source(exts,id)->bool(chain non-empty 반환=caller가 message header Z sync). 5 unit. push_routing_context/declare_routing_context=header Z 1줄 sync로 슬림화(각 ~90→~15줄, consts/helpers/read/set 전부 위임). push_build apply_chain_z_bits→ext_nodeid 리디렉트(로컬 fn 삭제). lib.rs pub mod ext_nodeid.",
+        "linkstate_forward.rs: is_tree_forward_target(id,zid,inbound,inbound_zid,children)=forward_push/forward_subscription 공유 re-forward predicate(inbound 제외+inbound_zid 제외+is_child). is_child(children,zid)=publish/declare_subscription/forward 공유 멤버십. 4 fan_out 클로저 중복 청산(fan_out은 기존 SSOT, selection predicate도 SSOT화)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features codec-push,codec-declare --lib 264 PASS(ext_nodeid 5 신규; push/declare routing-context 기존 13 무회귀=통합 동작 보존). -p wz-runtime-tokio --features routing-peer --lib 319 PASS(predicate 추출 28 linkstate_forward 무회귀). clippy 양 crate -D warnings clean. no-default-features routing-peer 빌드 OK(C1y 게이트). fmt clean.",
+        "리뷰 F-B(refactoring-expert CRITICAL=chain_z 3중복; 사용자 명시 비용무관 SSOT 위반) 해소: 3 site→1 ext_nodeid SSOT. 와이어 상수(0x33/per-entry Z invariant)가 단일 소유=zenoh iext 변경 시 1곳만 수정. F-C(MAJOR=exclusion closure 중복) 해소: is_tree_forward_target 단일 predicate. 기존 테스트 전부 무변경 통과=behavior-preserving 리팩터."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ru = c3c-3 적대 리뷰 remediation 2(SSOT): chain_z 와이어 codec 3중복(push_build/push_routing_context/declare_routing_context 바이트동일 ~40줄)→wz-session-core/ext_nodeid SSOT(consts+apply_chain_z_bits+read/set_source; carrier 모듈=header Z 1줄 sync만). forward_push/forward_subscription exclusion closure 중복→is_tree_forward_target+is_child 헬퍼. 동작 보존(264 session-core+319 tokio unit). F-B(CRITICAL)+F-C(MAJOR) 해소.",
+        "남은 remediation track: rl(honesty/coverage)=directions_toward doc 'mirrors insert_faces_for_subs'→정정(실제는 topology 다중-successor 쿼리=route_successor 확장; forward_push가 insert_faces_for_subs HAT 로직)+dest==source 'contributes nothing' 모순(실제 parent hop 반환) 정정+'byte-faithful' 과장(값 생존만 검증) 정정+forward 레벨 multi-subtree/multi-keyexpr/source-is-subscriber 커버리지 테스트 추가.",
+        "honest defer(리뷰 인정, 별도 atom): UndeclareSubscriber 전파, pubsub_tree_change(트리변경 재광고; keys() 제거됨=재도입 시 추가), interest 모델 flat map vs resource-tree(wildcard 재작성 seam; YAGNI tension), e2e selectivity 4-peer(unit이 selectivity 커버; e2e=gating 실증), e2e 15s budget(localhost 저위험).",
+        "LOCAL UNPUSHED 10커밋: rm/rn/ro/rp/rq/rr/rs/rt/ru(+rt). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

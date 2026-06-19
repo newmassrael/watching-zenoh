@@ -384,31 +384,14 @@ fn build_body_extensions(
     if exts.is_empty() {
         return Ok(None);
     }
-    apply_chain_z_bits(&mut exts);
+    crate::ext_nodeid::apply_chain_z_bits(&mut exts);
     Ok(Some(exts))
 }
 
-/// R233 — set the `Z` (chain-continuation, 0x80) bit on every
-/// `ExtEntry` in a chain except the last. The SCE-emitted
-/// `MsgPut::encode` / `MsgDel::encode` / `Push::encode` paths iterate
-/// the extension `Vec` and call each entry's own `encode` without
-/// adjusting the chain-continuation bit; the author owns Z. Mirrors
-/// the explicit flip pattern in `encode_ext_chain` (used for
-/// transport-message chains) so body / outer Push chains share the
-/// same invariant. Single-entry chains keep Z=0 (terminator).
-fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
-    if entries.is_empty() {
-        return;
-    }
-    let last = entries.len() - 1;
-    for (i, entry) in entries.iter_mut().enumerate() {
-        if i == last {
-            entry.header &= !0x80;
-        } else {
-            entry.header |= 0x80;
-        }
-    }
-}
+// R233 / R311ru — the per-entry chain-continuation `Z`-bit normalisation that
+// `MsgPut`/`MsgDel`/`Push::encode` rely on (the author owns Z; the SCE-emitted
+// encoders do not flip it) now lives in the shared `crate::ext_nodeid` SSOT,
+// consolidated with the two routing-context modules that re-implemented it.
 
 /// R233 — build the outer Push extension chain (currently only QoS).
 /// Returns `None` when no outer extension is requested so the caller
@@ -447,7 +430,7 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
     if exts.is_empty() {
         return None;
     }
-    apply_chain_z_bits(&mut exts);
+    crate::ext_nodeid::apply_chain_z_bits(&mut exts);
     Some(exts)
 }
 

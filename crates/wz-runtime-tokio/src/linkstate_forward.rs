@@ -415,22 +415,13 @@ impl LinkstateForwarder {
         set_push_source(&mut carrier, out_node_id);
 
         // Forward to the interested children in the source's tree — never to the
-        // inbound face, nor back toward the source's own neighbour (a parallel
-        // link).
+        // inbound face, nor back toward the source's own neighbour (the shared
+        // re-forward predicate).
         let _ = self.fan_out(reliable, |id, zid| {
-            if id == inbound {
-                return Ok(None);
-            }
-            let Some(zid) = zid else {
-                return Ok(None);
-            };
-            if inbound_zid.as_deref() == Some(zid) {
-                return Ok(None);
-            }
-            if !children.iter().any(|c| c.as_slice() == zid) {
-                return Ok(None);
-            }
-            Ok(Some(NetworkMessage::Push(Box::new(carrier.clone()))))
+            Ok(
+                is_tree_forward_target(id, zid, inbound, inbound_zid.as_deref(), &children)
+                    .then(|| NetworkMessage::Push(Box::new(carrier.clone()))),
+            )
         });
     }
 
@@ -462,11 +453,9 @@ impl LinkstateForwarder {
             return Ok(0);
         }
         self.fan_out(true, |_id, zid| {
-            let to_child = match zid {
-                Some(z) => children.iter().any(|c| c.as_slice() == z),
-                None => false,
-            };
-            Ok(to_child.then(|| NetworkMessage::Push(Box::new(push.clone()))))
+            Ok(zid
+                .is_some_and(|z| is_child(&children, z))
+                .then(|| NetworkMessage::Push(Box::new(push.clone()))))
         })
     }
 
@@ -492,11 +481,9 @@ impl LinkstateForwarder {
             return Ok(0);
         }
         self.fan_out(true, |_id, zid| {
-            let to_child = match zid {
-                Some(z) => children.iter().any(|c| c.as_slice() == z),
-                None => false,
-            };
-            Ok(to_child.then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
+            Ok(zid
+                .is_some_and(|z| is_child(&children, z))
+                .then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
         })
     }
 
@@ -549,22 +536,14 @@ impl LinkstateForwarder {
         }
         let mut carrier = declare.clone();
         set_declare_source(&mut carrier, out_node_id);
-        // Re-flood to self's children in the source's tree — never to the
-        // inbound face nor back toward the source's own neighbour.
+        // Re-flood to self's children in the source's tree — the same shared
+        // re-forward predicate forward_push uses (excludes the inbound face and
+        // the source's own neighbour); only the carrier differs.
         let _ = self.fan_out(reliable, |id, zid| {
-            if id == inbound {
-                return Ok(None);
-            }
-            let Some(zid) = zid else {
-                return Ok(None);
-            };
-            if inbound_zid.as_deref() == Some(zid) {
-                return Ok(None);
-            }
-            if !children.iter().any(|c| c.as_slice() == zid) {
-                return Ok(None);
-            }
-            Ok(Some(NetworkMessage::Declare(Box::new(carrier.clone()))))
+            Ok(
+                is_tree_forward_target(id, zid, inbound, inbound_zid.as_deref(), &children)
+                    .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
+            )
         });
     }
 
@@ -576,6 +555,35 @@ impl LinkstateForwarder {
     pub fn interested(&self, keyexpr: &str) -> Vec<Zid> {
         self.subs.borrow().interested(keyexpr)
     }
+}
+
+/// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
+/// The shared membership check the originate paths ([`publish`](LinkstateForwarder::publish)
+/// / [`declare_subscription`](LinkstateForwarder::declare_subscription)) and
+/// the re-forward paths ([`is_tree_forward_target`]) both build on.
+fn is_child(children: &[Zid], zid: &[u8]) -> bool {
+    children.iter().any(|c| c.as_slice() == zid)
+}
+
+/// Whether a face is a valid forward target when RE-FORWARDING along a source
+/// tree: its `zid` is one of `children` (the next hops), it is NOT the inbound
+/// face, and its zid is not the inbound neighbour's (a parallel link back
+/// toward the source). The single selection predicate shared by
+/// [`forward_push`](LinkstateForwarder::forward_push) (data, directions-filtered
+/// `children`) and [`forward_subscription`](LinkstateForwarder::forward_subscription)
+/// (control, all tree `children`) — only the carrier each wraps differs, so the
+/// loop-exclusion mechanics live here once.
+fn is_tree_forward_target(
+    id: FaceId,
+    zid: Option<&[u8]>,
+    inbound: FaceId,
+    inbound_zid: Option<&[u8]>,
+    children: &[Zid],
+) -> bool {
+    let Some(zid) = zid else {
+        return false;
+    };
+    id != inbound && inbound_zid != Some(zid) && is_child(children, zid)
 }
 
 /// Extract a literal keyexpr from a `WireexprOwned` — the wz MVP literal form

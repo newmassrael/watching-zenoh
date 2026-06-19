@@ -460,6 +460,18 @@ pub mod handshake_encode;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
+/// Shared `ext_nodeid` routing-context chain codec (P4 routing) — the SSOT
+/// for the `zextz64!(0x3, true)` NodeId extension Push and Declare both carry,
+/// plus the per-entry chain `Z`-bit normalisation. `push_routing_context` /
+/// `declare_routing_context` / `push_build` delegate here instead of each
+/// re-implementing the chain edits (R311ru consolidation of the prior
+/// triplication). Gated on `alloc` + whichever carrier codec is present.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "codec-push", feature = "codec-declare")
+))]
+pub mod ext_nodeid;
+
 /// Push routing-context source `node_id` (P4 routing, linkstate port step
 /// c3c-1): `read_push_source` / `set_push_source` over the Push `ext_nodeid`
 /// extension — the data-plane forward seam naming the spanning-tree root a

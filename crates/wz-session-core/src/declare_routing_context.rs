@@ -28,114 +28,40 @@
 //! `id(0x3) | M(0x10) | Z64(0x20) = 0x33` terminal, `FLAG_Z(0x80)` when
 //! another ext follows.
 //!
-//! The `ext_nodeid` chain-edit helpers here are deliberately self-contained
-//! (mirroring [`push_routing_context`](crate::push_routing_context)'s own
-//! self-ownership of the chain edits). The const + `apply_chain_z_bits`
-//! duplication across `push_build` / `push_routing_context` / this module is
-//! the pre-classified MINOR `chain_z` consolidation debt — one shared
-//! `ext_nodeid` SSOT covering all three sites is its own tracked atom.
-
-use alloc::vec::Vec;
+//! The `ext_nodeid` id / flags / chain edit + `node_id` read/build live in the
+//! shared [`ext_nodeid`](crate::ext_nodeid) SSOT (R311ru consolidated the prior
+//! triplication across `push_build` / `push_routing_context` / this module).
+//! This module keeps ONLY the Declare-level header `Z` sync — the one field
+//! that differs from the Push twin.
 
 use wz_codecs::declare::DeclareOwned;
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_zint::ExtZint;
 
-/// The `ext_nodeid` extension id (zenoh `Declare::ext::NodeId`,
-/// `zextz64!(0x3, true)` — the SAME id as Push's) — bits 0-3 of the ext
-/// header.
-const NODEID_EXT_ID: u8 = 0x03;
-/// Mandatory flag, zenoh `iext::FLAG_M` (bit 4).
-const EXT_FLAG_M: u8 = 0x10;
-/// `Z64` encoding, zenoh `iext::ENC_Z64` (bits 5-6) — the `node_id` rides a
-/// zint body.
-const EXT_ENC_Z64: u8 = 0x20;
-/// Chain-continuation flag, zenoh `iext::FLAG_Z` (bit 7): another extension
-/// follows this one.
-const EXT_FLAG_Z: u8 = 0x80;
-/// The `ext_nodeid` header with no further extension following: `id | M |
-/// Z64` = `0x33`. `apply_chain_z_bits` re-adds `FLAG_Z` when it is not last.
-const NODEID_EXT_HEADER: u8 = NODEID_EXT_ID | EXT_FLAG_M | EXT_ENC_Z64;
+use crate::ext_nodeid;
+
 /// The Declare-level header `Z` bit (zenoh `declare::flag::Z = 1 << 7`): the
-/// extension chain is present. Identical bit to Push's header `Z`.
+/// extension chain is present. Identical bit to Push's header `Z`, but on the
+/// Declare struct — the ONE field that differs from the Push twin; every other
+/// part of the edit lives in the shared [`ext_nodeid`](crate::ext_nodeid) SSOT.
 const DECLARE_FLAG_Z: u8 = 0x80;
 
-/// The extension id field (bits 0-3) of a header byte — zenoh `iext::mid`,
-/// dropping the mandatory / encoding / chain flags.
-fn ext_id(header: u8) -> u8 {
-    header & 0x0F
-}
-
-/// Set the chain-continuation `Z` bit on every entry except the last (which
-/// terminates the chain) — zenoh's per-entry `FLAG_Z` invariant. Replicated
-/// here so this module self-owns its `ext_nodeid` chain edits (see the
-/// module-level `chain_z` consolidation note).
-fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
-    if entries.is_empty() {
-        return;
-    }
-    let last = entries.len() - 1;
-    for (i, entry) in entries.iter_mut().enumerate() {
-        if i == last {
-            entry.header &= !EXT_FLAG_Z;
-        } else {
-            entry.header |= EXT_FLAG_Z;
-        }
-    }
-}
-
 /// Read the routing-context source `node_id` from a Declare's `ext_nodeid`
-/// extension. Returns `0` when the extension is absent — zenoh's DEFAULT,
-/// meaning the declaration was originated by the SENDING node itself — so a
-/// forwarder treats `0` as "the inbound neighbour is the source".
+/// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
+/// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
+/// the shared [`ext_nodeid::read_source`](crate::ext_nodeid::read_source).
 pub fn read_declare_source(declare: &DeclareOwned) -> u16 {
-    let Some(exts) = declare.extensions.as_ref() else {
-        return 0;
-    };
-    for ext in exts {
-        if ext_id(ext.header) == NODEID_EXT_ID {
-            if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
-                return z.value as u16;
-            }
-        }
-    }
-    0
+    ext_nodeid::read_source(declare.extensions.as_ref())
 }
 
 /// Set the routing-context source `node_id` on a Declare's `ext_nodeid`
-/// extension, mirroring zenoh's omit-on-DEFAULT encoding: `node_id == 0`
-/// (the "self-originated" default) REMOVES the extension, a non-zero id
-/// inserts or replaces it. The per-entry chain-continuation `Z` bits and the
-/// Declare-level header `Z` flag are kept consistent with the resulting
-/// chain, so the carrier re-encodes correctly whether or not other
-/// extensions (QoS, timestamp) coexist.
+/// extension (`node_id == 0` removes it — zenoh's omit-on-DEFAULT). The shared
+/// [`ext_nodeid::set_source`](crate::ext_nodeid::set_source) owns the chain
+/// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
+/// Declare-level header `Z` flag to the resulting chain.
 pub fn set_declare_source(declare: &mut DeclareOwned, node_id: u16) {
-    // Replace semantics: drop any existing ext_nodeid before (maybe) re-adding.
-    if let Some(exts) = declare.extensions.as_mut() {
-        exts.retain(|e| ext_id(e.header) != NODEID_EXT_ID);
-    }
-    if node_id != 0 {
-        let entry = ExtEntryOwned {
-            header: NODEID_EXT_HEADER,
-            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
-                value: node_id as u64,
-            }),
-        };
-        declare.extensions.get_or_insert_with(Vec::new).push(entry);
-    }
-    // Normalise the chain: an empty list collapses to `None` (Declare `Z`
-    // clear); a non-empty list fixes the per-entry continuation bits and sets
-    // the Declare header `Z`.
-    let empty = match declare.extensions.as_ref() {
-        Some(exts) => exts.is_empty(),
-        None => true,
-    };
-    if empty {
-        declare.extensions = None;
-        declare.header &= !DECLARE_FLAG_Z;
-    } else {
-        apply_chain_z_bits(declare.extensions.as_mut().expect("non-empty => Some"));
+    if ext_nodeid::set_source(&mut declare.extensions, node_id) {
         declare.header |= DECLARE_FLAG_Z;
+    } else {
+        declare.header &= !DECLARE_FLAG_Z;
     }
 }
 
@@ -143,7 +69,10 @@ pub fn set_declare_source(declare: &mut DeclareOwned, node_id: u16) {
 mod tests {
     use super::*;
     use crate::declare_build::build_declare_subscriber;
+    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z};
     use alloc::vec;
+    use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+    use wz_codecs::ext_zint::ExtZint;
 
     /// A sourced literal-keyexpr DeclareSubscriber (`id == 0`, the zenoh
     /// sourced-subscription sentinel; literal keyexpr via mapping id 0).
