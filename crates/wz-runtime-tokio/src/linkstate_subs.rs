@@ -104,6 +104,21 @@ impl LinkstatepeerSubs {
         dropped
     }
 
+    /// Every `(keyexpr, interested-peer)` pair, as an owned snapshot — the input
+    /// to the tree-change re-advertise (c3c-3 debt A2). On a topology change the
+    /// forwarder re-floods each pair's `DeclareSubscriber` (sourced from the
+    /// peer) toward that peer's recomputed tree children, so a node that joined
+    /// AFTER the declaration still learns it (zenoh `pubsub_tree_change`). Owned
+    /// (`String` / `Zid` clones) so the caller can re-flood without holding this
+    /// table's borrow across a graph borrow. Order is unspecified (`HashMap` /
+    /// `HashSet` iteration); the receiver change-gate dedups, so order is moot.
+    pub fn subscriptions(&self) -> Vec<(String, Zid)> {
+        self.by_key
+            .iter()
+            .flat_map(|(key, peers)| peers.iter().map(move |p| (key.clone(), p.clone())))
+            .collect()
+    }
+
     /// The peers interested in `keyexpr` (EXACT match), as a snapshot the
     /// data-route filter passes to
     /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
@@ -245,6 +260,29 @@ mod tests {
         assert!(
             !subs.withdraw("k", &zid(0xAA)),
             "key already pruned -> no change"
+        );
+    }
+
+    #[test]
+    fn subscriptions_snapshots_every_keyexpr_peer_pair() {
+        // The tree-change re-advertise input: one (keyexpr, peer) entry per
+        // interested peer per key, across all keys.
+        let mut subs = LinkstatepeerSubs::new();
+        subs.register("demo/a", zid(0xAA));
+        subs.register("demo/a", zid(0xBB));
+        subs.register("demo/b", zid(0xAA));
+        let mut got = subs.subscriptions();
+        got.sort();
+        let mut want = vec![
+            ("demo/a".to_owned(), zid(0xAA)),
+            ("demo/a".to_owned(), zid(0xBB)),
+            ("demo/b".to_owned(), zid(0xAA)),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+        assert!(
+            LinkstatepeerSubs::new().subscriptions().is_empty(),
+            "an empty table yields no pairs"
         );
     }
 }

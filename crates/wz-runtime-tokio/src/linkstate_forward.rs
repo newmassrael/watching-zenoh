@@ -50,7 +50,7 @@
 //! `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -138,6 +138,15 @@ pub struct LinkstateForwarder {
     /// interested subtrees. `RefCell` by the same single-task contract as the
     /// graph — borrowed only for a handler's synchronous duration.
     subs: RefCell<LinkstatepeerSubs>,
+    /// This node's OWN active subscription keyexprs — the local-origination
+    /// record (c3c-3 debt A2), distinct from the remote-interest [`subs`] table.
+    /// zenoh registers self in the same `linkstatepeer_subs` set; wz keeps the
+    /// data-route filter ([`subs`]) REMOTE-only (it feeds `directions_toward`,
+    /// which is not self-aware) and tracks self's declarations here so the
+    /// tree-change re-advertise ([`re_advertise_subscriptions`](Self::re_advertise_subscriptions))
+    /// re-floods them to peers that join after a one-time `declare_subscription`
+    /// — origination and remote-interest-routing being distinct roles.
+    self_declared: RefCell<HashSet<String>>,
 }
 
 impl LinkstateForwarder {
@@ -149,6 +158,7 @@ impl LinkstateForwarder {
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             subs: RefCell::new(LinkstatepeerSubs::new()),
+            self_declared: RefCell::new(HashSet::new()),
         }
     }
 
@@ -471,9 +481,26 @@ impl LinkstateForwarder {
     /// (interest) counterpart to [`publish`](Self::publish) (data). Mirrors
     /// zenoh `declare_linkstatepeer_subscription` -> `propagate_sourced_subscription`
     /// with source = self. Returns the number of tree-child faces reached.
+    ///
+    /// The keyexpr is recorded in [`self_declared`](Self#structfield.self_declared)
+    /// so the tree-change re-advertise re-floods it to peers that join LATER (the
+    /// late-joiner convergence that lets this be a ONE-TIME call, c3c-3 debt A2),
+    /// then the flood itself runs through [`flood_self_subscription`](Self::flood_self_subscription).
     pub fn declare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        // id 0 = zenoh sourced-subscription sentinel; literal keyexpr (the wz
-        // MVP form, mapping id 0 + suffix).
+        self.self_declared.borrow_mut().insert(keyexpr.to_owned());
+        self.flood_self_subscription(keyexpr)
+    }
+
+    /// Flood a self-originated `DeclareSubscriber` for `keyexpr` to self's CHILDREN
+    /// in self's own spanning tree — the wire half of
+    /// [`declare_subscription`](Self::declare_subscription), shared with the
+    /// tree-change re-advertise so a one-time declare and its later re-advertises
+    /// emit the identical sourced declaration. `id 0` = zenoh sourced-subscription
+    /// sentinel; literal keyexpr (the wz MVP form, mapping id 0 + suffix); node_id
+    /// 0 (self-originated, `build_declare_subscriber` emits no `ext_nodeid`). Does
+    /// NOT touch [`self_declared`](Self#structfield.self_declared) — the caller owns
+    /// that record.
+    fn flood_self_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
         let declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
         let children = {
             let net = self.net.borrow();
@@ -499,8 +526,13 @@ impl LinkstateForwarder {
     /// counterpart to [`declare_subscription`](Self::declare_subscription), and
     /// the control-plane mirror of zenoh's
     /// `undeclare_linkstatepeer_subscription` -> `propagate_forget_sourced_subscription`
-    /// with source = self. Returns the number of tree-child faces reached.
+    /// with source = self. Returns the number of tree-child faces reached. Clears
+    /// the [`self_declared`](Self#structfield.self_declared) record so the
+    /// retracted keyexpr is no longer re-advertised on a tree change (a
+    /// retraction, unlike a declaration, needs no late-joiner re-advertise — a
+    /// peer that joins after never held the interest).
     pub fn undeclare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        self.self_declared.borrow_mut().remove(keyexpr);
         let declare = build_undeclare_subscriber_with_keyexpr(keyexpr)?;
         let children = {
             let net = self.net.borrow();
@@ -637,6 +669,70 @@ impl LinkstateForwarder {
         });
     }
 
+    /// Re-advertise every known subscription along its source peer's (freshly
+    /// recomputed) spanning tree — zenoh's `pubsub_tree_change`. Called after a
+    /// [`compute_trees`](wz_routing_graph::LinkstateNetwork::compute_trees) on a
+    /// topology change (an inbound link-state, or a face loss). A subscription
+    /// declared before a peer joined did not reach it; the recompute changes the
+    /// source's tree, and re-flooding the `DeclareSubscriber` to the source's
+    /// CURRENT tree children delivers it onto the new branch.
+    ///
+    /// Why this works without a children-delta: EVERY node runs this on its own
+    /// recompute, so the node whose child set newly includes the joiner is the
+    /// one that re-floods to it. Re-advertising to an already-converged child is
+    /// gated at the receiver ([`forward_subscription`](Self::forward_subscription)'s
+    /// register change-gate returns false → no onward flood), so this re-floods
+    /// to all current children but only the genuinely-new ones propagate — the
+    /// same loop-freedom as the declare path (holds on a converged tree). Each
+    /// copy is re-stamped with THIS node's psid for the source, exactly like
+    /// `forward_subscription`. This is what lets a ONE-TIME `declare_subscription`
+    /// converge to a late-joining publisher without a per-tick re-declare.
+    fn re_advertise_subscriptions(&self) {
+        // Snapshot the (keyexpr, source) pairs so the table borrow is released
+        // before the per-pair graph borrow + fan_out below.
+        let pairs = self.subs.borrow().subscriptions();
+        for (keyexpr, source_zid) in pairs {
+            // self's children in the source's tree + this node's psid for the
+            // source (the re-stamp value). Scoped graph borrow released before
+            // fan_out (which takes the faces borrow).
+            let (children, out_node_id) = {
+                let net = self.net.borrow();
+                let Some(psid) = net
+                    .local_psid_of(&source_zid)
+                    .and_then(|p| u16::try_from(p).ok())
+                else {
+                    continue;
+                };
+                (net.tree_children_of(&source_zid), psid)
+            };
+            if children.is_empty() {
+                continue;
+            }
+            let Ok(mut declare) = build_declare_subscriber(0, 0, Some(&keyexpr)) else {
+                continue;
+            };
+            set_declare_source(&mut declare, out_node_id);
+            // Flood to self's children in the source's tree. No inbound exclusion
+            // — this is a proactive re-advertise, not a forward of a received
+            // message (zenoh sends with `src_face: None`). The children are
+            // downstream of the source, so a re-advertise never echoes upstream.
+            let _ = self.fan_out(true, |_id, zid| {
+                Ok(zid
+                    .is_some_and(|z| is_child(&children, z))
+                    .then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
+            });
+        }
+        // (b) self's OWN declarations: re-flood each sourced-from-self to self's
+        // CURRENT tree children, so a peer that joined after a one-time
+        // declare_subscription learns it. Snapshot first (the flood borrows the
+        // same cell). This is the origination half zenoh gets from registering
+        // self in linkstatepeer_subs.
+        let own: Vec<String> = self.self_declared.borrow().iter().cloned().collect();
+        for keyexpr in own {
+            let _ = self.flood_self_subscription(&keyexpr);
+        }
+    }
+
     /// The peers interested in `keyexpr` — the subscription-filter input the
     /// data forward (atom4) feeds to
     /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
@@ -757,7 +853,7 @@ impl FaceForwarder for LinkstateForwarder {
         // link until the next inbound link-state happened to trigger a recompute
         // — a misroute window after every face loss. zenoh recomputes on
         // link-down too (`hat/linkstate_peer/mod.rs` `schedule_compute_trees`).
-        if let Some(state) = self.faces.borrow_mut().remove(&id) {
+        let recomputed = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             // Purge the departed peer's subscription interest — zenoh's
             // `pubsub_remove_node` on link-down (`hat/linkstate_peer/mod.rs`).
             // Without this a gone subscriber's interest lingers in the table,
@@ -770,7 +866,20 @@ impl FaceForwarder for LinkstateForwarder {
                 let mut net = self.net.borrow_mut();
                 net.remove_link(link);
                 net.compute_trees();
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        // c3c-3 debt A2 — a face loss recomputed the trees: re-advertise known
+        // subscriptions to their source trees' surviving children (zenoh
+        // pubsub_tree_change), so the mesh reconverges interest around the dead
+        // link. Outside the borrow blocks above (re_advertise takes the faces /
+        // graph / subs borrows itself).
+        if recomputed {
+            self.re_advertise_subscriptions();
         }
     }
 
@@ -802,6 +911,14 @@ impl FaceForwarder for LinkstateForwarder {
                         // the OTHER faces (transitive propagation).
                         let changes = self.on_inbound_linkstate(id, list);
                         let _ = self.propagate(id, &changes);
+                        // c3c-3 debt A2 — a real topology change recomputed the
+                        // trees, so re-advertise known subscriptions to their
+                        // source trees' current children (zenoh pubsub_tree_change):
+                        // a peer that joined since the last declaration now learns
+                        // it. Gated on a change so a sn-stale re-flood is a no-op.
+                        if !changes.updated.is_empty() {
+                            self.re_advertise_subscriptions();
+                        }
                     }
                     // a malformed OAM_LINKSTATE or a non-linkstate OAM is
                     // left alone (the generic OAM path / a logged drop).
@@ -1795,5 +1912,77 @@ mod tests {
             fwd.interested("demo/sub").is_empty(),
             "the UndeclareSubscriber arm withdrew A's interest"
         );
+    }
+
+    // ── c3c-3 debt A2: pubsub_tree_change re-advertise ───────────────
+
+    #[test]
+    fn re_advertise_reaches_a_child_that_joined_after_the_declaration() {
+        // A subscribes when S has no other neighbour, so the declaration floods
+        // nowhere (S has no child in A's tree yet). C then joins; on the
+        // recompute S re-advertises A's subscription to the newly-arrived child C
+        // — the late-joiner convergence pubsub_tree_change provides, the reason a
+        // ONE-TIME declare suffices (no per-tick re-declare).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A only
+        declare_interest(&fwd, FaceId(0), "demo/sub"); // A interested; no child -> nowhere
+
+        // C joins now: S<->C edge makes C a child of S in A's tree.
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        sink_c.reset(); // ignore any join-time frames
+
+        fwd.re_advertise_subscriptions(); // what forward()'s hook runs on recompute
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the late-joining child C learns A's earlier subscription via re-advertise"
+        );
+    }
+
+    #[test]
+    fn re_advertise_reaches_a_child_that_joined_after_self_declared() {
+        // The origination half: self S declares its OWN subscription with no
+        // neighbour (floods nowhere). C then joins as S's child; on the recompute
+        // S re-advertises its own declaration to C — what lets self's ONE-TIME
+        // declare_subscription reach a late-joining peer (zenoh registers self in
+        // linkstatepeer_subs; wz tracks it in self_declared).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        fwd.declare_subscription("demo/self")
+            .expect("declare own sub"); // no faces
+
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0C, 0x05); // S<->C; C is S's child
+        sink_c.reset();
+
+        fwd.re_advertise_subscriptions();
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the late-joining child C learns self's earlier own subscription"
+        );
+    }
+
+    #[test]
+    fn re_advertise_with_no_subscriptions_sends_nothing() {
+        // The any-interest guard: with no known subscription there is nothing to
+        // re-advertise, so a tree recompute floods nothing.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        sink_a.reset();
+        sink_c.reset();
+
+        fwd.re_advertise_subscriptions();
+        assert_eq!(sink_a.frame_count(), 0, "nothing re-advertised to A");
+        assert_eq!(sink_c.frame_count(), 0, "nothing re-advertised to C");
     }
 }

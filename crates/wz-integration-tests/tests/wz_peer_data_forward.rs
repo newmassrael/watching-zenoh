@@ -31,6 +31,12 @@
 //! transition, not a flaky non-receipt) — the end-to-end proof of the
 //! subscription-lifecycle retraction path.
 //!
+//! Both tests declare interest exactly ONCE (c3c-3 debt A2): the subscription
+//! reaches the LATER-joining publisher via the tree-change re-advertise
+//! (`re_advertise_subscriptions`, zenoh `pubsub_tree_change`) on each topology
+//! recompute, not a per-tick re-declare — so these e2es also exercise that
+//! convergence path end-to-end.
+//!
 //! Requires the binary built with `--features routing-peer` (the `--peer` /
 //! `--publish` / `--subscribe` / `--unsubscribe-after-data` args are opt-in
 //! behind it). run-ci's Layer E builds it so both tests ride the same

@@ -1355,22 +1355,30 @@ pub(crate) async fn run_peer(
     let mut last_data_seen = 0usize;
     let mut announced_interest = false;
     let mut announced_withdrawal = false;
+    let mut declared = false;
+    let mut undeclared = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
             _ = app_tick.tick() => {
-                // R311rs (c3c-3 atom4-ii) — a `--subscribe` peer re-declares its
-                // interest each tick (idempotent at converged receivers via the
-                // register change-gate): re-flooding after topology converges is
-                // how it reaches a publisher without `pubsub_tree_change`.
+                // c3c-3 debt A2 — a `--subscribe` peer declares its interest ONCE.
+                // pubsub_tree_change (re_advertise_subscriptions on each tree
+                // recompute) re-floods the subscription to peers that join later,
+                // so the prior per-tick re-declare workaround is no longer needed.
                 // c3c-3 debt A1 — `--unsubscribe-after-data` flips to RETRACTING
-                // once the round-trip is confirmed (data received): the undeclare
-                // floods the same source tree, withdrawing this peer's interest at
-                // every hop. Self-coordinating, so no timing window is assumed.
+                // once the round-trip is confirmed (data received), also once: the
+                // undeclare floods the source tree withdrawing this peer's interest
+                // at each hop. Self-coordinating, so no timing window is assumed (a
+                // peer that joins after the retraction never held the interest, so
+                // a retraction needs no re-advertise).
                 if let Some(key) = subscribe_key {
                     if unsubscribe_after_data && forwarder.data_seen() > 0 {
-                        let _ = forwarder.undeclare_subscription(key);
-                    } else {
+                        if !undeclared {
+                            undeclared = true;
+                            let _ = forwarder.undeclare_subscription(key);
+                        }
+                    } else if !declared {
+                        declared = true;
                         let _ = forwarder.declare_subscription(key);
                     }
                 }

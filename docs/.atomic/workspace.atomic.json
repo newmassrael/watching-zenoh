@@ -42758,6 +42758,50 @@
         "LOCAL UNPUSHED: A1 3커밋(rw/rx/ry). push는 사용자 명시 동의 후(pre-push run-ci 재실행; 시스템 idle 확인)."
       ]
     },
+    "Round 311rz": {
+      "decision_summary": "R311rz: c3c-3 부채 A2 — pubsub_tree_change 구독 재광고. 트리 재계산 시 기존 구독을 source tree의 현재 children에 재flood(re_advertise_subscriptions=zenoh pubsub_tree_change), forward()/deregister의 compute_trees 후 훅. transit(remote peer subs)+origination(self_declared) 양면. demo가 1회 declare로 전환(매틱 재선언 우회 제거); pubsub_tree_change가 late-joiner 수렴 담당. 양 e2e 10/10 수렴 검증.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/linkstate_subs.rs: subscriptions()->Vec<(String,Zid)>(모든 keyexpr-peer pair owned snapshot; rt서 제거됐던 keys() 재도입; tree-change re-advertise 입력). 1 unit.",
+        "wz-runtime-tokio/src/linkstate_forward.rs: re_advertise_subscriptions = (a) remote peer subs를 각 source tree의 현재 children에 재flood(sourced-from-peer, set_declare_source 재stamp, inbound 제외 없음=proactive; zenoh src_face None) + (b) self_declared를 self tree children에 재flood(flood_self_subscription 공유). forward() OAM arm(changes.updated 비어있지 않을 때만)+deregister(compute_trees 후, borrow 블록 밖) 훅. self_declared: RefCell<HashSet<String>> field 신규(self 자신 active sub; data-filter subs는 remote-only 유지=SRP; zenoh는 linkstatepeer_subs에 self 포함하나 wz directions_toward가 self-aware 아니라 분리). declare_subscription=self_declared insert+flood_self_subscription(추출), undeclare_subscription=self_declared remove. 3 unit(late-join remote/late-join self/no-subs).",
+        "wz-ap-demo/src/runner.rs: --subscribe가 1회 declare(declared guard), --unsubscribe-after-data가 1회 undeclare(undeclared guard); 매틱 재선언 제거. pubsub_tree_change가 late-joining publisher 수렴 담당.",
+        "wz-integration-tests/tests/wz_peer_data_forward.rs: module doc — 양 e2e가 1회 declare + tree-change 재광고 수렴을 end-to-end 실증함 명시."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 45 PASS(re_advertise 3 + subscriptions 1 신규; 기존 41 무회귀=deregister 훅 추가 무영향). clippy routing-peer + demo -D warnings clean. fmt clean(A1 fmt-fail 교훈으로 run-ci 전 로컬 fmt --check). full run-ci RUNCI_EXIT=0(전 host 레인).",
+        "e2e(1회 declare 전환): 양 e2e(forward + A1 withdrawal) 10/10 0 flake([[feedback-no-flaky-ever]]). 1회 declare가 late-joining publisher(나중 합류 A)에 수렴 = pubsub_tree_change 실증(이전엔 매틱 재선언이 마스킹해 미검증). 결정성=모든 노드가 자기 compute_trees서 re_advertise 실행→intermediate 노드가 자기 new child에 재광고(원 subscriber 측 change-gate 무관). re_advertise_reaches_a_child_that_joined_after_the_declaration(remote)+_after_self_declared(origination) unit이 핵심 분기 실증.",
+        "정직: 전 children 재flood(children-delta 미사용; receiver register change-gate가 dedup=zenoh 동일). subs(data-filter remote-only)/self_declared(origination) 분리=zenoh 통합 대비 divergence이나 wz directions_toward가 self-aware 아니라 SRP가 clean(문서화)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rz = c3c-3 부채 A2 완결: pubsub_tree_change 구독 재광고. re_advertise_subscriptions(transit=remote peer subs + origination=self_declared)를 compute_trees 후 훅(forward() OAM arm changes-gated, deregister). demo 1회 declare(매틱 재선언 우회 제거); pubsub_tree_change가 late-joiner 수렴 담당. 양 e2e 10/10 수렴 검증. zenoh pubsub.rs:641-678 + mod.rs:147.",
+        "다음 부채(project_c3c3_debt_paydown 순): C2(push/declare/undecl ext_nodeid+ext_keyexpr golden-vector byte-parity, 작음) → C1(4-peer e2e selectivity=비구독 sibling D 미수신) → D1 (source,sn) seen-set → D2 change-triggered flood → B1 alias → E/F.",
+        "honest defer: children-delta(전 children 재flood; receiver change-gate dedup=zenoh도 동일), change-triggered batching(D2=현재 매 tree-change마다; zenoh TreesComputationWorker 지연 배치). self_declared/subs 분리=wz 구조 divergence(문서화; data-filter self-aware 아님).",
+        "LOCAL UNPUSHED: A1 3커밋(rw/rx/ry) + A2 1커밋(rz) = 4커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci 재실행; 시스템 idle 확인)."
+      ],
+      "publishable_decision_summary": "R311rz: c3c-3 부채 A2 — pubsub_tree_change 구독 재광고. 트리 재계산 시 기존 구독을 source tree의 현재 children에 재flood(re_advertise_subscriptions=zenoh pubsub_tree_change), forward()/deregister의 compute_trees 후 훅. transit(remote peer subs)+origination(self_declared) 양면. demo가 1회 declare로 전환(매틱 재선언 우회 제거); pubsub_tree_change가 late-joiner 수렴 담당. 양 e2e 10/10 수렴 검증.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/linkstate_subs.rs: subscriptions()->Vec<(String,Zid)>(모든 keyexpr-peer pair owned snapshot; rt서 제거됐던 keys() 재도입; tree-change re-advertise 입력). 1 unit.",
+        "wz-runtime-tokio/src/linkstate_forward.rs: re_advertise_subscriptions = (a) remote peer subs를 각 source tree의 현재 children에 재flood(sourced-from-peer, set_declare_source 재stamp, inbound 제외 없음=proactive; zenoh src_face None) + (b) self_declared를 self tree children에 재flood(flood_self_subscription 공유). forward() OAM arm(changes.updated 비어있지 않을 때만)+deregister(compute_trees 후, borrow 블록 밖) 훅. self_declared: RefCell<HashSet<String>> field 신규(self 자신 active sub; data-filter subs는 remote-only 유지=SRP; zenoh는 linkstatepeer_subs에 self 포함하나 wz directions_toward가 self-aware 아니라 분리). declare_subscription=self_declared insert+flood_self_subscription(추출), undeclare_subscription=self_declared remove. 3 unit(late-join remote/late-join self/no-subs).",
+        "wz-ap-demo/src/runner.rs: --subscribe가 1회 declare(declared guard), --unsubscribe-after-data가 1회 undeclare(undeclared guard); 매틱 재선언 제거. pubsub_tree_change가 late-joining publisher 수렴 담당.",
+        "wz-integration-tests/tests/wz_peer_data_forward.rs: module doc — 양 e2e가 1회 declare + tree-change 재광고 수렴을 end-to-end 실증함 명시."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate 45 PASS(re_advertise 3 + subscriptions 1 신규; 기존 41 무회귀=deregister 훅 추가 무영향). clippy routing-peer + demo -D warnings clean. fmt clean(A1 fmt-fail 교훈으로 run-ci 전 로컬 fmt --check). full run-ci RUNCI_EXIT=0(전 host 레인).",
+        "e2e(1회 declare 전환): 양 e2e(forward + A1 withdrawal) 10/10 0 flake([[feedback-no-flaky-ever]]). 1회 declare가 late-joining publisher(나중 합류 A)에 수렴 = pubsub_tree_change 실증(이전엔 매틱 재선언이 마스킹해 미검증). 결정성=모든 노드가 자기 compute_trees서 re_advertise 실행→intermediate 노드가 자기 new child에 재광고(원 subscriber 측 change-gate 무관). re_advertise_reaches_a_child_that_joined_after_the_declaration(remote)+_after_self_declared(origination) unit이 핵심 분기 실증.",
+        "정직: 전 children 재flood(children-delta 미사용; receiver register change-gate가 dedup=zenoh 동일). subs(data-filter remote-only)/self_declared(origination) 분리=zenoh 통합 대비 divergence이나 wz directions_toward가 self-aware 아니라 SRP가 clean(문서화)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rz = c3c-3 부채 A2 완결: pubsub_tree_change 구독 재광고. re_advertise_subscriptions(transit=remote peer subs + origination=self_declared)를 compute_trees 후 훅(forward() OAM arm changes-gated, deregister). demo 1회 declare(매틱 재선언 우회 제거); pubsub_tree_change가 late-joiner 수렴 담당. 양 e2e 10/10 수렴 검증. zenoh pubsub.rs:641-678 + mod.rs:147.",
+        "다음 부채(project_c3c3_debt_paydown 순): C2(push/declare/undecl ext_nodeid+ext_keyexpr golden-vector byte-parity, 작음) → C1(4-peer e2e selectivity=비구독 sibling D 미수신) → D1 (source,sn) seen-set → D2 change-triggered flood → B1 alias → E/F.",
+        "honest defer: children-delta(전 children 재flood; receiver change-gate dedup=zenoh도 동일), change-triggered batching(D2=현재 매 tree-change마다; zenoh TreesComputationWorker 지연 배치). self_declared/subs 분리=wz 구조 divergence(문서화; data-filter self-aware 아님).",
+        "LOCAL UNPUSHED: A1 3커밋(rw/rx/ry) + A2 1커밋(rz) = 4커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci 재실행; 시스템 idle 확인)."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
