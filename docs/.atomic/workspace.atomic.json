@@ -42682,6 +42682,44 @@
         "honest defer(A1 범위 외): alias/wildcard keyexpr ext(read_ext_keyexpr는 inner id!=0=None literal-only), undeclare ext_keyexpr golden-vector(현재 byte-parity 1 벡터)."
       ]
     },
+    "Round 311rx": {
+      "decision_summary": "R311rx: c3c-3 부채 A1b forwarder — UndeclareSubscriber 전파. LinkstatepeerSubs::withdraw(keyexpr,peer; change-gate+emptied-key prune; zenoh unregister_peer_subscription) + LinkstateForwarder::forward_unsubscription(ext_keyexpr 추출→공유 resolve_source→withdraw→실제 제거시만 source tree broadcast 재flood) + undeclare_subscription(self-originated retraction) + forward() UndeclareSubscriber 분기. forward_subscription의 정확한 구조 mirror(register↔withdraw+carrier만 차이). demo --unsubscribe-after-data self-coordinating retract.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/linkstate_subs.rs: withdraw(keyexpr,peer)->bool=per-keyexpr 철회(by_key.get_mut→set.remove→emptied key prune; idempotent; change-gate=실제 제거시만 true). remove_peer(whole-peer face-down purge)의 per-keyexpr 대응. zenoh unregister_peer_subscription 미러. 3 unit(removes+co-interested 생존+idempotent).",
+        "wz-runtime-tokio/src/linkstate_forward.rs: forward_unsubscription(undeclare_subscriber_keyexpr=read_ext_keyexpr로 keyexpr 추출→공유 resolve_source seam→withdraw change-gate→실제 제거시만 tree_children_of(source) broadcast 재flood with set_declare_source 재stamp+is_tree_forward_target inbound 제외). forward_subscription의 정확한 구조 mirror(resolve_source/is_tree_forward_target/fan_out/set_declare_source 공유; register↔withdraw+carrier만 차이). undeclare_subscription(keyexpr)=self-originated retraction flood(build_undeclare_subscriber_with_keyexpr→self tree children; declare_subscription twin). forward() Declare arm=match UndeclareSubscriber→forward_unsubscription else→forward_subscription. imports(build_undeclare_subscriber_with_keyexpr, read_ext_keyexpr). 4 unit.",
+        "wz-ap-demo main.rs/runner.rs: --unsubscribe-after-data presence flag→run_peer_mode→run_peer(unsubscribe_after_data). app_tick: data_seen>0(round-trip 확인)면 undeclare_subscription else declare_subscription=self-coordinating retract(타이밍 윈도우 불필요). publisher가 interested non-empty→empty 전이시 'publisher subscriber interest withdrawn' 로그(positive witness)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib: linkstate_subs 6(withdraw 3 신규=removes-one-key/co-interested-survives/idempotent-absent) + linkstate_forward 35(A1b 4 신규=undeclare_subscription_floods/forward_unsubscription_withdraws+re_floods/change-gate-unknown-interest/forward()-dispatch-arm). clippy -D warnings clean. no-default-features routing-peer 빌드 OK. wz-ap-demo routing-peer 빌드 OK. full run-ci RUNCI_EXIT=0.",
+        "forward_unsubscription=forward_subscription 구조 정확 mirror: 공유 seam(resolve_source self-source+u16 guard, is_tree_forward_target inbound+source-neighbour 제외, fan_out, set_declare_source 재stamp); 차이는 register↔withdraw change-gate + UndeclareSubscriber carrier뿐. control-plane retraction=tree_children broadcast(zenoh propagate_forget_sourced_subscription; 데이터면 directions_toward와 구분)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rx = c3c-3 부채 A1b forwarder: LinkstatepeerSubs::withdraw + forward_unsubscription + undeclare_subscription + forward() UndeclareSubscriber 분기 + demo --unsubscribe-after-data. forward_subscription의 정확한 retraction mirror(공유 resolve_source/is_tree_forward_target/fan_out/set_declare_source; register↔withdraw만 차이). zenoh forget_linkstatepeer_subscription→unregister_peer_subscription+propagate_forget_sourced_subscription.",
+        "다음 A1-e2e(ry): deterministic 2-hop withdrawal e2e(positive learned→withdrawn witness).",
+        "honest defer: undeclare_subscription은 self 자신의 interest는 미추적(declare_subscription과 대칭=self는 peer 테이블에 없음; remote만 withdraw). whole-peer face-down은 deregister→remove_peer가 이미 purge(별개 경로)."
+      ],
+      "publishable_decision_summary": "R311rx: c3c-3 부채 A1b forwarder — UndeclareSubscriber 전파. LinkstatepeerSubs::withdraw(keyexpr,peer; change-gate+emptied-key prune; zenoh unregister_peer_subscription) + LinkstateForwarder::forward_unsubscription(ext_keyexpr 추출→공유 resolve_source→withdraw→실제 제거시만 source tree broadcast 재flood) + undeclare_subscription(self-originated retraction) + forward() UndeclareSubscriber 분기. forward_subscription의 정확한 구조 mirror(register↔withdraw+carrier만 차이). demo --unsubscribe-after-data self-coordinating retract.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/linkstate_subs.rs: withdraw(keyexpr,peer)->bool=per-keyexpr 철회(by_key.get_mut→set.remove→emptied key prune; idempotent; change-gate=실제 제거시만 true). remove_peer(whole-peer face-down purge)의 per-keyexpr 대응. zenoh unregister_peer_subscription 미러. 3 unit(removes+co-interested 생존+idempotent).",
+        "wz-runtime-tokio/src/linkstate_forward.rs: forward_unsubscription(undeclare_subscriber_keyexpr=read_ext_keyexpr로 keyexpr 추출→공유 resolve_source seam→withdraw change-gate→실제 제거시만 tree_children_of(source) broadcast 재flood with set_declare_source 재stamp+is_tree_forward_target inbound 제외). forward_subscription의 정확한 구조 mirror(resolve_source/is_tree_forward_target/fan_out/set_declare_source 공유; register↔withdraw+carrier만 차이). undeclare_subscription(keyexpr)=self-originated retraction flood(build_undeclare_subscriber_with_keyexpr→self tree children; declare_subscription twin). forward() Declare arm=match UndeclareSubscriber→forward_unsubscription else→forward_subscription. imports(build_undeclare_subscriber_with_keyexpr, read_ext_keyexpr). 4 unit.",
+        "wz-ap-demo main.rs/runner.rs: --unsubscribe-after-data presence flag→run_peer_mode→run_peer(unsubscribe_after_data). app_tick: data_seen>0(round-trip 확인)면 undeclare_subscription else declare_subscription=self-coordinating retract(타이밍 윈도우 불필요). publisher가 interested non-empty→empty 전이시 'publisher subscriber interest withdrawn' 로그(positive witness)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib: linkstate_subs 6(withdraw 3 신규=removes-one-key/co-interested-survives/idempotent-absent) + linkstate_forward 35(A1b 4 신규=undeclare_subscription_floods/forward_unsubscription_withdraws+re_floods/change-gate-unknown-interest/forward()-dispatch-arm). clippy -D warnings clean. no-default-features routing-peer 빌드 OK. wz-ap-demo routing-peer 빌드 OK. full run-ci RUNCI_EXIT=0.",
+        "forward_unsubscription=forward_subscription 구조 정확 mirror: 공유 seam(resolve_source self-source+u16 guard, is_tree_forward_target inbound+source-neighbour 제외, fan_out, set_declare_source 재stamp); 차이는 register↔withdraw change-gate + UndeclareSubscriber carrier뿐. control-plane retraction=tree_children broadcast(zenoh propagate_forget_sourced_subscription; 데이터면 directions_toward와 구분)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rx = c3c-3 부채 A1b forwarder: LinkstatepeerSubs::withdraw + forward_unsubscription + undeclare_subscription + forward() UndeclareSubscriber 분기 + demo --unsubscribe-after-data. forward_subscription의 정확한 retraction mirror(공유 resolve_source/is_tree_forward_target/fan_out/set_declare_source; register↔withdraw만 차이). zenoh forget_linkstatepeer_subscription→unregister_peer_subscription+propagate_forget_sourced_subscription.",
+        "다음 A1-e2e(ry): deterministic 2-hop withdrawal e2e(positive learned→withdrawn witness).",
+        "honest defer: undeclare_subscription은 self 자신의 interest는 미추적(declare_subscription과 대칭=self는 peer 테이블에 없음; remote만 withdraw). whole-peer face-down은 deregister→remove_peer가 이미 purge(별개 경로)."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

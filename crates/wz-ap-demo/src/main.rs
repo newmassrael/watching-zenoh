@@ -154,7 +154,19 @@ fn main() -> ExitCode {
             // mesh so a `--publish` peer's subscription-filtered route reaches
             // it. Without a subscriber the data plane forwards nothing.
             let subscribe_key = parse_pair(rest, "--subscribe");
-            return run_peer_mode(peer_listen, dial_targets, publish_key, subscribe_key);
+            // c3c-3 debt A1 — `--unsubscribe-after-data` makes a `--subscribe`
+            // peer RETRACT its interest once it has confirmed the round-trip
+            // (received data on the subscription): a self-coordinating lifecycle
+            // that drives the UndeclareSubscriber propagation with no timing
+            // window. Meaningful only alongside `--subscribe`.
+            let unsubscribe_after_data = rest.iter().any(|a| a == "--unsubscribe-after-data");
+            return run_peer_mode(
+                peer_listen,
+                dial_targets,
+                publish_key,
+                subscribe_key,
+                unsubscribe_after_data,
+            );
         }
         #[cfg(not(feature = "routing-peer"))]
         {
@@ -637,6 +649,7 @@ fn run_peer_mode(
     dial_targets: Vec<String>,
     publish_key: Option<String>,
     subscribe_key: Option<String>,
+    unsubscribe_after_data: bool,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -651,6 +664,7 @@ fn run_peer_mode(
         &dial_targets,
         publish_key.as_deref(),
         subscribe_key.as_deref(),
+        unsubscribe_after_data,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

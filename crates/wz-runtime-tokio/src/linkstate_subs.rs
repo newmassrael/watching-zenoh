@@ -64,6 +64,27 @@ impl LinkstatepeerSubs {
             .insert(peer)
     }
 
+    /// Withdraw `peer`'s interest in ONE `keyexpr` — a sourced
+    /// `UndeclareSubscriber` arriving from the mesh while the peer's face stays
+    /// up (the per-keyexpr retraction, vs [`remove_peer`](Self::remove_peer)'s
+    /// whole-peer face-down purge). Idempotent. Returns `true` if the peer WAS
+    /// interested (a real change the caller re-propagates onward — re-flood the
+    /// retraction, recompute a data route), `false` if it held no such interest
+    /// (already gone / never declared). The emptied key is pruned, so
+    /// [`interested`](Self::interested) of a fully-unsubscribed key is empty.
+    /// Mirrors zenoh `unregister_peer_subscription`'s
+    /// `linkstatepeer_subs.retain(|p| p != peer)` + empty-set cleanup.
+    pub fn withdraw(&mut self, keyexpr: &str, peer: &Zid) -> bool {
+        let Some(set) = self.by_key.get_mut(keyexpr) else {
+            return false;
+        };
+        let removed = set.remove(peer);
+        if set.is_empty() {
+            self.by_key.remove(keyexpr);
+        }
+        removed
+    }
+
     /// Drop ALL of `peer`'s interests across every key — called from the
     /// forwarder's `deregister` when a peer's face goes down, so stale interest
     /// never keeps a departed subscriber armed in the publisher's any-interest
@@ -166,5 +187,64 @@ mod tests {
         );
         // removing the same (already-gone) peer drops nothing.
         assert_eq!(subs.remove_peer(&zid(0xAA)), 0, "no-op for an absent peer");
+    }
+
+    #[test]
+    fn withdraw_removes_one_key_and_reports_change() {
+        // A per-keyexpr retraction drops only the named key's interest; a
+        // co-subscribed key survives, and the change-gate reports the removal.
+        let mut subs = LinkstatepeerSubs::new();
+        subs.register("a", zid(0xAA));
+        subs.register("b", zid(0xAA));
+        assert!(subs.withdraw("a", &zid(0xAA)), "peer was interested in 'a'");
+        assert!(
+            subs.interested("a").is_empty(),
+            "sole-subscriber key 'a' pruned"
+        );
+        assert_eq!(
+            subs.interested("b"),
+            vec![zid(0xAA)],
+            "co-subscribed key 'b' survives",
+        );
+    }
+
+    #[test]
+    fn withdraw_keeps_a_co_interested_peer() {
+        // Withdrawing one peer leaves a key alive while another peer still wants
+        // it — only the withdrawing peer's interest goes.
+        let mut subs = LinkstatepeerSubs::new();
+        subs.register("k", zid(0xAA));
+        subs.register("k", zid(0xBB));
+        assert!(subs.withdraw("k", &zid(0xAA)));
+        assert_eq!(
+            subs.interested("k"),
+            vec![zid(0xBB)],
+            "key 'k' survives with the remaining peer BB",
+        );
+    }
+
+    #[test]
+    fn withdraw_is_idempotent_for_absent_interest() {
+        // Withdrawing an interest never held (unknown key, or a peer that never
+        // declared it) is a no-op the change-gate reports as false.
+        let mut subs = LinkstatepeerSubs::new();
+        subs.register("k", zid(0xAA));
+        // A peer that never declared 'k', and an unknown key, both report no
+        // change.
+        assert!(!subs.withdraw("k", &zid(0xBB)), "BB never declared 'k'");
+        assert!(
+            !subs.withdraw("other", &zid(0xAA)),
+            "no interest in an unknown key",
+        );
+        // A real withdraw of AA empties + prunes 'k'; a second is a no-op.
+        assert!(subs.withdraw("k", &zid(0xAA)), "AA's real interest removed");
+        assert!(
+            subs.interested("k").is_empty(),
+            "sole subscriber pruned the key"
+        );
+        assert!(
+            !subs.withdraw("k", &zid(0xAA)),
+            "key already pruned -> no change"
+        );
     }
 }

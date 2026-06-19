@@ -61,7 +61,10 @@ use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
-use wz_session_core::declare_build::build_declare_subscriber;
+use wz_session_core::declare_build::{
+    build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
+};
+use wz_session_core::declare_ext_keyexpr::read_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::linkstate_oam::{
@@ -487,6 +490,33 @@ impl LinkstateForwarder {
         })
     }
 
+    /// Originate a LOCAL subscription RETRACTION into the mesh: this node is no
+    /// longer interested in `keyexpr`, so flood a sourced `UndeclareSubscriber`
+    /// (the keyexpr carried in its `ext_keyexpr` extension, node_id 0 —
+    /// self-originated) to self's CHILDREN in self's own spanning tree. Each
+    /// child withdraws self's interest and re-forwards via
+    /// [`forward_unsubscription`](Self::forward_unsubscription). The retraction
+    /// counterpart to [`declare_subscription`](Self::declare_subscription), and
+    /// the control-plane mirror of zenoh's
+    /// `undeclare_linkstatepeer_subscription` -> `propagate_forget_sourced_subscription`
+    /// with source = self. Returns the number of tree-child faces reached.
+    pub fn undeclare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        let declare = build_undeclare_subscriber_with_keyexpr(keyexpr)?;
+        let children = {
+            let net = self.net.borrow();
+            let self_zid = net.self_zid().clone();
+            net.tree_children_of(&self_zid)
+        };
+        if children.is_empty() {
+            return Ok(0);
+        }
+        self.fan_out(true, |_id, zid| {
+            Ok(zid
+                .is_some_and(|z| is_child(&children, z))
+                .then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
+        })
+    }
+
     /// A sourced `DeclareSubscriber` arrived on `inbound`: register the SOURCE
     /// peer's interest in the declared keyexpr, and — only if this NEWLY
     /// learned it — re-flood the declaration onward along the SOURCE's spanning
@@ -539,6 +569,66 @@ impl LinkstateForwarder {
         // Re-flood to self's children in the source's tree — the same shared
         // re-forward predicate forward_push uses (excludes the inbound face and
         // the source's own neighbour); only the carrier differs.
+        let _ = self.fan_out(reliable, |id, zid| {
+            Ok(
+                is_tree_forward_target(id, zid, inbound, inbound_zid.as_deref(), &children)
+                    .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
+            )
+        });
+    }
+
+    /// A sourced `UndeclareSubscriber` arrived on `inbound`: withdraw the SOURCE
+    /// peer's interest in the retracted keyexpr (carried in the message's
+    /// `ext_keyexpr` extension — sourced undeclares use no id, the keyexpr is the
+    /// identity), and — only if this peer HELD that interest — re-flood the
+    /// retraction onward along the SOURCE's spanning tree to self's tree children
+    /// (excluding the inbound face), re-stamped with this node's psid for the
+    /// source. The "only on held"
+    /// ([`LinkstatepeerSubs::withdraw`](crate::linkstate_subs::LinkstatepeerSubs::withdraw)
+    /// returning `true`) is the change-gate bounding the flood — the exact mirror
+    /// of [`forward_subscription`](Self::forward_subscription)'s "only on new",
+    /// so a retraction cannot loop. zenoh
+    /// `forget_linkstatepeer_subscription` -> `unregister_peer_subscription` +
+    /// `propagate_forget_sourced_subscription`. Resolves the source + re-stamp
+    /// through the same shared [`resolve_source`](Self::resolve_source) seam the
+    /// declare path uses.
+    fn forward_unsubscription(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
+        // The retracted keyexpr rides the ext_keyexpr extension. A non-undeclare
+        // body, or an absent / aliased keyexpr ext, is left alone (the same
+        // literal-only MVP deferral as the declare side).
+        let Some(keyexpr) = undeclare_subscriber_keyexpr(declare) else {
+            return;
+        };
+        let (inbound_zid, inbound_link) = {
+            let faces = self.faces.borrow();
+            match faces.get(&inbound) {
+                Some(s) => (s.actions.peer_zid(), s.link),
+                None => return,
+            }
+        };
+        let Some((source_zid, out_node_id)) = self.resolve_source(
+            inbound_zid.as_ref(),
+            inbound_link,
+            read_declare_source(declare),
+        ) else {
+            return;
+        };
+        // Withdraw the source's interest; re-flood ONLY on a real removal (the
+        // loop-bounding change-gate). `withdraw` borrows `keyexpr` (a view into
+        // `declare`); the subsequent `declare.clone()` re-borrows after it
+        // returns.
+        if !self.subs.borrow_mut().withdraw(keyexpr, &source_zid) {
+            return;
+        }
+        let children = self.net.borrow().tree_children_of(&source_zid);
+        if children.is_empty() {
+            return;
+        }
+        let mut carrier = declare.clone();
+        set_declare_source(&mut carrier, out_node_id);
+        // Re-flood to self's children in the source's tree — the same shared
+        // re-forward predicate forward_subscription uses; only the carrier (an
+        // UndeclareSubscriber) differs.
         let _ = self.fan_out(reliable, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid.as_deref(), &children)
@@ -606,6 +696,20 @@ fn literal_keyexpr(wireexpr: &WireexprOwned) -> Option<&str> {
 fn declare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => literal_keyexpr(&sub.keyexpr),
+        _ => None,
+    }
+}
+
+/// The literal keyexpr a sourced `UndeclareSubscriber` retracts — read from its
+/// `ext_keyexpr` extension (a sourced undeclare carries no id, so the keyexpr is
+/// the subscription identity). `None` for a non-undeclare-subscriber body or an
+/// absent / aliased keyexpr ext (the literal-only MVP deferral, the retraction
+/// twin of [`declare_subscriber_keyexpr`]).
+fn undeclare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
+    match &declare.body {
+        DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
+            read_ext_keyexpr(u.extensions.as_ref())
+        }
         _ => None,
     }
 }
@@ -710,11 +814,16 @@ impl FaceForwarder for LinkstateForwarder {
                     self.data_seen.set(self.data_seen.get() + 1);
                     self.forward_push(id, *reliable, push);
                 }
-                // c3c-3 — a sourced DeclareSubscriber: register the source
-                // peer's interest, then re-flood along the source's tree.
-                NetworkMessage::Declare(declare) => {
-                    self.forward_subscription(id, *reliable, declare);
-                }
+                // c3c-3 — a sourced subscription declaration: a
+                // DeclareSubscriber registers the source peer's interest, an
+                // UndeclareSubscriber (c3c-3 debt A1) withdraws it; both then
+                // re-flood along the source's tree on a real change.
+                NetworkMessage::Declare(declare) => match &declare.body {
+                    DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
+                        self.forward_unsubscription(id, *reliable, declare);
+                    }
+                    _ => self.forward_subscription(id, *reliable, declare),
+                },
                 _ => {}
             }
         }
@@ -1578,6 +1687,113 @@ mod tests {
             fwd.interested("demo/sub"),
             vec![zid(0x0A)],
             "the Declare arm registered A's interest"
+        );
+    }
+
+    // ── c3c-3 debt A1: subscription RETRACTION propagation ───────────
+
+    #[test]
+    fn undeclare_subscription_floods_to_tree_children() {
+        // self(S) retracts its OWN interest: floods a sourced UndeclareSubscriber
+        // to self's children in self's tree (the single neighbour A) — the
+        // retraction twin of declare_subscription.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        sink_a.reset();
+
+        let sent = fwd.undeclare_subscription("demo/sub").expect("undeclare");
+        assert_eq!(sent, 1, "flooded the retraction to the one tree child");
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "A received the subscription retraction"
+        );
+    }
+
+    #[test]
+    fn forward_unsubscription_withdraws_source_and_re_floods_along_the_tree() {
+        // Line A - S(self) - C. A first declares interest, then retracts it: the
+        // sourced UndeclareSubscriber (node_id 0) floods along A's tree — self
+        // withdraws A's interest, then re-floods to its tree child C, never back
+        // to the inbound source A.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S<->C
+        declare_interest(&fwd, FaceId(0), "demo/sub"); // A is interested
+        assert_eq!(fwd.interested("demo/sub"), vec![zid(0x0A)], "A registered");
+        sink_a.reset();
+        sink_c.reset();
+
+        let undeclare =
+            build_undeclare_subscriber_with_keyexpr("demo/sub").expect("build undeclare");
+        fwd.forward_unsubscription(FaceId(0), true, &undeclare);
+
+        assert!(
+            fwd.interested("demo/sub").is_empty(),
+            "self withdrew A's interest"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "re-flooded the retraction to the tree child C"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+    }
+
+    #[test]
+    fn forward_unsubscription_does_not_re_flood_an_unknown_interest() {
+        // The change-gate: an UndeclareSubscriber for an interest never held does
+        // NOT withdraw or re-flood (the mirror of zenoh's `if contains`), so a
+        // retraction cannot loop on a converged mesh.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        sink_c.reset();
+
+        let undeclare = build_undeclare_subscriber_with_keyexpr("demo/sub").expect("build");
+        fwd.forward_unsubscription(FaceId(0), true, &undeclare); // never registered
+
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "an unknown interest's retraction is not re-flooded"
+        );
+    }
+
+    #[test]
+    fn forward_dispatches_an_undeclare_subscriber_to_withdraw() {
+        // The forward() seam routes a NetworkMessage::Declare(UndeclareSubscriber)
+        // to forward_unsubscription — the inbound-iteration retract path, distinct
+        // from the DeclareSubscriber register path.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        declare_interest(&fwd, FaceId(0), "demo/sub"); // A is interested
+        assert_eq!(fwd.interested("demo/sub"), vec![zid(0x0A)], "A registered");
+
+        let undeclare = build_undeclare_subscriber_with_keyexpr("demo/sub").expect("build");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(undeclare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        assert!(
+            fwd.interested("demo/sub").is_empty(),
+            "the UndeclareSubscriber arm withdrew A's interest"
         );
     }
 }
