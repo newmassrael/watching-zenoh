@@ -58,9 +58,16 @@
 //! [`with_trees_delay`](LinkstateForwarder::with_trees_delay) knob (default
 //! 100ms = zenoh's `TREES_COMPUTATION_DELAY_MS`); it tunes the SPF-throttle
 //! delay, NOT an on/off switch — the coalescing path is the single recompute
-//! SSOT. Still deferred: the `Details` topology optimisation (a per-link delta
-//! instead of the full-topology flood, D4), and alias / wildcard keyexprs (the
-//! filter is literal-keyexpr exact-match, B1 / B2). `routing-peer`-gated.
+//! SSOT. Data-plane keyexpr ALIASES are resolved (c3c-3 B1): a peer's sourced
+//! `Declare(DeclKexpr)` records `id -> keyexpr` in the inbound face's link-local
+//! table ([`absorb_keyexpr_declaration`](LinkstateForwarder::absorb_keyexpr_declaration)),
+//! a `Push` carrying that alias is resolved via the shared `resolve_wireexpr`
+//! SSOT, and the forward NORMALIZES the keyexpr to a literal so the downstream
+//! link (which does not share the inbound link's alias table) can resolve it.
+//! Still deferred: the same alias resolution on the CONTROL plane (an aliased
+//! `DeclareSubscriber` keyexpr, B1b), the `Details` topology optimisation (D4),
+//! and wildcard keyexpr intersection (the filter is exact-match, B2).
+//! `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -84,10 +91,11 @@ use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::push_build::build_push_literal;
+use wz_session_core::push_build::{build_push_literal, set_push_keyexpr_literal};
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
+use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Zid};
 
@@ -119,6 +127,14 @@ struct FaceState {
     /// identity: no graph link, so nothing to ingest against and no bootstrap
     /// target.
     link: Option<LinkId>,
+    /// This face's link-local keyexpr-alias table (c3c-3 B1): `id -> literal
+    /// keyexpr`, populated from sourced `Declare(DeclKexpr)` messages the peer
+    /// sent on THIS link and consulted (via the shared
+    /// [`resolve_wireexpr`](wz_session_core::wireexpr_resolve::resolve_wireexpr)
+    /// SSOT) to resolve an aliased keyexpr a later `Push` / `DeclareSubscriber`
+    /// carries. Per-face because keyexpr aliasing is a per-transport negotiation
+    /// in zenoh (`hashbrown` to match `resolve_wireexpr`'s table type).
+    keyexpr_table: hashbrown::HashMap<u64, String>,
 }
 
 pub struct LinkstateForwarder {
@@ -442,15 +458,21 @@ impl LinkstateForwarder {
     /// needs no hop-limit — it is bounded by the [`LinkstatepeerSubs`] register
     /// change-gate (re-flood only on a NEW interest), the state-convergent bound.
     fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
-        // The inbound face's zid + graph link — the only state the source
-        // resolution needs from the faces set, taken in a SCOPED borrow so the
-        // `fan_out` below holds the only live `faces` borrow.
-        let (inbound_zid, inbound_link) = {
+        // The inbound face's zid + graph link (source resolution) AND the Push's
+        // keyexpr resolved against THIS face's link-local alias table (c3c-3 B1) —
+        // taken in one SCOPED borrow so the `fan_out` below holds the only live
+        // `faces` borrow. An aliased keyexpr (id != 0) the peer never declared on
+        // this link is unresolvable and drops the Push (the same drop a missing
+        // literal got); id == 0 resolves to the suffix verbatim.
+        let (inbound_zid, inbound_link, keyexpr) = {
             let faces = self.faces.borrow();
-            match faces.get(&inbound) {
-                Some(s) => (s.actions.peer_zid(), s.link),
-                None => return,
-            }
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
+                return;
+            };
+            (s.actions.peer_zid(), s.link, keyexpr)
         };
 
         // Resolve the source (tree root) + this node's psid for it via the
@@ -464,14 +486,12 @@ impl LinkstateForwarder {
         // The data-route filter (c3c-3 atom4): forward only toward subtrees
         // that hold an interested subscriber — `directions_toward` over the
         // keyexpr's interested-peer set — not every tree child (the pre-atom4
-        // broadcast). A keyexpr no peer subscribes to forwards nowhere.
-        let Some(keyexpr) = push_keyexpr(push) else {
-            return;
-        };
-        // The data-route filter excludes self (interested_remote): self is the
-        // local sink (delivered by the session layer), not a mesh forward target.
+        // broadcast). A keyexpr no peer subscribes to forwards nowhere. (The
+        // keyexpr was resolved alias-aware in the scoped borrow above, B1.)
+        // The filter excludes self (interested_remote): self is the local sink
+        // (delivered by the session layer), not a mesh forward target.
         let self_zid = self.net.borrow().self_zid().clone();
-        let interested = self.subs.borrow().interested_remote(keyexpr, &self_zid);
+        let interested = self.subs.borrow().interested_remote(&keyexpr, &self_zid);
         if interested.is_empty() {
             return;
         }
@@ -507,6 +527,15 @@ impl LinkstateForwarder {
         let mut carrier = push.clone();
         set_push_source(&mut carrier, out_node_id);
         set_push_hoplimit(&mut carrier, hop - 1);
+        // c3c-3 B1 — NORMALIZE the forwarded keyexpr to a literal: a downstream
+        // child does not share THIS inbound link's alias table, so an aliased id
+        // would be unresolvable there. The forwarder always re-expresses to the
+        // resolved literal (it originates no outbound aliases, so downstream
+        // always sees id == 0); this also sets the header N bit a literal keyexpr
+        // requires, so a pure-aliased inbound (N clear) becomes a valid literal.
+        if set_push_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
+            return;
+        }
 
         // Forward to the interested children in the source's tree — never to the
         // inbound face, nor back toward the source's own neighbour (the shared
@@ -861,6 +890,36 @@ impl LinkstateForwarder {
         self.trees_dirty.set(true);
     }
 
+    /// Record (or drop) a peer keyexpr alias from a sourced `Declare` on `face`
+    /// (c3c-3 B1): a `DeclKexpr` maps `id -> resolved keyexpr` into THAT face's
+    /// link-local [`keyexpr_table`](FaceState::keyexpr_table), an `UndeclKexpr`
+    /// removes it. The declared base may itself reference an earlier alias on the
+    /// same link, so it is resolved against the table before recording (the
+    /// routing-routes HAT's `absorb_declare`, `pubsub.rs`; zenoh-pico
+    /// `_z_session_recv_declaration`). Link-local: NOT re-flooded onward — each
+    /// link negotiates its own aliases (zenoh declares keyexprs hop-by-hop, never
+    /// across the mesh), so the forwarder records the alias for RESOLUTION and
+    /// re-expresses the keyexpr to a literal when it forwards the carrying message.
+    fn absorb_keyexpr_declaration(&self, face: FaceId, declare: &DeclareOwned) {
+        let mut faces = self.faces.borrow_mut();
+        let Some(state) = faces.get_mut(&face) else {
+            return;
+        };
+        match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
+                if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, &state.keyexpr_table) {
+                    state.keyexpr_table.insert(d.id, literal);
+                }
+            }
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
+                state.keyexpr_table.remove(&u.id);
+            }
+            // Only the two keyexpr-declaration bodies reach here (the forward()
+            // dispatch routes everything else); a defensive no-op otherwise.
+            _ => {}
+        }
+    }
+
     /// The peers interested in `keyexpr` — the subscription-filter input the
     /// data forward (atom4) feeds to
     /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
@@ -938,13 +997,6 @@ fn undeclare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
     }
 }
 
-/// The literal keyexpr a data `Push` carries — the key the data-route filter
-/// (c3c-3 atom4) looks the interested-peer set up by. `None` for a non-literal
-/// keyexpr.
-fn push_keyexpr(push: &PushOwned) -> Option<&str> {
-    literal_keyexpr(&push.keyexpr)
-}
-
 impl FaceForwarder for LinkstateForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
         // Connect the face in the graph if its routing zid surfaced at the
@@ -963,6 +1015,7 @@ impl FaceForwarder for LinkstateForwarder {
             FaceState {
                 actions: actions.clone(),
                 link,
+                keyexpr_table: hashbrown::HashMap::new(),
             },
         );
         // Self gained a routing link (its own link-state changed, sn bumped):
@@ -1099,6 +1152,13 @@ impl FaceForwarder for LinkstateForwarder {
                 // UndeclareSubscriber (c3c-3 debt A1) withdraws it; both then
                 // re-flood along the source's tree on a real change.
                 NetworkMessage::Declare(declare) => match &declare.body {
+                    // c3c-3 B1 — a peer keyexpr alias declaration: record/drop it
+                    // in the INBOUND face's link-local table (not re-flooded; each
+                    // link negotiates its own aliases).
+                    DeclareOwnedVariant::CodecZenohDeclKexpr(_)
+                    | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
+                        self.absorb_keyexpr_declaration(id, declare);
+                    }
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
                         self.forward_unsubscription(id, *reliable, declare);
                     }
@@ -1457,6 +1517,117 @@ mod tests {
             Some(NetworkMessage::Declare(d)) => read_declare_source(d),
             other => panic!("expected a forwarded Declare, got {other:?}"),
         }
+    }
+
+    /// The LITERAL keyexpr of the single forwarded Push in a recorded wire frame,
+    /// or `None` if that Push's keyexpr is still aliased (id != 0). Proves the B1
+    /// normalize landed ON THE WIRE — a downstream link sees a literal.
+    fn forwarded_keyexpr(frame: &[u8]) -> Option<String> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Push(p)) => literal_keyexpr(&p.keyexpr).map(str::to_string),
+            other => panic!("expected a forwarded Push, got {other:?}"),
+        }
+    }
+
+    // ── c3c-3 B1: data-plane keyexpr alias resolution (DeclKexpr) ────
+
+    #[test]
+    fn an_aliased_push_resolves_via_the_face_table_and_forwards_a_literal() {
+        // Line A - S(self) - B; B subscribes to "demo/data" (literal). A first
+        // declares a keyexpr alias (id 7 -> "demo/data") on its link, then sends a
+        // PURE-ALIASED Push (id 7, no suffix). self resolves the alias via A's
+        // link-local table, matches B's interest, and forwards toward B — but
+        // NORMALIZED to a literal (id 0), since B's link does not share A's alias
+        // table (c3c-3 B1).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes (literal)
+        let decl = wz_session_core::declare_build::build_declare_kexpr(7, "demo/data")
+            .expect("build decl kexpr");
+        fwd.absorb_keyexpr_declaration(FaceId(0), &decl);
+        sink_a.reset();
+        sink_b.reset();
+
+        let aliased = wz_session_core::push_build::build_push_aliased(7, None, b"v")
+            .expect("build aliased push");
+        fwd.forward_push(FaceId(0), true, &aliased);
+
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the aliased Push resolved and forwarded to the interested child B"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "never back toward the source A");
+        assert_eq!(
+            forwarded_keyexpr(&sink_b.frame_bytes(0)),
+            Some("demo/data".to_string()),
+            "the forwarded keyexpr is normalized to a literal (B's link has no alias)",
+        );
+    }
+
+    #[test]
+    fn an_undeclared_alias_no_longer_resolves_so_the_push_drops() {
+        // After the alias is retracted (UndeclKexpr), a Push still carrying it is
+        // unresolvable and dropped — the table entry is gone.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        let decl = wz_session_core::declare_build::build_declare_kexpr(7, "demo/data")
+            .expect("build decl kexpr");
+        fwd.absorb_keyexpr_declaration(FaceId(0), &decl);
+        let undecl = wz_session_core::declare_build::build_undeclare_kexpr(7);
+        fwd.absorb_keyexpr_declaration(FaceId(0), &undecl);
+        sink_b.reset();
+
+        let aliased = wz_session_core::push_build::build_push_aliased(7, None, b"v")
+            .expect("build aliased push");
+        fwd.forward_push(FaceId(0), true, &aliased);
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "the retracted alias no longer resolves -> Push dropped"
+        );
+    }
+
+    #[test]
+    fn an_unknown_alias_push_is_dropped() {
+        // A Push carrying an alias the peer never declared on this link is
+        // unresolvable -> dropped (no misroute on a pre-declaration / bogus id).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_b.reset();
+
+        let aliased = wz_session_core::push_build::build_push_aliased(9, None, b"v")
+            .expect("build aliased push"); // id 9 never declared on this link
+        fwd.forward_push(FaceId(0), true, &aliased);
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "unknown alias -> dropped, not forwarded"
+        );
     }
 
     #[test]

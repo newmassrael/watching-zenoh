@@ -95,19 +95,12 @@ use wz_codecs::ext_zint::ExtZint;
 /// `wz_codecs::push::Push`; principled exemption from the
 /// signature-stability sweep per `feedback_signature_stability`).
 pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwned, CodecError> {
-    let suffix_len = keyexpr_suffix.len() as u64;
     let payload_len = value.len() as u64;
     Ok(PushOwned {
         // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
         // WireexprLocal arm at encode time (push.rs:189).
         header: wire_const::N_MID_PUSH | 0x20,
-        keyexpr: WireexprOwned {
-            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                id: 0,
-                suffix_len: Some(suffix_len),
-                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
-            }),
-        },
+        keyexpr: literal_wireexpr(keyexpr_suffix)?,
         extensions: None,
         body: PushOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
             header: 0x01,
@@ -118,6 +111,36 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwne
             payload: crate::codec_owned::owned_bytes(value)?,
         }),
     })
+}
+
+/// Build a literal (`id == 0`) keyexpr `Wireexpr` carrying `suffix` verbatim —
+/// the un-aliased wire form [`build_push_literal`] embeds, factored out as the
+/// SSOT literal-`Wireexpr` constructor. The linkstate forwarder NORMALIZES an
+/// inbound aliased keyexpr back to a literal with this before forwarding the
+/// message onward (c3c-3 B1): a downstream link does not share the inbound
+/// link's keyexpr-alias table, so an aliased id would be unresolvable there.
+pub fn literal_wireexpr(suffix: &str) -> Result<WireexprOwned, CodecError> {
+    Ok(WireexprOwned {
+        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+            id: 0,
+            suffix_len: Some(suffix.len() as u64),
+            suffix: Some(crate::codec_owned::owned_string(suffix)?),
+        }),
+    })
+}
+
+/// Re-express a `Push`'s keyexpr as the literal `suffix` (c3c-3 B1 normalize):
+/// set the keyexpr to a literal ([`literal_wireexpr`]) AND the header's `N`
+/// (suffix-present, `0x20`) bit, which a literal keyexpr always carries. The two
+/// MUST stay in sync — a clear `N` bit with a suffix-bearing wireexpr drops the
+/// peer's decoder into an offset-shifted read of the following `MsgPut` header.
+/// The linkstate forwarder calls this on the outbound carrier so a downstream
+/// link (no shared alias table) receives a self-contained literal Push, even
+/// when the inbound was a pure-aliased Push whose `N` bit was clear.
+pub fn set_push_keyexpr_literal(push: &mut PushOwned, suffix: &str) -> Result<(), CodecError> {
+    push.keyexpr = literal_wireexpr(suffix)?;
+    push.header |= 0x20;
+    Ok(())
 }
 
 /// R121g — build a `Push` network-message that references a peer-
