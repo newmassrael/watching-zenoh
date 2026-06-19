@@ -34,11 +34,20 @@
 //! Data forwarding (c3c): [`forward_push`](LinkstateForwarder::forward_push)
 //! floods a received Push along the source's spanning tree
 //! ([`tree_children_of`](wz_routing_graph::LinkstateNetwork::tree_children_of)),
-//! and [`publish`](LinkstateForwarder::publish) originates one. What is NOT
-//! here yet: subscription-filtered routing (zenoh forwards along
-//! `directions[sub]` toward interested subscribers; wz floods every tree child
-//! — the deferred c3c-3 step), and the change-triggered-flood / `Details`
-//! optimisations. `routing-peer`-gated.
+//! and [`publish`](LinkstateForwarder::publish) originates one. Subscription
+//! INTEREST now propagates across the mesh (c3c-3 atom3):
+//! [`declare_subscription`](LinkstateForwarder::declare_subscription) floods a
+//! sourced `DeclareSubscriber`, and
+//! [`forward_subscription`](LinkstateForwarder::forward_subscription) registers
+//! the source peer's interest + re-floods it, so each peer learns who is
+//! interested in what ([`interested`](LinkstateForwarder::interested)). What is
+//! NOT here yet: the data-route FILTER — `forward_push` still floods EVERY tree
+//! child, whereas zenoh forwards only along `directions[sub]` toward interested
+//! subscribers (the remaining c3c-3 atom4 step wires
+//! [`interested`](LinkstateForwarder::interested) into
+//! [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward))
+//! — and the change-triggered-flood / `Details` optimisations.
+//! `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -47,9 +56,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sce_forge_runtime::codec::CodecError;
+use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::push::PushOwned;
+use wz_codecs::wireexpr::WireexprOwnedVariant;
+use wz_session_core::declare_build::build_declare_subscriber;
+use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
@@ -61,6 +74,7 @@ use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Zid};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
+use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export so the peer-loop caller (the demo) names the neighbour role by
@@ -114,6 +128,13 @@ pub struct LinkstateForwarder {
     /// the end-to-end proof that mesh data forwarding reached it (the data
     /// counterpart of `ingested`).
     data_seen: Cell<usize>,
+    /// The linkstate-peer subscription interest table (c3c-3 atom2): which
+    /// peers are interested in which keyexpr, learned from sourced
+    /// `DeclareSubscriber`s flooded across the mesh. The HAT-analogue interest
+    /// state the data-route filter (atom4) reads to bound the Push fan-out to
+    /// interested subtrees. `RefCell` by the same single-task contract as the
+    /// graph — borrowed only for a handler's synchronous duration.
+    subs: RefCell<LinkstatepeerSubs>,
 }
 
 impl LinkstateForwarder {
@@ -124,6 +145,7 @@ impl LinkstateForwarder {
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
+            subs: RefCell::new(LinkstatepeerSubs::new()),
         }
     }
 
@@ -422,6 +444,129 @@ impl LinkstateForwarder {
             Ok(to_child.then(|| NetworkMessage::Push(Box::new(push.clone()))))
         })
     }
+
+    /// Originate a LOCAL subscription INTO the mesh: this node is interested in
+    /// `keyexpr`, so flood a sourced `DeclareSubscriber` to self's CHILDREN in
+    /// self's own spanning tree (this node is the source), stamped
+    /// self-originated (node_id 0 — `build_declare_subscriber` emits no
+    /// `ext_nodeid`). Each child registers self's interest and re-forwards via
+    /// [`forward_subscription`](Self::forward_subscription). The control-plane
+    /// (interest) counterpart to [`publish`](Self::publish) (data). Mirrors
+    /// zenoh `declare_linkstatepeer_subscription` -> `propagate_sourced_subscription`
+    /// with source = self. Returns the number of tree-child faces reached.
+    pub fn declare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        // id 0 = zenoh sourced-subscription sentinel; literal keyexpr (the wz
+        // MVP form, mapping id 0 + suffix).
+        let declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
+        let children = {
+            let net = self.net.borrow();
+            let self_zid = net.self_zid().clone();
+            net.tree_children_of(&self_zid)
+        };
+        if children.is_empty() {
+            return Ok(0);
+        }
+        self.fan_out(true, |_id, zid| {
+            let to_child = match zid {
+                Some(z) => children.iter().any(|c| c.as_slice() == z),
+                None => false,
+            };
+            Ok(to_child.then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
+        })
+    }
+
+    /// A sourced `DeclareSubscriber` arrived on `inbound`: register the SOURCE
+    /// peer's interest in the declared keyexpr, and — only if this NEWLY
+    /// learned it — re-flood the declaration onward along the SOURCE's spanning
+    /// tree to self's tree children (excluding the inbound face), re-stamped
+    /// with this node's psid for the source. The "only on new"
+    /// ([`LinkstatepeerSubs::register`](crate::linkstate_subs::LinkstatepeerSubs::register)
+    /// returning `true`) is the change-gate that bounds the flood: a peer that
+    /// already knew the interest does not re-flood, so the declaration cannot
+    /// loop. zenoh `register_linkstatepeer_subscription`'s `if !contains {
+    /// insert; propagate }`. Resolves the source + re-stamp value through the
+    /// shared [`resolve_source`](Self::resolve_source) seam, exactly as
+    /// [`forward_push`](Self::forward_push) — the difference is the
+    /// control-plane spread floods ALL tree children (zenoh
+    /// `propagate_sourced_subscription` uses the tree `children`), not the
+    /// data-plane interest-filtered directions.
+    fn forward_subscription(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
+        // Only a DeclareSubscriber body carries mesh interest (and only the MVP
+        // literal keyexpr form). A non-subscriber Declare / non-literal
+        // wireexpr is left alone.
+        let Some(keyexpr) = declare_subscriber_keyexpr(declare) else {
+            return;
+        };
+        let (inbound_zid, inbound_link) = {
+            let faces = self.faces.borrow();
+            match faces.get(&inbound) {
+                Some(s) => (s.actions.peer_zid(), s.link),
+                None => return,
+            }
+        };
+        let Some((source_zid, out_node_id)) = self.resolve_source(
+            inbound_zid.as_ref(),
+            inbound_link,
+            read_declare_source(declare),
+        ) else {
+            return;
+        };
+        // Register the source's interest; re-flood ONLY on a new registration
+        // (the loop-bounding change-gate). `register` borrows `keyexpr` (a view
+        // into `declare`); the subsequent `declare.clone()` re-borrows after it
+        // returns.
+        if !self.subs.borrow_mut().register(keyexpr, source_zid.clone()) {
+            return;
+        }
+        let children = self.net.borrow().tree_children_of(&source_zid);
+        if children.is_empty() {
+            return;
+        }
+        let mut carrier = declare.clone();
+        set_declare_source(&mut carrier, out_node_id);
+        // Re-flood to self's children in the source's tree — never to the
+        // inbound face nor back toward the source's own neighbour.
+        let _ = self.fan_out(reliable, |id, zid| {
+            if id == inbound {
+                return Ok(None);
+            }
+            let Some(zid) = zid else {
+                return Ok(None);
+            };
+            if inbound_zid.as_deref() == Some(zid) {
+                return Ok(None);
+            }
+            if !children.iter().any(|c| c.as_slice() == zid) {
+                return Ok(None);
+            }
+            Ok(Some(NetworkMessage::Declare(Box::new(carrier.clone()))))
+        });
+    }
+
+    /// The peers interested in `keyexpr` — the subscription-filter input the
+    /// data forward (atom4) feeds to
+    /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
+    /// Empty if no peer is interested. Exposed so a test (and the demo's
+    /// shutdown summary) can observe the interest the mesh propagated.
+    pub fn interested(&self, keyexpr: &str) -> Vec<Zid> {
+        self.subs.borrow().interested(keyexpr)
+    }
+}
+
+/// Extract the literal keyexpr from a `DeclareSubscriber` declaration — the wz
+/// MVP literal form (`WireexprLocal { id: 0, suffix }`, what `push_build` /
+/// `declare_build` emit). Returns `None` for a non-subscriber Declare body or
+/// a non-literal wireexpr: an aliased (`id != 0`) keyexpr needs a peer
+/// keyexpr-mapping table to resolve (the keyexpr-mapping deferral), and
+/// wildcard intersection is the further `linkstatepeer_subs` exact-match debt.
+fn declare_subscriber_keyexpr(declare: &DeclareOwned) -> Option<&str> {
+    let DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) = &declare.body else {
+        return None;
+    };
+    match &sub.keyexpr.body {
+        WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => w.suffix.as_deref(),
+        _ => None,
+    }
 }
 
 impl FaceForwarder for LinkstateForwarder {
@@ -508,6 +653,11 @@ impl FaceForwarder for LinkstateForwarder {
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
                     self.forward_push(id, *reliable, push);
+                }
+                // c3c-3 — a sourced DeclareSubscriber: register the source
+                // peer's interest, then re-flood along the source's tree.
+                NetworkMessage::Declare(declare) => {
+                    self.forward_subscription(id, *reliable, declare);
                 }
                 _ => {}
             }
@@ -1057,6 +1207,109 @@ mod tests {
             sink_b.frame_count(),
             0,
             "the S-B cycle edge is excluded by A's tree (B is A's child) — no loop"
+        );
+    }
+
+    // ── c3c-3 atom3b-ii: subscription declaration propagation ────────
+
+    #[test]
+    fn declare_subscription_floods_to_tree_children() {
+        // self(S) declares its OWN interest: floods a sourced DeclareSubscriber
+        // to self's children in self's tree (here the single neighbour A).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        sink_a.reset();
+
+        let sent = fwd.declare_subscription("demo/sub").expect("declare");
+        assert_eq!(sent, 1, "flooded to the one tree child");
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "A received the subscription declaration"
+        );
+    }
+
+    #[test]
+    fn forward_subscription_registers_source_and_re_floods_along_the_tree() {
+        // Line A - S(self) - C. A's sourced DeclareSubscriber (node_id 0) floods
+        // along A's tree: self registers A's interest, then re-floods to its
+        // tree child C — never back to the inbound source A.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S<->C
+        sink_a.reset();
+        sink_c.reset();
+
+        let declare = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
+        fwd.forward_subscription(FaceId(0), true, &declare);
+
+        assert_eq!(
+            fwd.interested("demo/sub"),
+            vec![zid(0x0A)],
+            "self learned A is interested in demo/sub"
+        );
+        assert_eq!(sink_c.frame_count(), 1, "re-flooded to the tree child C");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the inbound source A");
+    }
+
+    #[test]
+    fn forward_subscription_does_not_re_flood_a_known_interest() {
+        // The change-gate: a duplicate DeclareSubscriber for an interest already
+        // registered does NOT re-flood (zenoh's `if !contains`), so a converged
+        // mesh cannot loop the declaration.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+
+        let declare = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
+        fwd.forward_subscription(FaceId(0), true, &declare); // first: register + flood
+        sink_c.reset();
+        fwd.forward_subscription(FaceId(0), true, &declare); // duplicate: gated
+
+        assert_eq!(
+            fwd.interested("demo/sub"),
+            vec![zid(0x0A)],
+            "interest recorded exactly once"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "a known interest is not re-flooded"
+        );
+    }
+
+    #[test]
+    fn forward_dispatches_a_declare_subscriber_to_the_registry() {
+        // The forward() seam routes a NetworkMessage::Declare to
+        // forward_subscription — the inbound-iteration path the peer loop drives.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+
+        let declare = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        assert_eq!(
+            fwd.interested("demo/sub"),
+            vec![zid(0x0A)],
+            "the Declare arm registered A's interest"
         );
     }
 }

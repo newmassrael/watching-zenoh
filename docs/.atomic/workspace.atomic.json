@@ -42400,6 +42400,48 @@
         "LOCAL UNPUSHED 4커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요."
       ]
     },
+    "Round 311rq": {
+      "decision_summary": "R311rq: c3c-3 구독필터 atom3b-ii(전파 driver, feature). LinkstateForwarder에 LinkstatepeerSubs field+declare_subscription(로컬 interest→self tree children flood self-originated)+forward_subscription(수신→resolve_source+keyexpr 추출+register[change-gate]→source tree re-flood, inbound 제외)+forward() Declare arm 배선+interested() accessor. Cargo routing-peer에 codec-declare 추가. zenoh declare_linkstatepeer_subscription/register_linkstatepeer_subscription/propagate_sourced_subscription 미러. 4 unit. keyexpr=literal MVP. pubsub_tree_change(재광고)=정직 defer.",
+      "changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: routing-peer에 codec-declare 추가(구독필터 라우팅이 DeclareSubscriber 와이어 표면+declare_routing_context node_id seam 필요). linkstate_forward.rs: subs: RefCell<LinkstatepeerSubs> field+new 초기화.",
+        "declare_subscription(keyexpr)=로컬 interest 발신(build_declare_subscriber(0,0,literal) self-originated node_id 0→self tree children flood; publish의 control-plane 짝)=zenoh declare_linkstatepeer_subscription→propagate_sourced_subscription(source=self). forward_subscription(inbound,reliable,declare)=수신: declare_subscriber_keyexpr 추출→resolve_source(rp 공유 SSOT)→LinkstatepeerSubs.register(change-gate)→true시만 source tree children re-flood(set_declare_source 재stamp, inbound 제외)=zenoh register_linkstatepeer_subscription if-not-contains. forward() Declare arm→forward_subscription. interested(keyexpr) accessor(atom4 입력).",
+        "declare_subscriber_keyexpr(declare)->Option<&str>=literal(WireexprLocal id 0+suffix)만; non-sub body/alias/와일드카드=None(keyexpr-mapping 부채). 모듈 doc 정직 갱신(interest 전파=완료, 데이터 필터=atom4 잔여). 4 unit(declare flood/forward register+re-flood/change-gate no-reflood/forward arm dispatch)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 316 PASS(linkstate_forward 24=20+4 신규, 292 무회귀). clippy(routing-peer all-targets) -D warnings clean. fmt clean. build routing-peer 성공.",
+        "전파 메커니즘: control-plane sub flood=trees[source].children(broadcast; 데이터면 directions와 다름!)=resolve_source SSOT(rp) 재사용으로 forward_push와 source 해석 동일. change-gate(register()->bool)=re-flood loop 방지(zenoh if-not-contains).",
+        "정직 갭: pubsub_tree_change(트리 재계산 시 기존 구독을 새 tree children에 재광고) 미구현=늦게 합류한 서브트리가 기존 interest 놓침(atom2 keys() accessor가 이 용도; topology change-triggered-flood와 동급 부채). 3-peer e2e=atom4(필터 배선 후 'C-ward만' 실증 가능; 현재 데이터 여전히 broadcast). keyexpr literal MVP=alias/와일드카드 부채."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rq = c3c-3 atom3b-ii: 구독 전파 driver. LinkstatepeerSubs field+declare_subscription(로컬 flood self-originated)+forward_subscription(수신 register+source tree re-flood, change-gate)+forward() Declare arm+interested() accessor. routing-peer에 codec-declare 추가. zenoh declare/register_linkstatepeer_subscription 미러. 4 unit(24 linkstate_forward). keyexpr literal MVP.",
+        "c3c-3 남은 atom4(최종): forward_push가 tree_children_of broadcast→directions_toward(source, subs.interested(ke)) 전환 + any_interest 게이트(no interest→no forward) + publish 동일 + 3-peer e2e(C subscribe→A publish→C-ward 서브트리만; 현재 모든 tree child broadcast). 주의: push에서 keyexpr 추출 필요(read_push_keyexpr; push도 literal WireexprLocal id0). atom4가 interest+directions 결합=c3c-3 완결.",
+        "정직 부채(atom3b서 defer): pubsub_tree_change=트리 재계산 시 기존 구독 재광고 미구현(늦은 합류 서브트리가 interest 놓침; keys() accessor 준비됨; topology change-triggered-flood와 동급). declare_subscriber_keyexpr=literal만(alias resolve=routing.rs resolve_wireexpr는 다른 HAT이라 미결합; keyexpr-mapping 부채). wildcard keyexpr intersection 부채.",
+        "LOCAL UNPUSHED 5커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source refactor)+rq(전파 driver). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect."
+      ],
+      "publishable_decision_summary": "R311rq: c3c-3 구독필터 atom3b-ii(전파 driver, feature). LinkstateForwarder에 LinkstatepeerSubs field+declare_subscription(로컬 interest→self tree children flood self-originated)+forward_subscription(수신→resolve_source+keyexpr 추출+register[change-gate]→source tree re-flood, inbound 제외)+forward() Declare arm 배선+interested() accessor. Cargo routing-peer에 codec-declare 추가. zenoh declare_linkstatepeer_subscription/register_linkstatepeer_subscription/propagate_sourced_subscription 미러. 4 unit. keyexpr=literal MVP. pubsub_tree_change(재광고)=정직 defer.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: routing-peer에 codec-declare 추가(구독필터 라우팅이 DeclareSubscriber 와이어 표면+declare_routing_context node_id seam 필요). linkstate_forward.rs: subs: RefCell<LinkstatepeerSubs> field+new 초기화.",
+        "declare_subscription(keyexpr)=로컬 interest 발신(build_declare_subscriber(0,0,literal) self-originated node_id 0→self tree children flood; publish의 control-plane 짝)=zenoh declare_linkstatepeer_subscription→propagate_sourced_subscription(source=self). forward_subscription(inbound,reliable,declare)=수신: declare_subscriber_keyexpr 추출→resolve_source(rp 공유 SSOT)→LinkstatepeerSubs.register(change-gate)→true시만 source tree children re-flood(set_declare_source 재stamp, inbound 제외)=zenoh register_linkstatepeer_subscription if-not-contains. forward() Declare arm→forward_subscription. interested(keyexpr) accessor(atom4 입력).",
+        "declare_subscriber_keyexpr(declare)->Option<&str>=literal(WireexprLocal id 0+suffix)만; non-sub body/alias/와일드카드=None(keyexpr-mapping 부채). 모듈 doc 정직 갱신(interest 전파=완료, 데이터 필터=atom4 잔여). 4 unit(declare flood/forward register+re-flood/change-gate no-reflood/forward arm dispatch)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 316 PASS(linkstate_forward 24=20+4 신규, 292 무회귀). clippy(routing-peer all-targets) -D warnings clean. fmt clean. build routing-peer 성공.",
+        "전파 메커니즘: control-plane sub flood=trees[source].children(broadcast; 데이터면 directions와 다름!)=resolve_source SSOT(rp) 재사용으로 forward_push와 source 해석 동일. change-gate(register()->bool)=re-flood loop 방지(zenoh if-not-contains).",
+        "정직 갭: pubsub_tree_change(트리 재계산 시 기존 구독을 새 tree children에 재광고) 미구현=늦게 합류한 서브트리가 기존 interest 놓침(atom2 keys() accessor가 이 용도; topology change-triggered-flood와 동급 부채). 3-peer e2e=atom4(필터 배선 후 'C-ward만' 실증 가능; 현재 데이터 여전히 broadcast). keyexpr literal MVP=alias/와일드카드 부채."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rq = c3c-3 atom3b-ii: 구독 전파 driver. LinkstatepeerSubs field+declare_subscription(로컬 flood self-originated)+forward_subscription(수신 register+source tree re-flood, change-gate)+forward() Declare arm+interested() accessor. routing-peer에 codec-declare 추가. zenoh declare/register_linkstatepeer_subscription 미러. 4 unit(24 linkstate_forward). keyexpr literal MVP.",
+        "c3c-3 남은 atom4(최종): forward_push가 tree_children_of broadcast→directions_toward(source, subs.interested(ke)) 전환 + any_interest 게이트(no interest→no forward) + publish 동일 + 3-peer e2e(C subscribe→A publish→C-ward 서브트리만; 현재 모든 tree child broadcast). 주의: push에서 keyexpr 추출 필요(read_push_keyexpr; push도 literal WireexprLocal id0). atom4가 interest+directions 결합=c3c-3 완결.",
+        "정직 부채(atom3b서 defer): pubsub_tree_change=트리 재계산 시 기존 구독 재광고 미구현(늦은 합류 서브트리가 interest 놓침; keys() accessor 준비됨; topology change-triggered-flood와 동급). declare_subscriber_keyexpr=literal만(alias resolve=routing.rs resolve_wireexpr는 다른 HAT이라 미결합; keyexpr-mapping 부채). wildcard keyexpr intersection 부채.",
+        "LOCAL UNPUSHED 5커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source refactor)+rq(전파 driver). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
