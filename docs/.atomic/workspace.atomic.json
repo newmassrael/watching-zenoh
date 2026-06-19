@@ -42362,6 +42362,44 @@
         "LOCAL UNPUSHED 3커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT 통합, wildcard keyexpr intersection, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect/locators."
       ]
     },
+    "Round 311rp": {
+      "decision_summary": "R311rp: c3c-3 atom3b-i(resolve_source SSOT 추출, refactor). forward_push의 source 해석(node_id→source_zid+self psid 재stamp값; 0=inbound neighbour/else link psid, self-source guard, u16 range guard=rj correctness 수정 전부)을 resolve_source(&self,inbound_zid,inbound_link,node_id)->Option<(Zid,u16)>로 추출. forward_subscription(atom3b-ii)이 동일 해석 재사용=drift 방지 SSOT. 동작 보존(20 linkstate_forward unit 무회귀).",
+      "changes_bullets": [
+        "linkstate_forward.rs: resolve_source(&self, inbound_zid: Option<&Zid>, inbound_link, node_id: u16)->Option<(Zid,u16)> 추출=zenoh get_peer+get_local_context. node_id 0=inbound neighbour, else link.get_zid(psid); self-source=None(looped/malformed; 재stamp시 local psid 0 sentinel 오귀속), unmapped psid/u16-over=None(NodeIdType range). forward_push 인라인 ~40줄(rj correctness 수정 포함)→resolve_source 호출+self.net.borrow().tree_children_of로 단축.",
+        "동작 보존 refactor: 20 linkstate_forward unit 전부 무회귀(forwards_a_push/transit_resolving/drops_self_source/drops_unresolvable/cycle_edge 포함=resolve_source 모든 분기 가드). forward_subscription(atom3b-ii)이 이 SSOT로 sourced Declare source 동일 해석=drift 방지."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_forward 20 PASS(무회귀; resolve_source 추출 후 동작 동일). clippy(routing-peer all-targets) -D warnings clean. fmt clean.",
+        "순수 refactor=신규 테스트 0(기존 20개가 모든 source-해석 분기 가드: node_id 0 neighbour, transit link psid, self-source drop, unresolvable drop). drop(net)→self.net.borrow() 2회 차용으로 변경(single-task라 무관). rk fan_out SSOT 패턴 답습(중복 인라인→단일 소유 헬퍼)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rp = c3c-3 atom3b-i: resolve_source SSOT 추출(forward_push source 해석→공유 헬퍼). node_id->(source_zid, self psid u16); 0=neighbour/else link psid; self-source/u16-range guard(rj correctness 단일 소유). 동작 보존(20 linkstate_forward unit 무회귀). forward_subscription이 재사용.",
+        "다음 atom3b-ii(feature): LinkstatepeerSubs field + declare_subscription(로컬 interest->self tree children flood self-originated node_id 0) + forward_subscription(수신->resolve_source+keyexpr 추출+LinkstatepeerSubs.register[change-gate가 re-flood loop 방지]->re-flood along source tree, inbound 제외) + forward() Declare arm 배선 + Cargo routing-peer에 codec-declare 추가 + 3-peer e2e. keyexpr 추출=literal(WireexprLocal id 0+suffix)만(MVP; alias/와일드카드=keyexpr-mapping 부채).",
+        "주의: control-plane sub flood=trees[source].children(broadcast; 데이터면 directions_toward와 다름). register if-not-contains gate(atom2 register()->bool)가 loop 방지=zenoh register_linkstatepeer_subscription.",
+        "LOCAL UNPUSHED 4커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요."
+      ],
+      "publishable_decision_summary": "R311rp: c3c-3 atom3b-i(resolve_source SSOT 추출, refactor). forward_push의 source 해석(node_id→source_zid+self psid 재stamp값; 0=inbound neighbour/else link psid, self-source guard, u16 range guard=rj correctness 수정 전부)을 resolve_source(&self,inbound_zid,inbound_link,node_id)->Option<(Zid,u16)>로 추출. forward_subscription(atom3b-ii)이 동일 해석 재사용=drift 방지 SSOT. 동작 보존(20 linkstate_forward unit 무회귀).",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs: resolve_source(&self, inbound_zid: Option<&Zid>, inbound_link, node_id: u16)->Option<(Zid,u16)> 추출=zenoh get_peer+get_local_context. node_id 0=inbound neighbour, else link.get_zid(psid); self-source=None(looped/malformed; 재stamp시 local psid 0 sentinel 오귀속), unmapped psid/u16-over=None(NodeIdType range). forward_push 인라인 ~40줄(rj correctness 수정 포함)→resolve_source 호출+self.net.borrow().tree_children_of로 단축.",
+        "동작 보존 refactor: 20 linkstate_forward unit 전부 무회귀(forwards_a_push/transit_resolving/drops_self_source/drops_unresolvable/cycle_edge 포함=resolve_source 모든 분기 가드). forward_subscription(atom3b-ii)이 이 SSOT로 sourced Declare source 동일 해석=drift 방지."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate_forward 20 PASS(무회귀; resolve_source 추출 후 동작 동일). clippy(routing-peer all-targets) -D warnings clean. fmt clean.",
+        "순수 refactor=신규 테스트 0(기존 20개가 모든 source-해석 분기 가드: node_id 0 neighbour, transit link psid, self-source drop, unresolvable drop). drop(net)→self.net.borrow() 2회 차용으로 변경(single-task라 무관). rk fan_out SSOT 패턴 답습(중복 인라인→단일 소유 헬퍼)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rp = c3c-3 atom3b-i: resolve_source SSOT 추출(forward_push source 해석→공유 헬퍼). node_id->(source_zid, self psid u16); 0=neighbour/else link psid; self-source/u16-range guard(rj correctness 단일 소유). 동작 보존(20 linkstate_forward unit 무회귀). forward_subscription이 재사용.",
+        "다음 atom3b-ii(feature): LinkstatepeerSubs field + declare_subscription(로컬 interest->self tree children flood self-originated node_id 0) + forward_subscription(수신->resolve_source+keyexpr 추출+LinkstatepeerSubs.register[change-gate가 re-flood loop 방지]->re-flood along source tree, inbound 제외) + forward() Declare arm 배선 + Cargo routing-peer에 codec-declare 추가 + 3-peer e2e. keyexpr 추출=literal(WireexprLocal id 0+suffix)만(MVP; alias/와일드카드=keyexpr-mapping 부채).",
+        "주의: control-plane sub flood=trees[source].children(broadcast; 데이터면 directions_toward와 다름). register if-not-contains gate(atom2 register()->bool)가 loop 방지=zenoh register_linkstatepeer_subscription.",
+        "LOCAL UNPUSHED 4커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

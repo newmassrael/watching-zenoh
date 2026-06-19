@@ -280,12 +280,54 @@ impl LinkstateForwarder {
         Ok(())
     }
 
+    /// Resolve a routing-context source `node_id` (carried by a Push or a
+    /// sourced Declare arriving on `inbound`) to the SOURCE zid + THIS node's
+    /// psid for it — the value to re-stamp outbound copies with. `node_id == 0`
+    /// means the inbound neighbour itself originated it; a non-zero id is the
+    /// source's psid in the inbound link's space, resolved via that link's
+    /// `psid -> zid` mapping (zenoh `get_peer`). Returns `None` to DROP:
+    /// - unknown source (no inbound zid / no link / unmapped psid → cannot
+    ///   place it in any tree),
+    /// - the source resolves to SELF: a malformed / looped-back message. Self's
+    ///   local psid is 0, which `set_*_source` encodes as the self-originated
+    ///   sentinel, so re-stamping it would make every downstream node
+    ///   mis-attribute the source to ITS inbound neighbour,
+    /// - the local psid exceeds the u16 routing-context range (zenoh
+    ///   `NodeIdType`): DROP rather than silently alias by truncation.
+    ///   Unreachable until a graph holds >65535 live nodes
+    ///   (`remove_detached_nodes` pruning is a tracked deferral).
+    ///
+    /// The single SSOT shared by [`forward_push`](Self::forward_push) (data)
+    /// and [`forward_subscription`](Self::forward_subscription) (a sourced
+    /// subscription declaration): both flood along the SOURCE's tree, so both
+    /// resolve the source — and the self-source / range guards — identically.
+    fn resolve_source(
+        &self,
+        inbound_zid: Option<&Zid>,
+        inbound_link: Option<LinkId>,
+        node_id: u16,
+    ) -> Option<(Zid, u16)> {
+        let net = self.net.borrow();
+        let source_zid: Zid = match node_id {
+            0 => inbound_zid?.clone(),
+            nid => net
+                .get_link(inbound_link?)
+                .and_then(|l| l.get_zid(nid as u64))?
+                .clone(),
+        };
+        if source_zid == *net.self_zid() {
+            return None;
+        }
+        let out_node_id = u16::try_from(net.local_psid_of(&source_zid)?).ok()?;
+        Some((source_zid, out_node_id))
+    }
+
     /// Flood a data `Push` onward along the SOURCE's spanning tree (c3c-2) —
     /// the loop-free mesh data forward. The Push arrived on `inbound`; its
     /// `ext_nodeid` names the source the message floods FROM (zenoh's
-    /// data-route tree root): `node_id == 0` means the inbound neighbour
-    /// itself originated it, otherwise the node_id is the source's psid in the
-    /// inbound link's space, resolved via that link's `psid -> zid` mapping.
+    /// data-route tree root), resolved by [`resolve_source`](Self::resolve_source):
+    /// `node_id == 0` means the inbound neighbour itself originated it,
+    /// otherwise the node_id is the source's psid in the inbound link's space.
     /// Self's CHILDREN in the source-rooted tree are the next hops, and the
     /// inbound face (self's parent toward the source) is excluded. Each
     /// outbound copy is re-stamped with THIS node's psid for the source (the
@@ -317,50 +359,15 @@ impl LinkstateForwarder {
             }
         };
 
-        // Resolve the source (tree root) and this node's psid for it.
-        let net = self.net.borrow();
-        let source_zid: Zid = match read_push_source(push) {
-            // self-originated by the inbound neighbour: it IS the source.
-            0 => match inbound_zid.clone() {
-                Some(z) => z,
-                None => return,
-            },
-            // a transit message: node_id is the source's psid in the inbound
-            // link's space; resolve it through that link's psid -> zid mapping.
-            node_id => {
-                let Some(link_id) = inbound_link else {
-                    return;
-                };
-                match net
-                    .get_link(link_id)
-                    .and_then(|l| l.get_zid(node_id as u64))
-                {
-                    Some(z) => z.clone(),
-                    None => return, // unknown source -> cannot place it in a tree
-                }
-            }
-        };
-        // Self can never be a TRANSIT source on a message arriving at us. Its
-        // local psid is 0, which `set_push_source` encodes as the self-
-        // originated sentinel — re-stamping a transit message to 0 would make
-        // every downstream node mis-attribute the source to ITS inbound
-        // neighbour. Drop such a (malformed / looped-back) message.
-        if source_zid == *net.self_zid() {
-            return;
-        }
-        let Some(out_node_id) = net.local_psid_of(&source_zid) else {
+        // Resolve the source (tree root) + this node's psid for it via the
+        // shared seam (forward_subscription resolves a sourced Declare the same
+        // way; both flood along the source's tree).
+        let Some((source_zid, out_node_id)) =
+            self.resolve_source(inbound_zid.as_ref(), inbound_link, read_push_source(push))
+        else {
             return;
         };
-        // The wire routing-context node_id is a u16 (zenoh `NodeIdType`); a psid
-        // beyond that range cannot be represented, so DROP rather than silently
-        // alias by truncation (a truncated psid would re-stamp a wrong / 0
-        // source). Unreachable until a graph holds >65535 live nodes
-        // (`remove_detached_nodes` pruning is a tracked deferral).
-        let Ok(out_node_id) = u16::try_from(out_node_id) else {
-            return;
-        };
-        let children = net.tree_children_of(&source_zid);
-        drop(net);
+        let children = self.net.borrow().tree_children_of(&source_zid);
 
         if children.is_empty() {
             return;
