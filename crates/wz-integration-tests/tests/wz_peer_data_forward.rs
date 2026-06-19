@@ -127,7 +127,11 @@ fn wz_peer_mesh_forwards_data_two_hops() {
         )
     });
     // The transit hop B must ALSO have received the data (it is what forwarded
-    // it onward to C) — distinguishing a true two-hop relay from a fluke.
+    // it onward to C) — distinguishing a true two-hop relay from a fluke. B is
+    // read AFTER shutdown, so this matches B's DETERMINISTIC shutdown-summary
+    // witness (gated on data_seen > 0), not the in-run app-tick log B might be
+    // SIGTERM'd before firing (R311rj — the prior in-run-only assertion was
+    // flaky under load).
     assert!(
         b_captured.contains("received mesh data"),
         "peer-B (the transit hop) must have received and forwarded A's data\n\

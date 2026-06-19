@@ -42120,6 +42120,48 @@
         "코드 LOCAL UNPUSHED 5커밋: rf(84647b2)+re(7c5ad96)+rg(662fb1d,c3c-1)+rh(44e8c98,c3c-2)+ri(이 커밋,c3c e2e). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
       ]
     },
+    "Round 311rj": {
+      "decision_summary": "R311rj: c3c 4-에이전트 적대 세션리뷰 remediation 1차(correctness/push-blocker). flaky e2e 수정(B 단언 in-run app-tick 로그 grep→결정적 shutdown witness; 부하 3/20→0/15) + deregister compute_trees(face-down stale-tree misroute; zenoh link-down 미러) + forward_push self-source guard(node_id 0 alias 방지) + as u16→try_from. R311ri 'no-flake'·'재stamp 실증' 과장 정정.",
+      "changes_bullets": [
+        "linkstate_forward.rs forward_push: source_zid==self_zid면 drop(전이 source가 self일 수 없음; local_psid 0=self-originated sentinel 충돌해 misroute). out_node_id as u16→u16::try_from drop-on-overflow(zenoh truncate-to-0 대신; >65535 노드는 remove_detached 미구현이라 도달불가). 2 drop 테스트(self-source/unresolvable).",
+        "linkstate_forward.rs deregister: remove_link 후 compute_trees 추가(기존엔 face-down 후 다음 ingest까지 stale tree로 ~1s misroute; zenoh hat/linkstate_peer/mod.rs schedule_compute_trees 미러). 1 테스트(S-A,S-B,A-C서 A face drop→B 트리서 A/C 빠짐; stale면 A 잔류).",
+        "wz-ap-demo run_peer: shutdown에 'received mesh data'(data_seen>0 gate) 결정적 witness 추가('learned mesh topology' 패턴 미러). e2e B 단언이 in-run app-tick 로그(SIGTERM 전 미발화 가능=flaky)→shutdown witness 매칭(결정적).",
+        "정정(frozen-ledger=新 entry): R311ri 'wz_peer_data_forward 5/5 무flake' 과장 — 5회 quiescent는 무flake 입증 아님; 부하서 3/20 실패(적대 리뷰 재현), rj 후 64x 부하 0/15. ri 'NodeId 재stamp real TCP 실증'도 멀티홉 전달만 증명(C는 leaf라 node_id 미검증); 재stamp 값은 단위(forwarded_source 디코드)만."
+      ],
+      "verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 307 PASS(rj 3 신규: drops_a_transit_push_whose_source_resolves_to_self/with_unresolvable_source/deregister_recomputes_trees_dropping_the_dead_link). wz_peer_data_forward 64x busy-loop 부하 0/15 실패=flake 수정 확인(이전 적대리뷰 3/20). E6 wz_peer_mesh 3/3(shutdown witness 무회귀).",
+        "clippy rt-tokio(routing-peer all-targets)+ap-demo(routing-peer)+integration-tests -D warnings clean. fmt --all --check exit 0. 4-에이전트 독립 적대 리뷰 적발분: flaky B 단언(quality-eng 3/20 재현)·deregister no-recompute(root-cause M1)·node_id 0 alias+as u16 절단(root-cause M2/M3)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rj = c3c 4-에이전트 적대 세션리뷰 remediation 1차(correctness/push-blocker). flaky e2e(B in-run grep→결정적 shutdown witness, 부하 0/15)+deregister compute_trees(stale-tree misroute)+forward_push self-source guard+as u16→try_from. ri 'no-flake'·'재stamp 실증' 과장 정정. 3 unit.",
+        "남은 적대 리뷰 remediation: rk(구조/SSOT) — fan-out 4중복(flood_self/propagate/forward_push/publish)→공유 헬퍼; apply_chain_z_bits+iext 상수 중복(push_routing_context↔push_build)→공유 codec 헬퍼; test backdoor set_zid_mapping/get_link_mut→real ingest; stale 모듈 doc('tree_children_of unused'); register I/O 결합(bootstrap)+reset() smell 평가; publish demo-select seam(非-demo caller 재구현 강제).",
+        "rl(honesty): children-flood loop-freedom를 '수렴 일관 트리 한정'으로 정정+순환 mesh e2e 또는 dedup/TTL 방어(현재 line만 테스트=순환 미검증; zenoh는 directions[sub], children-flood 아님); data_seen/node_count 단언 보강.",
+        "건전 확인(리뷰 calibration): NodeId wire 0x33·재stamp 값·rh wire-decode 검증·rf tick-seam·E6(부하 20/20 robust)·borrow 규율·bellman_ford expect 도달불가 모두 OK. 코드 LOCAL UNPUSHED 6커밋 rf/re/rg/rh/ri/rj. qm~rd=PUSHED origin/main=5049fe0. rk(구조)·rl(honesty) 후 push 권고."
+      ],
+      "publishable_decision_summary": "R311rj: c3c 4-에이전트 적대 세션리뷰 remediation 1차(correctness/push-blocker). flaky e2e 수정(B 단언 in-run app-tick 로그 grep→결정적 shutdown witness; 부하 3/20→0/15) + deregister compute_trees(face-down stale-tree misroute; zenoh link-down 미러) + forward_push self-source guard(node_id 0 alias 방지) + as u16→try_from. R311ri 'no-flake'·'재stamp 실증' 과장 정정.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs forward_push: source_zid==self_zid면 drop(전이 source가 self일 수 없음; local_psid 0=self-originated sentinel 충돌해 misroute). out_node_id as u16→u16::try_from drop-on-overflow(zenoh truncate-to-0 대신; >65535 노드는 remove_detached 미구현이라 도달불가). 2 drop 테스트(self-source/unresolvable).",
+        "linkstate_forward.rs deregister: remove_link 후 compute_trees 추가(기존엔 face-down 후 다음 ingest까지 stale tree로 ~1s misroute; zenoh hat/linkstate_peer/mod.rs schedule_compute_trees 미러). 1 테스트(S-A,S-B,A-C서 A face drop→B 트리서 A/C 빠짐; stale면 A 잔류).",
+        "wz-ap-demo run_peer: shutdown에 'received mesh data'(data_seen>0 gate) 결정적 witness 추가('learned mesh topology' 패턴 미러). e2e B 단언이 in-run app-tick 로그(SIGTERM 전 미발화 가능=flaky)→shutdown witness 매칭(결정적).",
+        "정정(frozen-ledger=新 entry): R311ri 'wz_peer_data_forward 5/5 무flake' 과장 — 5회 quiescent는 무flake 입증 아님; 부하서 3/20 실패(적대 리뷰 재현), rj 후 64x 부하 0/15. ri 'NodeId 재stamp real TCP 실증'도 멀티홉 전달만 증명(C는 leaf라 node_id 미검증); 재stamp 값은 단위(forwarded_source 디코드)만."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 307 PASS(rj 3 신규: drops_a_transit_push_whose_source_resolves_to_self/with_unresolvable_source/deregister_recomputes_trees_dropping_the_dead_link). wz_peer_data_forward 64x busy-loop 부하 0/15 실패=flake 수정 확인(이전 적대리뷰 3/20). E6 wz_peer_mesh 3/3(shutdown witness 무회귀).",
+        "clippy rt-tokio(routing-peer all-targets)+ap-demo(routing-peer)+integration-tests -D warnings clean. fmt --all --check exit 0. 4-에이전트 독립 적대 리뷰 적발분: flaky B 단언(quality-eng 3/20 재현)·deregister no-recompute(root-cause M1)·node_id 0 alias+as u16 절단(root-cause M2/M3)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rj = c3c 4-에이전트 적대 세션리뷰 remediation 1차(correctness/push-blocker). flaky e2e(B in-run grep→결정적 shutdown witness, 부하 0/15)+deregister compute_trees(stale-tree misroute)+forward_push self-source guard+as u16→try_from. ri 'no-flake'·'재stamp 실증' 과장 정정. 3 unit.",
+        "남은 적대 리뷰 remediation: rk(구조/SSOT) — fan-out 4중복(flood_self/propagate/forward_push/publish)→공유 헬퍼; apply_chain_z_bits+iext 상수 중복(push_routing_context↔push_build)→공유 codec 헬퍼; test backdoor set_zid_mapping/get_link_mut→real ingest; stale 모듈 doc('tree_children_of unused'); register I/O 결합(bootstrap)+reset() smell 평가; publish demo-select seam(非-demo caller 재구현 강제).",
+        "rl(honesty): children-flood loop-freedom를 '수렴 일관 트리 한정'으로 정정+순환 mesh e2e 또는 dedup/TTL 방어(현재 line만 테스트=순환 미검증; zenoh는 directions[sub], children-flood 아님); data_seen/node_count 단언 보강.",
+        "건전 확인(리뷰 calibration): NodeId wire 0x33·재stamp 값·rh wire-decode 검증·rf tick-seam·E6(부하 20/20 robust)·borrow 규율·bellman_ford expect 도달불가 모두 OK. 코드 LOCAL UNPUSHED 6커밋 rf/re/rg/rh/ri/rj. qm~rd=PUSHED origin/main=5049fe0. rk(구조)·rl(honesty) 후 push 권고."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

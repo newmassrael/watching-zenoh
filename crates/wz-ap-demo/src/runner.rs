@@ -1390,5 +1390,16 @@ pub(crate) async fn run_peer(
             forwarder.node_count()
         );
     }
+    // Data-reception witness — a DETERMINISTIC shutdown counterpart to the
+    // in-run app-tick log (R311rj): a peer that received mesh data emits this
+    // unconditionally at shutdown, so a test need not race the 250 ms app-tick
+    // (the in-run log may not fire between the last reception and SIGTERM).
+    // Mirrors the `learned mesh topology` gate on `ingested > 0`.
+    if forwarder.data_seen() > 0 {
+        log::info!(
+            "wz-ap-demo peer: received mesh data ({} push(es))",
+            forwarder.data_seen()
+        );
+    }
     Ok(())
 }

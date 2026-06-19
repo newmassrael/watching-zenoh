@@ -302,7 +302,23 @@ impl LinkstateForwarder {
                 }
             }
         };
+        // Self can never be a TRANSIT source on a message arriving at us. Its
+        // local psid is 0, which `set_push_source` encodes as the self-
+        // originated sentinel — re-stamping a transit message to 0 would make
+        // every downstream node mis-attribute the source to ITS inbound
+        // neighbour. Drop such a (malformed / looped-back) message.
+        if source_zid == *net.self_zid() {
+            return;
+        }
         let Some(out_node_id) = net.local_psid_of(&source_zid) else {
+            return;
+        };
+        // The wire routing-context node_id is a u16 (zenoh `NodeIdType`); a psid
+        // beyond that range cannot be represented, so DROP rather than silently
+        // alias by truncation (a truncated psid would re-stamp a wrong / 0
+        // source). Unreachable until a graph holds >65535 live nodes
+        // (`remove_detached_nodes` pruning is a tracked deferral).
+        let Ok(out_node_id) = u16::try_from(out_node_id) else {
             return;
         };
         let children = net.tree_children_of(&source_zid);
@@ -314,7 +330,7 @@ impl LinkstateForwarder {
         // `out_node_id` is the same for every outbound face, so build the
         // re-stamped carrier once and clone it per child.
         let mut carrier = push.clone();
-        set_push_source(&mut carrier, out_node_id as u16);
+        set_push_source(&mut carrier, out_node_id);
 
         for (id, state) in faces.iter() {
             if *id == inbound {
@@ -399,10 +415,17 @@ impl FaceForwarder for LinkstateForwarder {
     }
 
     fn deregister(&self, id: FaceId) {
-        // Drop the face's state; if it had a graph link, disconnect it.
+        // Drop the face's state; if it had a graph link, disconnect it AND
+        // recompute the spanning trees. Without the recompute, `forward_push` /
+        // `publish` would keep routing along trees that still include the dead
+        // link until the next inbound link-state happened to trigger a recompute
+        // — a misroute window after every face loss. zenoh recomputes on
+        // link-down too (`hat/linkstate_peer/mod.rs` `schedule_compute_trees`).
         if let Some(state) = self.faces.borrow_mut().remove(&id) {
             if let Some(link) = state.link {
-                self.net.borrow_mut().remove_link(link);
+                let mut net = self.net.borrow_mut();
+                net.remove_link(link);
+                net.compute_trees();
             }
         }
     }
@@ -847,5 +870,102 @@ mod tests {
         };
         fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
         assert_eq!(fwd.data_seen(), 1, "one received data Push counted");
+    }
+
+    #[test]
+    fn drops_a_transit_push_whose_source_resolves_to_self() {
+        // R311rj — a neighbour stamps a node_id that maps (in OUR inbound link's
+        // space) to OUR OWN zid: a malformed / looped-back message. Self can
+        // never be a transit source on a message arriving at us, and re-stamping
+        // it would hit local psid 0 = the self-originated sentinel (misroute).
+        // forward_push must DROP it, not flood it to self's tree children.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        // A's link-state advertises SELF (0x05) under a non-zero psid 7 and
+        // links A to it (forming edge S<->A); B links back normally (edge S<->B).
+        fwd.on_inbound_linkstate(
+            FaceId(0),
+            list(vec![entry(7, 1, 0x05, &[]), entry(1, 5, 0x0A, &[7])]),
+        );
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        sink_a.reset();
+        sink_b.reset();
+
+        let mut push = data_push();
+        set_push_source(&mut push, 7); // resolves via A's link to self's zid
+        fwd.forward_push(FaceId(0), true, &push);
+        assert_eq!(sink_a.frame_count(), 0, "not echoed to the inbound face");
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "self-as-source is dropped, not flooded to self's tree children"
+        );
+    }
+
+    #[test]
+    fn drops_a_transit_push_with_an_unresolvable_source() {
+        // A transit node_id with no entry in the inbound link's psid->zid map
+        // cannot be placed in any tree — forward_push drops it (no misroute on
+        // an attacker-supplied / pre-convergence bogus source).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        sink_a.reset();
+        sink_b.reset();
+
+        let mut push = data_push();
+        set_push_source(&mut push, 123); // not in A's link mapping
+        fwd.forward_push(FaceId(0), true, &push);
+        assert_eq!(sink_a.frame_count(), 0);
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "unresolvable source -> dropped, not forwarded"
+        );
+    }
+
+    #[test]
+    fn deregister_recomputes_trees_dropping_the_dead_link() {
+        // R311rj — after a face drops, the spanning trees must drop paths
+        // through the dead link so a SURVIVING face is no longer routed toward
+        // the lost subtree (zenoh recomputes on link-down). Topology S-A, S-B,
+        // A-C: in B's tree, self's child is A (the next hop toward A and C).
+        // Dropping A's face must leave B's tree with NO child of self (A and C
+        // become unreachable) — which only holds if deregister recomputed; a
+        // stale tree would still name A.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, _sb) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        // A links to self (psid 0) and to C (psid 2); C links back to A — edges
+        // S-A and A-C. B links back to self — edge S-B.
+        fwd.on_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 2]),
+                entry(2, 5, 0x0C, &[1]),
+            ]),
+        );
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        assert_eq!(
+            fwd.tree_children_of(&zid(0x0B)),
+            vec![zid(0x0A)],
+            "in B's tree self forwards toward A/C via child A"
+        );
+
+        fwd.deregister(FaceId(0));
+        assert!(
+            fwd.tree_children_of(&zid(0x0B)).is_empty(),
+            "deregister recomputed: A/C left B's tree (a stale tree would keep A)"
+        );
     }
 }
