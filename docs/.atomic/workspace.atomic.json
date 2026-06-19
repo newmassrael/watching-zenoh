@@ -42320,6 +42320,48 @@
         "atom2 결정: 레지스트리 위치=wz-runtime-tokio(HAT-analogue)—graph crate는 zenoh network.rs(순수 topology) 미러라 sub set 두면 분리 위반. interested()->Vec 스냅샷(directions_toward &[Zid]에 맞춤; 작은 set이라 alloc 무관). exact-match=keyexpr intersection(resource-tree) 부채. 추적부채 불변: (source,sn) seen-set, wildcard keyexpr, remove_detached_nodes, Zid newtype, gossip/autoconnect."
       ]
     },
+    "Round 311ro": {
+      "decision_summary": "R311ro: c3c-3 구독필터 atom3a(Declare routing-context codec). wz-session-core/src/declare_routing_context.rs::read_declare_source/set_declare_source over Declare ext_nodeid=zenoh Declare NodeId zextz64!(0x3,true)=Push와 동일 id(header 0x33 terminal). push_routing_context의 Declare 트윈. zenoh도 Declare exts를 interest_id↔body 사이(body 앞)에 씀(zenoh-codec/declare.rs:117-132)=wz 생성 codec 일치=와이어 충실. 와이어 round-trip 테스트로 Declare codec ext 보존 실증(이전 build_declare_*는 전부 extensions:None이라 미검증분). 전파 driver=atom3b.",
+      "changes_bullets": [
+        "wz-session-core/src/declare_routing_context.rs 신규(alloc+codec-declare 게이트): read_declare_source(declare)->u16 / set_declare_source(declare,node_id) over DeclareOwned.extensions ext_nodeid(id 0x3, M, Z64=header 0x33; node_id 0=self-originated omit). push_routing_context의 Declare 트윈—DECLARE_FLAG_Z(0x80) header 동기화. 소스 해석은 forward_push와 동일(0=inbound neighbour, else link psid).",
+        "lib.rs: pub mod declare_routing_context(alloc+codec-declare 게이트, declare_build 뒤).",
+        "7 unit: struct-level 6(rg 미러: absent=0, set/read RT, header 0x33 terminal, set0=remove, replace, 타 ext 공존+chain Z) + 와이어 RT 1(신규: build_declare_subscriber(0,0,literal)+set_source(7)->wire()->decode->read=7 + DeclSubscriber body 보존; Declare ext path 첫 와이어 검증)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare --lib 237 PASS(declare_routing_context 7 신규, 230 무회귀). clippy(codec-declare all-targets) -D warnings clean. fmt clean.",
+        "결정적 리스크 해소: zenoh declare WCodec도 exts를 body 앞에 씀(zenoh-codec/declare.rs:117-132 ext_qos/tstamp/nodeid then body)=wz 생성 codec [header][iid?][exts?][body] 순 일치=와이어 충실. 와이어 RT 테스트가 생성 codec의 ext 보존(이전 모든 build_declare_*는 extensions:None이라 미검증) 실증.",
+        "chain_z 상수+apply_chain_z_bits dup(push_build/push_routing_context/this 3site)=pre-classified MINOR 부채; 통합 ext_nodeid SSOT=별도 atom(push_routing_context의 자체-소유 패턴 답습)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ro = c3c-3 atom3a: declare_routing_context(read/set_declare_source over Declare ext_nodeid id 0x3=Push 동일, 0x33 terminal)=push_routing_context Declare 트윈. zenoh exts-before-body 와이어 충실(zenoh-codec/declare.rs:117-132). 7 unit(struct 6+와이어 RT 1). build_declare_subscriber(0,0,literal)+set_declare_source가 sourced DeclareSubscriber 조립.",
+        "c3c-3 남은: atom3b=forwarder 전파(declare_subscription 로컬->self tree children flood stamped self-originated; forward_subscription 수신->source 해석+LinkstatepeerSubs.register(change-gate)->re-flood; forward() Declare arm 배선; zenoh propagate_sourced_subscription/register_linkstatepeer_subscription/pubsub_tree_change). atom4=forward_push가 directions_toward(source, subs.interested(ke)) 전환+any_interest 게이트+publish+3-peer e2e.",
+        "전파 메커니즘(zenoh 확인): control-plane sub flood=trees[source].children(전 children=broadcast; 데이터면 directions와 달리)+self psid 재stamp(set_declare_source)+inbound 제외=forward_push 동형. register if-not-contains gate(atom2 register()->bool 반환)가 re-flood loop 방지. get_peer=link.get_zid(node_id)=forward_push source 해석 동일(0=neighbour).",
+        "LOCAL UNPUSHED 3커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT 통합, wildcard keyexpr intersection, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect/locators."
+      ],
+      "publishable_decision_summary": "R311ro: c3c-3 구독필터 atom3a(Declare routing-context codec). wz-session-core/src/declare_routing_context.rs::read_declare_source/set_declare_source over Declare ext_nodeid=zenoh Declare NodeId zextz64!(0x3,true)=Push와 동일 id(header 0x33 terminal). push_routing_context의 Declare 트윈. zenoh도 Declare exts를 interest_id↔body 사이(body 앞)에 씀(zenoh-codec/declare.rs:117-132)=wz 생성 codec 일치=와이어 충실. 와이어 round-trip 테스트로 Declare codec ext 보존 실증(이전 build_declare_*는 전부 extensions:None이라 미검증분). 전파 driver=atom3b.",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/declare_routing_context.rs 신규(alloc+codec-declare 게이트): read_declare_source(declare)->u16 / set_declare_source(declare,node_id) over DeclareOwned.extensions ext_nodeid(id 0x3, M, Z64=header 0x33; node_id 0=self-originated omit). push_routing_context의 Declare 트윈—DECLARE_FLAG_Z(0x80) header 동기화. 소스 해석은 forward_push와 동일(0=inbound neighbour, else link psid).",
+        "lib.rs: pub mod declare_routing_context(alloc+codec-declare 게이트, declare_build 뒤).",
+        "7 unit: struct-level 6(rg 미러: absent=0, set/read RT, header 0x33 terminal, set0=remove, replace, 타 ext 공존+chain Z) + 와이어 RT 1(신규: build_declare_subscriber(0,0,literal)+set_source(7)->wire()->decode->read=7 + DeclSubscriber body 보존; Declare ext path 첫 와이어 검증)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare --lib 237 PASS(declare_routing_context 7 신규, 230 무회귀). clippy(codec-declare all-targets) -D warnings clean. fmt clean.",
+        "결정적 리스크 해소: zenoh declare WCodec도 exts를 body 앞에 씀(zenoh-codec/declare.rs:117-132 ext_qos/tstamp/nodeid then body)=wz 생성 codec [header][iid?][exts?][body] 순 일치=와이어 충실. 와이어 RT 테스트가 생성 codec의 ext 보존(이전 모든 build_declare_*는 extensions:None이라 미검증) 실증.",
+        "chain_z 상수+apply_chain_z_bits dup(push_build/push_routing_context/this 3site)=pre-classified MINOR 부채; 통합 ext_nodeid SSOT=별도 atom(push_routing_context의 자체-소유 패턴 답습)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ro = c3c-3 atom3a: declare_routing_context(read/set_declare_source over Declare ext_nodeid id 0x3=Push 동일, 0x33 terminal)=push_routing_context Declare 트윈. zenoh exts-before-body 와이어 충실(zenoh-codec/declare.rs:117-132). 7 unit(struct 6+와이어 RT 1). build_declare_subscriber(0,0,literal)+set_declare_source가 sourced DeclareSubscriber 조립.",
+        "c3c-3 남은: atom3b=forwarder 전파(declare_subscription 로컬->self tree children flood stamped self-originated; forward_subscription 수신->source 해석+LinkstatepeerSubs.register(change-gate)->re-flood; forward() Declare arm 배선; zenoh propagate_sourced_subscription/register_linkstatepeer_subscription/pubsub_tree_change). atom4=forward_push가 directions_toward(source, subs.interested(ke)) 전환+any_interest 게이트+publish+3-peer e2e.",
+        "전파 메커니즘(zenoh 확인): control-plane sub flood=trees[source].children(전 children=broadcast; 데이터면 directions와 달리)+self psid 재stamp(set_declare_source)+inbound 제외=forward_push 동형. register if-not-contains gate(atom2 register()->bool 반환)가 re-flood loop 방지. get_peer=link.get_zid(node_id)=forward_push source 해석 동일(0=neighbour).",
+        "LOCAL UNPUSHED 3커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT 통합, wildcard keyexpr intersection, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect/locators."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

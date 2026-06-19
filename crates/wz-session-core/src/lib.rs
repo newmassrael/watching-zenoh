@@ -485,6 +485,16 @@ pub mod linkstate_oam;
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub mod declare_build;
 
+/// Declare routing-context source `node_id` (P4 routing, linkstate port step
+/// c3c-3 atom3a): `read_declare_source` / `set_declare_source` over the
+/// Declare `ext_nodeid` extension — the control-plane forward seam naming the
+/// spanning-tree root a linkstate-peer floods a SOURCED subscription
+/// declaration along (the Declare twin of [`push_routing_context`]).
+/// `codec-declare` gated (the declaration carrier the routing context rides)
+/// and owned `Vec` output (alloc-gated).
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+pub mod declare_routing_context;
+
 /// Outbound INTEREST network-message builders
 /// (`build_interest_liveliness_subscriber` / `_get` / `build_interest_final`)
 /// hoisted from `wz-runtime-tokio::session_glue`. `InterestOwned` output, so
