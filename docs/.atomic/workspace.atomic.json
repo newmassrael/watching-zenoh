@@ -42948,6 +42948,54 @@
         "LOCAL UNPUSHED: A1(rw/rx/ry)+A2(rz)+C2(sa)+리뷰rem(sb)=6커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci)."
       ]
     },
+    "Round 311sc": {
+      "decision_summary": "R311sc: c3c-3 부채 C1 — 4-peer 분기 토폴로지 e2e selectivity. 허브 B에 publisher A/subscriber C/non-subscriber D 3-leaf(A-B-{C,D}); A publish가 C(2-hop)엔 도달하고 D엔 미도달 = directions_toward 필터가 허브에서 미구독 D 가지를 단일 fan-out에서 가지치기. 위트니스=C 수신(positive sync) 게이트 후 D의 결정적 종료상태(learned topology + 0 data push) 검사=non-flaky 비수신 증명. test-only(production 데모 무수정).",
+      "changes_bullets": [
+        "wz-integration-tests/tests/wz_peer_data_forward.rs: 신규 #[ignore] e2e wz_peer_mesh_prunes_the_unsubscribed_branch_four_peers. 분기 토폴로지 D(--peer, 무구독)/C(--peer --subscribe demo/mesh)/B(--peer --connect <C>,<D> 허브)/A(--peer --connect <B> --publish demo/mesh). 허브 멀티 dial=peer-mode --connect 콤마 리스트(main.rs:145 split(',')). 엣지 A-B/B-C/B-D star, B degree 3.",
+        "선택성 경로: A publish→directions_toward(A,{C})→child B; B에서 source=A로 directions_toward(A,{C})={C}만(D는 interested set 부재라 directions가 D쪽으로 안 감)→단일 fan_out서 C만 forward, D 제외=타이밍 아닌 필터 배제(linkstate_forward.rs:415-435 forward_push, interested_remote self-exclude).",
+        "non-flaky 위트니스: C \"received mesh data\"(15s) positive sync 게이트(데이터 실제 유동+수렴+A의 interest 학습 증명)→graceful_terminate 후 D 결정적 종료상태 검사. wait-for-absence 없음.",
+        "D 단언 3종: \"learned mesh topology\"(D=4-node 수렴 멤버=격리 아님, 비수신이 진짜 pruning) + \"0 data push(es) received\"(shutdown summary state-derived, data_seen==0) + !\"received mesh data\"(witness는 data_seen>0서만 발화=부재가 곧 0 수신의 positive 진술). +A \"publisher learned subscriber interest\", B \"received mesh data\"(허브 중계) 단언.",
+        "모듈 doc에 3번째 SELECTIVITY 테스트 단락 추가; \"Both tests\"→\"Both line tests\" 명확화 + Layer E6 자동 편입 명시. run-ci 무수정(E6가 --test wz_peer_data_forward -- --ignored로 파일 전체 ignored 실행, run-ci.sh:3120)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test wz_peer_data_forward -- --ignored: 신규 단독 PASS. 토폴로지 로그=B(허브) dialed 2/accepted 1/peak 3 faces/1 data push received(C 중계), C accepted 1/1 data push, D accepted 1/4-node learned topology/0 data push/witness 라인 무, A publisher learned subscriber interest(1 peer).",
+        "파일 전체(3 테스트=line forward/line withdraw/branch selectivity) ×12회=36 실행 0 flake. fmt clean(2줄 재포맷 적용), cargo clippy -p wz-integration-tests --tests clean.",
+        "full run-ci 1차 RUNCI_EXIT=1=Layer E ap_demo_round_trip_against_zenoh_pico_z_put 부하-flake: 데이터 왕복 실제 성공(SUBSCRIBER FIRED payload_len=16, session ended Terminated)이나 'accepted peer' substring 5s 내 미포착(캡처 첫줄 ':runner]'로 잘림=stderr tempfile 캡처 레이스). pico-interop=test-only 내 변경 무관.",
+        "격리 재실행 6/6 PASS로 기존 Layer E first-run flake 확증(project_layer_e_flake_debt). 시스템 idle(잔존 프로세스 0/load 0.63) 후 full run-ci 재실행 RUNCI_EXIT=0(Layer E pass + E6 pass + 0 failed, Q/Z pass). test-only=production 데모 바이너리 HEAD와 동일."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sc = c3c-3 부채 C1 완결: 4-peer 분기 selectivity e2e. directions_toward 필터가 허브서 미구독 D 가지치기를 real TCP end-to-end 실증(이전 unit-only 갭 해소=c3c-3 마지막 정직성 갭). non-flaky=positive sync(C 수신) 게이트+D 결정적 종료상태(0 data push, learned topology) 검사.",
+        "다음 부채(project_c3c3_debt_paydown 순): D1 (source,sn) seen-set(전이-불일치 loop 방어) → D2 children-delta+change-triggered flood batching(architect signature-cost 캐비엇) → B1 alias keyexpr → B2 wildcard → E/F.",
+        "honest: D 비수신은 C 수신 게이트+종료상태로 결정적이나, e2e 본질상 부하 하 Layer E pico-interop flake(ap_demo_round_trip)는 별개 기존 추적부채. test-only라 production 무영향. 데모 토폴로지는 수렴 후만 보장(매 250ms publish 재시도가 흡수).",
+        "LOCAL UNPUSHED: C1(sc) 1커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ],
+      "publishable_decision_summary": "R311sc: c3c-3 부채 C1 — 4-peer 분기 토폴로지 e2e selectivity. 허브 B에 publisher A/subscriber C/non-subscriber D 3-leaf(A-B-{C,D}); A publish가 C(2-hop)엔 도달하고 D엔 미도달 = directions_toward 필터가 허브에서 미구독 D 가지를 단일 fan-out에서 가지치기. 위트니스=C 수신(positive sync) 게이트 후 D의 결정적 종료상태(learned topology + 0 data push) 검사=non-flaky 비수신 증명. test-only(production 데모 무수정).",
+      "publishable_changes_bullets": [
+        "wz-integration-tests/tests/wz_peer_data_forward.rs: 신규 #[ignore] e2e wz_peer_mesh_prunes_the_unsubscribed_branch_four_peers. 분기 토폴로지 D(--peer, 무구독)/C(--peer --subscribe demo/mesh)/B(--peer --connect <C>,<D> 허브)/A(--peer --connect <B> --publish demo/mesh). 허브 멀티 dial=peer-mode --connect 콤마 리스트(main.rs:145 split(',')). 엣지 A-B/B-C/B-D star, B degree 3.",
+        "선택성 경로: A publish→directions_toward(A,{C})→child B; B에서 source=A로 directions_toward(A,{C})={C}만(D는 interested set 부재라 directions가 D쪽으로 안 감)→단일 fan_out서 C만 forward, D 제외=타이밍 아닌 필터 배제(linkstate_forward.rs:415-435 forward_push, interested_remote self-exclude).",
+        "non-flaky 위트니스: C \"received mesh data\"(15s) positive sync 게이트(데이터 실제 유동+수렴+A의 interest 학습 증명)→graceful_terminate 후 D 결정적 종료상태 검사. wait-for-absence 없음.",
+        "D 단언 3종: \"learned mesh topology\"(D=4-node 수렴 멤버=격리 아님, 비수신이 진짜 pruning) + \"0 data push(es) received\"(shutdown summary state-derived, data_seen==0) + !\"received mesh data\"(witness는 data_seen>0서만 발화=부재가 곧 0 수신의 positive 진술). +A \"publisher learned subscriber interest\", B \"received mesh data\"(허브 중계) 단언.",
+        "모듈 doc에 3번째 SELECTIVITY 테스트 단락 추가; \"Both tests\"→\"Both line tests\" 명확화 + Layer E6 자동 편입 명시. run-ci 무수정(E6가 --test wz_peer_data_forward -- --ignored로 파일 전체 ignored 실행, run-ci.sh:3120)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test wz_peer_data_forward -- --ignored: 신규 단독 PASS. 토폴로지 로그=B(허브) dialed 2/accepted 1/peak 3 faces/1 data push received(C 중계), C accepted 1/1 data push, D accepted 1/4-node learned topology/0 data push/witness 라인 무, A publisher learned subscriber interest(1 peer).",
+        "파일 전체(3 테스트=line forward/line withdraw/branch selectivity) ×12회=36 실행 0 flake. fmt clean(2줄 재포맷 적용), cargo clippy -p wz-integration-tests --tests clean.",
+        "full run-ci 1차 RUNCI_EXIT=1=Layer E ap_demo_round_trip_against_zenoh_pico_z_put 부하-flake: 데이터 왕복 실제 성공(SUBSCRIBER FIRED payload_len=16, session ended Terminated)이나 'accepted peer' substring 5s 내 미포착(캡처 첫줄 ':runner]'로 잘림=stderr tempfile 캡처 레이스). pico-interop=test-only 내 변경 무관.",
+        "격리 재실행 6/6 PASS로 기존 Layer E first-run flake 확증(project_layer_e_flake_debt). 시스템 idle(잔존 프로세스 0/load 0.63) 후 full run-ci 재실행 RUNCI_EXIT=0(Layer E pass + E6 pass + 0 failed, Q/Z pass). test-only=production 데모 바이너리 HEAD와 동일."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sc = c3c-3 부채 C1 완결: 4-peer 분기 selectivity e2e. directions_toward 필터가 허브서 미구독 D 가지치기를 real TCP end-to-end 실증(이전 unit-only 갭 해소=c3c-3 마지막 정직성 갭). non-flaky=positive sync(C 수신) 게이트+D 결정적 종료상태(0 data push, learned topology) 검사.",
+        "다음 부채(project_c3c3_debt_paydown 순): D1 (source,sn) seen-set(전이-불일치 loop 방어) → D2 children-delta+change-triggered flood batching(architect signature-cost 캐비엇) → B1 alias keyexpr → B2 wildcard → E/F.",
+        "honest: D 비수신은 C 수신 게이트+종료상태로 결정적이나, e2e 본질상 부하 하 Layer E pico-interop flake(ap_demo_round_trip)는 별개 기존 추적부채. test-only라 production 무영향. 데모 토폴로지는 수렴 후만 보장(매 250ms publish 재시도가 흡수).",
+        "LOCAL UNPUSHED: C1(sc) 1커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [

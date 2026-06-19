@@ -31,16 +31,31 @@
 //! transition, not a flaky non-receipt) — the end-to-end proof of the
 //! subscription-lifecycle retraction path.
 //!
-//! Both tests declare interest exactly ONCE (c3c-3 debt A2): the subscription
-//! reaches the LATER-joining publisher via the tree-change re-advertise
-//! (`re_advertise_subscriptions`, zenoh `pubsub_tree_change`) on each topology
-//! recompute, not a per-tick re-declare — so these e2es also exercise that
-//! convergence path end-to-end.
+//! Both line tests declare interest exactly ONCE (c3c-3 debt A2): the
+//! subscription reaches the LATER-joining publisher via the tree-change
+//! re-advertise (`re_advertise_subscriptions`, zenoh `pubsub_tree_change`) on
+//! each topology recompute, not a per-tick re-declare — so these e2es also
+//! exercise that convergence path end-to-end.
+//!
+//! A third test (c3c-3 debt C1) is the SELECTIVITY counterpart over a BRANCHING
+//! topology — a hub peer B with three leaves: publisher A, subscriber C, and a
+//! NON-subscriber D (`A - B - {C subscribes, D does not}`). A's published data
+//! must reach C (the subscriber, two hops) but NOT D: when A's Put reaches the
+//! hub B, B's `directions_toward` filter routes it only toward the interested
+//! subtree (the C branch), pruning the D branch in the SAME synchronous fan-out
+//! — so D is excluded by the subscription filter, not by timing. The witness is
+//! NEVER a flaky wait-for-absence: the test gates on C RECEIVING (the positive
+//! proof the data actually flowed through B), then asserts D's DETERMINISTIC
+//! shutdown state — D learned the mesh topology (so its non-receipt is genuine
+//! pruning, not isolation) yet its data-push count is exactly zero. This is the
+//! end-to-end proof that the data route prunes an unsubscribed branch rather
+//! than broadcasting along the whole tree.
 //!
 //! Requires the binary built with `--features routing-peer` (the `--peer` /
 //! `--publish` / `--subscribe` / `--unsubscribe-after-data` args are opt-in
-//! behind it). run-ci's Layer E builds it so both tests ride the same
-//! `--ignored` lane as the other binary-dep e2es.
+//! behind it; `--connect` takes a comma-separated dial list in peer mode, so the
+//! hub B dials both leaves). run-ci's Layer E6 builds it so all three tests ride
+//! the same `--ignored` lane as the other binary-dep e2es.
 
 use std::fs::File;
 use std::process::{Command, Stdio};
@@ -274,5 +289,136 @@ fn wz_peer_mesh_withdraws_subscription_two_hops() {
         c_captured.contains("received mesh data"),
         "peer-C never received data, so its --unsubscribe-after-data trigger never \
          fired\n--- peer-C stderr ---\n{c_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+fn wz_peer_mesh_prunes_the_unsubscribed_branch_four_peers() {
+    // c3c-3 debt C1 — the SELECTIVITY proof over a BRANCHING topology. The hub
+    // peer B holds three leaves:
+    //   - peer D: `--peer 127.0.0.1:0` — a hold-only mesh member that NEVER
+    //     subscribes (no `--subscribe`). It participates in topology flooding so
+    //     it is a converged graph node, but it declares no interest.
+    //   - peer C: `--peer 127.0.0.1:0 --subscribe demo/mesh` — the SUBSCRIBER,
+    //     two hops from the publisher.
+    //   - peer B: `--peer 127.0.0.1:0 --connect <C>,<D>` — the HUB. In peer mode
+    //     `--connect` takes a comma-separated dial list, so B dials BOTH leaves
+    //     and holds a face to each (plus the inbound face from A below).
+    //   - peer A: `--peer 127.0.0.1:0 --connect <B> --publish demo/mesh` — dials
+    //     the hub and originates data.
+    //
+    // Linkstate edges: A<->B, B<->C, B<->D (a star centred on B). C's
+    // subscription floods C -> B -> A, so A learns C is interested. When A's
+    // any-interest gate then forwards the Put, A's filtered route picks its child
+    // B; at B, `directions_toward` the interested set {C} routes the Put toward
+    // C's subtree ONLY. D is one of B's tree children too, but it is NOT in the
+    // interested set, so the SAME synchronous fan-out at B that forwards to C
+    // SKIPS D — pruned by the subscription filter, not by any timing window.
+    //
+    // The far SUBSCRIBER C and the NON-subscriber D both bind first (so the hub
+    // can dial them), then the hub B, then the publisher A.
+    let (mut d_guard, mut d_reader, p_d) = spawn_peer("peer-D", &["--peer", "127.0.0.1:0"]);
+    let addr_d = format!("127.0.0.1:{p_d}");
+    let (mut c_guard, mut c_reader, p_c) = spawn_peer(
+        "peer-C",
+        &["--peer", "127.0.0.1:0", "--subscribe", "demo/mesh"],
+    );
+    let addr_c = format!("127.0.0.1:{p_c}");
+    // The hub dials BOTH leaves via the comma-separated peer-mode dial list.
+    let dial_list = format!("{addr_c},{addr_d}");
+    let (mut b_guard, mut b_reader, p_b) = spawn_peer(
+        "peer-B",
+        &["--peer", "127.0.0.1:0", "--connect", &dial_list],
+    );
+    let addr_b = format!("127.0.0.1:{p_b}");
+    let (mut a_guard, mut a_reader, _p_a) = spawn_peer(
+        "peer-A",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_b,
+            "--publish",
+            "demo/mesh",
+        ],
+    );
+
+    // POSITIVE sync: the far SUBSCRIBER C must RECEIVE A's published data
+    // (A -> B -> C). Waiting on this is the proof the whole chain ran — interest
+    // propagated A-ward AND the filtered data route delivered C-ward — and it is
+    // also the gate that makes D's non-receipt below a DETERMINISTIC terminal
+    // state rather than a flaky wait-for-absence: once C has the data, B has
+    // already run the single fan-out that either includes or excludes each of its
+    // tree children, so D's state is settled.
+    let c_data = wait_for_substring(&mut c_reader, "received mesh data", Duration::from_secs(15));
+
+    graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(c_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(d_guard.child_mut(), Duration::from_secs(5));
+    let a_captured = read_captured(&mut a_reader);
+    let b_captured = read_captured(&mut b_reader);
+    let c_captured = read_captured(&mut c_reader);
+    let d_captured = read_captured(&mut d_reader);
+    eprintln!("--- peer-A stderr ---\n{a_captured}");
+    eprintln!("--- peer-B stderr ---\n{b_captured}");
+    eprintln!("--- peer-C stderr ---\n{c_captured}");
+    eprintln!("--- peer-D stderr ---\n{d_captured}");
+
+    // Diagnostics printed; now assert.
+    c_data.unwrap_or_else(|c| {
+        panic!(
+            "peer-C (the subscriber, 2 hops from the publisher) never logged 'received \
+             mesh data' within 15s — A's data did not reach the subscribed branch\n\
+             --- peer-C stderr ---\n{c}"
+        )
+    });
+    // The publisher A must have LEARNED C's subscription before its any-interest
+    // gate would forward anything — the subscription half of the chain.
+    assert!(
+        a_captured.contains("publisher learned subscriber interest"),
+        "peer-A never learned C's subscription — the declaration did not flood \
+         A-ward, so the subscription-filtered route could not enable the \
+         publish\n--- peer-A stderr ---\n{a_captured}"
+    );
+    // The hub B must have received and forwarded the data (it is what relayed it
+    // to C) — read AFTER shutdown via B's DETERMINISTIC data-reception witness
+    // (R311rj), not the in-run app-tick log that SIGTERM may have pre-empted.
+    assert!(
+        b_captured.contains("received mesh data"),
+        "peer-B (the hub) must have received and forwarded A's data toward the \
+         subscribed branch\n--- peer-B stderr ---\n{b_captured}"
+    );
+
+    // The crux: D is a CONVERGED mesh member (it learned the topology), so its
+    // non-receipt is genuine SUBSCRIPTION PRUNING, not isolation. Without this the
+    // "D got nothing" assertion below would also pass for a D that simply never
+    // joined the mesh.
+    assert!(
+        d_captured.contains("learned mesh topology"),
+        "peer-D never converged into the mesh, so its non-receipt would not prove \
+         the filter pruned it (it could just be isolated)\n--- peer-D stderr ---\n{d_captured}"
+    );
+    // The NON-subscriber D received NOTHING. Asserted DETERMINISTICALLY, never as
+    // a flaky wait-for-absence: the shutdown summary unconditionally reports the
+    // data-push count ("0 data push(es) received" here, state-derived from
+    // `data_seen == 0`), and the "received mesh data" witness fires ONLY when the
+    // count is > 0 — so its ABSENCE in D's log is a positive statement of zero
+    // receipt, anchored to the post-shutdown terminal state we reach only after C
+    // confirmed the data flowed. This is the selectivity: B's `directions_toward`
+    // filter forwarded to the interested C branch and pruned the uninterested D
+    // branch in one fan-out.
+    assert!(
+        d_captured.contains("0 data push(es) received"),
+        "peer-D's shutdown summary did not report zero data pushes — the data route \
+         leaked onto the UNSUBSCRIBED branch (the filter did not prune D)\n\
+         --- peer-D stderr ---\n{d_captured}"
+    );
+    assert!(
+        !d_captured.contains("received mesh data"),
+        "peer-D (which never subscribed) received mesh data — the subscription \
+         filter failed to prune the unsubscribed branch at the hub\n\
+         --- peer-D stderr ---\n{d_captured}"
     );
 }
