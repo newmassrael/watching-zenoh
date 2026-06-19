@@ -31,9 +31,14 @@
 //! the cell only for its own synchronous duration, never across an
 //! `.await`.
 //!
-//! What is NOT here yet: using the computed spanning trees to forward DATA
-//! (`tree_children_of` is exposed but unused — the c3c atom), and the
-//! change-triggered-flood / `Details` optimisations. `routing-peer`-gated.
+//! Data forwarding (c3c): [`forward_push`](LinkstateForwarder::forward_push)
+//! floods a received Push along the source's spanning tree
+//! ([`tree_children_of`](wz_routing_graph::LinkstateNetwork::tree_children_of)),
+//! and [`publish`](LinkstateForwarder::publish) originates one. What is NOT
+//! here yet: subscription-filtered routing (zenoh forwards along
+//! `directions[sub]` toward interested subscribers; wz floods every tree child
+//! — the deferred c3c-3 step), and the change-triggered-flood / `Details`
+//! optimisations. `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -156,35 +161,28 @@ impl LinkstateForwarder {
         if changes.updated.is_empty() {
             return Ok(0);
         }
-        let net = self.net.borrow();
-        let mut sent = 0;
-        for (id, state) in self.faces.borrow().iter() {
-            if *id == source {
-                continue;
+        // A clone of the graph handle so the per-face builder can borrow it
+        // (the `Rc` is the cell; `fan_out` only holds the `faces` borrow).
+        let net = self.net.clone();
+        self.fan_out(true, |id, zid| {
+            if id == source {
+                return Ok(None);
             }
-            let actions = &state.actions;
             // Drop the node whose own state this is from the list sent to ITS
             // face (zenoh `network.rs:663`) — the per-face payload differs, so
             // each face gets its own built carrier.
-            let peer_zid = actions.peer_zid();
             let to_send: Vec<Zid> = changes
                 .updated
                 .iter()
-                .filter(|z| peer_zid.as_deref() != Some(z.as_slice()))
+                .filter(|z| zid != Some(z.as_slice()))
                 .cloned()
                 .collect();
             if to_send.is_empty() {
-                continue;
+                return Ok(None);
             }
-            let oam = build_linkstate_oam_owned(&net.build_linkstate_for(&to_send))?;
-            if actions
-                .send_network_message(NetworkMessage::Oam(oam), true, false)
-                .is_ok()
-            {
-                sent += 1;
-            }
-        }
-        Ok(sent)
+            let oam = build_linkstate_oam_owned(&net.borrow().build_linkstate_for(&to_send))?;
+            Ok(Some(NetworkMessage::Oam(oam)))
+        })
     }
 
     /// Total link-state lists ingested so far — the control-plane witness.
@@ -224,6 +222,40 @@ impl LinkstateForwarder {
         build_linkstate_oam_owned(&list)
     }
 
+    /// The single fan-out SSOT: send to each held face the message `build`
+    /// produces for it, returning the count of faces that accepted one. The
+    /// builder `build(face_id, peer_zid)` returns `Ok(Some(msg))` to send to
+    /// that face, `Ok(None)` to skip it, or `Err` to abort the whole fan-out
+    /// (a per-face build failure). This owns the parts every sender shares —
+    /// borrow the `faces` set, iterate, read each peer zid, send, count, skip a
+    /// per-face send failure — so `flood_self` / `propagate` / `forward_push` /
+    /// `publish` each express ONLY their selection + carrier policy as the
+    /// closure, never a re-hand-rolled face loop. Holds only the `faces` borrow;
+    /// a builder may borrow the graph (a distinct cell).
+    fn fan_out(
+        &self,
+        reliable: bool,
+        mut build: impl FnMut(FaceId, Option<&[u8]>) -> Result<Option<NetworkMessage>, CodecError>,
+    ) -> Result<usize, CodecError> {
+        let mut sent = 0;
+        for (id, state) in self.faces.borrow().iter() {
+            let peer_zid = state.actions.peer_zid();
+            if let Some(msg) = build(*id, peer_zid.as_deref())? {
+                // a per-face send failure (link gone mid-fan-out) is skipped,
+                // not fatal to the rest — the face's own driver surfaces its
+                // teardown via deregister.
+                if state
+                    .actions
+                    .send_network_message(msg, reliable, false)
+                    .is_ok()
+                {
+                    sent += 1;
+                }
+            }
+        }
+        Ok(sent)
+    }
+
     /// Flood THIS peer's own link-state to every held face — the TX seam
     /// (c3d). Each face's [`SessionLinkActions::send_network_message`] puts it
     /// on the wire (reliably — topology is control traffic). Returns the number
@@ -234,17 +266,7 @@ impl LinkstateForwarder {
         // `NetworkMessage` is not `Clone`, but `OamOwned` is — build the
         // carrier once and re-wrap a clone per face.
         let oam = self.build_self_oam()?;
-        let mut sent = 0;
-        for state in self.faces.borrow().values() {
-            // a per-face send failure (link gone mid-flood) is skipped, not
-            // fatal to the rest of the flood — the face's own driver will
-            // surface its teardown via deregister.
-            let msg = NetworkMessage::Oam(oam.clone());
-            if state.actions.send_network_message(msg, true, false).is_ok() {
-                sent += 1;
-            }
-        }
-        Ok(sent)
+        self.fan_out(true, |_id, _zid| Ok(Some(NetworkMessage::Oam(oam.clone()))))
     }
 
     /// Advertise this peer's full link-state to ONE face — the register-time
@@ -273,11 +295,16 @@ impl LinkstateForwarder {
     /// interested subtrees) is the deferred c3c-3 step; this floods every tree
     /// child.
     fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
-        let faces = self.faces.borrow();
-        let Some(inbound_state) = faces.get(&inbound) else {
-            return;
+        // The inbound face's zid + graph link — the only state the source
+        // resolution needs from the faces set, taken in a SCOPED borrow so the
+        // `fan_out` below holds the only live `faces` borrow.
+        let (inbound_zid, inbound_link) = {
+            let faces = self.faces.borrow();
+            match faces.get(&inbound) {
+                Some(s) => (s.actions.peer_zid(), s.link),
+                None => return,
+            }
         };
-        let inbound_zid = inbound_state.actions.peer_zid();
 
         // Resolve the source (tree root) and this node's psid for it.
         let net = self.net.borrow();
@@ -290,7 +317,7 @@ impl LinkstateForwarder {
             // a transit message: node_id is the source's psid in the inbound
             // link's space; resolve it through that link's psid -> zid mapping.
             node_id => {
-                let Some(link_id) = inbound_state.link else {
+                let Some(link_id) = inbound_link else {
                     return;
                 };
                 match net
@@ -327,28 +354,28 @@ impl LinkstateForwarder {
         if children.is_empty() {
             return;
         }
-        // `out_node_id` is the same for every outbound face, so build the
-        // re-stamped carrier once and clone it per child.
+        // `out_node_id` is the same for every face, so build the re-stamped
+        // carrier once; fan_out clones it to each tree child.
         let mut carrier = push.clone();
         set_push_source(&mut carrier, out_node_id);
 
-        for (id, state) in faces.iter() {
-            if *id == inbound {
-                continue;
+        // Forward to self's children in the source's tree — never to the inbound
+        // face, nor back toward the source's own neighbour (a parallel link).
+        let _ = self.fan_out(reliable, |id, zid| {
+            if id == inbound {
+                return Ok(None);
             }
-            let Some(child_zid) = state.actions.peer_zid() else {
-                continue;
+            let Some(zid) = zid else {
+                return Ok(None);
             };
-            // never send back toward the source's own neighbour face.
-            if inbound_zid.as_deref() == Some(child_zid.as_slice()) {
-                continue;
+            if inbound_zid.as_deref() == Some(zid) {
+                return Ok(None);
             }
-            if !children.contains(&child_zid) {
-                continue;
+            if !children.iter().any(|c| c.as_slice() == zid) {
+                return Ok(None);
             }
-            let msg = NetworkMessage::Push(Box::new(carrier.clone()));
-            let _ = state.actions.send_network_message(msg, reliable, false);
-        }
+            Ok(Some(NetworkMessage::Push(Box::new(carrier.clone()))))
+        });
     }
 
     /// Originate a data Put INTO the mesh from this node (a publishing peer) —
@@ -361,27 +388,21 @@ impl LinkstateForwarder {
     /// RECEIVED Push). Returns the number of tree-child faces the Put reached.
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
         let push = build_push_literal(keyexpr, payload)?;
-        let net = self.net.borrow();
-        let self_zid = net.self_zid().clone();
-        let children = net.tree_children_of(&self_zid);
-        drop(net);
+        let children = {
+            let net = self.net.borrow();
+            let self_zid = net.self_zid().clone();
+            net.tree_children_of(&self_zid)
+        };
         if children.is_empty() {
             return Ok(0);
         }
-        let mut sent = 0;
-        for state in self.faces.borrow().values() {
-            let Some(child_zid) = state.actions.peer_zid() else {
-                continue;
+        self.fan_out(true, |_id, zid| {
+            let to_child = match zid {
+                Some(z) => children.iter().any(|c| c.as_slice() == z),
+                None => false,
             };
-            if !children.contains(&child_zid) {
-                continue;
-            }
-            let msg = NetworkMessage::Push(Box::new(push.clone()));
-            if state.actions.send_network_message(msg, true, false).is_ok() {
-                sent += 1;
-            }
-        }
-        Ok(sent)
+            Ok(to_child.then(|| NetworkMessage::Push(Box::new(push.clone()))))
+        })
     }
 }
 
@@ -794,43 +815,41 @@ mod tests {
 
     #[test]
     fn forwards_a_transit_push_resolving_the_source_from_the_link_psid() {
-        // Star: self(S) holds A, B, C (each links back to S). A Push arrives on
-        // A's face carrying a NON-zero node_id = A's psid for B (a transit
-        // message, not self-originated). Self resolves it via A's link
-        // psid->zid mapping to source B, then floods along B's tree: self's
-        // children there are A (excluded, the inbound face) and C, so only C
-        // receives it — re-stamped into SELF's psid space for B (idx 2).
+        // Line S - A - B (B behind A), plus S - C. A Push arrives on A's face
+        // carrying a NON-zero node_id = A's psid for B (a transit message, not
+        // self-originated). Self resolves it via A's link psid->zid mapping to
+        // source B, then floods along B's spanning tree: self's only child
+        // there is C (A is B's child, not self's), so only C receives it —
+        // re-stamped into SELF's psid space for B. The link mapping is taught by
+        // a REAL ingest (A advertising its links), not a graph-internal poke.
         let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
         let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
-        let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
-        let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 3
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 2
         fwd.register(FaceId(0), &face_a);
-        fwd.register(FaceId(1), &face_b);
-        fwd.register(FaceId(2), &face_c);
-        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
-        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
-        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05); // edge S<->C
-
-        // Teach A's link that it refers to B by psid 42 (a transit source).
-        let link_a = fwd.faces.borrow()[&FaceId(0)].link.expect("A has a link");
-        fwd.net
-            .borrow_mut()
-            .get_link_mut(link_a)
-            .expect("link A")
-            .set_zid_mapping(42, zid(0x0B));
+        fwd.register(FaceId(1), &face_c);
+        // A advertises links to self (psid 0) AND to B (psid 7); B links back to
+        // A — forming edges S-A and A-B and teaching A's link that psid 7 = B
+        // (the transit source). B is added as a node (idx 3).
+        fwd.on_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S-C
         sink_a.reset();
-        sink_b.reset();
         sink_c.reset();
 
         let mut push = data_push();
-        set_push_source(&mut push, 42); // node_id 42 = A's psid for B
+        set_push_source(&mut push, 7); // node_id 7 = A's psid for B
         fwd.forward_push(FaceId(0), true, &push);
 
         assert_eq!(sink_c.frame_count(), 1, "C is self's child in B's tree");
         assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
-        assert_eq!(sink_b.frame_count(), 0, "B is the source root, not a child");
-        // Re-stamped with self's psid for the RESOLVED source B (its idx, 2).
-        assert_eq!(forwarded_source(&sink_c.frame_bytes(0)), 2);
+        // Re-stamped with self's psid for the RESOLVED source B (its idx, 3).
+        assert_eq!(forwarded_source(&sink_c.frame_bytes(0)), 3);
     }
 
     #[test]

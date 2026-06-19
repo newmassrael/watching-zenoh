@@ -42162,6 +42162,46 @@
         "건전 확인(리뷰 calibration): NodeId wire 0x33·재stamp 값·rh wire-decode 검증·rf tick-seam·E6(부하 20/20 robust)·borrow 규율·bellman_ford expect 도달불가 모두 OK. 코드 LOCAL UNPUSHED 6커밋 rf/re/rg/rh/ri/rj. qm~rd=PUSHED origin/main=5049fe0. rk(구조)·rl(honesty) 후 push 권고."
       ]
     },
+    "Round 311rk": {
+      "decision_summary": "R311rk: c3c 적대 리뷰 remediation 2차(구조/SSOT). fan-out 4중복(flood_self/propagate/forward_push/publish)→단일 fan_out 헬퍼 SSOT(faces 차용·iterate·peer_zid·send·count 소유; caller는 selection+carrier policy만 closure). test backdoor 제거(transit 테스트 graph-internal poke→real ingest). stale 모듈 doc 정정. chain_z/register-I-O/publish-seam은 defer.",
+      "changes_bullets": [
+        "linkstate_forward.rs: fan_out(reliable, build: FnMut(FaceId,Option<&[u8]>)->Result<Option<NetworkMessage>>) 신규=face fan-out 단일 SSOT(borrow faces/iterate/peer_zid/send/skip-failure/count). flood_self/propagate/forward_push/publish이 각자 selection+carrier policy만 closure로 표현(4중 hand-rolled 루프 제거; self-stamp 버그가 4중1에만 숨은 구조 원인 해소). 19 unit 무회귀.",
+        "test backdoor 제거(리뷰 M3): forwards_a_transit_push가 graph 내부 set_zid_mapping/get_link_mut poke→real ingest(line S-A-B+S-C서 A가 B 광고)로 transit source 해석 검증. cross-crate poke 0(set_zid_mapping/get_link_mut은 graph 자체 테스트만 사용, 외부 0). stale 모듈 doc 정정('tree_children_of unused'→forward_push/publish가 사용; subscription-filter 미구현=zenoh directions[sub] 명시).",
+        "defer(reasoning): ②apply_chain_z_bits+iext 상수 중복(push_routing_context↔push_build)=MINOR multi-crate(wz-codecs 공유 헬퍼는 별도). ⑤register I/O 결합(bootstrap)=zenoh add_link도 send-on-new-link 결합이라 충실(미변경). ⑥publish demo-select seam=application-publish-drive는 session-layer 통합 시 설계(forwarder 관심사 아님)."
+      ],
+      "verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 307 PASS(fan_out 리팩터 19 linkstate unit 무회귀; transit 테스트 real-ingest 전환). clippy rt-tokio(routing-peer all-targets+no-default-features)+graph -D warnings clean. fmt --all --check exit 0. E6 wz_peer_mesh + E7 wz_peer_data_forward 무회귀(forward/publish가 fan_out 경유).",
+        "fan_out SSOT가 4 sender(flood_self 전체전송/propagate per-face/forward_push tree-child/publish self-tree)의 face-loop를 단일화. backdoor 제거로 graph 가변-link API의 cross-crate 노출 0(grep 확인)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rk = c3c 적대 리뷰 remediation 2차(구조/SSOT). fan_out 헬퍼=face fan-out 단일 SSOT(flood_self/propagate/forward_push/publish 4중복 제거; caller는 selection+carrier policy만 closure). test backdoor 제거(transit→real ingest). stale 모듈 doc 정정. 19 unit 무회귀.",
+        "남은 적대 리뷰: rl(honesty) — children-flood loop-freedom를 '수렴 일관 트리 한정'으로 정직 정정(jitter 결정적-대칭이라 수렴 후 loop-free지만 전이/flapping시 dedup/TTL 없음; e2e line만=순환 mesh 미검증; zenoh는 directions[sub], children-flood 아님). 순환 mesh e2e 또는 (source,sn) seen-set 방어. data_seen/node_count 단언 보강.",
+        "rk defer 항목(별도/충실): ②chain_z 중복=MINOR multi-crate. ⑤register I/O=zenoh add_link 결합이라 충실(미변경). ⑥publish seam=session-layer 통합 시. 추적부채: c3c-3 subscription-filter, change-triggered flood, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "코드 LOCAL UNPUSHED 7커밋: rf/re/rg/rh/ri/rj/rk. qm~rd=PUSHED origin/main=5049fe0. rl(honesty) 후 push 권고."
+      ],
+      "publishable_decision_summary": "R311rk: c3c 적대 리뷰 remediation 2차(구조/SSOT). fan-out 4중복(flood_self/propagate/forward_push/publish)→단일 fan_out 헬퍼 SSOT(faces 차용·iterate·peer_zid·send·count 소유; caller는 selection+carrier policy만 closure). test backdoor 제거(transit 테스트 graph-internal poke→real ingest). stale 모듈 doc 정정. chain_z/register-I-O/publish-seam은 defer.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs: fan_out(reliable, build: FnMut(FaceId,Option<&[u8]>)->Result<Option<NetworkMessage>>) 신규=face fan-out 단일 SSOT(borrow faces/iterate/peer_zid/send/skip-failure/count). flood_self/propagate/forward_push/publish이 각자 selection+carrier policy만 closure로 표현(4중 hand-rolled 루프 제거; self-stamp 버그가 4중1에만 숨은 구조 원인 해소). 19 unit 무회귀.",
+        "test backdoor 제거(리뷰 M3): forwards_a_transit_push가 graph 내부 set_zid_mapping/get_link_mut poke→real ingest(line S-A-B+S-C서 A가 B 광고)로 transit source 해석 검증. cross-crate poke 0(set_zid_mapping/get_link_mut은 graph 자체 테스트만 사용, 외부 0). stale 모듈 doc 정정('tree_children_of unused'→forward_push/publish가 사용; subscription-filter 미구현=zenoh directions[sub] 명시).",
+        "defer(reasoning): ②apply_chain_z_bits+iext 상수 중복(push_routing_context↔push_build)=MINOR multi-crate(wz-codecs 공유 헬퍼는 별도). ⑤register I/O 결합(bootstrap)=zenoh add_link도 send-on-new-link 결합이라 충실(미변경). ⑥publish demo-select seam=application-publish-drive는 session-layer 통합 시 설계(forwarder 관심사 아님)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 307 PASS(fan_out 리팩터 19 linkstate unit 무회귀; transit 테스트 real-ingest 전환). clippy rt-tokio(routing-peer all-targets+no-default-features)+graph -D warnings clean. fmt --all --check exit 0. E6 wz_peer_mesh + E7 wz_peer_data_forward 무회귀(forward/publish가 fan_out 경유).",
+        "fan_out SSOT가 4 sender(flood_self 전체전송/propagate per-face/forward_push tree-child/publish self-tree)의 face-loop를 단일화. backdoor 제거로 graph 가변-link API의 cross-crate 노출 0(grep 확인)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rk = c3c 적대 리뷰 remediation 2차(구조/SSOT). fan_out 헬퍼=face fan-out 단일 SSOT(flood_self/propagate/forward_push/publish 4중복 제거; caller는 selection+carrier policy만 closure). test backdoor 제거(transit→real ingest). stale 모듈 doc 정정. 19 unit 무회귀.",
+        "남은 적대 리뷰: rl(honesty) — children-flood loop-freedom를 '수렴 일관 트리 한정'으로 정직 정정(jitter 결정적-대칭이라 수렴 후 loop-free지만 전이/flapping시 dedup/TTL 없음; e2e line만=순환 mesh 미검증; zenoh는 directions[sub], children-flood 아님). 순환 mesh e2e 또는 (source,sn) seen-set 방어. data_seen/node_count 단언 보강.",
+        "rk defer 항목(별도/충실): ②chain_z 중복=MINOR multi-crate. ⑤register I/O=zenoh add_link 결합이라 충실(미변경). ⑥publish seam=session-layer 통합 시. 추적부채: c3c-3 subscription-filter, change-triggered flood, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "코드 LOCAL UNPUSHED 7커밋: rf/re/rg/rh/ri/rj/rk. qm~rd=PUSHED origin/main=5049fe0. rl(honesty) 후 push 권고."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
