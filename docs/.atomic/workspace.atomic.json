@@ -42524,6 +42524,44 @@
         "다음 후보: 위 추적부채 중 택1 또는 새 zenoh 조각. 권고=pubsub_tree_change(c3c-3 정직 갭 직접 닫음) 또는 chain_z SSOT(누적 dup 청산)."
       ]
     },
+    "Round 311rt": {
+      "decision_summary": "R311rt: c3c-3 4-에이전트 적대 세션리뷰 remediation 1(correctness/lifecycle). 4개 에이전트 전부 적발한 MAJOR=구독 interest가 peer 이탈 시 미purge. deregister→subs.remove_peer 배선(zenoh pubsub_remove_node link-down 미러). dead YAGNI 제거(withdraw/any_interest/keys=production 호출 0=false-confidence 테스트, pub이라 lint 미적발)+remove_peer doc 정직화(미연결 'stale 흐름 방지' 주장 청산). UndeclareSubscriber-while-up=honest defer.",
+      "changes_bullets": [
+        "linkstate_forward.rs deregister: state.actions.peer_zid()->subs.remove_peer(&zid) 추가=zenoh pubsub_remove_node link-down purge. 이전엔 graph link만 제거하고 subs 미정리=떠난 구독자 interest 누수(route는 unreachable로 self-heal하나 publisher any-interest 게이트가 spurious arm 유지). +deregister_purges_the_departed_peers_interest 테스트.",
+        "linkstate_subs.rs: withdraw/any_interest/keys 제거(production 호출 0; YAGNI; 테스트만 존재=false confidence; pub이라 dead-code lint 못 잡음). remove_peer=이제 deregister서 wired(real). doc 정직화(remove_peer가 'stale 흐름 방지 메커니즘'이라 주장했으나 미연결이던 doc-around-gap 청산; UndeclareSubscriber-while-up=별도 deferral 명시). withdraw 테스트 삭제, any_interest/keys 사용 테스트 interested로 정리."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 319 PASS(linkstate_subs 4→3 dead 제거, linkstate_forward +deregister purge 1; net 동일). clippy(routing-peer all-targets) -D warnings clean. fmt clean.",
+        "리뷰 F-A(4-에이전트 독립 수렴 MAJOR=구독 interest 이탈 시 미purge) 직접 해소: remove_peer 이제 wired=문서 주장과 실제 일치. dead surface 제거=pub이라 lint가 못 잡던 YAGNI 청산. honest defer: UndeclareSubscriber(face up 유지하며 keyexpr별 undeclare)+pubsub_tree_change(트리변경 재광고)는 별도 atom."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rt = c3c-3 4-에이전트 적대 세션리뷰 remediation 1(correctness/lifecycle): deregister→subs.remove_peer 배선(zenoh pubsub_remove_node link-down)=구독 interest 이탈 시 purge(4-에이전트 전부 적발 MAJOR=누수+dead+doc거짓). dead YAGNI(withdraw/any_interest/keys=production 호출 0) 제거+remove_peer doc 정직화. 319 unit.",
+        "남은 remediation track: rk(SSOT)=chain_z 3중복(push_build/push_routing_context/declare_routing_context 바이트동일 ~40줄) 공유 ext_nodeid 모듈로 통합(refactoring-expert CRITICAL; 사용자 명시 비용무관 SSOT 위반)+forward_push/forward_subscription exclusion closure 중복 헬퍼 추출. rl(honesty/coverage)=directions_toward doc 'mirrors insert_faces_for_subs'→실제는 topology 쿼리(route_successor 확장; forward_push가 insert_faces_for_subs) 정정+dest==source 'contributes nothing' 모순 정정+'byte-faithful' 과장(값생존만) 정정+forward 레벨 multi-subtree/multi-keyexpr/source-is-subscriber 커버리지 테스트.",
+        "honest defer(리뷰 인정): UndeclareSubscriber 전파, pubsub_tree_change, interest 모델 flat map vs resource-tree(wildcard 재작성 seam; YAGNI tension=wildcard 미도래라 resource-tree 선투자=speculative), e2e selectivity 4-peer(unit이 커버; e2e=gating 실증), e2e 15s budget(localhost convergence ~1-3s라 5-15x margin; 저위험).",
+        "LOCAL UNPUSHED 8커밋: rm/rn/ro/rp/rq/rr/rs/rt. qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci."
+      ],
+      "publishable_decision_summary": "R311rt: c3c-3 4-에이전트 적대 세션리뷰 remediation 1(correctness/lifecycle). 4개 에이전트 전부 적발한 MAJOR=구독 interest가 peer 이탈 시 미purge. deregister→subs.remove_peer 배선(zenoh pubsub_remove_node link-down 미러). dead YAGNI 제거(withdraw/any_interest/keys=production 호출 0=false-confidence 테스트, pub이라 lint 미적발)+remove_peer doc 정직화(미연결 'stale 흐름 방지' 주장 청산). UndeclareSubscriber-while-up=honest defer.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs deregister: state.actions.peer_zid()->subs.remove_peer(&zid) 추가=zenoh pubsub_remove_node link-down purge. 이전엔 graph link만 제거하고 subs 미정리=떠난 구독자 interest 누수(route는 unreachable로 self-heal하나 publisher any-interest 게이트가 spurious arm 유지). +deregister_purges_the_departed_peers_interest 테스트.",
+        "linkstate_subs.rs: withdraw/any_interest/keys 제거(production 호출 0; YAGNI; 테스트만 존재=false confidence; pub이라 dead-code lint 못 잡음). remove_peer=이제 deregister서 wired(real). doc 정직화(remove_peer가 'stale 흐름 방지 메커니즘'이라 주장했으나 미연결이던 doc-around-gap 청산; UndeclareSubscriber-while-up=별도 deferral 명시). withdraw 테스트 삭제, any_interest/keys 사용 테스트 interested로 정리."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer --lib 319 PASS(linkstate_subs 4→3 dead 제거, linkstate_forward +deregister purge 1; net 동일). clippy(routing-peer all-targets) -D warnings clean. fmt clean.",
+        "리뷰 F-A(4-에이전트 독립 수렴 MAJOR=구독 interest 이탈 시 미purge) 직접 해소: remove_peer 이제 wired=문서 주장과 실제 일치. dead surface 제거=pub이라 lint가 못 잡던 YAGNI 청산. honest defer: UndeclareSubscriber(face up 유지하며 keyexpr별 undeclare)+pubsub_tree_change(트리변경 재광고)는 별도 atom."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rt = c3c-3 4-에이전트 적대 세션리뷰 remediation 1(correctness/lifecycle): deregister→subs.remove_peer 배선(zenoh pubsub_remove_node link-down)=구독 interest 이탈 시 purge(4-에이전트 전부 적발 MAJOR=누수+dead+doc거짓). dead YAGNI(withdraw/any_interest/keys=production 호출 0) 제거+remove_peer doc 정직화. 319 unit.",
+        "남은 remediation track: rk(SSOT)=chain_z 3중복(push_build/push_routing_context/declare_routing_context 바이트동일 ~40줄) 공유 ext_nodeid 모듈로 통합(refactoring-expert CRITICAL; 사용자 명시 비용무관 SSOT 위반)+forward_push/forward_subscription exclusion closure 중복 헬퍼 추출. rl(honesty/coverage)=directions_toward doc 'mirrors insert_faces_for_subs'→실제는 topology 쿼리(route_successor 확장; forward_push가 insert_faces_for_subs) 정정+dest==source 'contributes nothing' 모순 정정+'byte-faithful' 과장(값생존만) 정정+forward 레벨 multi-subtree/multi-keyexpr/source-is-subscriber 커버리지 테스트.",
+        "honest defer(리뷰 인정): UndeclareSubscriber 전파, pubsub_tree_change, interest 모델 flat map vs resource-tree(wildcard 재작성 seam; YAGNI tension=wildcard 미도래라 resource-tree 선투자=speculative), e2e selectivity 4-peer(unit이 커버; e2e=gating 실증), e2e 15s budget(localhost convergence ~1-3s라 5-15x margin; 저위험).",
+        "LOCAL UNPUSHED 8커밋: rm/rn/ro/rp/rq/rr/rs/rt. qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

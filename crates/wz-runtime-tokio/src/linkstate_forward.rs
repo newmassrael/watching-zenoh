@@ -646,6 +646,14 @@ impl FaceForwarder for LinkstateForwarder {
         // — a misroute window after every face loss. zenoh recomputes on
         // link-down too (`hat/linkstate_peer/mod.rs` `schedule_compute_trees`).
         if let Some(state) = self.faces.borrow_mut().remove(&id) {
+            // Purge the departed peer's subscription interest — zenoh's
+            // `pubsub_remove_node` on link-down (`hat/linkstate_peer/mod.rs`).
+            // Without this a gone subscriber's interest lingers in the table,
+            // keeping the publisher's any-interest gate spuriously armed (the
+            // data route self-heals via unreachability, but the table leaks).
+            if let Some(zid) = state.actions.peer_zid() {
+                self.subs.borrow_mut().remove_peer(&zid);
+            }
             if let Some(link) = state.link {
                 let mut net = self.net.borrow_mut();
                 net.remove_link(link);
@@ -1346,6 +1354,32 @@ mod tests {
         fwd.forward_push(FaceId(0), true, &data_push());
         assert_eq!(sink_b.frame_count(), 0, "no subscriber -> no forward");
         assert_eq!(sink_a.frame_count(), 0, "not back to the source either");
+    }
+
+    #[test]
+    fn deregister_purges_the_departed_peers_interest() {
+        // R311rt review remediation — a subscriber's interest must not outlive
+        // its face. A declares interest, then its face deregisters: the table
+        // must drop A so the publisher's any-interest gate is no longer armed
+        // for it (zenoh pubsub_remove_node on link-down). Before the fix the
+        // interest leaked (the route self-healed via unreachability, but the
+        // table kept the stale entry).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        declare_interest(&fwd, FaceId(0), "demo/data");
+        assert_eq!(
+            fwd.interested("demo/data"),
+            vec![zid(0x0A)],
+            "A's interest registered"
+        );
+
+        fwd.deregister(FaceId(0));
+        assert!(
+            fwd.interested("demo/data").is_empty(),
+            "deregister purged A's interest (no stale subscriber left armed)"
+        );
     }
 
     // ── c3c-3 atom3b-ii: subscription declaration propagation ────────

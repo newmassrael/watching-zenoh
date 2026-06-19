@@ -39,9 +39,8 @@ use wz_routing_graph::Zid;
 pub struct LinkstatepeerSubs {
     /// keyexpr (exact string) -> the peers that declared interest in it.
     /// A key is present only while at least one peer is interested: the last
-    /// withdraw prunes the entry, so [`interested`](Self::interested) of an
-    /// unsubscribed key is empty and [`keys`](Self::keys) never lists an
-    /// emptied set.
+    /// peer's [`remove_peer`](Self::remove_peer) prunes the entry, so
+    /// [`interested`](Self::interested) of an unsubscribed key is empty.
     by_key: HashMap<String, HashSet<Zid>>,
 }
 
@@ -65,26 +64,14 @@ impl LinkstatepeerSubs {
             .insert(peer)
     }
 
-    /// Drop `peer`'s interest in `keyexpr` — an undeclare / forget. Returns
-    /// `true` if the interest was present and removed. When the last
-    /// interested peer of a key leaves, the key's entry is pruned so the
-    /// table does not leak emptied sets.
-    pub fn withdraw(&mut self, keyexpr: &str, peer: &Zid) -> bool {
-        let Some(set) = self.by_key.get_mut(keyexpr) else {
-            return false;
-        };
-        let removed = set.remove(peer);
-        if set.is_empty() {
-            self.by_key.remove(keyexpr);
-        }
-        removed
-    }
-
-    /// Drop ALL of `peer`'s interests across every key — used when a peer
-    /// leaves the mesh (its face/link went down), so stale interest never
-    /// keeps data flowing toward a departed subscriber. Returns the number
-    /// of keys the peer was dropped from. Emptied keys are pruned. zenoh
-    /// purges a removed peer's subscriptions likewise on link teardown.
+    /// Drop ALL of `peer`'s interests across every key — called from the
+    /// forwarder's `deregister` when a peer's face goes down, so stale interest
+    /// never keeps a departed subscriber armed in the publisher's any-interest
+    /// gate. Returns the number of keys the peer was dropped from; emptied keys
+    /// are pruned. Mirrors zenoh's `pubsub_remove_node` link-down purge
+    /// (`hat/linkstate_peer/mod.rs`). (A per-keyexpr undeclare —
+    /// `UndeclareSubscriber` while the face stays up — is a separate tracked
+    /// deferral; only whole-peer departure is wired so far.)
     pub fn remove_peer(&mut self, peer: &Zid) -> usize {
         let mut dropped = 0;
         self.by_key.retain(|_key, set| {
@@ -108,20 +95,6 @@ impl LinkstatepeerSubs {
             .get(keyexpr)
             .map(|set| set.iter().cloned().collect())
             .unwrap_or_default()
-    }
-
-    /// Whether any peer is interested in `keyexpr` — the cheap gate the
-    /// forward path checks before computing a data route (no interest ->
-    /// nothing to forward toward, skip the route computation entirely).
-    pub fn any_interest(&self, keyexpr: &str) -> bool {
-        self.by_key.get(keyexpr).is_some_and(|set| !set.is_empty())
-    }
-
-    /// The key expressions that currently have at least one interested peer
-    /// — the set to re-advertise when the topology changes (c3c-3 atom3's
-    /// tree-change re-propagation reads this). No emptied keys appear.
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.by_key.keys().map(String::as_str)
     }
 }
 
@@ -169,29 +142,6 @@ mod tests {
             subs.interested("demo").is_empty(),
             "a prefix key does not match (no resource-tree folding yet)"
         );
-        assert!(!subs.any_interest("demo/other"));
-        assert!(subs.any_interest("demo/data"));
-    }
-
-    #[test]
-    fn withdraw_removes_and_prunes_the_emptied_key() {
-        let mut subs = LinkstatepeerSubs::new();
-        subs.register("demo/data", zid(0xAA));
-        subs.register("demo/data", zid(0xBB));
-        assert!(subs.withdraw("demo/data", &zid(0xAA)));
-        assert_eq!(
-            subs.interested("demo/data"),
-            vec![zid(0xBB)],
-            "only the withdrawn peer is gone"
-        );
-        assert!(
-            !subs.withdraw("demo/data", &zid(0xAA)),
-            "withdrawing an absent peer reports no change"
-        );
-        // the last peer's withdraw prunes the key from keys().
-        assert!(subs.withdraw("demo/data", &zid(0xBB)));
-        assert!(!subs.any_interest("demo/data"));
-        assert_eq!(subs.keys().count(), 0, "emptied key is pruned");
     }
 
     #[test]
@@ -205,17 +155,16 @@ mod tests {
         subs.register("b", zid(0xBB));
         let dropped = subs.remove_peer(&zid(0xAA));
         assert_eq!(dropped, 2, "peer AA was interested in both keys");
-        assert!(!subs.any_interest("a"), "sole-subscriber key 'a' pruned");
+        assert!(
+            subs.interested("a").is_empty(),
+            "sole-subscriber key 'a' pruned"
+        );
         assert_eq!(
             subs.interested("b"),
             vec![zid(0xBB)],
             "shared key 'b' survives with the remaining peer"
         );
-        let keys: Vec<&str> = {
-            let mut k: Vec<&str> = subs.keys().collect();
-            k.sort_unstable();
-            k
-        };
-        assert_eq!(keys, vec!["b"], "only the still-subscribed key remains");
+        // removing the same (already-gone) peer drops nothing.
+        assert_eq!(subs.remove_peer(&zid(0xAA)), 0, "no-op for an absent peer");
     }
 }
