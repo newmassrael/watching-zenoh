@@ -202,4 +202,38 @@ mod tests {
             "the DeclareSubscriber body is preserved"
         );
     }
+
+    /// c3c-3 debt C2 — golden-vector byte-parity: a sourced
+    /// `Declare(DeclareSubscriber)` with a Declare-level `ext_nodeid` encodes to
+    /// the EXACT zenoh wire. Pins the `zextz64!(0x3)` ext header (`0x33`) + its
+    /// VLE body and its placement (the Declare-level ext chain, between the
+    /// header and the body), where the prior round-trip test checked only that
+    /// the value survives. The ext encode is confirmed against zenoh-pico
+    /// `_z_msg_ext_encode_zint` (`src/protocol/codec/ext.c`: header byte then a
+    /// VLE `node_id`), the field order against `commons/zenoh-codec/src/network/
+    /// declare.rs` (exts before body), and the DeclSubscriber body against the
+    /// `build_declare_subscriber` literal golden in `declare_build`.
+    #[test]
+    fn declare_with_nodeid_matches_zenoh_golden_bytes() {
+        use crate::declare_build::build_declare_subscriber;
+        use wz_codecs_test_support::TestWire;
+
+        let mut d = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build declare sub");
+        set_declare_source(&mut d, 7);
+        let mut expected = vec![
+            0x9E, // Declare header: N_MID_DECLARE 0x1E | Z 0x80 (ext chain present)
+            0x33, // ext_nodeid header: id 0x3 | M 0x10 | ENC_Z64 0x20 (terminal, Z clear)
+            0x07, // node_id 7 -> VLE(7)
+            0x62, // DeclSubscriber header: MID 0x02 | N 0x20 | M 0x40 (derived)
+            0x00, // subscriber_id 0 -> VLE
+            0x00, // wireexpr mapping id 0 -> VLE (literal sentinel)
+            0x08, // wireexpr suffix_len 8 -> VLE
+        ];
+        expected.extend_from_slice(b"demo/sub");
+        assert_eq!(
+            d.wire(),
+            expected,
+            "Declare + ext_nodeid wire must match the zenoh golden byte-for-byte",
+        );
+    }
 }

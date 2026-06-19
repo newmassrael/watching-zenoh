@@ -143,4 +143,47 @@ mod tests {
         assert_eq!(exts[0].header, 0x01 | EXT_ENC_Z64, "Z bit cleared (last)");
         assert_eq!(p.header & PUSH_FLAG_Z, PUSH_FLAG_Z, "chain still present");
     }
+
+    /// c3c-3 debt C2 — golden-vector byte-parity: a Push with an `ext_nodeid`
+    /// encodes to the EXACT zenoh wire. Differenced against the SAME Push with no
+    /// ext, so the body (`msg_put`) bytes are derived (not hand-rolled): adding
+    /// `ext_nodeid` must set the Push header `Z` bit and insert the `[0x33, VLE]`
+    /// ext chain AFTER the wireexpr, leaving the body byte-identical (just
+    /// shifted). Pins the `zextz64!(0x3)` ext encoding (confirmed vs zenoh-pico
+    /// `_z_msg_ext_encode_zint`) and its Push placement (the Push-level ext chain
+    /// sits between the wireexpr and the body, per `push.rs` field order). The
+    /// prior `set_then_read_round_trips` checked only value-survival.
+    #[test]
+    fn push_with_nodeid_matches_zenoh_golden_bytes() {
+        use wz_codecs_test_support::TestWire;
+
+        let base_wire = build_push_literal("demo/c3c", b"v").expect("build").wire();
+        let mut p = build_push_literal("demo/c3c", b"v").expect("build");
+        set_push_source(&mut p, 7);
+        let wire = p.wire();
+
+        // header(1) + literal wireexpr "demo/c3c" (mapping-id VLE + suffix_len VLE
+        // + 8 suffix bytes = 10) -> the ext chain begins at byte 11.
+        const EXT_OFFSET: usize = 1 + 10;
+        assert_eq!(
+            base_wire[0] & 0x80,
+            0,
+            "base Push carries no ext chain (Z clear)"
+        );
+        assert_eq!(
+            wire[0],
+            base_wire[0] | 0x80,
+            "ext_nodeid sets the Push header Z bit"
+        );
+        assert_eq!(
+            &wire[EXT_OFFSET..EXT_OFFSET + 2],
+            &[0x33, 0x07],
+            "ext_nodeid header 0x33 (id 0x3 | M | ENC_Z64) + VLE(7), after the wireexpr",
+        );
+        assert_eq!(
+            &wire[EXT_OFFSET + 2..],
+            &base_wire[EXT_OFFSET..],
+            "the msg_put body is byte-identical, shifted past the inserted ext",
+        );
+    }
 }

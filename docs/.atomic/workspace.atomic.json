@@ -42852,6 +42852,46 @@
         "R311u+ — QueryEvent.attachment extraction from Query.extensions chain (carry from R311r)."
       ]
     },
+    "Round 311sa": {
+      "decision_summary": "R311sa: c3c-3 부채 C2 — ext_nodeid golden-vector byte-parity. push_routing_context/declare_routing_context의 value-survival round-trip에 zenoh 골든 바이트 비교 추가. Declare full-wire [0x9E,0x33,0x07,0x62,0x00,0x00,0x08,demo/sub] + Push는 base 대비 차분(ext [0x33,0x07] placement+Z bit; msg_put body 파생). ext encode를 zenoh-pico _z_msg_ext_encode_zint(header+VLE)로 확인. ext_keyexpr 골든은 A1서 이미. test-only.",
+      "changes_bullets": [
+        "wz-session-core/src/declare_routing_context.rs: declare_with_nodeid_matches_zenoh_golden_bytes — full-wire 골든 [0x9E(N_MID_DECLARE 0x1E|Z 0x80), 0x33(ext_nodeid id 0x3|M 0x10|ENC_Z64 0x20, terminal), 0x07(VLE node_id 7), 0x62(DeclSub MID 0x02|N 0x20|M 0x40), 0x00(sub_id VLE), 0x00(wireexpr mapping id VLE), 0x08(suffix_len VLE), \"demo/sub\"]. 기존 set_then_read_round_trips_through_the_wire(value-survival만)를 byte-parity로 격상.",
+        "wz-session-core/src/push_routing_context.rs: push_with_nodeid_matches_zenoh_golden_bytes — base(no ext) 대비 차분으로 ext_nodeid가 (a) Push header Z bit 세팅 (b) [0x33, VLE(7)] ext chain을 wireexpr(10B) 뒤 offset 11에 삽입 (c) msg_put body 무변경(shift) 단언. msg_put body는 base서 파생(hand-roll 안 함=오류 방지). 기존 set_then_read는 value-survival만."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare,codec-push 273 PASS(골든 2 신규=declare full-wire + push diff; 기존 271 무회귀). clippy clean. fmt clean(run-ci 전 로컬). full run-ci RUNCI_EXIT=0(전 host 레인; test-only 변경=production 코드 무수정).",
+        "골든 바이트 = zenoh-pico 확인: ext_nodeid body=VLE(_z_msg_ext_encode_zint, src/protocol/codec/ext.c=header 후 zint64_encode), header 0x33=id 0x3|M 0x10|ENC(pico _Z_MSG_EXT_ENC_ZINT 0x20 = wz EXT_ENC_Z64 0x20; Z64=ZINT 동일 인코딩), placement=declare(exts before body)/push(exts after wireexpr) 필드 순서. value-survival(기존 round-trip)→byte-parity 격상(이전 tracked gap=A1 declare doc + push_routing_context doc 명시).",
+        "ext_keyexpr 골든은 A1(rw)서 이미 추가(undecl byte-parity); C2=ext_nodeid 측 완결."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sa = c3c-3 부채 C2 완결: ext_nodeid golden-vector byte-parity(push_with_nodeid + declare_with_nodeid). zenoh-pico _z_msg_ext_encode_zint 확인(header+VLE). value-survival→byte-parity 격상. ext_keyexpr 골든은 A1(rw)서 이미.",
+        "다음 부채(project_c3c3_debt_paydown 순): C1(4-peer e2e selectivity=A-B-{C sub, D no-sub}, D 미수신 단언; 데모 토폴로지 분기; flake 주의) → D1 (source,sn) seen-set(전이-불일치 loop 방어) → D2 change-triggered flood(현재 매 tree-change; zenoh 배치) → B1 alias keyexpr → D3/D4 → B2 wildcard → E/F.",
+        "honest defer: push 골든은 msg_put body를 base서 파생(full literal 아님; ext placement+encode는 정확 단언). golden=zenoh-pico spec 유도(actual zenoh 캡처 아님; A1 패턴 동일).",
+        "LOCAL UNPUSHED: A1 3(rw/rx/ry)+A2 1(rz)+C2 1(sa)=5커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci)."
+      ],
+      "publishable_decision_summary": "R311sa: c3c-3 부채 C2 — ext_nodeid golden-vector byte-parity. push_routing_context/declare_routing_context의 value-survival round-trip에 zenoh 골든 바이트 비교 추가. Declare full-wire [0x9E,0x33,0x07,0x62,0x00,0x00,0x08,demo/sub] + Push는 base 대비 차분(ext [0x33,0x07] placement+Z bit; msg_put body 파생). ext encode를 zenoh-pico _z_msg_ext_encode_zint(header+VLE)로 확인. ext_keyexpr 골든은 A1서 이미. test-only.",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/declare_routing_context.rs: declare_with_nodeid_matches_zenoh_golden_bytes — full-wire 골든 [0x9E(N_MID_DECLARE 0x1E|Z 0x80), 0x33(ext_nodeid id 0x3|M 0x10|ENC_Z64 0x20, terminal), 0x07(VLE node_id 7), 0x62(DeclSub MID 0x02|N 0x20|M 0x40), 0x00(sub_id VLE), 0x00(wireexpr mapping id VLE), 0x08(suffix_len VLE), \"demo/sub\"]. 기존 set_then_read_round_trips_through_the_wire(value-survival만)를 byte-parity로 격상.",
+        "wz-session-core/src/push_routing_context.rs: push_with_nodeid_matches_zenoh_golden_bytes — base(no ext) 대비 차분으로 ext_nodeid가 (a) Push header Z bit 세팅 (b) [0x33, VLE(7)] ext chain을 wireexpr(10B) 뒤 offset 11에 삽입 (c) msg_put body 무변경(shift) 단언. msg_put body는 base서 파생(hand-roll 안 함=오류 방지). 기존 set_then_read는 value-survival만."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare,codec-push 273 PASS(골든 2 신규=declare full-wire + push diff; 기존 271 무회귀). clippy clean. fmt clean(run-ci 전 로컬). full run-ci RUNCI_EXIT=0(전 host 레인; test-only 변경=production 코드 무수정).",
+        "골든 바이트 = zenoh-pico 확인: ext_nodeid body=VLE(_z_msg_ext_encode_zint, src/protocol/codec/ext.c=header 후 zint64_encode), header 0x33=id 0x3|M 0x10|ENC(pico _Z_MSG_EXT_ENC_ZINT 0x20 = wz EXT_ENC_Z64 0x20; Z64=ZINT 동일 인코딩), placement=declare(exts before body)/push(exts after wireexpr) 필드 순서. value-survival(기존 round-trip)→byte-parity 격상(이전 tracked gap=A1 declare doc + push_routing_context doc 명시).",
+        "ext_keyexpr 골든은 A1(rw)서 이미 추가(undecl byte-parity); C2=ext_nodeid 측 완결."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sa = c3c-3 부채 C2 완결: ext_nodeid golden-vector byte-parity(push_with_nodeid + declare_with_nodeid). zenoh-pico _z_msg_ext_encode_zint 확인(header+VLE). value-survival→byte-parity 격상. ext_keyexpr 골든은 A1(rw)서 이미.",
+        "다음 부채(project_c3c3_debt_paydown 순): C1(4-peer e2e selectivity=A-B-{C sub, D no-sub}, D 미수신 단언; 데모 토폴로지 분기; flake 주의) → D1 (source,sn) seen-set(전이-불일치 loop 방어) → D2 change-triggered flood(현재 매 tree-change; zenoh 배치) → B1 alias keyexpr → D3/D4 → B2 wildcard → E/F.",
+        "honest defer: push 골든은 msg_put body를 base서 파생(full literal 아님; ext placement+encode는 정확 단언). golden=zenoh-pico spec 유도(actual zenoh 캡처 아님; A1 패턴 동일).",
+        "LOCAL UNPUSHED: A1 3(rw/rx/ry)+A2 1(rz)+C2 1(sa)=5커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [
