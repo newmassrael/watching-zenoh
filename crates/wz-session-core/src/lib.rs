@@ -388,6 +388,11 @@ pub mod send_wire_error;
 #[cfg(feature = "alloc")]
 pub mod sample;
 
+/// Shared slice-based VLE decoder (the `SceCursor::read_vle_u64` borrowed-slice
+/// twin) — the SSOT for parsing a varint out of an already-buffered ext body.
+#[cfg(feature = "alloc")]
+pub(crate) mod vle;
+
 /// R74 / R311di-11 — `NetworkMessage` application-layer envelope batch
 /// + `parse_frame_payload` dispatcher. Uses `Box<Request>` etc. so
 /// gated on `alloc`. Body variants (Request / Push / Response /

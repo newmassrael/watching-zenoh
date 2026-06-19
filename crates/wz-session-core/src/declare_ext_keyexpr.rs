@@ -46,6 +46,7 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
 use crate::ext_nodeid::{ext_id, EXT_ENC_ZBUF, EXT_FLAG_M};
+use crate::vle::read_vle_u64;
 
 /// The `ext_keyexpr` extension id — zenoh `_z_decl_ext_keyexpr`, ext id `0x0f`.
 pub const KEYEXPR_EXT_ID: u8 = 0x0f;
@@ -86,59 +87,43 @@ pub fn build_ext_keyexpr(literal: &str) -> Result<ExtEntryOwned, CodecError> {
     })
 }
 
-/// Read the LITERAL keyexpr from an `ext_keyexpr` extension in `exts`. `None`
-/// when absent, when the entry is not a ZBuf body, or when the keyexpr is
-/// aliased (a non-zero inner mapping id) rather than a literal — the
-/// linkstate-peer HAT is literal-only in the MVP, the same deferral as the data
-/// / declare `literal_keyexpr` seams. Borrows the suffix out of the ext body (no
-/// allocation), so the caller can look it up directly in the interest table.
-pub fn read_ext_keyexpr(exts: Option<&Vec<ExtEntryOwned>>) -> Option<&str> {
-    let exts = exts?;
-    for ext in exts {
+/// Parse the FIRST `ext_keyexpr` entry in `exts` into its raw inner fields —
+/// `(inner_header, mapping_id, suffix_bytes)`. The single body-parse SSOT both
+/// [`read_ext_keyexpr`] (literal gate) and [`resolve_ext_keyexpr`] (table
+/// resolve) build on, so the ZBuf-body layout `[inner_header | id VLE | suffix]`
+/// and the VLE decode ([`read_vle_u64`](crate::vle::read_vle_u64)) live in ONE
+/// place rather than two hand-rolled parsers that could drift. `None` when no
+/// `ext_keyexpr` entry is present, its body is not a ZBuf, or the id VLE is
+/// truncated.
+fn parse_ext_keyexpr_entry(exts: Option<&Vec<ExtEntryOwned>>) -> Option<(u8, u64, &[u8])> {
+    for ext in exts? {
         if ext_id(ext.header) != KEYEXPR_EXT_ID {
             continue;
         }
         let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body else {
             continue;
         };
-        // [inner_header, mapping-id VLE, suffix]. Literal MVP: the id is the
-        // single byte 0x00 (mapping 0); a non-zero / multi-byte VLE is an alias.
         let body = z.value.as_slice();
-        let Some((&inner_header, rest)) = body.split_first() else {
-            continue;
-        };
-        let Some((&id_byte, suffix)) = rest.split_first() else {
-            continue;
-        };
-        if inner_header & INNER_HAS_SUFFIX == 0 || id_byte != 0x00 {
-            continue; // no suffix, or an aliased mapping id → literal-only defer
-        }
-        return core::str::from_utf8(suffix).ok();
+        let (&inner_header, rest) = body.split_first()?;
+        let (id, consumed) = read_vle_u64(rest)?;
+        let suffix_bytes = rest.get(consumed..)?;
+        return Some((inner_header, id, suffix_bytes));
     }
     None
 }
 
-/// Decode the leading zenoh VLE (varint) `u64` from `bytes`, returning the value
-/// and the bytes after it. `None` on truncation or an over-long encoding (a VLE
-/// wider than a `u64`). The inner mapping-id of an `ext_keyexpr` ZBuf body is
-/// VLE-encoded — a literal is the single byte `0x00`, an alias is the sender's
-/// (multi-byte-capable) mapping id.
-fn decode_vle(bytes: &[u8]) -> Option<(u64, &[u8])> {
-    let mut value = 0u64;
-    let mut shift = 0u32;
-    let mut i = 0usize;
-    loop {
-        let byte = *bytes.get(i)?;
-        i += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some((value, &bytes[i..]));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return None; // malformed: a VLE wider than a u64
-        }
+/// Read the LITERAL keyexpr from an `ext_keyexpr` extension in `exts`. `None`
+/// when absent, when the entry is not a ZBuf body, or when the keyexpr is
+/// aliased (a non-zero inner mapping id) rather than a literal — the
+/// linkstate-peer HAT is literal-only here, the same deferral as the data /
+/// declare literal seams. Borrows the suffix out of the ext body (no
+/// allocation). The alias-capable superset is [`resolve_ext_keyexpr`].
+pub fn read_ext_keyexpr(exts: Option<&Vec<ExtEntryOwned>>) -> Option<&str> {
+    let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts)?;
+    if inner_header & INNER_HAS_SUFFIX == 0 || id != 0 {
+        return None; // no suffix, or an aliased mapping id → literal-only defer
     }
+    core::str::from_utf8(suffix_bytes).ok()
 }
 
 /// Resolve the keyexpr an `ext_keyexpr` extension carries against a peer mapping
@@ -155,32 +140,19 @@ pub fn resolve_ext_keyexpr(
     exts: Option<&Vec<ExtEntryOwned>>,
     table: &HashMap<u64, String>,
 ) -> Option<String> {
-    let exts = exts?;
-    for ext in exts {
-        if ext_id(ext.header) != KEYEXPR_EXT_ID {
-            continue;
-        }
-        let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body else {
-            continue;
-        };
-        // [inner_header, mapping-id VLE, suffix].
-        let body = z.value.as_slice();
-        let (&inner_header, rest) = body.split_first()?;
-        let (id, suffix_bytes) = decode_vle(rest)?;
-        let suffix = if inner_header & INNER_HAS_SUFFIX != 0 {
-            core::str::from_utf8(suffix_bytes).ok()?
-        } else {
-            ""
-        };
-        return Some(if id == 0 {
-            String::from(suffix)
-        } else {
-            let mut out = table.get(&id)?.clone();
-            out.push_str(suffix);
-            out
-        });
-    }
-    None
+    let (inner_header, id, suffix_bytes) = parse_ext_keyexpr_entry(exts)?;
+    let suffix = if inner_header & INNER_HAS_SUFFIX != 0 {
+        core::str::from_utf8(suffix_bytes).ok()?
+    } else {
+        ""
+    };
+    Some(if id == 0 {
+        String::from(suffix)
+    } else {
+        let mut out = table.get(&id)?.clone();
+        out.push_str(suffix);
+        out
+    })
 }
 
 #[cfg(test)]
@@ -290,5 +262,40 @@ mod tests {
         };
         let table = HashMap::new();
         assert_eq!(resolve_ext_keyexpr(Some(&vec![aliased]), &table), None);
+    }
+
+    #[test]
+    fn resolve_composes_a_multi_byte_aliased_ext() {
+        // A multi-byte VLE inner id (129 = [0x81, 0x01]) resolves via the table —
+        // the > 127 id path the single-byte tests never reached (M1).
+        let aliased = ExtEntryOwned {
+            header: KEYEXPR_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 3,
+                // [inner_header 0x02 (local, no suffix), VLE id 129 = 0x81 0x01].
+                value: crate::codec_owned::owned_bytes(&[0x02, 0x81, 0x01]).unwrap(),
+            }),
+        };
+        let mut table = HashMap::new();
+        table.insert(129u64, String::from("demo/sub"));
+        assert_eq!(
+            resolve_ext_keyexpr(Some(&vec![aliased]), &table),
+            Some(String::from("demo/sub"))
+        );
+    }
+
+    #[test]
+    fn resolve_a_truncated_id_vle_is_none() {
+        // The inner-id VLE's continuation bit is set but the body ends -> the
+        // shared decoder rejects it -> None (not a panic / wrong id).
+        let truncated = ExtEntryOwned {
+            header: KEYEXPR_EXT_HEADER,
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                value_len: 2,
+                value: crate::codec_owned::owned_bytes(&[0x02, 0x81]).unwrap(),
+            }),
+        };
+        let table = HashMap::new();
+        assert_eq!(resolve_ext_keyexpr(Some(&vec![truncated]), &table), None);
     }
 }

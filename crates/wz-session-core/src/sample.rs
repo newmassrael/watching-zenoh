@@ -57,6 +57,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::vle::read_vle_u64;
+
 #[cfg(test)]
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -561,33 +563,6 @@ fn decode_source_info_payload(bytes: &[u8]) -> Option<SourceInfo> {
     })
 }
 
-/// Read a base-128 VLE-encoded u64 from a byte slice. Returns
-/// `(value, bytes_consumed)` on success, `None` on truncation or on
-/// the rare `>= 10`-byte case where the VLE accumulator would shift
-/// past 63 bits. This mirrors the receive-side half of
-/// `sce_forge_runtime::codec::SceCursor::read_vle_u64` semantics, but
-/// reads from a borrowed slice (no cursor state) since the source-info
-/// payload is already buffered as a `Vec<u8>` by `ExtZbuf`.
-fn read_vle_u64(bytes: &[u8]) -> Option<(u64, usize)> {
-    let mut value: u64 = 0;
-    let mut shift: u32 = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        let chunk = (b & 0x7f) as u64;
-        if shift >= 63 && chunk > 1 {
-            return None;
-        }
-        value |= chunk << shift;
-        if (b & 0x80) == 0 {
-            return Some((value, i + 1));
-        }
-        shift += 7;
-        if shift > 63 {
-            return None;
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,24 +885,5 @@ mod tests {
         assert_eq!(si.zid, expected_zid);
         assert_eq!(si.eid, 200);
         assert_eq!(si.sn, 16384);
-    }
-
-    #[test]
-    fn read_vle_u64_handles_single_byte_payloads() {
-        assert_eq!(read_vle_u64(&[0x00]), Some((0, 1)));
-        assert_eq!(read_vle_u64(&[0x7F]), Some((127, 1)));
-    }
-
-    #[test]
-    fn read_vle_u64_handles_multi_byte_payloads() {
-        // 0xC8 0x01 = 200 (0xC8 & 0x7F = 0x48, then + 0x01 << 7 = 128 → 200)
-        assert_eq!(read_vle_u64(&[0xC8, 0x01]), Some((200, 2)));
-    }
-
-    #[test]
-    fn read_vle_u64_returns_none_on_truncation() {
-        // Continuation bit set but slice ends.
-        assert_eq!(read_vle_u64(&[0x80]), None);
-        assert!(read_vle_u64(&[]).is_none());
     }
 }
