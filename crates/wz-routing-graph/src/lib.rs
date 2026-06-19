@@ -883,6 +883,36 @@ impl LinkstateNetwork {
         Some(self.graph[hop].zid.clone())
     }
 
+    /// The deduped set of first-hop children of this peer toward ANY of
+    /// `dests` along `source`'s tree — the subscription-filtered data-route
+    /// primitive (c3c-3). For each `dest`, [`next_hop`](Self::next_hop) gives
+    /// the child to forward toward; the children are DEDUPED, so several
+    /// destinations sharing one subtree yield that child once. A Push
+    /// replicated to this set reaches every `dest`'s subtree exactly once
+    /// instead of flooding every tree child ([`tree_children_of`](Self::tree_children_of)
+    /// is the unfiltered broadcast). This is the multicast generalisation of
+    /// the unicast `next_hop`: pass the interested-subscriber set, get the
+    /// minimal outbound child set.
+    ///
+    /// Mirrors zenoh `insert_faces_for_subs` (`pubsub.rs:909-944`):
+    /// `trees[source].directions[sub]` per interested peer, collected into the
+    /// unique output-face set. A `dest` that is unknown, unreachable in
+    /// `source`'s tree, or whose direction is `None` (e.g. `dest == source`,
+    /// upstream of self) contributes nothing — the caller's inbound-face
+    /// exclusion handles the upstream direction. Output order is
+    /// first-seen-deterministic over `dests`.
+    pub fn directions_toward(&self, source: &Zid, dests: &[Zid]) -> Vec<Zid> {
+        let mut out: Vec<Zid> = Vec::new();
+        for dest in dests {
+            if let Some(hop) = self.next_hop(source, dest) {
+                if !out.contains(&hop) {
+                    out.push(hop);
+                }
+            }
+        }
+        out
+    }
+
     /// Shortest-path distance from this peer to `dest`, if reachable
     /// (`None` for an unreachable node — Bellman-Ford infinity).
     pub fn distance_to(&self, dest: &Zid) -> Option<f64> {
@@ -1332,6 +1362,114 @@ mod tests {
         );
         assert_eq!(net.next_hop(&zid(0x01), &zid(0xAA)), Some(zid(0xAA)));
         assert_eq!(net.next_hop(&zid(0x01), &zid(0xBB)), Some(zid(0xBB)));
+    }
+
+    #[test]
+    fn directions_toward_splits_and_dedups_by_subtree() {
+        // self -- A, self -- B, B -- D (D behind B). In self's own tree A and
+        // B are direct children; D is reached via B. The subscription filter:
+        //  - [A, D]  -> {A, B}  (two distinct subtrees, no dedup)
+        //  - [B, D]  -> {B}     (both via child B -> deduped to one)
+        //  - [D]     -> {B}     (forward only down B's subtree, NOT to A)
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let la = net.add_link(zid(0xAA), 2);
+        let lb = net.add_link(zid(0xBB), 2);
+        // A floods: teach self/A zids, A links self -> edge self<->A.
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]),
+            ]),
+        );
+        // B floods: teach self/B/D zids; B links self + D -> edges self<->B,
+        // B<->D (D's own link advertised next pass).
+        net.ingest_linkstate_list(
+            lb,
+            list(vec![
+                entry(20, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(22, 0, Some(&zid(0xDD)), Some(2), &[]),
+                entry(21, 5, Some(&zid(0xBB)), Some(2), &[20, 22]),
+            ]),
+        );
+        net.ingest_linkstate_list(
+            lb,
+            list(vec![entry(22, 5, Some(&zid(0xDD)), Some(2), &[21])]),
+        );
+        net.compute_trees();
+
+        let mut split = net.directions_toward(&zid(0x01), &[zid(0xAA), zid(0xDD)]);
+        split.sort();
+        assert_eq!(
+            split,
+            vec![zid(0xAA), zid(0xBB)],
+            "A direct + D via B -> two distinct directions"
+        );
+        assert_eq!(
+            net.directions_toward(&zid(0x01), &[zid(0xBB), zid(0xDD)]),
+            vec![zid(0xBB)],
+            "B and D-behind-B collapse to the single child B"
+        );
+        assert_eq!(
+            net.directions_toward(&zid(0x01), &[zid(0xDD)]),
+            vec![zid(0xBB)],
+            "interest only behind B -> forward down B's subtree, not to A"
+        );
+        assert!(
+            net.directions_toward(&zid(0x01), &[]).is_empty(),
+            "no interested peers -> no outbound children"
+        );
+        assert!(
+            net.directions_toward(&zid(0x01), &[zid(0xFF)]).is_empty(),
+            "an unknown / unreachable dest contributes no direction"
+        );
+    }
+
+    #[test]
+    fn directions_toward_follows_a_non_self_source_tree() {
+        // Line A -- self -- C -- E. A Push SOURCED at A floods along A's tree,
+        // in which self's children are C (toward C and E). The filter on A's
+        // tree for interest {C, E} must pick child C once (E is behind C);
+        // interest in the source A itself resolves to the UPSTREAM (parent)
+        // direction, which forward_push's inbound-face exclusion suppresses.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let la = net.add_link(zid(0x0A), 2);
+        let lc = net.add_link(zid(0x0C), 2);
+        // A floods: A links self -> edge A<->self.
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0x0A)), Some(2), &[10]),
+            ]),
+        );
+        // C floods: teach self/C/E zids; C links self + E; E links C.
+        net.ingest_linkstate_list(
+            lc,
+            list(vec![
+                entry(20, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(22, 0, Some(&zid(0x0E)), Some(2), &[]),
+                entry(21, 5, Some(&zid(0x0C)), Some(2), &[20, 22]),
+            ]),
+        );
+        net.ingest_linkstate_list(
+            lc,
+            list(vec![entry(22, 5, Some(&zid(0x0E)), Some(2), &[21])]),
+        );
+        net.compute_trees();
+
+        assert_eq!(
+            net.directions_toward(&zid(0x0A), &[zid(0x0C), zid(0x0E)]),
+            vec![zid(0x0C)],
+            "in A's tree, interest in C and E-behind-C both route via child C"
+        );
+        assert_eq!(
+            net.directions_toward(&zid(0x0A), &[zid(0x0A)]),
+            vec![zid(0x0A)],
+            "interest in the source resolves to the upstream (parent) direction \
+             (zenoh directions[source]=parent); forward_push's inbound-face \
+             exclusion is what suppresses sending it back"
+        );
     }
 
     // ── c3b TX: build_linkstate_list + cross-peer convergence ───────

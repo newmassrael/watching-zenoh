@@ -42240,6 +42240,46 @@
         "리뷰 calibration 건전분: NodeId wire 0x33·재stamp 값·rh wire-decode·rf tick-seam·E6(부하 20/20)·borrow 규율·bellman_ford expect 도달불가 OK. 자가감사 과신을 독립 4-에이전트 리뷰가 교정=패턴 재확인."
       ]
     },
+    "Round 311rm": {
+      "decision_summary": "R311rm: c3c-3 구독필터 atom1(directions 기반 face 선택자). 그래프에 directions_toward(source,dests) 추가=next_hop(unicast)의 multi-peer dedup 일반화=zenoh insert_faces_for_subs(pubsub.rs:909-944) 미러. 각 interested dest의 next_hop 자식을 dedup 수집→broadcast(tree_children_of) 대신 interested 서브트리로만 향하는 최소 outbound 자식 집합. 레지스트리/Declare 전파/forward_push 배선은 후속 atom.",
+      "changes_bullets": [
+        "wz-routing-graph/src/lib.rs: directions_toward(source, dests) -> Vec<Zid> 추가. 각 dest의 next_hop(source,dest) 자식 zid를 first-seen 순서로 dedup 수집. zenoh insert_faces_for_subs(pubsub.rs:909-944) 핵심 루프(trees[source].directions[sub] per interested peer -> unique face set) 미러. unknown/unreachable/None-direction dest는 무기여; dest==source는 directions[source]=parent(상류)라 self 부모 zid 반환(forward_push inbound 제외가 실제 억제).",
+        "단위 테스트 2건(graph 24->26): splits_and_dedups_by_subtree(self-A·self-B·B-D서 [A,D]->{A,B} split, [B,D]->{B} dedup, [D]->{B} only-B-subtree, empty->empty, unknown 0xFF->empty) + follows_a_non_self_source_tree(A-self-C-E 라인서 A 트리 기준 [C,E]->{C} dedup, [A]->{A} 상류방향 정직 단언).",
+        "directions/next_hop는 qt(spanning-tree)서 이미 구축; 이 atom은 그 소비 primitive(unicast next_hop의 multi-peer dedup 일반화). 라이브 forward 경로 미배선=후속 atom이 소비."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-routing-graph 26 PASS(directions_toward 2 신규 무회귀). clippy -p wz-routing-graph --all-targets -D warnings clean. fmt -p wz-routing-graph --check exit 0.",
+        "directions_toward는 next_hop 위 순수 dedup 래퍼라 tree-walking SSOT를 그래프에 유지(forward_push가 재구현 안 함). zenoh는 face-id 키 dedup; wz는 child-zid 키 dedup(face<->zid 1:1이라 동치). 라이브 forward 경로 미배선=후속 atom(레지스트리/전파/배선)이 소비."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rm = c3c-3 구독필터 atom1: 그래프 directions_toward(source,dests)=next_hop의 multi-peer dedup 일반화(zenoh insert_faces_for_subs 미러). interested 서브트리로만 향하는 최소 outbound 자식 집합. 26 graph unit. directions/next_hop는 qt 기존; 이 atom=소비 primitive.",
+        "c3c-3 남은 atom(의존순): atom2=구독 레지스트리(keyexpr->interested peer zid HashSet; zenoh HatContext.linkstatepeer_subs; 위치=forwarder or 신규 모듈; 정직: exact-match MVP, 와일드카드 keyexpr intersection=zenoh resource-tree=별도 부채). atom3=Declare(Subscriber) wire codec+sourced 전파(트리 따라 flood, 수신시 register; zenoh propagate_sourced_subscription/pubsub_tree_change). atom4=forward_push가 tree_children_of broadcast->directions_toward(source,interested) 전환+publish 동일+3-peer e2e(C subscribe->A publish->C-ward 서브트리만 forward).",
+        "코드 LOCAL UNPUSHED: rm 1커밋. qm~rl=PUSHED origin/main=609db3d(MEMORY 인덱스 기준; rl carry의 'unpushed 8커밋'은 stale-이후 세션서 푸시됨). push 시 full run-ci(pre-push) 필요.",
+        "추적부채(불변): (source,sn) seen-set dedup/TTL, 와일드카드 keyexpr matching(resource tree), distributed multi-node no-loop 시뮬, change-triggered flood, remove_detached_nodes, Zid=Vec<u8>->16B newtype, gossip/autoconnect/locators, chain_z 상수 중복."
+      ],
+      "publishable_decision_summary": "R311rm: c3c-3 구독필터 atom1(directions 기반 face 선택자). 그래프에 directions_toward(source,dests) 추가=next_hop(unicast)의 multi-peer dedup 일반화=zenoh insert_faces_for_subs(pubsub.rs:909-944) 미러. 각 interested dest의 next_hop 자식을 dedup 수집→broadcast(tree_children_of) 대신 interested 서브트리로만 향하는 최소 outbound 자식 집합. 레지스트리/Declare 전파/forward_push 배선은 후속 atom.",
+      "publishable_changes_bullets": [
+        "wz-routing-graph/src/lib.rs: directions_toward(source, dests) -> Vec<Zid> 추가. 각 dest의 next_hop(source,dest) 자식 zid를 first-seen 순서로 dedup 수집. zenoh insert_faces_for_subs(pubsub.rs:909-944) 핵심 루프(trees[source].directions[sub] per interested peer -> unique face set) 미러. unknown/unreachable/None-direction dest는 무기여; dest==source는 directions[source]=parent(상류)라 self 부모 zid 반환(forward_push inbound 제외가 실제 억제).",
+        "단위 테스트 2건(graph 24->26): splits_and_dedups_by_subtree(self-A·self-B·B-D서 [A,D]->{A,B} split, [B,D]->{B} dedup, [D]->{B} only-B-subtree, empty->empty, unknown 0xFF->empty) + follows_a_non_self_source_tree(A-self-C-E 라인서 A 트리 기준 [C,E]->{C} dedup, [A]->{A} 상류방향 정직 단언).",
+        "directions/next_hop는 qt(spanning-tree)서 이미 구축; 이 atom은 그 소비 primitive(unicast next_hop의 multi-peer dedup 일반화). 라이브 forward 경로 미배선=후속 atom이 소비."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-routing-graph 26 PASS(directions_toward 2 신규 무회귀). clippy -p wz-routing-graph --all-targets -D warnings clean. fmt -p wz-routing-graph --check exit 0.",
+        "directions_toward는 next_hop 위 순수 dedup 래퍼라 tree-walking SSOT를 그래프에 유지(forward_push가 재구현 안 함). zenoh는 face-id 키 dedup; wz는 child-zid 키 dedup(face<->zid 1:1이라 동치). 라이브 forward 경로 미배선=후속 atom(레지스트리/전파/배선)이 소비."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rm = c3c-3 구독필터 atom1: 그래프 directions_toward(source,dests)=next_hop의 multi-peer dedup 일반화(zenoh insert_faces_for_subs 미러). interested 서브트리로만 향하는 최소 outbound 자식 집합. 26 graph unit. directions/next_hop는 qt 기존; 이 atom=소비 primitive.",
+        "c3c-3 남은 atom(의존순): atom2=구독 레지스트리(keyexpr->interested peer zid HashSet; zenoh HatContext.linkstatepeer_subs; 위치=forwarder or 신규 모듈; 정직: exact-match MVP, 와일드카드 keyexpr intersection=zenoh resource-tree=별도 부채). atom3=Declare(Subscriber) wire codec+sourced 전파(트리 따라 flood, 수신시 register; zenoh propagate_sourced_subscription/pubsub_tree_change). atom4=forward_push가 tree_children_of broadcast->directions_toward(source,interested) 전환+publish 동일+3-peer e2e(C subscribe->A publish->C-ward 서브트리만 forward).",
+        "코드 LOCAL UNPUSHED: rm 1커밋. qm~rl=PUSHED origin/main=609db3d(MEMORY 인덱스 기준; rl carry의 'unpushed 8커밋'은 stale-이후 세션서 푸시됨). push 시 full run-ci(pre-push) 필요.",
+        "추적부채(불변): (source,sn) seen-set dedup/TTL, 와일드카드 keyexpr matching(resource tree), distributed multi-node no-loop 시뮬, change-triggered flood, remove_detached_nodes, Zid=Vec<u8>->16B newtype, gossip/autoconnect/locators, chain_z 상수 중복."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
