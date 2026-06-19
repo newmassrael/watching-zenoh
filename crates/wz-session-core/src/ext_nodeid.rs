@@ -34,6 +34,11 @@ pub const EXT_FLAG_M: u8 = 0x10;
 /// `Z64` encoding, zenoh `iext::ENC_Z64` (bits 5-6) — the `node_id` rides a
 /// zint body.
 pub const EXT_ENC_Z64: u8 = 0x20;
+/// `ZBuf` encoding, zenoh `iext::ENC_ZBUF` (bits 5-6) — a length-prefixed byte
+/// body. Not used by the `node_id` ext (which is `Z64`); lives here as the shared
+/// iext encoding vocabulary the sibling [`declare_ext_keyexpr`](crate::declare_ext_keyexpr)
+/// ext rides.
+pub const EXT_ENC_ZBUF: u8 = 0x40;
 /// Chain-continuation flag, zenoh `iext::FLAG_Z` (bit 7): another extension
 /// follows this one.
 pub const EXT_FLAG_Z: u8 = 0x80;
@@ -42,8 +47,9 @@ pub const EXT_FLAG_Z: u8 = 0x80;
 pub const NODEID_EXT_HEADER: u8 = NODEID_EXT_ID | EXT_FLAG_M | EXT_ENC_Z64;
 
 /// The extension id field (bits 0-3) of a header byte — zenoh `iext::mid`,
-/// dropping the mandatory / encoding / chain flags.
-fn ext_id(header: u8) -> u8 {
+/// dropping the mandatory / encoding / chain flags. The shared iext id mask,
+/// reused by [`declare_ext_keyexpr`](crate::declare_ext_keyexpr).
+pub fn ext_id(header: u8) -> u8 {
     header & 0x0F
 }
 

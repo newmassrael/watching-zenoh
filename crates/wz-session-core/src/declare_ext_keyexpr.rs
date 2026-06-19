@@ -42,13 +42,10 @@ use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
-use crate::ext_nodeid::EXT_FLAG_M;
+use crate::ext_nodeid::{ext_id, EXT_ENC_ZBUF, EXT_FLAG_M};
 
 /// The `ext_keyexpr` extension id — zenoh `_z_decl_ext_keyexpr`, ext id `0x0f`.
 pub const KEYEXPR_EXT_ID: u8 = 0x0f;
-/// `ZBuf` encoding, zenoh `iext::ENC_ZBUF` (bit 6) — the keyexpr rides a ZBuf
-/// body (vs the `ext_nodeid` Z64 body).
-pub const EXT_ENC_ZBUF: u8 = 0x40;
 /// The `ext_keyexpr` header with no further extension following:
 /// `id (0x0f) | M (0x10) | ZBuf (0x40)` = `0x5f`. The chain-continuation
 /// `FLAG_Z` (0x80) is layered on by [`ext_nodeid::apply_chain_z_bits`] when the
@@ -61,12 +58,6 @@ pub const KEYEXPR_EXT_HEADER: u8 = KEYEXPR_EXT_ID | EXT_FLAG_M | EXT_ENC_ZBUF;
 const INNER_IS_LOCAL: u8 = 0x02;
 /// Inner-body flag (zenoh `kelen != 0`): a suffix string follows the id.
 const INNER_HAS_SUFFIX: u8 = 0x01;
-
-/// The extension id field (bits 0-3) of a header byte — zenoh `iext::mid`,
-/// dropping the mandatory / encoding / chain flags.
-fn ext_id(header: u8) -> u8 {
-    header & 0x0F
-}
 
 /// Build the `ext_keyexpr` extension entry for a LITERAL keyexpr — the keyexpr
 /// a sourced `UndeclareSubscriber` retracts. Mirrors zenoh-pico

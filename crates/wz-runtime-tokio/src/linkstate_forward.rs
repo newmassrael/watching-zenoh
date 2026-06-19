@@ -50,7 +50,7 @@
 //! `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,18 +135,13 @@ pub struct LinkstateForwarder {
     /// peers are interested in which keyexpr, learned from sourced
     /// `DeclareSubscriber`s flooded across the mesh. The HAT-analogue interest
     /// state the data-route filter (atom4) reads to bound the Push fan-out to
-    /// interested subtrees. `RefCell` by the same single-task contract as the
-    /// graph — borrowed only for a handler's synchronous duration.
+    /// interested subtrees, INCLUDING this node's own subscription (registered
+    /// under its own zid, zenoh-faithful — see [`LinkstatepeerSubs`]). The
+    /// data-route filter reads the self-excluding
+    /// [`interested_remote`](crate::linkstate_subs::LinkstatepeerSubs::interested_remote)
+    /// view. `RefCell` by the same single-task contract as the graph — borrowed
+    /// only for a handler's synchronous duration.
     subs: RefCell<LinkstatepeerSubs>,
-    /// This node's OWN active subscription keyexprs — the local-origination
-    /// record (c3c-3 debt A2), distinct from the remote-interest [`subs`] table.
-    /// zenoh registers self in the same `linkstatepeer_subs` set; wz keeps the
-    /// data-route filter ([`subs`]) REMOTE-only (it feeds `directions_toward`,
-    /// which is not self-aware) and tracks self's declarations here so the
-    /// tree-change re-advertise ([`re_advertise_subscriptions`](Self::re_advertise_subscriptions))
-    /// re-floods them to peers that join after a one-time `declare_subscription`
-    /// — origination and remote-interest-routing being distinct roles.
-    self_declared: RefCell<HashSet<String>>,
 }
 
 impl LinkstateForwarder {
@@ -158,7 +153,6 @@ impl LinkstateForwarder {
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             subs: RefCell::new(LinkstatepeerSubs::new()),
-            self_declared: RefCell::new(HashSet::new()),
         }
     }
 
@@ -411,7 +405,10 @@ impl LinkstateForwarder {
         let Some(keyexpr) = push_keyexpr(push) else {
             return;
         };
-        let interested = self.subs.borrow().interested(keyexpr);
+        // The data-route filter excludes self (interested_remote): self is the
+        // local sink (delivered by the session layer), not a mesh forward target.
+        let self_zid = self.net.borrow().self_zid().clone();
+        let interested = self.subs.borrow().interested_remote(keyexpr, &self_zid);
         if interested.is_empty() {
             return;
         }
@@ -452,16 +449,15 @@ impl LinkstateForwarder {
     /// `forward_push` (which re-forwards a RECEIVED Push). Returns the number of
     /// interested-child faces the Put reached.
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
-        let interested = self.subs.borrow().interested(keyexpr);
+        let self_zid = self.net.borrow().self_zid().clone();
+        // interested_remote excludes self: a key only self subscribes to has no
+        // remote forward target (self is the local sink), so publish sends nowhere.
+        let interested = self.subs.borrow().interested_remote(keyexpr, &self_zid);
         if interested.is_empty() {
-            return Ok(0); // no subscriber for this keyexpr -> nothing to send
+            return Ok(0); // no remote subscriber for this keyexpr -> nothing to send
         }
         let push = build_push_literal(keyexpr, payload)?;
-        let children = {
-            let net = self.net.borrow();
-            let self_zid = net.self_zid().clone();
-            net.directions_toward(&self_zid, &interested)
-        };
+        let children = self.net.borrow().directions_toward(&self_zid, &interested);
         if children.is_empty() {
             return Ok(0);
         }
@@ -482,38 +478,21 @@ impl LinkstateForwarder {
     /// zenoh `declare_linkstatepeer_subscription` -> `propagate_sourced_subscription`
     /// with source = self. Returns the number of tree-child faces reached.
     ///
-    /// The keyexpr is recorded in [`self_declared`](Self#structfield.self_declared)
-    /// so the tree-change re-advertise re-floods it to peers that join LATER (the
-    /// late-joiner convergence that lets this be a ONE-TIME call, c3c-3 debt A2),
-    /// then the flood itself runs through [`flood_self_subscription`](Self::flood_self_subscription).
+    /// Registers this node's OWN interest into the SINGLE [`subs`](Self#structfield.subs)
+    /// set under its own zid — exactly as zenoh's `declare_simple_subscription`
+    /// calls `register_linkstatepeer_subscription(.., tables.zid, ..)`. That is
+    /// what lets the tree-change re-advertise re-flood it to peers that join LATER
+    /// (the late-joiner convergence that makes this a ONE-TIME call, c3c-3 debt
+    /// A2), iterated uniformly with remote subscriptions — no separate
+    /// self-origination structure.
     pub fn declare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        self.self_declared.borrow_mut().insert(keyexpr.to_owned());
-        self.flood_self_subscription(keyexpr)
-    }
-
-    /// Flood a self-originated `DeclareSubscriber` for `keyexpr` to self's CHILDREN
-    /// in self's own spanning tree — the wire half of
-    /// [`declare_subscription`](Self::declare_subscription), shared with the
-    /// tree-change re-advertise so a one-time declare and its later re-advertises
-    /// emit the identical sourced declaration. `id 0` = zenoh sourced-subscription
-    /// sentinel; literal keyexpr (the wz MVP form, mapping id 0 + suffix); node_id
-    /// 0 (self-originated, `build_declare_subscriber` emits no `ext_nodeid`). Does
-    /// NOT touch [`self_declared`](Self#structfield.self_declared) — the caller owns
-    /// that record.
-    fn flood_self_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
+        let self_zid = self.net.borrow().self_zid().clone();
+        self.subs.borrow_mut().register(keyexpr, self_zid.clone());
+        // node_id 0 = self-originated (build_declare_subscriber emits no ext_nodeid);
+        // literal keyexpr (mapping id 0 + suffix, the wz MVP form).
         let declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
-        let children = {
-            let net = self.net.borrow();
-            let self_zid = net.self_zid().clone();
-            net.tree_children_of(&self_zid)
-        };
-        if children.is_empty() {
-            return Ok(0);
-        }
-        self.fan_out(true, |_id, zid| {
-            Ok(zid
-                .is_some_and(|z| is_child(&children, z))
-                .then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
+        self.flood_to_tree_children(&self_zid, || {
+            NetworkMessage::Declare(Box::new(declare.clone()))
         })
     }
 
@@ -526,26 +505,50 @@ impl LinkstateForwarder {
     /// counterpart to [`declare_subscription`](Self::declare_subscription), and
     /// the control-plane mirror of zenoh's
     /// `undeclare_linkstatepeer_subscription` -> `propagate_forget_sourced_subscription`
-    /// with source = self. Returns the number of tree-child faces reached. Clears
-    /// the [`self_declared`](Self#structfield.self_declared) record so the
-    /// retracted keyexpr is no longer re-advertised on a tree change (a
-    /// retraction, unlike a declaration, needs no late-joiner re-advertise — a
-    /// peer that joins after never held the interest).
+    /// with source = self. Returns the number of tree-child faces reached.
+    /// Withdraws self from the [`subs`](Self#structfield.subs) set so the retracted
+    /// keyexpr is no longer re-advertised on a tree change (a retraction, unlike a
+    /// declaration, needs no late-joiner re-advertise — a peer that joins after
+    /// never held the interest).
     pub fn undeclare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        self.self_declared.borrow_mut().remove(keyexpr);
+        let self_zid = self.net.borrow().self_zid().clone();
+        self.subs.borrow_mut().withdraw(keyexpr, &self_zid);
         let declare = build_undeclare_subscriber_with_keyexpr(keyexpr)?;
-        let children = {
-            let net = self.net.borrow();
-            let self_zid = net.self_zid().clone();
-            net.tree_children_of(&self_zid)
-        };
+        self.flood_to_tree_children(&self_zid, || {
+            NetworkMessage::Declare(Box::new(declare.clone()))
+        })
+    }
+
+    /// Flood `msg` to self's CHILDREN in `root`'s spanning tree — the shared
+    /// originate/proactively-re-advertise primitive (c3c-3 rem-1). Replaces the
+    /// per-site `tree_children_of(root) -> fan_out(is_child)` block that
+    /// [`declare_subscription`](Self::declare_subscription),
+    /// [`undeclare_subscription`](Self::undeclare_subscription) and the
+    /// [`re_advertise_subscriptions`](Self::re_advertise_subscriptions) loop each
+    /// expressed; only the carrier (`msg`) and the `root` differ. No inbound
+    /// exclusion — these are proactive originations toward children downstream of
+    /// `root` (zenoh `send_sourced_subscription_to_net_children(.., None, ..)`),
+    /// never re-forwards of a received message (those use
+    /// [`is_tree_forward_target`]). `build` mints a fresh carrier per child
+    /// (`NetworkMessage` is not `Clone`; the caller clones the inner owned body).
+    /// Returns the number of children reached.
+    fn flood_to_tree_children(
+        &self,
+        root: &Zid,
+        build: impl Fn() -> NetworkMessage,
+    ) -> Result<usize, CodecError> {
+        let children = self.net.borrow().tree_children_of(root);
         if children.is_empty() {
             return Ok(0);
         }
         self.fan_out(true, |_id, zid| {
-            Ok(zid
-                .is_some_and(|z| is_child(&children, z))
-                .then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
+            // `then(build)` would move `build` (called once per child); mint
+            // lazily on the matching children only.
+            Ok(if zid.is_some_and(|z| is_child(&children, z)) {
+                Some(build())
+            } else {
+                None
+            })
         })
     }
 
@@ -684,52 +687,40 @@ impl LinkstateForwarder {
     /// register change-gate returns false → no onward flood), so this re-floods
     /// to all current children but only the genuinely-new ones propagate — the
     /// same loop-freedom as the declare path (holds on a converged tree). Each
-    /// copy is re-stamped with THIS node's psid for the source, exactly like
-    /// `forward_subscription`. This is what lets a ONE-TIME `declare_subscription`
-    /// converge to a late-joining publisher without a per-tick re-declare.
+    /// copy is re-stamped with THIS node's psid for the source.
+    ///
+    /// ONE loop over the single [`subs`](Self#structfield.subs) set covers both
+    /// remote-relayed and self-originated subscriptions (zenoh's `pubsub_tree_change`
+    /// likewise iterates one `linkstatepeer_subs`): a self-sourced pair resolves
+    /// `local_psid_of(self) == 0`, so `set_declare_source(0)` leaves it
+    /// self-originated — the same wire a direct `declare_subscription` emits — while
+    /// a remote-sourced pair gets the source's psid stamped. This is what lets a
+    /// ONE-TIME `declare_subscription` converge to a late-joining publisher without
+    /// a per-tick re-declare.
     fn re_advertise_subscriptions(&self) {
         // Snapshot the (keyexpr, source) pairs so the table borrow is released
         // before the per-pair graph borrow + fan_out below.
         let pairs = self.subs.borrow().subscriptions();
         for (keyexpr, source_zid) in pairs {
             // self's children in the source's tree + this node's psid for the
-            // source (the re-stamp value). Scoped graph borrow released before
-            // fan_out (which takes the faces borrow).
-            let (children, out_node_id) = {
-                let net = self.net.borrow();
-                let Some(psid) = net
-                    .local_psid_of(&source_zid)
-                    .and_then(|p| u16::try_from(p).ok())
-                else {
-                    continue;
-                };
-                (net.tree_children_of(&source_zid), psid)
+            // source (the re-stamp value; 0 for a self-sourced pair). Scoped graph
+            // borrow released before flood_to_tree_children (which re-borrows).
+            let out_node_id = match self
+                .net
+                .borrow()
+                .local_psid_of(&source_zid)
+                .and_then(|p| u16::try_from(p).ok())
+            {
+                Some(n) => n,
+                None => continue,
             };
-            if children.is_empty() {
-                continue;
-            }
             let Ok(mut declare) = build_declare_subscriber(0, 0, Some(&keyexpr)) else {
                 continue;
             };
             set_declare_source(&mut declare, out_node_id);
-            // Flood to self's children in the source's tree. No inbound exclusion
-            // — this is a proactive re-advertise, not a forward of a received
-            // message (zenoh sends with `src_face: None`). The children are
-            // downstream of the source, so a re-advertise never echoes upstream.
-            let _ = self.fan_out(true, |_id, zid| {
-                Ok(zid
-                    .is_some_and(|z| is_child(&children, z))
-                    .then(|| NetworkMessage::Declare(Box::new(declare.clone()))))
+            let _ = self.flood_to_tree_children(&source_zid, || {
+                NetworkMessage::Declare(Box::new(declare.clone()))
             });
-        }
-        // (b) self's OWN declarations: re-flood each sourced-from-self to self's
-        // CURRENT tree children, so a peer that joined after a one-time
-        // declare_subscription learns it. Snapshot first (the flood borrows the
-        // same cell). This is the origination half zenoh gets from registering
-        // self in linkstatepeer_subs.
-        let own: Vec<String> = self.self_declared.borrow().iter().cloned().collect();
-        for keyexpr in own {
-            let _ = self.flood_self_subscription(&keyexpr);
         }
     }
 
@@ -1228,6 +1219,23 @@ mod tests {
         }
     }
 
+    /// Decode the routing-context `node_id` of the single forwarded Declare in a
+    /// recorded wire frame — the control-plane twin of [`forwarded_source`],
+    /// proving the re-stamp landed ON THE WIRE for a sourced (Un)DeclareSubscriber.
+    fn forwarded_declare_source(frame: &[u8]) -> u16 {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => read_declare_source(d),
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
     #[test]
     fn forwards_a_push_along_the_source_tree_to_a_child() {
         // Line A - S(self) - B (A and B each link only to S). B subscribes to
@@ -1321,6 +1329,53 @@ mod tests {
         assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
         // Re-stamped with self's psid for the RESOLVED source B (its idx, 3).
         assert_eq!(forwarded_source(&sink_c.frame_bytes(0)), 3);
+    }
+
+    #[test]
+    fn forward_subscription_resolves_a_transit_source_from_the_link_psid() {
+        // The CONTROL-plane twin of the transit-Push test (rem-2 coverage): a
+        // sourced DeclareSubscriber arrives on A's face with a NON-zero node_id =
+        // A's psid for B (a transit declaration, not A self-originated). Self
+        // resolves it via A's link psid->zid map to source B (NOT the inbound
+        // neighbour A), registers B's interest, then re-floods along B's spanning
+        // tree to self's child C (A is B's child, excluded as inbound) — re-stamped
+        // into self's psid for B. Exercises the shared resolve_source seam with a
+        // non-zero id on the Declare path, where the prior subscription tests only
+        // used node_id 0.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 2
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        fwd.on_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S-C
+        sink_a.reset();
+        sink_c.reset();
+
+        let mut declare = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
+        set_declare_source(&mut declare, 7); // node_id 7 = A's psid for B
+        fwd.forward_subscription(FaceId(0), true, &declare);
+
+        assert_eq!(
+            fwd.interested("demo/sub"),
+            vec![zid(0x0B)],
+            "registered the RESOLVED transit source B, not the inbound neighbour A",
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "re-flooded to self's child C in B's tree"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
+        // Re-stamped with self's psid for the resolved source B (its idx, 3).
+        assert_eq!(forwarded_declare_source(&sink_c.frame_bytes(0)), 3);
     }
 
     #[test]
@@ -1948,8 +2003,9 @@ mod tests {
         // The origination half: self S declares its OWN subscription with no
         // neighbour (floods nowhere). C then joins as S's child; on the recompute
         // S re-advertises its own declaration to C — what lets self's ONE-TIME
-        // declare_subscription reach a late-joining peer (zenoh registers self in
-        // linkstatepeer_subs; wz tracks it in self_declared).
+        // declare_subscription reach a late-joining peer. self's interest lives in
+        // the SAME subs set under its own zid (zenoh-faithful), so the single
+        // re_advertise loop re-floods it (local_psid_of(self) == 0 -> node_id 0).
         let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
         fwd.declare_subscription("demo/self")
             .expect("declare own sub"); // no faces
@@ -1984,5 +2040,138 @@ mod tests {
         fwd.re_advertise_subscriptions();
         assert_eq!(sink_a.frame_count(), 0, "nothing re-advertised to A");
         assert_eq!(sink_c.frame_count(), 0, "nothing re-advertised to C");
+    }
+
+    // ── c3c-3 rem-1: single interest set, self excluded from the data route ──
+
+    #[test]
+    fn publish_routes_to_remote_subscribers_excluding_self() {
+        // self S subscribes to demo/k (registered under its OWN zid in the single
+        // set) AND a remote child A subscribes. publish forwards to A only — self
+        // is the local sink (delivered by the session layer), excluded from the
+        // mesh route by interested_remote, yet still a member of the set.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        fwd.declare_subscription("demo/k").expect("self declares"); // self in the set
+        declare_interest(&fwd, FaceId(0), "demo/k"); // remote A in the set
+        assert!(
+            fwd.interested("demo/k").contains(&zid(0x05)),
+            "self is a member of the single interest set",
+        );
+        sink_a.reset();
+
+        let sent = fwd.publish("demo/k", b"v").expect("publish");
+        assert_eq!(sent, 1, "published to the one remote subscriber A");
+        assert_eq!(sink_a.frame_count(), 1, "A received the data");
+    }
+
+    #[test]
+    fn publish_to_a_self_only_subscription_has_no_remote_target() {
+        // A key only THIS node subscribes to yields no remote forward direction
+        // (interested_remote drops self), so publish sends nowhere over the mesh.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.declare_subscription("demo/k").expect("self declares"); // only self
+        sink_a.reset();
+
+        let sent = fwd.publish("demo/k", b"v").expect("publish");
+        assert_eq!(
+            sent, 0,
+            "a self-only subscription has no remote forward target"
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "A (not a subscriber) received nothing"
+        );
+    }
+
+    // ── c3c-3 rem-2: the re_advertise HOOK fires through forward()/deregister ──
+
+    #[test]
+    fn forward_hook_fires_re_advertise_on_an_inbound_change() {
+        // Drives the FULL forward() path (not re_advertise directly): A subscribes
+        // and C is its tree child (A's declare already reached C). An inbound
+        // OAM_LINKSTATE on C's OWN face that bumps C's sn is a real topology change,
+        // so forward()'s hook — gated on `!changes.updated.is_empty()` — fires
+        // re_advertise, re-flooding A's subscription to C. (The OAM is on C's own
+        // face, so `propagate` excludes C — a node never receives its own state
+        // echoed — leaving exactly the one re-advertised Declare for C to count.)
+        // Verifies the GATE + call site, which the direct re_advertise unit tests
+        // bypass; late-joiner CONVERGENCE is covered by the e2e +
+        // re_advertise_reaches_a_child_that_joined_* tests.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S<->C (C in A's tree, sn 5)
+        declare_interest(&fwd, FaceId(0), "demo/sub"); // A subscribes (reached C)
+        sink_c.reset();
+
+        // Inbound OAM on C's face bumping C's sn (5 -> 9) = a real change; on C's
+        // own face, so propagate does not echo back to C — only re_advertise does.
+        // options 0x03 = OPT_P (zid) | OPT_W (whatami): the entries are ENCODED
+        // into the OAM and decoded back through forward(), so (unlike the direct-
+        // ingest `entry` helper's options 0) the flags must match the carried
+        // optional fields for the codec round-trip to succeed.
+        let bump = list(vec![
+            LinkstateOwned {
+                options: 0x03,
+                ..entry(0, 1, 0x05, &[])
+            },
+            LinkstateOwned {
+                options: 0x03,
+                ..entry(1, 9, 0x0C, &[0])
+            },
+        ]);
+        let oam = build_linkstate_oam_owned(&bump).expect("build oam");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Oam(oam)],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "forward()'s hook re-advertised A's subscription to C on the inbound change",
+        );
+    }
+
+    #[test]
+    fn deregister_hook_re_advertises_surviving_subscriptions() {
+        // The face-loss hook: S has edges to A, B, C; A subscribes, so its declare
+        // reached both S-children B and C. Dropping B's face recomputes the trees
+        // and fires deregister's re_advertise (gated on `recomputed`, run AFTER the
+        // borrow block), re-flooding A's surviving subscription to C. Exercises the
+        // deregister call site of the hook, distinct from the inbound path above.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, _sb) = peer_face(zid(0x0B));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05); // edge S<->C
+        declare_interest(&fwd, FaceId(0), "demo/sub"); // A subscribes (children B, C)
+        sink_c.reset();
+
+        fwd.deregister(FaceId(1)); // B drops -> recompute -> re_advertise hook
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "deregister's hook re-advertised A's subscription to the surviving C",
+        );
     }
 }

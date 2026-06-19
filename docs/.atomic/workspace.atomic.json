@@ -42892,6 +42892,62 @@
         "LOCAL UNPUSHED: A1 3(rw/rx/ry)+A2 1(rz)+C2 1(sa)=5커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci)."
       ]
     },
+    "Round 311sb": {
+      "decision_summary": "R311sb: 4-에이전트 적대 세션리뷰(rw/rx/ry/rz/sa) remediation. F-1(MAJOR, refactoring+architect 2-에이전트 독립 적발=port-don't-invent 위반): self_declared 별 구조→단일 LinkstatepeerSubs 통합(declare가 self_zid 등록=zenoh declare_simple_subscription; data-route는 interested_remote read-filter=remote_linkstatepeer_subs). re_advertise 1-루프. F-2 flood_to_tree_children 헬퍼. F-5 iext vocab hoist. F-4 훅 발화 unit. F-8 transit 테스트. F-6/7 골든 doc 정직. F-9 shutdown withdrawal witness. 339+273 무회귀, e2e 10/10.",
+      "changes_bullets": [
+        "F-1(MAJOR, refactoring+architect 2-에이전트 독립 적발=port-don't-invent 위반): self_declared 별 구조 삭제→단일 LinkstatepeerSubs로 통합. wz-runtime-tokio/linkstate_forward.rs declare_subscription이 subs.register(self_zid)(zenoh declare_simple_subscription이 tables.zid 등록 미러), undeclare가 subs.withdraw(self_zid). linkstate_subs.rs interested_remote(keyexpr,self_zid)=self 제외 read-filter(zenoh remote_linkstatepeer_subs `.any(|p| p!=tables.zid)` 미러); forward_push/publish가 이걸 사용(self=local sink, mesh forward 대상 아님). re_advertise_subscriptions 단일 루프 over subscriptions()(self→local_psid_of=0→node_id 0 자연; remote→psid stamp). 모듈 doc=single-set+filter-on-read.",
+        "F-2: flood_to_tree_children(root, build closure) 헬퍼 추출=declare_subscription/undeclare_subscription/re_advertise 공유(flood_self_subscription 삭제; tree_children_of→fan_out(is_child) 중복 청산).",
+        "F-5: ext_nodeid.rs ext_id를 pub + EXT_ENC_ZBUF pub const 추가(공유 iext vocab); declare_ext_keyexpr.rs 로컬 ext_id fn+EXT_ENC_ZBUF 삭제, ext_nodeid서 import.",
+        "F-4: re_advertise 훅 발화 2 unit — forward_hook_fires_re_advertise_on_an_inbound_change(changes.updated 게이트; C 자기 face서 sn-bump OAM, propagate self-exclude로 re_advertise Declare만 관측; OAM round-trip 위해 options 0x03=P|W) + deregister_hook_re_advertises_surviving_subscriptions(recomputed 게이트).",
+        "F-8: forward_subscription_resolves_a_transit_source_from_the_link_psid(non-zero node_id transit; resolve_source가 inbound 이웃 아닌 link psid→zid로 해석) + forwarded_declare_source 헬퍼(control-plane forwarded_source twin).",
+        "F-6/F-7: push_routing_context.rs Push 골든 doc=DIFFERENTIAL 명시(full-literal 아님; msg_put body는 push_build 골든 상속, 여기서 미pin; spec-derived not captured 공개). declare_routing_context.rs도 spec-derived 공개.",
+        "F-9: wz-ap-demo/runner.rs shutdown withdrawal witness(announced_interest && interested(key) empty=state-derived; received-mesh-data/learned-topology witness 미러). e2e 코멘트=in-run+shutdown 양 witness.",
+        "신규 self-exclusion 2 unit(publish_routes_to_remote_subscribers_excluding_self / publish_to_a_self_only_subscription_has_no_remote_target) + interested_remote_filters_out_self."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer 339 PASS(통합 무회귀+신규 self-exclusion 2/hook 2/transit 1/interested_remote 1=7). -p wz-session-core --features codec-declare,codec-push 273 PASS. clippy 전 crate(runtime-tokio/session-core/ap-demo) -D warnings clean. fmt clean. no-default-features routing-peer 빌드 OK. full run-ci RUNCI_EXIT=0.",
+        "양 e2e(forward+withdraw) 10/10 0 flake(data path가 interested_remote 사용+shutdown witness 추가 후 무회귀=통합이 동작 보존). self가 단일 세트 멤버지만 data-route서 제외(zenoh remote_linkstatepeer_subs 미러), re_advertise가 self+remote 통일 처리(self→node_id 0).",
+        "적대 리뷰 calibration: correctness 에이전트 CRITICAL/MAJOR 버그 0(통합 전 동작 무결=misroute/loop/borrow-panic 없음). F-1을 refactoring+architect 2-에이전트가 독립 MAJOR 적발(zenoh declare_simple_subscription이 self를 단일 set에; remote_linkstatepeer_subs가 read-filter)=자가 'clean SSOT/SRP' 자평 과신 교정=라이프타임 프로젝트 자가감사 과신 패턴 재확인.",
+        "honest defer(리뷰 인정): #3 children-delta(architect MAJOR; zenoh compute_trees가 new_children delta 반환→pubsub_tree_change가 delta만; 현재 전 children 재flood=receiver change-gate가 dedup=correctness 무결, signature-change-later 캐비엇 기록)→D2와 함께. e2e sync는 여전히 in-run withdrawn wait(shutdown witness는 assertion robustness; sync는 본질적으로 in-run 필요)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sb = 4-에이전트 적대 세션리뷰(rw/rx/ry/rz/sa) remediation: F-1 self_declared 통합(단일 LinkstatepeerSubs+interested_remote read-filter=zenoh port-don't-invent/single-set 교정)+F-2 flood_to_tree_children 헬퍼+F-4 훅 발화 unit(inbound changes.updated/deregister recomputed 게이트)+F-5 iext vocab hoist+F-6/7 골든 doc 정직(Push=differential, spec-derived)+F-8 transit control-plane 테스트+F-9 shutdown withdrawal witness. 339+273 무회귀, e2e 10/10.",
+        "교훈 재확인: 자가 'clean SSOT/SRP' 자평을 독립 2-에이전트(refactoring+architect)가 F-1 MAJOR로 적발=자가감사 과신 패턴(라이프타임 프로젝트 핵심 교훈). correctness 무버그=동작은 옳았으나 구조가 zenoh divergence(별 구조 발명).",
+        "defer(리뷰 honest, 별도 atom): #3 children-delta(D2; compute_trees가 new_children delta 반환+re_advertise gate; architect signature-cost 캐비엇=나중이 더 비쌈)→change-triggered batching과 함께. e2e in-run sync(shutdown witness는 robustness 추가지만 sync 자체는 in-run 불가피).",
+        "다음 부채(project_c3c3_debt_paydown 순): C1(4-peer e2e selectivity=A-B-{C sub,D no-sub}, D 미수신) → D1 (source,sn) seen-set → D2(children-delta+change-triggered batching) → B1 alias → E/F.",
+        "LOCAL UNPUSHED: A1(rw/rx/ry)+A2(rz)+C2(sa)+리뷰rem(sb)=6커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci)."
+      ],
+      "publishable_decision_summary": "R311sb: 4-에이전트 적대 세션리뷰(rw/rx/ry/rz/sa) remediation. F-1(MAJOR, refactoring+architect 2-에이전트 독립 적발=port-don't-invent 위반): self_declared 별 구조→단일 LinkstatepeerSubs 통합(declare가 self_zid 등록=zenoh declare_simple_subscription; data-route는 interested_remote read-filter=remote_linkstatepeer_subs). re_advertise 1-루프. F-2 flood_to_tree_children 헬퍼. F-5 iext vocab hoist. F-4 훅 발화 unit. F-8 transit 테스트. F-6/7 골든 doc 정직. F-9 shutdown withdrawal witness. 339+273 무회귀, e2e 10/10.",
+      "publishable_changes_bullets": [
+        "F-1(MAJOR, refactoring+architect 2-에이전트 독립 적발=port-don't-invent 위반): self_declared 별 구조 삭제→단일 LinkstatepeerSubs로 통합. wz-runtime-tokio/linkstate_forward.rs declare_subscription이 subs.register(self_zid)(zenoh declare_simple_subscription이 tables.zid 등록 미러), undeclare가 subs.withdraw(self_zid). linkstate_subs.rs interested_remote(keyexpr,self_zid)=self 제외 read-filter(zenoh remote_linkstatepeer_subs `.any(|p| p!=tables.zid)` 미러); forward_push/publish가 이걸 사용(self=local sink, mesh forward 대상 아님). re_advertise_subscriptions 단일 루프 over subscriptions()(self→local_psid_of=0→node_id 0 자연; remote→psid stamp). 모듈 doc=single-set+filter-on-read.",
+        "F-2: flood_to_tree_children(root, build closure) 헬퍼 추출=declare_subscription/undeclare_subscription/re_advertise 공유(flood_self_subscription 삭제; tree_children_of→fan_out(is_child) 중복 청산).",
+        "F-5: ext_nodeid.rs ext_id를 pub + EXT_ENC_ZBUF pub const 추가(공유 iext vocab); declare_ext_keyexpr.rs 로컬 ext_id fn+EXT_ENC_ZBUF 삭제, ext_nodeid서 import.",
+        "F-4: re_advertise 훅 발화 2 unit — forward_hook_fires_re_advertise_on_an_inbound_change(changes.updated 게이트; C 자기 face서 sn-bump OAM, propagate self-exclude로 re_advertise Declare만 관측; OAM round-trip 위해 options 0x03=P|W) + deregister_hook_re_advertises_surviving_subscriptions(recomputed 게이트).",
+        "F-8: forward_subscription_resolves_a_transit_source_from_the_link_psid(non-zero node_id transit; resolve_source가 inbound 이웃 아닌 link psid→zid로 해석) + forwarded_declare_source 헬퍼(control-plane forwarded_source twin).",
+        "F-6/F-7: push_routing_context.rs Push 골든 doc=DIFFERENTIAL 명시(full-literal 아님; msg_put body는 push_build 골든 상속, 여기서 미pin; spec-derived not captured 공개). declare_routing_context.rs도 spec-derived 공개.",
+        "F-9: wz-ap-demo/runner.rs shutdown withdrawal witness(announced_interest && interested(key) empty=state-derived; received-mesh-data/learned-topology witness 미러). e2e 코멘트=in-run+shutdown 양 witness.",
+        "신규 self-exclusion 2 unit(publish_routes_to_remote_subscribers_excluding_self / publish_to_a_self_only_subscription_has_no_remote_target) + interested_remote_filters_out_self."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features routing-peer 339 PASS(통합 무회귀+신규 self-exclusion 2/hook 2/transit 1/interested_remote 1=7). -p wz-session-core --features codec-declare,codec-push 273 PASS. clippy 전 crate(runtime-tokio/session-core/ap-demo) -D warnings clean. fmt clean. no-default-features routing-peer 빌드 OK. full run-ci RUNCI_EXIT=0.",
+        "양 e2e(forward+withdraw) 10/10 0 flake(data path가 interested_remote 사용+shutdown witness 추가 후 무회귀=통합이 동작 보존). self가 단일 세트 멤버지만 data-route서 제외(zenoh remote_linkstatepeer_subs 미러), re_advertise가 self+remote 통일 처리(self→node_id 0).",
+        "적대 리뷰 calibration: correctness 에이전트 CRITICAL/MAJOR 버그 0(통합 전 동작 무결=misroute/loop/borrow-panic 없음). F-1을 refactoring+architect 2-에이전트가 독립 MAJOR 적발(zenoh declare_simple_subscription이 self를 단일 set에; remote_linkstatepeer_subs가 read-filter)=자가 'clean SSOT/SRP' 자평 과신 교정=라이프타임 프로젝트 자가감사 과신 패턴 재확인.",
+        "honest defer(리뷰 인정): #3 children-delta(architect MAJOR; zenoh compute_trees가 new_children delta 반환→pubsub_tree_change가 delta만; 현재 전 children 재flood=receiver change-gate가 dedup=correctness 무결, signature-change-later 캐비엇 기록)→D2와 함께. e2e sync는 여전히 in-run withdrawn wait(shutdown witness는 assertion robustness; sync는 본질적으로 in-run 필요)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sb = 4-에이전트 적대 세션리뷰(rw/rx/ry/rz/sa) remediation: F-1 self_declared 통합(단일 LinkstatepeerSubs+interested_remote read-filter=zenoh port-don't-invent/single-set 교정)+F-2 flood_to_tree_children 헬퍼+F-4 훅 발화 unit(inbound changes.updated/deregister recomputed 게이트)+F-5 iext vocab hoist+F-6/7 골든 doc 정직(Push=differential, spec-derived)+F-8 transit control-plane 테스트+F-9 shutdown withdrawal witness. 339+273 무회귀, e2e 10/10.",
+        "교훈 재확인: 자가 'clean SSOT/SRP' 자평을 독립 2-에이전트(refactoring+architect)가 F-1 MAJOR로 적발=자가감사 과신 패턴(라이프타임 프로젝트 핵심 교훈). correctness 무버그=동작은 옳았으나 구조가 zenoh divergence(별 구조 발명).",
+        "defer(리뷰 honest, 별도 atom): #3 children-delta(D2; compute_trees가 new_children delta 반환+re_advertise gate; architect signature-cost 캐비엇=나중이 더 비쌈)→change-triggered batching과 함께. e2e in-run sync(shutdown witness는 robustness 추가지만 sync 자체는 in-run 불가피).",
+        "다음 부채(project_c3c3_debt_paydown 순): C1(4-peer e2e selectivity=A-B-{C sub,D no-sub}, D 미수신) → D1 (source,sn) seen-set → D2(children-delta+change-triggered batching) → B1 alias → E/F.",
+        "LOCAL UNPUSHED: A1(rw/rx/ry)+A2(rz)+C2(sa)+리뷰rem(sb)=6커밋. origin/main=c6ad4ba. push 사용자 명시 동의 후(pre-push run-ci)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [

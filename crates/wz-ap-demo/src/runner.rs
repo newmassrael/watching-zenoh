@@ -1450,5 +1450,16 @@ pub(crate) async fn run_peer(
             forwarder.data_seen()
         );
     }
+    // Subscription-withdrawal witness — the DETERMINISTIC shutdown counterpart to
+    // the in-run app-tick log (c3c-3 debt A1 / rem-2): a publisher that LEARNED an
+    // interested subscriber and then saw that interest go away emits this from
+    // STATE (`announced_interest` ever true AND the interest set now empty),
+    // unconditionally at shutdown, so a test need not race the 250 ms app-tick.
+    // Mirrors the `received mesh data` / `learned mesh topology` shutdown witnesses.
+    if let Some(key) = publish_key {
+        if announced_interest && forwarder.interested(key).is_empty() {
+            log::info!("wz-ap-demo peer: publisher subscriber interest withdrawn");
+        }
+    }
     Ok(())
 }

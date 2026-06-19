@@ -16,10 +16,20 @@
 //! How it is driven: a sourced `DeclareSubscriber` arriving from the mesh
 //! [`register`](LinkstatepeerSubs::register)s the advertising peer's
 //! interest (c3c-3 atom3); the data-route filter (c3c-3 atom4) reads
-//! [`interested`](LinkstatepeerSubs::interested) and feeds the peer set to
-//! [`wz_routing_graph::LinkstateNetwork::directions_toward`] so a Push is
-//! replicated only toward subtrees holding an interested subscriber — the
-//! bounded fan-out that replaces the current broadcast-to-every-tree-child.
+//! [`interested_remote`](LinkstatepeerSubs::interested_remote) and feeds the
+//! peer set to [`wz_routing_graph::LinkstateNetwork::directions_toward`] so a
+//! Push is replicated only toward subtrees holding an interested subscriber —
+//! the bounded fan-out that replaces the current broadcast-to-every-tree-child.
+//!
+//! Single set, filter on read (zenoh-faithful): this node's OWN subscription is
+//! registered into the SAME set under its own zid — exactly as zenoh's
+//! `declare_simple_subscription` calls `register_linkstatepeer_subscription(..,
+//! tables.zid, ..)`. The "remote-only" view the data route needs is DERIVED by
+//! filtering self at read time ([`interested_remote`](LinkstatepeerSubs::interested_remote),
+//! mirroring zenoh's `remote_linkstatepeer_subs`), not by keeping a second
+//! structure. So "what is subscribed" has ONE source of truth: self-origination
+//! and remote interest are the same datum, distinguished by zid, and the
+//! tree-change re-advertise iterates them uniformly.
 //!
 //! MVP scope (honest): keys match by EXACT string equality. zenoh matches
 //! by full key-expression INTERSECTION over a resource tree (`*` / `**`
@@ -119,17 +129,34 @@ impl LinkstatepeerSubs {
             .collect()
     }
 
-    /// The peers interested in `keyexpr` (EXACT match), as a snapshot the
-    /// data-route filter passes to
-    /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
-    /// Empty when no peer is interested. Order is unspecified (`HashSet`
-    /// iteration); the route filter dedups by direction, so order does not
-    /// matter. A snapshot `Vec` (not a borrow) so the caller can hold it
-    /// across a graph borrow; interest sets are small.
+    /// The peers interested in `keyexpr` (EXACT match), as a snapshot — every
+    /// interested peer INCLUDING this node itself when it has a local
+    /// subscription (`register`ed with its own zid). The tree-change re-advertise
+    /// uses this whole view; the data-route filter uses
+    /// [`interested_remote`](Self::interested_remote) instead (it must exclude
+    /// self). Order is unspecified (`HashSet` iteration); a snapshot `Vec` (not a
+    /// borrow) so the caller can hold it across a graph borrow.
     pub fn interested(&self, keyexpr: &str) -> Vec<Zid> {
         self.by_key
             .get(keyexpr)
             .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The peers interested in `keyexpr` EXCLUDING `self_zid` — the snapshot the
+    /// data-route filter passes to
+    /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
+    /// Mirrors zenoh's `remote_linkstatepeer_subs` (`.any(|peer| peer !=
+    /// &tables.zid)`): the interest set is the single SSOT that holds self AND
+    /// remote peers, and the "remote-only" view is derived by filtering self at
+    /// READ time — not by maintaining a second structure. A data Push is replicated
+    /// toward each REMOTE subscriber's subtree; self is the local sink (delivered
+    /// by the session layer, not over the mesh), so it is excluded from the
+    /// forward directions.
+    pub fn interested_remote(&self, keyexpr: &str, self_zid: &Zid) -> Vec<Zid> {
+        self.by_key
+            .get(keyexpr)
+            .map(|set| set.iter().filter(|p| *p != self_zid).cloned().collect())
             .unwrap_or_default()
     }
 }
@@ -283,6 +310,35 @@ mod tests {
         assert!(
             LinkstatepeerSubs::new().subscriptions().is_empty(),
             "an empty table yields no pairs"
+        );
+    }
+
+    #[test]
+    fn interested_remote_filters_out_self() {
+        // The data-route view excludes this node's OWN subscription (zenoh
+        // remote_linkstatepeer_subs): self is the local sink, delivered by the
+        // session layer, not forwarded toward over the mesh.
+        let mut subs = LinkstatepeerSubs::new();
+        let me = zid(0x05);
+        subs.register("k", me.clone()); // self subscribes
+        subs.register("k", zid(0xAA)); // and a remote peer
+        let mut all = subs.interested("k");
+        all.sort();
+        assert_eq!(
+            all,
+            vec![zid(0x05), zid(0xAA)],
+            "interested() is the single set: self + remote"
+        );
+        assert_eq!(
+            subs.interested_remote("k", &me),
+            vec![zid(0xAA)],
+            "interested_remote() drops self, keeps the remote peer",
+        );
+        // A key only self subscribes to has no remote forward target.
+        subs.register("self-only", me.clone());
+        assert!(
+            subs.interested_remote("self-only", &me).is_empty(),
+            "a self-only subscription yields no remote direction",
         );
     }
 }

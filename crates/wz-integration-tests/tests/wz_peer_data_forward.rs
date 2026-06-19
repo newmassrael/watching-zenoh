@@ -218,8 +218,12 @@ fn wz_peer_mesh_withdraws_subscription_two_hops() {
 
     // Terminal witness: the publisher first LEARNS C's interest, then — after C
     // confirms data and retracts — sees that interest WITHDRAWN. Waiting on the
-    // withdrawal implies the whole lifecycle ran (subscribe propagate, data
-    // round-trip, undeclare propagate); 20s covers all legs on localhost.
+    // withdrawal is the SYNC that the whole lifecycle ran (subscribe propagate,
+    // data round-trip, undeclare propagate) before shutdown; 20s covers all legs
+    // on localhost. The demo emits this string BOTH in-run (per app-tick) AND
+    // deterministically at its shutdown summary (state-derived: learned-ever AND
+    // interest now empty), so the post-shutdown assertion below holds even if the
+    // in-run app-tick raced SIGTERM (rem-2 — mirrors the data/topology witnesses).
     let a_withdrawn = wait_for_substring(
         &mut a_reader,
         "publisher subscriber interest withdrawn",

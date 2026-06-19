@@ -208,11 +208,13 @@ mod tests {
     /// the EXACT zenoh wire. Pins the `zextz64!(0x3)` ext header (`0x33`) + its
     /// VLE body and its placement (the Declare-level ext chain, between the
     /// header and the body), where the prior round-trip test checked only that
-    /// the value survives. The ext encode is confirmed against zenoh-pico
-    /// `_z_msg_ext_encode_zint` (`src/protocol/codec/ext.c`: header byte then a
-    /// VLE `node_id`), the field order against `commons/zenoh-codec/src/network/
-    /// declare.rs` (exts before body), and the DeclSubscriber body against the
-    /// `build_declare_subscriber` literal golden in `declare_build`.
+    /// the value survives. The ext encode is DERIVED from the zenoh-pico encoder
+    /// source `_z_msg_ext_encode_zint` (`src/protocol/codec/ext.c`: header byte
+    /// then a VLE `node_id`) — not captured from a live peer, the capture-based
+    /// cross-check being the tracked interop gap — the field order from
+    /// `commons/zenoh-codec/src/network/declare.rs` (exts before body), and the
+    /// DeclSubscriber body from the `build_declare_subscriber` literal golden in
+    /// `declare_build`. Unlike the Push twin, this asserts a FULL literal vector.
     #[test]
     fn declare_with_nodeid_matches_zenoh_golden_bytes() {
         use crate::declare_build::build_declare_subscriber;
