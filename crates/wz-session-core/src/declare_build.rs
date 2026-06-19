@@ -30,7 +30,7 @@ use wz_codecs::decl_token::DeclTokenOwned;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::undecl_kexpr::UndeclKexpr;
 use wz_codecs::undecl_queryable::UndeclQueryable;
-use wz_codecs::undecl_subscriber::UndeclSubscriber;
+use wz_codecs::undecl_subscriber::UndeclSubscriberOwned;
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
@@ -591,11 +591,41 @@ pub fn build_undeclare_subscriber(subscriber_id: u64) -> DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareOwnedVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
+        body: DeclareOwnedVariant::CodecZenohUndeclSubscriber(UndeclSubscriberOwned {
             header: wire_const::D_MID_UNDECL_SUBSCRIBER,
             id: subscriber_id,
+            // Z=0 id-only retraction: no ext_keyexpr. The keyexpr-carrying
+            // sourced form is build_undeclare_subscriber_with_keyexpr (below).
+            extensions: None,
         }),
     }
+}
+
+/// c3c-3 debt A1 — build a SOURCED `Declare(UndeclareSubscriber)` that retracts
+/// a subscription identified by its LITERAL keyexpr. The linkstate-peer twin of
+/// the sourced `DeclareSubscriber` (`build_declare_subscriber(0, 0, Some(ke))`):
+/// zenoh retracts a sourced subscription by keyexpr, not id (`id == 0`,
+/// "Sourced subscriptions do not use ids" — zenoh
+/// `send_forget_sourced_subscription_to_net_children`), carrying the keyexpr in
+/// the `ext_keyexpr` extension (`UndeclareSubscriber { id, ext_wire_expr }`).
+/// The `id` is 0 and the inner declaration header sets `Z` (bit 7) to flag the
+/// ext chain; the keyexpr ext is built by the
+/// [`declare_ext_keyexpr`](crate::declare_ext_keyexpr) SSOT. Fallible only by
+/// that SSOT's profile-generic signature (the `alloc` owned carrier is
+/// unbounded, so a literal keyexpr is never length-rejected).
+pub fn build_undeclare_subscriber_with_keyexpr(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
+    let ext = crate::declare_ext_keyexpr::build_ext_keyexpr(keyexpr)?;
+    Ok(DeclareOwned {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareOwnedVariant::CodecZenohUndeclSubscriber(UndeclSubscriberOwned {
+            // Z (bit 7): the inner declaration carries an extension chain.
+            header: wire_const::D_MID_UNDECL_SUBSCRIBER | 0x80,
+            id: 0, // sourced subscriptions use no id; the keyexpr is the identity
+            extensions: Some(alloc::vec![ext]),
+        }),
+    })
 }
 
 /// R121i-c — build a `Declare(UndeclQueryable)` network-message that
@@ -1447,9 +1477,9 @@ mod tests {
     /// envelope carrying an `UndeclSubscriber` body in the no-ext
     /// shape (Z bit clear). Reference: zenoh-pico
     /// `_z_undecl_subscriber_encode` -> `_z_undecl_encode(.., has_keyexpr_ext=false)`
-    /// at declarations.c:90-103. The wz UndeclSubscriber codec does
-    /// not model the optional ext_keyexpr tail; this contract is
-    /// locked by the two vectors below.
+    /// at declarations.c:90-103. The keyexpr-carrying SOURCED form is
+    /// `build_undeclare_subscriber_with_keyexpr` (c3c-3 debt A1); this id-only
+    /// no-ext contract is locked by the two vectors below.
     #[test]
     fn build_undeclare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_subscriber(42);
@@ -1478,6 +1508,62 @@ mod tests {
                 assert_eq!(d.id, 42);
             }
             _ => panic!("build_undeclare_subscriber must produce CodecZenohUndeclSubscriber"),
+        }
+    }
+
+    /// c3c-3 debt A1 — `build_undeclare_subscriber_with_keyexpr` emits the
+    /// SOURCED retraction wire: `id == 0`, the inner header carries `Z`, and the
+    /// keyexpr rides the `ext_keyexpr` ZBuf extension. Byte-parity against
+    /// zenoh-pico `_z_undecl_subscriber_encode` ->
+    /// `_z_undecl_encode(.., has_keyexpr_ext=true)` -> `_z_decl_ext_keyexpr_encode`
+    /// (declarations.c:38-50 + 90-103) for the local literal "demo/sub".
+    #[test]
+    fn build_undeclare_subscriber_with_keyexpr_emits_zenoh_pico_compatible_wire_bytes() {
+        let d = build_undeclare_subscriber_with_keyexpr("demo/sub").unwrap();
+        let wire = d.wire();
+        let mut expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E outer Declare envelope
+            0x83,                      // UndeclSubscriber MID 0x03 | Z (ext chain present)
+            0x00,                      // VLE(id 0) — sourced subscriptions use no id
+            0x5f,                      // ext_keyexpr header: ENC_ZBUF 0x40 | M 0x10 | id 0x0f
+            0x0A,                      // ZBuf len VLE(10) = inner_header(1) + VLE(0)(1) + 8 suffix
+            0x03,                      // inner_header: is_local(2) | has_suffix(1)
+            0x00,                      // VLE(mapping id 0) — literal sentinel
+        ];
+        expected.extend_from_slice(b"demo/sub");
+        assert_eq!(
+            wire, expected,
+            "sourced UndeclareSubscriber + ext_keyexpr wire must match zenoh-pico",
+        );
+    }
+
+    /// c3c-3 debt A1 — the stamped `ext_keyexpr` survives the Declare codec
+    /// encode -> decode: a transit linkstate peer recovers the retracted keyexpr
+    /// from the decoded body (the wire path the forwarder drives). The Declare
+    /// extension path was never exercised for UndeclSubscriber before this round
+    /// (every build_undeclare_* used the no-ext shape).
+    #[test]
+    fn undeclare_subscriber_keyexpr_round_trips_through_the_wire() {
+        use crate::declare_ext_keyexpr::read_ext_keyexpr;
+        use sce_forge_runtime::codec::SceCursor;
+        use wz_codecs::declare::Declare;
+
+        let d = build_undeclare_subscriber_with_keyexpr("demo/sub").unwrap();
+        let bytes = d.wire();
+        let mut cursor = SceCursor::new(&bytes);
+        let decoded = Declare::decode(&mut cursor)
+            .and_then(|x| x.try_into_owned())
+            .expect("decode declare");
+        match &decoded.body {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => {
+                assert_eq!(u.id, 0, "sourced retraction carries no id");
+                assert_eq!(
+                    read_ext_keyexpr(u.extensions.as_ref()),
+                    Some("demo/sub"),
+                    "ext_keyexpr survived the wire round-trip",
+                );
+            }
+            _ => panic!("decoded body must be UndeclSubscriber"),
         }
     }
 

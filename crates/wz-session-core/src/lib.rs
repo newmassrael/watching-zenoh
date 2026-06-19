@@ -507,6 +507,15 @@ pub mod declare_build;
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 pub mod declare_routing_context;
 
+/// Declare `ext_keyexpr` extension (P4 routing, c3c-3 debt A1 — subscription
+/// lifecycle): `build_ext_keyexpr` / `read_ext_keyexpr` over the
+/// `_z_decl_ext_keyexpr` keyexpr extension a SOURCED `UndeclareSubscriber`
+/// carries — the keyexpr IS the sourced-subscription identity (`id == 0`), so a
+/// transit linkstate peer resolves which interest to withdraw from this ext.
+/// `codec-declare` gated and owned `Vec` output (alloc-gated).
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+pub mod declare_ext_keyexpr;
+
 /// Outbound INTEREST network-message builders
 /// (`build_interest_liveliness_subscriber` / `_get` / `build_interest_final`)
 /// hoisted from `wz-runtime-tokio::session_glue`. `InterestOwned` output, so

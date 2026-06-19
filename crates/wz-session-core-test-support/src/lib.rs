@@ -45,7 +45,7 @@ use wz_codecs::decl_token::{DeclToken, DeclTokenOwned};
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::undecl_kexpr::UndeclKexpr;
 use wz_codecs::undecl_queryable::UndeclQueryable;
-use wz_codecs::undecl_subscriber::UndeclSubscriber;
+use wz_codecs::undecl_subscriber::{UndeclSubscriber, UndeclSubscriberOwned};
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
@@ -115,11 +115,13 @@ pub fn undecl_kexpr(id: u64) -> UndeclKexpr {
     }
 }
 
-pub fn undecl_subscriber(id: u64) -> UndeclSubscriber {
+pub fn undecl_subscriber(id: u64) -> UndeclSubscriberOwned {
     UndeclSubscriber {
         id,
         ..UndeclSubscriber::default()
     }
+    .try_into_owned()
+    .expect("undecl_subscriber owns no borrowed data")
 }
 
 pub fn decl_queryable(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclQueryableOwned {
@@ -199,7 +201,7 @@ pub fn declare_envelope_decl_subscriber(d: DeclSubscriberOwned) -> DeclareOwned 
     }
 }
 
-pub fn declare_envelope_undecl_subscriber(u: UndeclSubscriber) -> DeclareOwned {
+pub fn declare_envelope_undecl_subscriber(u: UndeclSubscriberOwned) -> DeclareOwned {
     DeclareOwned {
         header: 0,
         interest_id: None,

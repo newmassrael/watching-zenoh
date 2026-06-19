@@ -42640,6 +42640,48 @@
         "리뷰 calibration 건전분: correctness 무결(root-cause=misroute/loop 없음)·crate 의존 clean·resolve_source/fan_out/ext_nodeid SSOT·신규 필터 테스트 적대적. 교훈: 자가감사 과신을 독립 4-에이전트가 교정(F-A 4개 전부 적발=가장 강한 신호; 패턴 재확인)."
       ]
     },
+    "Round 311rw": {
+      "decision_summary": "R311rw: c3c-3 부채 A1a 코덱 — sourced UndeclareSubscriber가 retract할 keyexpr를 ext_keyexpr(zenoh ext_wire_expr / pico _z_decl_ext_keyexpr, ext id 0x0f, Z-gated ZBuf)로 나름. zenoh linkstate sourced undeclare는 id=0이고 keyexpr가 정체성(로드맵 SubscriberId 전제 정정)이라 undecl_subscriber.scxml의 deferred Z=1 ext_keyexpr 경로 구현(SCE inner-declaration ext 첫 표현) + declare_ext_keyexpr SSOT(build/read) + build_undeclare_subscriber_with_keyexpr. byte-parity 정확 일치.",
+      "changes_bullets": [
+        "sources/codecs/undecl_subscriber.scxml: deferred Z=1 ext_keyexpr 경로 구현 = <sce:tlv-chain id=extensions type=codec_zenoh_ext_entry present-if header.Z terminate-on entry-flag Z>(메시지-레벨 ext-chain 패턴을 sub-codec에 미러; wz 최초 inner-declaration Z-gated ext). 생성 codec이 Vec 필드로 owned/borrowed 분리→UndeclSubscriberOwned{header,id,extensions:Option<Vec<ExtEntryOwned>>}; borrowed UndeclSubscriber<'a>도 extensions 보유(decode가 Z-gated ExtEntry chain 회복).",
+        "wz-session-core/src/declare_ext_keyexpr.rs 신규(alloc+codec-declare): ext_keyexpr SSOT(ext_nodeid 패턴 미러)=consts(KEYEXPR_EXT_ID 0x0f/EXT_ENC_ZBUF 0x40/KEYEXPR_EXT_HEADER 0x5f)+build_ext_keyexpr(literal→ZBuf body [inner_header 0x03|VLE(0)|suffix], owned_bytes=alloc SceBytes unbounded)+read_ext_keyexpr(exts→literal &str; inner id!=0 alias=None literal-only defer). 5 unit. lib.rs pub mod.",
+        "wz-session-core/src/declare_build.rs: build_undeclare_subscriber_with_keyexpr(keyexpr)=sourced retraction(id 0, 헤더 Z bit, ext_keyexpr 1 entry)=zenoh send_forget_sourced_subscription 미러; build_undeclare_subscriber(id-only)는 extensions:None로 Z=0 backward-compat 유지. import UndeclSubscriberOwned. test-support owned/borrowed split ripple fix(undecl_subscriber→try_into_owned→UndeclSubscriberOwned)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare 271 PASS(declare_ext_keyexpr 5 신규 + declare_build with_keyexpr byte-parity + 와이어 RT; 기존 build_undeclare_subscriber Z=0 무회귀=backward-compat). byte-parity 정확 일치 zenoh-pico _z_undecl_subscriber_encode(has_keyexpr_ext=true): [0x1E,0x83,0x00,0x5f,0x0A,0x03,0x00,\"demo/sub\"]. Declare encode→decode가 ext_keyexpr 회복(undeclare_subscriber_keyexpr_round_trips_through_the_wire).",
+        "clippy session-core -D warnings clean. no-default-features routing-peer 빌드 OK. cargo build -p wz-codecs(SCE regen) OK=SCE가 nested sub-codec의 inner Z-gated ext 표현 가능 첫 확인(stop-first 게이트 통과, 코드젠 갭 없음). full run-ci RUNCI_EXIT=0(전 host 레인; fmt 포함).",
+        "정직 교정: 초기 'ExtZbuf 32-cap fail-fast' 주장은 stale release heapless 아티팩트 기반 오류—실제 alloc SceBytes(R311nq)는 unbounded Vec(codec_owned.rs). fail-fast 테스트가 적발→주장 청산, build_and_read_round_trip_a_long_keyexpr(45B)로 교체(테스트 약화 아님, 주장 정정)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rw = c3c-3 부채 A1a 코덱: sourced UndeclareSubscriber가 keyexpr를 ext_keyexpr(zenoh ext_wire_expr / pico _z_decl_ext_keyexpr, ext id 0x0f Z-gated ZBuf)로 나르도록 undecl_subscriber.scxml의 deferred Z=1 경로 구현 + declare_ext_keyexpr SSOT(build/read) + build_undeclare_subscriber_with_keyexpr. zenoh linkstate sourced undeclare=id 0(\"Sourced subscriptions do not use ids\")+keyexpr 정체성(로드맵 'SubscriberId 기반' 전제 정정=evidence>assumption). SCE inner-declaration Z-gated ext 첫 표현. byte-parity 정확.",
+        "다음 A1b(rx): LinkstatepeerSubs::withdraw + LinkstateForwarder::forward_unsubscription + undeclare_subscription + forward() UndeclareSubscriber 분기. 그 다음 A1-e2e(ry).",
+        "남은 부채(로드맵 project_c3c3_debt_paydown 순): A2 pubsub_tree_change → C2(golden-vector byte-parity) → C1(4-peer e2e selectivity) → D(견고성) → B(alias/wildcard) → E/F(大).",
+        "honest defer(A1 범위 외): alias/wildcard keyexpr ext(read_ext_keyexpr는 inner id!=0=None literal-only), undeclare ext_keyexpr golden-vector(현재 byte-parity 1 벡터)."
+      ],
+      "publishable_decision_summary": "R311rw: c3c-3 부채 A1a 코덱 — sourced UndeclareSubscriber가 retract할 keyexpr를 ext_keyexpr(zenoh ext_wire_expr / pico _z_decl_ext_keyexpr, ext id 0x0f, Z-gated ZBuf)로 나름. zenoh linkstate sourced undeclare는 id=0이고 keyexpr가 정체성(로드맵 SubscriberId 전제 정정)이라 undecl_subscriber.scxml의 deferred Z=1 ext_keyexpr 경로 구현(SCE inner-declaration ext 첫 표현) + declare_ext_keyexpr SSOT(build/read) + build_undeclare_subscriber_with_keyexpr. byte-parity 정확 일치.",
+      "publishable_changes_bullets": [
+        "sources/codecs/undecl_subscriber.scxml: deferred Z=1 ext_keyexpr 경로 구현 = <sce:tlv-chain id=extensions type=codec_zenoh_ext_entry present-if header.Z terminate-on entry-flag Z>(메시지-레벨 ext-chain 패턴을 sub-codec에 미러; wz 최초 inner-declaration Z-gated ext). 생성 codec이 Vec 필드로 owned/borrowed 분리→UndeclSubscriberOwned{header,id,extensions:Option<Vec<ExtEntryOwned>>}; borrowed UndeclSubscriber<'a>도 extensions 보유(decode가 Z-gated ExtEntry chain 회복).",
+        "wz-session-core/src/declare_ext_keyexpr.rs 신규(alloc+codec-declare): ext_keyexpr SSOT(ext_nodeid 패턴 미러)=consts(KEYEXPR_EXT_ID 0x0f/EXT_ENC_ZBUF 0x40/KEYEXPR_EXT_HEADER 0x5f)+build_ext_keyexpr(literal→ZBuf body [inner_header 0x03|VLE(0)|suffix], owned_bytes=alloc SceBytes unbounded)+read_ext_keyexpr(exts→literal &str; inner id!=0 alias=None literal-only defer). 5 unit. lib.rs pub mod.",
+        "wz-session-core/src/declare_build.rs: build_undeclare_subscriber_with_keyexpr(keyexpr)=sourced retraction(id 0, 헤더 Z bit, ext_keyexpr 1 entry)=zenoh send_forget_sourced_subscription 미러; build_undeclare_subscriber(id-only)는 extensions:None로 Z=0 backward-compat 유지. import UndeclSubscriberOwned. test-support owned/borrowed split ripple fix(undecl_subscriber→try_into_owned→UndeclSubscriberOwned)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare 271 PASS(declare_ext_keyexpr 5 신규 + declare_build with_keyexpr byte-parity + 와이어 RT; 기존 build_undeclare_subscriber Z=0 무회귀=backward-compat). byte-parity 정확 일치 zenoh-pico _z_undecl_subscriber_encode(has_keyexpr_ext=true): [0x1E,0x83,0x00,0x5f,0x0A,0x03,0x00,\"demo/sub\"]. Declare encode→decode가 ext_keyexpr 회복(undeclare_subscriber_keyexpr_round_trips_through_the_wire).",
+        "clippy session-core -D warnings clean. no-default-features routing-peer 빌드 OK. cargo build -p wz-codecs(SCE regen) OK=SCE가 nested sub-codec의 inner Z-gated ext 표현 가능 첫 확인(stop-first 게이트 통과, 코드젠 갭 없음). full run-ci RUNCI_EXIT=0(전 host 레인; fmt 포함).",
+        "정직 교정: 초기 'ExtZbuf 32-cap fail-fast' 주장은 stale release heapless 아티팩트 기반 오류—실제 alloc SceBytes(R311nq)는 unbounded Vec(codec_owned.rs). fail-fast 테스트가 적발→주장 청산, build_and_read_round_trip_a_long_keyexpr(45B)로 교체(테스트 약화 아님, 주장 정정)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rw = c3c-3 부채 A1a 코덱: sourced UndeclareSubscriber가 keyexpr를 ext_keyexpr(zenoh ext_wire_expr / pico _z_decl_ext_keyexpr, ext id 0x0f Z-gated ZBuf)로 나르도록 undecl_subscriber.scxml의 deferred Z=1 경로 구현 + declare_ext_keyexpr SSOT(build/read) + build_undeclare_subscriber_with_keyexpr. zenoh linkstate sourced undeclare=id 0(\"Sourced subscriptions do not use ids\")+keyexpr 정체성(로드맵 'SubscriberId 기반' 전제 정정=evidence>assumption). SCE inner-declaration Z-gated ext 첫 표현. byte-parity 정확.",
+        "다음 A1b(rx): LinkstatepeerSubs::withdraw + LinkstateForwarder::forward_unsubscription + undeclare_subscription + forward() UndeclareSubscriber 분기. 그 다음 A1-e2e(ry).",
+        "남은 부채(로드맵 project_c3c3_debt_paydown 순): A2 pubsub_tree_change → C2(golden-vector byte-parity) → C1(4-peer e2e selectivity) → D(견고성) → B(alias/wildcard) → E/F(大).",
+        "honest defer(A1 범위 외): alias/wildcard keyexpr ext(read_ext_keyexpr는 inner id!=0=None literal-only), undeclare ext_keyexpr golden-vector(현재 byte-parity 1 벡터)."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
