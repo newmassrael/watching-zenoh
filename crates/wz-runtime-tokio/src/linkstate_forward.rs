@@ -44,11 +44,13 @@ use std::time::Duration;
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
+use wz_codecs::push::PushOwned;
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Zid};
 
@@ -241,6 +243,83 @@ impl LinkstateForwarder {
         let _ = actions.send_network_message(NetworkMessage::Oam(oam), true, false);
         Ok(())
     }
+
+    /// Flood a data `Push` onward along the SOURCE's spanning tree (c3c-2) —
+    /// the loop-free mesh data forward. The Push arrived on `inbound`; its
+    /// `ext_nodeid` names the source the message floods FROM (zenoh's
+    /// data-route tree root): `node_id == 0` means the inbound neighbour
+    /// itself originated it, otherwise the node_id is the source's psid in the
+    /// inbound link's space, resolved via that link's `psid -> zid` mapping.
+    /// Self's CHILDREN in the source-rooted tree are the next hops — a tree
+    /// has no cycles, so flooding to children never loops — and the inbound
+    /// face (self's parent toward the source) is excluded. Each outbound copy
+    /// is re-stamped with THIS node's psid for the source (the same value for
+    /// every face; each child remaps it via its own link, zenoh
+    /// `get_local_context`). Subscription-filtered routing (only toward
+    /// interested subtrees) is the deferred c3c-3 step; this floods every tree
+    /// child.
+    fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+        let faces = self.faces.borrow();
+        let Some(inbound_state) = faces.get(&inbound) else {
+            return;
+        };
+        let inbound_zid = inbound_state.actions.peer_zid();
+
+        // Resolve the source (tree root) and this node's psid for it.
+        let net = self.net.borrow();
+        let source_zid: Zid = match read_push_source(push) {
+            // self-originated by the inbound neighbour: it IS the source.
+            0 => match inbound_zid.clone() {
+                Some(z) => z,
+                None => return,
+            },
+            // a transit message: node_id is the source's psid in the inbound
+            // link's space; resolve it through that link's psid -> zid mapping.
+            node_id => {
+                let Some(link_id) = inbound_state.link else {
+                    return;
+                };
+                match net
+                    .get_link(link_id)
+                    .and_then(|l| l.get_zid(node_id as u64))
+                {
+                    Some(z) => z.clone(),
+                    None => return, // unknown source -> cannot place it in a tree
+                }
+            }
+        };
+        let Some(out_node_id) = net.local_psid_of(&source_zid) else {
+            return;
+        };
+        let children = net.tree_children_of(&source_zid);
+        drop(net);
+
+        if children.is_empty() {
+            return;
+        }
+        // `out_node_id` is the same for every outbound face, so build the
+        // re-stamped carrier once and clone it per child.
+        let mut carrier = push.clone();
+        set_push_source(&mut carrier, out_node_id as u16);
+
+        for (id, state) in faces.iter() {
+            if *id == inbound {
+                continue;
+            }
+            let Some(child_zid) = state.actions.peer_zid() else {
+                continue;
+            };
+            // never send back toward the source's own neighbour face.
+            if inbound_zid.as_deref() == Some(child_zid.as_slice()) {
+                continue;
+            }
+            if !children.contains(&child_zid) {
+                continue;
+            }
+            let msg = NetworkMessage::Push(Box::new(carrier.clone()));
+            let _ = state.actions.send_network_message(msg, reliable, false);
+        }
+    }
 }
 
 impl FaceForwarder for LinkstateForwarder {
@@ -295,12 +374,15 @@ impl FaceForwarder for LinkstateForwarder {
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
-        let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
+        let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+            messages, reliable, ..
+        }) = event
+        else {
             return;
         };
         for message in messages {
-            if let NetworkMessage::Oam(oam) = message {
-                match try_parse_linkstate_oam(oam) {
+            match message {
+                NetworkMessage::Oam(oam) => match try_parse_linkstate_oam(oam) {
                     LinkstateOam::Decoded(list) => {
                         // ingest, then re-flood the changed nodes onward to
                         // the OTHER faces (transitive propagation).
@@ -310,7 +392,11 @@ impl FaceForwarder for LinkstateForwarder {
                     // a malformed OAM_LINKSTATE or a non-linkstate OAM is
                     // left alone (the generic OAM path / a logged drop).
                     LinkstateOam::Malformed(_) | LinkstateOam::NotLinkstate => {}
-                }
+                },
+                // c3c-2 — a data Push: flood it onward along the SOURCE's
+                // spanning tree (loop-free), excluding the inbound face.
+                NetworkMessage::Push(push) => self.forward_push(id, *reliable, push),
+                _ => {}
             }
         }
     }
@@ -521,5 +607,155 @@ mod tests {
             0,
             "a zid-less held face is not bootstrapped"
         );
+    }
+
+    /// A self-originated data Push (its routing-context node_id defaults to 0).
+    fn data_push() -> PushOwned {
+        use wz_session_core::push_build::build_push_literal;
+        build_push_literal("demo/data", b"payload").expect("build push")
+    }
+
+    /// One LinkState entry (psid-space, with the psids it links to) — mirrors
+    /// the wz-routing-graph test idiom for building a topology by ingest.
+    fn entry(psid: u64, sn: u64, node: u8, links: &[u64]) -> LinkstateOwned {
+        LinkstateOwned {
+            options: 0,
+            psid,
+            sn,
+            zid_len: Some(4),
+            zid: Some(SceBytes::from_slice(&zid(node)).unwrap()),
+            whatami: Some(2),
+            num_locators: None,
+            locators: None,
+            links_len: links.len() as u64,
+            links: links.iter().map(|&psid| LinkstateLink { psid }).collect(),
+            weights: None,
+        }
+    }
+
+    fn list(entries: Vec<LinkstateOwned>) -> LinkstateListOwned {
+        LinkstateListOwned {
+            num_link_states: entries.len() as u64,
+            link_states: entries,
+        }
+    }
+
+    /// Make `neighbour` (on `face`) advertise a single link back to self
+    /// (`self_node`), which is what forms the mutual graph edge self<->
+    /// neighbour. The self entry (psid 0) is carried only to teach the
+    /// psid->zid mapping; its low sn keeps it stale so self's own links are
+    /// not clobbered. The neighbour entry (psid 1) links to psid 0 = self.
+    fn advertise_link_back(fwd: &LinkstateForwarder, face: FaceId, neighbour: u8, self_node: u8) {
+        fwd.on_inbound_linkstate(
+            face,
+            list(vec![
+                entry(0, 1, self_node, &[]),
+                entry(1, 5, neighbour, &[0]),
+            ]),
+        );
+    }
+
+    /// Decode the routing-context `node_id` of the single forwarded Push in a
+    /// recorded wire frame — proves the re-stamp landed ON THE WIRE (the Push
+    /// codec carried the ext_nodeid), not merely that a frame went out.
+    fn forwarded_source(frame: &[u8]) -> u16 {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Push(p)) => read_push_source(p),
+            other => panic!("expected a forwarded Push, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forwards_a_push_along_the_source_tree_to_a_child() {
+        // Line A - S(self) - B (A and B each link only to S). A Push
+        // self-originated by neighbour A (node_id 0) floods along A's tree:
+        // self's only child is B, so it reaches B and never goes back to A.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
+        let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        sink_a.reset();
+        sink_b.reset();
+
+        fwd.forward_push(FaceId(0), true, &data_push());
+
+        assert_eq!(sink_b.frame_count(), 1, "forwarded to the tree child B");
+        assert_eq!(sink_a.frame_count(), 0, "never back toward the source A");
+        // Re-stamped with THIS node's psid for the source A (its idx, 1).
+        assert_eq!(forwarded_source(&sink_b.frame_bytes(0)), 1);
+    }
+
+    #[test]
+    fn does_not_forward_a_push_to_a_face_outside_the_source_tree() {
+        // self holds A (connected, edge S<->A) and B (held but never advertised
+        // back, so it is an isolated node with no edge). A Push from A reaches
+        // self only — B is not in A's spanning tree, so it gets nothing.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // only S<->A
+        sink_a.reset();
+        sink_b.reset();
+
+        fwd.forward_push(FaceId(0), true, &data_push());
+        assert_eq!(sink_a.frame_count(), 0, "not back toward the source");
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "B is not in A's tree -> no forward"
+        );
+    }
+
+    #[test]
+    fn forwards_a_transit_push_resolving_the_source_from_the_link_psid() {
+        // Star: self(S) holds A, B, C (each links back to S). A Push arrives on
+        // A's face carrying a NON-zero node_id = A's psid for B (a transit
+        // message, not self-originated). Self resolves it via A's link
+        // psid->zid mapping to source B, then floods along B's tree: self's
+        // children there are A (excluded, the inbound face) and C, so only C
+        // receives it — re-stamped into SELF's psid space for B (idx 2).
+        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
+        let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 3
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05); // edge S<->C
+
+        // Teach A's link that it refers to B by psid 42 (a transit source).
+        let link_a = fwd.faces.borrow()[&FaceId(0)].link.expect("A has a link");
+        fwd.net
+            .borrow_mut()
+            .get_link_mut(link_a)
+            .expect("link A")
+            .set_zid_mapping(42, zid(0x0B));
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        let mut push = data_push();
+        set_push_source(&mut push, 42); // node_id 42 = A's psid for B
+        fwd.forward_push(FaceId(0), true, &push);
+
+        assert_eq!(sink_c.frame_count(), 1, "C is self's child in B's tree");
+        assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
+        assert_eq!(sink_b.frame_count(), 0, "B is the source root, not a child");
+        // Re-stamped with self's psid for the RESOLVED source B (its idx, 2).
+        assert_eq!(forwarded_source(&sink_c.frame_bytes(0)), 2);
     }
 }

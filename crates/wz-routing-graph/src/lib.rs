@@ -355,6 +355,16 @@ impl LinkstateNetwork {
         self.get_idx(zid).map(|i| &self.graph[i])
     }
 
+    /// This node's wire `psid` for `zid` (its petgraph `NodeIndex` as the
+    /// compact local id, `local_psid`), or `None` if `zid` is unknown. The
+    /// routing-context `node_id` a forwarder stamps on a data message it
+    /// floods FROM `zid`'s spanning tree: each receiver remaps it back to a
+    /// `zid` via its own link's `psid <-> zid` mapping (zenoh
+    /// `get_local_context`, `network.rs:273`).
+    pub fn local_psid_of(&self, zid: &Zid) -> Option<u64> {
+        self.get_idx(zid).map(local_psid)
+    }
+
     /// The single node-insertion path: add the node to the petgraph AND the
     /// `idx_by_zid` secondary index together, so the two never desync.
     fn insert_node(&mut self, node: Node) -> NodeIndex {
@@ -1407,6 +1417,19 @@ mod tests {
             net.ingest_linkstate_list(link, list(vec![entry(11, 5, Some(&big), Some(2), &[])]));
         assert!(changes.updated.is_empty(), "oversized-zid entry dropped");
         assert!(net.get_node(&big).is_none(), "oversized zid not admitted");
+    }
+
+    #[test]
+    fn local_psid_of_is_the_node_index() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2); // self -> idx 0
+        net.add_link(zid(0x0A), 2); // first neighbour -> idx 1
+        assert_eq!(net.local_psid_of(&zid(0x01)), Some(0), "self is psid 0");
+        assert_eq!(
+            net.local_psid_of(&zid(0x0A)),
+            Some(1),
+            "neighbour is psid 1"
+        );
+        assert_eq!(net.local_psid_of(&zid(0xFF)), None, "unknown zid -> None");
     }
 
     #[test]

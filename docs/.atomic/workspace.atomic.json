@@ -42040,6 +42040,46 @@
         "코드 LOCAL UNPUSHED 3커밋: rf(84647b2)+re(7c5ad96)+rg(이 커밋). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
       ]
     },
+    "Round 311rh": {
+      "decision_summary": "R311rh: c3c-2 (linkstate 데이터면 forward 통합). LinkstateForwarder::forward가 데이터 Push를 source spanning-tree 따라 forward(broadcast-along-tree, loop-free). source 해석(node_id 0=inbound neighbour, else link.get_zid psid)→tree_children_of→zid→face(inbound 제외)→set_push_source로 self psid 재stamp. 그래프 local_psid_of.",
+      "changes_bullets": [
+        "wz-runtime-tokio/linkstate_forward.rs: forward()를 if-let→match(OAM 유지)+NetworkMessage::Push arm=forward_push. forward_push: read_push_source로 source 해석(0=inbound neighbour zid; else inbound link.get_zid(node_id)=transit), local_psid_of(source)로 out_node_id, tree_children_of(source)→child face들 forward(inbound face 제외, set_push_source 재stamp). reliable은 FramePayload서. broadcast-along-tree(subscription-filter=c3c-3 deferred).",
+        "wz-routing-graph: local_psid_of(&Zid)->Option<u64>(get_idx+local_psid)=이 노드의 source psid=outbound node_id. 각 receiver가 자기 link mapping으로 remap(zenoh get_local_context network.rs:273). 재stamp=per-child 역참조 아닌 self psid 단일값(zenoh outbound 미러).",
+        "zenoh 정본 대조: source tree-root는 Push ext_nodeid(c3c-1); zenoh forward는 hat/linkstate_peer/pubsub.rs compute_data_route가 trees[source].directions[sub](subscription-filtered). wz는 carry 선택대로 tree_children_of(source) 전 child flood=loop-free(tree=무사이클)."
+      ],
+      "verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 302 PASS(forward 3 신규: child forward+재stamp decode 검증/held-but-not-in-tree 제외/transit link-psid 해석+재stamp), graph 24 PASS(local_psid_of 1 신규). 재stamp는 forwarded frame 디코드(parse_inbound+parse_frame_payload+read_push_source)로 wire 검증=Push 코덱이 ext_nodeid 운반 확인.",
+        "clippy rt-tokio(routing-peer all-targets+no-default)+session-core(codec-push)+graph -D warnings clean. fmt --all --check exit 0. E6 wz_peer_mesh 5/5(forward() if-let→match 재구성이 OAM 수렴 무회귀). forward 테스트 토폴로지=ingest로 edge 형성(이웃이 self 다시 광고=mutual edge)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rh = c3c-2 = linkstate 데이터면 forward 통합. LinkstateForwarder가 데이터 Push를 source spanning-tree 따라 broadcast-along-tree forward(loop-free). source 해석+local_psid_of 재stamp+tree_children_of→zid→face(inbound 제외). 재stamp=self psid 단일값(per-child 역참조 불필요; 각 receiver remap). 3 forward unit(재stamp wire decode 검증)+graph local_psid_of.",
+        "c3c 데이터면 코어 완료(c3c-1 wire seam + c3c-2 forward). 정직: 단위 검증(forward 결정+재stamp wire)뿐, 실제 multi-hop end-to-end 데이터 전달 e2e는 미구축(데모가 mesh 너머 publish/subscribe 미지원=별도 atom). dense-mesh 중복 가능(tree-flood이 비-parent 도착 시; zenoh directions가 정밀, broadcast는 단순화).",
+        "다음 후보: (a)c3c e2e(데모 mesh publish→far peer subscribe 배선) (b)c3c-3 subscription-filter(broadcast→interested-subtree; linkstatepeer_subs+Declare mesh 전파=별도 서브시스템) (c)추적부채(change-triggered flood, Details split, remove_detached_nodes+3-peer transitive e2e, options-SSOT, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators).",
+        "코드 LOCAL UNPUSHED 4커밋: rf(84647b2)+re(7c5ad96)+rg(662fb1d)+rh(이 커밋). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
+      ],
+      "publishable_decision_summary": "R311rh: c3c-2 (linkstate 데이터면 forward 통합). LinkstateForwarder::forward가 데이터 Push를 source spanning-tree 따라 forward(broadcast-along-tree, loop-free). source 해석(node_id 0=inbound neighbour, else link.get_zid psid)→tree_children_of→zid→face(inbound 제외)→set_push_source로 self psid 재stamp. 그래프 local_psid_of.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/linkstate_forward.rs: forward()를 if-let→match(OAM 유지)+NetworkMessage::Push arm=forward_push. forward_push: read_push_source로 source 해석(0=inbound neighbour zid; else inbound link.get_zid(node_id)=transit), local_psid_of(source)로 out_node_id, tree_children_of(source)→child face들 forward(inbound face 제외, set_push_source 재stamp). reliable은 FramePayload서. broadcast-along-tree(subscription-filter=c3c-3 deferred).",
+        "wz-routing-graph: local_psid_of(&Zid)->Option<u64>(get_idx+local_psid)=이 노드의 source psid=outbound node_id. 각 receiver가 자기 link mapping으로 remap(zenoh get_local_context network.rs:273). 재stamp=per-child 역참조 아닌 self psid 단일값(zenoh outbound 미러).",
+        "zenoh 정본 대조: source tree-root는 Push ext_nodeid(c3c-1); zenoh forward는 hat/linkstate_peer/pubsub.rs compute_data_route가 trees[source].directions[sub](subscription-filtered). wz는 carry 선택대로 tree_children_of(source) 전 child flood=loop-free(tree=무사이클)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test rt-tokio routing-peer --lib 302 PASS(forward 3 신규: child forward+재stamp decode 검증/held-but-not-in-tree 제외/transit link-psid 해석+재stamp), graph 24 PASS(local_psid_of 1 신규). 재stamp는 forwarded frame 디코드(parse_inbound+parse_frame_payload+read_push_source)로 wire 검증=Push 코덱이 ext_nodeid 운반 확인.",
+        "clippy rt-tokio(routing-peer all-targets+no-default)+session-core(codec-push)+graph -D warnings clean. fmt --all --check exit 0. E6 wz_peer_mesh 5/5(forward() if-let→match 재구성이 OAM 수렴 무회귀). forward 테스트 토폴로지=ingest로 edge 형성(이웃이 self 다시 광고=mutual edge)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rh = c3c-2 = linkstate 데이터면 forward 통합. LinkstateForwarder가 데이터 Push를 source spanning-tree 따라 broadcast-along-tree forward(loop-free). source 해석+local_psid_of 재stamp+tree_children_of→zid→face(inbound 제외). 재stamp=self psid 단일값(per-child 역참조 불필요; 각 receiver remap). 3 forward unit(재stamp wire decode 검증)+graph local_psid_of.",
+        "c3c 데이터면 코어 완료(c3c-1 wire seam + c3c-2 forward). 정직: 단위 검증(forward 결정+재stamp wire)뿐, 실제 multi-hop end-to-end 데이터 전달 e2e는 미구축(데모가 mesh 너머 publish/subscribe 미지원=별도 atom). dense-mesh 중복 가능(tree-flood이 비-parent 도착 시; zenoh directions가 정밀, broadcast는 단순화).",
+        "다음 후보: (a)c3c e2e(데모 mesh publish→far peer subscribe 배선) (b)c3c-3 subscription-filter(broadcast→interested-subtree; linkstatepeer_subs+Declare mesh 전파=별도 서브시스템) (c)추적부채(change-triggered flood, Details split, remove_detached_nodes+3-peer transitive e2e, options-SSOT, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators).",
+        "코드 LOCAL UNPUSHED 4커밋: rf(84647b2)+re(7c5ad96)+rg(662fb1d)+rh(이 커밋). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [
