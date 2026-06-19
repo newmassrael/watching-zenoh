@@ -3113,6 +3113,12 @@ layer_e6_peer_mesh() {
     (cd crates && cargo build -p wz-ap-demo --features routing-peer --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
+    # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the
+    # SAME routing-peer demo binary; gate it in E6 alongside the topology
+    # exchange e2e. (It was added in R311ri but never wired into a CI lane —
+    # Layer E `--skip wz_peer` excludes it and E6 ran only wz_peer_mesh.)
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_data_forward -- --ignored --quiet) || return 1
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────

@@ -42484,6 +42484,46 @@
         "LOCAL UNPUSHED 6커밋: rm(directions_toward)+rn(LinkstatepeerSubs)+ro(declare_routing_context)+rp(resolve_source)+rq(전파)+rr(필터). qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci 필요. 추적부채 불변: chain_z SSOT, (source,sn) seen-set, remove_detached_nodes, Zid newtype, gossip/autoconnect/locators."
       ]
     },
+    "Round 311rs": {
+      "decision_summary": "R311rs: c3c-3 구독필터 atom4-ii(e2e+CI 배선, 최종 완결). wz-ap-demo --subscribe(declare_subscription 구동) 추가. wz_peer_data_forward e2e 갱신=C(--subscribe demo/mesh) 구독→C→B→A 전파→A 'publisher learned subscriber interest'→A publish→C 'received mesh data'(subscription-gated multi-hop real TCP). run-ci E6에 wz_peer_data_forward 배선(ri서 추가됐으나 CI 미연결 갭 수정). 10/10 무flake. c3c-3 전 atom(directions/registry/propagation/filter) 완결.",
+      "changes_bullets": [
+        "wz-ap-demo: main.rs --subscribe 파싱+run_peer_mode 전달. runner.rs run_peer(subscribe_key 파라미터): app_tick서 declare_subscription(매틱 재선언=수렴 후 전파 보장; pubsub_tree_change 우회) + publisher가 interested(key) 비면 'publisher learned subscriber interest' witness 1회 로깅. 시작 로그 publishing/subscribing 조합.",
+        "wz_peer_data_forward.rs: C=--subscribe demo/mesh(far subscriber), B=transit, A=--publish. 단언 추가=A 'publisher learned subscriber interest'(구독 A-ward 전파 증명)+기존 C 'received mesh data'(필터 delivery)+B transit. subscription-gated multi-hop real TCP 실증. 테스트명 wz_peer_mesh_forwards_subscribed_data_two_hops.",
+        "run-ci.sh layer_e6_peer_mesh: wz_peer_data_forward --ignored 추가(ri서 추가됐으나 Layer E --skip wz_peer + E6 wz_peer_mesh만이라 CI 미실행 갭 수정). 10/10 무flake 검증."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test wz_peer_data_forward --ignored 통과; 10/10 무flake(반복 실행). clippy wz-ap-demo(routing-peer all-targets) -D warnings clean. fmt wz-ap-demo+integration-tests clean. build wz-ap-demo routing-peer 성공.",
+        "e2e가 c3c-3 전 체인 실증(real TCP): declare_subscription(atom3)→wire→forward_subscription register/re-flood→A가 C interest 학습(witness)→publish 필터(atom4 directions_toward)→2-hop C delivery. 구독 없으면 any_interest 게이트가 무전송이라 C 수신=genuinely subscription-gated(이전 broadcast 아님). pubsub_tree_change 없어 매틱 재선언으로 수렴 후 전파 보장."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311rs = c3c-3 atom4-ii(최종): wz-ap-demo --subscribe + wz_peer_data_forward e2e subscription-gated(C 구독→A 학습→A publish→C 2-hop 수신 real TCP) + run-ci E6 배선(ri CI 미연결 갭 수정). 10/10 무flake. c3c-3 subscription-filter 완결: atom1(directions_toward)+atom2(LinkstatepeerSubs)+atom3a(declare codec)+atom3b(전파)+atom4(필터+e2e).",
+        "c3c-3 DONE: broadcast-along-tree→interested-subtree directions 필터 완성=linkstate-peer 데이터/제어면 코어 완성(topology 교환+spanning tree+data forward+subscription filter). LOCAL UNPUSHED 7커밋: rm/rn/ro/rp/rq/rr/rs. qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci(pre-push) 필요.",
+        "남은 추적부채(c3c-3서 honest defer): pubsub_tree_change(트리 변경 시 기존 구독 재광고; keys() 준비; 데모는 매틱 재선언 우회), alias/wildcard keyexpr(wireexpr_resolve superset/intersection), chain_z SSOT 통합(push_build/push_routing_context/declare_routing_context 3site), (source,sn) seen-set dedup/TTL, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators, change-triggered flood.",
+        "다음 후보: 위 추적부채 중 택1 또는 새 zenoh 조각. 권고=pubsub_tree_change(c3c-3 정직 갭 직접 닫음) 또는 chain_z SSOT(누적 dup 청산)."
+      ],
+      "publishable_decision_summary": "R311rs: c3c-3 구독필터 atom4-ii(e2e+CI 배선, 최종 완결). wz-ap-demo --subscribe(declare_subscription 구동) 추가. wz_peer_data_forward e2e 갱신=C(--subscribe demo/mesh) 구독→C→B→A 전파→A 'publisher learned subscriber interest'→A publish→C 'received mesh data'(subscription-gated multi-hop real TCP). run-ci E6에 wz_peer_data_forward 배선(ri서 추가됐으나 CI 미연결 갭 수정). 10/10 무flake. c3c-3 전 atom(directions/registry/propagation/filter) 완결.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo: main.rs --subscribe 파싱+run_peer_mode 전달. runner.rs run_peer(subscribe_key 파라미터): app_tick서 declare_subscription(매틱 재선언=수렴 후 전파 보장; pubsub_tree_change 우회) + publisher가 interested(key) 비면 'publisher learned subscriber interest' witness 1회 로깅. 시작 로그 publishing/subscribing 조합.",
+        "wz_peer_data_forward.rs: C=--subscribe demo/mesh(far subscriber), B=transit, A=--publish. 단언 추가=A 'publisher learned subscriber interest'(구독 A-ward 전파 증명)+기존 C 'received mesh data'(필터 delivery)+B transit. subscription-gated multi-hop real TCP 실증. 테스트명 wz_peer_mesh_forwards_subscribed_data_two_hops.",
+        "run-ci.sh layer_e6_peer_mesh: wz_peer_data_forward --ignored 추가(ri서 추가됐으나 Layer E --skip wz_peer + E6 wz_peer_mesh만이라 CI 미실행 갭 수정). 10/10 무flake 검증."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test wz_peer_data_forward --ignored 통과; 10/10 무flake(반복 실행). clippy wz-ap-demo(routing-peer all-targets) -D warnings clean. fmt wz-ap-demo+integration-tests clean. build wz-ap-demo routing-peer 성공.",
+        "e2e가 c3c-3 전 체인 실증(real TCP): declare_subscription(atom3)→wire→forward_subscription register/re-flood→A가 C interest 학습(witness)→publish 필터(atom4 directions_toward)→2-hop C delivery. 구독 없으면 any_interest 게이트가 무전송이라 C 수신=genuinely subscription-gated(이전 broadcast 아님). pubsub_tree_change 없어 매틱 재선언으로 수렴 후 전파 보장."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311rs = c3c-3 atom4-ii(최종): wz-ap-demo --subscribe + wz_peer_data_forward e2e subscription-gated(C 구독→A 학습→A publish→C 2-hop 수신 real TCP) + run-ci E6 배선(ri CI 미연결 갭 수정). 10/10 무flake. c3c-3 subscription-filter 완결: atom1(directions_toward)+atom2(LinkstatepeerSubs)+atom3a(declare codec)+atom3b(전파)+atom4(필터+e2e).",
+        "c3c-3 DONE: broadcast-along-tree→interested-subtree directions 필터 완성=linkstate-peer 데이터/제어면 코어 완성(topology 교환+spanning tree+data forward+subscription filter). LOCAL UNPUSHED 7커밋: rm/rn/ro/rp/rq/rr/rs. qm~rl=PUSHED origin/main=609db3d. push 시 full run-ci(pre-push) 필요.",
+        "남은 추적부채(c3c-3서 honest defer): pubsub_tree_change(트리 변경 시 기존 구독 재광고; keys() 준비; 데모는 매틱 재선언 우회), alias/wildcard keyexpr(wireexpr_resolve superset/intersection), chain_z SSOT 통합(push_build/push_routing_context/declare_routing_context 3site), (source,sn) seen-set dedup/TTL, remove_detached_nodes, Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators, change-triggered flood.",
+        "다음 후보: 위 추적부채 중 택1 또는 새 zenoh 조각. 권고=pubsub_tree_change(c3c-3 정직 갭 직접 닫음) 또는 chain_z SSOT(누적 dup 청산)."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

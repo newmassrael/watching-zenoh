@@ -1234,6 +1234,7 @@ pub(crate) async fn run_peer(
     listen: &str,
     dial_targets: &[String],
     publish_key: Option<&str>,
+    subscribe_key: Option<&str>,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
     use std::time::Duration;
@@ -1277,10 +1278,11 @@ pub(crate) async fn run_peer(
          holding both directions' faces and forwarding mesh data along the \
          linkstate spanning tree{}",
         dials.len(),
-        if publish_key.is_some() {
-            " (publishing)"
-        } else {
-            ""
+        match (publish_key.is_some(), subscribe_key.is_some()) {
+            (true, true) => " (publishing + subscribing)",
+            (true, false) => " (publishing)",
+            (false, true) => " (subscribing)",
+            (false, false) => "",
         }
     );
 
@@ -1350,12 +1352,31 @@ pub(crate) async fn run_peer(
     // application I/O (publish + observe). The peer loop still drives the flood.
     let mut app_tick = tokio::time::interval(Duration::from_millis(APP_TICK_MS));
     let mut last_data_seen = 0usize;
+    let mut announced_interest = false;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
             _ = app_tick.tick() => {
+                // R311rs (c3c-3 atom4-ii) — a `--subscribe` peer re-declares its
+                // interest each tick (idempotent at converged receivers via the
+                // register change-gate): re-flooding after topology converges is
+                // how it reaches a publisher without `pubsub_tree_change`.
+                if let Some(key) = subscribe_key {
+                    let _ = forwarder.declare_subscription(key);
+                }
                 if let Some(key) = publish_key {
                     let _ = forwarder.publish(key, b"wz-mesh-data");
+                    // Witness the subscription-filtered route: the publisher only
+                    // forwards once it has LEARNED an interested subscriber (the
+                    // declaration flooded back to it). Logged once, when interest
+                    // first arrives — proof the propagation reached the publisher.
+                    if !announced_interest && !forwarder.interested(key).is_empty() {
+                        announced_interest = true;
+                        log::info!(
+                            "wz-ap-demo peer: publisher learned subscriber interest ({} peer(s))",
+                            forwarder.interested(key).len()
+                        );
+                    }
                 }
                 let seen = forwarder.data_seen();
                 if seen > last_data_seen {

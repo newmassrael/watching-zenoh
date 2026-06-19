@@ -149,7 +149,12 @@ fn main() -> ExitCode {
             // data into the mesh (flooded along its spanning tree); absent, the
             // peer only forwards others' data.
             let publish_key = parse_pair(rest, "--publish");
-            return run_peer_mode(peer_listen, dial_targets, publish_key);
+            // R311rs (c3c-3 atom4-ii) — `--subscribe <key>` makes this peer
+            // DECLARE interest in a keyexpr; the declaration floods across the
+            // mesh so a `--publish` peer's subscription-filtered route reaches
+            // it. Without a subscriber the data plane forwards nothing.
+            let subscribe_key = parse_pair(rest, "--subscribe");
+            return run_peer_mode(peer_listen, dial_targets, publish_key, subscribe_key);
         }
         #[cfg(not(feature = "routing-peer"))]
         {
@@ -631,6 +636,7 @@ fn run_peer_mode(
     listen: String,
     dial_targets: Vec<String>,
     publish_key: Option<String>,
+    subscribe_key: Option<String>,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -644,6 +650,7 @@ fn run_peer_mode(
         &listen,
         &dial_targets,
         publish_key.as_deref(),
+        subscribe_key.as_deref(),
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
