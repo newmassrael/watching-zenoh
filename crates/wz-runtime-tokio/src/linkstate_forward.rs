@@ -19,8 +19,9 @@
 //! every held face at once: the new neighbour is bootstrapped with the full
 //! topology AND the existing faces learn the change immediately. An inbound
 //! change re-floods transitively via `forward`'s `propagate`. Reliable transport
-//! (the mesh is TCP) delivers each flood, so the forwarder keeps the
-//! `FaceForwarder` default `tick_period` of `None` — the loop arms no timer.
+//! (the mesh is TCP) delivers each flood, so the topology FLOOD needs no periodic
+//! re-send — but the spanning-tree RECOMPUTE each change triggers IS coalesced on
+//! a debounce timer (D2c, below), not run inline.
 //!
 //! Single-task model: like [`RoutingForwarder`](crate::routing_forward),
 //! the whole loop is one `!Send` task, so the graph is held behind a plain
@@ -41,16 +42,31 @@
 //! the source peer's interest + re-floods it, so each peer learns who is
 //! interested in what ([`interested`](LinkstateForwarder::interested)), and a
 //! tree-change re-advertises a subscription to its source tree's NEW children
-//! (`pubsub_tree_change`, c3c-3 A2 + D2 children-delta). Still deferred: the
-//! `Details` topology optimisation (a per-link delta instead of the full-topology
-//! flood, D4), the `TreesComputationWorker` batching of rapid recomputes (D2c),
-//! and alias / wildcard keyexprs (the filter is literal-keyexpr exact-match, B1 /
-//! B2). `routing-peer`-gated.
+//! (`pubsub_tree_change`, c3c-3 A2 + D2 children-delta). Each topology change
+//! COALESCES its spanning-tree recompute on a debounce timer rather than
+//! recomputing inline (c3c-3 D2c): the change handlers
+//! ([`forward`](FaceForwarder::forward) / [`deregister`](FaceForwarder::deregister))
+//! [`schedule_recompute`](LinkstateForwarder::schedule_recompute) and the
+//! [`tick`](FaceForwarder::tick) flushes ONE
+//! [`compute_trees`](wz_routing_graph::LinkstateNetwork::compute_trees) +
+//! re-advertise per window, so a burst (a join flood, a flapping cascade)
+//! collapses to a single recompute — zenoh's `TreesComputationWorker`
+//! (`hat/linkstate_peer/mod.rs:122-157`), translated to wz's single-task actor:
+//! a coalescing tick on the loop, not a separate task (zenoh needs a task only
+//! because its tables are `Arc<RwLock>`-shared across many connection tasks; wz
+//! is one `!Send` task). The window is the
+//! [`with_trees_delay`](LinkstateForwarder::with_trees_delay) knob (default
+//! 100ms = zenoh's `TREES_COMPUTATION_DELAY_MS`); it tunes the SPF-throttle
+//! delay, NOT an on/off switch — the coalescing path is the single recompute
+//! SSOT. Still deferred: the `Details` topology optimisation (a per-link delta
+//! instead of the full-topology flood, D4), and alias / wildcard keyexprs (the
+//! filter is literal-keyexpr exact-match, B1 / B2). `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
@@ -131,44 +147,80 @@ pub struct LinkstateForwarder {
     /// view. `RefCell` by the same single-task contract as the graph — borrowed
     /// only for a handler's synchronous duration.
     subs: RefCell<LinkstatepeerSubs>,
+    /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
+    /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
+    /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
+    /// instead of recomputing inline; the [`tick`](FaceForwarder::tick) flushes it
+    /// ONCE per window, so a burst of changes collapses to a single
+    /// `compute_trees` — zenoh's `TreesComputationWorker` debounce
+    /// (`hat/linkstate_peer/mod.rs:122-157`). Setting an already-set flag is the
+    /// coalesce (N changes -> 1 recompute). `Cell` by the single-task contract.
+    trees_dirty: Cell<bool>,
+    /// The coalescing window: how long topology changes accumulate before the
+    /// tick flushes one recompute — the SPF-throttle delay (zenoh's
+    /// `TREES_COMPUTATION_DELAY_MS`, default 100ms). The
+    /// [`with_trees_delay`](Self::with_trees_delay) knob; zenoh fixes it at
+    /// compile time, wz exposes it (an operator tunes the throttle, a test drives
+    /// a short window) — it tunes the delay, it is NOT an on/off switch, since the
+    /// coalescing path is the single, always-on recompute SSOT.
+    trees_delay: Duration,
+    /// Total spanning-tree recomputes flushed so far — the D2c coalescing witness
+    /// (the count rises once per flushed window, not once per change, so a burst
+    /// of N scheduled changes followed by one tick raises it by exactly 1).
+    recomputes: Cell<usize>,
 }
 
 impl LinkstateForwarder {
-    /// A driver seeded with the local node (this peer's zid + whatami).
+    /// The default coalescing window — zenoh's `TREES_COMPUTATION_DELAY_MS`
+    /// (`hat/mod.rs:56`). The SPF-throttle delay a [`new`](Self::new) forwarder
+    /// uses unless [`with_trees_delay`](Self::with_trees_delay) overrides it.
+    pub const DEFAULT_TREES_DELAY: Duration = Duration::from_millis(100);
+
+    /// A driver seeded with the local node (this peer's zid + whatami), using the
+    /// default [`DEFAULT_TREES_DELAY`](Self::DEFAULT_TREES_DELAY) recompute window.
     pub fn new(self_zid: Zid, self_whatami: u8) -> Self {
+        Self::with_trees_delay(self_zid, self_whatami, Self::DEFAULT_TREES_DELAY)
+    }
+
+    /// As [`new`](Self::new), but with an explicit spanning-tree recompute
+    /// coalescing window (the SPF-throttle delay D2c debounces topology changes
+    /// by). A shorter window converges faster at the cost of more frequent
+    /// recomputes under churn; a longer one coalesces a heavier burst. This tunes
+    /// the single coalescing path — it does not turn coalescing off.
+    pub fn with_trees_delay(self_zid: Zid, self_whatami: u8, trees_delay: Duration) -> Self {
         Self {
             net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
             subs: RefCell::new(LinkstatepeerSubs::new()),
+            trees_dirty: Cell::new(false),
+            trees_delay,
+            recomputes: Cell::new(0),
         }
     }
 
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it against
-    /// that face's graph link and recompute the spanning trees. Returns BOTH
-    /// (a) the ingest `Changes` the caller re-floods onward
-    /// ([`propagate`](Self::propagate)), and (b) the recompute's per-tree
-    /// new-children DELTA the caller re-advertises subscriptions to
-    /// ([`re_advertise_subscriptions`](Self::re_advertise_subscriptions)) — both
-    /// fall out of the one ingest + recompute, so the seam returns the pair
-    /// rather than recomputing twice.
-    pub fn on_inbound_linkstate(
-        &self,
-        face: FaceId,
-        list: LinkstateListOwned,
-    ) -> (Changes, Vec<(Zid, Vec<Zid>)>) {
+    /// that face's graph link. Returns the ingest `Changes` the caller re-floods
+    /// onward ([`propagate`](Self::propagate)). Does NOT recompute the spanning
+    /// trees — the recompute is COALESCED (D2c): the caller
+    /// [`schedule_recompute`](Self::schedule_recompute)s and the
+    /// [`tick`](FaceForwarder::tick) runs one
+    /// [`compute_trees`](wz_routing_graph::LinkstateNetwork::compute_trees) per
+    /// window, so a burst of inbound lists collapses to a single recompute. (The
+    /// flood `Changes` fall out of the ingest itself and stay inline, exactly as
+    /// zenoh floods link-states inline and only debounces the tree compute.)
+    pub fn ingest_inbound_linkstate(&self, face: FaceId, list: LinkstateListOwned) -> Changes {
         let link_id = match self.faces.borrow().get(&face).and_then(|s| s.link) {
             Some(id) => id,
             // a list from a face with no graph link (unknown / no zid) is dropped.
-            None => return (Changes::default(), Vec::new()),
+            None => return Changes::default(),
         };
         let mut net = self.net.borrow_mut();
         let changes = net.ingest_linkstate_list(link_id, list);
-        let new_children = net.compute_trees();
         drop(net);
         self.ingested.set(self.ingested.get() + 1);
-        (changes, new_children)
+        changes
     }
 
     /// Re-flood the nodes an ingest changed to every face EXCEPT (a) the one
@@ -221,6 +273,14 @@ impl LinkstateForwarder {
     /// data forwarding reached it end to end.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
+    }
+
+    /// Total spanning-tree recomputes flushed so far (D2c) — the coalescing
+    /// witness. A burst of scheduled topology changes followed by one
+    /// [`tick`](FaceForwarder::tick) raises this by exactly 1, which is what a
+    /// coalescing test asserts (N changes did not produce N recomputes).
+    pub fn recomputes(&self) -> usize {
+        self.recomputes.get()
     }
 
     /// Number of nodes in the topology graph (self + every learned peer) —
@@ -776,6 +836,31 @@ impl LinkstateForwarder {
         }
     }
 
+    /// The single spanning-tree recompute path (D2c SSOT): recompute the trees
+    /// and re-advertise known subscriptions to whatever new children the recompute
+    /// produced. The [`tick`](FaceForwarder::tick) calls this once per coalescing
+    /// window after [`schedule_recompute`](Self::schedule_recompute) marked a
+    /// topology change pending — so EVERY production recompute funnels through
+    /// here (zenoh's `TreesComputationWorker` body: `compute_trees` then
+    /// `pubsub_tree_change`). The `compute_trees` borrow is released before
+    /// `re_advertise_subscriptions` re-borrows.
+    fn recompute_and_advertise(&self) {
+        let new_children = self.net.borrow_mut().compute_trees();
+        self.recomputes.set(self.recomputes.get() + 1);
+        self.re_advertise_subscriptions(&new_children);
+    }
+
+    /// Mark a spanning-tree recompute pending (D2c) — the coalescing entry the
+    /// topology-change handlers call instead of recomputing inline. The next
+    /// [`tick`](FaceForwarder::tick) flushes it via
+    /// [`recompute_and_advertise`](Self::recompute_and_advertise); setting an
+    /// already-set flag coalesces (a burst of changes -> one recompute). Mirrors
+    /// zenoh's `schedule_compute_trees` (`hat/linkstate_peer/mod.rs:178`), which
+    /// likewise only enqueues — the worker does the compute.
+    fn schedule_recompute(&self) {
+        self.trees_dirty.set(true);
+    }
+
     /// The peers interested in `keyexpr` — the subscription-filter input the
     /// data forward (atom4) feeds to
     /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
@@ -896,13 +981,16 @@ impl FaceForwarder for LinkstateForwarder {
     }
 
     fn deregister(&self, id: FaceId) {
-        // Drop the face's state; if it had a graph link, disconnect it AND
-        // recompute the spanning trees. Without the recompute, `forward_push` /
-        // `publish` would keep routing along trees that still include the dead
-        // link until the next inbound link-state happened to trigger a recompute
-        // — a misroute window after every face loss. zenoh recomputes on
-        // link-down too (`hat/linkstate_peer/mod.rs` `schedule_compute_trees`).
-        let new_children = if let Some(state) = self.faces.borrow_mut().remove(&id) {
+        // Drop the face's state; if it had a graph link, disconnect it (inline —
+        // the dead edge must leave the graph at once) and SCHEDULE a recompute.
+        // The recompute purges the trees that still include the dead link; until
+        // the next tick flushes it, `forward_push` / `publish` may route along a
+        // stale tree, but the dead face is already gone from `faces`, so a send
+        // toward it simply drops (self-heal) — the same bounded window zenoh
+        // accepts by debouncing link-down too (`hat/linkstate_peer/mod.rs`
+        // `schedule_compute_trees`, the link-down path). The recompute's
+        // re-advertise is deferred with it (D2c).
+        let dropped_link = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             // Purge the departed peer's subscription interest — zenoh's
             // `pubsub_remove_node` on link-down (`hat/linkstate_peer/mod.rs`).
             // Without this a gone subscriber's interest lingers in the table,
@@ -912,46 +1000,63 @@ impl FaceForwarder for LinkstateForwarder {
                 self.subs.borrow_mut().remove_peer(&zid);
             }
             if let Some(link) = state.link {
-                let mut net = self.net.borrow_mut();
-                net.remove_link(link);
-                Some(net.compute_trees())
+                self.net.borrow_mut().remove_link(link);
+                true
             } else {
-                None
+                false
             }
         } else {
-            None
+            false
         };
-        if let Some(new_children) = new_children {
-            // D2b — self LOST a routing link (its own link-state changed, sn bumped):
-            // flood self's updated full link-state to the surviving faces immediately
-            // (zenoh `remove_link`'s `send_on_links`, `network.rs:936-962`), so they
-            // drop the dead link from their topology NOW, not at a periodic tick.
+        if dropped_link {
+            // D2b — self LOST a routing link (its own link-state changed, sn
+            // bumped): flood self's updated full link-state to the surviving faces
+            // IMMEDIATELY (zenoh `remove_link`'s `send_on_links`,
+            // `network.rs:936-962`), so they drop the dead link from their topology
+            // NOW. The flood is a wire event on the link change and stays inline;
+            // only the spanning-tree recompute it triggers is coalesced (D2c).
             let _ = self.flood_self();
-            // Session-review remediation (R311sg) — re-advertise known subscriptions
-            // to any NEW children the recompute produced, EXACTLY as the inbound
-            // forward() path does. A self-link drop USUALLY only shrinks self's tree
-            // children (an empty delta — the uniform-weight wz-only case), but that
-            // is NOT a general invariant: under non-uniform edge weights (e.g. a
-            // zenohd peer's `transport_weights` ingested into the graph) dropping a
-            // link can REMOVE a cheaper detour and RE-HOME a node so it becomes
-            // self's NEW child in some root's tree — and self is then the only node
-            // that can deliver that root's interest to it. zenoh feeds the link-down
-            // delta into `pubsub_tree_change` unconditionally; a prior "delta provably
-            // empty" short-circuit here silently dropped that re-advertise (the delta
-            // is non-empty exactly when re-homing occurs, so this no-ops on the common
-            // shrink-only case and fires only when a re-home actually happened).
-            self.re_advertise_subscriptions(&new_children);
+            // D2c — coalesce the recompute (and its re-advertise) onto the tick,
+            // exactly as the inbound forward() path does. The recompute matters for
+            // more than purging the dead link: under non-uniform edge weights (e.g.
+            // a zenohd peer's `transport_weights` ingested into the graph) dropping
+            // a link can REMOVE a cheaper detour and RE-HOME a node so it becomes
+            // self's NEW child in some root's tree — self is then the only node that
+            // can deliver that root's interest to it, so the flushed
+            // re_advertise_subscriptions must run (R311sg). zenoh feeds the
+            // link-down delta into `pubsub_tree_change` unconditionally; the
+            // uniform-weight common case shrinks self's children with no re-home, so
+            // the flushed delta is empty and the re-advertise no-ops.
+            self.schedule_recompute();
         }
     }
 
-    // D2b — NO `tick_period` / `tick` override: topology flooding is now purely
-    // EVENT-DRIVEN (register / deregister flood self's changed link-state to held
-    // faces immediately, `propagate` re-floods inbound changes), exactly like
-    // zenoh, whose link-state flooding is event-only with NO periodic keepalive
-    // (`network.rs` floods solely on add_link / remove_link / received-state). The
-    // forwarder therefore keeps the `FaceForwarder` defaults (`tick_period` =
-    // None), so the loop arms no timer. Reliable transport (the mesh is TCP)
-    // delivers each event-flood, so no periodic re-send is needed for convergence.
+    // D2c — the coalescing recompute seam. Topology FLOODING stays event-driven
+    // (register / deregister flood self's changed link-state immediately,
+    // `propagate` re-floods inbound changes), exactly like zenoh — the mesh has NO
+    // periodic WIRE traffic. But the spanning-tree RECOMPUTE each change triggers
+    // is debounced: the handlers `schedule_recompute` (set the dirty flag) and the
+    // tick flushes ONE recompute per window, coalescing a burst into a single
+    // `compute_trees` (zenoh's `TreesComputationWorker`). This is the single-task
+    // actor translation of zenoh's worker task: the loop's tick drives the flush
+    // rather than a separate task, because `forward` runs INSIDE the per-face drive
+    // future (`accept_loop.rs`), so the loop's only regular re-entry point is this
+    // timer. The tick is a cheap local poll (one `Cell` read) when nothing
+    // accumulated — it sends nothing on the wire unless a real topology change is
+    // pending, so D2b's no-periodic-wire-traffic property holds.
+    fn tick_period(&self) -> Option<Duration> {
+        Some(self.trees_delay)
+    }
+
+    fn tick(&self) {
+        // Flush a coalesced recompute, if one accumulated since the last tick.
+        // `replace(false)` reads-and-clears in one step: an idle window leaves the
+        // flag false and this is a no-op poll; a window with >=1 scheduled change
+        // runs exactly one `compute_trees` + re-advertise for the whole burst.
+        if self.trees_dirty.replace(false) {
+            self.recompute_and_advertise();
+        }
+    }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
@@ -964,18 +1069,19 @@ impl FaceForwarder for LinkstateForwarder {
             match message {
                 NetworkMessage::Oam(oam) => match try_parse_linkstate_oam(oam) {
                     LinkstateOam::Decoded(list) => {
-                        // ingest, then re-flood the changed nodes onward to
-                        // the OTHER faces (transitive propagation).
-                        let (changes, new_children) = self.on_inbound_linkstate(id, list);
+                        // Ingest, then re-flood the changed nodes onward to the
+                        // OTHER faces (transitive propagation) — both inline, as
+                        // zenoh floods link-states inline.
+                        let changes = self.ingest_inbound_linkstate(id, list);
                         let _ = self.propagate(id, &changes);
-                        // c3c-3 debt A2 + D2 — re-advertise known subscriptions to
-                        // the NEW children this recompute added (zenoh
-                        // pubsub_tree_change): a peer that joined since the last
-                        // declaration now learns it, and only that new child is
-                        // re-sent to (the delta). Empty on a sn-stale re-flood (no
-                        // tree grew), so this no-ops without the prior
-                        // changes.updated gate.
-                        self.re_advertise_subscriptions(&new_children);
+                        // c3c-3 D2c — coalesce the spanning-tree recompute (and its
+                        // pubsub_tree_change re-advertise to new children) onto the
+                        // tick instead of recomputing inline: a burst of inbound
+                        // lists (a join flood) collapses to one compute_trees. The
+                        // re-advertise the recompute drives is what delivers a known
+                        // subscription to a peer that joined since the declaration
+                        // (A2 + D2 children-delta), now flushed by the tick.
+                        self.schedule_recompute();
                     }
                     // a malformed OAM_LINKSTATE or a non-linkstate OAM is
                     // left alone (the generic OAM path / a logged drop).
@@ -1063,7 +1169,7 @@ mod tests {
         let (face, _sink) = peer_face(zid(0xAA));
         fwd.register(FaceId(7), &face);
         // the neighbour A floods a list announcing a far node B.
-        fwd.on_inbound_linkstate(FaceId(7), list_with_node(11, 5, 0xBB));
+        fwd.ingest_inbound_linkstate(FaceId(7), list_with_node(11, 5, 0xBB));
         assert_eq!(fwd.ingested(), 1);
         assert!(fwd.net.borrow().get_node(&zid(0xBB)).is_some());
     }
@@ -1072,7 +1178,7 @@ mod tests {
     fn inbound_from_unknown_face_is_dropped() {
         let fwd = LinkstateForwarder::new(zid(0x01), 2);
         // no face registered for id 9.
-        fwd.on_inbound_linkstate(FaceId(9), list_with_node(11, 5, 0xBB));
+        fwd.ingest_inbound_linkstate(FaceId(9), list_with_node(11, 5, 0xBB));
         assert_eq!(fwd.ingested(), 0);
         assert!(fwd.net.borrow().get_node(&zid(0xBB)).is_none());
     }
@@ -1085,7 +1191,7 @@ mod tests {
         assert_eq!(fwd.net.borrow().node_count(), 2);
         fwd.deregister(FaceId(7));
         // the link mapping is gone; a later inbound on that face is dropped.
-        fwd.on_inbound_linkstate(FaceId(7), list_with_node(11, 5, 0xBB));
+        fwd.ingest_inbound_linkstate(FaceId(7), list_with_node(11, 5, 0xBB));
         assert_eq!(fwd.ingested(), 0);
     }
 
@@ -1287,23 +1393,25 @@ mod tests {
     /// neighbour. The self entry (psid 0) is carried only to teach the
     /// psid->zid mapping; its low sn keeps it stale so self's own links are
     /// not clobbered. The neighbour entry (psid 1) links to psid 0 = self.
-    /// Returns the ingest's new-children delta so a re-advertise test can thread
-    /// the real `compute_trees` output into `re_advertise_subscriptions` (callers
-    /// that only need the edge formed ignore it).
+    /// Ingests the list, then runs the recompute synchronously and returns its
+    /// new-children delta — D2c defers the recompute to the tick in production, so
+    /// a unit test forces it here to get the deterministic delta a re-advertise
+    /// test threads into `re_advertise_subscriptions` (callers that only need the
+    /// edge formed + trees computed ignore the return).
     fn advertise_link_back(
         fwd: &LinkstateForwarder,
         face: FaceId,
         neighbour: u8,
         self_node: u8,
     ) -> Vec<(Zid, Vec<Zid>)> {
-        fwd.on_inbound_linkstate(
+        fwd.ingest_inbound_linkstate(
             face,
             list(vec![
                 entry(0, 1, self_node, &[]),
                 entry(1, 5, neighbour, &[0]),
             ]),
-        )
-        .1
+        );
+        fwd.net.borrow_mut().compute_trees()
     }
 
     /// Register (via the real sourced-declare path) that the peer on `face` is
@@ -1423,7 +1531,7 @@ mod tests {
         // A advertises links to self (psid 0) AND to B (psid 7); B links back to
         // A — forming edges S-A and A-B and teaching A's link that psid 7 = B
         // (the transit source). B is added as a node (idx 3).
-        fwd.on_inbound_linkstate(
+        fwd.ingest_inbound_linkstate(
             FaceId(0),
             list(vec![
                 entry(0, 1, 0x05, &[]),
@@ -1462,7 +1570,7 @@ mod tests {
         let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 2
         fwd.register(FaceId(0), &face_a);
         fwd.register(FaceId(1), &face_c);
-        fwd.on_inbound_linkstate(
+        fwd.ingest_inbound_linkstate(
             FaceId(0),
             list(vec![
                 entry(0, 1, 0x05, &[]),
@@ -1562,7 +1670,7 @@ mod tests {
         fwd.register(FaceId(1), &face_b);
         // A's link-state advertises SELF (0x05) under a non-zero psid 7 and
         // links A to it (forming edge S<->A); B links back normally (edge S<->B).
-        fwd.on_inbound_linkstate(
+        fwd.ingest_inbound_linkstate(
             FaceId(0),
             list(vec![entry(7, 1, 0x05, &[]), entry(1, 5, 0x0A, &[7])]),
         );
@@ -1813,7 +1921,7 @@ mod tests {
         fwd.register(FaceId(1), &face_b);
         // A links to self (psid 0) and to C (psid 2); C links back to A — edges
         // S-A and A-C. B links back to self — edge S-B.
-        fwd.on_inbound_linkstate(
+        fwd.ingest_inbound_linkstate(
             FaceId(0),
             list(vec![
                 entry(0, 1, 0x05, &[]),
@@ -1829,9 +1937,18 @@ mod tests {
         );
 
         fwd.deregister(FaceId(0));
+        // D2c — deregister SCHEDULES the recompute, it no longer runs it inline, so
+        // B's tree is still the stale cached one (names A) until the tick flushes
+        // the recompute (remove_link drops the edge but leaves the `trees` cache).
+        assert_eq!(
+            fwd.tree_children_of(&zid(0x0B)),
+            vec![zid(0x0A)],
+            "deregister deferred the recompute: B's tree still names A pre-tick"
+        );
+        fwd.tick(); // flush the coalesced recompute
         assert!(
             fwd.tree_children_of(&zid(0x0B)).is_empty(),
-            "deregister recomputed: A/C left B's tree (a stale tree would keep A)"
+            "the tick recomputed: A/C left B's tree (a stale tree would keep A)"
         );
     }
 
@@ -1855,7 +1972,7 @@ mod tests {
         fwd.register(FaceId(1), &face_b);
         fwd.register(FaceId(2), &face_c);
         // A advertises links to S + B (authoritative); A-B closes the triangle.
-        fwd.on_inbound_linkstate(
+        fwd.ingest_inbound_linkstate(
             FaceId(0),
             list(vec![
                 entry(0, 1, 0x05, &[]),
@@ -1865,7 +1982,7 @@ mod tests {
         );
         // B advertises links to S + A (authoritative, higher sn so it is not
         // stale-gated); S and A are stale references for the psid mapping only.
-        fwd.on_inbound_linkstate(
+        fwd.ingest_inbound_linkstate(
             FaceId(1),
             list(vec![
                 entry(0, 1, 0x05, &[]),
@@ -2476,11 +2593,19 @@ mod tests {
             extensions: Vec::new(),
         };
         fwd.forward(FaceId(1), IterationEvent::Poll(&outcome));
-
+        // D2c — forward() SCHEDULES the recompute (and its re-advertise); nothing
+        // reaches C until the tick flushes it (the inbound OAM is on C's own face,
+        // so `propagate` excludes C, leaving zero frames pre-tick).
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "forward() deferred the re-advertise: C has no Declare pre-tick",
+        );
+        fwd.tick(); // flush the coalesced recompute
         assert_eq!(
             sink_c.frame_count(),
             1,
-            "forward()'s hook re-advertised A's subscription to the NEW child C",
+            "the tick's recompute re-advertised A's subscription to the NEW child C",
         );
     }
 
@@ -2494,9 +2619,9 @@ mod tests {
         // the retracted "provably empty" short-circuit — a re-home under non-uniform
         // weights CAN add a child, see deregister re_advertise wiring), but here the
         // delta is empty so it no-ops. S has edges to A, B, C; A subscribes, so its
-        // declare reached children B and C. Dropping B's face recomputes the trees
-        // and adds no new child. C DOES receive the D2b topology flood (an OAM, so
-        // it learns the dead link) — but NO subscription Declare.
+        // declare reached children B and C. Dropping B's face SCHEDULES a recompute
+        // (D2c) the tick flushes; it adds no new child. C DOES receive the D2b
+        // topology flood (an OAM, so it learns the dead link) — but NO Declare.
         let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, _sb) = peer_face(zid(0x0B));
@@ -2510,13 +2635,82 @@ mod tests {
         declare_interest(&fwd, FaceId(0), "demo/sub"); // A subscribes (children B, C)
         sink_c.reset();
 
-        fwd.deregister(FaceId(1)); // B drops -> recompute, no NEW child
+        fwd.deregister(FaceId(1)); // B drops -> schedules a recompute (D2c)
+        fwd.tick(); // flush it: uniform weights -> empty delta -> no re-advertise
         let any_declare =
             (0..sink_c.frame_count()).any(|i| frame_has_declare(&sink_c.frame_bytes(i)));
         assert!(
             !any_declare,
-            "no new child appeared, so the surviving C is not re-advertised the \
-             subscription (it may receive the D2b topology OAM flood, but no Declare)",
+            "no new child appeared, so the flushed recompute re-advertises nothing \
+             to the surviving C (it receives the D2b topology OAM flood, but no \
+             Declare)",
         );
+    }
+
+    // ── c3c-3 D2c: coalesced spanning-tree recompute (debounce) ──────
+
+    #[test]
+    fn tick_with_no_scheduled_change_does_not_recompute() {
+        // The coalescing tick is a cheap poll: with nothing scheduled it runs no
+        // compute_trees (the recompute witness stays 0), so an idle mesh does no
+        // recompute work per tick — D2b's no-periodic-work property, preserved.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        assert_eq!(fwd.recomputes(), 0);
+        fwd.tick();
+        fwd.tick();
+        assert_eq!(
+            fwd.recomputes(),
+            0,
+            "an idle tick is a no-op, not a recompute"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_scheduled_changes_coalesces_into_one_recompute() {
+        // D2c — several topology changes between ticks collapse to ONE recompute:
+        // each change sets the dirty flag, the tick flushes it once. Two inbound
+        // link-states (a join flood) with no tick between them, then one tick ->
+        // recomputes() rises by exactly 1, not 2 (the burst coalesced). This is
+        // exactly what the forward() OAM arm drives in production (ingest +
+        // schedule_recompute), exercised directly here for the count.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_b, _sb) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.ingest_inbound_linkstate(FaceId(0), list_with_node(11, 5, 0xAA));
+        fwd.schedule_recompute();
+        fwd.ingest_inbound_linkstate(FaceId(1), list_with_node(12, 5, 0xBB));
+        fwd.schedule_recompute();
+        assert_eq!(
+            fwd.recomputes(),
+            0,
+            "nothing recomputed inline (both deferred)"
+        );
+
+        fwd.tick();
+        assert_eq!(
+            fwd.recomputes(),
+            1,
+            "the burst coalesced into ONE recompute"
+        );
+
+        fwd.tick();
+        assert_eq!(fwd.recomputes(), 1, "a second idle tick adds no recompute");
+    }
+
+    #[test]
+    fn with_trees_delay_sets_the_tick_cadence() {
+        // The recompute window is the with_trees_delay knob (the SPF-throttle
+        // delay), surfaced as the loop's tick cadence. Default and override both
+        // arm the tick — the coalescing path is always on; the knob TUNES the
+        // window, it is not an on/off switch.
+        let default = LinkstateForwarder::new(zid(0x05), 2);
+        assert_eq!(
+            default.tick_period(),
+            Some(LinkstateForwarder::DEFAULT_TREES_DELAY)
+        );
+        let tuned = LinkstateForwarder::with_trees_delay(zid(0x05), 2, Duration::from_millis(5));
+        assert_eq!(tuned.tick_period(), Some(Duration::from_millis(5)));
     }
 }
