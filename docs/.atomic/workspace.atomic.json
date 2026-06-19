@@ -43088,6 +43088,50 @@
         "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd=8269900)+D2(se)=3커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
       ]
     },
+    "Round 311sf": {
+      "decision_summary": "R311sf: c3c-3 D2b event-driven flood — topology flood을 주기 1000ms timer에서 change-triggered로. register/deregister가 self link-state 변경(add_link/remove_link이 self.sn bump)을 전/surviving face에 즉시 flood(zenoh add_link/remove_link send_on_links 미러; 신규 face는 full topology bootstrap). 주기 timer 완전 제거(tick override 삭제→trait None 기본; LINKSTATE_FLOOD_PERIOD/flood_self_to 제거; zenoh는 주기 keepalive 전무, reliable TCP 전달). e2e 12/12 수렴(timer 마스킹 없이 event-flood만으로). D2c batching/D4 Details defer.",
+      "changes_bullets": [
+        "zenoh 조사(D2 Explore): link-state flood은 순수 EVENT-DRIVEN — add_link/remove_link이 즉시 send_on_links(network.rs:862-962), 주기 keepalive/timer 전무. wz는 register가 신규 face만 bootstrap(flood_self_to), 기존 face는 1000ms LINKSTATE_FLOOD_PERIOD 주기 timer까지 self 새 link 모름.",
+        "linkstate_forward.rs register: flood_self_to(신규)→flood_self()(전 face). self가 routing link 얻으면(add_link이 self.sn bump=graph lib.rs:417) 신규 face는 full topology bootstrap + 기존 face는 변경 즉시 학습(zenoh add_link 미러). flood_self_to 제거(전 face flood가 상위집합).",
+        "deregister: link 제거(remove_link이 self.sn bump=lib.rs:440) 후 flood_self()로 surviving face에 즉시 flood(zenoh remove_link send_on_links). 기존 borrow 밖.",
+        "주기 timer 제거: tick_period/tick override 삭제→FaceForwarder trait 기본(tick_period=None=무-timer). LINKSTATE_FLOOD_PERIOD const + std::time::Duration import 제거. reliable TCP가 각 event-flood 전달→keepalive 불요. propagate가 inbound 변경 transitive 재flood(기존). FaceForwarder trait doc 정정(linkstate=event-driven; tick은 dormant 확장점). 모듈/flood_self doc event-driven 정정."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio(routing-peer) lib 346 PASS(+2 신규: register_event_floods_self_to_existing_faces=B 등록 시 기존 A가 self 새 neighbour 즉시 학습; deregister_event_floods_self_to_surviving_faces=B drop 시 surviving A가 즉시 학습). deregister_does_not_re_advertise 갱신=C가 D2b topology OAM은 받되 Declare는 무(frame_has_declare 헬퍼로 구분). 기존 flood/register 테스트 무회귀(link=None face는 gate로 unaffected).",
+        "E6 e2e(wz_peer_mesh topology 교환 + wz_peer_data_forward 3 데이터) ×12 PASS 0 flake=주기 timer 제거 후에도 register event-flood + propagate만으로 수렴(topology learned + interest 전파 + 데이터 multi-hop + 4-peer selectivity). 결정적: 주기 timer가 마스킹하던 수렴을 event-flood가 대체.",
+        "clippy(runtime-tokio --tests) -D clean. fmt clean. full run-ci RUNCI_EXIT=0(idle 후 1차, 전 host lane 실패 0; E6 재실행=수렴 추가 검증)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sf = c3c-3 D2b event-driven flood 완결: 주기 1000ms timer→change-triggered. register/deregister가 self link-state 변경(sn bump)을 전/surviving face에 즉시 flood(zenoh add_link/remove_link send_on_links). 주기 timer 완전 제거(zenoh는 주기 keepalive 전무; reliable TCP 전달). flood_self_to/LINKSTATE_FLOOD_PERIOD 제거. e2e 12/12 수렴(timer 마스킹 없이 event-flood로).",
+        "D2 잔여: D2c TreesComputationWorker 배치(빠른 연속 변경 compute_trees coalesce; bounded(1) 100ms; 현재 매 inbound inline). 별도 atom. D4 Details split(per-link delta vs full-topology flood; 현재 full).",
+        "다음 부채(project_c3c3_debt_paydown): D2c(batching) → B1 alias keyexpr → D3 remove_detached_nodes → D4 Details → B2 wildcard → E/F.",
+        "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd=8269900)+D2(se=05b5c60)+D2b(sf)=4커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ],
+      "publishable_decision_summary": "R311sf: c3c-3 D2b event-driven flood — topology flood을 주기 1000ms timer에서 change-triggered로. register/deregister가 self link-state 변경(add_link/remove_link이 self.sn bump)을 전/surviving face에 즉시 flood(zenoh add_link/remove_link send_on_links 미러; 신규 face는 full topology bootstrap). 주기 timer 완전 제거(tick override 삭제→trait None 기본; LINKSTATE_FLOOD_PERIOD/flood_self_to 제거; zenoh는 주기 keepalive 전무, reliable TCP 전달). e2e 12/12 수렴(timer 마스킹 없이 event-flood만으로). D2c batching/D4 Details defer.",
+      "publishable_changes_bullets": [
+        "zenoh 조사(D2 Explore): link-state flood은 순수 EVENT-DRIVEN — add_link/remove_link이 즉시 send_on_links(network.rs:862-962), 주기 keepalive/timer 전무. wz는 register가 신규 face만 bootstrap(flood_self_to), 기존 face는 1000ms LINKSTATE_FLOOD_PERIOD 주기 timer까지 self 새 link 모름.",
+        "linkstate_forward.rs register: flood_self_to(신규)→flood_self()(전 face). self가 routing link 얻으면(add_link이 self.sn bump=graph lib.rs:417) 신규 face는 full topology bootstrap + 기존 face는 변경 즉시 학습(zenoh add_link 미러). flood_self_to 제거(전 face flood가 상위집합).",
+        "deregister: link 제거(remove_link이 self.sn bump=lib.rs:440) 후 flood_self()로 surviving face에 즉시 flood(zenoh remove_link send_on_links). 기존 borrow 밖.",
+        "주기 timer 제거: tick_period/tick override 삭제→FaceForwarder trait 기본(tick_period=None=무-timer). LINKSTATE_FLOOD_PERIOD const + std::time::Duration import 제거. reliable TCP가 각 event-flood 전달→keepalive 불요. propagate가 inbound 변경 transitive 재flood(기존). FaceForwarder trait doc 정정(linkstate=event-driven; tick은 dormant 확장점). 모듈/flood_self doc event-driven 정정."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio(routing-peer) lib 346 PASS(+2 신규: register_event_floods_self_to_existing_faces=B 등록 시 기존 A가 self 새 neighbour 즉시 학습; deregister_event_floods_self_to_surviving_faces=B drop 시 surviving A가 즉시 학습). deregister_does_not_re_advertise 갱신=C가 D2b topology OAM은 받되 Declare는 무(frame_has_declare 헬퍼로 구분). 기존 flood/register 테스트 무회귀(link=None face는 gate로 unaffected).",
+        "E6 e2e(wz_peer_mesh topology 교환 + wz_peer_data_forward 3 데이터) ×12 PASS 0 flake=주기 timer 제거 후에도 register event-flood + propagate만으로 수렴(topology learned + interest 전파 + 데이터 multi-hop + 4-peer selectivity). 결정적: 주기 timer가 마스킹하던 수렴을 event-flood가 대체.",
+        "clippy(runtime-tokio --tests) -D clean. fmt clean. full run-ci RUNCI_EXIT=0(idle 후 1차, 전 host lane 실패 0; E6 재실행=수렴 추가 검증)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sf = c3c-3 D2b event-driven flood 완결: 주기 1000ms timer→change-triggered. register/deregister가 self link-state 변경(sn bump)을 전/surviving face에 즉시 flood(zenoh add_link/remove_link send_on_links). 주기 timer 완전 제거(zenoh는 주기 keepalive 전무; reliable TCP 전달). flood_self_to/LINKSTATE_FLOOD_PERIOD 제거. e2e 12/12 수렴(timer 마스킹 없이 event-flood로).",
+        "D2 잔여: D2c TreesComputationWorker 배치(빠른 연속 변경 compute_trees coalesce; bounded(1) 100ms; 현재 매 inbound inline). 별도 atom. D4 Details split(per-link delta vs full-topology flood; 현재 full).",
+        "다음 부채(project_c3c3_debt_paydown): D2c(batching) → B1 alias keyexpr → D3 remove_detached_nodes → D4 Details → B2 wildcard → E/F.",
+        "LOCAL UNPUSHED: C1(sc=1a3351e)+D1(sd=8269900)+D2(se=05b5c60)+D2b(sf)=4커밋. origin/main=c740e4f. push 사용자 명시 동의 후(pre-push run-ci)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [

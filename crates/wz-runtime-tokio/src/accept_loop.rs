@@ -171,25 +171,26 @@ pub trait FaceForwarder {
     fn forward(&self, id: FaceId, event: IterationEvent<'_>);
 
     /// How often the loop should call [`tick`](Self::tick), or `None` (the
-    /// default) to never tick. A forwarder whose protocol has a PERIODIC
-    /// control-plane obligation — the linkstate peer re-advertises its own
-    /// link-state on a cadence so neighbours converge — returns `Some(period)`;
-    /// the accept-only / hold-only / data-plane forwarders keep the `None`
-    /// default, so the loop arms no timer and their behaviour is unchanged.
-    /// Read ONCE when the loop starts (a fixed cadence, not a per-tick query).
+    /// default) to never tick. The extension point for a forwarder whose protocol
+    /// has a PERIODIC control-plane obligation: it returns `Some(period)` and the
+    /// loop arms a timer. Every current forwarder is EVENT-DRIVEN (the linkstate
+    /// peer floods its link-state on each link change; the accept-only / hold-only
+    /// / data-plane forwarders have no time-driven work), so they keep the `None`
+    /// default and the loop arms no timer. Read ONCE when the loop starts (a fixed
+    /// cadence, not a per-tick query).
     fn tick_period(&self) -> Option<Duration> {
         None
     }
 
     /// The periodic timer fired (cadence from [`tick_period`](Self::tick_period)).
-    /// The forwarder's hook for time-driven work that is the FORWARDER's
-    /// protocol obligation, not a caller policy — the linkstate peer floods its
-    /// own link-state here. Putting it on the seam (rather than in a caller's
-    /// hand-rolled `select!`) is what makes EVERY `peer_loop` caller converge,
-    /// not only the demo. Default no-op; only a forwarder that returned `Some`
-    /// from [`tick_period`](Self::tick_period) is ever ticked. Runs on the
-    /// loop's single task with the same borrow discipline as the other hooks
-    /// (no `RefCell` held across an `.await`).
+    /// The forwarder's hook for time-driven work that is the FORWARDER's protocol
+    /// obligation, not a caller policy. Putting it on the seam (rather than in a
+    /// caller's hand-rolled `select!`) is what would make EVERY `peer_loop` caller
+    /// share the behaviour, not only the demo. Default no-op; only a forwarder
+    /// that returned `Some` from [`tick_period`](Self::tick_period) is ever ticked
+    /// — no current forwarder does (all are event-driven), so this is a dormant
+    /// extension point. Runs on the loop's single task with the same borrow
+    /// discipline as the other hooks (no `RefCell` held across an `.await`).
     fn tick(&self) {}
 }
 

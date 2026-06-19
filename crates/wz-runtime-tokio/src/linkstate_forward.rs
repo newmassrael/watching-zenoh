@@ -6,24 +6,21 @@
 //! graph to the [`accept_loop`](crate::accept_loop) /
 //! [`peer_loop`](crate::accept_loop::peer_loop) face lifecycle.
 //!
-//! Periodic flood lives on the SEAM (R311rf): the self-flood cadence is the
-//! forwarder's own protocol obligation, exposed through
-//! [`FaceForwarder::tick_period`] / [`FaceForwarder::tick`], so the
-//! [`face_drive_loop`](crate::accept_loop) drives it for EVERY `peer_loop`
-//! caller — not only a demo that hand-rolls a flood `select!`. (Before R311rf
-//! the period lived in the demo's `run_peer`, so a non-demo caller held faces
-//! but never converged.)
-//!
-//! [`LinkstateForwarder`] is a [`FaceForwarder`]: as peer faces come and
-//! go it connects/disconnects them in the graph
+//! [`LinkstateForwarder`] is a [`FaceForwarder`]: as peer faces come and go it
+//! connects/disconnects them in the graph
 //! ([`register`](FaceForwarder::register) / [`deregister`](FaceForwarder::deregister)),
-//! and on each inbound iteration event it extracts an `OAM_LINKSTATE`
-//! message and feeds the decoded `LinkStateList` to the graph ingest,
-//! recomputing the spanning trees ([`forward`](FaceForwarder::forward)).
-//! On `register` it also BOOTSTRAPS the new neighbour — immediately
-//! advertising its own link-state to that face (zenoh `add_link`'s
-//! send-on-new-link) so the neighbour converges at once, not at the next
-//! periodic tick.
+//! and on each inbound iteration event it extracts an `OAM_LINKSTATE` message,
+//! feeds the decoded `LinkStateList` to the graph ingest, recomputes the spanning
+//! trees, and re-floods the changed nodes onward ([`forward`](FaceForwarder::forward)).
+//!
+//! Topology flooding is EVENT-DRIVEN (D2b), like zenoh — which floods only on a
+//! link change, with NO periodic keepalive. A self-link change (`register` gained
+//! a link / `deregister` lost one, sn bumped) floods self's full link-state to
+//! every held face at once: the new neighbour is bootstrapped with the full
+//! topology AND the existing faces learn the change immediately. An inbound
+//! change re-floods transitively via `forward`'s `propagate`. Reliable transport
+//! (the mesh is TCP) delivers each flood, so the forwarder keeps the
+//! `FaceForwarder` default `tick_period` of `None` — the loop arms no timer.
 //!
 //! Single-task model: like [`RoutingForwarder`](crate::routing_forward),
 //! the whole loop is one `!Send` task, so the graph is held behind a plain
@@ -42,18 +39,18 @@
 //! sourced `DeclareSubscriber`, and
 //! [`forward_subscription`](LinkstateForwarder::forward_subscription) registers
 //! the source peer's interest + re-floods it, so each peer learns who is
-//! interested in what ([`interested`](LinkstateForwarder::interested)). Still
-//! deferred: the `pubsub_tree_change` re-advertise (a subscription declared
-//! before a peer joined is not re-flooded to the new subtree until the next
-//! declaration), the change-triggered-flood / `Details` topology optimisations,
-//! and alias / wildcard keyexprs (the filter is literal-keyexpr exact-match).
-//! `routing-peer`-gated.
+//! interested in what ([`interested`](LinkstateForwarder::interested)), and a
+//! tree-change re-advertises a subscription to its source tree's NEW children
+//! (`pubsub_tree_change`, c3c-3 A2 + D2 children-delta). Still deferred: the
+//! `Details` topology optimisation (a per-link delta instead of the full-topology
+//! flood, D4), the `TreesComputationWorker` batching of rapid recomputes (D2c),
+//! and alias / wildcard keyexprs (the filter is literal-keyexpr exact-match, B1 /
+//! B2). `routing-peer`-gated.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
@@ -85,16 +82,6 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 /// Re-export so the peer-loop caller (the demo) names the neighbour role by
 /// the same const the graph + forwarder use, not a bare `0x02` literal.
 pub use wz_routing_graph::WHATAMI_PEER;
-
-/// Cadence the linkstate peer re-advertises its own link-state on
-/// ([`FaceForwarder::tick`] → [`LinkstateForwarder::flood_self`]) — the
-/// periodic refresh of the mesh exchange; sn-staleness on each receiver drops
-/// a re-flood of unchanged topology. zenoh's link-state is event-driven (no
-/// fixed timer); a fixed cadence is the wz simplification, with
-/// change-triggered flooding the tracked optimisation. Driven from the seam
-/// (via [`FaceForwarder::tick_period`]) so every `peer_loop` caller converges,
-/// not only a demo's hand-rolled `select!`.
-const LINKSTATE_FLOOD_PERIOD: Duration = Duration::from_millis(1000);
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -252,8 +239,7 @@ impl LinkstateForwarder {
 
     /// Build the `OAM_LINKSTATE` carrier for this peer's full current topology
     /// — the shared body of [`flood_self`](Self::flood_self) (one carrier
-    /// re-wrapped per face) and the per-face [`flood_self_to`](Self::flood_self_to)
-    /// bootstrap. The graph builds the full-topology `LinkStateList` (c3b
+    /// re-wrapped per face). The graph builds the full-topology `LinkStateList` (c3b
     /// [`LinkstateNetwork::build_linkstate_list`]); `build_linkstate_oam_owned`
     /// (c1) wraps it in the carrier. Mirrors zenoh `make_msg`.
     fn build_self_oam(&self) -> Result<OamOwned, CodecError> {
@@ -295,28 +281,22 @@ impl LinkstateForwarder {
         Ok(sent)
     }
 
-    /// Flood THIS peer's own link-state to every held face — the TX seam
+    /// Flood THIS peer's own (full) link-state to every held face — the TX seam
     /// (c3d). Each face's [`SessionLinkActions::send_network_message`] puts it
     /// on the wire (reliably — topology is control traffic). Returns the number
     /// of faces the message reached. Mirrors zenoh `make_msg` + `send_on_links`.
-    /// The WHEN is the forwarder's own [`FaceForwarder::tick`] cadence (R311rf
-    /// — on the seam, so every caller converges).
+    /// The WHEN is EVENT-DRIVEN (D2b): [`register`](FaceForwarder::register) /
+    /// [`deregister`](FaceForwarder::deregister) call it the instant self's own
+    /// link-state changes (a link gained / lost, sn bumped), so the new face is
+    /// bootstrapped with the full topology and the existing faces learn the change
+    /// at once — no periodic tick (zenoh floods only on link change). The full
+    /// topology rather than a per-link delta is the wz simplification (the Details
+    /// split is D4); sn-staleness on each receiver drops the unchanged nodes.
     pub fn flood_self(&self) -> Result<usize, CodecError> {
         // `NetworkMessage` is not `Clone`, but `OamOwned` is — build the
         // carrier once and re-wrap a clone per face.
         let oam = self.build_self_oam()?;
         self.fan_out(true, |_id, _zid| Ok(Some(NetworkMessage::Oam(oam.clone()))))
-    }
-
-    /// Advertise this peer's full link-state to ONE face — the register-time
-    /// bootstrap (zenoh `add_link`'s "send all nodes linkstate on new link",
-    /// `network.rs:932`) so a freshly-up neighbour converges immediately rather
-    /// than waiting up to one flood period for the next periodic tick. Reuses
-    /// the same full-topology carrier [`flood_self`](Self::flood_self) builds.
-    fn flood_self_to(&self, actions: &SessionLinkActions) -> Result<(), CodecError> {
-        let oam = self.build_self_oam()?;
-        let _ = actions.send_network_message(NetworkMessage::Oam(oam), true, false);
-        Ok(())
     }
 
     /// Resolve a routing-context source `node_id` (carried by a Push or a
@@ -893,12 +873,18 @@ impl FaceForwarder for LinkstateForwarder {
                 link,
             },
         );
-        // Bootstrap a real routing neighbour: immediately advertise our full
-        // link-state to it (zenoh `add_link`'s send-on-new-link) so it
-        // converges now, not at the next periodic tick. A held-without-identity
-        // face (link == None) is not a routing peer, so it is not bootstrapped.
+        // Self gained a routing link (its own link-state changed, sn bumped):
+        // flood self's updated full link-state to EVERY held face — the new face is
+        // bootstrapped with the full topology, and existing faces learn the new
+        // neighbour NOW rather than at a periodic tick. zenoh `add_link` floods the
+        // updated self link-state to existing links + full state to the new link
+        // (`network.rs:862-903`); wz floods the full topology to all (the Details
+        // delta split is D4). Event-driven, so the mesh needs no periodic re-flood
+        // (D2b — the periodic tick is gone). A held-without-identity face (link ==
+        // None) is not a routing peer and did not change self's link-state, so it
+        // triggers no flood.
         if link.is_some() {
-            let _ = self.flood_self_to(actions);
+            let _ = self.flood_self();
         }
     }
 
@@ -909,7 +895,7 @@ impl FaceForwarder for LinkstateForwarder {
         // link until the next inbound link-state happened to trigger a recompute
         // — a misroute window after every face loss. zenoh recomputes on
         // link-down too (`hat/linkstate_peer/mod.rs` `schedule_compute_trees`).
-        if let Some(state) = self.faces.borrow_mut().remove(&id) {
+        let link_removed = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             // Purge the departed peer's subscription interest — zenoh's
             // `pubsub_remove_node` on link-down (`hat/linkstate_peer/mod.rs`).
             // Without this a gone subscriber's interest lingers in the table,
@@ -931,22 +917,31 @@ impl FaceForwarder for LinkstateForwarder {
                 // re-homing after the loss converges via the next inbound
                 // link-state's forward()-path re-advertise.
                 net.compute_trees();
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        // D2b — self LOST a routing link (its own link-state changed, sn bumped):
+        // flood self's updated full link-state to the surviving faces immediately
+        // (zenoh `remove_link`'s `send_on_links`, `network.rs:936-962`), so they
+        // drop the dead link from their topology NOW, not at a periodic tick.
+        // Outside the borrow blocks above (flood_self takes the faces / net borrows).
+        if link_removed {
+            let _ = self.flood_self();
         }
     }
 
-    fn tick_period(&self) -> Option<Duration> {
-        // The linkstate peer's periodic self-flood cadence — a protocol
-        // obligation, so the loop drives it for every caller (R311rf).
-        Some(LINKSTATE_FLOOD_PERIOD)
-    }
-
-    fn tick(&self) {
-        // Re-advertise our own link-state to every held face. A CodecError
-        // building the carrier drops this tick (the next one retries) rather
-        // than tearing down the loop; a per-face send failure is skipped.
-        let _ = self.flood_self();
-    }
+    // D2b — NO `tick_period` / `tick` override: topology flooding is now purely
+    // EVENT-DRIVEN (register / deregister flood self's changed link-state to held
+    // faces immediately, `propagate` re-floods inbound changes), exactly like
+    // zenoh, whose link-state flooding is event-only with NO periodic keepalive
+    // (`network.rs` floods solely on add_link / remove_link / received-state). The
+    // forwarder therefore keeps the `FaceForwarder` defaults (`tick_period` =
+    // None), so the loop arms no timer. Reliable transport (the mesh is TCP)
+    // delivers each event-flood, so no periodic re-send is needed for convergence.
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
@@ -1109,6 +1104,46 @@ mod tests {
         let sent = fwd.flood_self().expect("flood self after deregister");
         assert_eq!(sent, 0, "the deregistered face is no longer flooded");
         assert_eq!(sink_a.frame_count(), 0);
+    }
+
+    #[test]
+    fn register_event_floods_self_to_existing_faces() {
+        // D2b — when a NEW routing face registers, self's own link-state changed
+        // (it gained a neighbour, sn bumped), so self floods the update to the
+        // EXISTING faces at once (event-driven), not at a periodic tick. A is held
+        // (a routing peer, so its zid connects it); B then registers, and A
+        // receives self's updated link-state immediately.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        sink_a.reset(); // ignore A's own register-time bootstrap
+        let (face_b, _sb) = peer_face(zid(0x0B));
+        fwd.register(FaceId(1), &face_b); // self gains a link -> floods existing A
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "the existing face A learns self's new neighbour B at once (event-driven)"
+        );
+    }
+
+    #[test]
+    fn deregister_event_floods_self_to_surviving_faces() {
+        // D2b — when a routing face drops, self's own link-state changed (it lost a
+        // neighbour, sn bumped), so self floods the update to the SURVIVING faces at
+        // once, so they drop the dead link from their topology now (zenoh
+        // remove_link's send_on_links) rather than at a periodic tick.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, _sb) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        sink_a.reset(); // ignore the register-time floods
+        fwd.deregister(FaceId(1)); // B drops -> floods surviving A
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "the surviving face A learns self lost B at once (event-driven)"
+        );
     }
 
     #[test]
@@ -1578,6 +1613,22 @@ mod tests {
             Some(NetworkMessage::Push(p)) => read_push_hoplimit(p),
             other => panic!("expected a forwarded Push, got {other:?}"),
         }
+    }
+
+    /// Whether a recorded wire frame carries a `Declare` — used to tell a
+    /// SUBSCRIPTION re-advertise (a sourced DeclareSubscriber) apart from a
+    /// TOPOLOGY flood (an OAM_LINKSTATE), since after D2b both can reach a face.
+    fn frame_has_declare(frame: &[u8]) -> bool {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        parse_frame_payload(&payload)
+            .expect("parse frame payload")
+            .iter()
+            .any(|m| matches!(m, NetworkMessage::Declare(_)))
     }
 
     #[test]
@@ -2375,15 +2426,16 @@ mod tests {
     }
 
     #[test]
-    fn deregister_does_not_re_advertise_to_an_already_converged_survivor() {
+    fn deregister_does_not_re_advertise_the_subscription_to_a_survivor() {
         // c3c-3 D2 — the delta on a face loss: a self-link drop can only SHRINK
         // self's tree children (children are a subset of self's neighbours), so the
         // recompute's new-children delta adds nothing, and an already-converged
-        // surviving child is NOT spuriously re-advertised to (the prior
+        // surviving child is NOT re-advertised the SUBSCRIPTION (the prior
         // re-flood-to-all-children did this redundantly, leaning on the receiver
         // change-gate to drop it). S has edges to A, B, C; A subscribes, so its
         // declare reached children B and C. Dropping B's face recomputes the trees
-        // but adds no new child, so the survivor C receives nothing further.
+        // but adds no new child. C DOES receive the D2b topology flood (an OAM, so
+        // it learns the dead link) — but NO subscription Declare.
         let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, _sb) = peer_face(zid(0x0B));
@@ -2397,11 +2449,13 @@ mod tests {
         declare_interest(&fwd, FaceId(0), "demo/sub"); // A subscribes (children B, C)
         sink_c.reset();
 
-        fwd.deregister(FaceId(1)); // B drops -> recompute, no new child
-        assert_eq!(
-            sink_c.frame_count(),
-            0,
-            "no new child appeared, so the surviving C is not spuriously re-advertised to",
+        fwd.deregister(FaceId(1)); // B drops -> recompute, no NEW child
+        let any_declare =
+            (0..sink_c.frame_count()).any(|i| frame_has_declare(&sink_c.frame_bytes(i)));
+        assert!(
+            !any_declare,
+            "no new child appeared, so the surviving C is not re-advertised the \
+             subscription (it may receive the D2b topology OAM flood, but no Declare)",
         );
     }
 }
