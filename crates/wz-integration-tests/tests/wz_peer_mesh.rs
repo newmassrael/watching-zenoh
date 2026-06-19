@@ -137,12 +137,15 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
     graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
     let a_captured = read_captured(&mut a_reader);
 
-    // Reap B and C (A's shutdown closed C's socket; B holds an idle face).
+    // Graceful-shutdown peer B too → it logs its OWN peer-loop summary, so the
+    // test can assert the REVERSE convergence direction (B learned A) below.
+    // The register-time bootstrap is mutual — each side advertises its own
+    // link-state to a new face — so B ingests A's flood at face-up just as A
+    // ingests B's. Reap C (a single-session client, no linkstate of its own).
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    let b_captured = read_captured(&mut b_reader);
     let _ = c_guard.child_mut().kill();
     let _ = c_guard.child_mut().wait();
-    let _ = b_guard.child_mut().kill();
-    let _ = b_guard.child_mut().wait();
-    let b_captured = read_captured(&mut b_reader);
     let c_captured = read_captured(&mut c_reader);
     eprintln!("--- peer-A stderr ---\n{a_captured}");
     eprintln!("--- peer-B stderr ---\n{b_captured}");
@@ -176,6 +179,20 @@ fn wz_peer_holds_a_dialed_and_an_accepted_face() {
         "peer-A summary must report 'learned mesh topology' — it held the face \
          to B but never INGESTED B's link-state flood (topology did not converge \
          over the wire)\n--- peer-A stderr ---\n{a_captured}"
+    );
+
+    // R311re — REVERSE direction: peer B (the pure acceptor) must ALSO ingest
+    // peer A's link-state, not only A ingesting B's. The bootstrap is mutual
+    // (each side advertises its own state to a new face at register), so the
+    // mesh converges symmetrically. This closes the prior one-directional gap
+    // (only A<-B was witnessed). A transitive multi-hop convergence (A<-B<-C
+    // over the wire, exercising propagate()) remains unit-tested only — a
+    // 3-peer e2e harness is a separate future atom.
+    assert!(
+        b_captured.contains("learned mesh topology"),
+        "peer-B summary must report 'learned mesh topology' — the mesh must \
+         converge in BOTH directions (B ingests A's flood, not only A ingests \
+         B's)\n--- peer-B stderr ---\n{b_captured}"
     );
 
     assert!(

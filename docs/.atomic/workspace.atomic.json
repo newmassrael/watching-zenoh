@@ -41914,6 +41914,44 @@
         "코드 LOCAL UNPUSHED 5커밋: qz(c3d-1)/ra(c3d-2)/rb(c3d-3)/rc(c3d-4)/rd(리뷰 correctness). qm~qy=PUSHED origin/main=14df94d."
       ]
     },
+    "Round 311re": {
+      "decision_summary": "R311re: c3d 적대 리뷰 remediation 3차(honesty). 과거 entry 과장 정정 — c3d='control-plane 토폴로지 교환 완료'지 데이터면(c3c) 완료 아님; 주기 flood=wz 단순화(zenoh event-driven, change-triggered 미구현); E6 양방향 수렴 단언 추가(역방향 B←A 갭 해소), transitive는 unit-only.",
+      "changes_bullets": [
+        "wz_peer_mesh e2e: peer-B를 kill→graceful_terminate로 B summary 확보 + B도 'learned mesh topology' 단언(역방향 B←A 수렴). bootstrap 상호적이라 결정적. 실측 B 'ingested 1, 2 node(s)'. 5/5 무flake. transitive A←B←C over-wire는 여전히 unit-only(propagate 단위테스트); 3-peer e2e=별도 future atom.",
+        "코드/주석은 rf서 이미 정직화: LINKSTATE_FLOOD_PERIOD doc='zenoh event-driven, fixed cadence=wz simplification, change-triggered=tracked opt'; linkstate_forward 모듈 doc='tree_children_of unused=c3c atom'. 이 entry=과거 ledger 과장 framing의 정정 기록(frozen-ledger=新 entry)."
+      ],
+      "verification_bullets": [
+        "E6 wz_peer_mesh 5/5 무flake(0.25s). A→'ingested 1, 3 node(s)'(self+B+C), B→'ingested 1, 2 node(s)'(self+A), 양쪽 'learned mesh topology' 실측. clippy integration-tests -D warnings clean, fmt --all --check exit 0.",
+        "honesty 정정 대상(과거 entry 過大 framing): rc 'production inert 완전 탈출'·'c3d 전체 완료'. 실제=control-plane 토폴로지 교환만 완료, c3c data-forward 미구축. flood=wz periodic(zenoh event-driven 아님; rf bootstrap=on-face-up event)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311re = c3d 적대 리뷰 remediation 3차(honesty). 정정: ②flood=wz-periodic(zenoh event-driven; rf bootstrap=on-face-up event, change-triggered 미구현) ③'c3d 완료'=control-plane만(c3c data-forward 미구축; remove_detached_nodes 미구현=ghost prune 없음) ④E6 양방향 단언 추가로 역방향 갭 해소(transitive over-wire는 unit-only). ①e2e graph-state는 rf 선반영.",
+        "c3d 적대 리뷰 트랙 전부 종료: rd(correctness)·rf(구조 MAJOR=tick seam+bootstrap)·re(honesty). 4-에이전트 리뷰 적발분 모두 반영.",
+        "다음 = c3c(tree_children_of로 data Push forward; source spanning-tree 따라 forward=loop-free). 이후 추적부채: change-triggered flood, Details split(full-for-new/links-for-updated), remove_detached_nodes(reachability prune+3-peer e2e 동반), options-SSOT(SCE owned-flag-setter), Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "코드 LOCAL UNPUSHED: rf(84647b2)+re(이 커밋). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
+      ],
+      "publishable_decision_summary": "R311re: c3d 적대 리뷰 remediation 3차(honesty). 과거 entry 과장 정정 — c3d='control-plane 토폴로지 교환 완료'지 데이터면(c3c) 완료 아님; 주기 flood=wz 단순화(zenoh event-driven, change-triggered 미구현); E6 양방향 수렴 단언 추가(역방향 B←A 갭 해소), transitive는 unit-only.",
+      "publishable_changes_bullets": [
+        "wz_peer_mesh e2e: peer-B를 kill→graceful_terminate로 B summary 확보 + B도 'learned mesh topology' 단언(역방향 B←A 수렴). bootstrap 상호적이라 결정적. 실측 B 'ingested 1, 2 node(s)'. 5/5 무flake. transitive A←B←C over-wire는 여전히 unit-only(propagate 단위테스트); 3-peer e2e=별도 future atom.",
+        "코드/주석은 rf서 이미 정직화: LINKSTATE_FLOOD_PERIOD doc='zenoh event-driven, fixed cadence=wz simplification, change-triggered=tracked opt'; linkstate_forward 모듈 doc='tree_children_of unused=c3c atom'. 이 entry=과거 ledger 과장 framing의 정정 기록(frozen-ledger=新 entry)."
+      ],
+      "publishable_verification_bullets": [
+        "E6 wz_peer_mesh 5/5 무flake(0.25s). A→'ingested 1, 3 node(s)'(self+B+C), B→'ingested 1, 2 node(s)'(self+A), 양쪽 'learned mesh topology' 실측. clippy integration-tests -D warnings clean, fmt --all --check exit 0.",
+        "honesty 정정 대상(과거 entry 過大 framing): rc 'production inert 완전 탈출'·'c3d 전체 완료'. 실제=control-plane 토폴로지 교환만 완료, c3c data-forward 미구축. flood=wz periodic(zenoh event-driven 아님; rf bootstrap=on-face-up event)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311re = c3d 적대 리뷰 remediation 3차(honesty). 정정: ②flood=wz-periodic(zenoh event-driven; rf bootstrap=on-face-up event, change-triggered 미구현) ③'c3d 완료'=control-plane만(c3c data-forward 미구축; remove_detached_nodes 미구현=ghost prune 없음) ④E6 양방향 단언 추가로 역방향 갭 해소(transitive over-wire는 unit-only). ①e2e graph-state는 rf 선반영.",
+        "c3d 적대 리뷰 트랙 전부 종료: rd(correctness)·rf(구조 MAJOR=tick seam+bootstrap)·re(honesty). 4-에이전트 리뷰 적발분 모두 반영.",
+        "다음 = c3c(tree_children_of로 data Push forward; source spanning-tree 따라 forward=loop-free). 이후 추적부채: change-triggered flood, Details split(full-for-new/links-for-updated), remove_detached_nodes(reachability prune+3-peer e2e 동반), options-SSOT(SCE owned-flag-setter), Zid=Vec<u8>→16B newtype, gossip/autoconnect/locators.",
+        "코드 LOCAL UNPUSHED: rf(84647b2)+re(이 커밋). qm~rd=PUSHED origin/main=5049fe0. push 시 full run-ci(pre-push 게이트) 필요."
+      ]
+    },
     "Round 311rf": {
       "decision_summary": "R311rf: c3d 적대 리뷰 remediation 2차(구조 MAJOR). 주기 link-state flood을 demo run_peer hand-rolled select→FaceForwarder::tick seam 이전(非-demo peer_loop caller도 수렴) + register-time bootstrap(zenoh add_link send-on-new-link) + cheap cleanup(const/struct/helper).",
       "changes_bullets": [
