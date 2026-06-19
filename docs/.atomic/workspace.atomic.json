@@ -42720,6 +42720,44 @@
         "honest defer: undeclare_subscription은 self 자신의 interest는 미추적(declare_subscription과 대칭=self는 peer 테이블에 없음; remote만 withdraw). whole-peer face-down은 deregister→remove_peer가 이미 purge(별개 경로)."
       ]
     },
+    "Round 311ry": {
+      "decision_summary": "R311ry: c3c-3 부채 A1 완결(UndeclareSubscriber 전파) — real-TCP 2-hop withdrawal e2e. wz_peer_mesh_withdraws_subscription_two_hops: C subscribe→data round-trip 확인 후 --unsubscribe-after-data flip→sourced UndeclareSubscriber C→B→A flood→publisher A의 learned interest withdrawn positive 전이 witness(non-receipt 단언 회피). 10+ 실행 0 flake. codec A1a+forwarder A1b의 unit-only 정직성 갭 해소.",
+      "changes_bullets": [
+        "wz-integration-tests/tests/wz_peer_data_forward.rs: wz_peer_mesh_withdraws_subscription_two_hops 추가(line A-B-C). C --subscribe demo/mesh --unsubscribe-after-data: C가 data 수신 확인(round-trip 성립) 후 self-coordinating으로 undeclare flip→sourced UndeclareSubscriber C→B→A flood→A의 learned interest 철회. 단언=A 'publisher learned subscriber interest' THEN 'publisher subscriber interest withdrawn'(positive 전이 witness, learned<withdrawn 순서) + C 'received mesh data'(retract trigger anchor). flaky non-receipt 단언 회피. module doc에 retraction 테스트 기술.",
+        "(rx의 demo --unsubscribe-after-data가 이 테스트를 구동; E6은 --test wz_peer_data_forward -- --ignored로 바이너리 전체 실행이라 신규 테스트 자동 합류=run-ci 와이어링 변경 불필요.)"
+      ],
+      "verification_bullets": [
+        "신규 withdrawal e2e: 단독 5/5 + 양 e2e(forward+withdraw) 동반 5/5 = withdrawal 테스트 10+ 실행 0 flake([[feedback-no-flaky-ever]] 충족). 결정성=positive witness only(non-receipt 단언 없음); C가 data 확인 후만 retract=self-coordinating(타이밍 윈도우 가정 없음); A는 SIGTERM까지 tick하므로 withdrawn 전이 반드시 관측. full run-ci RUNCI_EXIT=0(E6 wz_peer_data_forward --ignored 2 테스트 포함, Layer Z zenohd 9/9, Layer Q footprint, 전 host 레인).",
+        "real-TCP 2-hop withdrawal 실증=c3c-3 lifecycle 부채 A1의 unit-only 정직성 갭 해소(codec A1a+forwarder A1b를 end-to-end로 입증)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ry = c3c-3 부채 A1 완결(UndeclareSubscriber 전파): codec A1a(rw)+forwarder A1b(rx)+e2e(ry). sourced undeclare=keyexpr 정체성(ext_keyexpr ext id 0x0f); withdraw change-gate; real-TCP 2-hop withdrawal positive witness. c3c-3 subscription lifecycle 부채 A1 종료.",
+        "다음 부채(project_c3c3_debt_paydown 순): A2 pubsub_tree_change(트리 변경 시 기존 구독 NEW children에 재광고; LinkstatepeerSubs::keys() 재도입+compute_trees 후 훅; zenoh pubsub.rs:641-678) → C2(push/declare/undecl ext golden-vector byte-parity) → C1(4-peer e2e selectivity=비구독 sibling D 미수신) → D1 (source,sn) seen-set → B1 alias keyexpr → E/F.",
+        "honest defer(A1 범위 외, 별도 atom): alias/wildcard keyexpr(read_ext_keyexpr literal-only), undeclare ext_keyexpr golden-vector(byte-parity 1 벡터), undeclare도 sn 없음(D1 seen-set 동반).",
+        "LOCAL UNPUSHED: A1 3커밋(rw/rx/ry). push는 사용자 명시 동의 후(pre-push run-ci 재실행; 시스템 idle 확인)."
+      ],
+      "publishable_decision_summary": "R311ry: c3c-3 부채 A1 완결(UndeclareSubscriber 전파) — real-TCP 2-hop withdrawal e2e. wz_peer_mesh_withdraws_subscription_two_hops: C subscribe→data round-trip 확인 후 --unsubscribe-after-data flip→sourced UndeclareSubscriber C→B→A flood→publisher A의 learned interest withdrawn positive 전이 witness(non-receipt 단언 회피). 10+ 실행 0 flake. codec A1a+forwarder A1b의 unit-only 정직성 갭 해소.",
+      "publishable_changes_bullets": [
+        "wz-integration-tests/tests/wz_peer_data_forward.rs: wz_peer_mesh_withdraws_subscription_two_hops 추가(line A-B-C). C --subscribe demo/mesh --unsubscribe-after-data: C가 data 수신 확인(round-trip 성립) 후 self-coordinating으로 undeclare flip→sourced UndeclareSubscriber C→B→A flood→A의 learned interest 철회. 단언=A 'publisher learned subscriber interest' THEN 'publisher subscriber interest withdrawn'(positive 전이 witness, learned<withdrawn 순서) + C 'received mesh data'(retract trigger anchor). flaky non-receipt 단언 회피. module doc에 retraction 테스트 기술.",
+        "(rx의 demo --unsubscribe-after-data가 이 테스트를 구동; E6은 --test wz_peer_data_forward -- --ignored로 바이너리 전체 실행이라 신규 테스트 자동 합류=run-ci 와이어링 변경 불필요.)"
+      ],
+      "publishable_verification_bullets": [
+        "신규 withdrawal e2e: 단독 5/5 + 양 e2e(forward+withdraw) 동반 5/5 = withdrawal 테스트 10+ 실행 0 flake([[feedback-no-flaky-ever]] 충족). 결정성=positive witness only(non-receipt 단언 없음); C가 data 확인 후만 retract=self-coordinating(타이밍 윈도우 가정 없음); A는 SIGTERM까지 tick하므로 withdrawn 전이 반드시 관측. full run-ci RUNCI_EXIT=0(E6 wz_peer_data_forward --ignored 2 테스트 포함, Layer Z zenohd 9/9, Layer Q footprint, 전 host 레인).",
+        "real-TCP 2-hop withdrawal 실증=c3c-3 lifecycle 부채 A1의 unit-only 정직성 갭 해소(codec A1a+forwarder A1b를 end-to-end로 입증)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ry = c3c-3 부채 A1 완결(UndeclareSubscriber 전파): codec A1a(rw)+forwarder A1b(rx)+e2e(ry). sourced undeclare=keyexpr 정체성(ext_keyexpr ext id 0x0f); withdraw change-gate; real-TCP 2-hop withdrawal positive witness. c3c-3 subscription lifecycle 부채 A1 종료.",
+        "다음 부채(project_c3c3_debt_paydown 순): A2 pubsub_tree_change(트리 변경 시 기존 구독 NEW children에 재광고; LinkstatepeerSubs::keys() 재도입+compute_trees 후 훅; zenoh pubsub.rs:641-678) → C2(push/declare/undecl ext golden-vector byte-parity) → C1(4-peer e2e selectivity=비구독 sibling D 미수신) → D1 (source,sn) seen-set → B1 alias keyexpr → E/F.",
+        "honest defer(A1 범위 외, 별도 atom): alias/wildcard keyexpr(read_ext_keyexpr literal-only), undeclare ext_keyexpr golden-vector(byte-parity 1 벡터), undeclare도 sn 없음(D1 seen-set 동반).",
+        "LOCAL UNPUSHED: A1 3커밋(rw/rx/ry). push는 사용자 명시 동의 후(pre-push run-ci 재실행; 시스템 idle 확인)."
+      ]
+    },
     "Round 311s": {
       "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
       "changes_bullets": [

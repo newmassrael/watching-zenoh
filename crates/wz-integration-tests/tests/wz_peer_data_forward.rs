@@ -24,10 +24,17 @@
 //! C-ward. Without C's subscription the publisher's any-interest gate would
 //! forward nothing.
 //!
+//! A second test (c3c-3 debt A1) is the RETRACTION counterpart over the same
+//! line: C subscribes, confirms the round-trip, then `--unsubscribe-after-data`
+//! flips it to flooding a sourced `UndeclareSubscriber` C -> B -> A, and the
+//! publisher witnesses its learned interest being WITHDRAWN (a positive
+//! transition, not a flaky non-receipt) — the end-to-end proof of the
+//! subscription-lifecycle retraction path.
+//!
 //! Requires the binary built with `--features routing-peer` (the `--peer` /
-//! `--publish` / `--subscribe` args are opt-in behind it). run-ci's Layer E
-//! builds it so this rides the same `--ignored` lane as the other binary-dep
-//! e2es.
+//! `--publish` / `--subscribe` / `--unsubscribe-after-data` args are opt-in
+//! behind it). run-ci's Layer E builds it so both tests ride the same
+//! `--ignored` lane as the other binary-dep e2es.
 
 use std::fs::File;
 use std::process::{Command, Stdio};
@@ -159,5 +166,103 @@ fn wz_peer_mesh_forwards_subscribed_data_two_hops() {
         b_captured.contains("received mesh data"),
         "peer-B (the transit hop) must have received and forwarded A's data\n\
          --- peer-B stderr ---\n{b_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+fn wz_peer_mesh_withdraws_subscription_two_hops() {
+    // c3c-3 debt A1 — the RETRACTION counterpart of the forward test. The same
+    // line A-B-C, but C RETRACTS its interest once it has confirmed the
+    // round-trip (received data): `--unsubscribe-after-data` flips C from
+    // declaring to undeclaring. The sourced UndeclareSubscriber floods C -> B ->
+    // A (re-stamping the routing-context NodeId at each hop), so A's LEARNED
+    // interest is withdrawn.
+    //
+    // The witness is a POSITIVE state transition at the publisher — interest
+    // learned, then withdrawn — never a flaky non-receipt assertion. Because C
+    // only retracts AFTER it has received data, observing the withdrawal at A
+    // proves the whole lifecycle ran over real TCP: subscribe propagate, the
+    // data round-trip (C's self-coordinating trigger), and undeclare propagate.
+    let (mut c_guard, mut c_reader, p_c) = spawn_peer(
+        "peer-C",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--subscribe",
+            "demo/mesh",
+            "--unsubscribe-after-data",
+        ],
+    );
+    let addr_c = format!("127.0.0.1:{p_c}");
+    let (mut b_guard, mut b_reader, p_b) =
+        spawn_peer("peer-B", &["--peer", "127.0.0.1:0", "--connect", &addr_c]);
+    let addr_b = format!("127.0.0.1:{p_b}");
+    let (mut a_guard, mut a_reader, _p_a) = spawn_peer(
+        "peer-A",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_b,
+            "--publish",
+            "demo/mesh",
+        ],
+    );
+
+    // Terminal witness: the publisher first LEARNS C's interest, then — after C
+    // confirms data and retracts — sees that interest WITHDRAWN. Waiting on the
+    // withdrawal implies the whole lifecycle ran (subscribe propagate, data
+    // round-trip, undeclare propagate); 20s covers all legs on localhost.
+    let a_withdrawn = wait_for_substring(
+        &mut a_reader,
+        "publisher subscriber interest withdrawn",
+        Duration::from_secs(20),
+    );
+
+    graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(c_guard.child_mut(), Duration::from_secs(5));
+    let a_captured = read_captured(&mut a_reader);
+    let b_captured = read_captured(&mut b_reader);
+    let c_captured = read_captured(&mut c_reader);
+    eprintln!("--- peer-A stderr ---\n{a_captured}");
+    eprintln!("--- peer-B stderr ---\n{b_captured}");
+    eprintln!("--- peer-C stderr ---\n{c_captured}");
+
+    a_withdrawn.unwrap_or_else(|c| {
+        panic!(
+            "peer-A never logged 'publisher subscriber interest withdrawn' within 20s — \
+             C's UndeclareSubscriber did not flood C -> B -> A to retract the learned \
+             interest\n--- peer-A stderr ---\n{c}"
+        )
+    });
+    // Order + both-present: the publisher must have LEARNED the interest before
+    // it could be WITHDRAWN — the retraction is meaningful only against an
+    // established interest. The demo logs withdrawn ONLY after learned, so this
+    // asserts the lifecycle, not a spurious empty.
+    let learned_at = a_captured
+        .find("publisher learned subscriber interest")
+        .unwrap_or_else(|| {
+            panic!(
+                "peer-A withdrew without first learning C's interest\n\
+                 --- peer-A stderr ---\n{a_captured}"
+            )
+        });
+    let withdrawn_at = a_captured
+        .find("publisher subscriber interest withdrawn")
+        .expect("withdrawn substring present (waited on above)");
+    assert!(
+        learned_at < withdrawn_at,
+        "publisher must LEARN interest before WITHDRAWING it\n\
+         --- peer-A stderr ---\n{a_captured}"
+    );
+    // C must have RECEIVED data — the trigger that made it retract. Anchors that
+    // the withdrawal followed a real established round-trip, not a peer that
+    // never subscribed in the first place.
+    assert!(
+        c_captured.contains("received mesh data"),
+        "peer-C never received data, so its --unsubscribe-after-data trigger never \
+         fired\n--- peer-C stderr ---\n{c_captured}"
     );
 }
