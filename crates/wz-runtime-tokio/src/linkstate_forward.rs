@@ -293,7 +293,7 @@ impl LinkstateForwarder {
             // Drop the node whose own state this is from the list sent to ITS
             // face (zenoh `network.rs:663`) — the per-face payload differs, so
             // each face gets its own built carrier.
-            let keep = |z: &&Zid| zid != Some(z.as_slice());
+            let keep = |z: &&Zid| zid != Some(**z);
             let new: Vec<Zid> = changes.new.iter().filter(keep).cloned().collect();
             let updated: Vec<Zid> = changes.updated.iter().filter(keep).cloned().collect();
             if new.is_empty() && updated.is_empty() {
@@ -363,12 +363,17 @@ impl LinkstateForwarder {
     fn fan_out(
         &self,
         reliable: bool,
-        mut build: impl FnMut(FaceId, Option<&[u8]>) -> Result<Option<NetworkMessage>, CodecError>,
+        mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
         for (id, state) in self.faces.borrow().iter() {
-            let peer_zid = state.actions.peer_zid();
-            if let Some(msg) = build(*id, peer_zid.as_deref())? {
+            // Convert the session-layer peer zid (Vec<u8>) to the routing Zid at
+            // this single boundary, so every fan-out builder works in Zid terms
+            // (Copy, Eq) rather than re-deriving it from raw bytes per call. The
+            // handshake supplies a trusted, canonical zid, so the infallible
+            // from_slice is the right ctor (a wire zid would use try_from).
+            let peer_zid = state.actions.peer_zid().map(|v| Zid::from_slice(&v));
+            if let Some(msg) = build(*id, peer_zid)? {
                 // a per-face send failure (link gone mid-fan-out) is skipped,
                 // not fatal to the rest — the face's own driver surfaces its
                 // teardown via deregister.
@@ -473,13 +478,13 @@ impl LinkstateForwarder {
     /// resolve the source — and the self-source / range guards — identically.
     fn resolve_source(
         &self,
-        inbound_zid: Option<&[u8]>,
+        inbound_zid: Option<Zid>,
         inbound_link: Option<LinkId>,
         node_id: u16,
     ) -> Option<(Zid, u16)> {
         let net = self.net.borrow();
         let source_zid: Zid = match node_id {
-            0 => Zid::from_slice(inbound_zid?),
+            0 => inbound_zid?,
             nid => match inbound_link
                 .and_then(|l| net.get_link(l))
                 .and_then(|l| l.get_zid(nid as u64))
@@ -560,14 +565,18 @@ impl LinkstateForwarder {
             let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
                 return;
             };
-            (s.actions.peer_zid(), s.link, keyexpr)
+            (
+                s.actions.peer_zid().map(|v| Zid::from_slice(&v)),
+                s.link,
+                keyexpr,
+            )
         };
 
         // Resolve the source (tree root) + this node's psid for it via the
         // shared seam (forward_subscription resolves a sourced Declare the same
         // way; both flood along the source's tree).
         let Some((source_zid, out_node_id)) =
-            self.resolve_source(inbound_zid.as_deref(), inbound_link, read_push_source(push))
+            self.resolve_source(inbound_zid, inbound_link, read_push_source(push))
         else {
             return;
         };
@@ -634,7 +643,7 @@ impl LinkstateForwarder {
         // re-forward predicate).
         let _ = self.fan_out(reliable, |id, zid| {
             Ok(
-                is_tree_forward_target(id, zid, inbound, inbound_zid.as_deref(), &children)
+                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Push(Box::new(carrier.clone()))),
             )
         });
@@ -810,13 +819,15 @@ impl LinkstateForwarder {
             let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
                 return;
             };
-            (s.actions.peer_zid(), s.link, keyexpr)
+            (
+                s.actions.peer_zid().map(|v| Zid::from_slice(&v)),
+                s.link,
+                keyexpr,
+            )
         };
-        let Some((source_zid, out_node_id)) = self.resolve_source(
-            inbound_zid.as_deref(),
-            inbound_link,
-            read_declare_source(declare),
-        ) else {
+        let Some((source_zid, out_node_id)) =
+            self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))
+        else {
             return;
         };
         // Register the resolved interest; re-flood ONLY on a new registration
@@ -844,7 +855,7 @@ impl LinkstateForwarder {
         // the source's own neighbour); only the carrier differs.
         let _ = self.fan_out(reliable, |id, zid| {
             Ok(
-                is_tree_forward_target(id, zid, inbound, inbound_zid.as_deref(), &children)
+                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
             )
         });
@@ -882,13 +893,15 @@ impl LinkstateForwarder {
             let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
                 return;
             };
-            (s.actions.peer_zid(), s.link, keyexpr)
+            (
+                s.actions.peer_zid().map(|v| Zid::from_slice(&v)),
+                s.link,
+                keyexpr,
+            )
         };
-        let Some((source_zid, out_node_id)) = self.resolve_source(
-            inbound_zid.as_deref(),
-            inbound_link,
-            read_declare_source(declare),
-        ) else {
+        let Some((source_zid, out_node_id)) =
+            self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))
+        else {
             return;
         };
         // Withdraw the resolved interest; re-flood ONLY on a real removal (the
@@ -914,7 +927,7 @@ impl LinkstateForwarder {
         // UndeclareSubscriber) differs.
         let _ = self.fan_out(reliable, |id, zid| {
             Ok(
-                is_tree_forward_target(id, zid, inbound, inbound_zid.as_deref(), &children)
+                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
             )
         });
@@ -1063,8 +1076,8 @@ impl LinkstateForwarder {
 /// The shared membership check the originate paths ([`publish`](LinkstateForwarder::publish)
 /// / [`declare_subscription`](LinkstateForwarder::declare_subscription)) and
 /// the re-forward paths ([`is_tree_forward_target`]) both build on.
-fn is_child(children: &[Zid], zid: &[u8]) -> bool {
-    children.iter().any(|c| c.as_slice() == zid)
+fn is_child(children: &[Zid], zid: Zid) -> bool {
+    children.contains(&zid)
 }
 
 /// Whether a face is a valid forward target when RE-FORWARDING along a source
@@ -1077,9 +1090,9 @@ fn is_child(children: &[Zid], zid: &[u8]) -> bool {
 /// loop-exclusion mechanics live here once.
 fn is_tree_forward_target(
     id: FaceId,
-    zid: Option<&[u8]>,
+    zid: Option<Zid>,
     inbound: FaceId,
-    inbound_zid: Option<&[u8]>,
+    inbound_zid: Option<Zid>,
     children: &[Zid],
 ) -> bool {
     let Some(zid) = zid else {
