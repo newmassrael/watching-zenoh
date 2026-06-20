@@ -1105,15 +1105,14 @@ pub(crate) async fn run_demo(
 /// handshake did not surface it). Shared by the router and peer face observers.
 #[cfg(any(feature = "routing-router", feature = "routing-peer"))]
 fn zid_hex(zid: Option<&[u8]>) -> String {
-    use wz::runtime_tokio::linkstate_forward::Zid;
-    // Delegate the hex formatting to `Zid::Display` (the single SSOT for the wire-
-    // order lowercase-hex zid form); this adapter only adds the `?` for a face
-    // whose handshake did not surface a zid. A handshake zid is <= 16 bytes, so
-    // `from_slice` is lossless here.
-    zid.map_or_else(
-        || "?".to_string(),
-        |bytes| Zid::from_slice(bytes).to_string(),
-    )
+    // Wire-order lowercase per-byte hex (same rendering as `Zid::Display`, but NOT
+    // via it): this helper is compiled for routing-ROUTER too, where the routing
+    // `Zid` (a routing-peer-only re-export) is absent — so it formats the bytes
+    // directly rather than coupling a router-mode log helper to the peer-mode type.
+    match zid {
+        Some(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        None => "?".to_string(),
+    }
 }
 
 /// R311qa — multi-peer ROUTER mode: bind once and hold N concurrent peer faces
