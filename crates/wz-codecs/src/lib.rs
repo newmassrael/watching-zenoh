@@ -55,6 +55,12 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+// R311tf — the typed `WhatAmI` node role, the SSOT for the role byte across the
+// session layer, the routing graph, and the runtime driver. Hand-written (not
+// codegen), so it sits outside the `#![allow(clippy::all)]` intent — but the
+// crate-level allow still covers it; rustc `warnings = "deny"` keeps it honest.
+pub mod whatami;
+
 // Re-exposes the alloc-prelude items the SCE codegen emits without
 // fully-qualifying. Invoked at the head of every `pub mod` block so
 // the `include!()`-pasted generated code resolves `String` and

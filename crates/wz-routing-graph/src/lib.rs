@@ -58,19 +58,13 @@ use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::linkstate_weight::LinkstateWeight;
 use wz_codecs::locator::{LocatorOwned, MAX_LOCATORS_PER_NODE, MAX_LOCATOR_LEN};
 
-/// WhatAmI role bytes (zenoh `WhatAmI`): a node advertises exactly one.
-/// The codec carries the raw byte; the ingest validates against this set
-/// (zenoh rejects an out-of-set value at decode — the c2 host obligation).
-/// Public so the single definition is shared (e.g. the `linkstate_forward`
-/// driver records a peer-mesh neighbour as [`WHATAMI_PEER`]) rather than
-/// re-spelling the literal.
-pub const WHATAMI_ROUTER: u8 = 1;
-pub const WHATAMI_PEER: u8 = 2;
-pub const WHATAMI_CLIENT: u8 = 4;
-
-fn is_valid_whatami(w: u8) -> bool {
-    matches!(w, WHATAMI_ROUTER | WHATAMI_PEER | WHATAMI_CLIENT)
-}
+/// The node-role type, re-exported from `wz-codecs` (the SSOT). The graph keys
+/// a node's role on this typed enum; the former `WHATAMI_*` byte constants and
+/// the `is_valid_whatami` predicate are subsumed by [`WhatAmI`] and its
+/// `TryFrom<u8>` (the codec carries the raw byte on the wire; the ingest
+/// validates it through the type, so an out-of-set role is unrepresentable in
+/// the graph rather than guarded by a hand-rolled match).
+pub use wz_codecs::whatami::WhatAmI;
 
 /// Maximum zid length in bytes (zenoh `ZenohIdProto::MAX_SIZE`). zenoh
 /// rejects an oversized zid at DECODE (the zid codec caps at this); the wz
@@ -369,7 +363,7 @@ pub type Psid = u64;
 /// transposed — and to match [`LocalLinkState`], the pass-2 output.
 struct ResolvedEntry {
     zid: Zid,
-    whatami: u8,
+    whatami: WhatAmI,
     sn: u64,
     links: Vec<LinkstateLink>,
     weights: Option<Vec<LinkstateWeight>>,
@@ -411,14 +405,15 @@ impl LinkEdgeWeight {
 }
 
 /// A node (vertex) in the topology graph — one peer's advertised state.
-/// Mirrors zenoh `Node` (`network.rs:56-62`). `whatami` / `locators` are
-/// the codec's host types (raw `u8` / UTF-8 strings); `whatami`
-/// range-validation is the consumer's obligation (the codec carries the
-/// raw byte, unlike zenoh which rejects an invalid `WhatAmI` at decode).
+/// Mirrors zenoh `Node` (`network.rs:56-62`). `whatami` is the typed
+/// [`WhatAmI`] role (`None` until a link-state for the node arrives); the wire
+/// codec carries the raw role byte, and the ingest validates it into the type,
+/// so an out-of-set role is unrepresentable here. `locators` stays the codec's
+/// host type (UTF-8 strings).
 #[derive(Debug, Clone)]
 pub struct Node {
     pub zid: Zid,
-    pub whatami: Option<u8>,
+    pub whatami: Option<WhatAmI>,
     pub locators: Option<Vec<String>>,
     pub sn: u64,
     pub links: HashMap<Zid, LinkEdgeWeight>,
@@ -529,7 +524,7 @@ impl Details {
 struct LocalLinkState {
     sn: u64,
     zid: Zid,
-    whatami: u8,
+    whatami: WhatAmI,
     links: HashMap<Zid, LinkEdgeWeight>,
     locators: Option<Vec<String>>,
 }
@@ -595,7 +590,7 @@ pub struct LinkstateNetwork {
 impl LinkstateNetwork {
     /// A graph seeded with the local (self) node — sn starts at 1, as in
     /// zenoh `Network::new` (`network.rs:156-162`).
-    pub fn new(self_zid: Zid, self_whatami: u8) -> Self {
+    pub fn new(self_zid: Zid, self_whatami: WhatAmI) -> Self {
         let mut graph = StableUnGraph::default();
         let idx = graph.add_node(Node {
             zid: self_zid,
@@ -727,7 +722,7 @@ impl LinkstateNetwork {
     /// (`network.rs:812-859`): introduce the neighbour node, record that
     /// self now links to it (bumping self's link-state sn), and form the
     /// edge if the neighbour already advertises self back.
-    pub fn add_link(&mut self, peer_zid: Zid, peer_whatami: u8) -> LinkId {
+    pub fn add_link(&mut self, peer_zid: Zid, peer_whatami: WhatAmI) -> LinkId {
         let id = self.next_link_id;
         self.next_link_id += 1;
         self.links.insert(id, Link::new(peer_zid));
@@ -975,7 +970,9 @@ impl LinkstateNetwork {
             zid: want_zid.then(|| {
                 SceBytes::from_slice(node.zid.as_slice()).expect("graph zid is <= ZENOHID_MAX_SIZE")
             }),
-            whatami: node.whatami,
+            // the wire carries the raw API-form role byte; the node holds the
+            // typed role, so project it back to the byte here at the codec edge.
+            whatami: node.whatami.map(WhatAmI::to_api),
             num_locators: locators.as_ref().map(|l| l.len() as u64),
             locators,
             links_len: links.len() as u64,
@@ -1122,18 +1119,21 @@ impl LinkstateNetwork {
                         }
                     },
                 };
-                // whatami: absent defaults to Router; an out-of-range value
-                // is dropped (the c2 host-validation obligation — zenoh
-                // rejects it at decode, the wz codec carries the raw byte).
+                // whatami: absent defaults to Router; an out-of-set byte is
+                // dropped (the c2 host-validation obligation — zenoh rejects it
+                // at decode, the wz codec carries the raw byte and the typed
+                // `WhatAmI::try_from` is the single validator).
                 let whatami = match entry.whatami {
-                    None => WHATAMI_ROUTER,
-                    Some(w) if is_valid_whatami(w) => w,
-                    Some(w) => {
-                        log::warn!(
-                            "dropping linkstate entry on link {src_link_id}: invalid whatami {w}"
-                        );
-                        continue;
-                    }
+                    None => WhatAmI::Router,
+                    Some(w) => match WhatAmI::try_from(w) {
+                        Ok(role) => role,
+                        Err(()) => {
+                            log::warn!(
+                                "dropping linkstate entry on link {src_link_id}: invalid whatami {w}"
+                            );
+                            continue;
+                        }
+                    },
                 };
                 resolved.push(ResolvedEntry {
                     zid,
@@ -1725,18 +1725,18 @@ mod tests {
 
     #[test]
     fn new_seeds_self_node() {
-        let net = LinkstateNetwork::new(zid(0x01), 2);
+        let net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         assert_eq!(net.node_count(), 1);
         assert_eq!(net.self_zid(), &zid(0x01));
         assert_eq!(net.get_idx(&zid(0x01)), Some(net.self_idx()));
         let self_node = net.get_node(&zid(0x01)).unwrap();
-        assert_eq!(self_node.whatami, Some(2));
+        assert_eq!(self_node.whatami, Some(WhatAmI::Peer));
         assert_eq!(self_node.sn, 1, "self sn starts at 1 (zenoh parity)");
     }
 
     #[test]
     fn ensure_node_is_idempotent_upsert() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         let a = net.ensure_node(zid(0x07));
         assert_eq!(net.node_count(), 2);
         let again = net.ensure_node(zid(0x07));
@@ -1749,8 +1749,8 @@ mod tests {
 
     #[test]
     fn link_psid_to_zid_mapping() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let id = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let id = net.add_link(zid(0x07), WhatAmI::Peer);
         assert_eq!(net.get_link(id).unwrap().zid, zid(0x07));
 
         let link = net.get_link_mut(id).unwrap();
@@ -1761,9 +1761,9 @@ mod tests {
 
     #[test]
     fn add_and_remove_link() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let a = net.add_link(zid(0x07), 2);
-        let b = net.add_link(zid(0x08), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let a = net.add_link(zid(0x07), WhatAmI::Peer);
+        let b = net.add_link(zid(0x08), WhatAmI::Peer);
         assert_ne!(a, b, "distinct link ids");
         assert!(net.get_link(a).is_some());
         // A is a leaf neighbour (no other advertiser), so dropping its link
@@ -1862,8 +1862,8 @@ mod tests {
 
     #[test]
     fn ingest_adds_node_and_learns_mapping() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // 0x07 relays node 0xAA (psid 10) behind it, so 0xAA is reachable and
         // the prune keeps it. 0xAA is listed BEFORE the relay so it is
         // inserted from its own entry (whatami Some(2)) rather than as a
@@ -1883,15 +1883,15 @@ mod tests {
         );
         let node = net.get_node(&zid(0xAA)).expect("node added");
         assert_eq!(node.sn, 5);
-        assert_eq!(node.whatami, Some(2));
+        assert_eq!(node.whatami, Some(WhatAmI::Peer));
         // the source link learned psid 10 -> 0xAA.
         assert_eq!(net.get_link(link).unwrap().get_zid(10), Some(&zid(0xAA)));
     }
 
     #[test]
     fn ingest_sn_staleness_gate() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // 0x07 relays 0xAA so it stays reachable across the re-ingests below.
         net.ingest_linkstate_list(
             link,
@@ -1912,8 +1912,8 @@ mod tests {
 
     #[test]
     fn ingest_drops_entry_with_invalid_whatami() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // whatami=3 is not a valid single role -> the entry is dropped.
         let changes = net.ingest_linkstate_list(
             link,
@@ -1925,8 +1925,8 @@ mod tests {
 
     #[test]
     fn ingest_resolves_link_psids_to_zid_edges() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // A (psid 1 -> 0xAA) appears before B, so B's link psid 1 resolves
         // against the mapping A registered earlier in the same list. 0x07
         // relays both so they are reachable and survive the prune.
@@ -1947,7 +1947,7 @@ mod tests {
 
     #[test]
     fn ingest_from_unknown_link_is_dropped() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
         // link id 99 was never registered.
         let changes =
             net.ingest_linkstate_list(99, list(vec![entry(10, 5, Some(&zid(0xAA)), None, &[])]));
@@ -1979,8 +1979,8 @@ mod tests {
 
     #[test]
     fn edge_forms_only_on_mutual_advertisement() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // 0x07 relays A and B (reachability), plus B (psid 2, no links yet)
         // and A->B one-sided.
         net.ingest_linkstate_list(
@@ -2000,8 +2000,8 @@ mod tests {
 
     #[test]
     fn edge_pruned_when_link_no_longer_advertised() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // 0x07 relays A and B so they remain reachable even after A drops its
         // link below (the edge prune is the subject; the node prune is not).
         net.ingest_linkstate_list(
@@ -2028,8 +2028,8 @@ mod tests {
 
     #[test]
     fn edge_weight_is_max_of_both_directions() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // 0x07 relays A and B (reachability), plus B (psid 2, no links yet)
         // and A->B weight 50, in one consistent snapshot.
         net.ingest_linkstate_list(
@@ -2058,8 +2058,8 @@ mod tests {
 
     #[test]
     fn add_link_connects_self_and_edge_forms_on_mutual() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         // add_link connects self to A in the graph (node + self link).
         assert_eq!(net.node_count(), 2);
         assert_eq!(net.edge_count(), 0, "A has not advertised self back yet");
@@ -2076,8 +2076,8 @@ mod tests {
 
     #[test]
     fn self_rooted_tree_lists_direct_neighbour_as_child() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         net.ingest_linkstate_list(
             l,
             list(vec![
@@ -2097,8 +2097,8 @@ mod tests {
         // initial trees). A second neighbour B then joins; the next recompute's
         // delta for self's tree is JUST B — A is an existing child, not re-emitted.
         // This is the new-children delta the subscription re-advertise floods to.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let la = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let la = net.add_link(zid(0xAA), WhatAmI::Peer);
         net.ingest_linkstate_list(
             la,
             list(vec![
@@ -2117,7 +2117,7 @@ mod tests {
         );
 
         // B joins as a second direct neighbour of self.
-        let lb = net.add_link(zid(0xBB), 2);
+        let lb = net.add_link(zid(0xBB), WhatAmI::Peer);
         net.ingest_linkstate_list(
             lb,
             list(vec![
@@ -2155,10 +2155,10 @@ mod tests {
         let r = zid(0x0D); // root (a remote node, e.g. a subscription source)
         let m = zid(0x0B); // the detour relay
         let f = zid(0x0F); // the node that re-homes
-        let mut net = LinkstateNetwork::new(s, 2);
-        let lr = net.add_link(r, 2);
-        let lf = net.add_link(f, 2);
-        let lm = net.add_link(m, 2);
+        let mut net = LinkstateNetwork::new(s, WhatAmI::Peer);
+        let lr = net.add_link(r, WhatAmI::Peer);
+        let lf = net.add_link(f, WhatAmI::Peer);
+        let lm = net.add_link(m, WhatAmI::Peer);
 
         // Pass 1 — teach each link's psid -> zid mappings (low sn, no links).
         net.ingest_linkstate_list(lr, list(vec![entry(0, 1, Some(&s), Some(2), &[])]));
@@ -2230,8 +2230,8 @@ mod tests {
     #[test]
     fn next_hop_follows_shortest_path_over_a_line() {
         // Topology: self -- A -- B (a line). next hop self->B is A.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         // One consistent snapshot (a real flood is one list): A (the direct
         // peer) advertises self + B, and B advertises A back. The 2-pass
         // convert resolves a link to an entry appearing later in the same
@@ -2261,8 +2261,8 @@ mod tests {
 
     #[test]
     fn remove_link_disconnects_self() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         net.ingest_linkstate_list(
             l,
             list(vec![
@@ -2283,8 +2283,8 @@ mod tests {
         // A's advertisement. When A re-advertises (newer sn) WITHOUT B, B has
         // no remaining path from self and remove_detached_nodes prunes it; the
         // ingest reports it in `changes.removed` (zenoh network.rs:786-808).
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         net.ingest_linkstate_list(
             l,
             list(vec![
@@ -2318,8 +2318,8 @@ mod tests {
         // self--A link detaches A AND, transitively, B; remove_link prunes both
         // and returns their zids (zenoh remove_link -> remove_detached_nodes,
         // network.rs:948).
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         net.ingest_linkstate_list(
             l,
             list(vec![
@@ -2349,9 +2349,9 @@ mod tests {
         // NodeIndex, BEFORE the next recompute runs. The accessors must use
         // node_weight (not the panicking index op): a dangling child is
         // skipped, a pruned destination yields no next hop. Never a panic.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let la = net.add_link(zid(0xAA), 2);
-        let lc = net.add_link(zid(0xCC), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let la = net.add_link(zid(0xAA), WhatAmI::Peer);
+        let lc = net.add_link(zid(0xCC), WhatAmI::Peer);
         // A and C each advertise self back -> both are self's tree children.
         net.ingest_linkstate_list(
             la,
@@ -2402,8 +2402,8 @@ mod tests {
         // still-absent index — it would resolve a REUSED one to the wrong live
         // node and misroute. remove_detached_nodes scrubs the freed indices from
         // the trees so no stale entry can alias the reused node.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let la = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let la = net.add_link(zid(0xAA), WhatAmI::Peer);
         // self -- A -- C: C is reachable only via A, so self's tree routes toward
         // C through A (directions[C] = A).
         net.ingest_linkstate_list(
@@ -2454,8 +2454,8 @@ mod tests {
         // longer) in the graph is reintroduced as a placeholder; zenoh pushes it
         // into new_nodes so it re-floods onward (network.rs:763). It must appear
         // in changes.new even though it carries no own entry in this list.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         // A advertises self + B; B advertises A. The link learns psid 12 -> B.
         net.ingest_linkstate_list(
             l,
@@ -2491,8 +2491,8 @@ mod tests {
         // D4: a NEW node re-floods full (zid + P flag); an UPDATED node
         // re-floods links-only (no zid, P clear) — the links/psid/sn survive so
         // the receiver applies the update against its existing psid->zid map.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        net.add_link(zid(0xAA), 2); // self advertises a link, so it has one
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        net.add_link(zid(0xAA), WhatAmI::Peer); // self advertises a link, so it has one
         let full = net.build_linkstate_split(&[zid(0x01)], &[]); // self as NEW
         let links_only = net.build_linkstate_split(&[], &[zid(0x01)]); // self as UPDATED
         let fe = &full.link_states[0];
@@ -2517,9 +2517,9 @@ mod tests {
         // ZID-ONLY (zid present, NO links) first, then self LINKS-ONLY (no zid,
         // links present incl the neighbour). It is a delta -- NOT the full
         // topology -- so a third (unrelated) node is absent.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        net.add_link(zid(0x0C), 2); // an unrelated existing neighbour C
-        net.add_link(zid(0x0B), 2); // the just-added neighbour B
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        net.add_link(zid(0x0C), WhatAmI::Peer); // an unrelated existing neighbour C
+        net.add_link(zid(0x0B), WhatAmI::Peer); // the just-added neighbour B
         let delta = net.build_link_added_delta(&zid(0x0B));
         assert_eq!(
             delta.link_states.len(),
@@ -2550,10 +2550,10 @@ mod tests {
         // entry registered that psid->zid mapping. R is an EXISTING neighbour of A
         // (already mapped A via a bootstrap); A then gains C and sends R the delta,
         // so R must learn C AND resolve A's freshly-advertised link to C.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
-        let mut r = LinkstateNetwork::new(zid(0x0B), 2);
-        a.add_link(zid(0x0B), 2); // A knows R
-        let ra = r.add_link(zid(0x0A), 2); // R knows A
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
+        let mut r = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        a.add_link(zid(0x0B), WhatAmI::Peer); // A knows R
+        let ra = r.add_link(zid(0x0A), WhatAmI::Peer); // R knows A
         r.ingest_linkstate_list(ra, a.build_linkstate_list()); // bootstrap: R maps A
         assert!(
             r.get_node(&zid(0x0A)).is_some(),
@@ -2562,7 +2562,7 @@ mod tests {
         assert!(r.get_node(&zid(0x0C)).is_none(), "R does not know C yet");
 
         // A gains a NEW neighbour C -> the 2-entry delta to its existing link R.
-        a.add_link(zid(0x0C), 2);
+        a.add_link(zid(0x0C), WhatAmI::Peer);
         let delta = a.build_link_added_delta(&zid(0x0C));
         assert_eq!(delta.link_states.len(), 2, "[C zid-only, A links-only]");
         let changes = r.ingest_linkstate_list(ra, delta);
@@ -2591,12 +2591,12 @@ mod tests {
         // (it lists neighbour-first only to match zenoh). Prove it: feed the SAME
         // delta with its entries REVERSED (self links-only FIRST, then C zid-only)
         // and the receiver must still resolve C and A's A->C link.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
-        let mut r = LinkstateNetwork::new(zid(0x0B), 2);
-        a.add_link(zid(0x0B), 2);
-        let ra = r.add_link(zid(0x0A), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
+        let mut r = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        a.add_link(zid(0x0B), WhatAmI::Peer);
+        let ra = r.add_link(zid(0x0A), WhatAmI::Peer);
         r.ingest_linkstate_list(ra, a.build_linkstate_list());
-        a.add_link(zid(0x0C), 2);
+        a.add_link(zid(0x0C), WhatAmI::Peer);
 
         let mut delta = a.build_link_added_delta(&zid(0x0C));
         delta.link_states.reverse(); // self links-only now precedes C zid-only
@@ -2620,10 +2620,10 @@ mod tests {
         // The D4 round-trip: B first ingests A's FULL flood (registering A's
         // psid->zid), then ingests A's links-only re-advertise (no zid) and
         // resolves A from that earlier mapping — applying the newer sn, no drop.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
-        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
-        let _la = a.add_link(zid(0x0B), 2);
-        let lb = b.add_link(zid(0x0A), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let _la = a.add_link(zid(0x0B), WhatAmI::Peer);
+        let lb = b.add_link(zid(0x0A), WhatAmI::Peer);
 
         b.ingest_linkstate_list(lb, a.build_linkstate_list()); // A full -> B maps A
         assert!(
@@ -2632,7 +2632,7 @@ mod tests {
         );
         let sn_before = b.get_node(&zid(0x0A)).unwrap().sn;
 
-        a.add_link(zid(0x0C), 2); // bumps A's sn so the re-advertise is newer
+        a.add_link(zid(0x0C), WhatAmI::Peer); // bumps A's sn so the re-advertise is newer
         let links_only = a.build_linkstate_split(&[], &[zid(0x0A)]);
         assert!(
             links_only.link_states[0].zid.is_none(),
@@ -2659,8 +2659,8 @@ mod tests {
         // zid whose psid the link never learned must be DROPPED — never admitted
         // with a guessed identity. (Also path-covers the E2 unresolvable-psid
         // error log in convert.)
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0x07), WhatAmI::Peer);
         let links_only_unmapped = LinkstateOwned {
             options: 0, // P clear -> no zid (links-only)
             psid: 50,   // never mapped on this link
@@ -2705,8 +2705,8 @@ mod tests {
         // a mutual edge between two SHORT (4-byte) zids; the jitter must hash
         // the 16-byte zero-padded form (zenoh's to_le_bytes), so wz agrees
         // with zenohd on equal-cost tie-breaks.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let l = net.add_link(zid(0xAA), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let l = net.add_link(zid(0xAA), WhatAmI::Peer);
         net.ingest_linkstate_list(
             l,
             list(vec![
@@ -2728,9 +2728,9 @@ mod tests {
     fn spanning_tree_is_acyclic_on_a_triangle() {
         // self -- A, self -- B, A -- B (a 3-cycle). self's own tree must be
         // acyclic: A and B are both direct children; the A-B edge is unused.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let la = net.add_link(zid(0xAA), 2);
-        let lb = net.add_link(zid(0xBB), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let la = net.add_link(zid(0xAA), WhatAmI::Peer);
+        let lb = net.add_link(zid(0xBB), WhatAmI::Peer);
         // A floods (its link): teach self/A/B zids, A links to self + B.
         net.ingest_linkstate_list(
             la,
@@ -2769,9 +2769,9 @@ mod tests {
         //  - [A, D]  -> {A, B}  (two distinct subtrees, no dedup)
         //  - [B, D]  -> {B}     (both via child B -> deduped to one)
         //  - [D]     -> {B}     (forward only down B's subtree, NOT to A)
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let la = net.add_link(zid(0xAA), 2);
-        let lb = net.add_link(zid(0xBB), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let la = net.add_link(zid(0xAA), WhatAmI::Peer);
+        let lb = net.add_link(zid(0xBB), WhatAmI::Peer);
         // A floods: teach self/A zids, A links self -> edge self<->A.
         net.ingest_linkstate_list(
             la,
@@ -2830,9 +2830,9 @@ mod tests {
         // tree for interest {C, E} must pick child C once (E is behind C);
         // interest in the source A itself resolves to the UPSTREAM (parent)
         // direction, which forward_push's inbound-face exclusion suppresses.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let la = net.add_link(zid(0x0A), 2);
-        let lc = net.add_link(zid(0x0C), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let la = net.add_link(zid(0x0A), WhatAmI::Peer);
+        let lc = net.add_link(zid(0x0C), WhatAmI::Peer);
         // A floods: A links self -> edge A<->self.
         net.ingest_linkstate_list(
             la,
@@ -2877,10 +2877,10 @@ mod tests {
         // A and B are directly linked. Each builds its own link-state list
         // (the TX path) and the other ingests it (the RX path); both must
         // learn the A<->B edge from the round-trip — the real mesh property.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
-        let la_b = a.add_link(zid(0x0B), 2);
-        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
-        let lb_a = b.add_link(zid(0x0A), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
+        let la_b = a.add_link(zid(0x0B), WhatAmI::Peer);
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
 
         // Two flood rounds (linkstate is idempotent under re-flood).
         for _ in 0..2 {
@@ -2909,13 +2909,13 @@ mod tests {
         // Line A -- B -- C. A has NO direct link to C; it must learn C from
         // B's flood (B advertises its C link + C's node), then route to C
         // through B — multi-hop topology propagation over build/ingest.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
-        let la_b = a.add_link(zid(0x0B), 2);
-        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
-        let lb_a = b.add_link(zid(0x0A), 2);
-        let lb_c = b.add_link(zid(0x0C), 2);
-        let mut c = LinkstateNetwork::new(zid(0x0C), 2);
-        let lc_b = c.add_link(zid(0x0B), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
+        let la_b = a.add_link(zid(0x0B), WhatAmI::Peer);
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
+        let lb_c = b.add_link(zid(0x0C), WhatAmI::Peer);
+        let mut c = LinkstateNetwork::new(zid(0x0C), WhatAmI::Peer);
+        let lc_b = c.add_link(zid(0x0B), WhatAmI::Peer);
 
         // Flood until converged: neighbours feed B, then B feeds the far ends.
         for _ in 0..3 {
@@ -2949,11 +2949,11 @@ mod tests {
         // reads. Mutation guard: if make_link_state stops emitting locators OR
         // process_linkstates stops ingesting them, node_locators(A) is None and
         // this fails.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
         a.set_self_locators(vec!["tcp/10.0.0.10:7447".to_string()]);
-        a.add_link(zid(0x0B), 2);
-        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
-        let lb_a = b.add_link(zid(0x0A), 2);
+        a.add_link(zid(0x0B), WhatAmI::Peer);
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
 
         b.ingest_linkstate_list(lb_a, a.build_linkstate_list());
 
@@ -2973,8 +2973,8 @@ mod tests {
         // are learned, a later links-only re-advertisement (no `L` field) must
         // KEEP them, not wipe them — otherwise every D4 links-only delta would
         // erase the discovery data.
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // 0x07 relays 0xAA; 0xAA first advertises locators (full entry, L set).
         net.ingest_linkstate_list(
             link,
@@ -3019,14 +3019,14 @@ mod tests {
         // no-alloc peer's decoder, so the TX projection drops it (the same
         // host-validation obligation as the oversized-zid drop) while the
         // valid sibling still rides.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
         let ok = "tcp/10.0.0.10:7447".to_string();
         let too_long = format!("tcp/[{}]:7447", "f".repeat(200));
         assert!(too_long.len() > MAX_LOCATOR_LEN);
         a.set_self_locators(vec![ok.clone(), too_long]);
-        a.add_link(zid(0x0B), 2);
-        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
-        let lb_a = b.add_link(zid(0x0A), 2);
+        a.add_link(zid(0x0B), WhatAmI::Peer);
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
 
         b.ingest_linkstate_list(lb_a, a.build_linkstate_list());
 
@@ -3047,9 +3047,9 @@ mod tests {
         // drives the FULL path: build -> ENCODE to bytes -> DECODE -> ingest, so
         // OPT_L / num_locators / the locator bytes must all be self-consistent
         // for the locators to survive.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
         a.set_self_locators(vec!["tcp/10.0.0.10:7447".to_string()]);
-        a.add_link(zid(0x0B), 2);
+        a.add_link(zid(0x0B), WhatAmI::Peer);
 
         // TX: build A's full link-state list, then ENCODE it to wire bytes.
         let wire = a
@@ -3065,8 +3065,8 @@ mod tests {
             .try_into_owned()
             .expect("own the decoded list");
 
-        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
-        let lb_a = b.add_link(zid(0x0A), 2);
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
         b.ingest_linkstate_list(lb_a, decoded);
 
         assert_eq!(
@@ -3078,8 +3078,8 @@ mod tests {
 
     #[test]
     fn ingest_drops_entry_with_oversized_zid() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // a 17-byte WIRE zid exceeds ZENOHID_MAX_SIZE -> the entry is dropped (the
         // host-validation obligation zenoh enforces at decode), so it never
         // reaches the graph and the later build re-encode stays infallible. The
@@ -3110,8 +3110,8 @@ mod tests {
 
     #[test]
     fn ingest_drops_entry_with_all_zero_zid() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2);
-        let link = net.add_link(zid(0x07), 2);
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
         // An all-zero (or empty) wire zid has no significant bytes — zenoh's
         // u128-backed ZenohIdProto reports it as size 0 and rejects it at decode;
         // the validating Zid::try_from drops the entry here. This closes the gap
@@ -3142,8 +3142,8 @@ mod tests {
 
     #[test]
     fn local_psid_of_is_the_node_index() {
-        let mut net = LinkstateNetwork::new(zid(0x01), 2); // self -> idx 0
-        net.add_link(zid(0x0A), 2); // first neighbour -> idx 1
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer); // self -> idx 0
+        net.add_link(zid(0x0A), WhatAmI::Peer); // first neighbour -> idx 1
         assert_eq!(net.local_psid_of(&zid(0x01)), Some(0), "self is psid 0");
         assert_eq!(
             net.local_psid_of(&zid(0x0A)),
@@ -3160,8 +3160,8 @@ mod tests {
         // A builds its list and serializes it through the REAL LinkStateList
         // codec; B decodes the wire bytes and ingests — exercising the
         // encode/decode round-trip the in-process convergence tests skip.
-        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
-        a.add_link(zid(0x0B), 2);
+        let mut a = LinkstateNetwork::new(zid(0x0A), WhatAmI::Peer);
+        a.add_link(zid(0x0B), WhatAmI::Peer);
         let wire = a
             .build_linkstate_list()
             .try_as_borrowed()
@@ -3173,8 +3173,8 @@ mod tests {
             .try_into_owned()
             .expect("into owned");
 
-        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
-        let lb_a = b.add_link(zid(0x0A), 2);
+        let mut b = LinkstateNetwork::new(zid(0x0B), WhatAmI::Peer);
+        let lb_a = b.add_link(zid(0x0A), WhatAmI::Peer);
         b.ingest_linkstate_list(lb_a, decoded);
         b.compute_trees();
         assert!(

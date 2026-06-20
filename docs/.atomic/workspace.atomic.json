@@ -44496,6 +44496,56 @@
         "LOCAL UNPUSHED: 311td(4e50794)+311te on origin/main=dd93ae5. Host lanes verified (build/tests/clippy/fmt + 4 demo axes); full run-ci + idle before push. Push only after explicit consent."
       ]
     },
+    "Round 311tf": {
+      "decision_summary": "R311tf: typed WhatAmI (SSOT) atoms 1+2 -- introduce the enum in wz-codecs and migrate the routing graph + driver + demo off bare-u8 role bytes. Behaviour-preserving; subsumes is_valid_whatami and the wire decode half.",
+      "changes_bullets": [
+        "Session-review SSOT remediation atoms 1+2: the bare-u8 node role -> a typed WhatAmI enum (zenoh whatami.rs clone) in wz-codecs -- the lowest crate every role consumer already depends on, no_std/core-only.",
+        "wz-codecs: new whatami module -- WhatAmI{Router=1,Peer=2,Client=4} + TryFrom<u8> (subsumes is_valid_whatami) + to_wire/from_wire (the 2-bit INIT/JOIN packing SSOT) + to_api/Display; round-trip + prior-arithmetic byte-equality tests.",
+        "wz-routing-graph: Node.whatami -> Option<WhatAmI>; add_link/new take WhatAmI; make_link_state projects to_api at the wire edge; ingest validates via TryFrom; the WHATAMI_* byte consts + is_valid_whatami are removed and WhatAmI re-exported.",
+        "wz-runtime-tokio: whatami_from_wire fn deleted (-> WhatAmI::from_wire); peer_whatami_routing returns WhatAmI; LinkstateForwarder::new/with_trees_delay take WhatAmI; re-export is WhatAmI not the byte consts; demo passes WhatAmI::Peer.",
+        "Test call sites migrated (graph 116 new/add_link, driver new/add_link) via a line-anchored sed (node_count and peer_face_whatami wire-2 args preserved); the Node.whatami assertions become Some(WhatAmI::Peer)."
+      ],
+      "verification_bullets": [
+        "Gates: wz-codecs whatami 3; wz-routing-graph 49; wz-runtime-tokio routing-peer lib 365 (the driver's whatami_from_wire test moved to its wz-codecs SSOT home); session_fsm 25; demo builds all 4 routing axes; clippy -D + fmt clean.",
+        "Behaviour-preserving: to_wire/from_wire are byte-equal to the prior init_cbyte (api>>1)&3 / pico 1<<(b&3) (pinned by a wz-codecs test); all-peer wire output unchanged; no routing/tree path reads whatami.",
+        "Layering: WhatAmI lives in wz-codecs -- the only crate wz-routing-graph (which cannot dep on session-core, the Zid-debt constraint), wz-session-core, and wz-runtime-tokio all already depend on.",
+        "Grounding (direct read): zenoh whatami.rs (the enum + TryFrom<u8>); zenoh-codec init.rs:166-172 (the 2-bit wire decode rejects the reserved 0b11); zenoh-pico transport.c:31-37.",
+        "Partial by design: the self/handshake role (init_cbyte, SessionInitParams) + multicast JOIN are still bare u8 -- the next atom routes them through WhatAmI::to_wire to finish the SSOT (F1/F4)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tf = typed WhatAmI SSOT, atoms 1+2 (the structural round the te session-review tracked). The role is now one type owning both wire mappings; the routing graph + driver + demo are off bare u8.",
+        "NEXT atom (A3): migrate the self/handshake role -- init_cbyte uses WhatAmI::to_wire (closing F1: the wire<->api bijection's two halves no longer split across crates), and SessionInitParams.whatami + MulticastParams.whatami + JOIN -> WhatAmI (closing F4).",
+        "THEN atom (A4) = gossip-policy: introduce WhatAmIMatcher (its load-bearing consumer) + port zenoh propagate_locators per-target gate (network.rs:406-418) so locators stop flooding to all faces (divergence lib.rs:492-503).",
+        "LOCAL UNPUSHED: 311td/te/tf on origin/main=dd93ae5. Host lanes verified per-atom; full run-ci + idle before push. Push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tf: typed WhatAmI (SSOT) atoms 1+2 -- introduce the enum in wz-codecs and migrate the routing graph + driver + demo off bare-u8 role bytes. Behaviour-preserving; subsumes is_valid_whatami and the wire decode half.",
+      "publishable_changes_bullets": [
+        "Session-review SSOT remediation atoms 1+2: the bare-u8 node role -> a typed WhatAmI enum (zenoh whatami.rs clone) in wz-codecs -- the lowest crate every role consumer already depends on, no_std/core-only.",
+        "wz-codecs: new whatami module -- WhatAmI{Router=1,Peer=2,Client=4} + TryFrom<u8> (subsumes is_valid_whatami) + to_wire/from_wire (the 2-bit INIT/JOIN packing SSOT) + to_api/Display; round-trip + prior-arithmetic byte-equality tests.",
+        "wz-routing-graph: Node.whatami -> Option<WhatAmI>; add_link/new take WhatAmI; make_link_state projects to_api at the wire edge; ingest validates via TryFrom; the WHATAMI_* byte consts + is_valid_whatami are removed and WhatAmI re-exported.",
+        "wz-runtime-tokio: whatami_from_wire fn deleted (-> WhatAmI::from_wire); peer_whatami_routing returns WhatAmI; LinkstateForwarder::new/with_trees_delay take WhatAmI; re-export is WhatAmI not the byte consts; demo passes WhatAmI::Peer.",
+        "Test call sites migrated (graph 116 new/add_link, driver new/add_link) via a line-anchored sed (node_count and peer_face_whatami wire-2 args preserved); the Node.whatami assertions become Some(WhatAmI::Peer)."
+      ],
+      "publishable_verification_bullets": [
+        "Gates: wz-codecs whatami 3; wz-routing-graph 49; wz-runtime-tokio routing-peer lib 365 (the driver's whatami_from_wire test moved to its wz-codecs SSOT home); session_fsm 25; demo builds all 4 routing axes; clippy -D + fmt clean.",
+        "Behaviour-preserving: to_wire/from_wire are byte-equal to the prior init_cbyte (api>>1)&3 / pico 1<<(b&3) (pinned by a wz-codecs test); all-peer wire output unchanged; no routing/tree path reads whatami.",
+        "Layering: WhatAmI lives in wz-codecs -- the only crate wz-routing-graph (which cannot dep on session-core, the Zid-debt constraint), wz-session-core, and wz-runtime-tokio all already depend on.",
+        "Grounding (direct read): zenoh whatami.rs (the enum + TryFrom<u8>); zenoh-codec init.rs:166-172 (the 2-bit wire decode rejects the reserved 0b11); zenoh-pico transport.c:31-37.",
+        "Partial by design: the self/handshake role (init_cbyte, SessionInitParams) + multicast JOIN are still bare u8 -- the next atom routes them through WhatAmI::to_wire to finish the SSOT (F1/F4)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tf = typed WhatAmI SSOT, atoms 1+2 (the structural round the te session-review tracked). The role is now one type owning both wire mappings; the routing graph + driver + demo are off bare u8.",
+        "NEXT atom (A3): migrate the self/handshake role -- init_cbyte uses WhatAmI::to_wire (closing F1: the wire<->api bijection's two halves no longer split across crates), and SessionInitParams.whatami + MulticastParams.whatami + JOIN -> WhatAmI (closing F4).",
+        "THEN atom (A4) = gossip-policy: introduce WhatAmIMatcher (its load-bearing consumer) + port zenoh propagate_locators per-target gate (network.rs:406-418) so locators stop flooding to all faces (divergence lib.rs:492-503).",
+        "LOCAL UNPUSHED: 311td/te/tf on origin/main=dd93ae5. Host lanes verified per-atom; full run-ci + idle before push. Push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

@@ -110,13 +110,10 @@ use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
-/// Re-export so the peer-loop caller (the demo) names the neighbour role by
-/// the same const the graph + forwarder use, not a bare `0x02` literal. Only
-/// `WHATAMI_PEER` is in the demo's vocabulary; `WHATAMI_ROUTER` /
-/// `WHATAMI_CLIENT` are consumed internally by [`whatami_from_wire`], so they are
-/// imported (not re-exported) to keep the public surface to what callers name.
-pub use wz_routing_graph::{Zid, WHATAMI_PEER};
-use wz_routing_graph::{WHATAMI_CLIENT, WHATAMI_ROUTER};
+/// Re-export `Zid` and the typed [`WhatAmI`] role so the peer-loop caller (the
+/// demo) and the forwarder name a neighbour's role by the same SSOT type
+/// (defined in `wz-codecs`, re-exported through the graph), not a bare byte.
+pub use wz_routing_graph::{WhatAmI, Zid};
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -206,7 +203,7 @@ impl LinkstateForwarder {
 
     /// A driver seeded with the local node (this peer's zid + whatami), using the
     /// default [`DEFAULT_TREES_DELAY`](Self::DEFAULT_TREES_DELAY) recompute window.
-    pub fn new(self_zid: Zid, self_whatami: u8) -> Self {
+    pub fn new(self_zid: Zid, self_whatami: WhatAmI) -> Self {
         Self::with_trees_delay(self_zid, self_whatami, Self::DEFAULT_TREES_DELAY)
     }
 
@@ -215,7 +212,7 @@ impl LinkstateForwarder {
     /// by). A shorter window converges faster at the cost of more frequent
     /// recomputes under churn; a longer one coalesces a heavier burst. This tunes
     /// the single coalescing path — it does not turn coalescing off.
-    pub fn with_trees_delay(self_zid: Zid, self_whatami: u8, trees_delay: Duration) -> Self {
+    pub fn with_trees_delay(self_zid: Zid, self_whatami: WhatAmI, trees_delay: Duration) -> Self {
         Self {
             net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
             faces: RefCell::new(HashMap::new()),
@@ -1110,48 +1107,28 @@ fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
         .and_then(|bytes| Zid::try_from(bytes).ok())
 }
 
-/// Map the 2-bit INIT wire whatami (`SessionLinkActions::peer_whatami_wire` =
-/// `InitBody::whatami()` = `cbyte & 0x03`) to the graph's API-form role byte (the
-/// [`WHATAMI_ROUTER`] / [`WHATAMI_PEER`] / [`WHATAMI_CLIENT`] set). Inverse of the
-/// handshake's `init_cbyte` packing (`(api >> 1) & 0x03`,
-/// `wz-session-core/src/handshake_encode.rs`). For the three valid bit-patterns it
-/// equals zenoh-pico `_z_whatami_from_uint8` (`1 << (b & 0x03)`,
-/// `codec/transport.c:35-37`); it DIVERGES at the reserved `0b11`, where pico
-/// returns 8 (an out-of-set role) but this returns `None`. A conforming encoder
-/// never emits `0b11`, so this narrows what a non-conforming peer can put on a
-/// graph node's role byte to the valid set — it does NOT reject the handshake
-/// itself (wz, unlike zenoh `init.rs`, does not reject a reserved whatami at INIT
-/// decode; tracked alongside the typed-`WhatAmI` follow-up).
-fn whatami_from_wire(wire: u8) -> Option<u8> {
-    match wire & 0x03 {
-        0 => Some(WHATAMI_ROUTER),
-        1 => Some(WHATAMI_PEER),
-        2 => Some(WHATAMI_CLIENT),
-        _ => None, // 0b11 reserved — never produced by `init_cbyte`
-    }
-}
-
-/// The neighbour's WhatAmI role for [`add_link`](LinkstateNetwork::add_link),
+/// The neighbour's [`WhatAmI`] role for [`add_link`](LinkstateNetwork::add_link),
 /// derived from the handshake (R311td "F1"). Mirrors [`peer_zid_routing`]: the
 /// raw wire datum lives in routing-agnostic session-core, and the routing
-/// interpretation (wire -> API form via [`whatami_from_wire`]) lives here at the
-/// driver boundary. The two fall-back cases are kept DISTINCT (not collapsed into
-/// one silent default):
+/// interpretation (the 2-bit wire role -> the typed role via
+/// [`WhatAmI::from_wire`], the SSOT decode in `wz-codecs`) lives here at the
+/// driver boundary. The two fall-back cases are kept DISTINCT (not collapsed
+/// into one silent default):
 /// - role ABSENT (`None`): a face registered before the INIT exchange populated
-///   the slot — silently the peer-mesh default [`WHATAMI_PEER`] (legitimate).
-/// - role NON-CONFORMING (a reserved wire pattern): `log::warn!` then default to
-///   [`WHATAMI_PEER`], matching the ingest path's warn-on-invalid-whatami
+///   the slot — silently the peer-mesh default [`WhatAmI::Peer`] (legitimate).
+/// - role NON-CONFORMING (the reserved wire pattern): `log::warn!` then default
+///   to [`WhatAmI::Peer`], matching the ingest path's warn-on-invalid-whatami
 ///   (`wz-routing-graph` `process_linkstates`) so a protocol violation is logged
 ///   on both paths, not swallowed silently here.
 ///
-/// An all-peer deployment hits neither branch (wire Peer -> WHATAMI_PEER), so it
-/// is behaviour-unchanged.
-fn peer_whatami_routing(actions: &SessionLinkActions) -> u8 {
+/// An all-peer deployment hits neither branch (wire Peer -> Peer), so it is
+/// behaviour-unchanged.
+fn peer_whatami_routing(actions: &SessionLinkActions) -> WhatAmI {
     match actions.peer_whatami_wire() {
-        None => WHATAMI_PEER,
-        Some(wire) => whatami_from_wire(wire).unwrap_or_else(|| {
+        None => WhatAmI::Peer,
+        Some(wire) => WhatAmI::from_wire(wire).unwrap_or_else(|| {
             log::warn!("face handshake whatami wire={wire} non-conforming; recording as peer");
-            WHATAMI_PEER
+            WhatAmI::Peer
         }),
     }
 }
@@ -1205,7 +1182,7 @@ impl FaceForwarder for LinkstateForwarder {
         // R311td ("F1") — the neighbour's real handshake WhatAmI is now threaded
         // onto the face: `peer_whatami_routing` maps the wire role captured at the
         // INIT exchange to the graph's API-form byte (absent / non-conforming ->
-        // WHATAMI_PEER, the peer-mesh default). Spanning-tree forwarding stays
+        // WhatAmI::Peer, the peer-mesh default). Spanning-tree forwarding stays
         // whatami-agnostic, so this is behaviour-neutral for an all-peer mesh; it
         // is the gossip-policy / autoconnect prerequisite (those gate per the
         // target's true role).
@@ -1460,30 +1437,22 @@ mod tests {
 
     #[test]
     fn face_up_connects_neighbour() {
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (face, _sink) = peer_face(zid(0xAA));
         fwd.register(FaceId(7), &face);
         // self + the neighbour node.
         assert_eq!(fwd.net.borrow().node_count(), 2);
     }
 
-    #[test]
-    fn whatami_from_wire_maps_wire_to_api() {
-        // The 2-bit INIT wire role -> the graph's API-form byte (inverse of
-        // init_cbyte's `(api >> 1) & 3`; zenoh-pico `_z_whatami_from_uint8`).
-        assert_eq!(whatami_from_wire(0), Some(WHATAMI_ROUTER));
-        assert_eq!(whatami_from_wire(1), Some(WHATAMI_PEER));
-        assert_eq!(whatami_from_wire(2), Some(WHATAMI_CLIENT));
-        // 0b11 is the reserved pattern a conforming encoder never emits.
-        assert_eq!(whatami_from_wire(3), None);
-    }
+    // (the wire<->role mapping itself is tested at its SSOT home, `wz-codecs`
+    // `whatami` — the driver no longer owns a conversion fn to test.)
 
     #[test]
     fn register_threads_real_handshake_whatami() {
         // R311td "F1": the neighbour's real role (not a hardcoded peer) lands on
         // its graph node — a router neighbour and a client neighbour each record
         // their true WhatAmI, the gossip-policy/autoconnect prerequisite.
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (router, _r) = peer_face_whatami(zid(0xAA), 0); // wire 0 = Router
         let (client, _c) = peer_face_whatami(zid(0xBB), 2); // wire 2 = Client
         fwd.register(FaceId(1), &router);
@@ -1491,25 +1460,25 @@ mod tests {
         let net = fwd.net.borrow();
         assert_eq!(
             net.get_node(&zid(0xAA)).unwrap().whatami,
-            Some(WHATAMI_ROUTER)
+            Some(WhatAmI::Router)
         );
         assert_eq!(
             net.get_node(&zid(0xBB)).unwrap().whatami,
-            Some(WHATAMI_CLIENT)
+            Some(WhatAmI::Client)
         );
     }
 
     #[test]
     fn register_without_handshake_whatami_falls_back_to_peer() {
         // A face whose handshake role never surfaced (the pre-F1 path / a peer
-        // mesh) keeps the WHATAMI_PEER default, so an all-peer deployment is
+        // mesh) keeps the WhatAmI::Peer default, so an all-peer deployment is
         // behaviour-unchanged by F1.
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (face, _sink) = peer_face(zid(0xAA)); // no whatami slot set
         fwd.register(FaceId(7), &face);
         assert_eq!(
             fwd.net.borrow().get_node(&zid(0xAA)).unwrap().whatami,
-            Some(WHATAMI_PEER)
+            Some(WhatAmI::Peer)
         );
     }
 
@@ -1521,7 +1490,7 @@ mod tests {
     #[cfg(feature = "codec-init-body")]
     #[test]
     fn register_records_whatami_end_to_end_through_handle_inbound() {
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (actions, _sink) = recording_actions();
         let initsyn = vec![
             0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
@@ -1539,14 +1508,14 @@ mod tests {
         fwd.register(FaceId(7), &actions);
         assert_eq!(
             fwd.net.borrow().get_node(&zid(0xAA)).unwrap().whatami,
-            Some(WHATAMI_ROUTER),
+            Some(WhatAmI::Router),
             "a router peer's INIT role is captured and recorded end-to-end"
         );
     }
 
     #[test]
     fn inbound_linkstate_grows_the_graph_and_counts() {
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (face, _sink) = peer_face(zid(0xAA));
         fwd.register(FaceId(7), &face);
         // The neighbour A floods a consistent list: A (psid 1) advertises self
@@ -1567,7 +1536,7 @@ mod tests {
 
     #[test]
     fn inbound_from_unknown_face_is_dropped() {
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         // no face registered for id 9.
         fwd.ingest_inbound_linkstate(FaceId(9), list_with_node(11, 5, 0xBB));
         assert_eq!(fwd.ingested(), 0);
@@ -1576,7 +1545,7 @@ mod tests {
 
     #[test]
     fn face_down_disconnects_neighbour() {
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (face, _sink) = peer_face(zid(0xAA));
         fwd.register(FaceId(7), &face);
         assert_eq!(fwd.net.borrow().node_count(), 2);
@@ -1590,7 +1559,7 @@ mod tests {
     fn flood_self_links_changed_sends_to_every_face() {
         // the TX seam fan-out: a self link-state delta reaches every held face's
         // send seam (the OAM landing as one frame per face).
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (face_a, sink_a) = recording_actions();
         let (face_b, sink_b) = recording_actions();
         fwd.register(FaceId(0), &face_a);
@@ -1604,7 +1573,7 @@ mod tests {
 
     #[test]
     fn deregister_stops_flooding_a_face() {
-        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
         let (face_a, sink_a) = recording_actions();
         fwd.register(FaceId(0), &face_a);
         fwd.deregister(FaceId(0));
@@ -1622,7 +1591,7 @@ mod tests {
         // EXISTING faces at once (event-driven), not at a periodic tick. A is held
         // (a routing peer, so its zid connects it); B then registers, and A
         // receives self's updated link-state immediately.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         sink_a.reset(); // ignore A's own register-time bootstrap
@@ -1662,7 +1631,7 @@ mod tests {
         // -- existing faces get only self's links-only entry, not the 2-entry
         // [neighbour, self] delta. (Each add_link mints a new link id but the graph
         // node is shared, so the second register sees the peer already present.)
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A)); // an existing witness
         let (face_b0, sink_b0) = peer_face(zid(0x0B)); // B's first link
         fwd.register(FaceId(0), &face_a);
@@ -1694,7 +1663,7 @@ mod tests {
         // neighbour, sn bumped), so self floods the update to the SURVIVING faces at
         // once, so they drop the dead link from their topology now (zenoh
         // remove_link's send_on_links) rather than at a periodic tick.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, _sb) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -1718,7 +1687,7 @@ mod tests {
     fn propagate_re_floods_changed_nodes_to_other_faces() {
         // a change that arrived on face 0 is re-flooded to face 1, never
         // back to its source (transitive propagation; zenoh excludes src).
-        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let fwd = LinkstateForwarder::new(zid(0x0B), WhatAmI::Peer);
         let (source, source_sink) = recording_actions();
         let (other, other_sink) = recording_actions();
         fwd.register(FaceId(0), &source);
@@ -1741,7 +1710,7 @@ mod tests {
 
     #[test]
     fn propagate_with_no_changes_sends_nothing() {
-        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let fwd = LinkstateForwarder::new(zid(0x0B), WhatAmI::Peer);
         let (other, other_sink) = recording_actions();
         fwd.register(FaceId(1), &other);
         let sent = fwd
@@ -1756,7 +1725,7 @@ mod tests {
         // zenoh network.rs:663 — a peer never receives its OWN link-state
         // echoed. With faces to A (zid 0x0A) and C (zid 0x0C) held, a change
         // to A's state propagates to C but NOT back to A's own face.
-        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let fwd = LinkstateForwarder::new(zid(0x0B), WhatAmI::Peer);
         let (peer_a, sink_a) = peer_face(zid(0x0A));
         let (peer_c, sink_c) = peer_face(zid(0x0C));
         // register connects each face in the graph AND bootstraps it (a
@@ -1789,7 +1758,7 @@ mod tests {
         // face to a NON-involved peer (C) receives both halves; decoding its
         // frame proves the split landed on the wire (new keeps its zid, updated
         // omits it) and was not swapped.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (peer_a, _sa) = peer_face(zid(0x0A));
         let (peer_b, _sb) = peer_face(zid(0x0B));
         let (peer_c, sink_c) = peer_face(zid(0x0C));
@@ -1829,7 +1798,7 @@ mod tests {
         // R311rf — a face with a routing zid is bootstrapped on register:
         // the forwarder immediately advertises its own link-state to it, so a
         // freshly-up neighbour converges without waiting for the next tick.
-        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let fwd = LinkstateForwarder::new(zid(0x0B), WhatAmI::Peer);
         let (peer, sink) = peer_face(zid(0x0A));
         fwd.register(FaceId(1), &peer);
         assert_eq!(
@@ -1843,7 +1812,7 @@ mod tests {
     fn register_without_zid_does_not_bootstrap() {
         // A face held without a routing identity (no zid) is not a graph
         // neighbour, so there is nothing to bootstrap it with.
-        let fwd = LinkstateForwarder::new(zid(0x0B), 2);
+        let fwd = LinkstateForwarder::new(zid(0x0B), WhatAmI::Peer);
         let (face, sink) = recording_actions();
         fwd.register(FaceId(1), &face);
         assert_eq!(
@@ -2082,7 +2051,7 @@ mod tests {
         // link-local table, matches B's interest, and forwards toward B — but
         // NORMALIZED to a literal (id 0), since B's link does not share A's alias
         // table (c3c-3 B1).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2117,7 +2086,7 @@ mod tests {
     fn an_undeclared_alias_no_longer_resolves_so_the_push_drops() {
         // After the alias is retracted (UndeclKexpr), a Push still carrying it is
         // unresolvable and dropped — the table entry is gone.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2146,7 +2115,7 @@ mod tests {
     fn an_unknown_alias_push_is_dropped() {
         // A Push carrying an alias the peer never declared on this link is
         // unresolvable -> dropped (no misroute on a pre-declaration / bogus id).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2172,7 +2141,7 @@ mod tests {
         // sends a Push aliased 7 WITH a per-message suffix "/data". self resolves
         // it to "demo" + "/data" = "demo/data" via the table, matches B's interest,
         // and forwards the COMPOSED literal (proving the suffix survives normalize).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2211,7 +2180,7 @@ mod tests {
         // it via A's table, registers the RESOLVED literal interest, and re-floods
         // a LITERAL declare to its child B (B1b, the control-plane twin of B1a's
         // forward_push normalize).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2250,7 +2219,7 @@ mod tests {
         // unsubscribe. A aliases 7 -> "demo/sub", subscribes (aliased), then sends
         // a PURE-ALIASED UndeclareSubscriber (ext_keyexpr id 7). self resolves the
         // ext alias via A's table and withdraws the resolved literal interest.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2296,7 +2265,7 @@ mod tests {
         // the Push's keyexpr. A Push self-originated by neighbour A (node_id 0)
         // floods along A's tree toward the interested subscriber B: self's only
         // child toward B is B, so it reaches B and never goes back to A.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self -> idx 0
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self -> idx 0
         let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
         let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
         fwd.register(FaceId(0), &face_a);
@@ -2333,7 +2302,7 @@ mod tests {
         // Push from A still does not reach it: B is not in A's spanning tree, so
         // `directions_toward` finds no hop toward it (interest alone is not
         // enough — the subscriber must be reachable in the source's tree).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2361,7 +2330,7 @@ mod tests {
         // there is C (A is B's child, not self's), so only C receives it —
         // re-stamped into SELF's psid space for B. The link mapping is taught by
         // a REAL ingest (A advertising its links), not a graph-internal poke.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S -> idx 0
         let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
         let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 2
         fwd.register(FaceId(0), &face_a);
@@ -2403,7 +2372,7 @@ mod tests {
         // into self's psid for B. Exercises the shared resolve_source seam with a
         // non-zero id on the Declare path, where the prior subscription tests only
         // used node_id 0.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S -> idx 0
         let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
         let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 2
         fwd.register(FaceId(0), &face_a);
@@ -2444,7 +2413,7 @@ mod tests {
         // self(S) publishes its OWN data toward an interested subscriber: A
         // subscribes, so the Put reaches A (self's child toward A in self's
         // tree), stamped self-originated (node_id 0).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
@@ -2462,7 +2431,7 @@ mod tests {
     fn publish_to_an_unsubscribed_keyexpr_sends_nothing() {
         // The any-interest gate on the publish path: with no subscriber for the
         // keyexpr, originating a Put reaches no face (and allocates no carrier).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
@@ -2477,7 +2446,7 @@ mod tests {
     fn forward_counts_received_data_pushes() {
         // The forward() seam counts every received data Push — the data-plane
         // reception witness a far peer logs to prove end-to-end delivery.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
@@ -2501,7 +2470,7 @@ mod tests {
         // never be a transit source on a message arriving at us, and re-stamping
         // it would hit local psid 0 = the self-originated sentinel (misroute).
         // forward_push must DROP it, not flood it to self's tree children.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2532,7 +2501,7 @@ mod tests {
         // A transit node_id with no entry in the inbound link's psid->zid map
         // cannot be placed in any tree — forward_push drops it (no misroute on
         // an attacker-supplied / pre-convergence bogus source).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2592,7 +2561,7 @@ mod tests {
         // c3c-3 D1 — a published Put carries a hop-limit budget = node_count (the
         // transient-loop bound). With self + A in the graph, node_count is 2, so
         // the Put A receives is stamped with budget 2.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A (2 nodes)
@@ -2614,7 +2583,7 @@ mod tests {
         // c3c-3 D1 — a transit forward decrements the budget by one (the next hop
         // sees one less). Line A - S - B, B subscribes; a Push from A arrives with
         // hop 5 and is re-forwarded to B with hop 4.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2642,7 +2611,7 @@ mod tests {
         // (hop 1, the last unit) is NOT re-forwarded, even though B is an
         // interested child in the source's tree. This is what cuts a transient
         // convergence loop after a bounded number of hops.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2671,7 +2640,7 @@ mod tests {
         // node_count, then decremented, so it is bounded from its first mesh hop.
         // Line A - S - B (3 nodes), B subscribes; an un-stamped Push from A is
         // forwarded to B with hop = node_count - 1 = 2.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2704,7 +2673,7 @@ mod tests {
         // initial budget — proving a transient loop terminates by construction
         // rather than circulating forever. Line C(source) - S - A; A subscribes,
         // so each round forwards toward A and decrements the budget.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A)); // interested child
         let (face_c, _sc) = peer_face(zid(0x0C)); // inbound source neighbour
         fwd.register(FaceId(0), &face_a);
@@ -2752,7 +2721,7 @@ mod tests {
         // Dropping A's face must leave B's tree with NO child of self (A and C
         // become unreachable) — which only holds if deregister recomputed; a
         // stale tree would still name A.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, _sb) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2819,7 +2788,7 @@ mod tests {
         // NEVER across the S-B cycle edge, so the message cannot loop S->B->A->S.
         // The cycle edge is excluded because the (converged, deterministic-
         // jitter) tree is consistent and acyclic — interest does not override it.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S -> idx 0
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S -> idx 0
         let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
         let (face_b, sink_b) = peer_face(zid(0x0B)); // -> idx 2
         let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 3
@@ -2878,7 +2847,7 @@ mod tests {
         // tree, where B and C are both self's children. Only B subscribes, so
         // the filter forwards to B ALONE — never to the uninterested C (the
         // pre-atom4 broadcast would have hit both). This is the point of c3c-3.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         let (face_c, sink_c) = peer_face(zid(0x0C));
@@ -2907,7 +2876,7 @@ mod tests {
     fn forward_push_with_no_interest_forwards_nothing() {
         // The any-interest gate: a Push whose keyexpr no peer subscribes to is
         // not forwarded at all (the pre-atom4 broadcast would have flooded B).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -2928,7 +2897,7 @@ mod tests {
         // (the graph unit covers the split; this proves forward_push honours
         // it). S has neighbours A, B, C; a Push from A has B and C both as self's
         // children. BOTH subscribe -> the filter forwards to BOTH.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         let (face_c, sink_c) = peer_face(zid(0x0C));
@@ -2957,7 +2926,7 @@ mod tests {
         // forward filter honours it). B subscribes demo/a, C subscribes demo/b;
         // a Push for demo/a reaches only B.
         use wz_session_core::push_build::build_push_literal;
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         let (face_c, sink_c) = peer_face(zid(0x0C));
@@ -2989,7 +2958,7 @@ mod tests {
         // the far subscriber. A Push from A must reach B but NOT echo back to A:
         // A's own interest resolves to the upstream (inbound) direction, which
         // the inbound-face exclusion drops.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -3018,7 +2987,7 @@ mod tests {
         // for it (zenoh pubsub_remove_node on link-down). Before the fix the
         // interest leaked (the route self-healed via unreachability, but the
         // table kept the stale entry).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
@@ -3045,7 +3014,7 @@ mod tests {
         // therefore NOT pruned and its interest MUST survive (self still forwards
         // toward A, now via C). zenoh purges only remove_link's detached set; the
         // former unconditional peer purge wrongly dropped a still-reachable peer.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_c, _sc) = peer_face(zid(0x0C));
         fwd.register(FaceId(0), &face_a);
@@ -3086,7 +3055,7 @@ mod tests {
     fn declare_subscription_floods_to_tree_children() {
         // self(S) declares its OWN interest: floods a sourced DeclareSubscriber
         // to self's children in self's tree (here the single neighbour A).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
@@ -3106,7 +3075,7 @@ mod tests {
         // Line A - S(self) - C. A's sourced DeclareSubscriber (node_id 0) floods
         // along A's tree: self registers A's interest, then re-floods to its
         // tree child C — never back to the inbound source A.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self S
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_c, sink_c) = peer_face(zid(0x0C));
         fwd.register(FaceId(0), &face_a);
@@ -3133,7 +3102,7 @@ mod tests {
         // The change-gate: a duplicate DeclareSubscriber for an interest already
         // registered does NOT re-flood (zenoh's `if !contains`), so a converged
         // mesh cannot loop the declaration.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_c, sink_c) = peer_face(zid(0x0C));
         fwd.register(FaceId(0), &face_a);
@@ -3162,7 +3131,7 @@ mod tests {
     fn forward_dispatches_a_declare_subscriber_to_the_registry() {
         // The forward() seam routes a NetworkMessage::Declare to
         // forward_subscription — the inbound-iteration path the peer loop drives.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
@@ -3190,7 +3159,7 @@ mod tests {
         // self(S) retracts its OWN interest: floods a sourced UndeclareSubscriber
         // to self's children in self's tree (the single neighbour A) — the
         // retraction twin of declare_subscription.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
@@ -3211,7 +3180,7 @@ mod tests {
         // sourced UndeclareSubscriber (node_id 0) floods along A's tree — self
         // withdraws A's interest, then re-floods to its tree child C, never back
         // to the inbound source A.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_c, sink_c) = peer_face(zid(0x0C));
         fwd.register(FaceId(0), &face_a);
@@ -3244,7 +3213,7 @@ mod tests {
         // The change-gate: an UndeclareSubscriber for an interest never held does
         // NOT withdraw or re-flood (the mirror of zenoh's `if contains`), so a
         // retraction cannot loop on a converged mesh.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_c, sink_c) = peer_face(zid(0x0C));
         fwd.register(FaceId(0), &face_a);
@@ -3268,7 +3237,7 @@ mod tests {
         // The forward() seam routes a NetworkMessage::Declare(UndeclareSubscriber)
         // to forward_unsubscription — the inbound-iteration retract path, distinct
         // from the DeclareSubscriber register path.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
@@ -3299,7 +3268,7 @@ mod tests {
         // recompute S re-advertises A's subscription to the newly-arrived child C
         // — the late-joiner convergence pubsub_tree_change provides, the reason a
         // ONE-TIME declare suffices (no per-tick re-declare).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self S
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A only
@@ -3329,7 +3298,7 @@ mod tests {
         // declare_subscription reach a late-joining peer. self's interest lives in
         // the SAME subs set under its own zid (zenoh-faithful), so the single
         // re_advertise loop re-floods it (local_psid_of(self) == 0 -> node_id 0).
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self S
         fwd.declare_subscription("demo/self")
             .expect("declare own sub"); // no faces
 
@@ -3351,7 +3320,7 @@ mod tests {
     fn re_advertise_with_no_subscriptions_sends_nothing() {
         // The any-interest guard: with no known subscription there is nothing to
         // re-advertise, so a tree recompute floods nothing.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_c, sink_c) = peer_face(zid(0x0C));
         fwd.register(FaceId(0), &face_a);
@@ -3375,7 +3344,7 @@ mod tests {
         // converged. self S declares demo/x with B as its sole child (B gets it).
         // D then joins as a second child of S; the recompute delta is just [D], so
         // re-advertise sends demo/x to D ALONE — B is not re-sent.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self S
         let (face_b, sink_b) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_b);
         advertise_link_back(&fwd, FaceId(0), 0x0B, 0x05); // S<->B
@@ -3404,7 +3373,7 @@ mod tests {
         // set) AND a remote child A subscribes. publish forwards to A only — self
         // is the local sink (delivered by the session layer), excluded from the
         // mesh route by interested_remote, yet still a member of the set.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // self S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // self S
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
@@ -3425,7 +3394,7 @@ mod tests {
     fn publish_to_a_self_only_subscription_has_no_remote_target() {
         // A key only THIS node subscribes to yields no remote forward direction
         // (interested_remote drops self), so publish sends nowhere over the mesh.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
@@ -3458,7 +3427,7 @@ mod tests {
         // bypass forward()). The OAM is on C's own face, so `propagate` excludes C
         // (a node never receives its own state echoed), leaving exactly the one
         // re-advertised Declare for C to count.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_c, sink_c) = peer_face(zid(0x0C));
         fwd.register(FaceId(0), &face_a);
@@ -3521,7 +3490,7 @@ mod tests {
         // declare reached children B and C. Dropping B's face SCHEDULES a recompute
         // (D2c) the tick flushes; it adds no new child. C DOES receive the D2b
         // topology flood (an OAM, so it learns the dead link) — but NO Declare.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2); // S
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, _sb) = peer_face(zid(0x0B));
         let (face_c, sink_c) = peer_face(zid(0x0C));
@@ -3553,7 +3522,7 @@ mod tests {
         // The coalescing tick is a cheap poll: with nothing scheduled it runs no
         // compute_trees (the recompute witness stays 0), so an idle mesh does no
         // recompute work per tick — D2b's no-periodic-work property, preserved.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         assert_eq!(fwd.recomputes(), 0);
         fwd.tick();
         fwd.tick();
@@ -3572,7 +3541,7 @@ mod tests {
         // recomputes() rises by exactly 1, not 2 (the burst coalesced). This is
         // exactly what the forward() OAM arm drives in production (ingest +
         // schedule_recompute), exercised directly here for the count.
-        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
         let (face_b, _sb) = peer_face(zid(0x0B));
         fwd.register(FaceId(0), &face_a);
@@ -3604,12 +3573,16 @@ mod tests {
         // delay), surfaced as the loop's tick cadence. Default and override both
         // arm the tick — the coalescing path is always on; the knob TUNES the
         // window, it is not an on/off switch.
-        let default = LinkstateForwarder::new(zid(0x05), 2);
+        let default = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         assert_eq!(
             default.tick_period(),
             Some(LinkstateForwarder::DEFAULT_TREES_DELAY)
         );
-        let tuned = LinkstateForwarder::with_trees_delay(zid(0x05), 2, Duration::from_millis(5));
+        let tuned = LinkstateForwarder::with_trees_delay(
+            zid(0x05),
+            WhatAmI::Peer,
+            Duration::from_millis(5),
+        );
         assert_eq!(tuned.tick_period(), Some(Duration::from_millis(5)));
     }
 }
