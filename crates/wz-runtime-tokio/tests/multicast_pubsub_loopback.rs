@@ -45,6 +45,7 @@ use wz_runtime_tokio::UdpDriver;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::observer::ApplicationLayerObserver;
+use wz_session_core::WhatAmI;
 
 const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
 // Distinct group port from the scouting Layer M tests (7446 / 7448) so the
@@ -56,7 +57,7 @@ const PAYLOAD: &[u8] = b"pub-over-multicast";
 fn mc_params(zid_byte: u8) -> MulticastParams {
     MulticastParams {
         version: 0x09,
-        whatami: 0x01, // PEER (wire form)
+        whatami: WhatAmI::Peer,
         zid: vec![zid_byte; 4],
         lease_ms: 5_000,
         join_interval_ms: 50,

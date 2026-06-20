@@ -60,7 +60,7 @@ pub fn encode_join(params: &MulticastParams, tx_sn: &TxSn) -> Vec<u8> {
     let zid = &params.zid;
     let mut join = Join::new();
     join.version = params.version;
-    join.set_whatami(params.whatami);
+    join.set_whatami(params.whatami.to_wire());
     if !zid.is_empty() {
         join.set_zid_len_m1((zid.len() - 1) as u8);
         join.zid = zid.as_slice();
@@ -186,11 +186,12 @@ mod tests {
     use super::*;
     use crate::sn;
     use std::vec::Vec;
+    use wz_codecs::whatami::WhatAmI;
 
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             version: 0x09,
-            whatami: 0x01, // PEER (wire form)
+            whatami: WhatAmI::Peer,
             zid: zid.to_vec(),
             lease_ms: 5_000,
             join_interval_ms: 1,
@@ -339,7 +340,7 @@ mod tests {
         let p = params(&[0x01, 0x02, 0x03, 0x04]);
         let mut join = Join::new();
         join.version = p.version;
-        join.set_whatami(p.whatami);
+        join.set_whatami(p.whatami.to_wire());
         join.set_zid_len_m1(3);
         join.zid = &[0x05, 0x06, 0x07, 0x08];
         join.sn_res = Some(pack_res_cbyte(0x02, 0x01)); // seq ok, req off
@@ -367,7 +368,7 @@ mod tests {
         let zid = [0x11, 0x22, 0x33];
         let mut join = Join::new();
         join.version = 0x09;
-        join.set_whatami(0x01);
+        join.set_whatami(WhatAmI::Peer.to_wire());
         join.set_zid_len_m1((zid.len() - 1) as u8);
         join.zid = &zid;
         join.sn_res = Some(0x00);

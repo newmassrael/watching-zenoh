@@ -18,7 +18,7 @@
 //     state from `main` into `run_demo` without inflating the
 //     latter's argument list past clippy::too_many_arguments.
 
-use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey};
+use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey, WhatAmI};
 
 /// R121f — session role select. `--listen` lands here as
 /// `Acceptor`; `--connect` lands as `Initiator`. The two roles
@@ -139,21 +139,21 @@ impl Role {
 }
 
 pub(crate) fn demo_session_init_params(kind: NodeKind) -> SessionInitParams {
-    let whatami_api = match kind {
-        NodeKind::Acceptor => 0x02, // Peer — R121b/c/d/e baseline
+    let whatami = match kind {
+        NodeKind::Acceptor => WhatAmI::Peer, // R121b/c/d/e baseline
         // The router accepts via the same well-tested Client->Peer direction as
         // the acceptor (a true WhatAmI::Router wire value is a later refinement,
         // R311qa carry), so it also announces Peer.
         #[cfg(feature = "routing-router")]
-        NodeKind::Router => 0x02,
+        NodeKind::Router => WhatAmI::Peer,
         // A hold-only mesh peer announces Peer too (whatami refinement later).
         #[cfg(feature = "routing-peer")]
-        NodeKind::Peer => 0x02,
-        NodeKind::Initiator => 0x04, // Client — R121f initiator path
+        NodeKind::Peer => WhatAmI::Peer,
+        NodeKind::Initiator => WhatAmI::Client, // R121f initiator path
     };
     SessionInitParams {
         version: 0x09,
-        whatami: whatami_api,
+        whatami,
         zid: vec![0x01, 0x02, 0x03, 0x04],
         seq_num_res: 2,
         req_id_res: 2,

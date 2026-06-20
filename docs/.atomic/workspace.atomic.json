@@ -44546,6 +44546,64 @@
         "LOCAL UNPUSHED: 311td/te/tf on origin/main=dd93ae5. Host lanes verified per-atom; full run-ci + idle before push. Push only after explicit consent."
       ]
     },
+    "Round 311tg": {
+      "decision_summary": "R311tg: typed WhatAmI A3 -- outbound self role (SessionInitParams + MulticastParams) off bare u8; init_cbyte + encode_join project via to_wire, closing F1 (api<->wire bijection) and F4 (form divergence).",
+      "changes_bullets": [
+        "SessionInitParams.whatami: u8 (API form) -> WhatAmI; init_cbyte now packs whatami.to_wire() in place of the inline (api>>1)&3, so the api<->wire bijection lives only in wz-codecs::whatami (F1 closed).",
+        "MulticastParams.whatami: u8 (wire 2-bit) -> WhatAmI; encode_join projects to_wire() at the codec edge. The two bundles had stored the same Peer as 0x02(api) vs 0x01(wire) -- now one type (F4 closed).",
+        "wz-session-core re-exports WhatAmI (beside wire_const) and wz-runtime-tokio::session_glue re-exports it beside SessionInitParams, so callers name the param bundle and its whatami field type from one place.",
+        "All construction sites migrated form-correctly: api 0x02 + wire 0x01 both -> WhatAmI::Peer, demo Initiator 0x04 -> Client (demo, MCU crates, lwip drives, test-support, e2e-harness, 6 fixtures).",
+        "The latent multicast->graph wire/api confusion (a wire 1=Peer read as api 1=Router at add_link) is now unrepresentable: MulticastParams.whatami is a role, not a byte; its sole consumer stays encode_join.",
+        "The two direct-Join wire tests now use WhatAmI::Peer.to_wire(); remaining raw whatami bytes are only the LinkState OAM codec field (Option<u8>, ingest TryFrom) and the layer3 FFI oracle."
+      ],
+      "verification_bullets": [
+        "Layer C1 (workspace test minus the 4 MCU crates) green; byte-preserving: init_cbyte + multicast_join wire tests, session_glue_dispatch InitSyn byte assert, layer3_init_body pico FFI oracle all unchanged.",
+        "MCU host lanes pass (lwip transport-multicast, mcu-acceptor, mcu-multicast-e2e); clippy -D clean on session-core/runtime-tokio/demo-4-axes/lwip/mcu; fmt clean; demo builds 4 routing axes.",
+        "to_wire byte-equality is pinned in wz-codecs (to_wire == (api>>1)&3 and 1<<wire == api), so the SSOT consolidation is mechanically behaviour-preserving; all-peer demo emits the identical cbyte (Peer -> 0x01).",
+        "Grounding (read): MulticastParams.whatami's sole reader is encode_join and validate_join does not inspect join.whatami, so no multicast->graph path exists today -- the typing is by-construction prevention, not a bug fix (honest)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311tg = typed WhatAmI A3 (outbound self role). F1 (init_cbyte -> to_wire; api<->wire bijection in one crate) and F4 (SessionInitParams + MulticastParams both store WhatAmI) closed; all-peer behaviour byte-identical.",
+        "NEXT = A4 gossip-policy: add WhatAmIMatcher (the load-bearing consumer) + port propagate_locators per-target gate (network.rs:406-418), ending locator flood-to-all (divergence lib.rs:490-494). Now unblocked.",
+        "STILL TRACKED (decode-side, outside A3's outbound scope): wz Init still accepts the reserved 0b11 whatami where zenoh rejects at decode -- wire the orphaned whatami_v1_valid into Init decode.",
+        "STILL TRACKED: the inbound peer_whatami slot stays raw wire u8, typed at the driver routing boundary (from_wire); promoting it to WhatAmI is the same decode-validation item as the 0b11 gap.",
+        "STILL TRACKED: bare-u8 role retired; remaining raw whatami bytes are legitimate wire layer (LinkState OAM Option<u8> + layer3 FFI oracle). Zid/Locator newtype is the sibling debt class.",
+        "LOCAL UNPUSHED: 311tg on origin/main=a03f221. Host + MCU host lanes verified; full run-ci + idle before push. Push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tg: typed WhatAmI A3 -- outbound self role (SessionInitParams + MulticastParams) off bare u8; init_cbyte + encode_join project via to_wire, closing F1 (api<->wire bijection) and F4 (form divergence).",
+      "publishable_changes_bullets": [
+        "SessionInitParams.whatami: u8 (API form) -> WhatAmI; init_cbyte now packs whatami.to_wire() in place of the inline (api>>1)&3, so the api<->wire bijection lives only in wz-codecs::whatami (F1 closed).",
+        "MulticastParams.whatami: u8 (wire 2-bit) -> WhatAmI; encode_join projects to_wire() at the codec edge. The two bundles had stored the same Peer as 0x02(api) vs 0x01(wire) -- now one type (F4 closed).",
+        "wz-session-core re-exports WhatAmI (beside wire_const) and wz-runtime-tokio::session_glue re-exports it beside SessionInitParams, so callers name the param bundle and its whatami field type from one place.",
+        "All construction sites migrated form-correctly: api 0x02 + wire 0x01 both -> WhatAmI::Peer, demo Initiator 0x04 -> Client (demo, MCU crates, lwip drives, test-support, e2e-harness, 6 fixtures).",
+        "The latent multicast->graph wire/api confusion (a wire 1=Peer read as api 1=Router at add_link) is now unrepresentable: MulticastParams.whatami is a role, not a byte; its sole consumer stays encode_join.",
+        "The two direct-Join wire tests now use WhatAmI::Peer.to_wire(); remaining raw whatami bytes are only the LinkState OAM codec field (Option<u8>, ingest TryFrom) and the layer3 FFI oracle."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1 (workspace test minus the 4 MCU crates) green; byte-preserving: init_cbyte + multicast_join wire tests, session_glue_dispatch InitSyn byte assert, layer3_init_body pico FFI oracle all unchanged.",
+        "MCU host lanes pass (lwip transport-multicast, mcu-acceptor, mcu-multicast-e2e); clippy -D clean on session-core/runtime-tokio/demo-4-axes/lwip/mcu; fmt clean; demo builds 4 routing axes.",
+        "to_wire byte-equality is pinned in wz-codecs (to_wire == (api>>1)&3 and 1<<wire == api), so the SSOT consolidation is mechanically behaviour-preserving; all-peer demo emits the identical cbyte (Peer -> 0x01).",
+        "Grounding (read): MulticastParams.whatami's sole reader is encode_join and validate_join does not inspect join.whatami, so no multicast->graph path exists today -- the typing is by-construction prevention, not a bug fix (honest)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tg = typed WhatAmI A3 (outbound self role). F1 (init_cbyte -> to_wire; api<->wire bijection in one crate) and F4 (SessionInitParams + MulticastParams both store WhatAmI) closed; all-peer behaviour byte-identical.",
+        "NEXT = A4 gossip-policy: add WhatAmIMatcher (the load-bearing consumer) + port propagate_locators per-target gate (network.rs:406-418), ending locator flood-to-all (divergence lib.rs:490-494). Now unblocked.",
+        "STILL TRACKED (decode-side, outside A3's outbound scope): wz Init still accepts the reserved 0b11 whatami where zenoh rejects at decode -- wire the orphaned whatami_v1_valid into Init decode.",
+        "STILL TRACKED: the inbound peer_whatami slot stays raw wire u8, typed at the driver routing boundary (from_wire); promoting it to WhatAmI is the same decode-validation item as the 0b11 gap.",
+        "STILL TRACKED: bare-u8 role retired; remaining raw whatami bytes are legitimate wire layer (LinkState OAM Option<u8> + layer3 FFI oracle). Zid/Locator newtype is the sibling debt class.",
+        "LOCAL UNPUSHED: 311tg on origin/main=a03f221. Host + MCU host lanes verified; full run-ci + idle before push. Push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

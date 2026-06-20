@@ -80,6 +80,7 @@ use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
+use wz_session_core::WhatAmI;
 
 /// UDP port the acceptor session socket binds to.
 pub const SESSION_PORT: u16 = 7460;
@@ -549,7 +550,7 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
 fn acceptor_params() -> SessionInitParams {
     SessionInitParams {
         version: 0x05,
-        whatami: 0x02,
+        whatami: WhatAmI::Peer,
         zid: vec![0x0A, 0x0B, 0x0C, 0x0D],
         seq_num_res: 2,
         req_id_res: 2,

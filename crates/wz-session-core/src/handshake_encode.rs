@@ -36,6 +36,8 @@ use alloc::vec::Vec;
     feature = "codec-close"
 ))]
 use sce_forge_runtime::codec::VecSink;
+#[cfg(feature = "codec-init-body")]
+use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
@@ -254,16 +256,17 @@ pub const fn encode_keep_alive() -> [u8; 1] {
     [wire_const::T_MID_KEEP_ALIVE]
 }
 
-/// Pack the `cbyte` field per zenoh-pico's `_z_whatami_to_uint8`
-/// (transport.c:31-37) + `(zid_len - 1) << 4` (transport.c:189-192).
+/// Pack the `cbyte` field: the 2-bit whatami wire form (via
+/// [`WhatAmI::to_wire`], the `_z_whatami_to_uint8` SSOT,
+/// transport.c:31-37) in the low bits + `(zid_len - 1) << 4`
+/// (transport.c:189-192) in the high nibble.
 #[cfg(feature = "codec-init-body")]
-fn init_cbyte(api_whatami: u8, zid_len: usize) -> u8 {
+fn init_cbyte(whatami: WhatAmI, zid_len: usize) -> u8 {
     debug_assert!(
         (1..=16).contains(&zid_len),
         "zid_len must be 1..=16 (wire constraint, transport.h)"
     );
-    let whatami_wire = (api_whatami >> 1) & 0x03;
-    whatami_wire | (((zid_len as u8 - 1) & 0x0F) << 4)
+    whatami.to_wire() | (((zid_len as u8 - 1) & 0x0F) << 4)
 }
 
 /// Pack `sn_res` per transport.c:196-197:
@@ -276,6 +279,7 @@ fn pack_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
 #[cfg(all(test, feature = "codec-init-body"))]
 mod tests {
     use super::{init_cbyte, pack_sn_res};
+    use wz_codecs::whatami::WhatAmI;
 
     /// A minimal params bundle for the OPEN lease-unit fixtures.
     #[cfg(feature = "codec-open-body")]
@@ -284,7 +288,7 @@ mod tests {
         use alloc::vec::Vec;
         crate::session_init_params::SessionInitParams {
             version: 0x05,
-            whatami: 0x02,
+            whatami: WhatAmI::Peer,
             zid: vec![0x01; 4],
             seq_num_res: 0,
             req_id_res: 0,
@@ -340,15 +344,12 @@ mod tests {
     /// packing exactly — Layer 3 byte-equiv depends on this.
     #[test]
     fn init_cbyte_packs_whatami_and_zid_len() {
-        // whatami=Peer(0x02), zid_len=4 → wire whatami = (0x02>>1)&3 = 0x01
-        // zid_len_m1 = 3 → cbyte = 0x01 | (3 << 4) = 0x31
-        assert_eq!(init_cbyte(0x02, 4), 0x31);
-        // whatami=Router(0x01), zid_len=1 → wire whatami = (0x01>>1)&3 = 0
-        // zid_len_m1 = 0 → cbyte = 0
-        assert_eq!(init_cbyte(0x01, 1), 0x00);
-        // whatami=Client(0x04), zid_len=16 → wire whatami = (0x04>>1)&3 = 0x02
-        // zid_len_m1 = 15 → cbyte = 0x02 | (15 << 4) = 0xF2
-        assert_eq!(init_cbyte(0x04, 16), 0xF2);
+        // Peer.to_wire() = 0x01, zid_len_m1 = 3 → cbyte = 0x01 | (3 << 4) = 0x31
+        assert_eq!(init_cbyte(WhatAmI::Peer, 4), 0x31);
+        // Router.to_wire() = 0x00, zid_len_m1 = 0 → cbyte = 0
+        assert_eq!(init_cbyte(WhatAmI::Router, 1), 0x00);
+        // Client.to_wire() = 0x02, zid_len_m1 = 15 → cbyte = 0x02 | (15 << 4) = 0xF2
+        assert_eq!(init_cbyte(WhatAmI::Client, 16), 0xF2);
     }
 
     /// pack_sn_res must match transport.c:196-197 packing exactly.

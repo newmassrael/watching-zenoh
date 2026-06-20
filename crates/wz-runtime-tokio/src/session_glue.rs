@@ -156,6 +156,9 @@ pub fn signing_key_from_os_entropy() -> Result<SigningKey, getrandom::Error> {
 // the fixture_session_init_params test-support builder) resolve
 // unchanged. DP3 leaf.
 pub use wz_session_core::session_init_params::SessionInitParams;
+// Re-exported alongside `SessionInitParams` so a caller naming the param
+// bundle also names its `whatami` field type from one place.
+pub use wz_session_core::WhatAmI;
 
 // R311ed — CloseReason moved to wz-session-core::close_reason (a
 // runtime-agnostic byte-valued discriminator, sibling of Reliability /

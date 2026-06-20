@@ -454,6 +454,7 @@ mod tests {
     ))]
     use wz_session_core::network_message::parse_frame_payload;
     use wz_session_core::wire_const;
+    use wz_session_core::WhatAmI;
 
     use crate::runtime_impl::TokioTime;
 
@@ -465,7 +466,7 @@ mod tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             version: 0x09,
-            whatami: 0x01, // PEER (wire form)
+            whatami: WhatAmI::Peer,
             zid: zid.to_vec(),
             lease_ms: 5_000,
             join_interval_ms: 1,
@@ -683,7 +684,7 @@ mod tests {
         let zid = [0x01, 0x02, 0x03, 0x04];
         let mut join = Join::new();
         join.version = 0x09;
-        join.set_whatami(0x01);
+        join.set_whatami(WhatAmI::Peer.to_wire());
         join.set_zid_len_m1((zid.len() - 1) as u8);
         join.zid = &zid;
         join.sn_res = Some(0x01); // 14-bit ring, ours is 0x02 (28-bit)

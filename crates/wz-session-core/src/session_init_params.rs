@@ -20,6 +20,8 @@
 
 use alloc::vec::Vec;
 
+use wz_codecs::whatami::WhatAmI;
+
 use crate::signing_key::SigningKey;
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -29,10 +31,12 @@ use crate::signing_key::SigningKey;
 pub struct SessionInitParams {
     /// Protocol version (zenoh: 0x05 at the time of writing).
     pub version: u8,
-    /// API-form whatami: `0x01` Router, `0x02` Peer, `0x04` Client.
-    /// The codec packs the wire-form 2-bit field per
-    /// `_z_whatami_to_uint8` (transport.c:31-37).
-    pub whatami: u8,
+    /// This node's role (Router / Peer / Client). The handshake encoder
+    /// projects it to the 2-bit INIT / OPEN cbyte wire form via
+    /// [`WhatAmI::to_wire`] (`_z_whatami_to_uint8`, transport.c:31-37) at
+    /// the codec edge — the typed role is stored, not a pre-encoded byte,
+    /// so the API-vs-wire form is no longer ambiguous across call sites.
+    pub whatami: WhatAmI,
     /// ZenohID — 1..=16 bytes. The codec encodes the length in the
     /// high 4 bits of `cbyte` as `zid_len - 1`.
     pub zid: Vec<u8>,

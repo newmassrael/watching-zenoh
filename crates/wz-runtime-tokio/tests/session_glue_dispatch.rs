@@ -35,7 +35,7 @@ use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastActions;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, BoxedLinkDriver, CloseReason, SessionActionsBinding, SessionInitParams,
-    SigningKey,
+    SigningKey, WhatAmI,
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{fixture_session_init_params, LifecycleRecordingDriver};
@@ -59,7 +59,7 @@ fn expected_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
 fn fixture_params() -> SessionInitParams {
     SessionInitParams {
         version: 0x05,
-        whatami: 0x02, // Peer
+        whatami: WhatAmI::Peer,
         zid: vec![0x10, 0x20, 0x30, 0x40],
         seq_num_res: 0x03,
         req_id_res: 0x02,
@@ -142,7 +142,9 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // as a failure rather than being hidden by shared code.
     let params = fixture_params();
 
-    let init_cbyte = expected_init_cbyte(params.whatami, params.zid.len());
+    // expected_init_cbyte is an independent API-form oracle ((api>>1)&3), kept
+    // separate from production's WhatAmI::to_wire, so feed it the API byte.
+    let init_cbyte = expected_init_cbyte(params.whatami.to_api(), params.zid.len());
     let init_sn_res = expected_sn_res(params.seq_num_res, params.req_id_res);
 
     // InitSyn — flags=S|Z (R121f1 default ext chain seeds the patch

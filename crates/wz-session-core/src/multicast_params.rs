@@ -20,6 +20,8 @@
 
 use alloc::vec::Vec;
 
+use wz_codecs::whatami::WhatAmI;
+
 /// R311kq — the PROTOCOL default an omitted JOIN `sn_res` / `batch_size`
 /// optional means (zenoh-pico `_Z_DEFAULT_RESOLUTION_SIZE`, protocol/
 /// definitions/core.h:22; decode fills it when the S flag is absent,
@@ -60,11 +62,16 @@ pub struct MulticastParams {
     /// Zenoh protocol version byte (`Z_PROTO_VERSION`), emitted as JOIN
     /// body byte 0.
     pub version: u8,
-    /// This peer's WhatAmI, in the JOIN cbyte wire form (low 2 bits;
-    /// `join` codec `set_whatami`). A multicast peer advertises itself, so
-    /// this is what it IS (typically PEER), not what it is looking for
-    /// (contrast [`crate::scout_params::ScoutParams::what`], a search mask).
-    pub whatami: u8,
+    /// This peer's role (Router / Peer / Client). The JOIN encoder
+    /// projects it to the cbyte's 2-bit wire form via [`WhatAmI::to_wire`]
+    /// (`join` codec `set_whatami`) at the codec edge — the typed role is
+    /// stored, not a pre-encoded wire byte (the unicast
+    /// [`crate::session_init_params::SessionInitParams::whatami`] is now
+    /// the same type, so the two no longer disagree on form). A multicast
+    /// peer advertises what it IS (typically Peer), not what it is looking
+    /// for (contrast [`crate::scout_params::ScoutParams::what`], a search
+    /// mask).
+    pub whatami: WhatAmI,
     /// This peer's own zenoh id (1..=16 bytes). The drive loop packs
     /// `zid_len - 1` into the JOIN cbyte high nibble and appends the bytes;
     /// it is the key group members admit the peer under (the §3.2

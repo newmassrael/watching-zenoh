@@ -75,6 +75,7 @@ use wz_runtime_tokio::UdpDriver;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::observer::ApplicationLayerObserver;
+use wz_session_core::WhatAmI;
 
 // Distinct PORT from every other multicast lane (scouting 7446/7448,
 // pubsub-loopback 7449/7450, wz->pico 7457) so the `--ignored` lanes never
@@ -94,7 +95,7 @@ const VALUE: &str = "WZ-MCAST-DIALIN-R311no";
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
         version: PICO_PROTO_VERSION,
-        whatami: 0x01, // PEER (wire form)
+        whatami: WhatAmI::Peer,
         zid: vec![0x77; 4],
         lease_ms: 5_000,
         join_interval_ms: 50,

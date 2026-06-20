@@ -28,6 +28,7 @@ use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::TokioSession;
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, SigningKey,
+    WhatAmI,
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
@@ -217,7 +218,7 @@ pub async fn run_acceptor_e2e<H>(
 fn session_init_params() -> SessionInitParams {
     SessionInitParams {
         version: 0x09,
-        whatami: 0x02, // Peer
+        whatami: WhatAmI::Peer,
         zid: vec![0x01, 0x02, 0x03, 0x04],
         seq_num_res: 2,
         req_id_res: 2,

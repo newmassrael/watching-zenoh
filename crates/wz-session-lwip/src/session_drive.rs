@@ -253,6 +253,7 @@ mod tests {
     use wz_session_core::session_actions::SessionLinkActions;
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::signing_key::SigningKey;
+    use wz_session_core::WhatAmI;
 
     use crate::driver::{LwipUdpDriver, SharedSessionSocket};
 
@@ -271,7 +272,7 @@ mod tests {
     fn test_params() -> SessionInitParams {
         SessionInitParams {
             version: 0x05,
-            whatami: 0x02,
+            whatami: WhatAmI::Peer,
             zid: vec![0x01, 0x02, 0x03, 0x04],
             seq_num_res: 2,
             req_id_res: 2,

@@ -81,6 +81,7 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::UdpDriver;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::MulticastParams;
+use wz_session_core::WhatAmI;
 
 // Distinct PORT from every other multicast test (scouting 7446/7448,
 // pubsub-loopback 7449) so the `--ignored` lane never contends on the same
@@ -100,7 +101,7 @@ const PAYLOAD: &str = "WZ-MCAST-JOIN-INTEROP-R311nm";
 fn wz_mc_params() -> MulticastParams {
     MulticastParams {
         version: PICO_PROTO_VERSION,
-        whatami: 0x01, // PEER (wire form; pico stores it, does not reject on it)
+        whatami: WhatAmI::Peer,
         zid: vec![0x77; 4],
         lease_ms: 5_000,
         join_interval_ms: 50,

@@ -34,6 +34,10 @@ extern crate std;
 // loop, the MCU `wz-session-lwip::multicast_drive` loop) reach them through the
 // session SSOT instead of taking a direct `wz-codecs` dependency.
 pub use wz_codecs::wire_const;
+// The node role type owned by the codec layer, re-exported here because the
+// `SessionInitParams` / `MulticastParams` `whatami` fields are now this type —
+// callers of those param bundles name the role from this crate's surface.
+pub use wz_codecs::whatami::WhatAmI;
 
 /// R221 — zenoh keyexpr structural canonicalization mirror.
 ///

@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 use sce_rust_runtime::Hal;
 
-use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
+use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey, WhatAmI};
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
@@ -43,7 +43,7 @@ use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, T
 pub fn fixture_session_init_params() -> SessionInitParams {
     SessionInitParams {
         version: 0x05,
-        whatami: 0x02, // Peer
+        whatami: WhatAmI::Peer,
         zid: vec![0x01; 4],
         seq_num_res: 0,
         req_id_res: 0,

@@ -80,6 +80,7 @@ use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastParams};
 use wz_session_core::multicast_tx::{multicast_put_literal, multicast_tx_emit, MulticastTxItem};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::sn::{self, TxSn};
+use wz_session_core::WhatAmI;
 
 /// The multicast transport group + port the e2e binds + multicasts to:
 /// `224.0.0.224:7446` (zenoh's `Z_CONFIG_MULTICAST_LOCATOR_DEFAULT`).
@@ -273,7 +274,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
 fn params(zid: &[u8]) -> MulticastParams {
     MulticastParams {
         version: 0x09,
-        whatami: 0x01, // PEER (wire form)
+        whatami: WhatAmI::Peer,
         zid: zid.to_vec(),
         lease_ms: 5_000,
         join_interval_ms: 1,

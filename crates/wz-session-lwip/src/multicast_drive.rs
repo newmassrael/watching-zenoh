@@ -498,6 +498,7 @@ mod tests {
     use wz_link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
     use wz_session_core::multicast_dispatch::MulticastConfig;
     use wz_session_core::multicast_params::MulticastParams;
+    use wz_session_core::WhatAmI;
 
     /// Frozen host clock — `now_us` is constant, so no JOIN-interval / lease
     /// deadline ever advances past a peer's admit time. Keeps the drive-loop
@@ -516,7 +517,7 @@ mod tests {
     fn params(zid: &[u8]) -> MulticastParams {
         MulticastParams {
             version: 0x09,
-            whatami: 0x01, // PEER (wire form)
+            whatami: WhatAmI::Peer,
             zid: zid.to_vec(),
             lease_ms: 5_000,
             join_interval_ms: 1,
