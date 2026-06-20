@@ -253,11 +253,15 @@ impl LinkstateForwarder {
     /// across a multi-hop mesh: a node B learns from face A is advertised
     /// onward to face C. sn-staleness on each receiver drops a re-flood of
     /// unchanged state, so the propagation converges rather than storming.
-    /// Returns the number of faces propagated to. (zenoh's
-    /// full-state-for-new / links-only-for-updated `Details` split is the
-    /// deferred optimisation; wz sends the changed nodes full-state.)
+    /// Returns the number of faces propagated to. zenoh's D4 `Details` split is
+    /// honoured: `changes.new` nodes (first full state seen) re-flood FULL
+    /// (zid + links), `changes.updated` nodes (already-mapped re-advertisers)
+    /// re-flood LINKS-ONLY (no zid — the receiver resolves it from the psid it
+    /// learned when the node was new). Both halves ride ONE list per face so
+    /// they arrive atomically (zenoh `network.rs:643-644`: send all states at
+    /// once to avoid premature node deletion on the other side).
     pub fn propagate(&self, source: FaceId, changes: &Changes) -> Result<usize, CodecError> {
-        if changes.updated.is_empty() {
+        if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
         }
         // A clone of the graph handle so the per-face builder can borrow it
@@ -270,16 +274,14 @@ impl LinkstateForwarder {
             // Drop the node whose own state this is from the list sent to ITS
             // face (zenoh `network.rs:663`) — the per-face payload differs, so
             // each face gets its own built carrier.
-            let to_send: Vec<Zid> = changes
-                .updated
-                .iter()
-                .filter(|z| zid != Some(z.as_slice()))
-                .cloned()
-                .collect();
-            if to_send.is_empty() {
+            let keep = |z: &&Zid| zid != Some(z.as_slice());
+            let new: Vec<Zid> = changes.new.iter().filter(keep).cloned().collect();
+            let updated: Vec<Zid> = changes.updated.iter().filter(keep).cloned().collect();
+            if new.is_empty() && updated.is_empty() {
                 return Ok(None);
             }
-            let oam = build_linkstate_oam_owned(&net.borrow().build_linkstate_for(&to_send))?;
+            let oam =
+                build_linkstate_oam_owned(&net.borrow().build_linkstate_split(&new, &updated))?;
             Ok(Some(NetworkMessage::Oam(oam)))
         })
     }
@@ -1441,6 +1443,48 @@ mod tests {
     }
 
     #[test]
+    fn propagate_re_floods_new_full_and_updated_links_only() {
+        // c3c-3 D4 — propagate must route `changes.new` into the FULL slot and
+        // `changes.updated` into the LINKS-ONLY slot, in ONE list per face. The
+        // face to a NON-involved peer (C) receives both halves; decoding its
+        // frame proves the split landed on the wire (new keeps its zid, updated
+        // omits it) and was not swapped.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (peer_a, _sa) = peer_face(zid(0x0A));
+        let (peer_b, _sb) = peer_face(zid(0x0B));
+        let (peer_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &peer_a); // graph gains 0x0A
+        fwd.register(FaceId(1), &peer_b); // graph gains 0x0B
+        fwd.register(FaceId(2), &peer_c); // graph gains 0x0C
+        sink_c.reset();
+
+        // 0x0A is NEW (full), 0x0B is UPDATED (links-only). Source is an
+        // unregistered face so C is not excluded.
+        let changes = Changes {
+            new: vec![zid(0x0A)],
+            updated: vec![zid(0x0B)],
+            ..Default::default()
+        };
+        fwd.propagate(FaceId(99), &changes).expect("propagate");
+
+        let states = propagated_link_states(&sink_c.frame_bytes(0));
+        assert_eq!(
+            states.len(),
+            2,
+            "C's list carries both the new and updated node"
+        );
+        // new nodes are listed first (build_linkstate_split): full state.
+        assert!(states[0].zid.is_some(), "the NEW node (0x0A) keeps its zid");
+        assert_eq!(states[0].options & 0x01, 0x01, "NEW sets the P flag");
+        // updated node second: links-only, no zid.
+        assert!(
+            states[1].zid.is_none(),
+            "the UPDATED node (0x0B) omits its zid"
+        );
+        assert_eq!(states[1].options & 0x01, 0, "UPDATED clears the P flag");
+    }
+
+    #[test]
     fn register_bootstraps_the_new_neighbour() {
         // R311rf — a face with a routing zid is bootstrapped on register:
         // the forwarder immediately advertises its own link-state to it, so a
@@ -1639,6 +1683,26 @@ mod tests {
                 _ => None,
             },
             other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
+    /// Decode the `LinkStateList` entries of a propagated OAM frame — the D4
+    /// witness that the per-face re-flood carried the right `Details` split on
+    /// the wire (a `new` node full, an `updated` node links-only).
+    fn propagated_link_states(frame: &[u8]) -> Vec<wz_codecs::linkstate::LinkstateOwned> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Oam(oam)) => match try_parse_linkstate_oam(oam) {
+                LinkstateOam::Decoded(list) => list.link_states,
+                other => panic!("OAM did not decode as a link-state list: {other:?}"),
+            },
+            other => panic!("expected a propagated OAM, got {other:?}"),
         }
     }
 

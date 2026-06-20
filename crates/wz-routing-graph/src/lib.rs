@@ -24,15 +24,12 @@
 //! advertisement is withdrawn (zenoh `network.rs:786,948,990`).
 //!
 //! EXPLICITLY DEFERRED (tracked, not silently dropped):
-//! - `propagate_link_states` — the receive-side onward re-flood
-//!   (`network.rs:804`) that carries topology transitively across a
-//!   multi-hop mesh. The graph supplies the [`build_linkstate_for`] payload
-//!   builder; the per-face re-flood (changed nodes to every face but the
-//!   source) lives in the driver (`linkstate_forward::propagate`, R311ra).
-//!   Still deferred there: zenoh's full-state-for-new vs links-only-for-
-//!   updated `Details` split (wz re-floods the changed nodes full-state).
 //! - gossip / autoconnect propagation, locator ingest, and the
-//!   `local_mappings` forwarding table.
+//!   `local_mappings` forwarding table. (The receive-side onward re-flood
+//!   `propagate_link_states`, `network.rs:804`, is DONE: the graph supplies
+//!   the [`build_linkstate_split`] payload builder — `new` nodes full,
+//!   `updated` nodes links-only, the D4 `Details` split — and the per-face
+//!   re-flood lives in the driver `linkstate_forward::propagate`, R311ra+sl.)
 //! - the real handshake `whatami` (the driver currently records every
 //!   peer-mesh neighbour as Peer), and observability for dropped entries
 //!   (zenoh `tracing::error!`s an unresolvable psid/link; wz drops silently
@@ -227,16 +224,20 @@ struct LocalLinkState {
     links: HashMap<Zid, LinkEdgeWeight>,
 }
 
-/// What a LinkStateList ingest changed — the zids of nodes added/updated
-/// (`updated`) and the zids of nodes the ensuing reachability prune removed
-/// (`removed`). The driver (step c3) re-floods the `updated` set and purges
-/// each `removed` node's subscription interest (zenoh `pubsub_remove_node`
-/// over `changes.removed_nodes`, `hat/linkstate_peer/mod.rs:418-422`). A
-/// NARROWED subset of zenoh `Changes` (`network.rs:110-114`, which carries
-/// both halves as `(NodeIndex, Node)` pairs): wz carries only the zids (the
-/// node payloads land when gossip needs them).
+/// What a LinkStateList ingest changed, split the way zenoh's re-flood needs:
+/// `new` = nodes seen for the first time with full state (a fresh insert, or a
+/// placeholder getting its first real link-state — `oldsn == 0`); `updated` =
+/// nodes already mapped that re-advertised (`oldsn > 0`); `removed` = nodes the
+/// ensuing reachability prune dropped. The driver (step c3) re-floods `new`
+/// FULL and `updated` LINKS-ONLY (the D4 `Details` split — zenoh
+/// `network.rs:645-678`), and purges each `removed` node's subscription
+/// interest (zenoh `pubsub_remove_node` over `changes.removed_nodes`,
+/// `hat/linkstate_peer/mod.rs:418-422`). A NARROWED subset of zenoh `Changes`
+/// (`network.rs:110-114`, `(NodeIndex, Node)` pairs): wz carries only the zids
+/// (the node payloads land when gossip needs them).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
+    pub new: Vec<Zid>,
     pub updated: Vec<Zid>,
     pub removed: Vec<Zid>,
 }
@@ -518,16 +519,21 @@ impl LinkstateNetwork {
     }
 
     /// Build one node's `LinkState` keyed by its local `psid` (the petgraph
-    /// `NodeIndex`): its zid (so the receiver learns the psid<->zid mapping),
-    /// whatami, and its links (each resolved to the neighbour's local psid)
-    /// with weights. Mirrors zenoh `make_link_state` (`network.rs:304-348`)
-    /// with the full-state `Details` (zid + links); the `zid:false`
-    /// links-only variant (zenoh's updated-node propagation optimisation)
-    /// and locators are deferred.
-    fn make_link_state(&self, idx: NodeIndex) -> LinkstateOwned {
+    /// `NodeIndex`): its whatami and its links (each resolved to the
+    /// neighbour's local psid) with weights, and — for the FULL variant — its
+    /// zid so the receiver learns the psid<->zid mapping. Mirrors zenoh
+    /// `make_link_state` (`network.rs:304-348`); `links_only` is zenoh's
+    /// `Details { zid: false, links: true }` updated-node propagation
+    /// optimisation (D4): a node the receiver already mapped (it got the full
+    /// state when the node was NEW) re-advertises just its links/whatami, NOT
+    /// the ~16-byte zid again — the codec gates the zid on the P flag and the
+    /// receiver resolves the omitted zid from the psid it learned earlier
+    /// (`convert_to_local_link_states`). Locators are deferred either way.
+    fn make_link_state(&self, idx: NodeIndex, links_only: bool) -> LinkstateOwned {
         let node = &self.graph[idx];
         // links: resolve each neighbour zid to its local psid, with a weight
-        // per link (zenoh make_link_state, `network.rs:308-325`).
+        // per link (zenoh make_link_state, `network.rs:308-325`). Present in
+        // both variants — zenoh's updated `Details` keeps `links: true`.
         let mut links = Vec::with_capacity(node.links.len());
         let mut weights = Vec::with_capacity(node.links.len());
         let mut has_weight = false;
@@ -544,9 +550,11 @@ impl LinkstateNetwork {
             // a link to an unknown node is an internal inconsistency; skip it
             // rather than emit an unresolvable psid.
         }
-        // options: P (zid, always advertised so the receiver can map the
-        // psid) | W (if whatami known) | H (if any non-default weight).
-        let mut options = OPT_P;
+        // options: P (zid) only in the FULL variant — the links-only variant
+        // omits the zid (and the P flag), relying on the receiver's existing
+        // psid->zid mapping. W (if whatami known) | H (if non-default weight)
+        // apply to both.
+        let mut options = if links_only { 0 } else { OPT_P };
         if node.whatami.is_some() {
             options |= OPT_W;
         }
@@ -557,11 +565,13 @@ impl LinkstateNetwork {
             options,
             psid: local_psid(idx),
             sn: node.sn,
-            zid_len: Some(node.zid.len() as u64),
+            zid_len: (!links_only).then_some(node.zid.len() as u64),
             // every graph zid is <= ZENOHID_MAX_SIZE by construction (the
             // ingest drops an oversized wire zid; the handshake supplies a
             // valid self/neighbour zid), so this never exceeds capacity.
-            zid: Some(SceBytes::from_slice(&node.zid).expect("graph zid is <= ZENOHID_MAX_SIZE")),
+            zid: (!links_only).then(|| {
+                SceBytes::from_slice(&node.zid).expect("graph zid is <= ZENOHID_MAX_SIZE")
+            }),
             whatami: node.whatami,
             num_locators: None,
             locators: None,
@@ -580,7 +590,7 @@ impl LinkstateNetwork {
         let link_states = self
             .graph
             .node_indices()
-            .map(|idx| self.make_link_state(idx))
+            .map(|idx| self.make_link_state(idx, false))
             .collect::<Vec<_>>();
         LinkstateListOwned {
             num_link_states: link_states.len() as u64,
@@ -588,16 +598,27 @@ impl LinkstateNetwork {
         }
     }
 
-    /// Build a `LinkStateList` carrying only the given nodes (full state) —
-    /// the re-flood payload `propagate_link_states` (c3d-2) sends onward when
-    /// an ingest changed a subset of the graph. Unknown zids are skipped.
-    /// Mirrors zenoh `make_msg` over a `Changes`-derived node subset
-    /// (`network.rs:645-678` builds the per-link `out` list this way).
-    pub fn build_linkstate_for(&self, zids: &[Zid]) -> LinkstateListOwned {
-        let link_states = zids
+    /// Build the re-flood payload `propagate_link_states` (c3d-2) sends onward
+    /// when an ingest changed a subset of the graph: `new` nodes carry FULL
+    /// state (zid + links, so a receiver can map a psid it has not seen) and
+    /// `updated` nodes carry LINKS-ONLY state (the D4 `Details` split — the
+    /// receiver already mapped them when they were new, so the zid is omitted).
+    /// New nodes are listed first so, within the single list, a links-only
+    /// entry that happens to reference a brand-new node still resolves. Unknown
+    /// zids are skipped. Mirrors zenoh `make_msg` over the `propagate_link_states`
+    /// per-link `out` list (`network.rs:645-678`: new = `Details{zid:true}`,
+    /// updated = `Details{zid:false}`).
+    pub fn build_linkstate_split(&self, new: &[Zid], updated: &[Zid]) -> LinkstateListOwned {
+        let link_states = new
             .iter()
             .filter_map(|zid| self.get_idx(zid))
-            .map(|idx| self.make_link_state(idx))
+            .map(|idx| self.make_link_state(idx, false))
+            .chain(
+                updated
+                    .iter()
+                    .filter_map(|zid| self.get_idx(zid))
+                    .map(|idx| self.make_link_state(idx, true)),
+            )
             .collect::<Vec<_>>();
         LinkstateListOwned {
             num_link_states: link_states.len() as u64,
@@ -728,15 +749,22 @@ impl LinkstateNetwork {
     fn process_linkstates(&mut self, states: Vec<LocalLinkState>) -> Changes {
         let mut changes = Changes::default();
         for ls in states {
-            let idx = match self.get_idx(&ls.zid) {
-                None => self.insert_node(Node {
-                    zid: ls.zid.clone(),
-                    whatami: Some(ls.whatami),
-                    // locator ingest lands with the gossip/autoconnect atom.
-                    locators: None,
-                    sn: ls.sn,
-                    links: ls.links,
-                }),
+            // `is_new` = the receiver does not yet have this node's full state,
+            // so the re-flood must carry its zid: a fresh insert, or an
+            // existing node whose `sn` was still 0 (a placeholder that never
+            // had a real link-state). zenoh `oldsn == 0` (network.rs:717).
+            let (idx, is_new) = match self.get_idx(&ls.zid) {
+                None => (
+                    self.insert_node(Node {
+                        zid: ls.zid.clone(),
+                        whatami: Some(ls.whatami),
+                        // locator ingest lands with the gossip/autoconnect atom.
+                        locators: None,
+                        sn: ls.sn,
+                        links: ls.links,
+                    }),
+                    true,
+                ),
                 Some(idx) => {
                     let node = &mut self.graph[idx];
                     // sn-staleness gate (zenoh network.rs:580): ignore a
@@ -744,20 +772,27 @@ impl LinkstateNetwork {
                     if node.sn >= ls.sn {
                         continue;
                     }
+                    let was_placeholder = node.sn == 0;
                     node.sn = ls.sn;
                     node.links = ls.links;
-                    idx
+                    (idx, was_placeholder)
                 }
             };
             self.rebuild_edges(idx);
-            changes.updated.push(self.graph[idx].zid.clone());
+            let zid = self.graph[idx].zid.clone();
+            if is_new {
+                changes.new.push(zid);
+            } else {
+                changes.updated.push(zid);
+            }
         }
         // Prune nodes the update made unreachable, then drop any pruned zid
-        // from `updated` (a node cannot be both freshly-advertised and
-        // detached in the same ingest, but the retain keeps the two sets
-        // disjoint by construction — zenoh `network.rs:786-788`).
+        // from `new` / `updated` (a node cannot be both freshly-advertised and
+        // detached in the same ingest, but the retain keeps the sets disjoint
+        // by construction — zenoh `network.rs:786-788`).
         let removed = self.remove_detached_nodes();
         if !removed.is_empty() {
+            changes.new.retain(|z| !removed.contains(z));
             changes.updated.retain(|z| !removed.contains(z));
         }
         changes.removed = removed;
@@ -1197,7 +1232,10 @@ mod tests {
                 relay(1, &[10]),
             ]),
         );
-        assert!(changes.updated.contains(&zid(0xAA)), "0xAA was added");
+        assert!(
+            changes.new.contains(&zid(0xAA)),
+            "0xAA is freshly added -> the `new` (full-state) set"
+        );
         let node = net.get_node(&zid(0xAA)).expect("node added");
         assert_eq!(node.sn, 5);
         assert_eq!(node.whatami, Some(2));
@@ -1701,6 +1739,70 @@ mod tests {
             net.directions_toward(&zid(0x01), &[zid(0xAA), zid(0xCC)]),
             vec![zid(0xCC)],
             "a pruned destination yields no direction (no next hop, no panic)"
+        );
+    }
+
+    // ── c3c-3 D4 Details split (full-for-new / links-only-for-updated) ──
+
+    #[test]
+    fn build_linkstate_split_full_carries_the_zid_links_only_omits_it() {
+        // D4: a NEW node re-floods full (zid + P flag); an UPDATED node
+        // re-floods links-only (no zid, P clear) — the links/psid/sn survive so
+        // the receiver applies the update against its existing psid->zid map.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        net.add_link(zid(0xAA), 2); // self advertises a link, so it has one
+        let full = net.build_linkstate_split(&[zid(0x01)], &[]); // self as NEW
+        let links_only = net.build_linkstate_split(&[], &[zid(0x01)]); // self as UPDATED
+        let fe = &full.link_states[0];
+        let le = &links_only.link_states[0];
+        assert!(fe.zid.is_some(), "full carries the zid");
+        assert_eq!(
+            fe.options & 0x01,
+            0x01,
+            "full sets the P (zid-present) flag"
+        );
+        assert!(le.zid.is_none(), "links-only omits the zid");
+        assert_eq!(le.options & 0x01, 0, "links-only clears the P flag");
+        // identity + the links delta survive in both (the point of links-only).
+        assert_eq!(fe.psid, le.psid);
+        assert_eq!(fe.sn, le.sn);
+        assert_eq!(fe.links_len, le.links_len, "links present in both variants");
+    }
+
+    #[test]
+    fn a_links_only_reflood_resolves_against_the_prior_full_mapping() {
+        // The D4 round-trip: B first ingests A's FULL flood (registering A's
+        // psid->zid), then ingests A's links-only re-advertise (no zid) and
+        // resolves A from that earlier mapping — applying the newer sn, no drop.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
+        let _la = a.add_link(zid(0x0B), 2);
+        let lb = b.add_link(zid(0x0A), 2);
+
+        b.ingest_linkstate_list(lb, a.build_linkstate_list()); // A full -> B maps A
+        assert!(
+            b.get_idx(&zid(0x0A)).is_some(),
+            "B mapped A from the full flood"
+        );
+        let sn_before = b.get_node(&zid(0x0A)).unwrap().sn;
+
+        a.add_link(zid(0x0C), 2); // bumps A's sn so the re-advertise is newer
+        let links_only = a.build_linkstate_split(&[], &[zid(0x0A)]);
+        assert!(
+            links_only.link_states[0].zid.is_none(),
+            "A's re-flood omits its zid (links-only)"
+        );
+
+        let changes = b.ingest_linkstate_list(lb, links_only);
+        assert_eq!(
+            changes.updated,
+            vec![zid(0x0A)],
+            "B resolved the zid-less entry to A and recorded an update"
+        );
+        assert!(changes.new.is_empty(), "A was already known, so not `new`");
+        assert!(
+            b.get_node(&zid(0x0A)).unwrap().sn > sn_before,
+            "B applied the newer sn from the links-only re-advertise"
         );
     }
 
