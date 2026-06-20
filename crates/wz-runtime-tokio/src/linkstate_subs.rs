@@ -133,7 +133,7 @@ impl LinkstatepeerSubs {
     pub fn subscriptions(&self) -> Vec<(String, Zid)> {
         self.by_key
             .iter()
-            .flat_map(|(key, peers)| peers.iter().map(move |p| (key.clone(), p.clone())))
+            .flat_map(|(key, peers)| peers.iter().map(move |p| (key.clone(), *p)))
             .collect()
     }
 
@@ -156,7 +156,7 @@ impl LinkstatepeerSubs {
             }
             for peer in peers {
                 if exclude != Some(peer) && !out.contains(peer) {
-                    out.push(peer.clone());
+                    out.push(*peer);
                 }
             }
         }
@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     fn zid(b: u8) -> Zid {
-        vec![b, b, b, b]
+        Zid::from_slice(&[b, b, b, b])
     }
 
     #[test]
@@ -392,7 +392,7 @@ mod tests {
         // session layer, not forwarded toward over the mesh.
         let mut subs = LinkstatepeerSubs::new();
         let me = zid(0x05);
-        subs.register("k", me.clone()); // self subscribes
+        subs.register("k", me); // self subscribes
         subs.register("k", zid(0xAA)); // and a remote peer
         let mut all = subs.interested("k");
         all.sort();
@@ -407,7 +407,7 @@ mod tests {
             "interested_remote() drops self, keeps the remote peer",
         );
         // A key only self subscribes to has no remote forward target.
-        subs.register("self-only", me.clone());
+        subs.register("self-only", me);
         assert!(
             subs.interested_remote("self-only", &me).is_empty(),
             "a self-only subscription yields no remote direction",

@@ -92,17 +92,12 @@ const OPT_H: u8 = 0x08;
 /// fraction so Bellman-Ford breaks ties deterministically.
 const JITTER_FRACTION: f64 = 0.01;
 
-/// A zid as the fixed 16-byte zero-padded little-endian array zenoh hashes
-/// for the edge-jitter tie-break (`ZenohIdProto::to_le_bytes()`). The wz
-/// `Zid` carries the trimmed wire bytes (`to_le_bytes()[..size]`); padding
-/// back to 16 reproduces the full `to_le_bytes()` zenohd uses, so the
-/// jitter is byte-identical cross-implementation. A zid never exceeds 16
-/// bytes (`ZenohIdProto::MAX_SIZE`); a longer slice is truncated defensively.
+/// The fixed 16-byte zero-padded little-endian array zenoh hashes for the
+/// edge-jitter tie-break (`ZenohIdProto::to_le_bytes()`) — now just the zid's
+/// canonical backing buffer ([`Zid::le16`]). Kept as a free fn so the
+/// `update_edge` hash sites read unchanged.
 fn zid_to_le_16(zid: &Zid) -> [u8; 16] {
-    let mut buf = [0u8; 16];
-    let n = zid.len().min(16);
-    buf[..n].copy_from_slice(&zid[..n]);
-    buf
+    zid.le16()
 }
 
 /// The wire `psid` for a local node — its petgraph `NodeIndex` as the
@@ -112,9 +107,88 @@ fn local_psid(idx: NodeIndex) -> u64 {
     idx.index() as u64
 }
 
-/// A routing identity — the raw zid bytes, matching the wz face / session
-/// `peer_zid` representation (`Vec<u8>`).
-pub type Zid = Vec<u8>;
+/// A routing identity — a zenoh zid (1..=16 bytes). Stored as a fixed 16-byte
+/// zero-padded buffer plus a length, so it is no-alloc (`Copy`) and the
+/// edge-jitter tie-break hashes the buffer directly. The wz mirror of zenoh
+/// `ZenohIdProto` (a fixed buffer + size), replacing the prior `Vec<u8>`.
+///
+/// CANONICAL invariant: `bytes[len..]` is always zero (the constructor
+/// guarantees it). This makes the derived `Ord` — compare `bytes`
+/// lexicographically, then `len` — byte-for-byte identical to the ordering of
+/// the trimmed `Vec<u8>` it replaces: a shorter zid that is a zero-extended
+/// prefix of a longer one compares equal on `bytes` and then orders BEFORE it
+/// on `len`, exactly as `Vec<u8>` orders a prefix before its extension. So the
+/// deterministic cross-implementation jitter tie-break with a zenohd peer
+/// (`update_edge`, which orders the pair by `Ord` then hashes [`le16`](Self::le16))
+/// is unchanged by the representation switch.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Zid {
+    bytes: [u8; 16],
+    len: u8,
+}
+
+impl Zid {
+    /// The maximum zid length (zenoh `ZenohIdProto::MAX_SIZE`).
+    pub const MAX_SIZE: usize = 16;
+
+    /// From wire / host bytes — truncated to 16 and canonically zero-padded.
+    /// A slice longer than 16 is truncated defensively (the ingest already
+    /// drops an oversized wire zid before it reaches here).
+    pub fn from_slice(src: &[u8]) -> Self {
+        let mut bytes = [0u8; 16];
+        let len = src.len().min(Self::MAX_SIZE);
+        bytes[..len].copy_from_slice(&src[..len]);
+        Zid {
+            bytes,
+            len: len as u8,
+        }
+    }
+
+    /// The trimmed zid bytes — the wire form (`to_le_bytes()[..size]`).
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+
+    /// The trimmed length (1..=16 for a real zid).
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the zid carries no bytes (only an empty/placeholder value).
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The fixed 16-byte zero-padded form zenoh hashes for the edge-jitter
+    /// tie-break (`ZenohIdProto::to_le_bytes()`).
+    pub fn le16(&self) -> [u8; 16] {
+        self.bytes
+    }
+}
+
+impl core::fmt::Debug for Zid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Zid(")?;
+        for b in self.as_slice() {
+            write!(f, "{b:02x}")?;
+        }
+        write!(f, ")")
+    }
+}
+
+impl From<&[u8]> for Zid {
+    fn from(bytes: &[u8]) -> Self {
+        Zid::from_slice(bytes)
+    }
+}
+
+impl From<Vec<u8>> for Zid {
+    /// The session / handshake layer carries a peer zid as `Vec<u8>`; this is
+    /// the boundary conversion into the routing identity.
+    fn from(bytes: Vec<u8>) -> Self {
+        Zid::from_slice(&bytes)
+    }
+}
 
 /// A local link id (the index the runtime assigns a peer face).
 pub type LinkId = usize;
@@ -294,7 +368,7 @@ impl LinkstateNetwork {
     pub fn new(self_zid: Zid, self_whatami: u8) -> Self {
         let mut graph = StableUnGraph::default();
         let idx = graph.add_node(Node {
-            zid: self_zid.clone(),
+            zid: self_zid,
             whatami: Some(self_whatami),
             locators: None,
             sn: 1,
@@ -375,7 +449,7 @@ impl LinkstateNetwork {
     /// The single node-insertion path: add the node to the petgraph AND the
     /// `idx_by_zid` secondary index together, so the two never desync.
     fn insert_node(&mut self, node: Node) -> NodeIndex {
-        let zid = node.zid.clone();
+        let zid = node.zid;
         let idx = self.graph.add_node(node);
         self.idx_by_zid.insert(zid, idx);
         idx
@@ -407,11 +481,11 @@ impl LinkstateNetwork {
     pub fn add_link(&mut self, peer_zid: Zid, peer_whatami: u8) -> LinkId {
         let id = self.next_link_id;
         self.next_link_id += 1;
-        self.links.insert(id, Link::new(peer_zid.clone()));
+        self.links.insert(id, Link::new(peer_zid));
 
         if self.get_idx(&peer_zid).is_none() {
             self.insert_node(Node {
-                zid: peer_zid.clone(),
+                zid: peer_zid,
                 whatami: Some(peer_whatami),
                 locators: None,
                 sn: 0,
@@ -583,7 +657,7 @@ impl LinkstateNetwork {
             // ingest drops an oversized wire zid; the handshake supplies a
             // valid self/neighbour zid), so this never exceeds capacity.
             zid: (!links_only).then(|| {
-                SceBytes::from_slice(&node.zid).expect("graph zid is <= ZENOHID_MAX_SIZE")
+                SceBytes::from_slice(node.zid.as_slice()).expect("graph zid is <= ZENOHID_MAX_SIZE")
             }),
             whatami: node.whatami,
             num_locators: None,
@@ -687,12 +761,12 @@ impl LinkstateNetwork {
                             );
                             continue;
                         }
-                        let zid = bytes.as_slice().to_vec();
-                        src_link.set_zid_mapping(entry.psid, zid.clone());
+                        let zid = Zid::from_slice(bytes.as_slice());
+                        src_link.set_zid_mapping(entry.psid, zid);
                         zid
                     }
                     None => match src_link.get_zid(entry.psid) {
-                        Some(zid) => zid.clone(),
+                        Some(zid) => *zid,
                         None => {
                             // unknown psid mapping -> drop entry (the node
                             // silently vanishes); zenoh error!s the same
@@ -755,7 +829,7 @@ impl LinkstateNetwork {
                                 .and_then(|ws| ws.get(i))
                                 .map(|w| LinkEdgeWeight::from_raw(w.weight))
                                 .unwrap_or_default();
-                            links.insert(dst.clone(), weight);
+                            links.insert(*dst, weight);
                         } else {
                             // unknown link psid -> drop that edge; zenoh error!s
                             // the same (`network.rs:538`).
@@ -798,7 +872,7 @@ impl LinkstateNetwork {
             let (idx, is_new) = match self.get_idx(&ls.zid) {
                 None => (
                     self.insert_node(Node {
-                        zid: ls.zid.clone(),
+                        zid: ls.zid,
                         whatami: Some(ls.whatami),
                         // locator ingest lands with the gossip/autoconnect atom.
                         locators: None,
@@ -821,7 +895,7 @@ impl LinkstateNetwork {
                 }
             };
             self.rebuild_edges(idx);
-            let zid = self.graph[idx].zid.clone();
+            let zid = self.graph[idx].zid;
             if is_new {
                 changes.new.push(zid);
             } else {
@@ -848,7 +922,7 @@ impl LinkstateNetwork {
     /// advertises. Mirrors zenoh's edge-rebuild loop (`network.rs:742-783`):
     /// an edge exists iff both endpoints advertise the link.
     fn rebuild_edges(&mut self, idx1: NodeIndex) {
-        let zid1 = self.graph[idx1].zid.clone();
+        let zid1 = self.graph[idx1].zid;
         let link_zids: Vec<Zid> = self.graph[idx1].links.keys().cloned().collect();
 
         // add / update mutual edges; introduce unknown destinations so a
@@ -861,7 +935,7 @@ impl LinkstateNetwork {
                     }
                 }
                 None => {
-                    self.ensure_node(dest.clone());
+                    self.ensure_node(*dest);
                 }
             }
         }
@@ -895,8 +969,8 @@ impl LinkstateNetwork {
     fn update_edge(&mut self, idx1: NodeIndex, idx2: NodeIndex) {
         use std::hash::Hasher;
 
-        let zid1 = self.graph[idx1].zid.clone();
-        let zid2 = self.graph[idx2].zid.clone();
+        let zid1 = self.graph[idx1].zid;
+        let zid2 = self.graph[idx2].zid;
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         if zid1 > zid2 {
@@ -1029,10 +1103,10 @@ impl LinkstateNetwork {
                 .children
                 .iter()
                 .filter(|child| old.map_or(true, |o| !o.contains(child)))
-                .map(|child| self.graph[*child].zid.clone())
+                .map(|child| self.graph[*child].zid)
                 .collect();
             if !delta.is_empty() {
-                new_children.push((self.graph[*tree_root_idx].zid.clone(), delta));
+                new_children.push((self.graph[*tree_root_idx].zid, delta));
             }
         }
         new_children
@@ -1057,7 +1131,7 @@ impl LinkstateNetwork {
                 // tick — resolves to None and is skipped. The pruned node is
                 // unreachable, so it was never a valid forward target anyway;
                 // the next recompute drops it from the tree for good.
-                .filter_map(|child| self.graph.node_weight(*child).map(|n| n.zid.clone()))
+                .filter_map(|child| self.graph.node_weight(*child).map(|n| n.zid))
                 .collect(),
             None => Vec::new(),
         }
@@ -1073,7 +1147,7 @@ impl LinkstateNetwork {
         // `node_weight` so a hop pruned since the last `compute_trees`
         // resolves to None rather than panicking on a removed index (the
         // coalesced-recompute window — see `tree_children_of`).
-        Some(self.graph.node_weight(hop)?.zid.clone())
+        Some(self.graph.node_weight(hop)?.zid)
     }
 
     /// The deduped set of first-hop children of this peer toward ANY of
@@ -1130,7 +1204,7 @@ mod tests {
     use super::*;
 
     fn zid(b: u8) -> Zid {
-        vec![b, b, b, b]
+        Zid::from_slice(&[b, b, b, b])
     }
 
     #[test]
@@ -1218,7 +1292,7 @@ mod tests {
     fn entry(
         psid: u64,
         sn: u64,
-        zid: Option<&[u8]>,
+        zid: Option<&Zid>,
         whatami: Option<u8>,
         links: &[u64],
     ) -> LinkstateOwned {
@@ -1227,7 +1301,7 @@ mod tests {
             psid,
             sn,
             zid_len: zid.map(|z| z.len() as u64),
-            zid: zid.map(|z| SceBytes::from_slice(z).unwrap()),
+            zid: zid.map(|z| SceBytes::from_slice(z.as_slice()).unwrap()),
             whatami,
             num_locators: None,
             locators: None,
@@ -1359,7 +1433,7 @@ mod tests {
     fn entry_weighted(
         psid: u64,
         sn: u64,
-        zid: Option<&[u8]>,
+        zid: Option<&Zid>,
         whatami: Option<u8>,
         links: &[u64],
         weights: &[u16],
@@ -1546,10 +1620,10 @@ mod tests {
         let r = zid(0x0D); // root (a remote node, e.g. a subscription source)
         let m = zid(0x0B); // the detour relay
         let f = zid(0x0F); // the node that re-homes
-        let mut net = LinkstateNetwork::new(s.clone(), 2);
-        let lr = net.add_link(r.clone(), 2);
-        let lf = net.add_link(f.clone(), 2);
-        let lm = net.add_link(m.clone(), 2);
+        let mut net = LinkstateNetwork::new(s, 2);
+        let lr = net.add_link(r, 2);
+        let lf = net.add_link(f, 2);
+        let lm = net.add_link(m, 2);
 
         // Pass 1 — teach each link's psid -> zid mappings (low sn, no links).
         net.ingest_linkstate_list(lr, list(vec![entry(0, 1, Some(&s), Some(2), &[])]));
@@ -1586,7 +1660,7 @@ mod tests {
         net.compute_trees();
         assert_eq!(
             net.tree_children_of(&r),
-            vec![m.clone()],
+            vec![m],
             "before the drop: F routes via the cheaper detour M, so S's only child \
              in R's tree is M (F is M's child, not S's)"
         );
@@ -1603,7 +1677,7 @@ mod tests {
         let delta = net.compute_trees();
         assert_eq!(
             net.tree_children_of(&r),
-            vec![f.clone()],
+            vec![f],
             "after the drop: F re-homed as S's child in R's tree"
         );
         let r_delta = delta
@@ -1612,7 +1686,7 @@ mod tests {
             .map(|(_, c)| c.clone());
         assert_eq!(
             r_delta,
-            Some(vec![f.clone()]),
+            Some(vec![f]),
             "the self-link drop ADDED F as a new child of R's tree — a non-empty \
              delta deregister MUST re-advertise to (not discard as 'provably empty')"
         );
@@ -2107,14 +2181,32 @@ mod tests {
     fn ingest_drops_entry_with_oversized_zid() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let link = net.add_link(zid(0x07), 2);
-        // a 17-byte zid exceeds ZENOHID_MAX_SIZE -> the entry is dropped (the
+        // a 17-byte WIRE zid exceeds ZENOHID_MAX_SIZE -> the entry is dropped (the
         // host-validation obligation zenoh enforces at decode), so it never
-        // reaches the graph and the later build re-encode stays infallible.
+        // reaches the graph and the later build re-encode stays infallible. The
+        // entry is built directly with the oversized SceBytes since `Zid` itself
+        // truncates to 16 (the `entry` helper can no longer carry the raw form).
         let big = vec![0xAB_u8; ZENOHID_MAX_SIZE + 1];
-        let changes =
-            net.ingest_linkstate_list(link, list(vec![entry(11, 5, Some(&big), Some(2), &[])]));
+        let oversized = LinkstateOwned {
+            options: 0,
+            psid: 11,
+            sn: 5,
+            zid_len: Some(big.len() as u64),
+            zid: Some(SceBytes::from_slice(&big).unwrap()),
+            whatami: Some(2),
+            num_locators: None,
+            locators: None,
+            links_len: 0,
+            links: Vec::new(),
+            weights: None,
+        };
+        let changes = net.ingest_linkstate_list(link, list(vec![oversized]));
         assert!(changes.updated.is_empty(), "oversized-zid entry dropped");
-        assert!(net.get_node(&big).is_none(), "oversized zid not admitted");
+        assert!(changes.new.is_empty());
+        assert!(
+            net.get_node(&Zid::from_slice(&big)).is_none(),
+            "the oversized zid (even truncated) was not admitted"
+        );
     }
 
     #[test]

@@ -199,7 +199,7 @@ impl LinkstateForwarder {
 
     /// A driver seeded with the local node (this peer's zid + whatami), using the
     /// default [`DEFAULT_TREES_DELAY`](Self::DEFAULT_TREES_DELAY) recompute window.
-    pub fn new(self_zid: Zid, self_whatami: u8) -> Self {
+    pub fn new(self_zid: impl Into<Zid>, self_whatami: u8) -> Self {
         Self::with_trees_delay(self_zid, self_whatami, Self::DEFAULT_TREES_DELAY)
     }
 
@@ -208,9 +208,16 @@ impl LinkstateForwarder {
     /// by). A shorter window converges faster at the cost of more frequent
     /// recomputes under churn; a longer one coalesces a heavier burst. This tunes
     /// the single coalescing path — it does not turn coalescing off.
-    pub fn with_trees_delay(self_zid: Zid, self_whatami: u8, trees_delay: Duration) -> Self {
+    pub fn with_trees_delay(
+        self_zid: impl Into<Zid>,
+        self_whatami: u8,
+        trees_delay: Duration,
+    ) -> Self {
         Self {
-            net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
+            net: Rc::new(RefCell::new(LinkstateNetwork::new(
+                self_zid.into(),
+                self_whatami,
+            ))),
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
@@ -414,18 +421,18 @@ impl LinkstateForwarder {
     /// resolve the source — and the self-source / range guards — identically.
     fn resolve_source(
         &self,
-        inbound_zid: Option<&Zid>,
+        inbound_zid: Option<&[u8]>,
         inbound_link: Option<LinkId>,
         node_id: u16,
     ) -> Option<(Zid, u16)> {
         let net = self.net.borrow();
         let source_zid: Zid = match node_id {
-            0 => inbound_zid?.clone(),
+            0 => Zid::from_slice(inbound_zid?),
             nid => match inbound_link
                 .and_then(|l| net.get_link(l))
                 .and_then(|l| l.get_zid(nid as u64))
             {
-                Some(zid) => zid.clone(),
+                Some(zid) => *zid,
                 // The message names a source psid the inbound link never mapped
                 // (an out-of-order flood, or a link that dropped the mapping):
                 // the message is dropped. Surface it (E2) so a non-forwarding
@@ -508,7 +515,7 @@ impl LinkstateForwarder {
         // shared seam (forward_subscription resolves a sourced Declare the same
         // way; both flood along the source's tree).
         let Some((source_zid, out_node_id)) =
-            self.resolve_source(inbound_zid.as_ref(), inbound_link, read_push_source(push))
+            self.resolve_source(inbound_zid.as_deref(), inbound_link, read_push_source(push))
         else {
             return;
         };
@@ -519,7 +526,7 @@ impl LinkstateForwarder {
         // keyexpr was resolved alias-aware in the scoped borrow above, B1.)
         // The filter excludes self (interested_remote): self is the local sink
         // (delivered by the session layer), not a mesh forward target.
-        let self_zid = self.net.borrow().self_zid().clone();
+        let self_zid = *self.net.borrow().self_zid();
         let interested = self.subs.borrow().interested_remote(&keyexpr, &self_zid);
         if interested.is_empty() {
             return;
@@ -595,7 +602,7 @@ impl LinkstateForwarder {
     /// `forward_push` (which re-forwards a RECEIVED Push). Returns the number of
     /// interested-child faces the Put reached.
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<usize, CodecError> {
-        let self_zid = self.net.borrow().self_zid().clone();
+        let self_zid = *self.net.borrow().self_zid();
         // interested_remote excludes self: a key only self subscribes to has no
         // remote forward target (self is the local sink), so publish sends nowhere.
         let interested = self.subs.borrow().interested_remote(keyexpr, &self_zid);
@@ -638,8 +645,8 @@ impl LinkstateForwarder {
     /// A2), iterated uniformly with remote subscriptions — no separate
     /// self-origination structure.
     pub fn declare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        let self_zid = self.net.borrow().self_zid().clone();
-        self.subs.borrow_mut().register(keyexpr, self_zid.clone());
+        let self_zid = *self.net.borrow().self_zid();
+        self.subs.borrow_mut().register(keyexpr, self_zid);
         // node_id 0 = self-originated (build_declare_subscriber emits no ext_nodeid);
         // literal keyexpr (mapping id 0 + suffix, the wz MVP form).
         let declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
@@ -663,7 +670,7 @@ impl LinkstateForwarder {
     /// declaration, needs no late-joiner re-advertise — a peer that joins after
     /// never held the interest).
     pub fn undeclare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
-        let self_zid = self.net.borrow().self_zid().clone();
+        let self_zid = *self.net.borrow().self_zid();
         self.subs.borrow_mut().withdraw(keyexpr, &self_zid);
         let declare = build_undeclare_subscriber_with_keyexpr(keyexpr)?;
         self.flood_to_tree_children(&self_zid, || {
@@ -754,7 +761,7 @@ impl LinkstateForwarder {
             (s.actions.peer_zid(), s.link, keyexpr)
         };
         let Some((source_zid, out_node_id)) = self.resolve_source(
-            inbound_zid.as_ref(),
+            inbound_zid.as_deref(),
             inbound_link,
             read_declare_source(declare),
         ) else {
@@ -762,11 +769,7 @@ impl LinkstateForwarder {
         };
         // Register the resolved interest; re-flood ONLY on a new registration
         // (the loop-bounding change-gate).
-        if !self
-            .subs
-            .borrow_mut()
-            .register(&keyexpr, source_zid.clone())
-        {
+        if !self.subs.borrow_mut().register(&keyexpr, source_zid) {
             return;
         }
         let children = self.net.borrow().tree_children_of(&source_zid);
@@ -830,7 +833,7 @@ impl LinkstateForwarder {
             (s.actions.peer_zid(), s.link, keyexpr)
         };
         let Some((source_zid, out_node_id)) = self.resolve_source(
-            inbound_zid.as_ref(),
+            inbound_zid.as_deref(),
             inbound_link,
             read_declare_source(declare),
         ) else {
@@ -1038,9 +1041,11 @@ impl FaceForwarder for LinkstateForwarder {
         // tracked deferral — spanning-tree forwarding is whatami-agnostic;
         // only gossip/autoconnect would need the true role), so a neighbour is
         // recorded as WHATAMI_PEER.
-        let link = actions
-            .peer_zid()
-            .map(|peer_zid| self.net.borrow_mut().add_link(peer_zid, WHATAMI_PEER));
+        let link = actions.peer_zid().map(|peer_zid| {
+            self.net
+                .borrow_mut()
+                .add_link(Zid::from_slice(&peer_zid), WHATAMI_PEER)
+        });
         self.faces.borrow_mut().insert(
             id,
             FaceState {
@@ -1244,7 +1249,7 @@ mod tests {
     use wz_runtime_core::runtime::Runtime;
 
     fn zid(b: u8) -> Zid {
-        vec![b, b, b, b]
+        Zid::from_slice(&[b, b, b, b])
     }
 
     /// A recording-actions face whose remote peer zid is `peer`, so `register`
@@ -1253,7 +1258,11 @@ mod tests {
     /// assert the frames the face received.
     fn peer_face(peer: Zid) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
         let (actions, sink) = recording_actions();
-        TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| *s = Some(peer));
+        // the session-layer peer_zid is raw bytes (Vec<u8>); the driver maps it
+        // to a routing `Zid` on register, so a test sets the raw form here.
+        TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+            *s = Some(peer.as_slice().to_vec())
+        });
         (actions, sink)
     }
 
@@ -1266,7 +1275,7 @@ mod tests {
                 psid,
                 sn,
                 zid_len: Some(4),
-                zid: Some(SceBytes::from_slice(&zid(node)).unwrap()),
+                zid: Some(SceBytes::from_slice(zid(node).as_slice()).unwrap()),
                 whatami: Some(2),
                 num_locators: None,
                 locators: None,
@@ -1548,7 +1557,7 @@ mod tests {
             psid,
             sn,
             zid_len: Some(4),
-            zid: Some(SceBytes::from_slice(&zid(node)).unwrap()),
+            zid: Some(SceBytes::from_slice(zid(node).as_slice()).unwrap()),
             whatami: Some(2),
             num_locators: None,
             locators: None,
