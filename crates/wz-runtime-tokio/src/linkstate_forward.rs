@@ -224,6 +224,16 @@ impl LinkstateForwarder {
         }
     }
 
+    /// Advertise self's dial locators (its listen addresses) — they ride every
+    /// FULL flood self originates, so a neighbour learns where to reach this
+    /// peer (the discovery data a gossip/autoconnect consumer dials). The driver
+    /// sets this ONCE at startup, before the first face registers, so self's
+    /// very first flood already carries them. Signature-stable: a driver that
+    /// never calls this advertises no locators (the prior behaviour exactly).
+    pub fn set_self_locators(&self, locators: Vec<String>) {
+        self.net.borrow_mut().set_self_locators(locators);
+    }
+
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it against
     /// that face's graph link. Returns the ingest `Changes` the caller re-floods
     /// onward ([`propagate`](Self::propagate)). Does NOT recompute the spanning
@@ -250,6 +260,16 @@ impl LinkstateForwarder {
         };
         let mut net = self.net.borrow_mut();
         let changes = net.ingest_linkstate_list(link_id, list);
+        // Discovery observability (E2): a node seen for the first time that
+        // advertised dial locators is a freshly-DISCOVERED peer — log where it
+        // is reachable. This is the data a future gossip/autoconnect step dials
+        // toward; at the data layer it is a pure diagnostic (healthy meshes that
+        // never gossip locators log nothing).
+        for zid in &changes.new {
+            if let Some(locators) = net.node_locators(zid) {
+                log::info!("discovered peer {zid} reachable at {locators:?}");
+            }
+        }
         drop(net);
         self.ingested.set(self.ingested.get() + 1);
         changes

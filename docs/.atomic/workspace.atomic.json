@@ -44288,6 +44288,56 @@
         "LESSON (cf sq/sv): the 4-agent adversarial review is the strongest calibration -- caught a convergent CRITICAL (incomplete+duplicated guard, missed local delivery) sy's own mutation-verified tests missed. [[feedback-textbook-over-cost]]"
       ]
     },
+    "Round 311tb": {
+      "decision_summary": "R311tb: locator ingest = the F discovery data layer. Node link-states now carry the L (locators) field; self advertises its listen addr, the neighbour ingests it (preserve-on-None). Codec unchanged; gossip-policy + autoconnect deferred.",
+      "changes_bullets": [
+        "F discovery atom 1: chose locators over F1-whatami -- the graph already self-heals a node's role via the neighbour's flood, so whatami face-wiring has no consumer until gossip; locators are the absent foundational discovery data.",
+        "TX: Details gains a locators dimension (FULL carries it); make_link_state emits OPT_L + num_locators + node.locators via locators_to_wire (over-128 dropped). LinkstateNetwork::set_self_locators sets the self node's locators.",
+        "RX: ResolvedEntry/LocalLinkState gain locators; the resolve loop projects entry.locators via locators_from_wire; process_linkstates sets Node.locators on insert and preserve-on-None on update (zenoh network.rs:714-715).",
+        "Codec UNCHANGED: linkstate.scxml already generates the L field (LinkstateOwned.num_locators/locators were hardcoded None in wz-routing-graph). Added node_locators(zid) accessor -- the read a gossip/autoconnect consumer dials toward.",
+        "Driver/demo: LinkstateForwarder::set_self_locators (signature-stable; empty = prior behaviour); demo wires --listen as tcp/<addr> before first register; ingest logs \"discovered peer <zid> reachable at <locs>\" for changes.new."
+      ],
+      "verification_bullets": [
+        "Gates: wz-routing-graph 48 (+3 locator: full-flood round-trip / links-only preserve-on-None / over-128 TX drop), both gates mutation-verified (TX emit off and RX preserve off each fail the round-trip). routing-peer lib 362; routing_forward 21.",
+        "Demo builds all 4 routing axes (router/routes/peer/default); clippy -D warnings + fmt clean. E6 peer-mesh e2e (wz_peer_mesh + wz_peer_data_forward) = 5 tests x 4 runs, 0 flake.",
+        "Discovery observable e2e: wz_peer_mesh --nocapture logs 'discovered peer 70728f4f reachable at [\"tcp/127.0.0.1:36687\"]' -- self listen addr advertised, the neighbour ingested it.",
+        "Grounding (direct read): zenoh make_link_state locators network.rs:336-341, propagate_locators gossip gate :406-418, ingest preserve-on-None :714-715. LocatorOwned.locator = SceString<128>; OPT_L = 0x04."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tb = F discovery atom 1 (locator data layer). Node link-states carry the L field; self advertises its listen addr, neighbours ingest it (preserve-on-None). The graph now answers node_locators(zid) -- the data autoconnect dials.",
+        "Scope finding: F1-whatami alone is YAGNI -- the graph node role self-heals via the neighbour's flood and self never re-originates a neighbour's link-state. Locators are absent today, so they are the real foundational discovery data.",
+        "Deferred (next F atoms): gossip propagation policy (zenoh propagate_locators per-target gate = gossip_target mask + multihop), autoconnect (connect_discovered_peer dials gossiped locators), F1 whatami face-wiring (folds into the gossip-policy atom that consumes the role).",
+        "LOCAL UNPUSHED: 311tb on origin/main=f44d54f. Push only after explicit consent (pre-push full run-ci; idle first)."
+      ],
+      "publishable_decision_summary": "R311tb: locator ingest = the F discovery data layer. Node link-states now carry the L (locators) field; self advertises its listen addr, the neighbour ingests it (preserve-on-None). Codec unchanged; gossip-policy + autoconnect deferred.",
+      "publishable_changes_bullets": [
+        "F discovery atom 1: chose locators over F1-whatami -- the graph already self-heals a node's role via the neighbour's flood, so whatami face-wiring has no consumer until gossip; locators are the absent foundational discovery data.",
+        "TX: Details gains a locators dimension (FULL carries it); make_link_state emits OPT_L + num_locators + node.locators via locators_to_wire (over-128 dropped). LinkstateNetwork::set_self_locators sets the self node's locators.",
+        "RX: ResolvedEntry/LocalLinkState gain locators; the resolve loop projects entry.locators via locators_from_wire; process_linkstates sets Node.locators on insert and preserve-on-None on update (zenoh network.rs:714-715).",
+        "Codec UNCHANGED: linkstate.scxml already generates the L field (LinkstateOwned.num_locators/locators were hardcoded None in wz-routing-graph). Added node_locators(zid) accessor -- the read a gossip/autoconnect consumer dials toward.",
+        "Driver/demo: LinkstateForwarder::set_self_locators (signature-stable; empty = prior behaviour); demo wires --listen as tcp/<addr> before first register; ingest logs \"discovered peer <zid> reachable at <locs>\" for changes.new."
+      ],
+      "publishable_verification_bullets": [
+        "Gates: wz-routing-graph 48 (+3 locator: full-flood round-trip / links-only preserve-on-None / over-128 TX drop), both gates mutation-verified (TX emit off and RX preserve off each fail the round-trip). routing-peer lib 362; routing_forward 21.",
+        "Demo builds all 4 routing axes (router/routes/peer/default); clippy -D warnings + fmt clean. E6 peer-mesh e2e (wz_peer_mesh + wz_peer_data_forward) = 5 tests x 4 runs, 0 flake.",
+        "Discovery observable e2e: wz_peer_mesh --nocapture logs 'discovered peer 70728f4f reachable at [\"tcp/127.0.0.1:36687\"]' -- self listen addr advertised, the neighbour ingested it.",
+        "Grounding (direct read): zenoh make_link_state locators network.rs:336-341, propagate_locators gossip gate :406-418, ingest preserve-on-None :714-715. LocatorOwned.locator = SceString<128>; OPT_L = 0x04."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tb = F discovery atom 1 (locator data layer). Node link-states carry the L field; self advertises its listen addr, neighbours ingest it (preserve-on-None). The graph now answers node_locators(zid) -- the data autoconnect dials.",
+        "Scope finding: F1-whatami alone is YAGNI -- the graph node role self-heals via the neighbour's flood and self never re-originates a neighbour's link-state. Locators are absent today, so they are the real foundational discovery data.",
+        "Deferred (next F atoms): gossip propagation policy (zenoh propagate_locators per-target gate = gossip_target mask + multihop), autoconnect (connect_discovered_peer dials gossiped locators), F1 whatami face-wiring (folds into the gossip-policy atom that consumes the role).",
+        "LOCAL UNPUSHED: 311tb on origin/main=f44d54f. Push only after explicit consent (pre-push full run-ci; idle first)."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

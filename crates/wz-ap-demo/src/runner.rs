@@ -1316,6 +1316,12 @@ pub(crate) async fn run_peer(
     // use the validating `Zid::try_from`). Borrows `params.zid`, leaving it owned
     // by `params` to pass on to peer_loop below.
     let forwarder = LinkstateForwarder::new(Zid::from_slice(&params.zid), WHATAMI_PEER);
+    // Advertise this peer's listen address as its dial locator BEFORE the first
+    // face registers, so self's first FULL flood already carries it. A neighbour
+    // then learns where to reach this peer (the discovery data — what a future
+    // gossip/autoconnect step dials). `local` is the bound TCP endpoint; the
+    // zenoh locator form is `tcp/<addr>`.
+    forwarder.set_self_locators(vec![format!("tcp/{local}")]);
 
     let loop_fut = peer_loop(
         FaceSources {

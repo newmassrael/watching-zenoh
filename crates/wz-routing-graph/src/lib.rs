@@ -51,11 +51,12 @@ use std::num::NonZeroU16;
 
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableUnGraph;
-use sce_forge_runtime::codec::SceBytes;
+use sce_forge_runtime::codec::{SceBytes, SceString};
 use wz_codecs::linkstate::LinkstateOwned;
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::linkstate_weight::LinkstateWeight;
+use wz_codecs::locator::LocatorOwned;
 
 /// WhatAmI role bytes (zenoh `WhatAmI`): a node advertises exactly one.
 /// The codec carries the raw byte; the ingest validates against this set
@@ -81,10 +82,13 @@ fn is_valid_whatami(w: u8) -> bool {
 pub const ZENOHID_MAX_SIZE: usize = 16;
 
 /// LinkState `options` flag bits (zenoh `linkstate.rs:20-23`): which optional
-/// fields a built LinkState carries. P=zid, W=whatami, H=link weights. L
-/// (locators, 0x04) is unused here — locator advertisement is deferred.
+/// fields a built LinkState carries. P=zid, W=whatami, L=locators, H=link
+/// weights. L gates a node's advertised reachability locators — the gossip
+/// payload a discovering peer dials (zenoh `make_link_state` `locators` field,
+/// `network.rs:336-341`).
 const OPT_P: u8 = 0x01;
 const OPT_W: u8 = 0x02;
+const OPT_L: u8 = 0x04;
 const OPT_H: u8 = 0x08;
 
 /// The sub-1% tie-break budget the edge jitter rides on (zenoh
@@ -110,6 +114,52 @@ fn into_list(link_states: Vec<LinkstateOwned>) -> LinkstateListOwned {
         num_link_states: link_states.len() as u64,
         link_states,
     }
+}
+
+/// The wire cap on a single locator — the codec's `SceString<128>` field width
+/// (`locator.scxml`). A locator past this cannot round-trip through a no-alloc
+/// peer's fixed-capacity decoder, so the graph drops it at the TX/RX boundary
+/// rather than admit one that re-encodes lossily — the same host-validation
+/// obligation the oversized-zid drop ([`Zid::try_from`]) discharges.
+const MAX_LOCATOR_WIRE_LEN: usize = 128;
+
+/// Project a node's host locators (`&[String]`) into the codec's owned
+/// `LocatorOwned` list for a TX entry, dropping any locator past the wire cap.
+/// Returns `None` when the node advertises no usable locator — the caller then
+/// leaves the `L` option clear, exactly as a node with no locators emits no
+/// locator field. The TX inverse of [`locators_from_wire`].
+fn locators_to_wire(locators: &[String]) -> Option<Vec<LocatorOwned>> {
+    let owned: Vec<LocatorOwned> = locators
+        .iter()
+        .filter_map(|loc| {
+            if loc.len() > MAX_LOCATOR_WIRE_LEN {
+                log::warn!(
+                    "dropping over-long locator ({} bytes) from a link-state entry",
+                    loc.len()
+                );
+                return None;
+            }
+            // `from_view` is infallible on the alloc (AP) backing this crate
+            // targets; the `.ok()` keeps the no-alloc contract honest.
+            SceString::from_view(loc).ok().map(|locator| LocatorOwned {
+                locator_len: loc.len() as u64,
+                locator,
+            })
+        })
+        .collect();
+    (!owned.is_empty()).then_some(owned)
+}
+
+/// Project a decoded entry's `LocatorOwned` list back into host `String`s for
+/// the graph `Node.locators`. Returns `None` for an absent OR empty list, so a
+/// node's stored locators are never `Some(empty)` (a degenerate "advertises
+/// zero locators" state). The RX inverse of [`locators_to_wire`].
+fn locators_from_wire(locators: Option<Vec<LocatorOwned>>) -> Option<Vec<String>> {
+    let strings: Vec<String> = locators?
+        .into_iter()
+        .map(|loc| loc.locator.as_str().to_string())
+        .collect();
+    (!strings.is_empty()).then_some(strings)
 }
 
 /// A routing identity — a zenoh zid (1..=16 bytes). Stored as a fixed 16-byte
@@ -304,6 +354,7 @@ struct ResolvedEntry {
     sn: u64,
     links: Vec<LinkstateLink>,
     weights: Option<Vec<LinkstateWeight>>,
+    locators: Option<Vec<String>>,
 }
 
 /// An edge weight (zenoh `LinkEdgeWeight`, `net/protocol/linkstate.rs:54`):
@@ -390,22 +441,32 @@ impl Link {
 
 /// Which fields of a node's `LinkState` a TX entry carries — the wz mirror of
 /// zenoh `Details` (`network.rs:49`), narrowed to the field combinations wz
-/// emits (locators are deferred with the gossip/autoconnect atom). An ENUM, not
-/// a `(zid, links)` bool pair, so the meaningless "neither zid nor links" combo
-/// is unrepresentable (the project's make-illegal-states-unrepresentable rule).
-/// Each variant is one of zenoh's selective re-advertisements:
-/// - [`Full`](Self::Full) (zid + links) — a new node: the receiver learns its
-///   psid<->zid mapping AND its links ([`build_linkstate_list`](LinkstateNetwork::build_linkstate_list),
-///   the `new` half of [`build_linkstate_split`](LinkstateNetwork::build_linkstate_split)).
-/// - [`LinksOnly`](Self::LinksOnly) (links, no zid) — an updated node the
-///   receiver already mapped: omit the ~16-byte zid, re-advertise just its
-///   links/whatami (the D4 propagate optimisation; the receiver resolves the
-///   omitted zid from the psid it learned earlier).
-/// - [`ZidOnly`](Self::ZidOnly) (zid, no links) — a newly-linked neighbour
-///   announced to EXISTING peers so a sibling entry referencing it by psid
-///   resolves, without re-sending the neighbour's own (irrelevant to them) links
-///   — the first entry of zenoh `add_link`'s 2-entry delta (`network.rs:873-890`),
+/// emits. An ENUM, not a `(zid, links, locators)` bool triple, so the
+/// meaningless "neither zid nor links" combo is unrepresentable (the project's
+/// make-illegal-states-unrepresentable rule). Each variant is one of zenoh's
+/// selective re-advertisements:
+/// - [`Full`](Self::Full) (zid + links + locators) — a new node: the receiver
+///   learns its psid<->zid mapping, its links, AND its dial locators
+///   ([`build_linkstate_list`](LinkstateNetwork::build_linkstate_list), the
+///   `new` half of [`build_linkstate_split`](LinkstateNetwork::build_linkstate_split)).
+/// - [`LinksOnly`](Self::LinksOnly) (links, no zid, no locators) — an updated
+///   node the receiver already mapped: omit the ~16-byte zid, re-advertise just
+///   its links/whatami (the D4 propagate optimisation; the receiver resolves the
+///   omitted zid from the psid it learned earlier, and KEEPS the locators it
+///   learned when the node was new — the ingest's preserve-on-None rule).
+/// - [`ZidOnly`](Self::ZidOnly) (zid, no links, no locators) — a newly-linked
+///   neighbour announced to EXISTING peers so a sibling entry referencing it by
+///   psid resolves, without re-sending the neighbour's own (irrelevant to them)
+///   links — the first entry of zenoh `add_link`'s 2-entry delta
+///   (`network.rs:873-890`),
 ///   [`build_link_added_delta`](LinkstateNetwork::build_link_added_delta).
+///
+/// Locators ride [`Full`](Self::Full) only — a node's locators are advertised
+/// when it is first introduced, and the ingest's preserve-on-None rule keeps
+/// them across the links-only updates that follow. zenoh instead gates locators
+/// per target link via `propagate_locators` (a gossip-target / multihop policy,
+/// `network.rs:406-418`); that selective re-advertisement is a tracked
+/// follow-up (the gossip-policy atom), not carried here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Details {
     Full,
@@ -414,27 +475,29 @@ enum Details {
 }
 
 impl Details {
-    /// `(carry_zid, carry_links)` — the two `LinkState` field gates this variant
-    /// selects, the form [`make_link_state`](LinkstateNetwork::make_link_state)
-    /// consumes (mirroring zenoh's `Details { zid, links }` bool fields).
-    fn fields(self) -> (bool, bool) {
+    /// `(carry_zid, carry_links, carry_locators)` — the `LinkState` field gates
+    /// this variant selects, the form [`make_link_state`](LinkstateNetwork::make_link_state)
+    /// consumes (mirroring zenoh's `Details { zid, links, locators }` bool fields).
+    fn fields(self) -> (bool, bool, bool) {
         match self {
-            Details::Full => (true, true),
-            Details::LinksOnly => (false, true),
-            Details::ZidOnly => (true, false),
+            Details::Full => (true, true, true),
+            Details::LinksOnly => (false, true, false),
+            Details::ZidOnly => (true, false, false),
         }
     }
 }
 
 /// A LinkState resolved from psid-space into zid-space — the intermediate
 /// the ingest produces before applying it to the graph. Mirrors zenoh
-/// `LocalLinkState` (`network.rs:96-103`), narrowed to what c2b applies
-/// (locator ingest lands with the gossip/autoconnect atom).
+/// `LocalLinkState` (`network.rs:96-103`). `locators` is `None` when the entry
+/// carried no `L` field — a links-only re-advertisement — and the apply step
+/// then KEEPS the node's existing locators (preserve-on-None).
 struct LocalLinkState {
     sn: u64,
     zid: Zid,
     whatami: u8,
     links: HashMap<Zid, LinkEdgeWeight>,
+    locators: Option<Vec<String>>,
 }
 
 /// What a LinkStateList ingest changed, split the way zenoh's re-flood needs:
@@ -534,6 +597,25 @@ impl LinkstateNetwork {
     /// The self node's zid.
     pub fn self_zid(&self) -> &Zid {
         &self.graph[self.idx].zid
+    }
+
+    /// Set self's advertised dial locators (its listen addresses) on the self
+    /// node, so they ride every FULL flood self originates — the wz analog of
+    /// zenoh reading `runtime.get_locators()` for the self entry
+    /// (`network.rs:337-339`). The driver calls this once at startup (before
+    /// the first face registers, so the first flood already carries them). An
+    /// empty list clears the advertisement (self emits no `L` field — the
+    /// signature-stable default for a node that does not announce locators).
+    pub fn set_self_locators(&mut self, locators: Vec<String>) {
+        self.graph[self.idx].locators = (!locators.is_empty()).then_some(locators);
+    }
+
+    /// The dial locators a node has advertised, or `None` if it is unknown or
+    /// has announced none. The discovery read a gossip/autoconnect consumer
+    /// dials toward (the data this ingest populates).
+    pub fn node_locators(&self, zid: &Zid) -> Option<&[String]> {
+        self.get_idx(zid)
+            .and_then(|idx| self.graph[idx].locators.as_deref())
     }
 
     /// The number of nodes currently known (including self).
@@ -792,10 +874,12 @@ impl LinkstateNetwork {
     /// the links iteration and the zid field. The links-only / zid-only forms
     /// are the D4 selective-re-advertisement deltas (a node the receiver already
     /// mapped need not re-send its ~16-byte zid; a sibling need not re-send a
-    /// new neighbour's links). Locators are deferred for every form.
+    /// new neighbour's links). Locators ride the FULL form only (a node's dial
+    /// addresses, advertised when it is first introduced); the ingest's
+    /// preserve-on-None rule keeps them across the links-only updates that follow.
     fn make_link_state(&self, idx: NodeIndex, details: Details) -> LinkstateOwned {
         let node = &self.graph[idx];
-        let (want_zid, want_links) = details.fields();
+        let (want_zid, want_links, want_locators) = details.fields();
         // links: resolve each neighbour zid to its local psid, with a weight per
         // link (zenoh make_link_state, `network.rs:308-325`) — ONLY when the
         // variant carries links; an entry that omits links (a zid-only neighbour
@@ -822,13 +906,26 @@ impl LinkstateNetwork {
                 }
             }
         }
+        // locators: the node's dial addresses, carried only by the FULL form
+        // (`want_locators`) and only when the node actually has some — a
+        // links-only/zid-only re-advertisement omits them, and the receiver
+        // keeps what it learned (the ingest's preserve-on-None rule). zenoh
+        // `make_link_state` `network.rs:336-341` (self reads the live
+        // `runtime.get_locators()`; wz stores self's locators on the self node,
+        // so both self and others read `node.locators` uniformly here).
+        let locators = want_locators
+            .then(|| node.locators.as_deref().and_then(locators_to_wire))
+            .flatten();
         // options: P (zid) set iff the variant carries the zid (the codec gates
         // the zid field on P; a zid-omitting entry relies on the receiver's
-        // existing psid->zid mapping). W (if whatami known) | H (if a non-default
-        // weight was emitted) apply on top.
+        // existing psid->zid mapping). W (if whatami known) | L (if locators are
+        // carried) | H (if a non-default weight was emitted) apply on top.
         let mut options = if want_zid { OPT_P } else { 0 };
         if node.whatami.is_some() {
             options |= OPT_W;
+        }
+        if locators.is_some() {
+            options |= OPT_L;
         }
         if has_weight {
             options |= OPT_H;
@@ -845,8 +942,8 @@ impl LinkstateNetwork {
                 SceBytes::from_slice(node.zid.as_slice()).expect("graph zid is <= ZENOHID_MAX_SIZE")
             }),
             whatami: node.whatami,
-            num_locators: None,
-            locators: None,
+            num_locators: locators.as_ref().map(|l| l.len() as u64),
+            locators,
             links_len: links.len() as u64,
             links,
             weights: has_weight.then_some(weights),
@@ -1010,6 +1107,9 @@ impl LinkstateNetwork {
                     sn: entry.sn,
                     links: entry.links,
                     weights: entry.weights,
+                    // a `None`/empty `L` field projects to `None`, which the
+                    // apply step reads as "keep the node's existing locators".
+                    locators: locators_from_wire(entry.locators),
                 });
             }
             resolved
@@ -1031,6 +1131,7 @@ impl LinkstateNetwork {
                      sn,
                      links: entry_links,
                      weights,
+                     locators,
                  }| {
                     let mut links = HashMap::with_capacity(entry_links.len());
                     for (i, link) in entry_links.iter().enumerate() {
@@ -1056,6 +1157,7 @@ impl LinkstateNetwork {
                         zid,
                         whatami,
                         links,
+                        locators,
                     }
                 },
             )
@@ -1085,8 +1187,10 @@ impl LinkstateNetwork {
                     self.insert_node(Node {
                         zid: ls.zid,
                         whatami: Some(ls.whatami),
-                        // locator ingest lands with the gossip/autoconnect atom.
-                        locators: None,
+                        // a fresh node takes whatever locators the entry carried
+                        // (`None` if it was a links-only introduction — a later
+                        // FULL entry for it then supplies them).
+                        locators: ls.locators,
                         sn: ls.sn,
                         links: ls.links,
                     }),
@@ -1102,6 +1206,13 @@ impl LinkstateNetwork {
                     let was_placeholder = node.sn == 0;
                     node.sn = ls.sn;
                     node.links = ls.links;
+                    // preserve-on-None: a links-only re-advertisement (no `L`
+                    // field) keeps the locators learned when the node was new;
+                    // only an entry that actually carries locators overwrites
+                    // them. zenoh `network.rs:714-715`.
+                    if ls.locators.is_some() {
+                        node.locators = ls.locators;
+                    }
                     (idx, was_placeholder)
                 }
             };
@@ -1686,6 +1797,32 @@ mod tests {
     /// so a later node-only ingest cannot sn-gate it away).
     fn relay(sn: u64, node_psids: &[u64]) -> LinkstateOwned {
         entry(7, sn, Some(&zid(0x07)), Some(2), node_psids)
+    }
+
+    /// [`entry`] plus an advertised `L` (locators) field — for the locator
+    /// ingest tests. `num_locators` rides the count and `OPT_L` is set, exactly
+    /// as the TX path emits a node that advertises locators.
+    fn entry_with_locators(
+        psid: u64,
+        sn: u64,
+        zid: Option<&Zid>,
+        whatami: Option<u8>,
+        links: &[u64],
+        locators: &[&str],
+    ) -> LinkstateOwned {
+        let mut e = entry(psid, sn, zid, whatami, links);
+        e.options |= OPT_L;
+        e.num_locators = Some(locators.len() as u64);
+        e.locators = Some(
+            locators
+                .iter()
+                .map(|s| LocatorOwned {
+                    locator_len: s.len() as u64,
+                    locator: SceString::from_view(s).unwrap(),
+                })
+                .collect(),
+        );
+        e
     }
 
     #[test]
@@ -2766,6 +2903,102 @@ mod tests {
             a.next_hop(&zid(0x0A), &zid(0x0C)),
             Some(zid(0x0B)),
             "A routes to C through B"
+        );
+    }
+
+    #[test]
+    fn full_flood_carries_self_locators_into_the_neighbour_graph() {
+        // The locator data round-trip: A advertises its dial locators on its
+        // full flood (the FULL form carries the `L` field), and B ingests them
+        // into A's node — the discovery data a gossip/autoconnect consumer
+        // reads. Mutation guard: if make_link_state stops emitting locators OR
+        // process_linkstates stops ingesting them, node_locators(A) is None and
+        // this fails.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        a.set_self_locators(vec!["tcp/10.0.0.10:7447".to_string()]);
+        a.add_link(zid(0x0B), 2);
+        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
+        let lb_a = b.add_link(zid(0x0A), 2);
+
+        b.ingest_linkstate_list(lb_a, a.build_linkstate_list());
+
+        assert_eq!(
+            b.node_locators(&zid(0x0A)),
+            Some(["tcp/10.0.0.10:7447".to_string()].as_slice()),
+            "B learned A's advertised locators from the full flood"
+        );
+        // Control: B announced no self locators, so its own node carries none —
+        // the L field is omitted, not emitted empty.
+        assert_eq!(b.node_locators(&zid(0x0B)), None);
+    }
+
+    #[test]
+    fn a_links_only_update_preserves_previously_learned_locators() {
+        // preserve-on-None (zenoh network.rs:714-715): once a node's locators
+        // are learned, a later links-only re-advertisement (no `L` field) must
+        // KEEP them, not wipe them — otherwise every D4 links-only delta would
+        // erase the discovery data.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let link = net.add_link(zid(0x07), 2);
+        // 0x07 relays 0xAA; 0xAA first advertises locators (full entry, L set).
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                entry_with_locators(
+                    10,
+                    5,
+                    Some(&zid(0xAA)),
+                    Some(2),
+                    &[],
+                    &["tcp/192.0.2.1:7447"],
+                ),
+                relay(1, &[10]),
+            ]),
+        );
+        assert_eq!(
+            net.node_locators(&zid(0xAA)),
+            Some(["tcp/192.0.2.1:7447".to_string()].as_slice()),
+            "0xAA's locators were ingested"
+        );
+        // 0xAA re-advertises with a NEWER sn but NO L field (a links-only
+        // update): its locators survive.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![entry(10, 6, Some(&zid(0xAA)), Some(2), &[])]),
+        );
+        assert_eq!(
+            net.get_node(&zid(0xAA)).unwrap().sn,
+            6,
+            "the newer sn was applied (the entry was not stale-gated)"
+        );
+        assert_eq!(
+            net.node_locators(&zid(0xAA)),
+            Some(["tcp/192.0.2.1:7447".to_string()].as_slice()),
+            "a links-only (no-L) re-advertisement preserves the locators"
+        );
+    }
+
+    #[test]
+    fn an_over_long_locator_is_dropped_at_the_tx_boundary() {
+        // A locator past the codec's SceString<128> width cannot round-trip a
+        // no-alloc peer's decoder, so the TX projection drops it (the same
+        // host-validation obligation as the oversized-zid drop) while the
+        // valid sibling still rides.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let ok = "tcp/10.0.0.10:7447".to_string();
+        let too_long = format!("tcp/[{}]:7447", "f".repeat(200));
+        assert!(too_long.len() > MAX_LOCATOR_WIRE_LEN);
+        a.set_self_locators(vec![ok.clone(), too_long]);
+        a.add_link(zid(0x0B), 2);
+        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
+        let lb_a = b.add_link(zid(0x0A), 2);
+
+        b.ingest_linkstate_list(lb_a, a.build_linkstate_list());
+
+        assert_eq!(
+            b.node_locators(&zid(0x0A)),
+            Some([ok].as_slice()),
+            "the valid locator rode; the over-128 one was dropped at TX"
         );
     }
 
