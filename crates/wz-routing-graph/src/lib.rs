@@ -31,9 +31,15 @@
 //!   `updated` nodes links-only, the D4 `Details` split — and the per-face
 //!   re-flood lives in the driver `linkstate_forward::propagate`, R311ra+sl.)
 //! - the real handshake `whatami` (the driver currently records every
-//!   peer-mesh neighbour as Peer), and observability for dropped entries
-//!   (zenoh `tracing::error!`s an unresolvable psid/link; wz drops silently
-//!   — wz-runtime-tokio has no `tracing` dep yet).
+//!   peer-mesh neighbour as Peer).
+//!
+//! Drop observability (E2): a dropped ingest entry — an unresolvable psid /
+//! link / zid, an invalid whatami — is now surfaced through the `log` facade
+//! (wz's logging SSOT; zenoh `tracing::error!`s the same sites). `error!` for
+//! an unresolvable reference (a protocol inconsistency), `warn!` for a
+//! host-validation drop of malformed input, `debug!` for a GC prune. A no-op
+//! without a logger backend; an operator who installs one sees why a peer or
+//! edge silently failed to appear.
 //!
 //! This crate is pulled only by wz-runtime-tokio's `routing-peer` feature
 //! (AP/full-node mesh routing; absent from the MCU footprint). Backed by
@@ -492,6 +498,9 @@ impl LinkstateNetwork {
         for idx in self.graph.node_indices().collect::<Vec<NodeIndex>>() {
             if !visit_map.is_visited(&idx) {
                 if let Some(node) = self.graph.remove_node(idx) {
+                    // GC event (zenoh debug!s the same, `network.rs:1008`): a
+                    // node left the reachable mesh and is pruned.
+                    log::debug!("pruning detached node {:02x?}", node.zid);
                     self.idx_by_zid.remove(&node.zid);
                     removed.push(node.zid);
                 }
@@ -546,9 +555,13 @@ impl LinkstateNetwork {
                     weight: weight.as_raw(),
                 });
                 has_weight = has_weight || weight.is_set();
+            } else {
+                // a link to an unknown node is an internal inconsistency: the
+                // graph holds an edge to a vertex it cannot index. Skip it
+                // rather than emit an unresolvable psid; zenoh error!s the same
+                // (`network.rs:317`).
+                log::error!("building linkstate: link dest {dest_zid:02x?} is not in the graph");
             }
-            // a link to an unknown node is an internal inconsistency; skip it
-            // rather than emit an unresolvable psid.
         }
         // options: P (zid) only in the FULL variant — the links-only variant
         // omits the zid (and the P flag), relying on the receiver's existing
@@ -640,6 +653,7 @@ impl LinkstateNetwork {
         // A list from an unknown link is dropped (zenoh logs + returns
         // empty, `network.rs:469-476`).
         if !self.links.contains_key(&src_link_id) {
+            log::error!("linkstate list received on unknown link {src_link_id}");
             return Vec::new();
         }
 
@@ -665,6 +679,12 @@ impl LinkstateNetwork {
                         // codec carries raw bytes, so drop an oversized one
                         // here rather than admit it to the graph.
                         if bytes.as_slice().len() > ZENOHID_MAX_SIZE {
+                            log::warn!(
+                                "dropping linkstate entry (psid {}): zid is {} bytes, over the {} max",
+                                entry.psid,
+                                bytes.as_slice().len(),
+                                ZENOHID_MAX_SIZE
+                            );
                             continue;
                         }
                         let zid = bytes.as_slice().to_vec();
@@ -673,7 +693,17 @@ impl LinkstateNetwork {
                     }
                     None => match src_link.get_zid(entry.psid) {
                         Some(zid) => zid.clone(),
-                        None => continue, // unknown psid mapping -> drop entry
+                        None => {
+                            // unknown psid mapping -> drop entry (the node
+                            // silently vanishes); zenoh error!s the same
+                            // (`network.rs:507`).
+                            log::error!(
+                                "linkstate entry on link {src_link_id} has an unresolvable \
+                                 node psid {} (no zid mapping)",
+                                entry.psid
+                            );
+                            continue;
+                        }
                     },
                 };
                 // whatami: absent defaults to Router; an out-of-range value
@@ -682,7 +712,12 @@ impl LinkstateNetwork {
                 let whatami = match entry.whatami {
                     None => WHATAMI_ROUTER,
                     Some(w) if is_valid_whatami(w) => w,
-                    Some(_) => continue,
+                    Some(w) => {
+                        log::warn!(
+                            "dropping linkstate entry on link {src_link_id}: invalid whatami {w}"
+                        );
+                        continue;
+                    }
                 };
                 resolved.push(ResolvedEntry {
                     zid,
@@ -721,8 +756,15 @@ impl LinkstateNetwork {
                                 .map(|w| LinkEdgeWeight::from_raw(w.weight))
                                 .unwrap_or_default();
                             links.insert(dst.clone(), weight);
+                        } else {
+                            // unknown link psid -> drop that edge; zenoh error!s
+                            // the same (`network.rs:538`).
+                            log::error!(
+                                "linkstate entry on link {src_link_id} references an \
+                                 unresolvable link psid {}",
+                                link.psid
+                            );
                         }
-                        // unknown link psid -> drop that edge (zenoh network.rs:544)
                     }
                     LocalLinkState {
                         sn,

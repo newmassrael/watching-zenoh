@@ -234,8 +234,16 @@ impl LinkstateForwarder {
     pub fn ingest_inbound_linkstate(&self, face: FaceId, list: LinkstateListOwned) -> Changes {
         let link_id = match self.faces.borrow().get(&face).and_then(|s| s.link) {
             Some(id) => id,
-            // a list from a face with no graph link (unknown / no zid) is dropped.
-            None => return Changes::default(),
+            // a list from a face with no graph link (held but no routing zid at
+            // the handshake) is dropped — surface it (E2) so the topology not
+            // converging over such a face is diagnosable.
+            None => {
+                log::debug!(
+                    "dropping linkstate from face {} with no graph link (no routing zid)",
+                    face.0
+                );
+                return Changes::default();
+            }
         };
         let mut net = self.net.borrow_mut();
         let changes = net.ingest_linkstate_list(link_id, list);
@@ -413,10 +421,23 @@ impl LinkstateForwarder {
         let net = self.net.borrow();
         let source_zid: Zid = match node_id {
             0 => inbound_zid?.clone(),
-            nid => net
-                .get_link(inbound_link?)
-                .and_then(|l| l.get_zid(nid as u64))?
-                .clone(),
+            nid => match inbound_link
+                .and_then(|l| net.get_link(l))
+                .and_then(|l| l.get_zid(nid as u64))
+            {
+                Some(zid) => zid.clone(),
+                // The message names a source psid the inbound link never mapped
+                // (an out-of-order flood, or a link that dropped the mapping):
+                // the message is dropped. Surface it (E2) so a non-forwarding
+                // route is diagnosable.
+                None => {
+                    log::debug!(
+                        "dropping a sourced message: unresolvable source psid {nid} \
+                         on the inbound link"
+                    );
+                    return None;
+                }
+            },
         };
         if source_zid == *net.self_zid() {
             return None;

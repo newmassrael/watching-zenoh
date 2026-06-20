@@ -46,6 +46,11 @@ wz-codecs = { path = "../wz-codecs", default-features = false, features = [
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false, features = [
     "alloc",
 ] }
+# Drop observability (E2): the `log` facade so an unresolvable psid / link /
+# zid that gets silently dropped during ingest is surfaced to an operator's
+# logger (zenoh `tracing::error!`s the same sites). A no-op without a backend;
+# this crate is AP-only (routing-peer), so the facade never reaches the MCU.
+log = "0.4"
 
 [lints]
 workspace = true

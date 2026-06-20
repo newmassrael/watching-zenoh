@@ -2096,6 +2096,7 @@ dependencies = [
 name = "wz-routing-graph"
 version = "0.1.0"
 dependencies = [
+ "log",
  "petgraph",
  "sce-forge-runtime",
  "wz-codecs",
