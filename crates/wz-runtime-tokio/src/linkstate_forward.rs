@@ -102,7 +102,7 @@ use wz_session_core::push_routing_context::{
 };
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
-use wz_routing_graph::{Changes, LinkId, LinkstateNetwork, Zid};
+use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{FaceForwarder, FaceId};
 use crate::linkstate_subs::LinkstatepeerSubs;
@@ -110,7 +110,7 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export so the peer-loop caller (the demo) names the neighbour role by
 /// the same const the graph + forwarder use, not a bare `0x02` literal.
-pub use wz_routing_graph::WHATAMI_PEER;
+pub use wz_routing_graph::{Zid, WHATAMI_PEER};
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -199,7 +199,7 @@ impl LinkstateForwarder {
 
     /// A driver seeded with the local node (this peer's zid + whatami), using the
     /// default [`DEFAULT_TREES_DELAY`](Self::DEFAULT_TREES_DELAY) recompute window.
-    pub fn new(self_zid: impl Into<Zid>, self_whatami: u8) -> Self {
+    pub fn new(self_zid: Zid, self_whatami: u8) -> Self {
         Self::with_trees_delay(self_zid, self_whatami, Self::DEFAULT_TREES_DELAY)
     }
 
@@ -208,16 +208,9 @@ impl LinkstateForwarder {
     /// by). A shorter window converges faster at the cost of more frequent
     /// recomputes under churn; a longer one coalesces a heavier burst. This tunes
     /// the single coalescing path — it does not turn coalescing off.
-    pub fn with_trees_delay(
-        self_zid: impl Into<Zid>,
-        self_whatami: u8,
-        trees_delay: Duration,
-    ) -> Self {
+    pub fn with_trees_delay(self_zid: Zid, self_whatami: u8, trees_delay: Duration) -> Self {
         Self {
-            net: Rc::new(RefCell::new(LinkstateNetwork::new(
-                self_zid.into(),
-                self_whatami,
-            ))),
+            net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),

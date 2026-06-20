@@ -1105,10 +1105,15 @@ pub(crate) async fn run_demo(
 /// handshake did not surface it). Shared by the router and peer face observers.
 #[cfg(any(feature = "routing-router", feature = "routing-peer"))]
 fn zid_hex(zid: Option<&[u8]>) -> String {
-    match zid {
-        Some(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
-        None => "?".to_string(),
-    }
+    use wz::runtime_tokio::linkstate_forward::Zid;
+    // Delegate the hex formatting to `Zid::Display` (the single SSOT for the wire-
+    // order lowercase-hex zid form); this adapter only adds the `?` for a face
+    // whose handshake did not surface a zid. A handshake zid is <= 16 bytes, so
+    // `from_slice` is lossless here.
+    zid.map_or_else(
+        || "?".to_string(),
+        |bytes| Zid::from_slice(bytes).to_string(),
+    )
 }
 
 /// R311qa — multi-peer ROUTER mode: bind once and hold N concurrent peer faces
@@ -1240,7 +1245,7 @@ pub(crate) async fn run_peer(
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
-    use wz::runtime_tokio::linkstate_forward::{LinkstateForwarder, WHATAMI_PEER};
+    use wz::runtime_tokio::linkstate_forward::{LinkstateForwarder, Zid, WHATAMI_PEER};
     use wz::runtime_tokio::session_open::bind_endpoint;
 
     // Per-peer routing zid = this 2-byte prefix + the listen port (derived
@@ -1306,11 +1311,12 @@ pub(crate) async fn run_peer(
     // own link-state on its OWN periodic tick and bootstraps each new neighbour
     // at face-up, so the mesh converges for every peer_loop caller (the flood
     // is on the FaceForwarder seam now, not a hand-rolled select here).
-    // `WHATAMI_PEER` is this node's role; `params.zid` is its id.
-    // `&params.zid[..]` (not a clone): `new` takes `impl Into<Zid>`, so the
-    // session-layer byte zid converts at the boundary without a Vec clone
-    // (params.zid is still owned by `params`, passed on to peer_loop below).
-    let forwarder = LinkstateForwarder::new(&params.zid[..], WHATAMI_PEER);
+    // `WHATAMI_PEER` is this node's role; `params.zid` is its id. `new` takes a
+    // `Zid`; the self zid is this node's own (trusted) identity, so the
+    // infallible `Zid::from_slice` is the right boundary ctor (a wire zid would
+    // use the validating `Zid::try_from`). Borrows `params.zid`, leaving it owned
+    // by `params` to pass on to peer_loop below.
+    let forwarder = LinkstateForwarder::new(Zid::from_slice(&params.zid), WHATAMI_PEER);
 
     let loop_fut = peer_loop(
         FaceSources {

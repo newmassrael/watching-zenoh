@@ -146,9 +146,14 @@ impl Zid {
     /// The maximum zid length (zenoh `ZenohIdProto::MAX_SIZE`).
     pub const MAX_SIZE: usize = 16;
 
-    /// From wire / host bytes — truncated to 16 and canonically zero-padded.
-    /// A slice longer than 16 is truncated defensively (the ingest already
-    /// drops an oversized wire zid before it reaches here).
+    /// From TRUSTED, already-canonical bytes — this node's own zid, or a
+    /// handshake neighbour's — infallible, truncated to 16 and canonically
+    /// zero-padded. For an UNTRUSTED zid decoded off the wire use the
+    /// validating `TryFrom<&[u8]>` / `TryFrom<Vec<u8>>` instead, which reject an
+    /// empty / all-zero / oversized one rather than silently admitting or
+    /// truncating it. A slice longer than 16 is truncated defensively (the wire
+    /// ingest already rejects an oversized zid via `TryFrom` before it reaches
+    /// here).
     pub fn from_slice(src: &[u8]) -> Self {
         let mut bytes = [0u8; 16];
         let len = src.len().min(Self::MAX_SIZE);
@@ -181,27 +186,102 @@ impl Zid {
     }
 }
 
-impl core::fmt::Debug for Zid {
+impl core::fmt::Display for Zid {
+    /// Lowercase per-byte hex in WIRE order — the bytes [`as_slice`](Self::as_slice)
+    /// yields, e.g. `[0x1a, 0x2b]` renders `"1a2b"`. wz's single zid string form:
+    /// [`Debug`](Self) wraps this in `Zid(..)`, and the demo's face logs print it.
+    ///
+    /// DIVERGES (deliberately) from zenoh `ZenohIdProto::Display`, which prints the
+    /// bytes interpreted as a little-endian `u128` in hex with the leading zero
+    /// stripped (so `[0x1a, 0x2b]` would render `"2b1a"`). wz does not need that
+    /// form: zenoh's only use of it is turning a zid into a key expression
+    /// (`From<ZenohIdProto> for OwnedKeyExpr`), a path wz has no analogue of. A wz
+    /// zid is a routing identity shown only in diagnostics, where the wire-order
+    /// hex an operator also reads in a packet dump is the more useful rendering.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Zid(")?;
         for b in self.as_slice() {
             write!(f, "{b:02x}")?;
         }
-        write!(f, ")")
+        Ok(())
     }
 }
 
-impl From<&[u8]> for Zid {
-    fn from(bytes: &[u8]) -> Self {
-        Zid::from_slice(bytes)
+impl core::fmt::Debug for Zid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Zid({self})")
     }
 }
 
-impl From<Vec<u8>> for Zid {
-    /// The session / handshake layer carries a peer zid as `Vec<u8>`; this is
-    /// the boundary conversion into the routing identity.
-    fn from(bytes: Vec<u8>) -> Self {
-        Zid::from_slice(&bytes)
+impl AsRef<[u8]> for Zid {
+    /// The trimmed wire bytes — the borrow form for an API expecting `&[u8]`
+    /// (the session boundary, hashing, a codec). The same bytes as
+    /// [`as_slice`](Self::as_slice).
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+/// Why a byte slice is not a valid [`Zid`]. The zid size contract is zenoh's
+/// `ZenohIdProto`: 1..=16 SIGNIFICANT bytes. The typed reject the validating
+/// [`Zid`] `TryFrom` conversions return for an untrusted wire zid, mirroring the
+/// two cases zenoh's `ZenohIdProto::try_from(&[u8])` rejects via `SizeError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZidError {
+    /// No significant bytes — an empty slice OR an all-zero buffer. zenoh's
+    /// u128-backed `ZenohIdProto` reports an all-zero id as size 0 (a zid is
+    /// `NonZero` by construction), so both collapse to one reject; a conformant
+    /// peer never sends either.
+    Empty,
+    /// More than [`Zid::MAX_SIZE`] (16) bytes — carries the offending length,
+    /// like zenoh's `SizeError(size)`.
+    Oversized(usize),
+}
+
+impl core::fmt::Display for ZidError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ZidError::Empty => write!(f, "zid has no significant (non-zero) bytes"),
+            ZidError::Oversized(n) => {
+                write!(f, "zid is {n} bytes, over the {} max", Zid::MAX_SIZE)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ZidError {}
+
+impl TryFrom<&[u8]> for Zid {
+    type Error = ZidError;
+
+    /// The VALIDATING wire-bytes -> zid conversion (the UNTRUSTED path): an
+    /// empty / all-zero slice, or one over [`MAX_SIZE`](Self::MAX_SIZE), is
+    /// rejected — exactly as zenoh `ZenohIdProto::try_from(&[u8])` rejects via
+    /// `SizeError`. Use this for any zid decoded off the wire; for a trusted,
+    /// already-canonical zid (self / a handshake neighbour) use the infallible
+    /// [`from_slice`](Self::from_slice). Replaces the prior infallible
+    /// `From<&[u8]>`, whose silent truncation made an over-length zid a
+    /// representable illegal state.
+    fn try_from(src: &[u8]) -> Result<Self, Self::Error> {
+        // Size first (matches zenoh's size-checked-first order), then the
+        // all-zero / empty check (`all` is vacuously true for an empty slice).
+        if src.len() > Self::MAX_SIZE {
+            return Err(ZidError::Oversized(src.len()));
+        }
+        if src.iter().all(|&b| b == 0) {
+            return Err(ZidError::Empty);
+        }
+        Ok(Zid::from_slice(src))
+    }
+}
+
+impl TryFrom<Vec<u8>> for Zid {
+    type Error = ZidError;
+
+    /// The session / handshake layer carries a peer zid as `Vec<u8>`; the
+    /// validating boundary conversion into the routing identity (delegates to
+    /// the slice form).
+    fn try_from(src: Vec<u8>) -> Result<Self, Self::Error> {
+        Zid::try_from(src.as_slice())
     }
 }
 
@@ -806,20 +886,21 @@ impl LinkstateNetwork {
                 // mapping) or referenced by a previously-learned psid.
                 let zid = match entry.zid {
                     Some(bytes) => {
-                        // host-validation obligation (like whatami below):
-                        // zenoh rejects a zid > MAX_SIZE at decode; the wz
-                        // codec carries raw bytes, so drop an oversized one
-                        // here rather than admit it to the graph.
-                        if bytes.as_slice().len() > ZENOHID_MAX_SIZE {
-                            log::warn!(
-                                "dropping linkstate entry (psid {}): zid is {} bytes, over the {} max",
-                                entry.psid,
-                                bytes.as_slice().len(),
-                                ZENOHID_MAX_SIZE
-                            );
-                            continue;
-                        }
-                        let zid = Zid::from_slice(bytes.as_slice());
+                        // host-validation obligation (like whatami below): zenoh
+                        // rejects a non-conformant zid at decode (its
+                        // `ZenohIdProto::try_from` enforces 1..=16 significant
+                        // bytes); the wz codec carries the raw bytes, so the
+                        // validating `Zid::try_from` drops an oversized OR an
+                        // empty / all-zero one here, before it reaches the graph
+                        // (the length-only guard this replaced admitted an empty
+                        // zid as a len-0 identity).
+                        let zid = match Zid::try_from(bytes.as_slice()) {
+                            Ok(zid) => zid,
+                            Err(e) => {
+                                log::warn!("dropping linkstate entry (psid {}): {e}", entry.psid);
+                                continue;
+                            }
+                        };
                         src_link.set_zid_mapping(entry.psid, zid);
                         zid
                     }
@@ -1335,10 +1416,70 @@ mod tests {
         let big = Zid::from_slice(&[0xAB; 17]);
         assert_eq!(big.len(), 16);
         assert_eq!(big.as_slice(), &[0xAB; 16]);
-        // From<&[u8]> / From<Vec<u8>> (the session(Vec<u8>) -> routing boundary)
-        // agree with from_slice.
-        assert_eq!(Zid::from(&[1, 2][..]), Zid::from_slice(&[1, 2]));
-        assert_eq!(Zid::from(vec![1, 2]), Zid::from_slice(&[1, 2]));
+        // The validating TryFrom (the session(Vec<u8>) / wire -> routing
+        // boundary) agrees with from_slice for a canonical zid; its rejects are
+        // covered in zid_try_from_rejects_empty_and_oversized.
+        assert_eq!(
+            Zid::try_from(&[1, 2][..]).unwrap(),
+            Zid::from_slice(&[1, 2])
+        );
+        assert_eq!(Zid::try_from(vec![1, 2]).unwrap(), Zid::from_slice(&[1, 2]));
+    }
+
+    #[test]
+    fn zid_try_from_rejects_empty_and_oversized() {
+        // The UNTRUSTED wire path: TryFrom enforces the zenoh ZenohIdProto size
+        // contract (1..=16 significant bytes), unlike the trusted infallible
+        // from_slice which admits / truncates.
+        assert_eq!(Zid::try_from(&[][..]), Err(ZidError::Empty), "empty slice");
+        assert_eq!(
+            Zid::try_from(&[0u8, 0, 0][..]),
+            Err(ZidError::Empty),
+            "an all-zero buffer has size 0 (a zid is NonZero in zenoh)"
+        );
+        assert_eq!(
+            Zid::try_from(&[0xAB; 17][..]),
+            Err(ZidError::Oversized(17)),
+            "17 bytes is over the 16 max"
+        );
+        // oversized is checked first, so a >16 all-zero slice reports Oversized
+        // (matches zenoh's size-checked-first order).
+        assert_eq!(Zid::try_from(&[0u8; 20][..]), Err(ZidError::Oversized(20)));
+        // a conformant 1- and 16-byte zid round-trips through as_slice.
+        assert_eq!(Zid::try_from(&[1][..]).unwrap().as_slice(), &[1]);
+        assert_eq!(
+            Zid::try_from(&[7u8; 16][..]).unwrap().as_slice(),
+            &[7u8; 16]
+        );
+        // the Vec form delegates to the slice form.
+        assert_eq!(
+            Zid::try_from(vec![1u8, 2]).unwrap(),
+            Zid::from_slice(&[1, 2])
+        );
+        assert!(Zid::try_from(Vec::<u8>::new()).is_err());
+    }
+
+    #[test]
+    fn zid_display_is_wire_order_lowercase_hex() {
+        // Display (and Debug, which wraps it) render the trimmed bytes as
+        // lowercase per-byte hex in WIRE order — the SSOT the demo face logs use.
+        let z = Zid::from_slice(&[0x1a, 0x2b, 0x0c]);
+        assert_eq!(z.to_string(), "1a2b0c");
+        assert_eq!(format!("{z:?}"), "Zid(1a2b0c)");
+        // a zero byte within the trimmed length is preserved (no integer-style
+        // stripping) and the order is NOT reversed — the deliberate divergence
+        // from zenoh's u128 ZenohIdProto::Display, which would render the first
+        // zid "c2b1a" and this one "1".
+        let lead0 = Zid::from_slice(&[0x01, 0x00]);
+        assert_eq!(lead0.to_string(), "0100");
+    }
+
+    #[test]
+    fn zid_as_ref_is_the_trimmed_bytes() {
+        let z = Zid::from_slice(&[9, 8, 7]);
+        let r: &[u8] = z.as_ref();
+        assert_eq!(r, z.as_slice());
+        assert_eq!(r, &[9, 8, 7]);
     }
 
     #[test]
@@ -2471,6 +2612,38 @@ mod tests {
         assert!(
             net.get_node(&Zid::from_slice(&big)).is_none(),
             "the oversized zid (even truncated) was not admitted"
+        );
+    }
+
+    #[test]
+    fn ingest_drops_entry_with_all_zero_zid() {
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let link = net.add_link(zid(0x07), 2);
+        // An all-zero (or empty) wire zid has no significant bytes — zenoh's
+        // u128-backed ZenohIdProto reports it as size 0 and rejects it at decode;
+        // the validating Zid::try_from drops the entry here. This closes the gap
+        // the old length-only guard left: an all-zero / empty zid passed the
+        // `> MAX` check and reached the graph as a zero identity.
+        let zeros = vec![0u8; 4];
+        let zero_zid = LinkstateOwned {
+            options: 0,
+            psid: 11,
+            sn: 5,
+            zid_len: Some(zeros.len() as u64),
+            zid: Some(SceBytes::from_slice(&zeros).unwrap()),
+            whatami: Some(2),
+            num_locators: None,
+            locators: None,
+            links_len: 0,
+            links: Vec::new(),
+            weights: None,
+        };
+        let changes = net.ingest_linkstate_list(link, list(vec![zero_zid]));
+        assert!(changes.updated.is_empty(), "all-zero-zid entry dropped");
+        assert!(changes.new.is_empty());
+        assert!(
+            net.get_node(&Zid::from_slice(&zeros)).is_none(),
+            "the all-zero zid was not admitted"
         );
     }
 
