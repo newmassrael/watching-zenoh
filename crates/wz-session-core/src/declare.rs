@@ -96,22 +96,24 @@ pub mod liveliness_get;
 
 /// R311kh — the shared membership consult behind the subscriber /
 /// queryable `has_matching` AND the matching-watch re-evaluation: does
-/// any currently-declared peer keyexpr intersect `keyexpr` under
-/// [`crate::keyexpr_match::keyexpr_intersect_patterns`]? A free fn (not
-/// a registry method) so the watch-list sweep can consult the
+/// any currently-declared peer keyexpr intersect `keyexpr`? A free fn
+/// (not a registry method) so the watch-list sweep can consult the
 /// membership table while the watch list itself is mutably borrowed —
-/// disjoint-field borrows inside one registry.
+/// disjoint-field borrows inside one registry. Splits the published
+/// target ONCE, then tests each declared candidate via the shared
+/// keyexpr-scan SSOT [`crate::keyexpr_match::keyexpr_intersects_target`]
+/// — the same per-candidate membership test the routing layer's
+/// linkstate-peer `matching_peers` scan uses.
 #[cfg(feature = "alloc")]
 pub(crate) fn declared_intersects(
     declared: &hashbrown::HashMap<u64, alloc::string::String>,
     keyexpr: &str,
 ) -> bool {
     use alloc::vec::Vec;
-    let chunks: Vec<&str> = keyexpr.split('/').collect();
-    declared.values().any(|peer_keyexpr| {
-        let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
-        crate::keyexpr_match::keyexpr_intersect_patterns(&peer_chunks, &chunks)
-    })
+    let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+    declared
+        .values()
+        .any(|candidate| crate::keyexpr_match::keyexpr_intersects_target(candidate, &target_chunks))
 }
 
 // R311kh — matching-listener watch machinery (pico Z_FEATURE_MATCHING

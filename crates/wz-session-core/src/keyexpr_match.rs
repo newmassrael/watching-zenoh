@@ -311,6 +311,41 @@ pub fn keyexpr_intersect_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool 
     intersect_chunks(a_chunks, b_chunks)
 }
 
+/// Whether the registered/declared keyexpr `candidate` intersects a published
+/// target already split into `target_chunks` — the per-candidate membership test
+/// every keyexpr SCAN shares. A scan splits the published target ONCE, then
+/// calls this per candidate; the candidate is split here into a bounded chunk
+/// buffer and consulted via [`keyexpr_intersect_patterns`]. Two scans route
+/// through it: the local subscriber / queryable registry consult
+/// (`crate::declare::declared_intersects`) and the routing layer's linkstate-peer
+/// interest scan (`matching_peers` in wz-runtime-tokio).
+///
+/// The candidate is split into a bounded buffer exactly as
+/// [`keyexpr_pattern_matches`] splits its target: on the no-alloc MCU profile a
+/// candidate deeper than [`MAX_KEYEXPR_CHUNKS`] is conservatively no-match, while
+/// the alloc (AP) backing grows past it — so AP matching is unbounded and
+/// behaviour-identical to the prior `Vec` split (see [`MAX_KEYEXPR_CHUNKS`]). The
+/// pre-split `target_chunks` are the caller's, mirroring how
+/// [`keyexpr_pattern_matches`] takes a caller-pre-split pattern.
+///
+/// zenoh folds these candidates into a prefix RESOURCE TREE (`Resource`) for
+/// sublinear matching; wz keeps the O(candidates) linear scan (correct, and a
+/// realistic subscription set is small). This helper is the SINGLE seam a future
+/// resource-tree would land behind — both scans already consult it, so the tree
+/// is one reimplementation site rather than two.
+pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> bool {
+    let mut candidate_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+    for chunk in candidate.split('/') {
+        // No-alloc backing: a candidate deeper than the declared bound cannot be
+        // represented, so it is conservatively no-match (the alloc backing never
+        // takes this arm). Same shape as keyexpr_pattern_matches' target split.
+        if candidate_chunks.push(chunk).is_err() {
+            return false;
+        }
+    }
+    keyexpr_intersect_patterns(&candidate_chunks, target_chunks)
+}
+
 fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
     match (a.first(), b.first()) {
         (None, None) => true,
@@ -515,6 +550,24 @@ mod tests {
         assert!(keyexpr_pattern_matches(&["home", "temp"], "home/temp"));
         assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/humid"));
         assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/temp/x"));
+    }
+
+    #[test]
+    fn intersects_target_literal() {
+        // The shared keyexpr-scan membership test: a candidate (registered
+        // keyexpr) against a pre-split published target.
+        assert!(keyexpr_intersects_target("home/temp", &["home", "temp"]));
+        assert!(!keyexpr_intersects_target("home/humid", &["home", "temp"]));
+        assert!(!keyexpr_intersects_target("home", &["home", "temp"]));
+    }
+
+    #[cfg(feature = "keyexpr-wildcard-double")]
+    #[test]
+    fn intersects_target_wildcard() {
+        // A `**` candidate covers a deeper concrete target (the wildcard scan B2
+        // relies on); a disjoint-anchor candidate does not.
+        assert!(keyexpr_intersects_target("home/**", &["home", "a", "b"]));
+        assert!(!keyexpr_intersects_target("other/**", &["home", "a", "b"]));
     }
 
     #[cfg(feature = "keyexpr-wildcard-single")]

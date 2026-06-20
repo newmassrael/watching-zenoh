@@ -33,9 +33,10 @@
 //!
 //! Wildcard matching (c3c-3 B2): a lookup is the key-expression INTERSECTION
 //! of the published key against every registered subscription keyexpr, via the
-//! same [`keyexpr_intersect_patterns`] SSOT the local
-//! [`SubscriberRegistry`](wz_session_core::SubscriberRegistry) uses (zenoh's
-//! intersection route matching, `Resource::get_matches`). So a `demo/**` or
+//! shared [`keyexpr_intersects_target`] scan SSOT — the same per-candidate
+//! membership test the local [`SubscriberRegistry`](wz_session_core::SubscriberRegistry)
+//! uses through `declared_intersects` (zenoh's intersection route matching,
+//! `Resource::get_matches`). So a `demo/**` or
 //! `demo/*` subscription now attracts a concrete `demo/data` Push, while a
 //! literal subscription stays exact. STILL deferred (a performance, not a
 //! correctness, concern): zenoh folds subscriptions into a prefix RESOURCE
@@ -46,7 +47,7 @@
 use std::collections::{HashMap, HashSet};
 
 use wz_routing_graph::Zid;
-use wz_session_core::keyexpr_match::keyexpr_intersect_patterns;
+use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 
 /// Per-key-expression set of interested PEER zids — the linkstate-peer
 /// subscription interest table. See the module docs for the zenoh mapping
@@ -140,10 +141,12 @@ impl LinkstatepeerSubs {
     /// The distinct peers whose subscription keyexpr INTERSECTS `target` (the
     /// published key), optionally excluding `exclude` (this node's own zid).
     /// Wildcard-aware: a `demo/**` subscription matches a concrete `demo/data`
-    /// target via [`keyexpr_intersect_patterns`] — the same SSOT the local
-    /// subscriber registry uses (zenoh's intersection route matching). An
-    /// O(subscriptions) scan; the resource-tree fold for sublinear matching is
-    /// a tracked performance deferral (see the module docs). Note: this runs on
+    /// target via the shared [`keyexpr_intersects_target`] scan SSOT — the same
+    /// per-candidate membership test the local subscriber registry uses (zenoh's
+    /// intersection route matching). An O(subscriptions) scan; the resource-tree
+    /// fold for sublinear matching is a tracked performance deferral, and that
+    /// shared helper is the single seam it would land behind (see the module
+    /// docs). Note: this runs on
     /// the DATA path ([`interested_remote`](Self::interested_remote) is called
     /// per forwarded Push / publish), so it is a per-message keyexpr-intersection
     /// scan, not the prior single `HashMap::get`. A literal target against a
@@ -151,14 +154,15 @@ impl LinkstatepeerSubs {
     /// Peers are deduped across multiple matching keys via a `HashSet` (`Zid` is
     /// `Copy + Hash`), not an O(matches²) linear membership scan.
     fn matching_peers(&self, target: &str, exclude: Option<&Zid>) -> Vec<Zid> {
+        // Split the published target ONCE, then test each registered subscription
+        // keyexpr via the shared keyexpr-scan SSOT (the same per-candidate
+        // membership test the local registry's `declared_intersects` uses).
         let target_chunks: Vec<&str> = target.split('/').collect();
         let mut out: HashSet<Zid> = HashSet::new();
         for (sub, peers) in &self.by_key {
-            let sub_chunks: Vec<&str> = sub.split('/').collect();
-            if !keyexpr_intersect_patterns(&sub_chunks, &target_chunks) {
-                continue;
+            if keyexpr_intersects_target(sub, &target_chunks) {
+                out.extend(peers.iter().filter(|p| exclude != Some(*p)).copied());
             }
-            out.extend(peers.iter().filter(|p| exclude != Some(*p)).copied());
         }
         out.into_iter().collect()
     }
