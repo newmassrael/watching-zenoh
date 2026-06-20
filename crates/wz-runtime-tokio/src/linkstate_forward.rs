@@ -114,6 +114,9 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 /// demo) and the forwarder name a neighbour's role by the same SSOT type
 /// (defined in `wz-codecs`, re-exported through the graph), not a bare byte.
 pub use wz_routing_graph::{WhatAmI, Zid};
+// The gossip-target role set lives in the codec layer beside `WhatAmI`; the
+// forwarder consumes it to gate which faces a link-state flood reaches.
+use wz_codecs::whatami::WhatAmIMatcher;
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -193,6 +196,16 @@ pub struct LinkstateForwarder {
     /// (the count rises once per flushed window, not once per change, so a burst
     /// of N scheduled changes followed by one tick raises it by exactly 1).
     recomputes: Cell<usize>,
+    /// The set of neighbour roles this peer gossips its link-state to (zenoh's
+    /// `gossip_target`). A face whose handshake `whatami` is outside this set is
+    /// skipped by every link-state flood ([`fan_out`](Self::fan_out)'s gossip
+    /// gate), exactly like zenoh's per-target `send_on_link`
+    /// (`hat/p2p_peer/gossip.rs:238-252`). Seeded to the zenoh peer/router
+    /// default `router|peer` (a `client` face never receives gossip — zenoh
+    /// `bail`s if `client` is even configured as a target); config-sourcing it
+    /// per local whatami is a later atom, so it has no setter yet. An all-peer
+    /// deployment matches every face, so the gate is behaviour-neutral there.
+    gossip_target: WhatAmIMatcher,
 }
 
 impl LinkstateForwarder {
@@ -222,6 +235,8 @@ impl LinkstateForwarder {
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
+            // zenoh peer/router default gossip target (router|peer); never client.
+            gossip_target: WhatAmIMatcher::empty().router().peer(),
         }
     }
 
@@ -312,7 +327,7 @@ impl LinkstateForwarder {
         // A clone of the graph handle so the per-face builder can borrow it
         // (the `Rc` is the cell; `fan_out` only holds the `faces` borrow).
         let net = self.net.clone();
-        self.fan_out(true, |id, zid| {
+        self.fan_out(true, Some(&self.gossip_target), |id, zid| {
             if id == source {
                 return Ok(None);
             }
@@ -386,13 +401,28 @@ impl LinkstateForwarder {
     /// selection + carrier policy as the closure, never a re-hand-rolled face
     /// loop. Holds only the `faces` borrow;
     /// a builder may borrow the graph (a distinct cell).
+    /// `gossip_gate` is the per-target whatami gate: a link-state gossip flood
+    /// passes `Some(&self.gossip_target)` so a face whose role is outside the
+    /// gossip target (a `client`) is skipped entirely — zenoh's per-target
+    /// `send_on_link` (`hat/p2p_peer/gossip.rs:241`). A data-plane fan-out
+    /// passes `None`: its selectivity is the tree/interest filter in the builder,
+    /// not the role gate, so it must reach every held face the builder selects.
     fn fan_out(
         &self,
         reliable: bool,
+        gossip_gate: Option<&WhatAmIMatcher>,
         mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
         for (id, state) in self.faces.borrow().iter() {
+            // Gossip floods reach only faces whose handshake whatami is in the
+            // gossip target; an out-of-target face (a client) is skipped before
+            // a carrier is even built for it. Data fan-outs pass no gate.
+            if let Some(target) = gossip_gate {
+                if !target.matches(peer_whatami_routing(&state.actions)) {
+                    continue;
+                }
+            }
             // Convert the session-layer peer zid (Vec<u8>) to the routing Zid at
             // this single boundary, so every fan-out builder works in Zid terms
             // (Copy, Eq) rather than re-deriving it from raw bytes per call. The
@@ -452,7 +482,7 @@ impl LinkstateForwarder {
             };
             build_linkstate_oam_owned(&list)?
         };
-        self.fan_out(true, |id, zid| {
+        self.fan_out(true, Some(&self.gossip_target), |id, zid| {
             if id == new_face {
                 // the new link is bootstrapped with the FULL topology.
                 return Ok(Some(NetworkMessage::Oam(full.clone())));
@@ -480,7 +510,9 @@ impl LinkstateForwarder {
     /// mapped self. Reliable; returns the count of faces reached.
     fn flood_self_links_changed(&self) -> Result<usize, CodecError> {
         let oam = build_linkstate_oam_owned(&self.net.borrow().build_self_links_delta())?;
-        self.fan_out(true, |_id, _zid| Ok(Some(NetworkMessage::Oam(oam.clone()))))
+        self.fan_out(true, Some(&self.gossip_target), |_id, _zid| {
+            Ok(Some(NetworkMessage::Oam(oam.clone())))
+        })
     }
 
     /// Resolve a routing-context source `node_id` (carried by a Push or a
@@ -666,7 +698,7 @@ impl LinkstateForwarder {
         // Forward to the interested children in the source's tree — never to the
         // inbound face, nor back toward the source's own neighbour (the shared
         // re-forward predicate).
-        let _ = self.fan_out(reliable, |id, zid| {
+        let _ = self.fan_out(reliable, None, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Push(Box::new(carrier.clone()))),
@@ -706,7 +738,7 @@ impl LinkstateForwarder {
         if children.is_empty() {
             return Ok(0);
         }
-        self.fan_out(true, |_id, zid| {
+        self.fan_out(true, None, |_id, zid| {
             Ok(zid
                 .is_some_and(|z| is_child(&children, z))
                 .then(|| NetworkMessage::Push(Box::new(push.clone()))))
@@ -802,7 +834,7 @@ impl LinkstateForwarder {
         if children.is_empty() {
             return Ok(0);
         }
-        self.fan_out(true, |_id, zid| {
+        self.fan_out(true, None, |_id, zid| {
             // `then(build)` would move `build` (called once per child); mint
             // lazily on the matching children only.
             Ok(if zid.is_some_and(|z| is_child(children, z)) {
@@ -874,7 +906,7 @@ impl LinkstateForwarder {
         // Re-flood to self's children in the source's tree — the same shared
         // re-forward predicate forward_push uses (excludes the inbound face and
         // the source's own neighbour); only the carrier differs.
-        let _ = self.fan_out(reliable, |id, zid| {
+        let _ = self.fan_out(reliable, None, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
@@ -942,7 +974,7 @@ impl LinkstateForwarder {
         // Re-flood to self's children in the source's tree — the same shared
         // re-forward predicate forward_subscription uses; only the carrier (an
         // UndeclareSubscriber) differs.
-        let _ = self.fan_out(reliable, |id, zid| {
+        let _ = self.fan_out(reliable, None, |id, zid| {
             Ok(
                 is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
                     .then(|| NetworkMessage::Declare(Box::new(carrier.clone()))),
@@ -1569,6 +1601,34 @@ mod tests {
         assert_eq!(sent, 2, "flooded both held faces");
         assert_eq!(sink_a.frame_count(), 1, "face A received the link-state");
         assert_eq!(sink_b.frame_count(), 1, "face B received the link-state");
+    }
+
+    #[test]
+    fn gossip_skips_a_client_face_but_reaches_a_peer() {
+        // zenoh's per-target gossip gate (`send_on_link`): a peer gossips its
+        // link-state to router|peer faces only, so a CLIENT face is skipped
+        // entirely while a PEER face receives it. An all-peer deployment hits the
+        // peer arm for every face, so the gate is behaviour-neutral there.
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let (peer, peer_sink) = peer_face_whatami(zid(0xAA), 1); // wire 1 = Peer
+        let (client, client_sink) = peer_face_whatami(zid(0xBB), 2); // wire 2 = Client
+        fwd.register(FaceId(0), &peer);
+        fwd.register(FaceId(1), &client);
+
+        let sent = fwd.flood_self_links_changed().expect("flood self");
+        assert_eq!(
+            sent, 1,
+            "only the peer face is in the gossip target (router|peer)"
+        );
+        assert!(
+            peer_sink.frame_count() >= 1,
+            "the peer face received the link-state"
+        );
+        assert_eq!(
+            client_sink.frame_count(),
+            0,
+            "a client face never receives gossip (the router|peer target excludes it)"
+        );
     }
 
     #[test]

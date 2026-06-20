@@ -44604,6 +44604,60 @@
         "LOCAL UNPUSHED: 311tg on origin/main=a03f221. Host + MCU host lanes verified; full run-ci + idle before push. Push only after explicit consent."
       ]
     },
+    "Round 311th": {
+      "decision_summary": "R311th: gossip-policy A4a -- port WhatAmIMatcher into wz-codecs + gate each link-state flood per-target by gossip_target (router|peer); a client face no longer receives gossip. All-peer byte-identical.",
+      "changes_bullets": [
+        "wz-codecs: new WhatAmIMatcher -- a one-hot role bitset (empty/router/peer/client/is_empty/matches), the gossip-target type. Plain u8 (empty=0); zenoh's NonZeroU8 bit-7 marker is only an Option-niche opt wz omits. core-only.",
+        "LinkstateForwarder gains gossip_target: WhatAmIMatcher, seeded to the zenoh peer/router default router|peer (no setter yet -- config-sourcing per local whatami is a later atom).",
+        "fan_out takes gossip_gate: Option<&WhatAmIMatcher>; when Some it skips a face whose handshake whatami (peer_whatami_routing) is outside the set BEFORE building its carrier -- zenoh's per-target send_on_link (gossip.rs:241).",
+        "The 3 link-state floods (propagate, flood_link_added, flood_self_links_changed) pass Some(&gossip_target); the 5 data/subscription fan-outs pass None (their selectivity is the tree/interest filter, not the role gate).",
+        "Effect: a client face no longer receives any link-state gossip (bootstrap or delta), matching zenoh (client is never a valid gossip target). An all-peer deploy matches router|peer on every face, so its wire output is unchanged."
+      ],
+      "verification_bullets": [
+        "wz-codecs whatami: matcher membership test (router|peer matches router/peer not client; empty matches none). routing-peer lib 366 (the +1: a client face is skipped while a peer face receives the self-flood; sent==1).",
+        "Layer C1 (workspace test minus 4 MCU crates) green; MCU host lanes pass (lwip transport-multicast, mcu-acceptor, mcu-multicast-e2e); clippy -D clean (codecs, runtime routing-peer/routes, lwip); fmt clean; demo 4 routing axes build.",
+        "Behaviour-neutral for all-peer: every existing flood test (peer faces, no whatami -> Peer default) passes unchanged, so the gate adds client exclusion without altering the demo wire output.",
+        "Grounding (read): zenoh gossip.rs send_on_link/send_on_links (per-target whatami gate) + defaults.rs gossip target router|peer + the bail when client is a gossip target."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "R311th = gossip-policy A4a: WhatAmIMatcher + the per-face gossip_target gate (zenoh send_on_link port). A client face is excluded from link-state gossip; all-peer byte-identical. A4 is a multi-atom track -- this is the first.",
+        "NEXT A4b: port propagate_locators (gossip.rs:281) -- the per-SOURCE locator gate (include a node's locators only if self / direct-neighbour, or gossip_multihop). wz still emits locators on every Full entry; this narrows WHICH nodes' locators ride.",
+        "THEN A4c/A5: gossip_multihop flag + config-sourcing gossip_target per local whatami (a setter on the forwarder); then autoconnect (connect_discovered_peer dial seam + AutoConnect mask, common.rs:28-71).",
+        "DESIGN: gossip_target has no setter yet (const default router|peer); fan_out's gossip_gate is Option<&WhatAmIMatcher> (Some=gossip flood, None=data) so the data-plane tree/interest routing is untouched by the role gate.",
+        "LOCAL UNPUSHED: 311tg(aed313f)+311th on origin/main=a03f221. Host + MCU host lanes verified; full run-ci + idle before push. Push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311th: gossip-policy A4a -- port WhatAmIMatcher into wz-codecs + gate each link-state flood per-target by gossip_target (router|peer); a client face no longer receives gossip. All-peer byte-identical.",
+      "publishable_changes_bullets": [
+        "wz-codecs: new WhatAmIMatcher -- a one-hot role bitset (empty/router/peer/client/is_empty/matches), the gossip-target type. Plain u8 (empty=0); zenoh's NonZeroU8 bit-7 marker is only an Option-niche opt wz omits. core-only.",
+        "LinkstateForwarder gains gossip_target: WhatAmIMatcher, seeded to the zenoh peer/router default router|peer (no setter yet -- config-sourcing per local whatami is a later atom).",
+        "fan_out takes gossip_gate: Option<&WhatAmIMatcher>; when Some it skips a face whose handshake whatami (peer_whatami_routing) is outside the set BEFORE building its carrier -- zenoh's per-target send_on_link (gossip.rs:241).",
+        "The 3 link-state floods (propagate, flood_link_added, flood_self_links_changed) pass Some(&gossip_target); the 5 data/subscription fan-outs pass None (their selectivity is the tree/interest filter, not the role gate).",
+        "Effect: a client face no longer receives any link-state gossip (bootstrap or delta), matching zenoh (client is never a valid gossip target). An all-peer deploy matches router|peer on every face, so its wire output is unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "wz-codecs whatami: matcher membership test (router|peer matches router/peer not client; empty matches none). routing-peer lib 366 (the +1: a client face is skipped while a peer face receives the self-flood; sent==1).",
+        "Layer C1 (workspace test minus 4 MCU crates) green; MCU host lanes pass (lwip transport-multicast, mcu-acceptor, mcu-multicast-e2e); clippy -D clean (codecs, runtime routing-peer/routes, lwip); fmt clean; demo 4 routing axes build.",
+        "Behaviour-neutral for all-peer: every existing flood test (peer faces, no whatami -> Peer default) passes unchanged, so the gate adds client exclusion without altering the demo wire output.",
+        "Grounding (read): zenoh gossip.rs send_on_link/send_on_links (per-target whatami gate) + defaults.rs gossip target router|peer + the bail when client is a gossip target."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311th = gossip-policy A4a: WhatAmIMatcher + the per-face gossip_target gate (zenoh send_on_link port). A client face is excluded from link-state gossip; all-peer byte-identical. A4 is a multi-atom track -- this is the first.",
+        "NEXT A4b: port propagate_locators (gossip.rs:281) -- the per-SOURCE locator gate (include a node's locators only if self / direct-neighbour, or gossip_multihop). wz still emits locators on every Full entry; this narrows WHICH nodes' locators ride.",
+        "THEN A4c/A5: gossip_multihop flag + config-sourcing gossip_target per local whatami (a setter on the forwarder); then autoconnect (connect_discovered_peer dial seam + AutoConnect mask, common.rs:28-71).",
+        "DESIGN: gossip_target has no setter yet (const default router|peer); fan_out's gossip_gate is Option<&WhatAmIMatcher> (Some=gossip flood, None=data) so the data-plane tree/interest routing is untouched by the role gate.",
+        "LOCAL UNPUSHED: 311tg(aed313f)+311th on origin/main=a03f221. Host + MCU host lanes verified; full run-ci + idle before push. Push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

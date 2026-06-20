@@ -110,9 +110,59 @@ impl core::fmt::Display for WhatAmI {
     }
 }
 
+/// A set of [`WhatAmI`] roles as a one-hot bitmask — the gossip-policy gate that
+/// asks "does this target's role belong to the set I gossip to?". Membership is
+/// a bitwise AND with the role's one-hot API byte (`Router = 0b001`,
+/// `Peer = 0b010`, `Client = 0b100`), so a router-or-peer matcher is `0b011`.
+/// The load-bearing consumer is the link-state driver's `gossip_target`
+/// (zenoh's per-target send gate, `gossip_target.matches(face_whatami)`).
+///
+/// Ported from zenoh `commons/zenoh-protocol/src/core/whatami.rs`, with one
+/// deliberate simplification: zenoh wraps the set in a `NonZeroU8` (a bit-7
+/// marker keeps it non-zero) purely so `Option<WhatAmIMatcher>` occupies one
+/// byte in its config tables. wz stores the matcher directly (no `Option`
+/// niche to exploit), so a plain `u8` bitset — `empty()` = `0` — carries the
+/// identical `matches` semantics without the marker bit or its `unsafe`
+/// constructor. `core`-only, like [`WhatAmI`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WhatAmIMatcher(u8);
+
+impl WhatAmIMatcher {
+    /// The empty set — matches no role (the gate sends to nobody).
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Add [`WhatAmI::Router`] to the set.
+    pub const fn router(self) -> Self {
+        Self(self.0 | WhatAmI::Router as u8)
+    }
+
+    /// Add [`WhatAmI::Peer`] to the set.
+    pub const fn peer(self) -> Self {
+        Self(self.0 | WhatAmI::Peer as u8)
+    }
+
+    /// Add [`WhatAmI::Client`] to the set.
+    pub const fn client(self) -> Self {
+        Self(self.0 | WhatAmI::Client as u8)
+    }
+
+    /// Whether the set is empty — a gate that admits no target.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether `w` is in the set — the gossip-target membership test (zenoh
+    /// `WhatAmIMatcher::matches`). AND against the role's one-hot API byte.
+    pub const fn matches(self, w: WhatAmI) -> bool {
+        (self.0 & w.to_api()) != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::WhatAmI;
+    use super::{WhatAmI, WhatAmIMatcher};
 
     #[test]
     fn api_byte_round_trips_and_rejects_out_of_set() {
@@ -154,5 +204,31 @@ mod tests {
             );
             assert_eq!(1u8 << w.to_wire(), w.to_api(), "1<<wire vs api");
         }
+    }
+
+    #[test]
+    fn matcher_membership_is_a_one_hot_bitset() {
+        // The zenoh peer/router default gossip target: router|peer, not client.
+        let rp = WhatAmIMatcher::empty().router().peer();
+        assert!(rp.matches(WhatAmI::Router));
+        assert!(rp.matches(WhatAmI::Peer));
+        assert!(
+            !rp.matches(WhatAmI::Client),
+            "client is never a gossip target"
+        );
+        assert!(!rp.is_empty());
+
+        // The empty set admits no role.
+        let e = WhatAmIMatcher::empty();
+        assert!(e.is_empty());
+        for w in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+            assert!(!e.matches(w));
+        }
+
+        // A single-role matcher admits only that role.
+        let c = WhatAmIMatcher::empty().client();
+        assert!(c.matches(WhatAmI::Client));
+        assert!(!c.matches(WhatAmI::Router));
+        assert!(!c.matches(WhatAmI::Peer));
     }
 }
