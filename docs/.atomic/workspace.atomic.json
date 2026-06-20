@@ -44658,6 +44658,58 @@
         "LOCAL UNPUSHED: 311tg(aed313f)+311th on origin/main=a03f221. Host + MCU host lanes verified; full run-ci + idle before push. Push only after explicit consent."
       ]
     },
+    "Round 311ti": {
+      "decision_summary": "R311ti: gossip-policy A4b -- port propagate_locators per-source gate; a Full link-state entry carries a node's locators only for self or a direct neighbour, withholding distant multihop nodes.",
+      "changes_bullets": [
+        "wz-routing-graph: new propagate_locators(idx) -- self || direct-neighbour (self.idx's links contains the node's zid). zenoh hat/p2p_peer/gossip.rs:281, minus the gossip_multihop arm (no such flag yet -> non-multihop default).",
+        "make_link_state gates the locator field by it: locators ride a FULL entry only when (want_locators && propagate_locators(idx)). A distant node's dial addresses are withheld; self + direct neighbours still advertise.",
+        "Effect with A4a: the two-part zenoh gossip gate is now in wz -- per-target face (A4a, gossip_target role) AND per-source node (A4b, propagate_locators). The Details divergence doc that flagged unconditional locator flooding is rewritten to the implemented form.",
+        "Ingest (RX) stays ungated: a peer still STORES every locator it receives (preserve-on-None intact); only the TX re-advertisement narrows -- a far node's locators reach a peer from that node's own neighbour, one hop, not relayed across the mesh."
+      ],
+      "verification_bullets": [
+        "wz-routing-graph 50 (the +1: S stores both a neighbour's and a distant node's locators on ingest, but its full re-flood advertises only the neighbour's -- a receiver learns N's locators, not D's). routing-peer lib 366 unchanged.",
+        "Layer C1 (workspace minus 4 MCU) green; clippy -D clean (graph, runtime routing-peer); fmt clean; demo 4 routing axes build. MCU unaffected (no MCU crate deps wz-routing-graph).",
+        "Existing locator tests pass unchanged -- all advertise from self's perspective (propagate_locators(self)=true) or test the ungated RX path, so the per-source TX gate adds distant-node withholding without altering them.",
+        "Grounding (read): zenoh gossip.rs propagate_locators (self/direct-neighbour/multihop) + make_link_state locators field (idx==self reads runtime locators, else node.locators)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "R311ti = gossip-policy A4b: propagate_locators per-source locator gate. With A4a the two-part zenoh gossip gate (per-target face role + per-source node) is complete; a distant node's locators no longer flood. The Details over-advertise divergence is closed.",
+        "NEXT A4c/A5: gossip_multihop flag (rides every node's locators across all hops when set; default off) + config-source gossip_target per local whatami (a forwarder setter, no longer the const default).",
+        "THEN autoconnect: connect_discovered_peer dial seam + AutoConnect mask (zenoh common.rs:28-71) -- consume the now-narrowed locator discovery data to dial a discovered peer.",
+        "DESIGN: propagate_locators is self || self.links.contains_key(node.zid); gossip-enabled is implicit (wz only builds link-state when it gossips). Ingest stays ungated -- a peer stores every locator, the gate is TX-only.",
+        "LOCAL UNPUSHED: 311tg(aed313f)+311th(f01a841)+311ti on origin/main=a03f221. Host lanes verified (graph/routing-peer/C1/clippy/fmt/demo); MCU unaffected. full run-ci + idle before push. Push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311ti: gossip-policy A4b -- port propagate_locators per-source gate; a Full link-state entry carries a node's locators only for self or a direct neighbour, withholding distant multihop nodes.",
+      "publishable_changes_bullets": [
+        "wz-routing-graph: new propagate_locators(idx) -- self || direct-neighbour (self.idx's links contains the node's zid). zenoh hat/p2p_peer/gossip.rs:281, minus the gossip_multihop arm (no such flag yet -> non-multihop default).",
+        "make_link_state gates the locator field by it: locators ride a FULL entry only when (want_locators && propagate_locators(idx)). A distant node's dial addresses are withheld; self + direct neighbours still advertise.",
+        "Effect with A4a: the two-part zenoh gossip gate is now in wz -- per-target face (A4a, gossip_target role) AND per-source node (A4b, propagate_locators). The Details divergence doc that flagged unconditional locator flooding is rewritten to the implemented form.",
+        "Ingest (RX) stays ungated: a peer still STORES every locator it receives (preserve-on-None intact); only the TX re-advertisement narrows -- a far node's locators reach a peer from that node's own neighbour, one hop, not relayed across the mesh."
+      ],
+      "publishable_verification_bullets": [
+        "wz-routing-graph 50 (the +1: S stores both a neighbour's and a distant node's locators on ingest, but its full re-flood advertises only the neighbour's -- a receiver learns N's locators, not D's). routing-peer lib 366 unchanged.",
+        "Layer C1 (workspace minus 4 MCU) green; clippy -D clean (graph, runtime routing-peer); fmt clean; demo 4 routing axes build. MCU unaffected (no MCU crate deps wz-routing-graph).",
+        "Existing locator tests pass unchanged -- all advertise from self's perspective (propagate_locators(self)=true) or test the ungated RX path, so the per-source TX gate adds distant-node withholding without altering them.",
+        "Grounding (read): zenoh gossip.rs propagate_locators (self/direct-neighbour/multihop) + make_link_state locators field (idx==self reads runtime locators, else node.locators)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ti = gossip-policy A4b: propagate_locators per-source locator gate. With A4a the two-part zenoh gossip gate (per-target face role + per-source node) is complete; a distant node's locators no longer flood. The Details over-advertise divergence is closed.",
+        "NEXT A4c/A5: gossip_multihop flag (rides every node's locators across all hops when set; default off) + config-source gossip_target per local whatami (a forwarder setter, no longer the const default).",
+        "THEN autoconnect: connect_discovered_peer dial seam + AutoConnect mask (zenoh common.rs:28-71) -- consume the now-narrowed locator discovery data to dial a discovered peer.",
+        "DESIGN: propagate_locators is self || self.links.contains_key(node.zid); gossip-enabled is implicit (wz only builds link-state when it gossips). Ingest stays ungated -- a peer stores every locator, the gate is TX-only.",
+        "LOCAL UNPUSHED: 311tg(aed313f)+311th(f01a841)+311ti on origin/main=a03f221. Host lanes verified (graph/routing-peer/C1/clippy/fmt/demo); MCU unaffected. full run-ci + idle before push. Push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

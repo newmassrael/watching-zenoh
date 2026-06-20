@@ -481,21 +481,23 @@ impl Link {
 /// them across the links-only updates that follow. A late-joining face is
 /// bootstrapped with the FULL topology
 /// ([`build_linkstate_list`](LinkstateNetwork::build_linkstate_list), every node
-/// [`Full`](Self::Full)), so it learns every node's locators — the `Full`-only
-/// binding does not starve a joiner.
+/// [`Full`](Self::Full)), so it learns this peer's and its direct neighbours'
+/// locators (the per-source gate below withholds distant ones).
 ///
-/// DIVERGENCE from zenoh, honestly stated: this currently emits locators on
-/// EVERY `Full` entry UNCONDITIONALLY — i.e. it OVER-advertises relative to
-/// zenoh's default. zenoh gates each entry's locators per TARGET LINK via
-/// `propagate_locators` (`network.rs:406-418`: `gossip && gossip_target.matches(
-/// target_whatami) && (multihop || self || direct-neighbour)`), which needs the
-/// target FACE's whatami and so withholds locators from a client / a distant
-/// multihop node. wz cannot express per-target gating on the build-once flood
-/// path and has no face whatami yet, so it floods locators to all faces. The
-/// `L` field is optional and an uninterested peer ignores it (wire-legal), but
-/// the gossip-target / multihop NARROWING is a tracked follow-up (the
-/// gossip-policy atom, whose prerequisite is threading the handshake whatami
-/// onto the face — the original "F1").
+/// `Full` REQUESTS a node's locators, but the gossip-policy filter (zenoh's
+/// two-part `gossip` gate) narrows which actually ride the wire:
+/// - per SOURCE node: [`make_link_state`](LinkstateNetwork::make_link_state)
+///   admits a node's locators only when
+///   [`propagate_locators`](LinkstateNetwork::propagate_locators) does — self or
+///   a direct neighbour — so a distant multihop node's locators are withheld
+///   (the A4b port of zenoh `hat/p2p_peer/gossip.rs:281`).
+/// - per TARGET face: the driver's link-state fan-out skips a face whose role is
+///   outside the `gossip_target` set (a client), zenoh's per-target
+///   `send_on_link` (the A4a port, threaded on the handshake whatami — "F1").
+///
+/// Still pending (zenoh has it, wz does not yet): the `gossip_multihop` flag
+/// that relays every node's locators across all hops, and config-sourcing the
+/// gossip target per local whatami.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Details {
     Full,
@@ -942,7 +944,13 @@ impl LinkstateNetwork {
         // `make_link_state` `network.rs:336-341` (self reads the live
         // `runtime.get_locators()`; wz stores self's locators on the self node,
         // so both self and others read `node.locators` uniformly here).
-        let locators = want_locators
+        // Even on the FULL form, a node's locators ride only when zenoh's
+        // per-source `propagate_locators` gate admits it (self or a direct
+        // neighbour) — a distant multihop node's reachability addresses are
+        // withheld, so locators travel one hop (the A4b TX complement of A4a's
+        // per-face gossip-target gate). `want_locators` selects the FULL form;
+        // the gate then narrows which sources within it actually advertise.
+        let locators = (want_locators && self.propagate_locators(idx))
             .then(|| node.locators.as_deref().and_then(locators_to_wire))
             .flatten();
         // options: P (zid) set iff the variant carries the zid (the codec gates
@@ -979,6 +987,25 @@ impl LinkstateNetwork {
             links,
             weights: has_weight.then_some(weights),
         }
+    }
+
+    /// Whether node `idx`'s dial locators may ride a FULL link-state entry this
+    /// peer floods — zenoh `propagate_locators` (`hat/p2p_peer/gossip.rs:281`).
+    /// True for self (this peer advertises its own listen addresses) and for a
+    /// DIRECT neighbour (a node self holds a link to); a distant multihop node's
+    /// locators are withheld, so reachability data travels one hop — a receiver
+    /// learns a far node's locators from that node's OWN neighbour, not relayed
+    /// across every hop.
+    ///
+    /// zenoh also rides every node's locators when `gossip_multihop` is set; wz
+    /// has no such flag yet, so this is the non-multihop self-or-direct-neighbour
+    /// form (zenoh's `gossip` enabled flag is implicitly true here — wz only
+    /// builds a link-state when it gossips). The multihop flag is a later atom.
+    fn propagate_locators(&self, idx: NodeIndex) -> bool {
+        idx == self.idx
+            || self.graph[self.idx]
+                .links
+                .contains_key(&self.graph[idx].zid)
     }
 
     /// Build the `LinkStateList` advertising THIS peer's full known topology,
@@ -2965,6 +2992,65 @@ mod tests {
         // Control: B announced no self locators, so its own node carries none —
         // the L field is omitted, not emitted empty.
         assert_eq!(b.node_locators(&zid(0x0B)), None);
+    }
+
+    #[test]
+    fn a_full_flood_rides_a_direct_neighbours_locators_but_withholds_a_distant_nodes() {
+        // zenoh's per-source `propagate_locators` gate (gossip.rs:281): when S
+        // re-floods its topology it advertises a DIRECT neighbour's locators but
+        // WITHHOLDS a distant (multihop) node's — reachability data travels one
+        // hop. A receiver therefore learns the neighbour's dial addresses through
+        // S, not the distant node's (it learns those from the distant node's own
+        // neighbour). The non-multihop gossip default.
+        let mut s = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link_n = s.add_link(zid(0x20), WhatAmI::Peer); // S — N (direct)
+                                                           // N (psid 10) advertises its locators + a link to D; D (psid 11)
+                                                           // advertises its own locators + a link back to N. Ingest is ungated, so
+                                                           // S stores both.
+        s.ingest_linkstate_list(
+            link_n,
+            list(vec![
+                entry_with_locators(
+                    10,
+                    5,
+                    Some(&zid(0x20)),
+                    Some(2),
+                    &[11],
+                    &["tcp/10.0.0.20:7447"],
+                ),
+                entry_with_locators(
+                    11,
+                    5,
+                    Some(&zid(0x30)),
+                    Some(2),
+                    &[10],
+                    &["tcp/10.0.0.30:7447"],
+                ),
+            ]),
+        );
+        assert!(
+            s.node_locators(&zid(0x20)).is_some(),
+            "S ingested N's locators"
+        );
+        assert!(
+            s.node_locators(&zid(0x30)).is_some(),
+            "S ingested D's locators"
+        );
+
+        // A fresh receiver R links to S and ingests S's full re-flood.
+        let mut r = LinkstateNetwork::new(zid(0x02), WhatAmI::Peer);
+        let link_s = r.add_link(zid(0x01), WhatAmI::Peer);
+        r.ingest_linkstate_list(link_s, s.build_linkstate_list());
+
+        assert!(
+            r.node_locators(&zid(0x20)).is_some(),
+            "S advertised its direct neighbour N's locators",
+        );
+        assert_eq!(
+            r.node_locators(&zid(0x30)),
+            None,
+            "S withheld the distant node D's locators (the per-source gate)",
+        );
     }
 
     #[test]
