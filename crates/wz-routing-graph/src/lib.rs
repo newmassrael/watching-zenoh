@@ -389,25 +389,41 @@ impl Link {
 }
 
 /// Which fields of a node's `LinkState` a TX entry carries — the wz mirror of
-/// zenoh `Details` (`network.rs:49`), narrowed to the two fields wz emits
-/// (locators are deferred with the gossip/autoconnect atom). The combinations
-/// express zenoh's selective re-advertisement:
-/// - `{zid:true, links:true}` FULL — a new node: the receiver learns its
+/// zenoh `Details` (`network.rs:49`), narrowed to the field combinations wz
+/// emits (locators are deferred with the gossip/autoconnect atom). An ENUM, not
+/// a `(zid, links)` bool pair, so the meaningless "neither zid nor links" combo
+/// is unrepresentable (the project's make-illegal-states-unrepresentable rule).
+/// Each variant is one of zenoh's selective re-advertisements:
+/// - [`Full`](Self::Full) (zid + links) — a new node: the receiver learns its
 ///   psid<->zid mapping AND its links ([`build_linkstate_list`](LinkstateNetwork::build_linkstate_list),
 ///   the `new` half of [`build_linkstate_split`](LinkstateNetwork::build_linkstate_split)).
-/// - `{zid:false, links:true}` LINKS-ONLY — an updated node the receiver
-///   already mapped: omit the ~16-byte zid, re-advertise just its links/whatami
-///   (the D4 propagate optimisation; the receiver resolves the omitted zid from
-///   the psid it learned earlier).
-/// - `{zid:true, links:false}` ZID-ONLY — a newly-linked neighbour announced to
-///   EXISTING peers so a sibling entry referencing it by psid resolves, without
-///   re-sending the neighbour's own (irrelevant to them) links — the first
-///   entry of zenoh `add_link`'s 2-entry delta (`network.rs:873-890`),
+/// - [`LinksOnly`](Self::LinksOnly) (links, no zid) — an updated node the
+///   receiver already mapped: omit the ~16-byte zid, re-advertise just its
+///   links/whatami (the D4 propagate optimisation; the receiver resolves the
+///   omitted zid from the psid it learned earlier).
+/// - [`ZidOnly`](Self::ZidOnly) (zid, no links) — a newly-linked neighbour
+///   announced to EXISTING peers so a sibling entry referencing it by psid
+///   resolves, without re-sending the neighbour's own (irrelevant to them) links
+///   — the first entry of zenoh `add_link`'s 2-entry delta (`network.rs:873-890`),
 ///   [`build_link_added_delta`](LinkstateNetwork::build_link_added_delta).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Details {
-    zid: bool,
-    links: bool,
+enum Details {
+    Full,
+    LinksOnly,
+    ZidOnly,
+}
+
+impl Details {
+    /// `(carry_zid, carry_links)` — the two `LinkState` field gates this variant
+    /// selects, the form [`make_link_state`](LinkstateNetwork::make_link_state)
+    /// consumes (mirroring zenoh's `Details { zid, links }` bool fields).
+    fn fields(self) -> (bool, bool) {
+        match self {
+            Details::Full => (true, true),
+            Details::LinksOnly => (false, true),
+            Details::ZidOnly => (true, false),
+        }
+    }
 }
 
 /// A LinkState resolved from psid-space into zid-space — the intermediate
@@ -779,14 +795,15 @@ impl LinkstateNetwork {
     /// new neighbour's links). Locators are deferred for every form.
     fn make_link_state(&self, idx: NodeIndex, details: Details) -> LinkstateOwned {
         let node = &self.graph[idx];
+        let (want_zid, want_links) = details.fields();
         // links: resolve each neighbour zid to its local psid, with a weight per
-        // link (zenoh make_link_state, `network.rs:308-325`) — ONLY when
-        // `details.links`; an entry that omits links (a zid-only neighbour
+        // link (zenoh make_link_state, `network.rs:308-325`) — ONLY when the
+        // variant carries links; an entry that omits links (a zid-only neighbour
         // announcement) leaves the list empty, like zenoh's `if details.links`.
         let mut links = Vec::new();
         let mut weights = Vec::new();
         let mut has_weight = false;
-        if details.links {
+        if want_links {
             for (dest_zid, weight) in &node.links {
                 if let Some(dest_idx) = self.get_idx(dest_zid) {
                     links.push(LinkstateLink {
@@ -805,11 +822,11 @@ impl LinkstateNetwork {
                 }
             }
         }
-        // options: P (zid) set iff `details.zid` (the codec gates the zid field
-        // on P; a zid-omitting entry relies on the receiver's existing psid->zid
-        // mapping). W (if whatami known) | H (if a non-default weight was
-        // emitted) apply on top.
-        let mut options = if details.zid { OPT_P } else { 0 };
+        // options: P (zid) set iff the variant carries the zid (the codec gates
+        // the zid field on P; a zid-omitting entry relies on the receiver's
+        // existing psid->zid mapping). W (if whatami known) | H (if a non-default
+        // weight was emitted) apply on top.
+        let mut options = if want_zid { OPT_P } else { 0 };
         if node.whatami.is_some() {
             options |= OPT_W;
         }
@@ -820,11 +837,11 @@ impl LinkstateNetwork {
             options,
             psid: local_psid(idx),
             sn: node.sn,
-            zid_len: details.zid.then_some(node.zid.len() as u64),
+            zid_len: want_zid.then_some(node.zid.len() as u64),
             // every graph zid is <= ZENOHID_MAX_SIZE by construction (the
             // ingest drops an oversized wire zid; the handshake supplies a
             // valid self/neighbour zid), so this never exceeds capacity.
-            zid: details.zid.then(|| {
+            zid: want_zid.then(|| {
                 SceBytes::from_slice(node.zid.as_slice()).expect("graph zid is <= ZENOHID_MAX_SIZE")
             }),
             whatami: node.whatami,
@@ -845,15 +862,7 @@ impl LinkstateNetwork {
         into_list(
             self.graph
                 .node_indices()
-                .map(|idx| {
-                    self.make_link_state(
-                        idx,
-                        Details {
-                            zid: true,
-                            links: true,
-                        },
-                    )
-                })
+                .map(|idx| self.make_link_state(idx, Details::Full))
                 .collect(),
         )
     }
@@ -872,31 +881,26 @@ impl LinkstateNetwork {
         into_list(
             new.iter()
                 .filter_map(|zid| self.get_idx(zid))
-                .map(|idx| {
-                    self.make_link_state(
-                        idx,
-                        Details {
-                            zid: true,
-                            links: true,
-                        },
-                    )
-                })
+                .map(|idx| self.make_link_state(idx, Details::Full))
                 .chain(
                     updated
                         .iter()
                         .filter_map(|zid| self.get_idx(zid))
-                        .map(|idx| {
-                            self.make_link_state(
-                                idx,
-                                Details {
-                                    zid: false,
-                                    links: true,
-                                },
-                            )
-                        }),
+                        .map(|idx| self.make_link_state(idx, Details::LinksOnly)),
                 )
                 .collect(),
         )
+    }
+
+    /// Build the 1-entry `[self LINKS-ONLY]` delta — self's own node entry with
+    /// its links but no zid. This is what zenoh `remove_link` floods to all links
+    /// on a link loss (`network.rs:952-962`), and what `add_link` sends existing
+    /// links when the new neighbour was already known. Named once here so both
+    /// driver flood paths share one construction (the self-links-only delta is one
+    /// concept). Equivalent to `build_linkstate_split(&[], &[self_zid])` without
+    /// the zid round-trip.
+    pub fn build_self_links_delta(&self) -> LinkstateListOwned {
+        into_list(vec![self.make_link_state(self.idx, Details::LinksOnly)])
     }
 
     /// Build the minimal delta zenoh `add_link` sends to its EXISTING links when
@@ -913,21 +917,9 @@ impl LinkstateNetwork {
     pub fn build_link_added_delta(&self, neighbour: &Zid) -> LinkstateListOwned {
         let mut entries = Vec::with_capacity(2);
         if let Some(n_idx) = self.get_idx(neighbour) {
-            entries.push(self.make_link_state(
-                n_idx,
-                Details {
-                    zid: true,
-                    links: false,
-                },
-            ));
+            entries.push(self.make_link_state(n_idx, Details::ZidOnly));
         }
-        entries.push(self.make_link_state(
-            self.idx,
-            Details {
-                zid: false,
-                links: true,
-            },
-        ));
+        entries.push(self.make_link_state(self.idx, Details::LinksOnly));
         into_list(entries)
     }
 
@@ -2365,6 +2357,79 @@ mod tests {
         assert!(
             me.links_len >= 1,
             "self's links-only entry advertises its links (incl the new B)"
+        );
+    }
+
+    #[test]
+    fn build_link_added_delta_resolves_at_the_receiver() {
+        // The 2-entry add-delta's LOAD-BEARING claim (session-review coverage
+        // gap): the receiver resolves self's links-only entry — which references
+        // the NEW neighbour by psid — because the SAME list's zid-only neighbour
+        // entry registered that psid->zid mapping. R is an EXISTING neighbour of A
+        // (already mapped A via a bootstrap); A then gains C and sends R the delta,
+        // so R must learn C AND resolve A's freshly-advertised link to C.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let mut r = LinkstateNetwork::new(zid(0x0B), 2);
+        a.add_link(zid(0x0B), 2); // A knows R
+        let ra = r.add_link(zid(0x0A), 2); // R knows A
+        r.ingest_linkstate_list(ra, a.build_linkstate_list()); // bootstrap: R maps A
+        assert!(
+            r.get_node(&zid(0x0A)).is_some(),
+            "R mapped A from the bootstrap"
+        );
+        assert!(r.get_node(&zid(0x0C)).is_none(), "R does not know C yet");
+
+        // A gains a NEW neighbour C -> the 2-entry delta to its existing link R.
+        a.add_link(zid(0x0C), 2);
+        let delta = a.build_link_added_delta(&zid(0x0C));
+        assert_eq!(delta.link_states.len(), 2, "[C zid-only, A links-only]");
+        let changes = r.ingest_linkstate_list(ra, delta);
+
+        // The zid-only entry taught R that C exists...
+        assert!(
+            r.get_node(&zid(0x0C)).is_some(),
+            "R resolved C from the same-list zid-only entry"
+        );
+        assert!(changes.new.contains(&zid(0x0C)), "C is reported new to R");
+        // ...and A's links-only entry resolved its link to C against the psid that
+        // zid-only entry just registered — the cross-entry resolution that is the
+        // whole point of the 2-entry delta.
+        assert!(
+            r.get_node(&zid(0x0A))
+                .unwrap()
+                .links
+                .contains_key(&zid(0x0C)),
+            "A's links-only entry resolved its A->C link via the same-list mapping"
+        );
+    }
+
+    #[test]
+    fn link_added_delta_resolves_regardless_of_entry_order() {
+        // The docstring claims the two-pass ingest tolerates either entry order
+        // (it lists neighbour-first only to match zenoh). Prove it: feed the SAME
+        // delta with its entries REVERSED (self links-only FIRST, then C zid-only)
+        // and the receiver must still resolve C and A's A->C link.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        let mut r = LinkstateNetwork::new(zid(0x0B), 2);
+        a.add_link(zid(0x0B), 2);
+        let ra = r.add_link(zid(0x0A), 2);
+        r.ingest_linkstate_list(ra, a.build_linkstate_list());
+        a.add_link(zid(0x0C), 2);
+
+        let mut delta = a.build_link_added_delta(&zid(0x0C));
+        delta.link_states.reverse(); // self links-only now precedes C zid-only
+        r.ingest_linkstate_list(ra, delta);
+
+        assert!(
+            r.get_node(&zid(0x0C)).is_some(),
+            "C resolved even though its zid-only entry came AFTER self's links entry"
+        );
+        assert!(
+            r.get_node(&zid(0x0A))
+                .unwrap()
+                .links
+                .contains_key(&zid(0x0C)),
+            "A->C resolved regardless of entry order (two-pass ingest)"
         );
     }
 

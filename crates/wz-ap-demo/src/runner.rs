@@ -1358,7 +1358,7 @@ pub(crate) async fn run_peer(
     // `--publish` peer ORIGINATES a data Put into the mesh (flooded along its
     // own spanning tree by the forwarder), and EVERY peer observes how many
     // data Pushes it has received, logging the first rise so the e2e witnesses
-    // multi-hop delivery. Topology `flood_self` is NOT here — only the demo's
+    // multi-hop delivery. The topology self-flood is NOT here — only the demo's
     // application I/O (publish + observe). The peer loop still drives the flood.
     let mut app_tick = tokio::time::interval(Duration::from_millis(APP_TICK_MS));
     let mut last_data_seen = 0usize;

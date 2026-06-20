@@ -730,4 +730,31 @@ mod tests {
         // AP backing grows past the declared bound -> `**` still matches.
         assert!(keyexpr_pattern_matches(&["**"], deep));
     }
+
+    // The CANDIDATE-side bound (session-review coverage gap): keyexpr_intersects_target
+    // splits the candidate into the same bounded buffer, so the no-alloc backing is
+    // conservatively no-match past the bound while the alloc backing grows. Mirrors
+    // the over_depth_target_* pair above. Literal 33-vs-33 so no wildcard toggle is
+    // needed (an equal candidate isolates the bound, not the content, as the cause).
+    #[cfg(not(feature = "alloc"))]
+    #[test]
+    fn intersects_target_candidate_over_depth_no_match_no_alloc() {
+        let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a";
+        assert_eq!(deep.split('/').count(), MAX_KEYEXPR_CHUNKS + 1);
+        let target: [&str; MAX_KEYEXPR_CHUNKS + 1] = ["a"; MAX_KEYEXPR_CHUNKS + 1];
+        // candidate too deep for the no-alloc buffer -> no-match despite equal content.
+        assert!(!keyexpr_intersects_target(deep, &target));
+        // a within-bound equal candidate DOES match (the bound, not content, caused it).
+        assert!(keyexpr_intersects_target("a/a/a", &["a", "a", "a"]));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn intersects_target_candidate_over_depth_matches_on_alloc() {
+        let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a";
+        assert_eq!(deep.split('/').count(), MAX_KEYEXPR_CHUNKS + 1);
+        let target: [&str; MAX_KEYEXPR_CHUNKS + 1] = ["a"; MAX_KEYEXPR_CHUNKS + 1];
+        // AP backing grows past the bound -> the deep candidate still matches.
+        assert!(keyexpr_intersects_target(deep, &target));
+    }
 }

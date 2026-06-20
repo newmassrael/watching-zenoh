@@ -14,11 +14,13 @@
 //! trees, and re-floods the changed nodes onward ([`forward`](FaceForwarder::forward)).
 //!
 //! Topology flooding is EVENT-DRIVEN (D2b), like zenoh — which floods only on a
-//! link change, with NO periodic keepalive. A self-link change (`register` gained
-//! a link / `deregister` lost one, sn bumped) floods self's full link-state to
-//! every held face at once: the new neighbour is bootstrapped with the full
-//! topology AND the existing faces learn the change immediately. An inbound
-//! change re-floods transitively via `forward`'s `propagate`. Reliable transport
+//! link change, with NO periodic keepalive. A self-link change floods the zenoh
+//! MINIMAL DELTA (D4), not the full topology: on `register` the NEW face is
+//! bootstrapped with the full topology while EXISTING faces get only a 2-entry
+//! `[neighbour zid-only, self links-only]` delta ([`flood_link_added`](LinkstateForwarder::flood_link_added));
+//! on `deregister` every surviving face gets a 1-entry `[self links-only]` delta
+//! ([`flood_self_links_changed`](LinkstateForwarder::flood_self_links_changed)).
+//! An inbound change re-floods transitively via `forward`'s `propagate`. Reliable transport
 //! (the mesh is TCP) delivers each flood, so the topology FLOOD needs no periodic
 //! re-send — but the spanning-tree RECOMPUTE each change triggers IS coalesced on
 //! a debounce timer (D2c, below), not run inline.
@@ -372,7 +374,7 @@ impl LinkstateForwarder {
             // (Copy, Eq) rather than re-deriving it from raw bytes per call. The
             // handshake supplies a trusted, canonical zid, so the infallible
             // from_slice is the right ctor (a wire zid would use try_from).
-            let peer_zid = state.actions.peer_zid().map(|v| Zid::from_slice(&v));
+            let peer_zid = peer_zid_routing(&state.actions);
             if let Some(msg) = build(*id, peer_zid)? {
                 // a per-face send failure (link gone mid-fan-out) is skipped,
                 // not fatal to the rest — the face's own driver surfaces its
@@ -419,21 +421,28 @@ impl LinkstateForwarder {
         let full = self.build_self_oam()?;
         let delta = {
             let net = self.net.borrow();
-            let self_zid = *net.self_zid();
             let list = if neighbour_was_new {
                 net.build_link_added_delta(neighbour)
             } else {
-                net.build_linkstate_split(&[], &[self_zid])
+                net.build_self_links_delta()
             };
             build_linkstate_oam_owned(&list)?
         };
-        self.fan_out(true, |id, _zid| {
-            let oam = if id == new_face {
-                full.clone()
-            } else {
-                delta.clone()
-            };
-            Ok(Some(NetworkMessage::Oam(oam)))
+        self.fan_out(true, |id, zid| {
+            if id == new_face {
+                // the new link is bootstrapped with the FULL topology.
+                return Ok(Some(NetworkMessage::Oam(full.clone())));
+            }
+            if zid == Some(*neighbour) {
+                // Another link carrying the SAME neighbour zid (a relink to a peer
+                // already held on a different face): zenoh excludes EVERY link with
+                // `link.zid == zid` from the existing-links delta (`network.rs:864`),
+                // since that peer learns self's change on its own new face's full
+                // bootstrap. Skip it (otherwise it gets a redundant — if idempotent
+                // — self-links frame).
+                return Ok(None);
+            }
+            Ok(Some(NetworkMessage::Oam(delta.clone())))
         })
     }
 
@@ -446,11 +455,7 @@ impl LinkstateForwarder {
     /// and the links-only form (no zid) suffices since every survivor already
     /// mapped self. Reliable; returns the count of faces reached.
     fn flood_self_links_changed(&self) -> Result<usize, CodecError> {
-        let oam = {
-            let net = self.net.borrow();
-            let self_zid = *net.self_zid();
-            build_linkstate_oam_owned(&net.build_linkstate_split(&[], &[self_zid]))?
-        };
+        let oam = build_linkstate_oam_owned(&self.net.borrow().build_self_links_delta())?;
         self.fan_out(true, |_id, _zid| Ok(Some(NetworkMessage::Oam(oam.clone()))))
     }
 
@@ -565,11 +570,7 @@ impl LinkstateForwarder {
             let Some(keyexpr) = resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) else {
                 return;
             };
-            (
-                s.actions.peer_zid().map(|v| Zid::from_slice(&v)),
-                s.link,
-                keyexpr,
-            )
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
 
         // Resolve the source (tree root) + this node's psid for it via the
@@ -819,11 +820,7 @@ impl LinkstateForwarder {
             let Some(keyexpr) = resolve_wireexpr(&wireexpr.body, &s.keyexpr_table) else {
                 return;
             };
-            (
-                s.actions.peer_zid().map(|v| Zid::from_slice(&v)),
-                s.link,
-                keyexpr,
-            )
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
         let Some((source_zid, out_node_id)) =
             self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))
@@ -893,11 +890,7 @@ impl LinkstateForwarder {
             let Some(keyexpr) = resolve_ext_keyexpr(exts, &s.keyexpr_table) else {
                 return;
             };
-            (
-                s.actions.peer_zid().map(|v| Zid::from_slice(&v)),
-                s.link,
-                keyexpr,
-            )
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
         };
         let Some((source_zid, out_node_id)) =
             self.resolve_source(inbound_zid, inbound_link, read_declare_source(declare))
@@ -1072,6 +1065,24 @@ impl LinkstateForwarder {
     }
 }
 
+/// This face's remote peer zid as the routing [`Zid`], or `None` if the
+/// handshake did not surface one OR surfaced a non-conformant one — the SINGLE
+/// session(`Vec<u8>`) -> routing(`Zid`) boundary every flood / forward path
+/// reads through. The peer zid is captured verbatim from the peer's INIT body
+/// (`SessionLinkActions::peer_zid`), so it is UNTRUSTED wire data: validate it
+/// with the same `Zid::try_from` the linkstate ingest uses (rejecting an empty /
+/// all-zero zid) rather than the infallible `from_slice`, so a non-conformant
+/// peer cannot enter the graph as a zero-identity node. A face whose zid is
+/// absent / rejected is held WITHOUT a routing identity (it routes nothing),
+/// exactly like a zid-less face. The conversion lives here (the driver), keeping
+/// `SessionLinkActions` (session-core, `#![no_std]`, routing-agnostic) free of
+/// the routing `Zid` type.
+fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
+    actions
+        .peer_zid()
+        .and_then(|bytes| Zid::try_from(bytes).ok())
+}
+
 /// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
 /// The shared membership check the originate paths ([`publish`](LinkstateForwarder::publish)
 /// / [`declare_subscription`](LinkstateForwarder::declare_subscription)) and
@@ -1122,8 +1133,7 @@ impl FaceForwarder for LinkstateForwarder {
         // tracked deferral — spanning-tree forwarding is whatami-agnostic;
         // only gossip/autoconnect would need the true role), so a neighbour is
         // recorded as WHATAMI_PEER.
-        let added = actions.peer_zid().map(|peer_zid| {
-            let neighbour = Zid::from_slice(&peer_zid);
+        let added = peer_zid_routing(actions).map(|neighbour| {
             let mut net = self.net.borrow_mut();
             // Whether this neighbour is NEW to the GRAPH (not merely a new face):
             // a second link to an already-known peer re-advertises only self's
@@ -1488,10 +1498,11 @@ mod tests {
         // node is shared, so the second register sees the peer already present.)
         let fwd = LinkstateForwarder::new(zid(0x05), 2);
         let (face_a, sink_a) = peer_face(zid(0x0A)); // an existing witness
-        let (face_b0, _b0) = peer_face(zid(0x0B)); // B's first link
+        let (face_b0, sink_b0) = peer_face(zid(0x0B)); // B's first link
         fwd.register(FaceId(0), &face_a);
         fwd.register(FaceId(1), &face_b0); // B is NEW to the graph here
         sink_a.reset();
+        sink_b0.reset();
         let (face_b1, _b1) = peer_face(zid(0x0B)); // a SECOND link to the same B
         fwd.register(FaceId(2), &face_b1); // B already known -> not re-announced
         let states = propagated_link_states(&sink_a.frame_bytes(0));
@@ -1501,6 +1512,14 @@ mod tests {
             "a known-peer relink re-sends only self's links, no neighbour entry"
         );
         assert!(states[0].zid.is_none(), "self links-only (zid omitted)");
+        // zenoh excludes EVERY link with link.zid == neighbour from the delta
+        // (network.rs:864): B's FIRST face must get nothing (it learns self's
+        // change on the new face's full bootstrap), not a redundant self-links frame.
+        assert_eq!(
+            sink_b0.frame_count(),
+            0,
+            "B's other link (same zid) is excluded from the relink delta"
+        );
     }
 
     #[test]
