@@ -505,6 +505,15 @@ mod imp {
         /// Source-independent (see [`forward_push`](Self::forward_push)) —
         /// zenoh's `get_or_set_route` analog.
         fn route_targets(&self, keyexpr: &str) -> Arc<[u64]> {
+            // zenoh `compute_data_route` guard (linkstate_peer/pubsub.rs:948):
+            // a keyexpr ending in '/' is malformed — a trailing empty chunk.
+            // Such a Push must reach NO face, yet the chunk splitter yields a
+            // trailing "" chunk that a `**` subscriber's backtrack would absorb
+            // (a spurious match). Return an empty route without scanning or
+            // caching; the malformed key never enters the route cache.
+            if keyexpr.ends_with('/') {
+                return Arc::from(Vec::<u64>::new());
+            }
             let generation = self.generation;
             // Read borrow scoped so the miss path can re-borrow `route_cache`
             // mutably; the scan below reads only `self.faces`, never the cache,

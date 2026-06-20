@@ -154,6 +154,15 @@ impl LinkstatepeerSubs {
     /// Peers are deduped across multiple matching keys via a `HashSet` (`Zid` is
     /// `Copy + Hash`), not an O(matches²) linear membership scan.
     fn matching_peers(&self, target: &str, exclude: Option<&Zid>) -> Vec<Zid> {
+        // zenoh `compute_data_route` guard (linkstate_peer/pubsub.rs:948): a
+        // target ending in '/' is malformed — a trailing empty chunk that a
+        // `**` subscription's backtrack would otherwise absorb (a spurious
+        // match). A malformed published key reaches NO peer; return empty
+        // before the scan, the data-route twin of the routing-routes
+        // `RouteTable::route_targets` guard.
+        if target.ends_with('/') {
+            return Vec::new();
+        }
         // Split the published target ONCE, then test each registered subscription
         // keyexpr via the shared keyexpr-scan SSOT (the same per-candidate
         // membership test the local registry's `declared_intersects` uses).
@@ -415,6 +424,26 @@ mod tests {
         assert!(
             subs.interested_remote("self-only", &me).is_empty(),
             "a self-only subscription yields no remote direction",
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_target_matches_no_peer() {
+        // zenoh compute_data_route guard (pubsub.rs:948): a published key ending
+        // in '/' is malformed (a trailing empty chunk). It must reach no peer --
+        // not even a `**` subscriber, whose backtrack would otherwise absorb the
+        // empty chunk and spuriously match. The control confirms the SAME `**`
+        // subscription answers the well-formed key.
+        let mut subs = LinkstatepeerSubs::new();
+        subs.register("demo/**", zid(0xAA));
+        assert!(
+            subs.interested("demo/data/").is_empty(),
+            "a trailing-slash target intersects no subscription",
+        );
+        assert_eq!(
+            subs.interested("demo/data"),
+            vec![zid(0xAA)],
+            "the well-formed key still matches the `**` subscription",
         );
     }
 }

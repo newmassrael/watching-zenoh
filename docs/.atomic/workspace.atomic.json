@@ -44082,6 +44082,54 @@
         "Remaining honest-defer (from sv): (d) ends_with('/') data-route reject, (e) next_hop dangling-hop test, resource-tree sublinear fold, or F discovery (handshake whatami + gossip/autoconnect/locators)."
       ]
     },
+    "Round 311sy": {
+      "decision_summary": "R311sy: zenoh parity (defer d): both wz data-route paths drop a trailing-slash keyexpr (malformed) instead of spuriously matching `**` subs. Guards in route_targets + matching_peers, mutation-verified.",
+      "changes_bullets": [
+        "Gap: zenoh compute_data_route empties the route for key_expr.ends_with('/') in every hat (linkstate_peer/pubsub.rs:948). wz had no such guard; resolve_wireexpr concats table[id]+suffix without canon, so a trailing slash passes raw to the matcher.",
+        "Misroute proof: `home/temp/` -> chunks [home,temp,\"\"]; a `home/**` sub's `**` backtrack absorbs the trailing \"\" = spurious match = forwarded. Guard-off mutation: both new tests fail (forwarded 1, want 0).",
+        "Fix 1 (routing-routes): RouteTable.route_targets (the compute_data_route / get_or_set_route analog) returns an empty Arc<[u64]> for a trailing-slash keyexpr before the scan; the malformed key never enters the route cache.",
+        "Fix 2 (routing-peer): LinkstatepeerSubs.matching_peers (the SSOT feeding interested / interested_remote, su's keyexpr_intersects_target consumer) returns empty for a trailing-slash target -- the data-route twin of fix 1. Both wz forward paths now parity-complete."
+      ],
+      "verification_bullets": [
+        "New tests, both mutation-verified load-bearing (guard off => fail): drops_a_put_on_a_trailing_slash_keyexpr (RouteTable) + a_trailing_slash_target_matches_no_peer (matching_peers); each pairs the drop with a well-formed-key control.",
+        "No regression: routing-peer lib 362 pass (sv gate 361 + 1 new); routing-routes routing_forward 21 pass (+1 new). clippy -D warnings clean (routing-peer + routing-routes all-targets); fmt clean.",
+        "Grounding (direct read): zenoh pubsub.rs:948 returns an empty route on key_expr.ends_with('/') (same guard across p2p_peer / client / router hats); wz resolve_wireexpr (wireexpr_resolve.rs:34) does no canon, so a trailing slash reached the matcher raw.",
+        "Scope: guarded at each data-route match-set (route_targets / matching_peers) like zenoh compute_data_route, NOT in the keyexpr_intersects_target primitive -- local subscriber delivery is unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sy = zenoh parity for honest-defer (d): a trailing-slash keyexpr is malformed (reaches no face). wz had no guard -- the chunk splitter's trailing \"\" chunk let a `**` sub spuriously match. Both wz data-route paths now guard.",
+        "Guarded at each match-set SSOT: route_targets (routing-routes) + matching_peers (routing-peer, su keyexpr_intersects_target consumer), mirroring zenoh compute_data_route present in every hat. Both mutation-verified load-bearing.",
+        "LOCAL UNPUSHED: 311sx(fabe40c)+311sy = 2 commits on origin/main=34bd2f5. Push only after explicit consent (pre-push full run-ci; idle first). E6 covers the happy path; the guard only touches malformed keys.",
+        "Remaining honest-defer: (e) next_hop dangling-intermediate-hop test (lib.rs:1377 node_weight(hop)?=None). remove_detached_nodes scrubs freed indices from trees, so it may be near-unreachable -- verify reachability (diamond topology) first.",
+        "Also: resource-tree sublinear fold (perf, measure-first deferral behind the su matching_peers/route_targets seam), or F discovery (handshake whatami + gossip/autoconnect/locators)."
+      ],
+      "publishable_decision_summary": "R311sy: zenoh parity (defer d): both wz data-route paths drop a trailing-slash keyexpr (malformed) instead of spuriously matching `**` subs. Guards in route_targets + matching_peers, mutation-verified.",
+      "publishable_changes_bullets": [
+        "Gap: zenoh compute_data_route empties the route for key_expr.ends_with('/') in every hat (linkstate_peer/pubsub.rs:948). wz had no such guard; resolve_wireexpr concats table[id]+suffix without canon, so a trailing slash passes raw to the matcher.",
+        "Misroute proof: `home/temp/` -> chunks [home,temp,\"\"]; a `home/**` sub's `**` backtrack absorbs the trailing \"\" = spurious match = forwarded. Guard-off mutation: both new tests fail (forwarded 1, want 0).",
+        "Fix 1 (routing-routes): RouteTable.route_targets (the compute_data_route / get_or_set_route analog) returns an empty Arc<[u64]> for a trailing-slash keyexpr before the scan; the malformed key never enters the route cache.",
+        "Fix 2 (routing-peer): LinkstatepeerSubs.matching_peers (the SSOT feeding interested / interested_remote, su's keyexpr_intersects_target consumer) returns empty for a trailing-slash target -- the data-route twin of fix 1. Both wz forward paths now parity-complete."
+      ],
+      "publishable_verification_bullets": [
+        "New tests, both mutation-verified load-bearing (guard off => fail): drops_a_put_on_a_trailing_slash_keyexpr (RouteTable) + a_trailing_slash_target_matches_no_peer (matching_peers); each pairs the drop with a well-formed-key control.",
+        "No regression: routing-peer lib 362 pass (sv gate 361 + 1 new); routing-routes routing_forward 21 pass (+1 new). clippy -D warnings clean (routing-peer + routing-routes all-targets); fmt clean.",
+        "Grounding (direct read): zenoh pubsub.rs:948 returns an empty route on key_expr.ends_with('/') (same guard across p2p_peer / client / router hats); wz resolve_wireexpr (wireexpr_resolve.rs:34) does no canon, so a trailing slash reached the matcher raw.",
+        "Scope: guarded at each data-route match-set (route_targets / matching_peers) like zenoh compute_data_route, NOT in the keyexpr_intersects_target primitive -- local subscriber delivery is unchanged."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sy = zenoh parity for honest-defer (d): a trailing-slash keyexpr is malformed (reaches no face). wz had no guard -- the chunk splitter's trailing \"\" chunk let a `**` sub spuriously match. Both wz data-route paths now guard.",
+        "Guarded at each match-set SSOT: route_targets (routing-routes) + matching_peers (routing-peer, su keyexpr_intersects_target consumer), mirroring zenoh compute_data_route present in every hat. Both mutation-verified load-bearing.",
+        "LOCAL UNPUSHED: 311sx(fabe40c)+311sy = 2 commits on origin/main=34bd2f5. Push only after explicit consent (pre-push full run-ci; idle first). E6 covers the happy path; the guard only touches malformed keys.",
+        "Remaining honest-defer: (e) next_hop dangling-intermediate-hop test (lib.rs:1377 node_weight(hop)?=None). remove_detached_nodes scrubs freed indices from trees, so it may be near-unreachable -- verify reachability (diamond topology) first.",
+        "Also: resource-tree sublinear fold (perf, measure-first deferral behind the su matching_peers/route_targets seam), or F discovery (handshake whatami + gossip/autoconnect/locators)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [

@@ -212,6 +212,41 @@ mod tests {
     }
 
     #[test]
+    fn drops_a_put_on_a_trailing_slash_keyexpr() {
+        // zenoh `compute_data_route` guard (linkstate_peer/pubsub.rs:948): a
+        // keyexpr ending in '/' is malformed (a trailing empty chunk) and must
+        // reach NO face — not even a `**` subscriber, whose backtrack would
+        // otherwise absorb the trailing "" chunk and spuriously match. The
+        // control half confirms the SAME subscriber receives the well-formed key
+        // (so the drop is the trailing slash, not a non-matching subscription).
+        let fwd = RoutingForwarder::new();
+        let (consumer, consumer_sink) = recording_actions();
+        let (producer, _producer_sink) = recording_actions();
+        fwd.register(FaceId(0), &consumer);
+        fwd.register(FaceId(1), &producer);
+
+        declare_sub(&fwd, 0, 1, "home/**");
+
+        // Malformed: trailing slash -> empty route, nothing forwarded.
+        publish(&fwd, 1, "home/temp/");
+        assert_eq!(
+            fwd.forwarded(),
+            0,
+            "a trailing-slash keyexpr resolves to an empty route"
+        );
+        assert_eq!(
+            consumer_sink.frame_count(),
+            0,
+            "the `**` subscriber received nothing for the malformed key"
+        );
+
+        // Control: the well-formed key matches the same `**` subscriber.
+        publish(&fwd, 1, "home/temp");
+        assert_eq!(fwd.forwarded(), 1, "the well-formed key forwards once");
+        assert_eq!(consumer_sink.frame_count(), 1);
+    }
+
+    #[test]
     fn fans_out_to_every_matching_face() {
         let fwd = RoutingForwarder::new();
         let (sub_a, sink_a) = recording_actions();
