@@ -1371,9 +1371,19 @@ impl LinkstateNetwork {
         let dest_idx = self.get_idx(dest)?;
         let tree = self.trees.get(root.index())?;
         let hop = tree.directions.get(dest_idx.index()).copied().flatten()?;
-        // `node_weight` so a hop pruned since the last `compute_trees`
-        // resolves to None rather than panicking on a removed index (the
-        // coalesced-recompute window — see `tree_children_of`).
+        // `node_weight` is the non-panicking accessor (the `graph[hop]`
+        // indexing op panics on a removed `NodeIndex`). In practice this
+        // None arm is UNREACHABLE: the single node-removal path
+        // (`remove_detached_nodes`) always runs `scrub_trees`, which nulls a
+        // `directions` slot whose VALUE is a freed hop (its by-value clause),
+        // so a hop pruned since the last `compute_trees` is already caught by
+        // the `.flatten()?` above (its slot was nulled by value, not by the
+        // node_weight check). The "live dest, freed first-hop" state the arm
+        // would catch is itself unreachable: a freed hop means it is no longer
+        // reachable from self, which detaches its whole downstream subtree —
+        // including `dest` — so `dest_idx` would already be absent above. Kept
+        // as defensive belt-and-suspenders for that invariant (mirrors the same
+        // node_weight guard in `tree_children_of`).
         Some(self.graph.node_weight(hop)?.zid)
     }
 

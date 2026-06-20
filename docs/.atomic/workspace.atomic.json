@@ -44130,6 +44130,50 @@
         "Also: resource-tree sublinear fold (perf, measure-first deferral behind the su matching_peers/route_targets seam), or F discovery (handshake whatami + gossip/autoconnect/locators)."
       ]
     },
+    "Round 311sz": {
+      "decision_summary": "R311sz: defer (e) = unreachable-by-invariant, not a missing test. next_hop node_weight-None arm (lib.rs:1377) cannot fire: scrub nulls directions by value, live-dest+freed-hop is graph-unreachable. Corrected the comment; no fabricated test.",
+      "changes_bullets": [
+        "(e) wanted a direct test of next_hop's node_weight-None arm (lib.rs:1377). Verified UNREACHABLE -> no honest black-box test exists; the deliverable is documenting the invariant, not fabricating a test (diagnose-before-carry).",
+        "Proof 1: the sole node-removal path (remove_detached_nodes, lib.rs:708) always runs scrub_trees, which nulls directions by VALUE (a freed hop, 755-759). So a freed first-hop is caught at .flatten()? (1373), one line before node_weight (1377).",
+        "Proof 2: the 'live-dest + freed-first-hop' state the arm would catch is graph-unreachable -- a freed hop is unreachable from self, detaching its downstream subtree incl dest, so dest_idx is already absent (get_idx, 1371).",
+        "Fix: corrected next_hop's comment (lib.rs:1374+): the old text implied node_weight catches a pruned hop; now states scrub nulls directions by value so the arm is defensive + unreachable (cross-ref scrub_trees + the single removal path)."
+      ],
+      "verification_bullets": [
+        "Comment-only change: wz-routing-graph lib 45 pass (sv gate unchanged). No test added -- the target state is unrepresentable via the public API. clippy -D warnings clean; fmt clean.",
+        "Existing tests cover the reachable adjacent states: tree_accessors_tolerate_a_node_pruned_since_the_last_recompute (pruned dest = slot None) + a_reused_node_index_does_not_alias_a_stale_tree_entry (reused index = slot None, no alias).",
+        "Grounding (direct read): remove_detached_nodes (lib.rs:708) is the only remove_node caller + always scrubs; scrub_trees nulls directions by-value (755-759) + by-slot (760-764); line 482 names it the single removal path."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311sz = honest closure of (e): the requested next_hop dangling-hop test is not honestly writable -- the node_weight-None arm (lib.rs:1377) is unreachable by invariant. Fixed the misleading comment; no fabricated test.",
+        "Why: the single removal path always scrubs directions by value (freed hop -> slot None at .flatten()? 1373); 'live-dest + freed-first-hop' is itself graph-unreachable. node_weight is defensive belt-and-suspenders.",
+        "LOCAL UNPUSHED: 311sx(fabe40c)+311sy(ed0f1a3)+311sz = 3 commits on origin/main=34bd2f5. Push only after explicit consent (pre-push full run-ci; idle first).",
+        "Remaining: resource-tree fold (perf deferral behind the su seam), or F discovery (handshake whatami + gossip/autoconnect/locators). (d)=sy + (e)=sz done; the small honest-defer list is exhausted except the perf deferral."
+      ],
+      "publishable_decision_summary": "R311sz: defer (e) = unreachable-by-invariant, not a missing test. next_hop node_weight-None arm (lib.rs:1377) cannot fire: scrub nulls directions by value, live-dest+freed-hop is graph-unreachable. Corrected the comment; no fabricated test.",
+      "publishable_changes_bullets": [
+        "(e) wanted a direct test of next_hop's node_weight-None arm (lib.rs:1377). Verified UNREACHABLE -> no honest black-box test exists; the deliverable is documenting the invariant, not fabricating a test (diagnose-before-carry).",
+        "Proof 1: the sole node-removal path (remove_detached_nodes, lib.rs:708) always runs scrub_trees, which nulls directions by VALUE (a freed hop, 755-759). So a freed first-hop is caught at .flatten()? (1373), one line before node_weight (1377).",
+        "Proof 2: the 'live-dest + freed-first-hop' state the arm would catch is graph-unreachable -- a freed hop is unreachable from self, detaching its downstream subtree incl dest, so dest_idx is already absent (get_idx, 1371).",
+        "Fix: corrected next_hop's comment (lib.rs:1374+): the old text implied node_weight catches a pruned hop; now states scrub nulls directions by value so the arm is defensive + unreachable (cross-ref scrub_trees + the single removal path)."
+      ],
+      "publishable_verification_bullets": [
+        "Comment-only change: wz-routing-graph lib 45 pass (sv gate unchanged). No test added -- the target state is unrepresentable via the public API. clippy -D warnings clean; fmt clean.",
+        "Existing tests cover the reachable adjacent states: tree_accessors_tolerate_a_node_pruned_since_the_last_recompute (pruned dest = slot None) + a_reused_node_index_does_not_alias_a_stale_tree_entry (reused index = slot None, no alias).",
+        "Grounding (direct read): remove_detached_nodes (lib.rs:708) is the only remove_node caller + always scrubs; scrub_trees nulls directions by-value (755-759) + by-slot (760-764); line 482 names it the single removal path."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sz = honest closure of (e): the requested next_hop dangling-hop test is not honestly writable -- the node_weight-None arm (lib.rs:1377) is unreachable by invariant. Fixed the misleading comment; no fabricated test.",
+        "Why: the single removal path always scrubs directions by value (freed hop -> slot None at .flatten()? 1373); 'live-dest + freed-first-hop' is itself graph-unreachable. node_weight is defensive belt-and-suspenders.",
+        "LOCAL UNPUSHED: 311sx(fabe40c)+311sy(ed0f1a3)+311sz = 3 commits on origin/main=34bd2f5. Push only after explicit consent (pre-push full run-ci; idle first).",
+        "Remaining: resource-tree fold (perf deferral behind the su seam), or F discovery (handshake whatami + gossip/autoconnect/locators). (d)=sy + (e)=sz done; the small honest-defer list is exhausted except the perf deferral."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [
