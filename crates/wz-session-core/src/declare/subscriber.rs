@@ -766,6 +766,27 @@ mod tests {
     }
 
     #[test]
+    fn subscriber_has_matching_false_on_a_malformed_published_key() {
+        // The LOCAL delivery membership check (zenoh compute_data_route parity):
+        // a `home/**` subscriber must NOT match a malformed published key (an
+        // empty `/`-delimited chunk). This is the local-delivery twin of the
+        // mesh-forward drop — both route through the matcher's
+        // `target_chunks_well_formed` invariant, so a stray `home/temp/` /
+        // `home//temp` / `/home/temp` / `""` reaches no subscriber on any path.
+        let mut reg = RemoteSubscriberRegistry::new();
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(13, 0, Some("home/**")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(reg.has_matching("home/temp"), "well-formed key matches");
+        for malformed in ["home/temp/", "home//temp", "/home/temp", ""] {
+            assert!(
+                !reg.has_matching(malformed),
+                "`home/**` must not match malformed `{malformed}`"
+            );
+        }
+    }
+
+    #[test]
     fn subscriber_has_matching_true_when_publish_pattern_covers_peer_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
         let body =

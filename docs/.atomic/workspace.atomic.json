@@ -44236,6 +44236,58 @@
         "Phase W lwIP runtime crate (long-standing architectural carry; multi-round work, no R311 series interaction)."
       ]
     },
+    "Round 311ta": {
+      "decision_summary": "R311ta: 4-agent session review REFUTED self-assessment: sy ends_with('/') was incomplete (1/4 forms), duplicated, missed local delivery. Replaced by one matcher-SSOT invariant covering all forms+consumers; fixed sz Proof 2.",
+      "changes_bullets": [
+        "Review (4/4 convergent): sy ported only zenoh's ends_with('/') fast-path, not OwnedKeyExpr::try_from (pubsub.rs:957) -- home//temp, /home, \"\" still spuriously matched `**` subs and forwarded.",
+        "And it was duplicated across 2 crates while declared_intersects (the LOCAL subscriber-delivery scan) had none -- a local `home/**` sub still fired on home/temp/ (sy's \"reaches NO subscriber\" was false).",
+        "Fix: removed both ends_with('/') guards; one invariant target_chunks_well_formed (empty chunk => no match) now lives inside BOTH matcher entries (keyexpr_pattern_matches + keyexpr_intersects_target), so all consumers inherit it by construction.",
+        "Coverage: forward (route_targets/matching_peers), local delivery (has_matching), switchboard all go through the matcher -> all 4 empty-chunk forms reach NO subscriber on ANY path, not just the trailing slash.",
+        "sz fix: next_hop's \"Proof 2\" (freed hop => dest detached) was FALSE (a diamond keeps dest alive via an alternate subtree while its first-hop is freed); the arm is unreachable SOLELY via scrub's by-value null (Proof 1). Corrected."
+      ],
+      "verification_bullets": [
+        "New tests, both mutation-verified (guard off => both fail): a_malformed_target_with_an_empty_chunk_matches_nothing (4 forms x 2 matcher entries) + subscriber_has_matching_false_on_a_malformed_published_key (local delivery). Each + a well-formed control.",
+        "No regression: session-core lib 152 (+1); no-alloc lib 69 (the matcher test runs no-alloc too); routing-peer 362; routing-routes routing_forward 21 (sy's e2e tests still pass via the matcher); graph 45. clippy -D warnings + fmt clean.",
+        "Grounding (direct read): zenoh compute_data_route = ends_with('/') (pubsub.rs:948) then OwnedKeyExpr::try_from (:957). Empty-chunk is the structural subset a concrete target violates; keyexpr_canon stays the full-grammar SSOT (cross-ref'd in the helper doc).",
+        "CALIBRATION: the recurring trigger fired a 4-agent adversarial review that REFUTED '교과서적' (overconfident AGAIN -- the project pattern), convergent CRITICAL the happy-path missed. Same value as sq/sv."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ta = session-review remediation. The recurring textbook/SSOT/north-star trigger fired a 4-agent adversarial review that REFUTED '교과서적' -- overconfident AGAIN (the project pattern, cf sq/sv).",
+        "Core fix: sy's ends_with('/') was incomplete (1/4 forms), duplicated, missed local delivery. Now ONE matcher invariant (target_chunks_well_formed, both entries) -> all forms + all consumers (forward/local/switchboard) by construction.",
+        "Also fixed sz's WRONG Proof 2 (freed-hop=>dest-detached is false; a diamond keeps dest alive via an alternate subtree). next_hop's arm is unreachable SOLELY via scrub by-value null (Proof 1).",
+        "LOCAL UNPUSHED: sx+sy+sz+ta = 4 commits on origin/main=34bd2f5. Push after explicit consent (pre-push full run-ci; idle). ta supersedes sy's guard placement (2 ends_with removed; sy e2e tests retained, pass via the matcher).",
+        "LESSON (cf sq/sv): the 4-agent adversarial review is the strongest calibration -- caught a convergent CRITICAL (incomplete+duplicated guard, missed local delivery) sy's own mutation-verified tests missed. [[feedback-textbook-over-cost]]"
+      ],
+      "publishable_decision_summary": "R311ta: 4-agent session review REFUTED self-assessment: sy ends_with('/') was incomplete (1/4 forms), duplicated, missed local delivery. Replaced by one matcher-SSOT invariant covering all forms+consumers; fixed sz Proof 2.",
+      "publishable_changes_bullets": [
+        "Review (4/4 convergent): sy ported only zenoh's ends_with('/') fast-path, not OwnedKeyExpr::try_from (pubsub.rs:957) -- home//temp, /home, \"\" still spuriously matched `**` subs and forwarded.",
+        "And it was duplicated across 2 crates while declared_intersects (the LOCAL subscriber-delivery scan) had none -- a local `home/**` sub still fired on home/temp/ (sy's \"reaches NO subscriber\" was false).",
+        "Fix: removed both ends_with('/') guards; one invariant target_chunks_well_formed (empty chunk => no match) now lives inside BOTH matcher entries (keyexpr_pattern_matches + keyexpr_intersects_target), so all consumers inherit it by construction.",
+        "Coverage: forward (route_targets/matching_peers), local delivery (has_matching), switchboard all go through the matcher -> all 4 empty-chunk forms reach NO subscriber on ANY path, not just the trailing slash.",
+        "sz fix: next_hop's \"Proof 2\" (freed hop => dest detached) was FALSE (a diamond keeps dest alive via an alternate subtree while its first-hop is freed); the arm is unreachable SOLELY via scrub's by-value null (Proof 1). Corrected."
+      ],
+      "publishable_verification_bullets": [
+        "New tests, both mutation-verified (guard off => both fail): a_malformed_target_with_an_empty_chunk_matches_nothing (4 forms x 2 matcher entries) + subscriber_has_matching_false_on_a_malformed_published_key (local delivery). Each + a well-formed control.",
+        "No regression: session-core lib 152 (+1); no-alloc lib 69 (the matcher test runs no-alloc too); routing-peer 362; routing-routes routing_forward 21 (sy's e2e tests still pass via the matcher); graph 45. clippy -D warnings + fmt clean.",
+        "Grounding (direct read): zenoh compute_data_route = ends_with('/') (pubsub.rs:948) then OwnedKeyExpr::try_from (:957). Empty-chunk is the structural subset a concrete target violates; keyexpr_canon stays the full-grammar SSOT (cross-ref'd in the helper doc).",
+        "CALIBRATION: the recurring trigger fired a 4-agent adversarial review that REFUTED '교과서적' (overconfident AGAIN -- the project pattern), convergent CRITICAL the happy-path missed. Same value as sq/sv."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ta = session-review remediation. The recurring textbook/SSOT/north-star trigger fired a 4-agent adversarial review that REFUTED '교과서적' -- overconfident AGAIN (the project pattern, cf sq/sv).",
+        "Core fix: sy's ends_with('/') was incomplete (1/4 forms), duplicated, missed local delivery. Now ONE matcher invariant (target_chunks_well_formed, both entries) -> all forms + all consumers (forward/local/switchboard) by construction.",
+        "Also fixed sz's WRONG Proof 2 (freed-hop=>dest-detached is false; a diamond keeps dest alive via an alternate subtree). next_hop's arm is unreachable SOLELY via scrub by-value null (Proof 1).",
+        "LOCAL UNPUSHED: sx+sy+sz+ta = 4 commits on origin/main=34bd2f5. Push after explicit consent (pre-push full run-ci; idle). ta supersedes sy's guard placement (2 ends_with removed; sy e2e tests retained, pass via the matcher).",
+        "LESSON (cf sq/sv): the 4-agent adversarial review is the strongest calibration -- caught a convergent CRITICAL (incomplete+duplicated guard, missed local delivery) sy's own mutation-verified tests missed. [[feedback-textbook-over-cost]]"
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

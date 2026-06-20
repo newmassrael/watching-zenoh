@@ -154,15 +154,11 @@ impl LinkstatepeerSubs {
     /// Peers are deduped across multiple matching keys via a `HashSet` (`Zid` is
     /// `Copy + Hash`), not an O(matches²) linear membership scan.
     fn matching_peers(&self, target: &str, exclude: Option<&Zid>) -> Vec<Zid> {
-        // zenoh `compute_data_route` guard (linkstate_peer/pubsub.rs:948): a
-        // target ending in '/' is malformed — a trailing empty chunk that a
-        // `**` subscription's backtrack would otherwise absorb (a spurious
-        // match). A malformed published key reaches NO peer; return empty
-        // before the scan, the data-route twin of the routing-routes
-        // `RouteTable::route_targets` guard.
-        if target.ends_with('/') {
-            return Vec::new();
-        }
+        // A malformed target (an empty chunk, e.g. a trailing '/') matches no
+        // peer: the shared `keyexpr_intersects_target` rejects it at the matcher
+        // (zenoh compute_data_route parity), so the scan below yields the empty
+        // set. The invariant is single-sourced in the matcher, not re-guarded
+        // here — see `wz_session_core::keyexpr_match::target_chunks_well_formed`.
         // Split the published target ONCE, then test each registered subscription
         // keyexpr via the shared keyexpr-scan SSOT (the same per-candidate
         // membership test the local registry's `declared_intersects` uses).

@@ -1372,18 +1372,18 @@ impl LinkstateNetwork {
         let tree = self.trees.get(root.index())?;
         let hop = tree.directions.get(dest_idx.index()).copied().flatten()?;
         // `node_weight` is the non-panicking accessor (the `graph[hop]`
-        // indexing op panics on a removed `NodeIndex`). In practice this
-        // None arm is UNREACHABLE: the single node-removal path
-        // (`remove_detached_nodes`) always runs `scrub_trees`, which nulls a
-        // `directions` slot whose VALUE is a freed hop (its by-value clause),
-        // so a hop pruned since the last `compute_trees` is already caught by
-        // the `.flatten()?` above (its slot was nulled by value, not by the
-        // node_weight check). The "live dest, freed first-hop" state the arm
-        // would catch is itself unreachable: a freed hop means it is no longer
-        // reachable from self, which detaches its whole downstream subtree —
-        // including `dest` — so `dest_idx` would already be absent above. Kept
-        // as defensive belt-and-suspenders for that invariant (mirrors the same
-        // node_weight guard in `tree_children_of`).
+        // indexing op panics on a removed `NodeIndex`). In practice this None
+        // arm is UNREACHABLE, for ONE reason: the single node-removal path
+        // (`remove_detached_nodes`) always runs `scrub_trees`, whose by-value
+        // clause nulls every `directions` slot whose VALUE is a freed hop. So a
+        // hop freed since the last `compute_trees` leaves its `directions` slot
+        // `None` and is caught at the `.flatten()?` above — it never reaches
+        // this line. Note the "live `dest`, freed first-hop" state DOES exist
+        // transiently: in a diamond, `dest` can survive via an alternate subtree
+        // while its cached first-hop is pruned, so the slot is nulled by VALUE,
+        // not because `dest` itself left the graph (an earlier comment wrongly
+        // claimed a freed hop always detaches `dest`). Kept as defensive
+        // belt-and-suspenders for that scrub invariant.
         Some(self.graph.node_weight(hop)?.zid)
     }
 

@@ -67,6 +67,33 @@ use crate::bounded::BoundedVec;
 /// declared-bound precedent.
 pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 
+/// Whether a published `target` (already split on `/`) is well-formed — i.e.
+/// has no empty `/`-delimited chunk. A target with an empty chunk (a trailing
+/// `home/`, leading `/home`, interior `home//temp`, or the empty key `""`) is
+/// NON-CANONICAL and must match NOTHING; without this a stray `home/temp/`
+/// splits to `["home","temp",""]` and the trailing `""` is absorbed by a `**`
+/// subscription's backtrack — a spurious match (and forward / local delivery).
+///
+/// zenoh rejects such keys at the data route (`compute_data_route` bails on
+/// `key_expr.ends_with('/')` then `OwnedKeyExpr::try_from`,
+/// `linkstate_peer/pubsub.rs:948,957`). wz enforces it HERE, inside the two
+/// matcher entry points ([`keyexpr_pattern_matches`] +
+/// [`keyexpr_intersects_target`]), so "a malformed target matches nothing" is
+/// an INVARIANT OF THE MATCHER — every consumer inherits it by construction:
+/// the local subscriber / queryable `has_matching`
+/// ([`crate::declare::declared_intersects`]), the routing data-route scans
+/// (`matching_peers`, `RouteTable::route_targets`), and the switchboard. That is
+/// the single-source-of-truth placement: a per-call-site `ends_with('/')` guard
+/// (the prior shape) both DUPLICATED the rule and was INCOMPLETE — it missed
+/// `home//temp`, `/home`, and `""`. The full canonical grammar lives in
+/// [`crate::keyexpr_canon`]; the empty-chunk test is the structural subset a
+/// concrete published target can realistically violate, checked here without the
+/// per-candidate allocation a full `canonize_keyexpr` would cost on this scan
+/// hot path.
+fn target_chunks_well_formed(target_chunks: &[&str]) -> bool {
+    !target_chunks.iter().any(|chunk| chunk.is_empty())
+}
+
 /// Match a `/`-separated zenoh keyexpr `target` (Push's suffix) against
 /// a pattern split into chunks. Pattern chunks are:
 ///
@@ -106,6 +133,11 @@ pub fn keyexpr_pattern_matches(pattern_chunks: &[&str], target: &str) -> bool {
         if target_chunks.push(chunk).is_err() {
             return false;
         }
+    }
+    // A malformed target (an empty chunk) matches nothing — see
+    // `target_chunks_well_formed`.
+    if !target_chunks_well_formed(&target_chunks) {
+        return false;
     }
     matches_chunks(pattern_chunks, &target_chunks)
 }
@@ -334,6 +366,12 @@ pub fn keyexpr_intersect_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool 
 /// resource-tree would land behind — both scans already consult it, so the tree
 /// is one reimplementation site rather than two.
 pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> bool {
+    // A malformed target (an empty chunk) matches nothing — see
+    // `target_chunks_well_formed`. Guarded once here, ahead of the candidate
+    // split, so every scan (`matching_peers`, `declared_intersects`) inherits it.
+    if !target_chunks_well_formed(target_chunks) {
+        return false;
+    }
     let mut candidate_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
     for chunk in candidate.split('/') {
         // No-alloc backing: a candidate deeper than the declared bound cannot be
@@ -568,6 +606,46 @@ mod tests {
         // relies on); a disjoint-anchor candidate does not.
         assert!(keyexpr_intersects_target("home/**", &["home", "a", "b"]));
         assert!(!keyexpr_intersects_target("other/**", &["home", "a", "b"]));
+    }
+
+    #[cfg(feature = "keyexpr-wildcard-double")]
+    #[test]
+    fn a_malformed_target_with_an_empty_chunk_matches_nothing() {
+        // zenoh compute_data_route parity (linkstate_peer/pubsub.rs:948,957): a
+        // published key with an empty `/`-delimited chunk is non-canonical and
+        // must match NOTHING. Without the matcher guard each splits to leave a
+        // trailing/leading/interior "" chunk that a `**` subscription's backtrack
+        // absorbs (a spurious match -> forward AND local delivery). Covers all
+        // four empty-chunk forms the prior `ends_with('/')` guard missed (it
+        // caught only the first), across BOTH matcher entry points.
+        let cases: [(&str, &[&str]); 4] = [
+            ("home/temp/", &["home", "temp", ""]),
+            ("home//temp", &["home", "", "temp"]),
+            ("/home/temp", &["", "home", "temp"]),
+            ("", &[""]),
+        ];
+        for (raw, chunks) in cases {
+            assert!(
+                !keyexpr_pattern_matches(&["home", "**"], raw),
+                "pattern `home/**` must not match malformed `{raw}`"
+            );
+            assert!(
+                !keyexpr_pattern_matches(&["**"], raw),
+                "pattern `**` must not match malformed `{raw}`"
+            );
+            assert!(
+                !keyexpr_intersects_target("home/**", chunks),
+                "candidate `home/**` must not intersect malformed `{raw}`"
+            );
+            assert!(
+                !keyexpr_intersects_target("**", chunks),
+                "candidate `**` must not intersect malformed `{raw}`"
+            );
+        }
+        // Control: the well-formed key DOES match, so the rejection is the empty
+        // chunk, not an over-broad guard.
+        assert!(keyexpr_pattern_matches(&["home", "**"], "home/temp"));
+        assert!(keyexpr_intersects_target("home/**", &["home", "temp"]));
     }
 
     #[cfg(feature = "keyexpr-wildcard-single")]
