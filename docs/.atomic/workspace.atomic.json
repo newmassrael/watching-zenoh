@@ -44034,6 +44034,54 @@
         "LOCAL UNPUSHED: sr(8d549ef)+ss(c3b4f96)+st(8d6dd92)+su(b267713)+sv(204dac4)+sw = 6 commits after origin/main=1a5ac48. Push pending on the now-idle machine (pre-push re-runs full run-ci on all 6). Note: sr..sv individually fail the routing-router demo build; sw fixes it at HEAD (interactive rebase to fold into sr is unavailable in this environment)."
       ]
     },
+    "Round 311sx": {
+      "decision_summary": "R311sx BUILD FIX: no-alloc wz-session-core lib-test broke at query_sink.rs:298 (test literal set alloc-gated source_info, no cfg). Gated it + a no-alloc C1o arm runs the dormant keyexpr asserts.",
+      "changes_bullets": [
+        "query_sink.rs:298: the concrete_query_sink test's BorrowedQuery literal set source_info:None unconditionally, but the field is #[cfg(feature=alloc)] (SourceInfo lives in the alloc-gated sample module). Mirrored the cfg onto the field-init (E0560 fix).",
+        "Root cause: the field is alloc-gated, its enclosing test fn was not, so --no-default-features failed to compile the lib test (E0560 no field source_info). The other 2 literals (350/361) sit in an alloc-gated fn, already correct (untouched).",
+        "run-ci.sh C1o: added a 3rd arm (no-alloc, wildcards-on, --lib keyexpr_match) that compiles the whole no-alloc lib test binary (the missing regression guard) + runs the cfg(not(alloc)) bounded-buffer over-depth asserts.",
+        "Coverage gap closed: C1h cargo-builds the no-alloc lib but never its tests; old C1o cargo-tested only with alloc. So a no-alloc test-only break reached only the pre-push full run-ci. The new arm is the only host lane compiling no-alloc tests."
+      ],
+      "verification_bullets": [
+        "no-alloc lib test now compiles + passes: cargo test -p wz-session-core --no-default-features --lib = 60 passed, incl the never-run-before cfg(not(alloc)) asserts keyexpr_match.rs:711 + :741 (bounded-buffer over-depth no-match).",
+        "All 3 C1o arms green: alloc/wild-off 6, alloc/wild-on 14, no-alloc/wild-on 14 (54 alloc-only tests filtered in the no-alloc arm, confirming it is the smaller surface).",
+        "No regression: default cargo test -p wz-session-core --lib = 151 pass (matches the sv gate). fmt -p wz-session-core --check clean; bash -n scripts/run-ci.sh OK. Fix is test-cfg + CI-only; no production path changed.",
+        "Grounding (direct read): BorrowedQuery.source_info + its QueryView method are #[cfg(feature=alloc)] (query_sink.rs:152,171); old C1o (run-ci.sh:1223) ran 2 alloc arms only; C1h cargo-builds the lib, not its tests."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "carry_forward_bullets": [
+        "R311sx = build fix for the sv-tracked no-alloc wz-session-core test break (query_sink.rs:298): a test BorrowedQuery literal set the alloc-gated source_info without the cfg. Mirrored the cfg + added a no-alloc C1o arm.",
+        "The previously-dormant no-alloc keyexpr asserts now RUN in CI (C1o 3rd arm) -- sv's TRACKED item (\"no-alloc keyexpr_match tests dormant, C1o alloc-only\") is resolved.",
+        "LESSON: a cfg-gated struct field needs the same cfg on each literal field-init not already under it. Build-only CI lanes miss test-only breaks; the no-alloc cargo-test arm was the missing guard. [[feedback-full-runci-all-host-lanes]]",
+        "LOCAL UNPUSHED: Round 311sx = 1 commit on origin/main=34bd2f5. Push only after explicit user consent (pre-push re-runs full run-ci; ensure system idle first).",
+        "Remaining honest-defer (from sv): (d) ends_with('/') data-route reject, (e) next_hop dangling-hop test, resource-tree sublinear fold, or F discovery (handshake whatami + gossip/autoconnect/locators)."
+      ],
+      "publishable_decision_summary": "R311sx BUILD FIX: no-alloc wz-session-core lib-test broke at query_sink.rs:298 (test literal set alloc-gated source_info, no cfg). Gated it + a no-alloc C1o arm runs the dormant keyexpr asserts.",
+      "publishable_changes_bullets": [
+        "query_sink.rs:298: the concrete_query_sink test's BorrowedQuery literal set source_info:None unconditionally, but the field is #[cfg(feature=alloc)] (SourceInfo lives in the alloc-gated sample module). Mirrored the cfg onto the field-init (E0560 fix).",
+        "Root cause: the field is alloc-gated, its enclosing test fn was not, so --no-default-features failed to compile the lib test (E0560 no field source_info). The other 2 literals (350/361) sit in an alloc-gated fn, already correct (untouched).",
+        "run-ci.sh C1o: added a 3rd arm (no-alloc, wildcards-on, --lib keyexpr_match) that compiles the whole no-alloc lib test binary (the missing regression guard) + runs the cfg(not(alloc)) bounded-buffer over-depth asserts.",
+        "Coverage gap closed: C1h cargo-builds the no-alloc lib but never its tests; old C1o cargo-tested only with alloc. So a no-alloc test-only break reached only the pre-push full run-ci. The new arm is the only host lane compiling no-alloc tests."
+      ],
+      "publishable_verification_bullets": [
+        "no-alloc lib test now compiles + passes: cargo test -p wz-session-core --no-default-features --lib = 60 passed, incl the never-run-before cfg(not(alloc)) asserts keyexpr_match.rs:711 + :741 (bounded-buffer over-depth no-match).",
+        "All 3 C1o arms green: alloc/wild-off 6, alloc/wild-on 14, no-alloc/wild-on 14 (54 alloc-only tests filtered in the no-alloc arm, confirming it is the smaller surface).",
+        "No regression: default cargo test -p wz-session-core --lib = 151 pass (matches the sv gate). fmt -p wz-session-core --check clean; bash -n scripts/run-ci.sh OK. Fix is test-cfg + CI-only; no production path changed.",
+        "Grounding (direct read): BorrowedQuery.source_info + its QueryView method are #[cfg(feature=alloc)] (query_sink.rs:152,171); old C1o (run-ci.sh:1223) ran 2 alloc arms only; C1h cargo-builds the lib, not its tests."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311sx = build fix for the sv-tracked no-alloc wz-session-core test break (query_sink.rs:298): a test BorrowedQuery literal set the alloc-gated source_info without the cfg. Mirrored the cfg + added a no-alloc C1o arm.",
+        "The previously-dormant no-alloc keyexpr asserts now RUN in CI (C1o 3rd arm) -- sv's TRACKED item (\"no-alloc keyexpr_match tests dormant, C1o alloc-only\") is resolved.",
+        "LESSON: a cfg-gated struct field needs the same cfg on each literal field-init not already under it. Build-only CI lanes miss test-only breaks; the no-alloc cargo-test arm was the missing guard. [[feedback-full-runci-all-host-lanes]]",
+        "LOCAL UNPUSHED: Round 311sx = 1 commit on origin/main=34bd2f5. Push only after explicit user consent (pre-push re-runs full run-ci; ensure system idle first).",
+        "Remaining honest-defer (from sv): (d) ends_with('/') data-route reject, (e) next_hop dangling-hop test, resource-tree sublinear fold, or F discovery (handshake whatami + gossip/autoconnect/locators)."
+      ]
+    },
     "Round 311t": {
       "decision_summary": "R311t Session::query Result-form transition. ReplyHandle::sentinel retired; query/query_aliased/Querier::get return Result with FeatureDisabled honest signal.",
       "changes_bullets": [

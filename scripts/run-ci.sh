@@ -95,11 +95,14 @@
 #              seam under --features scouting-static, which Layer C1 stops
 #              building once the static tests gain the gate.)
 #   Layer C1o — keyexpr matching composition gating BEHAVIOUR
-#              (R311jf; runs the keyexpr_match test module twice —
+#              (R311jf; runs the keyexpr_match test module three times —
 #              wildcards OFF asserts `**`/`*`/`$*` degrade to a literal
 #              chunk compare, wildcards ON asserts the glob + directional
-#              `includes` semantics. The behavioural composability guard
-#              that proves the per-site cfg gates ACT, not just build.)
+#              `includes` semantics, wildcards ON no-`alloc` exercises the
+#              bounded `heapless` candidate buffer + is the only host lane
+#              that COMPILES the no-alloc lib tests (R311sx). The
+#              behavioural composability guard that proves the per-site cfg
+#              gates ACT, not just build.)
 #   Layer C1j — wz-runtime-tokio arbitrary-subset BEHAVIOUR matrix
 #              (R311ff; `cargo test`s the runtime crate under the same
 #              SSOT coherent subsets C4c builds — handshake-only /
@@ -1210,12 +1213,23 @@ layer_c1k_cargo_test_scouting_static() {
 # unifies them ON (wz-runtime-tokio's default forwards them), so C1
 # only ever exercises the wildcards-ON matcher. This lane is the
 # behavioural composability guard the audit flagged as missing: it runs
-# the SAME keyexpr_match test module twice and proves the gate ACTS —
+# the SAME keyexpr_match test module three times and proves the gate ACTS —
 #   - wildcards OFF (alloc only): the off-degrade tests assert `**`/`*`
 #     lose wildcard meaning and match only the literal chunk; the
 #     wildcard / includes tests are cfg'd out (not run);
-#   - wildcards ON: the `**`/`*`/`$*` glob + directional `includes`
-#     tests run and pass.
+#   - wildcards ON (alloc): the `**`/`*`/`$*` glob + directional `includes`
+#     tests run and pass;
+#   - wildcards ON, no-`alloc`: the same matcher over the bounded
+#     `heapless`-backed candidate buffer. This arm runs the
+#     `cfg(not(feature = "alloc"))` over-depth asserts (the bounded buffer
+#     refuses to grow and conservatively NO-matches) that the two alloc
+#     arms cfg out, and — because `cargo test` compiles the WHOLE no-alloc
+#     lib test binary before filtering — it is the only host lane that
+#     compiles wz-session-core's tests under `--no-default-features`
+#     (R311sx). C1h `cargo build`s the no-alloc lib but never its tests, so
+#     a test-only no-alloc break (a test struct-literal that inits an
+#     `alloc`-gated field without the matching cfg) slipped past every
+#     lane until the pre-push full run-ci; this arm closes that gap.
 # A regression that ungated a branch (made it always-on again) would
 # make the OFF arm fail (a `**` would wrongly match multi-chunk),
 # catching exactly the "implemented-but-not-excludable" drift this
@@ -1226,6 +1240,9 @@ layer_c1o_keyexpr_gating_behavior() {
             --lib keyexpr_match --quiet \
         && cargo test -p wz-session-core --no-default-features \
             --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
+            --lib keyexpr_match --quiet \
+        && cargo test -p wz-session-core --no-default-features \
+            --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
             --lib keyexpr_match --quiet)
 }
 

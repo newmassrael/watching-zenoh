@@ -295,6 +295,7 @@ mod tests {
                 keyexpr: "robot/**",
                 parameters: Some(b"p=1"),
                 attachment: None,
+                #[cfg(feature = "alloc")]
                 source_info: None,
                 rid: 42,
                 is_local: false,
