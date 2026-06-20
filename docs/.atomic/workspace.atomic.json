@@ -44710,6 +44710,52 @@
         "LOCAL UNPUSHED: 311tg(aed313f)+311th(f01a841)+311ti on origin/main=a03f221. Host lanes verified (graph/routing-peer/C1/clippy/fmt/demo); MCU unaffected. full run-ci + idle before push. Push only after explicit consent."
       ]
     },
+    "Round 311tj": {
+      "decision_summary": "R311tj: gossip-policy A4c -- add the gossip_multihop flag (default off) to propagate_locators, completing it to the full zenoh form; set_gossip_multihop on rides every node's locators across all hops.",
+      "changes_bullets": [
+        "wz-routing-graph: LinkstateNetwork gains gossip_multihop: bool (default false) + set_gossip_multihop. propagate_locators is now self.gossip_multihop || self || direct-neighbour -- the full zenoh gossip.rs:281 form (the A4b port omitted the multihop arm).",
+        "Off (default): a node's locators travel one hop (the A4b non-multihop behaviour, unchanged). On: every node's locators ride every flood -- zenoh's scouting.gossip.multihop. The driver threads its deploy setting through the setter; an all-default deploy never calls it."
+      ],
+      "verification_bullets": [
+        "wz-routing-graph 51 (the +1: with gossip_multihop set, the same S-N-D topology where A4b withheld D's locators now rides them; a receiver learns the distant node's locators). All A4b/locator tests pass unchanged (default stays off).",
+        "Layer C1 (workspace minus 4 MCU) green; clippy -D clean (graph, runtime routing-peer); fmt clean; demo 4 routing axes build. MCU unaffected (no MCU crate deps wz-routing-graph).",
+        "Grounding (read): zenoh propagate_locators = gossip && (gossip_multihop || self || neighbour); wz's gossip is implicitly true (only builds link-state when gossiping), so the wz form is (gossip_multihop || self || neighbour)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "R311tj = gossip-policy A4c: the gossip_multihop flag completes propagate_locators to the full zenoh form. The gossip-policy GATE work (A4a per-face role + A4b/A4c per-source locator with multihop) is now zenoh-faithful and configurable.",
+        "Still open in A4's config surface (low priority, no producer yet): config-sourcing gossip_target per local whatami via a driver setter (A4a's const default router|peer is correct for peer/router; only a non-default deploy needs it).",
+        "NEXT = A5 autoconnect, a LARGE separate subsystem (not one atom): the discovery seam (driver ingest, sync) must feed a dial future back into the async accept_loop FuturesUnordered, which opens a session and registers the new face.",
+        "A5 decomposition: (a) AutoConnect mask type + should_autoconnect zid tie-break (avoid double-dial), (b) a forwarder->accept-loop dial-intent channel, (c) the dial+open+register wiring. zenoh common.rs AutoConnect + gossip.rs connect_peer/should_autoconnect.",
+        "LOCAL UNPUSHED: 311tg(aed313f)+311th(f01a841)+311ti(c4d6b33)+311tj on origin/main=a03f221. Host lanes verified; MCU unaffected. full run-ci + idle before push. Push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tj: gossip-policy A4c -- add the gossip_multihop flag (default off) to propagate_locators, completing it to the full zenoh form; set_gossip_multihop on rides every node's locators across all hops.",
+      "publishable_changes_bullets": [
+        "wz-routing-graph: LinkstateNetwork gains gossip_multihop: bool (default false) + set_gossip_multihop. propagate_locators is now self.gossip_multihop || self || direct-neighbour -- the full zenoh gossip.rs:281 form (the A4b port omitted the multihop arm).",
+        "Off (default): a node's locators travel one hop (the A4b non-multihop behaviour, unchanged). On: every node's locators ride every flood -- zenoh's scouting.gossip.multihop. The driver threads its deploy setting through the setter; an all-default deploy never calls it."
+      ],
+      "publishable_verification_bullets": [
+        "wz-routing-graph 51 (the +1: with gossip_multihop set, the same S-N-D topology where A4b withheld D's locators now rides them; a receiver learns the distant node's locators). All A4b/locator tests pass unchanged (default stays off).",
+        "Layer C1 (workspace minus 4 MCU) green; clippy -D clean (graph, runtime routing-peer); fmt clean; demo 4 routing axes build. MCU unaffected (no MCU crate deps wz-routing-graph).",
+        "Grounding (read): zenoh propagate_locators = gossip && (gossip_multihop || self || neighbour); wz's gossip is implicitly true (only builds link-state when gossiping), so the wz form is (gossip_multihop || self || neighbour)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tj = gossip-policy A4c: the gossip_multihop flag completes propagate_locators to the full zenoh form. The gossip-policy GATE work (A4a per-face role + A4b/A4c per-source locator with multihop) is now zenoh-faithful and configurable.",
+        "Still open in A4's config surface (low priority, no producer yet): config-sourcing gossip_target per local whatami via a driver setter (A4a's const default router|peer is correct for peer/router; only a non-default deploy needs it).",
+        "NEXT = A5 autoconnect, a LARGE separate subsystem (not one atom): the discovery seam (driver ingest, sync) must feed a dial future back into the async accept_loop FuturesUnordered, which opens a session and registers the new face.",
+        "A5 decomposition: (a) AutoConnect mask type + should_autoconnect zid tie-break (avoid double-dial), (b) a forwarder->accept-loop dial-intent channel, (c) the dial+open+register wiring. zenoh common.rs AutoConnect + gossip.rs connect_peer/should_autoconnect.",
+        "LOCAL UNPUSHED: 311tg(aed313f)+311th(f01a841)+311ti(c4d6b33)+311tj on origin/main=a03f221. Host lanes verified; MCU unaffected. full run-ci + idle before push. Push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

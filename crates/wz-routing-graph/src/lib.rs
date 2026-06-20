@@ -587,6 +587,13 @@ pub struct LinkstateNetwork {
     /// Shortest-path distance from this peer to each node, indexed by
     /// `NodeIndex::index()`. The self-rooted Bellman-Ford result.
     distances: Vec<f64>,
+    /// zenoh `gossip_multihop` (`scouting.gossip.multihop`, default false): when
+    /// true, EVERY node's locators ride a flood, not just self's and its direct
+    /// neighbours' — [`propagate_locators`](Self::propagate_locators) then admits
+    /// all sources. Off by default (the next-hop-only locator gossip the
+    /// non-multihop default gives), flipped via
+    /// [`set_gossip_multihop`](Self::set_gossip_multihop).
+    gossip_multihop: bool,
 }
 
 impl LinkstateNetwork {
@@ -617,6 +624,9 @@ impl LinkstateNetwork {
                 directions: vec![None],
             }],
             distances: vec![0.0],
+            // non-multihop by default: a node's locators travel one hop (zenoh
+            // `scouting.gossip.multihop` default false).
+            gossip_multihop: false,
         }
     }
 
@@ -639,6 +649,16 @@ impl LinkstateNetwork {
     /// signature-stable default for a node that does not announce locators).
     pub fn set_self_locators(&mut self, locators: Vec<String>) {
         self.graph[self.idx].locators = (!locators.is_empty()).then_some(locators);
+    }
+
+    /// Enable or disable zenoh `gossip_multihop` (`scouting.gossip.multihop`).
+    /// On: a node's locators ride every flood regardless of hop distance; off
+    /// (the default): only self's and direct neighbours' do
+    /// ([`propagate_locators`](Self::propagate_locators)). The config seam the
+    /// driver threads its deploy setting through; an all-default deploy never
+    /// calls it, so the non-multihop one-hop behaviour is unchanged.
+    pub fn set_gossip_multihop(&mut self, enabled: bool) {
+        self.gossip_multihop = enabled;
     }
 
     /// The dial locators a node has advertised, or `None` if it is unknown or
@@ -997,12 +1017,13 @@ impl LinkstateNetwork {
     /// learns a far node's locators from that node's OWN neighbour, not relayed
     /// across every hop.
     ///
-    /// zenoh also rides every node's locators when `gossip_multihop` is set; wz
-    /// has no such flag yet, so this is the non-multihop self-or-direct-neighbour
-    /// form (zenoh's `gossip` enabled flag is implicitly true here — wz only
-    /// builds a link-state when it gossips). The multihop flag is a later atom.
+    /// When [`gossip_multihop`](Self::set_gossip_multihop) is set, EVERY node's
+    /// locators ride (zenoh's `gossip_multihop` arm); off (the default), only
+    /// self's and direct neighbours' do. zenoh's `gossip` enabled flag is
+    /// implicitly true here — wz only builds a link-state when it gossips.
     fn propagate_locators(&self, idx: NodeIndex) -> bool {
-        idx == self.idx
+        self.gossip_multihop
+            || idx == self.idx
             || self.graph[self.idx]
                 .links
                 .contains_key(&self.graph[idx].zid)
@@ -3050,6 +3071,45 @@ mod tests {
             r.node_locators(&zid(0x30)),
             None,
             "S withheld the distant node D's locators (the per-source gate)",
+        );
+    }
+
+    #[test]
+    fn gossip_multihop_rides_even_a_distant_nodes_locators() {
+        // With gossip_multihop set (zenoh `scouting.gossip.multihop`), the
+        // per-source gate admits EVERY node, so S re-advertises even a distant
+        // node D's locators — the opposite of the non-multihop default. Same
+        // S — N — D topology as the sibling test; only the flag differs.
+        let mut s = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        s.set_gossip_multihop(true);
+        let link_n = s.add_link(zid(0x20), WhatAmI::Peer);
+        s.ingest_linkstate_list(
+            link_n,
+            list(vec![
+                entry_with_locators(
+                    10,
+                    5,
+                    Some(&zid(0x20)),
+                    Some(2),
+                    &[11],
+                    &["tcp/10.0.0.20:7447"],
+                ),
+                entry_with_locators(
+                    11,
+                    5,
+                    Some(&zid(0x30)),
+                    Some(2),
+                    &[10],
+                    &["tcp/10.0.0.30:7447"],
+                ),
+            ]),
+        );
+        let mut r = LinkstateNetwork::new(zid(0x02), WhatAmI::Peer);
+        let link_s = r.add_link(zid(0x01), WhatAmI::Peer);
+        r.ingest_linkstate_list(link_s, s.build_linkstate_list());
+        assert!(
+            r.node_locators(&zid(0x30)).is_some(),
+            "multihop gossip advertises even a distant node's locators",
         );
     }
 
