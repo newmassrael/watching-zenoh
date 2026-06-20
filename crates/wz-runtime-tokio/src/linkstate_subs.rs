@@ -31,26 +31,34 @@
 //! and remote interest are the same datum, distinguished by zid, and the
 //! tree-change re-advertise iterates them uniformly.
 //!
-//! MVP scope (honest): keys match by EXACT string equality. zenoh matches
-//! by full key-expression INTERSECTION over a resource tree (`*` / `**`
-//! wildcards, prefix folding); that resource-tree keyexpr matching is a
-//! tracked deferral, not modelled here. So a `demo/**` subscription does
-//! NOT (yet) attract `demo/data` data through this table — only an exact
-//! `demo/data` interest does.
+//! Wildcard matching (c3c-3 B2): a lookup is the key-expression INTERSECTION
+//! of the published key against every registered subscription keyexpr, via the
+//! same [`keyexpr_intersect_patterns`] SSOT the local
+//! [`SubscriberRegistry`](wz_session_core::SubscriberRegistry) uses (zenoh's
+//! intersection route matching, `Resource::get_matches`). So a `demo/**` or
+//! `demo/*` subscription now attracts a concrete `demo/data` Push, while a
+//! literal subscription stays exact. STILL deferred (a performance, not a
+//! correctness, concern): zenoh folds subscriptions into a prefix RESOURCE
+//! TREE for sublinear matching; wz does an O(subscriptions) scan per lookup,
+//! which is correct but linear — the tree is a tracked optimisation for large
+//! subscription sets, not modelled here.
 
 use std::collections::{HashMap, HashSet};
 
 use wz_routing_graph::Zid;
+use wz_session_core::keyexpr_match::keyexpr_intersect_patterns;
 
 /// Per-key-expression set of interested PEER zids — the linkstate-peer
 /// subscription interest table. See the module docs for the zenoh mapping
 /// and the exact-match MVP scope.
 #[derive(Debug, Default)]
 pub struct LinkstatepeerSubs {
-    /// keyexpr (exact string) -> the peers that declared interest in it.
-    /// A key is present only while at least one peer is interested: the last
-    /// peer's [`remove_peer`](Self::remove_peer) prunes the entry, so
-    /// [`interested`](Self::interested) of an unsubscribed key is empty.
+    /// subscription keyexpr (a literal OR a `*`/`**` pattern) -> the peers that
+    /// declared interest in it. A key is present only while at least one peer
+    /// is interested: the last peer's [`remove_peer`](Self::remove_peer) prunes
+    /// the entry. A lookup matches a published key against these keys by
+    /// keyexpr INTERSECTION ([`matching_peers`](Self::matching_peers)), so a
+    /// `demo/**` key attracts a `demo/data` Push.
     by_key: HashMap<String, HashSet<Zid>>,
 }
 
@@ -129,18 +137,42 @@ impl LinkstatepeerSubs {
             .collect()
     }
 
-    /// The peers interested in `keyexpr` (EXACT match), as a snapshot — every
-    /// interested peer INCLUDING this node itself when it has a local
-    /// subscription (`register`ed with its own zid). The tree-change re-advertise
-    /// uses this whole view; the data-route filter uses
+    /// The distinct peers whose subscription keyexpr INTERSECTS `target` (the
+    /// published key), optionally excluding `exclude` (this node's own zid).
+    /// Wildcard-aware: a `demo/**` subscription matches a concrete `demo/data`
+    /// target via [`keyexpr_intersect_patterns`] — the same SSOT the local
+    /// subscriber registry uses (zenoh's intersection route matching). An
+    /// O(subscriptions) scan; the resource-tree fold for sublinear matching is
+    /// a tracked performance deferral (see the module docs). A literal target
+    /// against a literal key reduces to byte equality, so exact interest is
+    /// unchanged. Peers are deduped across multiple matching keys.
+    fn matching_peers(&self, target: &str, exclude: Option<&Zid>) -> Vec<Zid> {
+        let target_chunks: Vec<&str> = target.split('/').collect();
+        let mut out: Vec<Zid> = Vec::new();
+        for (sub, peers) in &self.by_key {
+            let sub_chunks: Vec<&str> = sub.split('/').collect();
+            if !keyexpr_intersect_patterns(&sub_chunks, &target_chunks) {
+                continue;
+            }
+            for peer in peers {
+                if exclude != Some(peer) && !out.contains(peer) {
+                    out.push(peer.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The peers interested in `keyexpr`, as a snapshot — every interested peer
+    /// INCLUDING this node itself when it has a local subscription (`register`ed
+    /// with its own zid). Matches by keyexpr intersection (a `demo/**` key
+    /// answers a `demo/data` lookup). The tree-change re-advertise uses this
+    /// whole view; the data-route filter uses
     /// [`interested_remote`](Self::interested_remote) instead (it must exclude
-    /// self). Order is unspecified (`HashSet` iteration); a snapshot `Vec` (not a
+    /// self). Order is unspecified (`HashMap` iteration); a snapshot `Vec` (not a
     /// borrow) so the caller can hold it across a graph borrow.
     pub fn interested(&self, keyexpr: &str) -> Vec<Zid> {
-        self.by_key
-            .get(keyexpr)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default()
+        self.matching_peers(keyexpr, None)
     }
 
     /// The peers interested in `keyexpr` EXCLUDING `self_zid` — the snapshot the
@@ -152,12 +184,9 @@ impl LinkstatepeerSubs {
     /// READ time — not by maintaining a second structure. A data Push is replicated
     /// toward each REMOTE subscriber's subtree; self is the local sink (delivered
     /// by the session layer, not over the mesh), so it is excluded from the
-    /// forward directions.
+    /// forward directions. Wildcard-aware (see [`interested`](Self::interested)).
     pub fn interested_remote(&self, keyexpr: &str, self_zid: &Zid) -> Vec<Zid> {
-        self.by_key
-            .get(keyexpr)
-            .map(|set| set.iter().filter(|p| *p != self_zid).cloned().collect())
-            .unwrap_or_default()
+        self.matching_peers(keyexpr, Some(self_zid))
     }
 }
 
@@ -190,10 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn interest_is_keyed_exactly_not_by_prefix() {
-        // MVP exact-match: a `demo/data` interest must NOT answer for a
-        // different (even prefix-related) key. Wildcard intersection is the
-        // tracked deferral.
+    fn a_literal_subscription_stays_exact() {
+        // B2 widens matching to wildcards, but a LITERAL subscription must still
+        // be exact: `demo/data` must NOT answer for a sibling or a prefix key
+        // (intersection of two literals reduces to byte equality).
         let mut subs = LinkstatepeerSubs::new();
         subs.register("demo/data", zid(0xAA));
         assert_eq!(subs.interested("demo/data"), vec![zid(0xAA)]);
@@ -203,7 +232,50 @@ mod tests {
         );
         assert!(
             subs.interested("demo").is_empty(),
-            "a prefix key does not match (no resource-tree folding yet)"
+            "a prefix key does not match a literal subscription"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_subscription_attracts_a_concrete_publish() {
+        // B2: `**` (any depth) and `*` (one chunk) subscriptions now attract a
+        // concrete Push by keyexpr intersection — the exact-match MVP missed it.
+        let mut subs = LinkstatepeerSubs::new();
+        subs.register("demo/**", zid(0xAA));
+        subs.register("demo/*", zid(0xBB));
+        subs.register("other/**", zid(0xCC));
+        let mut got = subs.interested("demo/data");
+        got.sort();
+        assert_eq!(
+            got,
+            vec![zid(0xAA), zid(0xBB)],
+            "demo/** and demo/* cover demo/data; other/** does not"
+        );
+        // `**` spans depth, `*` is a single chunk.
+        assert_eq!(
+            subs.interested("demo/a/b"),
+            vec![zid(0xAA)],
+            "only ** spans the extra chunk"
+        );
+        // interested_remote applies the same matching, then drops self.
+        assert_eq!(
+            subs.interested_remote("demo/data", &zid(0xAA)),
+            vec![zid(0xBB)],
+            "wildcard match minus the self subscriber AA"
+        );
+    }
+
+    #[test]
+    fn a_peer_matching_via_two_patterns_appears_once() {
+        // A peer subscribed via two keys that both cover the published key is
+        // deduped across the matching keys.
+        let mut subs = LinkstatepeerSubs::new();
+        subs.register("demo/**", zid(0xAA));
+        subs.register("demo/data", zid(0xAA));
+        assert_eq!(
+            subs.interested("demo/data"),
+            vec![zid(0xAA)],
+            "peer AA matches both keys but appears once"
         );
     }
 

@@ -192,6 +192,63 @@ fn wz_peer_mesh_forwards_subscribed_data_two_hops() {
 
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+fn wz_peer_mesh_wildcard_subscription_attracts_a_concrete_publish() {
+    // c3c-3 B2 — the wildcard-matching counterpart of the two-hop forward test.
+    // The far subscriber C declares `demo/**` (a PATTERN), the publisher A
+    // publishes the CONCRETE `demo/mesh`. With exact-match-only this would never
+    // route; B2's keyexpr intersection means A's `interested("demo/mesh")` now
+    // matches C's `demo/**`, so the subscription-gated route fires and C receives
+    // — proving the wildcard match end-to-end over real TCP (the pattern keyexpr
+    // survives the DeclareSubscriber wire, floods A-ward, and the data route
+    // intersects it against the concrete publish).
+    let (mut c_guard, mut c_reader, p_c) = spawn_peer(
+        "peer-C",
+        &["--peer", "127.0.0.1:0", "--subscribe", "demo/**"],
+    );
+    let addr_c = format!("127.0.0.1:{p_c}");
+    let (mut b_guard, mut b_reader, p_b) =
+        spawn_peer("peer-B", &["--peer", "127.0.0.1:0", "--connect", &addr_c]);
+    let addr_b = format!("127.0.0.1:{p_b}");
+    let (mut a_guard, mut a_reader, _p_a) = spawn_peer(
+        "peer-A",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_b,
+            "--publish",
+            "demo/mesh",
+        ],
+    );
+
+    let c_data = wait_for_substring(&mut c_reader, "received mesh data", Duration::from_secs(15));
+
+    graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(c_guard.child_mut(), Duration::from_secs(5));
+    let a_captured = read_captured(&mut a_reader);
+    let b_captured = read_captured(&mut b_reader);
+    let c_captured = read_captured(&mut c_reader);
+    eprintln!("--- peer-A stderr ---\n{a_captured}");
+    eprintln!("--- peer-B stderr ---\n{b_captured}");
+    eprintln!("--- peer-C stderr ---\n{c_captured}");
+
+    c_data.unwrap_or_else(|c| {
+        panic!(
+            "peer-C (subscribed to the PATTERN demo/**) never received the concrete \
+             demo/mesh publish within 15s — the wildcard subscription did not attract \
+             the data (B2 keyexpr intersection)\n--- peer-C stderr ---\n{c}"
+        )
+    });
+    assert!(
+        a_captured.contains("publisher learned subscriber interest"),
+        "peer-A never learned C's demo/** subscription, so the intersection route \
+         could not enable the publish\n--- peer-A stderr ---\n{a_captured}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
 fn wz_peer_mesh_withdraws_subscription_two_hops() {
     // c3c-3 debt A1 — the RETRACTION counterpart of the forward test. The same
     // line A-B-C, but C RETRACTS its interest once it has confirmed the
