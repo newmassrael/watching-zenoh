@@ -123,8 +123,9 @@ pub use wz_routing_graph::{Zid, WHATAMI_PEER};
 /// cannot drift out of sync.
 struct FaceState {
     /// The face's transport send seam (an `Arc` clone of its
-    /// `SessionLinkActions`), so [`LinkstateForwarder::flood_self`] and the
-    /// register-time bootstrap can push the local link-state out on it.
+    /// `SessionLinkActions`), so the event-driven self-floods
+    /// ([`LinkstateForwarder::flood_link_added`] / `flood_self_links_changed`)
+    /// and the register-time bootstrap can push the local link-state out on it.
     actions: Arc<SessionLinkActions>,
     /// The graph link this face maps to, once its peer zid surfaced at
     /// register — an inbound list is ingested against it (its psid<->zid
@@ -339,8 +340,8 @@ impl LinkstateForwarder {
     }
 
     /// Build the `OAM_LINKSTATE` carrier for this peer's full current topology
-    /// — the shared body of [`flood_self`](Self::flood_self) (one carrier
-    /// re-wrapped per face). The graph builds the full-topology `LinkStateList` (c3b
+    /// — the new-face bootstrap body of [`flood_link_added`](Self::flood_link_added)
+    /// (one carrier re-wrapped per new face). The graph builds the full-topology `LinkStateList` (c3b
     /// [`LinkstateNetwork::build_linkstate_list`]); `build_linkstate_oam_owned`
     /// (c1) wraps it in the carrier. Mirrors zenoh `make_msg`.
     fn build_self_oam(&self) -> Result<OamOwned, CodecError> {
@@ -354,9 +355,10 @@ impl LinkstateForwarder {
     /// that face, `Ok(None)` to skip it, or `Err` to abort the whole fan-out
     /// (a per-face build failure). This owns the parts every sender shares —
     /// borrow the `faces` set, iterate, read each peer zid, send, count, skip a
-    /// per-face send failure — so `flood_self` / `propagate` / `forward_push` /
-    /// `publish` each express ONLY their selection + carrier policy as the
-    /// closure, never a re-hand-rolled face loop. Holds only the `faces` borrow;
+    /// per-face send failure — so `flood_link_added` / `flood_self_links_changed`
+    /// / `propagate` / `forward_push` / `publish` each express ONLY their
+    /// selection + carrier policy as the closure, never a re-hand-rolled face
+    /// loop. Holds only the `faces` borrow;
     /// a builder may borrow the graph (a distinct cell).
     fn fan_out(
         &self,
@@ -382,27 +384,68 @@ impl LinkstateForwarder {
         Ok(sent)
     }
 
-    /// Flood THIS peer's own (full) link-state to every held face — the TX seam
-    /// (c3d). Each face's [`SessionLinkActions::send_network_message`] puts it
-    /// on the wire (reliably — topology is control traffic). Returns the number
-    /// of faces the message reached. Mirrors zenoh `make_msg` + `send_on_links`.
-    /// The WHEN is EVENT-DRIVEN (D2b): [`register`](FaceForwarder::register) /
-    /// [`deregister`](FaceForwarder::deregister) call it the instant self's own
-    /// link-state changes (a link gained / lost, sn bumped), so the new face is
-    /// bootstrapped with the full topology and the existing faces learn the change
-    /// at once — no periodic tick (zenoh floods only on link change).
+    /// Flood self's GAINED-link event (the [`register`](FaceForwarder::register)
+    /// path) — the D4-faithful counterpart of zenoh `add_link`
+    /// (`network.rs:861-932`). The WHEN is EVENT-DRIVEN (D2b): register calls this
+    /// the instant self gains a neighbour (sn bumped), so there is no periodic
+    /// tick. The WHAT is now a DELTA, not the full topology:
+    /// - the NEW face is bootstrapped with the FULL topology (every node, full
+    ///   state — zenoh's "send all nodes linkstate on new link");
+    /// - every EXISTING face gets only the minimal delta zenoh sends on its
+    ///   existing links: the 2-entry `[neighbour zid-only, self links-only]` list
+    ///   when the neighbour is NEW to the graph
+    ///   ([`build_link_added_delta`](wz_routing_graph::LinkstateNetwork::build_link_added_delta)),
+    ///   or just self's links-only entry when the neighbour was already known (a
+    ///   second link to it).
     ///
-    /// HONEST D4 scope: the `Details` full-for-new / links-only-for-updated split
-    /// (sm) is applied to the RECEIVE-side re-flood ([`propagate`](Self::propagate))
-    /// only. This SELF-originated event flood still sends the FULL topology to
-    /// every face (zenoh's `add_link` / `remove_link` send a minimal 2-entry
-    /// delta instead, `network.rs:861-903` / `:958-962`). sn-staleness on each
-    /// receiver drops the unchanged nodes, so it is correct but verbose; the
-    /// self-flood delta is a tracked follow-on, NOT done here.
-    pub fn flood_self(&self) -> Result<usize, CodecError> {
-        // `NetworkMessage` is not `Clone`, but `OamOwned` is — build the
-        // carrier once and re-wrap a clone per face.
-        let oam = self.build_self_oam()?;
+    /// sn-staleness on each receiver drops the unchanged nodes a full re-flood
+    /// would carry, so the delta is the same convergence with far less wire churn
+    /// — this closes the SELF-event half of D4 (the receive-side
+    /// [`propagate`](Self::propagate) half landed in sm). Reliable (topology is
+    /// control traffic); returns the count of faces reached.
+    fn flood_link_added(
+        &self,
+        new_face: FaceId,
+        neighbour: &Zid,
+        neighbour_was_new: bool,
+    ) -> Result<usize, CodecError> {
+        // Build each shape once (NetworkMessage is not Clone, OamOwned is —
+        // re-wrap a clone per face).
+        let full = self.build_self_oam()?;
+        let delta = {
+            let net = self.net.borrow();
+            let self_zid = *net.self_zid();
+            let list = if neighbour_was_new {
+                net.build_link_added_delta(neighbour)
+            } else {
+                net.build_linkstate_split(&[], &[self_zid])
+            };
+            build_linkstate_oam_owned(&list)?
+        };
+        self.fan_out(true, |id, _zid| {
+            let oam = if id == new_face {
+                full.clone()
+            } else {
+                delta.clone()
+            };
+            Ok(Some(NetworkMessage::Oam(oam)))
+        })
+    }
+
+    /// Flood self's LOST-link event (the [`deregister`](FaceForwarder::deregister)
+    /// path) — zenoh `remove_link`'s `send_on_links` of self's updated links-only
+    /// entry (`network.rs:952-962`). Sends the 1-entry `[self links-only]` delta
+    /// to every surviving face so they drop the dead link from their topology at
+    /// once; each receiver's own `remove_detached_nodes` prunes the now-detached
+    /// nodes (self stops referencing them), so no node-removal entries are needed,
+    /// and the links-only form (no zid) suffices since every survivor already
+    /// mapped self. Reliable; returns the count of faces reached.
+    fn flood_self_links_changed(&self) -> Result<usize, CodecError> {
+        let oam = {
+            let net = self.net.borrow();
+            let self_zid = *net.self_zid();
+            build_linkstate_oam_owned(&net.build_linkstate_split(&[], &[self_zid]))?
+        };
         self.fan_out(true, |_id, _zid| Ok(Some(NetworkMessage::Oam(oam.clone()))))
     }
 
@@ -1066,31 +1109,34 @@ impl FaceForwarder for LinkstateForwarder {
         // tracked deferral — spanning-tree forwarding is whatami-agnostic;
         // only gossip/autoconnect would need the true role), so a neighbour is
         // recorded as WHATAMI_PEER.
-        let link = actions.peer_zid().map(|peer_zid| {
-            self.net
-                .borrow_mut()
-                .add_link(Zid::from_slice(&peer_zid), WHATAMI_PEER)
+        let added = actions.peer_zid().map(|peer_zid| {
+            let neighbour = Zid::from_slice(&peer_zid);
+            let mut net = self.net.borrow_mut();
+            // Whether this neighbour is NEW to the GRAPH (not merely a new face):
+            // a second link to an already-known peer re-advertises only self's
+            // links, not the neighbour again — zenoh add_link's `new` flag
+            // (`network.rs:826`). Queried before add_link, under the one borrow.
+            let neighbour_was_new = net.get_node(&neighbour).is_none();
+            let link_id = net.add_link(neighbour, WHATAMI_PEER);
+            (link_id, neighbour, neighbour_was_new)
         });
         self.faces.borrow_mut().insert(
             id,
             FaceState {
                 actions: actions.clone(),
-                link,
+                link: added.map(|(link_id, _, _)| link_id),
                 keyexpr_table: hashbrown::HashMap::new(),
             },
         );
-        // Self gained a routing link (its own link-state changed, sn bumped):
-        // flood self's updated full link-state to EVERY held face — the new face is
-        // bootstrapped with the full topology, and existing faces learn the new
-        // neighbour NOW rather than at a periodic tick. zenoh `add_link` floods the
-        // updated self link-state to existing links + full state to the new link
-        // (`network.rs:862-903`); wz floods the full topology to all (the Details
-        // delta split is D4). Event-driven, so the mesh needs no periodic re-flood
-        // (D2b — the periodic tick is gone). A held-without-identity face (link ==
-        // None) is not a routing peer and did not change self's link-state, so it
-        // triggers no flood.
-        if link.is_some() {
-            let _ = self.flood_self();
+        // Self gained a routing link (its own link-state changed, sn bumped): the
+        // NEW face is bootstrapped with the full topology and the EXISTING faces
+        // learn the change NOW (event-driven), via the minimal D4 delta —
+        // `flood_link_added` (zenoh `add_link`, `network.rs:861-932`: full on the
+        // new link, a 2-entry delta on existing links). D2b — no periodic
+        // re-flood. A held-without-identity face (added == None) is not a routing
+        // peer and did not change self's link-state, so it triggers no flood.
+        if let Some((_, neighbour, neighbour_was_new)) = added {
+            let _ = self.flood_link_added(id, &neighbour, neighbour_was_new);
             // Self gained a link, so its spanning trees changed: SCHEDULE a
             // recompute (D2c coalesces it onto the tick), mirroring zenoh's
             // schedule_compute_trees on link-up (`hat/linkstate_peer/mod.rs:275`).
@@ -1137,12 +1183,14 @@ impl FaceForwarder for LinkstateForwarder {
         };
         if dropped_link {
             // D2b — self LOST a routing link (its own link-state changed, sn
-            // bumped): flood self's updated full link-state to the surviving faces
-            // IMMEDIATELY (zenoh `remove_link`'s `send_on_links`,
-            // `network.rs:936-962`), so they drop the dead link from their topology
-            // NOW. The flood is a wire event on the link change and stays inline;
-            // only the spanning-tree recompute it triggers is coalesced (D2c).
-            let _ = self.flood_self();
+            // bumped): flood self's updated LINKS-ONLY entry to the surviving faces
+            // IMMEDIATELY (zenoh `remove_link`'s `send_on_links` of one
+            // links-only self entry, `network.rs:952-962`), so they drop the dead
+            // link from their topology NOW (the D4 self-flood delta — no full
+            // topology, no node-removal entries; each receiver prunes the detached
+            // nodes itself). The flood is a wire event on the link change and stays
+            // inline; only the spanning-tree recompute it triggers is coalesced (D2c).
+            let _ = self.flood_self_links_changed();
             // D2c — coalesce the recompute (and its re-advertise) onto the tick,
             // exactly as the inbound forward() path does. The recompute matters for
             // more than purging the dead link: under non-uniform edge weights (e.g.
@@ -1350,16 +1398,16 @@ mod tests {
     }
 
     #[test]
-    fn flood_self_sends_link_state_to_every_face() {
-        // the TX seam: flood_self pushes the local link-state out on each
-        // held face's send seam (the OAM landing as one frame per face).
+    fn flood_self_links_changed_sends_to_every_face() {
+        // the TX seam fan-out: a self link-state delta reaches every held face's
+        // send seam (the OAM landing as one frame per face).
         let fwd = LinkstateForwarder::new(zid(0x01), 2);
         let (face_a, sink_a) = recording_actions();
         let (face_b, sink_b) = recording_actions();
         fwd.register(FaceId(0), &face_a);
         fwd.register(FaceId(1), &face_b);
 
-        let sent = fwd.flood_self().expect("flood self");
+        let sent = fwd.flood_self_links_changed().expect("flood self");
         assert_eq!(sent, 2, "flooded both held faces");
         assert_eq!(sink_a.frame_count(), 1, "face A received the link-state");
         assert_eq!(sink_b.frame_count(), 1, "face B received the link-state");
@@ -1371,7 +1419,9 @@ mod tests {
         let (face_a, sink_a) = recording_actions();
         fwd.register(FaceId(0), &face_a);
         fwd.deregister(FaceId(0));
-        let sent = fwd.flood_self().expect("flood self after deregister");
+        let sent = fwd
+            .flood_self_links_changed()
+            .expect("flood self after deregister");
         assert_eq!(sent, 0, "the deregistered face is no longer flooded");
         assert_eq!(sink_a.frame_count(), 0);
     }
@@ -1394,6 +1444,50 @@ mod tests {
             1,
             "the existing face A learns self's new neighbour B at once (event-driven)"
         );
+        // D4 self-flood delta: A gets the MINIMAL 2-entry delta [B zid-only, self
+        // links-only], NOT the full topology (which would also re-send A itself).
+        let states = propagated_link_states(&sink_a.frame_bytes(0));
+        assert_eq!(
+            states.len(),
+            2,
+            "the delta is [neighbour B, self] -- A's own entry is NOT re-sent"
+        );
+        assert!(
+            states[0].zid.is_some(),
+            "B is announced zid-only (zid present)"
+        );
+        assert_eq!(
+            states[0].links_len, 0,
+            "B's entry carries no links (zid-only)"
+        );
+        assert!(
+            states[1].zid.is_none(),
+            "self is links-only (zid omitted) in the delta"
+        );
+    }
+
+    #[test]
+    fn register_relink_to_known_peer_floods_self_links_only() {
+        // The was_new == false branch (zenoh add_link's `new` flag, network.rs:826):
+        // a SECOND link to an ALREADY-KNOWN peer does NOT re-announce the neighbour
+        // -- existing faces get only self's links-only entry, not the 2-entry
+        // [neighbour, self] delta. (Each add_link mints a new link id but the graph
+        // node is shared, so the second register sees the peer already present.)
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // an existing witness
+        let (face_b0, _b0) = peer_face(zid(0x0B)); // B's first link
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b0); // B is NEW to the graph here
+        sink_a.reset();
+        let (face_b1, _b1) = peer_face(zid(0x0B)); // a SECOND link to the same B
+        fwd.register(FaceId(2), &face_b1); // B already known -> not re-announced
+        let states = propagated_link_states(&sink_a.frame_bytes(0));
+        assert_eq!(
+            states.len(),
+            1,
+            "a known-peer relink re-sends only self's links, no neighbour entry"
+        );
+        assert!(states[0].zid.is_none(), "self links-only (zid omitted)");
     }
 
     #[test]
@@ -1414,6 +1508,12 @@ mod tests {
             1,
             "the surviving face A learns self lost B at once (event-driven)"
         );
+        // D4 self-flood delta: A gets the MINIMAL 1-entry [self links-only] delta,
+        // NOT the full topology (which would re-send self + A). A's own
+        // remove_detached_nodes prunes the now-gone B.
+        let states = propagated_link_states(&sink_a.frame_bytes(0));
+        assert_eq!(states.len(), 1, "remove_link delta is self's entry alone");
+        assert!(states[0].zid.is_none(), "self is links-only (zid omitted)");
     }
 
     #[test]
