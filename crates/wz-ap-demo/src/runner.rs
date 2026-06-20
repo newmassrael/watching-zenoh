@@ -1321,7 +1321,23 @@ pub(crate) async fn run_peer(
     // then learns where to reach this peer (the discovery data — what a future
     // gossip/autoconnect step dials). `local` is the bound TCP endpoint; the
     // zenoh locator form is `tcp/<addr>`.
-    forwarder.set_self_locators(vec![format!("tcp/{local}")]);
+    //
+    // An unspecified bind (0.0.0.0 / [::], the deploy default) is NOT a dialable
+    // address: advertising `tcp/0.0.0.0:<port>` hands a peer a locator it cannot
+    // connect to. zenoh expands an unspecified bind to the host's concrete
+    // interface addresses (`io/zenoh-link-commons/src/listener.rs:115-145`);
+    // until wz mirrors that, advertise nothing rather than a bogus locator —
+    // topology still converges, only the (not-yet-consumed) dial hint is withheld.
+    let self_locators: Vec<String> = if local.ip().is_unspecified() {
+        log::warn!(
+            "listen address {local} is unspecified (bind-all); advertising no dial \
+             locator (interface expansion is a tracked follow-up)"
+        );
+        Vec::new()
+    } else {
+        vec![format!("tcp/{local}")]
+    };
+    forwarder.set_self_locators(self_locators);
 
     let loop_fut = peer_loop(
         FaceSources {

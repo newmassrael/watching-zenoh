@@ -260,14 +260,17 @@ impl LinkstateForwarder {
         };
         let mut net = self.net.borrow_mut();
         let changes = net.ingest_linkstate_list(link_id, list);
-        // Discovery observability (E2): a node seen for the first time that
+        // Discovery observability: a node seen for the first time that
         // advertised dial locators is a freshly-DISCOVERED peer — log where it
         // is reachable. This is the data a future gossip/autoconnect step dials
-        // toward; at the data layer it is a pure diagnostic (healthy meshes that
-        // never gossip locators log nothing).
+        // toward; until that consumer exists it is a pure diagnostic. `debug!`,
+        // not `info!`: with locators currently flooded unconditionally (the
+        // gossip-policy gate is a tracked follow-up), this fires for every new
+        // peer in any multi-peer mesh, so it is per-peer-noisy operational
+        // detail, not a steady-state event worth the info channel.
         for zid in &changes.new {
             if let Some(locators) = net.node_locators(zid) {
-                log::info!("discovered peer {zid} reachable at {locators:?}");
+                log::debug!("discovered peer {zid} reachable at {locators:?}");
             }
         }
         drop(net);

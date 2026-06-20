@@ -44338,6 +44338,58 @@
         "LOCAL UNPUSHED: 311tb on origin/main=f44d54f. Push only after explicit consent (pre-push full run-ci; idle first)."
       ]
     },
+    "Round 311tc": {
+      "decision_summary": "R311tc: session-review remediation. A 4-agent adversarial review REFUTED 'textbook' (overconfident again, cf sq/sv/ta). Fixed the 0.0.0.0 undialable locator, the SSOT cap (codec-mirror const), and the missing wire encode/decode test; the late-joiner gap was refuted as a probe artifact.",
+      "changes_bullets": [
+        "The recurring textbook/SSOT/north-star/cost-no-object trigger fired a 4-agent adversarial review (correctness/SSOT/architecture/honesty); all 4 REFUTED the '교과서적' self-claim on R311tb locator ingest -- the documented overconfidence pattern repeated (cf sq/sv/ta).",
+        "FIXED C1 (correctness, empirical): the demo advertised tcp/0.0.0.0:<port> (the deploy-default bind-all) = an UNDIALABLE locator. runner.rs now skips an unspecified-host bind (full interface expansion, zenoh listener.rs:115-145, tracked).",
+        "FIXED C2 (SSOT): MAX_LOCATOR_WIRE_LEN=128 was a magic const hand-copied from the codec. Moved to wz-codecs::locator::MAX_LOCATOR_LEN + MAX_LOCATORS_PER_NODE (codec-mirror, tied to SceString<128> / list max-count); the graph imports them and caps the list count by-construction.",
+        "FIXED C5 (honesty): the 'L field rides the wire' claim had NO test (all 3 were in-memory build->ingest that ignore OPT_L). Added an encode->decode->ingest test, mutation-verified to catch an OPT_L/locators desync the in-memory tests miss.",
+        "Honesty nits: discovery log info->debug (fires per-peer, ungated); Details doc now states wz OVER-advertises vs zenoh default (propagate_locators is a deferred NARROWING, not a subset); Some([])->None divergence from zenoh clear-on-empty documented."
+      ],
+      "verification_bullets": [
+        "REFUTED a review finding (diagnose-before-carry): 'late-joiner never learns locators' (correctness MAJOR) is a PROBE ARTIFACT -- a new face is bootstrapped via flood_link_added -> build_self_oam = build_linkstate_list (every node FULL WITH locators); the agent drove build_linkstate_split (the transit path) directly.",
+        "Gates: wz-routing-graph 49 (+1 wire round-trip; mutation-verified: with OPT_L off the in-memory test still PASSES but the wire test FAILS, proving it closes the gap). routing-peer 362; routing_forward 21; 4 routing axes build; clippy -D + fmt clean.",
+        "E6 peer-mesh e2e (wz_peer_mesh + wz_peer_data_forward) 5 tests x 4 runs, 0 flake (now via the is_unspecified guard + debug log).",
+        "Grounding (direct read): zenoh propagate_locators is per-target gossip policy (network.rs:406-418, needs target whatami); listener.rs:115-145 expands unspecified binds; the codec L width is SceString<128>."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tc = session-review remediation. The recurring trigger fired a 4-agent adversarial review; all 4 REFUTED '교과서적' -- overconfident AGAIN (the project pattern, cf sq/sv/ta). Independent review caught what self-review missed = strongest calibration.",
+        "Fixed in-scope: 0.0.0.0 undialable locator (skip unspecified), SSOT cap (codec-mirror const + count cap), the missing wire encode/decode test (mutation-verified vs the OPT_L gap), + honesty nits (log level, over-advertise doc, empty-locator divergence).",
+        "REFUTED via direct verification: the 'late-joiner starves of locators' finding is a probe artifact -- bootstrap uses build_linkstate_list (Full+locators); only the transit build_linkstate_split path omits them, and that path never introduces an unknown node (zid-less => dropped).",
+        "TRACKED DEFERS (architecture critique accepted): (a) Vec<String> -> typed Locator newtype = the Zid=Vec<u8> debt repeat, its own structural round (graph cannot dep on session-core ParsedLocator; layering decision needed); (b) per-target locator gating (propagate_locators) + threading the FACE whatami = the gossip-policy atom, whose prerequisite IS the original F1 whatami face-wiring -- so locators-first did NOT remove the whatami prerequisite, the next atom needs it.",
+        "LOCAL UNPUSHED: 311tb(1e409cb) + 311tc on origin/main=f44d54f. Push only after explicit consent (pre-push full run-ci; idle)."
+      ],
+      "publishable_decision_summary": "R311tc: session-review remediation. A 4-agent adversarial review REFUTED 'textbook' (overconfident again, cf sq/sv/ta). Fixed the 0.0.0.0 undialable locator, the SSOT cap (codec-mirror const), and the missing wire encode/decode test; the late-joiner gap was refuted as a probe artifact.",
+      "publishable_changes_bullets": [
+        "The recurring textbook/SSOT/north-star/cost-no-object trigger fired a 4-agent adversarial review (correctness/SSOT/architecture/honesty); all 4 REFUTED the '교과서적' self-claim on R311tb locator ingest -- the documented overconfidence pattern repeated (cf sq/sv/ta).",
+        "FIXED C1 (correctness, empirical): the demo advertised tcp/0.0.0.0:<port> (the deploy-default bind-all) = an UNDIALABLE locator. runner.rs now skips an unspecified-host bind (full interface expansion, zenoh listener.rs:115-145, tracked).",
+        "FIXED C2 (SSOT): MAX_LOCATOR_WIRE_LEN=128 was a magic const hand-copied from the codec. Moved to wz-codecs::locator::MAX_LOCATOR_LEN + MAX_LOCATORS_PER_NODE (codec-mirror, tied to SceString<128> / list max-count); the graph imports them and caps the list count by-construction.",
+        "FIXED C5 (honesty): the 'L field rides the wire' claim had NO test (all 3 were in-memory build->ingest that ignore OPT_L). Added an encode->decode->ingest test, mutation-verified to catch an OPT_L/locators desync the in-memory tests miss.",
+        "Honesty nits: discovery log info->debug (fires per-peer, ungated); Details doc now states wz OVER-advertises vs zenoh default (propagate_locators is a deferred NARROWING, not a subset); Some([])->None divergence from zenoh clear-on-empty documented."
+      ],
+      "publishable_verification_bullets": [
+        "REFUTED a review finding (diagnose-before-carry): 'late-joiner never learns locators' (correctness MAJOR) is a PROBE ARTIFACT -- a new face is bootstrapped via flood_link_added -> build_self_oam = build_linkstate_list (every node FULL WITH locators); the agent drove build_linkstate_split (the transit path) directly.",
+        "Gates: wz-routing-graph 49 (+1 wire round-trip; mutation-verified: with OPT_L off the in-memory test still PASSES but the wire test FAILS, proving it closes the gap). routing-peer 362; routing_forward 21; 4 routing axes build; clippy -D + fmt clean.",
+        "E6 peer-mesh e2e (wz_peer_mesh + wz_peer_data_forward) 5 tests x 4 runs, 0 flake (now via the is_unspecified guard + debug log).",
+        "Grounding (direct read): zenoh propagate_locators is per-target gossip policy (network.rs:406-418, needs target whatami); listener.rs:115-145 expands unspecified binds; the codec L width is SceString<128>."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tc = session-review remediation. The recurring trigger fired a 4-agent adversarial review; all 4 REFUTED '교과서적' -- overconfident AGAIN (the project pattern, cf sq/sv/ta). Independent review caught what self-review missed = strongest calibration.",
+        "Fixed in-scope: 0.0.0.0 undialable locator (skip unspecified), SSOT cap (codec-mirror const + count cap), the missing wire encode/decode test (mutation-verified vs the OPT_L gap), + honesty nits (log level, over-advertise doc, empty-locator divergence).",
+        "REFUTED via direct verification: the 'late-joiner starves of locators' finding is a probe artifact -- bootstrap uses build_linkstate_list (Full+locators); only the transit build_linkstate_split path omits them, and that path never introduces an unknown node (zid-less => dropped).",
+        "TRACKED DEFERS (architecture critique accepted): (a) Vec<String> -> typed Locator newtype = the Zid=Vec<u8> debt repeat, its own structural round (graph cannot dep on session-core ParsedLocator; layering decision needed); (b) per-target locator gating (propagate_locators) + threading the FACE whatami = the gossip-policy atom, whose prerequisite IS the original F1 whatami face-wiring -- so locators-first did NOT remove the whatami prerequisite, the next atom needs it.",
+        "LOCAL UNPUSHED: 311tb(1e409cb) + 311tc on origin/main=f44d54f. Push only after explicit consent (pre-push full run-ci; idle)."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

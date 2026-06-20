@@ -56,7 +56,7 @@ use wz_codecs::linkstate::LinkstateOwned;
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::linkstate_weight::LinkstateWeight;
-use wz_codecs::locator::LocatorOwned;
+use wz_codecs::locator::{LocatorOwned, MAX_LOCATORS_PER_NODE, MAX_LOCATOR_LEN};
 
 /// WhatAmI role bytes (zenoh `WhatAmI`): a node advertises exactly one.
 /// The codec carries the raw byte; the ingest validates against this set
@@ -116,36 +116,44 @@ fn into_list(link_states: Vec<LinkstateOwned>) -> LinkstateListOwned {
     }
 }
 
-/// The wire cap on a single locator — the codec's `SceString<128>` field width
-/// (`locator.scxml`). A locator past this cannot round-trip through a no-alloc
-/// peer's fixed-capacity decoder, so the graph drops it at the TX/RX boundary
-/// rather than admit one that re-encodes lossily — the same host-validation
-/// obligation the oversized-zid drop ([`Zid::try_from`]) discharges.
-const MAX_LOCATOR_WIRE_LEN: usize = 128;
-
 /// Project a node's host locators (`&[String]`) into the codec's owned
-/// `LocatorOwned` list for a TX entry, dropping any locator past the wire cap.
-/// Returns `None` when the node advertises no usable locator — the caller then
-/// leaves the `L` option clear, exactly as a node with no locators emits no
-/// locator field. The TX inverse of [`locators_from_wire`].
+/// `LocatorOwned` list for a TX entry, capping against the codec's own wire
+/// bounds. Returns `None` when the node advertises no usable locator — the
+/// caller then leaves the `L` option clear, exactly as a node with no locators
+/// emits no locator field. The TX inverse of [`locators_from_wire`].
+///
+/// The two caps are a RUNTIME boundary check, not a by-construction invariant
+/// like the zid one ([`make_link_state`] re-encodes `node.zid` with an
+/// `expect`, since every graph zid is `<= 16` by construction): a locator is an
+/// arbitrary host string (a deploy listen address, or a peer's wire bytes) with
+/// no upstream length/count guarantee, so the obligation to keep the wire within
+/// what a no-alloc receiver can decode is discharged HERE — the producer-side
+/// analog of the ingest's oversized-zid drop. Both bounds are sourced from the
+/// codec ([`MAX_LOCATOR_LEN`] = the `SceString<N>` width, [`MAX_LOCATORS_PER_NODE`]
+/// = the list `max-count`), so this never hand-copies a literal that could
+/// silently drift from the generated type.
 fn locators_to_wire(locators: &[String]) -> Option<Vec<LocatorOwned>> {
     let owned: Vec<LocatorOwned> = locators
         .iter()
         .filter_map(|loc| {
-            if loc.len() > MAX_LOCATOR_WIRE_LEN {
+            if loc.len() > MAX_LOCATOR_LEN {
                 log::warn!(
-                    "dropping over-long locator ({} bytes) from a link-state entry",
+                    "dropping over-long locator ({} bytes, cap {MAX_LOCATOR_LEN}) \
+                     from a link-state entry",
                     loc.len()
                 );
                 return None;
             }
-            // `from_view` is infallible on the alloc (AP) backing this crate
-            // targets; the `.ok()` keeps the no-alloc contract honest.
-            SceString::from_view(loc).ok().map(|locator| LocatorOwned {
+            // On the alloc (AP) backing this crate targets, `from_view` is
+            // infallible (the `> MAX_LOCATOR_LEN` guard above is what enforces
+            // the wire bound); on a no-alloc backing it would reject past `N`,
+            // so the `?` keeps that path correct too.
+            Some(LocatorOwned {
                 locator_len: loc.len() as u64,
-                locator,
+                locator: SceString::from_view(loc).ok()?,
             })
         })
+        .take(MAX_LOCATORS_PER_NODE)
         .collect();
     (!owned.is_empty()).then_some(owned)
 }
@@ -154,6 +162,17 @@ fn locators_to_wire(locators: &[String]) -> Option<Vec<LocatorOwned>> {
 /// the graph `Node.locators`. Returns `None` for an absent OR empty list, so a
 /// node's stored locators are never `Some(empty)` (a degenerate "advertises
 /// zero locators" state). The RX inverse of [`locators_to_wire`].
+///
+/// DIVERGENCE from zenoh on the empty case: zenoh sets `L` whenever
+/// `locators.is_some()` INCLUDING `Some([])`, and on update does
+/// `if ls.locators.is_some() { node.locators = ls.locators }` — so a `Some([])`
+/// CLEARS a node's locators (`network.rs:713-716`). wz collapses `Some([])` to
+/// `None` here, which under the apply step's preserve-on-None rule instead KEEPS
+/// the prior locators. The divergence is unreachable from a wz producer
+/// ([`locators_to_wire`] never emits `Some([])` — an empty list returns `None`,
+/// leaving `L` clear), so it only differs for a peer that explicitly wires an
+/// empty `L`; wz treats that as "no new locators" rather than "clear", which is
+/// the safer reading for discovery data.
 fn locators_from_wire(locators: Option<Vec<LocatorOwned>>) -> Option<Vec<String>> {
     let strings: Vec<String> = locators?
         .into_iter()
@@ -462,11 +481,26 @@ impl Link {
 ///   [`build_link_added_delta`](LinkstateNetwork::build_link_added_delta).
 ///
 /// Locators ride [`Full`](Self::Full) only — a node's locators are advertised
-/// when it is first introduced, and the ingest's preserve-on-None rule keeps
-/// them across the links-only updates that follow. zenoh instead gates locators
-/// per target link via `propagate_locators` (a gossip-target / multihop policy,
-/// `network.rs:406-418`); that selective re-advertisement is a tracked
-/// follow-up (the gossip-policy atom), not carried here.
+/// when it is first introduced (a new neighbour's bootstrap full flood, and the
+/// `new` half of a propagation), and the ingest's preserve-on-None rule keeps
+/// them across the links-only updates that follow. A late-joining face is
+/// bootstrapped with the FULL topology
+/// ([`build_linkstate_list`](LinkstateNetwork::build_linkstate_list), every node
+/// [`Full`](Self::Full)), so it learns every node's locators — the `Full`-only
+/// binding does not starve a joiner.
+///
+/// DIVERGENCE from zenoh, honestly stated: this currently emits locators on
+/// EVERY `Full` entry UNCONDITIONALLY — i.e. it OVER-advertises relative to
+/// zenoh's default. zenoh gates each entry's locators per TARGET LINK via
+/// `propagate_locators` (`network.rs:406-418`: `gossip && gossip_target.matches(
+/// target_whatami) && (multihop || self || direct-neighbour)`), which needs the
+/// target FACE's whatami and so withholds locators from a client / a distant
+/// multihop node. wz cannot express per-target gating on the build-once flood
+/// path and has no face whatami yet, so it floods locators to all faces. The
+/// `L` field is optional and an uninterested peer ignores it (wire-legal), but
+/// the gossip-target / multihop NARROWING is a tracked follow-up (the
+/// gossip-policy atom, whose prerequisite is threading the handshake whatami
+/// onto the face — the original "F1").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Details {
     Full,
@@ -1751,9 +1785,10 @@ mod tests {
 
     // ── c2b ingest ──────────────────────────────────────────────────
 
-    use sce_forge_runtime::codec::SceBytes;
+    use sce_forge_runtime::codec::{SceBytes, SceCursor};
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
+    use wz_codecs::linkstate_list::LinkstateList;
 
     /// Build a LinkState entry. `options` is unused by the ingest (it reads
     /// the typed `Option` fields, not the flag byte), so it is left 0.
@@ -2987,7 +3022,7 @@ mod tests {
         let mut a = LinkstateNetwork::new(zid(0x0A), 2);
         let ok = "tcp/10.0.0.10:7447".to_string();
         let too_long = format!("tcp/[{}]:7447", "f".repeat(200));
-        assert!(too_long.len() > MAX_LOCATOR_WIRE_LEN);
+        assert!(too_long.len() > MAX_LOCATOR_LEN);
         a.set_self_locators(vec![ok.clone(), too_long]);
         a.add_link(zid(0x0B), 2);
         let mut b = LinkstateNetwork::new(zid(0x0B), 2);
@@ -2999,6 +3034,45 @@ mod tests {
             b.node_locators(&zid(0x0A)),
             Some([ok].as_slice()),
             "the valid locator rode; the over-128 one was dropped at TX"
+        );
+    }
+
+    #[test]
+    fn locators_survive_a_full_wire_encode_decode_round_trip() {
+        // The load-bearing claim is "link-states carry the L field ON THE WIRE".
+        // The other locator tests build->ingest owned structs in memory and
+        // never touch bytes, so they would still pass if make_link_state set
+        // `locators: Some(..)` with OPT_L clear or a wrong num_locators — a real
+        // peer's decode gates `locators` on OPT_L (codec linkstate.rs). This
+        // drives the FULL path: build -> ENCODE to bytes -> DECODE -> ingest, so
+        // OPT_L / num_locators / the locator bytes must all be self-consistent
+        // for the locators to survive.
+        let mut a = LinkstateNetwork::new(zid(0x0A), 2);
+        a.set_self_locators(vec!["tcp/10.0.0.10:7447".to_string()]);
+        a.add_link(zid(0x0B), 2);
+
+        // TX: build A's full link-state list, then ENCODE it to wire bytes.
+        let wire = a
+            .build_linkstate_list()
+            .try_as_borrowed()
+            .expect("re-borrow A's list for encode")
+            .encode_to_vec();
+
+        // RX: decode the bytes back (the real peer path), then ingest on B.
+        let mut cursor = SceCursor::new(&wire);
+        let decoded = LinkstateList::decode(&mut cursor)
+            .expect("decode A's link-state list")
+            .try_into_owned()
+            .expect("own the decoded list");
+
+        let mut b = LinkstateNetwork::new(zid(0x0B), 2);
+        let lb_a = b.add_link(zid(0x0A), 2);
+        b.ingest_linkstate_list(lb_a, decoded);
+
+        assert_eq!(
+            b.node_locators(&zid(0x0A)),
+            Some(["tcp/10.0.0.10:7447".to_string()].as_slice()),
+            "A's locators survived encode->decode->ingest (OPT_L + num_locators consistent)"
         );
     }
 

@@ -209,6 +209,22 @@ pub mod join {
 pub mod locator {
     codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/locator.rs"));
+
+    /// The wire width of one locator string — the `LocatorOwned::locator`
+    /// field's `SceString<N>` capacity (`sources/codecs/locator.scxml`
+    /// `sce:max-size`). The SSOT for "how long a locator may be on the wire",
+    /// so a producer (e.g. the linkstate graph) caps against ONE value tied to
+    /// this crate's generated type rather than hand-copying the literal — a
+    /// no-alloc receiver decodes into exactly `heapless::String<N>`, so a
+    /// longer locator would fail its decode. Keep in lockstep with the SCXML
+    /// `sce:max-size` until codegen can emit it directly.
+    pub const MAX_LOCATOR_LEN: usize = 128;
+
+    /// The maximum number of locators one node advertises — the linkstate
+    /// `locators` list `sce:max-count` (`sources/codecs/linkstate.scxml`). A
+    /// producer caps the list against this so a no-alloc receiver's bounded
+    /// repeat-decode never overflows.
+    pub const MAX_LOCATORS_PER_NODE: usize = 64;
 }
 
 #[cfg(feature = "codec-hello")]
