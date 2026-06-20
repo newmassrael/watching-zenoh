@@ -394,8 +394,9 @@ impl LinkstateForwarder {
     ///   mis-attribute the source to ITS inbound neighbour,
     /// - the local psid exceeds the u16 routing-context range (zenoh
     ///   `NodeIdType`): DROP rather than silently alias by truncation.
-    ///   Unreachable until a graph holds >65535 live nodes
-    ///   (`remove_detached_nodes` pruning is a tracked deferral).
+    ///   Unreachable until a graph holds >65535 live nodes (and
+    ///   `remove_detached_nodes` GC-prunes nodes that leave, bounding the
+    ///   live set to the reachable mesh).
     ///
     /// The single SSOT shared by [`forward_push`](Self::forward_push) (data)
     /// and [`forward_subscription`](Self::forward_subscription) (a sourced
@@ -1059,16 +1060,26 @@ impl FaceForwarder for LinkstateForwarder {
         // `schedule_compute_trees`, the link-down path). The recompute's
         // re-advertise is deferred with it (D2c).
         let dropped_link = if let Some(state) = self.faces.borrow_mut().remove(&id) {
-            // Purge the departed peer's subscription interest — zenoh's
-            // `pubsub_remove_node` on link-down (`hat/linkstate_peer/mod.rs`).
-            // Without this a gone subscriber's interest lingers in the table,
-            // keeping the publisher's any-interest gate spuriously armed (the
-            // data route self-heals via unreachability, but the table leaks).
-            if let Some(zid) = state.actions.peer_zid() {
-                self.subs.borrow_mut().remove_peer(&zid);
-            }
             if let Some(link) = state.link {
-                self.net.borrow_mut().remove_link(link);
+                // remove_link drops the self<->neighbour edge and GC-prunes every
+                // node the link's loss DETACHED from the mesh (zenoh remove_link ->
+                // remove_detached_nodes, network.rs:948). Purge each pruned node's
+                // subscription interest — zenoh's `pubsub_remove_node` per removed
+                // node on link-down (`hat/linkstate_peer/mod.rs:378-387`). Without
+                // it a gone subscriber's interest lingers, keeping a publisher's
+                // any-interest gate spuriously armed. The departed neighbour is
+                // itself in the pruned set when it had no other path, so this both
+                // subsumes AND corrects the former unconditional peer purge: a
+                // neighbour still reachable via another face KEEPS its interest (it
+                // is still a valid subscriber, reached via the surviving path), as
+                // in zenoh — only the genuinely detached set is purged.
+                let removed = self.net.borrow_mut().remove_link(link);
+                if !removed.is_empty() {
+                    let mut subs = self.subs.borrow_mut();
+                    for zid in &removed {
+                        subs.remove_peer(zid);
+                    }
+                }
                 true
             } else {
                 false
@@ -1142,6 +1153,19 @@ impl FaceForwarder for LinkstateForwarder {
                         // zenoh floods link-states inline.
                         let changes = self.ingest_inbound_linkstate(id, list);
                         let _ = self.propagate(id, &changes);
+                        // c3c-3 D3 — purge the subscription interest of every node
+                        // the ingest detached from the mesh (zenoh pubsub_remove_node
+                        // over changes.removed_nodes, handle_oam
+                        // hat/linkstate_peer/mod.rs:418-422). A node pruned by
+                        // remove_detached_nodes is unreachable, so its interest can no
+                        // longer be served and must not keep the any-interest gate
+                        // armed.
+                        if !changes.removed.is_empty() {
+                            let mut subs = self.subs.borrow_mut();
+                            for zid in &changes.removed {
+                                subs.remove_peer(zid);
+                            }
+                        }
                         // c3c-3 D2c — coalesce the spanning-tree recompute (and its
                         // pubsub_tree_change re-advertise to new children) onto the
                         // tick instead of recomputing inline: a burst of inbound
@@ -1244,8 +1268,18 @@ mod tests {
         let fwd = LinkstateForwarder::new(zid(0x01), 2);
         let (face, _sink) = peer_face(zid(0xAA));
         fwd.register(FaceId(7), &face);
-        // the neighbour A floods a list announcing a far node B.
-        fwd.ingest_inbound_linkstate(FaceId(7), list_with_node(11, 5, 0xBB));
+        // The neighbour A floods a consistent list: A (psid 1) advertises self
+        // (psid 0) and a far node B (psid 2). B is reachable THROUGH A, so the
+        // reachability prune (D3) keeps it — a B announced with no advertiser
+        // leading back to self would be pruned as detached.
+        fwd.ingest_inbound_linkstate(
+            FaceId(7),
+            list(vec![
+                entry(0, 1, 0x01, &[]),
+                entry(1, 5, 0xAA, &[0, 2]),
+                entry(2, 5, 0xBB, &[1]),
+            ]),
+        );
         assert_eq!(fwd.ingested(), 1);
         assert!(fwd.net.borrow().get_node(&zid(0xBB)).is_some());
     }
@@ -1351,6 +1385,7 @@ mod tests {
         // the self node is always in the graph, so it resolves in build.
         let changes = Changes {
             updated: vec![zid(0x0B)],
+            ..Default::default()
         };
         let sent = fwd.propagate(FaceId(0), &changes).expect("propagate");
         assert_eq!(sent, 1, "propagated to the other face only");
@@ -1394,6 +1429,7 @@ mod tests {
         // are propagation candidates.
         let changes = Changes {
             updated: vec![zid(0x0A)],
+            ..Default::default()
         };
         fwd.propagate(FaceId(99), &changes).expect("propagate");
         assert_eq!(
@@ -2333,20 +2369,37 @@ mod tests {
             vec![zid(0x0A)],
             "in B's tree self forwards toward A/C via child A"
         );
+        let recomputes_before = fwd.recomputes();
 
         fwd.deregister(FaceId(0));
-        // D2c — deregister SCHEDULES the recompute, it no longer runs it inline, so
-        // B's tree is still the stale cached one (names A) until the tick flushes
-        // the recompute (remove_link drops the edge but leaves the `trees` cache).
+        // D3 — remove_link prunes A INLINE (dropping S-A detaches A, and C
+        // transitively, since both are reachable only through the dead link),
+        // and purges any interest they held (zenoh remove_link ->
+        // remove_detached_nodes + pubsub_remove_node).
+        assert!(
+            fwd.net.borrow().get_node(&zid(0x0A)).is_none(),
+            "A is pruned the moment its link drops"
+        );
+        assert!(
+            fwd.net.borrow().get_node(&zid(0x0C)).is_none(),
+            "C is pruned transitively (only reachable via A)"
+        );
+        // D2c — the tree RECOMPUTE is still deferred (only the prune is inline):
+        // the recompute counter has not advanced until the tick flushes it.
         assert_eq!(
-            fwd.tree_children_of(&zid(0x0B)),
-            vec![zid(0x0A)],
-            "deregister deferred the recompute: B's tree still names A pre-tick"
+            fwd.recomputes(),
+            recomputes_before,
+            "deregister scheduled but did not run the recompute"
         );
         fwd.tick(); // flush the coalesced recompute
+        assert_eq!(
+            fwd.recomputes(),
+            recomputes_before + 1,
+            "the tick ran exactly one coalesced recompute"
+        );
         assert!(
             fwd.tree_children_of(&zid(0x0B)).is_empty(),
-            "the tick recomputed: A/C left B's tree (a stale tree would keep A)"
+            "after the recompute B's tree has no child of self (A/C are gone)"
         );
     }
 
@@ -2576,6 +2629,50 @@ mod tests {
         assert!(
             fwd.interested("demo/data").is_empty(),
             "deregister purged A's interest (no stale subscriber left armed)"
+        );
+    }
+
+    #[test]
+    fn deregister_keeps_a_still_reachable_peers_interest() {
+        // The correctness boundary D3 corrects: a face going down must purge a
+        // subscriber's interest ONLY if that subscriber LEFT the mesh. Here A is
+        // reachable by two paths — the direct face S-A and the relay path S-C-A —
+        // so dropping the direct S-A face leaves A still reachable via C. A is
+        // therefore NOT pruned and its interest MUST survive (self still forwards
+        // toward A, now via C). zenoh purges only remove_link's detached set; the
+        // former unconditional peer purge wrongly dropped a still-reachable peer.
+        let fwd = LinkstateForwarder::new(zid(0x05), 2);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_c, _sc) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        // A advertises self back (edge S-A). C advertises self AND A, giving A a
+        // second path S-C-A (edges S-C and C-A).
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.ingest_inbound_linkstate(
+            FaceId(1),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0C, &[0, 2]), // C -> S, A
+                entry(2, 5, 0x0A, &[0, 1]), // A -> S, C
+            ]),
+        );
+        declare_interest(&fwd, FaceId(0), "demo/data"); // A subscribes
+        assert_eq!(
+            fwd.interested("demo/data"),
+            vec![zid(0x0A)],
+            "A's interest registered"
+        );
+
+        fwd.deregister(FaceId(0)); // drop the DIRECT S-A face
+        assert!(
+            fwd.net.borrow().get_node(&zid(0x0A)).is_some(),
+            "A is still reachable via C, so it is NOT pruned"
+        );
+        assert_eq!(
+            fwd.interested("demo/data"),
+            vec![zid(0x0A)],
+            "A's interest survives — it is still a reachable subscriber (via C)"
         );
     }
 

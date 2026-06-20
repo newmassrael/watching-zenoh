@@ -1357,10 +1357,20 @@ pub(crate) async fn run_peer(
     let mut announced_withdrawal = false;
     let mut declared = false;
     let mut undeclared = false;
+    // High-water mark of the topology-graph node count, sampled each tick. The
+    // shutdown summary reports THIS, not the live `node_count()`: teardown
+    // deregisters every face, and a face-down now GC-prunes the nodes it
+    // detached (c3c-3 D3 remove_detached_nodes), so the live graph collapses
+    // toward self during shutdown. The peak is the meaningful convergence
+    // witness — "this peer's graph held N peers once it had converged" — which
+    // is what the e2e asserts on (it must read the converged size, not the
+    // mid-teardown remnant).
+    let mut peak_nodes = 0usize;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
             _ = app_tick.tick() => {
+                peak_nodes = peak_nodes.max(forwarder.node_count());
                 // c3c-3 debt A2 — a `--subscribe` peer declares its interest ONCE.
                 // pubsub_tree_change (re_advertise_subscriptions on each tree
                 // recompute) re-floods the subscription to peers that join later,
@@ -1418,13 +1428,13 @@ pub(crate) async fn run_peer(
     log::info!(
         "wz-ap-demo peer: shutdown; dialed {}, accepted {}, served {} peer(s), \
          peak {} concurrent face(s), ingested {} link-state(s), \
-         {} node(s) in topology graph, {} data push(es) received",
+         peak {} node(s) in topology graph, {} data push(es) received",
         summary.dialed,
         summary.accepted,
         summary.established,
         summary.peak_concurrent,
         forwarder.ingested(),
-        forwarder.node_count(),
+        peak_nodes.max(forwarder.node_count()),
         forwarder.data_seen()
     );
     // Convergence witness the e2e asserts on: emitted ONLY when this peer
@@ -1434,9 +1444,9 @@ pub(crate) async fn run_peer(
     // has ingested >= 1 by shutdown.
     if forwarder.ingested() > 0 {
         log::info!(
-            "wz-ap-demo peer: learned mesh topology (ingested {} link-state(s), {} node(s) in graph)",
+            "wz-ap-demo peer: learned mesh topology (ingested {} link-state(s), peak {} node(s) in graph)",
             forwarder.ingested(),
-            forwarder.node_count()
+            peak_nodes.max(forwarder.node_count())
         );
     }
     // Data-reception witness — a DETERMINISTIC shutdown counterpart to the

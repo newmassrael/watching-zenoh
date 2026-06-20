@@ -18,16 +18,12 @@
 //! with psid<->zid mappings, c2b the
 //! [`LinkstateNetwork::ingest_linkstate_list`] node update under the
 //! sn-staleness gate, c2c the mutual-link edge rebuild (`update_edge`), d
-//! the spanning-tree computation (`compute_trees`).
+//! the spanning-tree computation (`compute_trees`), and (c3c-3 D3) the
+//! [`remove_detached_nodes`](LinkstateNetwork::remove_detached_nodes) GC
+//! that prunes nodes no longer reachable from self once a link drops or an
+//! advertisement is withdrawn (zenoh `network.rs:786,948,990`).
 //!
 //! EXPLICITLY DEFERRED (tracked, not silently dropped):
-//! - `remove_detached_nodes` — zenoh GC-prunes nodes no longer reachable
-//!   from self via the advertisement graph (`network.rs:786,990`). wz does
-//!   NOT yet prune, so a node that leaves the mesh lingers as a ghost
-//!   vertex (memory growth + topology divergence from zenoh after a
-//!   partition heals). It lands with the c3b TX/flood atom, where a
-//!   realistic multi-node topology makes the prune testable (the current
-//!   unit tests model artificially-detached nodes).
 //! - `propagate_link_states` — the receive-side onward re-flood
 //!   (`network.rs:804`) that carries topology transitively across a
 //!   multi-hop mesh. The graph supplies the [`build_linkstate_for`] payload
@@ -231,16 +227,18 @@ struct LocalLinkState {
     links: HashMap<Zid, LinkEdgeWeight>,
 }
 
-/// What a LinkStateList ingest changed — the zids of nodes added or
-/// updated. The driver (step c3) uses this to decide what to re-flood /
-/// autoconnect. A NARROWED subset of zenoh `Changes` (`network.rs:110-114`,
-/// which carries `updated_nodes` + `removed_nodes` as `(NodeIndex, Node)`
-/// pairs): wz carries only the updated zids for now. The `removed_nodes`
-/// half lands with `remove_detached_nodes` (a tracked deferral), and the
-/// node payloads when gossip needs them.
+/// What a LinkStateList ingest changed — the zids of nodes added/updated
+/// (`updated`) and the zids of nodes the ensuing reachability prune removed
+/// (`removed`). The driver (step c3) re-floods the `updated` set and purges
+/// each `removed` node's subscription interest (zenoh `pubsub_remove_node`
+/// over `changes.removed_nodes`, `hat/linkstate_peer/mod.rs:418-422`). A
+/// NARROWED subset of zenoh `Changes` (`network.rs:110-114`, which carries
+/// both halves as `(NodeIndex, Node)` pairs): wz carries only the zids (the
+/// node payloads land when gossip needs them).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
     pub updated: Vec<Zid>,
+    pub removed: Vec<Zid>,
 }
 
 /// A spanning tree rooted at one node, computed from THIS peer's vantage
@@ -266,9 +264,11 @@ pub struct LinkstateNetwork {
     graph: StableUnGraph<Node, f64>,
     /// Secondary index `zid -> NodeIndex` so `get_idx` is O(1) instead of
     /// the O(n) scan zenoh does over its `Copy` 16-byte ids. Maintained as
-    /// an invariant by `insert_node` (the single node-insertion path); it
-    /// has no removal counterpart yet because node removal
-    /// (`remove_detached_nodes`) is a tracked deferral (see the module doc).
+    /// an invariant by `insert_node` (the single node-insertion path) and
+    /// `remove_detached_nodes` (the single node-removal path), which keep it
+    /// in lockstep with the petgraph node set — zenoh needs no such index
+    /// (its O(n) `get_idx` reads the graph directly), so this is wz's added
+    /// bookkeeping obligation.
     idx_by_zid: HashMap<Zid, NodeIndex>,
     links: HashMap<LinkId, Link>,
     next_link_id: LinkId,
@@ -430,16 +430,73 @@ impl LinkstateNetwork {
     }
 
     /// Remove a link (the peer face went down): drop the per-link mapping
-    /// state and disconnect self from the neighbour in the graph (self no
-    /// longer advertises the link, so the self<->neighbour edge is pruned
-    /// and self's link-state sn is bumped). Returns the removed link.
-    /// Mirrors zenoh `remove_link`'s self-side bookkeeping.
-    pub fn remove_link(&mut self, id: LinkId) -> Option<Link> {
-        let link = self.links.remove(&id)?;
+    /// state, disconnect self from the neighbour in the graph (self no longer
+    /// advertises the link, so the self<->neighbour edge is pruned and self's
+    /// link-state sn is bumped), then GC every node the link's loss detached
+    /// from the mesh. Returns the zids of those pruned nodes (the departed
+    /// neighbour itself when it had no other path, plus anything reachable
+    /// only through it). Mirrors zenoh `remove_link` (`network.rs:936-988`):
+    /// self-side bookkeeping then `remove_detached_nodes`. An unknown link id
+    /// is a no-op returning an empty vec.
+    pub fn remove_link(&mut self, id: LinkId) -> Vec<Zid> {
+        let link = match self.links.remove(&id) {
+            Some(link) => link,
+            None => return Vec::new(),
+        };
         self.graph[self.idx].links.remove(&link.zid);
         self.graph[self.idx].sn += 1;
         self.rebuild_edges(self.idx);
-        Some(link)
+        self.remove_detached_nodes()
+    }
+
+    /// GC every node no longer reachable from self over the ADVERTISEMENT
+    /// graph, returning the pruned nodes' zids. Mirrors zenoh
+    /// `remove_detached_nodes` (`network.rs:990-1013`): a DFS from `self.idx`
+    /// following each visited node's advertised `links` (NOT the petgraph
+    /// edges — reachability is over what nodes claim to link to, so a node is
+    /// kept as long as a chain of advertisements leads to it), then any
+    /// node the DFS never reached is removed. A node that left the mesh (its
+    /// last advertiser dropped it, or the only link toward it went down)
+    /// would otherwise linger as a ghost vertex — unbounded memory growth and
+    /// topology divergence from a zenoh peer that did prune. Run after every
+    /// topology mutation that can sever reachability: the ingest tail
+    /// (`process_linkstates`) and `remove_link`.
+    ///
+    /// Unlike zenoh (which returns `(NodeIndex, Node)` pairs for gossip), wz
+    /// returns just the zids — the only thing the driver needs to purge the
+    /// pruned nodes' subscription interest. Keeps the `idx_by_zid` secondary
+    /// index in lockstep: every node dropped from the graph is dropped from
+    /// the index too (wz's removal-side invariant — see the field doc).
+    fn remove_detached_nodes(&mut self) -> Vec<Zid> {
+        use petgraph::visit::{VisitMap, Visitable};
+
+        let mut dfs_stack = vec![self.idx];
+        let mut visit_map = self.graph.visit_map();
+        while let Some(node) = dfs_stack.pop() {
+            if visit_map.visit(node) {
+                // Collect first: the `links` borrow of `self.graph` must end
+                // before `get_idx` borrows `self` again.
+                let succ_zids: Vec<Zid> = self.graph[node].links.keys().cloned().collect();
+                for succ_zid in succ_zids {
+                    if let Some(succ) = self.get_idx(&succ_zid) {
+                        if !visit_map.is_visited(&succ) {
+                            dfs_stack.push(succ);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut removed = Vec::new();
+        for idx in self.graph.node_indices().collect::<Vec<NodeIndex>>() {
+            if !visit_map.is_visited(&idx) {
+                if let Some(node) = self.graph.remove_node(idx) {
+                    self.idx_by_zid.remove(&node.zid);
+                    removed.push(node.zid);
+                }
+            }
+        }
+        removed
     }
 
     /// Ingest a `LinkStateList` received on link `src_link_id`: learn its
@@ -658,14 +715,16 @@ impl LinkstateNetwork {
     }
 
     /// Apply zid-resolved link-states to the graph under the sn-staleness
-    /// gate, then rebuild the changed node's edges. A new node is added; an
-    /// existing node is updated only if the advertised sn is strictly newer
-    /// (a stale or duplicate advertisement is ignored). Mirrors the
-    /// `full_linkstate` `link_states` node-update + edge-rebuild
-    /// (`network.rs:728-783`) minus, for now, the trailing
-    /// `remove_detached_nodes` prune and the `propagate_link_states`
-    /// receive-side re-flood (both tracked deferrals — see the module doc).
-    /// Returns the changed nodes' zids.
+    /// gate, rebuild the changed nodes' edges, then GC any node the update
+    /// detached from the mesh. A new node is added; an existing node is
+    /// updated only if the advertised sn is strictly newer (a stale or
+    /// duplicate advertisement is ignored). Mirrors the `full_linkstate`
+    /// `link_states` node-update + edge-rebuild + trailing
+    /// `remove_detached_nodes` (`network.rs:728-808`) minus only the
+    /// `propagate_link_states` receive-side re-flood (a tracked deferral —
+    /// see the module doc). Returns the changed and the pruned nodes' zids:
+    /// a node the prune removed is dropped from `updated` (zenoh
+    /// `network.rs:787-788` `new_nodes.retain` / `updated_nodes.retain`).
     fn process_linkstates(&mut self, states: Vec<LocalLinkState>) -> Changes {
         let mut changes = Changes::default();
         for ls in states {
@@ -693,6 +752,15 @@ impl LinkstateNetwork {
             self.rebuild_edges(idx);
             changes.updated.push(self.graph[idx].zid.clone());
         }
+        // Prune nodes the update made unreachable, then drop any pruned zid
+        // from `updated` (a node cannot be both freshly-advertised and
+        // detached in the same ingest, but the retain keeps the two sets
+        // disjoint by construction — zenoh `network.rs:786-788`).
+        let removed = self.remove_detached_nodes();
+        if !removed.is_empty() {
+            changes.updated.retain(|z| !removed.contains(z));
+        }
+        changes.removed = removed;
         changes
     }
 
@@ -906,7 +974,13 @@ impl LinkstateNetwork {
             Some(tree) => tree
                 .children
                 .iter()
-                .map(|child| self.graph[*child].zid.clone())
+                // `node_weight` (not the panicking index op): a child pruned
+                // by `remove_detached_nodes` since the last `compute_trees` —
+                // possible because the recompute is COALESCED onto a later
+                // tick — resolves to None and is skipped. The pruned node is
+                // unreachable, so it was never a valid forward target anyway;
+                // the next recompute drops it from the tree for good.
+                .filter_map(|child| self.graph.node_weight(*child).map(|n| n.zid.clone()))
                 .collect(),
             None => Vec::new(),
         }
@@ -919,7 +993,10 @@ impl LinkstateNetwork {
         let dest_idx = self.get_idx(dest)?;
         let tree = self.trees.get(root.index())?;
         let hop = tree.directions.get(dest_idx.index()).copied().flatten()?;
-        Some(self.graph[hop].zid.clone())
+        // `node_weight` so a hop pruned since the last `compute_trees`
+        // resolves to None rather than panicking on a removed index (the
+        // coalesced-recompute window — see `tree_children_of`).
+        Some(self.graph.node_weight(hop)?.zid.clone())
     }
 
     /// The deduped set of first-hop children of this peer toward ANY of
@@ -1036,10 +1113,21 @@ mod tests {
         let b = net.add_link(zid(0x08), 2);
         assert_ne!(a, b, "distinct link ids");
         assert!(net.get_link(a).is_some());
-        let removed = net.remove_link(a).expect("link present");
-        assert_eq!(removed.zid, zid(0x07));
+        // A is a leaf neighbour (no other advertiser), so dropping its link
+        // detaches it: remove_link prunes the node and returns its zid.
+        let removed = net.remove_link(a);
+        assert_eq!(
+            removed,
+            vec![zid(0x07)],
+            "dropping the only link to A detaches and prunes it"
+        );
         assert!(net.get_link(a).is_none());
         assert!(net.get_link(b).is_some(), "removing one link leaves others");
+        assert!(
+            net.get_idx(&zid(0x07)).is_none(),
+            "the pruned node left the graph and the idx_by_zid index"
+        );
+        assert!(net.get_idx(&zid(0x08)).is_some(), "B remains a graph node");
     }
 
     // ── c2b ingest ──────────────────────────────────────────────────
@@ -1079,15 +1167,37 @@ mod tests {
         }
     }
 
+    /// A link-state entry for the link peer 0x07 (psid 7) advertising links
+    /// to `node_psids`. Co-list it with those nodes' entries so the
+    /// reachability prune (c3c-3 D3) keeps them: a node only reachable as a
+    /// floating A<->B pair (no advertiser leading back to self) is detached
+    /// and pruned, so the edge/ingest mechanics below relay their nodes
+    /// behind 0x07 (self -> 0x07 -> nodes). 0x07 does NOT advertise self
+    /// back, so it adds no self<->0x07 edge — the tests still isolate the
+    /// A<->B edge. Sent once; its `links` persist (0x07 is not re-advertised,
+    /// so a later node-only ingest cannot sn-gate it away).
+    fn relay(sn: u64, node_psids: &[u64]) -> LinkstateOwned {
+        entry(7, sn, Some(&zid(0x07)), Some(2), node_psids)
+    }
+
     #[test]
     fn ingest_adds_node_and_learns_mapping() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let link = net.add_link(zid(0x07), 2);
+        // 0x07 relays node 0xAA (psid 10) behind it, so 0xAA is reachable and
+        // the prune keeps it. 0xAA is listed BEFORE the relay so it is
+        // inserted from its own entry (whatami Some(2)) rather than as a
+        // whatami-None placeholder created by the relay's advertisement —
+        // process_linkstates, like zenoh, sets whatami only at node creation
+        // (network.rs:711-722 updates sn/links, not whatami).
         let changes = net.ingest_linkstate_list(
             link,
-            list(vec![entry(10, 5, Some(&zid(0xAA)), Some(2), &[])]),
+            list(vec![
+                entry(10, 5, Some(&zid(0xAA)), Some(2), &[]),
+                relay(1, &[10]),
+            ]),
         );
-        assert_eq!(changes.updated, vec![zid(0xAA)]);
+        assert!(changes.updated.contains(&zid(0xAA)), "0xAA was added");
         let node = net.get_node(&zid(0xAA)).expect("node added");
         assert_eq!(node.sn, 5);
         assert_eq!(node.whatami, Some(2));
@@ -1099,7 +1209,14 @@ mod tests {
     fn ingest_sn_staleness_gate() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let link = net.add_link(zid(0x07), 2);
-        net.ingest_linkstate_list(link, list(vec![entry(10, 5, Some(&zid(0xAA)), None, &[])]));
+        // 0x07 relays 0xAA so it stays reachable across the re-ingests below.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                relay(1, &[10]),
+                entry(10, 5, Some(&zid(0xAA)), None, &[]),
+            ]),
+        );
         // a duplicate (same sn) is ignored.
         let dup = net.ingest_linkstate_list(link, list(vec![entry(10, 5, None, None, &[])]));
         assert!(dup.updated.is_empty(), "stale/duplicate sn ignored");
@@ -1128,10 +1245,12 @@ mod tests {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let link = net.add_link(zid(0x07), 2);
         // A (psid 1 -> 0xAA) appears before B, so B's link psid 1 resolves
-        // against the mapping A registered earlier in the same list.
+        // against the mapping A registered earlier in the same list. 0x07
+        // relays both so they are reachable and survive the prune.
         net.ingest_linkstate_list(
             link,
             list(vec![
+                relay(1, &[1, 2]),
                 entry(1, 5, Some(&zid(0xAA)), Some(2), &[]),
                 entry(2, 5, Some(&zid(0xBB)), Some(2), &[1]),
             ]),
@@ -1179,15 +1298,15 @@ mod tests {
     fn edge_forms_only_on_mutual_advertisement() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let link = net.add_link(zid(0x07), 2);
-        // learn psid 2 -> 0xBB (B, no links yet)
+        // 0x07 relays A and B (reachability), plus B (psid 2, no links yet)
+        // and A->B one-sided.
         net.ingest_linkstate_list(
             link,
-            list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
-        );
-        // A advertises a link to B, but B has not advertised A back.
-        net.ingest_linkstate_list(
-            link,
-            list(vec![entry(1, 1, Some(&zid(0xAA)), Some(2), &[2])]),
+            list(vec![
+                relay(1, &[1, 2]),
+                entry(2, 1, Some(&zid(0xBB)), Some(2), &[]),
+                entry(1, 1, Some(&zid(0xAA)), Some(2), &[2]),
+            ]),
         );
         assert_eq!(net.edge_count(), 0, "one-sided link => no edge");
         // B advertises a link back to A => mutual => the edge forms.
@@ -1200,17 +1319,20 @@ mod tests {
     fn edge_pruned_when_link_no_longer_advertised() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let link = net.add_link(zid(0x07), 2);
+        // 0x07 relays A and B so they remain reachable even after A drops its
+        // link below (the edge prune is the subject; the node prune is not).
         net.ingest_linkstate_list(
             link,
-            list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
-        );
-        net.ingest_linkstate_list(
-            link,
-            list(vec![entry(1, 1, Some(&zid(0xAA)), Some(2), &[2])]),
+            list(vec![
+                relay(1, &[1, 2]),
+                entry(2, 1, Some(&zid(0xBB)), Some(2), &[]),
+                entry(1, 1, Some(&zid(0xAA)), Some(2), &[2]),
+            ]),
         );
         net.ingest_linkstate_list(link, list(vec![entry(2, 2, None, Some(2), &[1])]));
         assert_eq!(net.edge_count(), 1);
-        // A re-advertises with no links => the edge is pruned.
+        // A re-advertises with no links => the A<->B edge is pruned (A and B
+        // both stay in the graph — still reachable via the 0x07 relay).
         net.ingest_linkstate_list(link, list(vec![entry(1, 2, None, Some(2), &[])]));
         assert_eq!(net.edge_count(), 0, "dropped link => edge pruned");
     }
@@ -1219,21 +1341,15 @@ mod tests {
     fn edge_weight_is_max_of_both_directions() {
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let link = net.add_link(zid(0x07), 2);
+        // 0x07 relays A and B (reachability), plus B (psid 2, no links yet)
+        // and A->B weight 50, in one consistent snapshot.
         net.ingest_linkstate_list(
             link,
-            list(vec![entry(2, 1, Some(&zid(0xBB)), Some(2), &[])]),
-        );
-        // A->B weight 50.
-        net.ingest_linkstate_list(
-            link,
-            list(vec![entry_weighted(
-                1,
-                1,
-                Some(&zid(0xAA)),
-                Some(2),
-                &[2],
-                &[50],
-            )]),
+            list(vec![
+                relay(1, &[1, 2]),
+                entry(2, 1, Some(&zid(0xBB)), Some(2), &[]),
+                entry_weighted(1, 1, Some(&zid(0xAA)), Some(2), &[2], &[50]),
+            ]),
         );
         // B->A weight 80 => mutual; the edge takes max(50, 80) = 80 + jitter.
         net.ingest_linkstate_list(
@@ -1397,7 +1513,13 @@ mod tests {
 
         // Drop the S-M link: F can now only reach R via R-S-F, so it re-homes as
         // S's child. compute_trees must report F as a NEW child of S in R's tree.
-        net.remove_link(lm);
+        // M itself stays reachable via F (S-F-M), so the reachability prune keeps
+        // it — a node with another path is NOT detached (zenoh parity).
+        let pruned = net.remove_link(lm);
+        assert!(
+            pruned.is_empty(),
+            "M is still reachable via F, so dropping S-M prunes nothing"
+        );
         let delta = net.compute_trees();
         assert_eq!(
             net.tree_children_of(&r),
@@ -1421,19 +1543,18 @@ mod tests {
         // Topology: self -- A -- B (a line). next hop self->B is A.
         let mut net = LinkstateNetwork::new(zid(0x01), 2);
         let l = net.add_link(zid(0xAA), 2);
-        // Pass 1: teach every zid mapping; B advertises its link to A.
+        // One consistent snapshot (a real flood is one list): A (the direct
+        // peer) advertises self + B, and B advertises A back. The 2-pass
+        // convert resolves a link to an entry appearing later in the same
+        // list, so B stays reachable (self -> A -> B) and is not pruned —
+        // unlike a split build where B is transiently detached between lists.
         net.ingest_linkstate_list(
             l,
             list(vec![
-                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
-                entry(11, 0, Some(&zid(0xAA)), Some(2), &[]),
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]), // teach self mapping
                 entry(12, 5, Some(&zid(0xBB)), Some(2), &[11]), // B -> A
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12]), // A -> self, B
             ]),
-        );
-        // Pass 2: A advertises links to self and B (now resolvable).
-        net.ingest_linkstate_list(
-            l,
-            list(vec![entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12])]),
         );
         assert_eq!(net.edge_count(), 2, "self<->A and A<->B");
         net.compute_trees();
@@ -1463,6 +1584,124 @@ mod tests {
         assert_eq!(net.edge_count(), 1);
         net.remove_link(l);
         assert_eq!(net.edge_count(), 0, "self<->A edge pruned on link removal");
+    }
+
+    // ── c3c-3 D3 remove_detached_nodes ──────────────────────────────
+
+    #[test]
+    fn ingest_prunes_a_node_no_longer_advertised() {
+        // self -- A, and A advertises a link to B, so B is reachable THROUGH
+        // A's advertisement. When A re-advertises (newer sn) WITHOUT B, B has
+        // no remaining path from self and remove_detached_nodes prunes it; the
+        // ingest reports it in `changes.removed` (zenoh network.rs:786-808).
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(12, 0, Some(&zid(0xBB)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12]), // A -> self, B
+            ]),
+        );
+        assert!(net.get_idx(&zid(0xBB)).is_some(), "B is reachable via A");
+
+        // A re-advertises (sn 6) dropping its link to B.
+        let changes = net.ingest_linkstate_list(
+            l,
+            list(vec![entry(11, 6, Some(&zid(0xAA)), Some(2), &[10])]),
+        );
+        assert_eq!(
+            changes.removed,
+            vec![zid(0xBB)],
+            "B lost its only advertiser, so the ingest prunes it"
+        );
+        assert!(
+            net.get_idx(&zid(0xBB)).is_none(),
+            "B left both the graph and the idx_by_zid index"
+        );
+        assert!(net.get_idx(&zid(0xAA)).is_some(), "A is still reachable");
+    }
+
+    #[test]
+    fn remove_link_transitively_prunes_unreachable_nodes() {
+        // self -- A -- B (a line): B is reachable ONLY through A. Dropping the
+        // self--A link detaches A AND, transitively, B; remove_link prunes both
+        // and returns their zids (zenoh remove_link -> remove_detached_nodes,
+        // network.rs:948).
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(12, 5, Some(&zid(0xBB)), Some(2), &[11]), // B -> A
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12]), // A -> self, B
+            ]),
+        );
+        assert_eq!(net.node_count(), 3, "self, A, B");
+
+        let mut removed = net.remove_link(l);
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![zid(0xAA), zid(0xBB)],
+            "dropping self--A detaches A and (transitively) B"
+        );
+        assert_eq!(net.node_count(), 1, "only self remains");
+        assert!(net.get_idx(&zid(0xAA)).is_none());
+        assert!(net.get_idx(&zid(0xBB)).is_none());
+    }
+
+    #[test]
+    fn tree_accessors_tolerate_a_node_pruned_since_the_last_recompute() {
+        // D2c coalesces the recompute, so a node can be pruned (remove_link /
+        // ingest) AFTER compute_trees built a tree still referencing its
+        // NodeIndex, BEFORE the next recompute runs. The accessors must use
+        // node_weight (not the panicking index op): a dangling child is
+        // skipped, a pruned destination yields no next hop. Never a panic.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let la = net.add_link(zid(0xAA), 2);
+        let lc = net.add_link(zid(0xCC), 2);
+        // A and C each advertise self back -> both are self's tree children.
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10]),
+            ]),
+        );
+        net.ingest_linkstate_list(
+            lc,
+            list(vec![
+                entry(20, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(21, 5, Some(&zid(0xCC)), Some(2), &[20]),
+            ]),
+        );
+        net.compute_trees();
+        let mut kids = net.tree_children_of(&zid(0x01));
+        kids.sort();
+        assert_eq!(
+            kids,
+            vec![zid(0xAA), zid(0xCC)],
+            "A and C are both children"
+        );
+
+        // Drop A's link WITHOUT recomputing — A is pruned but the trees still
+        // hold its now-dangling NodeIndex.
+        let removed = net.remove_link(la);
+        assert_eq!(removed, vec![zid(0xAA)], "leaf A is pruned");
+
+        assert_eq!(
+            net.tree_children_of(&zid(0x01)),
+            vec![zid(0xCC)],
+            "the pruned child A is skipped (not panicked on); C remains"
+        );
+        assert_eq!(
+            net.directions_toward(&zid(0x01), &[zid(0xAA), zid(0xCC)]),
+            vec![zid(0xCC)],
+            "a pruned destination yields no direction (no next hop, no panic)"
+        );
     }
 
     /// Independently recompute the default-weight jittered edge weight the
