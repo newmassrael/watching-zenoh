@@ -44442,6 +44442,60 @@
         "LOCAL UNPUSHED: 311td on origin/main=dd93ae5. Verified host lanes (build/targeted tests/clippy/fmt + 4 demo axes); full run-ci pending. Push only after explicit consent (full run-ci; idle first)."
       ]
     },
+    "Round 311te": {
+      "decision_summary": "R311te: F1 session-review remediation. 4-agent adversarial review upheld structure, REFUTED clean/SSOT: fixed silent malformed-role fallback + doc over-claims + pub surface + e2e test. Typed WhatAmI deferred.",
+      "changes_bullets": [
+        "The recurring trigger fired a 4-agent adversarial review of R311td(4e50794): correctness + architecture/north-star UPHELD, SSOT + honesty REFUTED -- self 'textbook' overconfident again (cf sq/sv/ta/tc).",
+        "FIXED (MAJOR): peer_whatami_routing silently coerced a non-conforming role to PEER, unlike siblings (peer_zid rejects; ingest warns+drops). Now splits absent (silent) vs non-conforming (log::warn!+PEER).",
+        "FIXED: whatami_from_wire doc 'mirrors zenoh-pico' but DIVERGES at reserved 0b11 (pico->8, wz->None) -- now stated; +wz accepts a reserved Init at decode where zenoh rejects (tracked).",
+        "FIXED: the WHATAMI_ROUTER/CLIENT re-export had no external consumer (the demo names only WHATAMI_PEER) -> demoted to a crate-internal use; public surface trimmed to what callers name.",
+        "ADDED e2e test: real InitSyn -> handle_inbound -> register -> Node.whatami=Some(ROUTER), proving the wire->API conversion through the real handshake (the two seams were tested only in isolation)."
+      ],
+      "verification_bullets": [
+        "Gates: wz-runtime-tokio routing-peer lib 366 (+1 e2e over R311td's 365); session_fsm_inbound_dispatch 25; clippy -D warnings + fmt clean; demo builds all 4 routing axes (default/peer/router/routes).",
+        "REFUTED a review hypothesis: 'whatami on the Node not the FaceState forces an awkward gossip lookup' -- false; it is on SessionLinkActions (face transport state) = where zenoh reads target.get_whatami().",
+        "Grounding (read): zenoh WhatAmI is an enum; is_valid_whatami half-reimplements its TryFrom<u8>; INIT/JOIN pack whatami 2-bit but LinkState carries the raw api byte = two conventions the typed round must unify.",
+        "F1 itself unchanged + still behaviour-neutral for all-peer; remediation is honesty/coverage only (no routing or wire behaviour change). No CRITICAL/MAJOR correctness defect found in the diff."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311te = F1 session-review remediation. The recurring trigger fired a 4-agent adversarial review; self 'textbook' overconfident AGAIN (the project pattern). Architecture/correctness UPHELD; honesty/SSOT smells fixed.",
+        "KEY: F1's structure is north-star-correct -- whatami is on the face transport state (SessionLinkActions), where zenoh's gossip reads target.get_whatami(); the next atom reads it there, no refactor.",
+        "TRACKED debt (own round, fuse w/ gossip-policy): bare u8 -> typed WhatAmI enum (clone zenoh whatami.rs; subsumes is_valid_whatami + 4 role-set dups + the wire<->api mirror). Same class as Zid/Locator debt.",
+        "TRACKED hazard: INIT/JOIN whatami=2-bit wire, LinkState=raw api byte, multicast_params=wire but add_link=api -- multicast->graph before the typed round stores wire1(Peer) as api1(Router). Fix then.",
+        "TRACKED: wz Init accepts reserved 0b11 whatami; zenoh rejects at decode. Wire the orphaned whatami_v1_valid into Init decode. Next F = gossip-policy (propagate_locators per-target gate network.rs:406-418).",
+        "LOCAL UNPUSHED: 311td(4e50794)+311te on origin/main=dd93ae5. Host lanes verified (build/tests/clippy/fmt + 4 demo axes); full run-ci + idle before push. Push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311te: F1 session-review remediation. 4-agent adversarial review upheld structure, REFUTED clean/SSOT: fixed silent malformed-role fallback + doc over-claims + pub surface + e2e test. Typed WhatAmI deferred.",
+      "publishable_changes_bullets": [
+        "The recurring trigger fired a 4-agent adversarial review of R311td(4e50794): correctness + architecture/north-star UPHELD, SSOT + honesty REFUTED -- self 'textbook' overconfident again (cf sq/sv/ta/tc).",
+        "FIXED (MAJOR): peer_whatami_routing silently coerced a non-conforming role to PEER, unlike siblings (peer_zid rejects; ingest warns+drops). Now splits absent (silent) vs non-conforming (log::warn!+PEER).",
+        "FIXED: whatami_from_wire doc 'mirrors zenoh-pico' but DIVERGES at reserved 0b11 (pico->8, wz->None) -- now stated; +wz accepts a reserved Init at decode where zenoh rejects (tracked).",
+        "FIXED: the WHATAMI_ROUTER/CLIENT re-export had no external consumer (the demo names only WHATAMI_PEER) -> demoted to a crate-internal use; public surface trimmed to what callers name.",
+        "ADDED e2e test: real InitSyn -> handle_inbound -> register -> Node.whatami=Some(ROUTER), proving the wire->API conversion through the real handshake (the two seams were tested only in isolation)."
+      ],
+      "publishable_verification_bullets": [
+        "Gates: wz-runtime-tokio routing-peer lib 366 (+1 e2e over R311td's 365); session_fsm_inbound_dispatch 25; clippy -D warnings + fmt clean; demo builds all 4 routing axes (default/peer/router/routes).",
+        "REFUTED a review hypothesis: 'whatami on the Node not the FaceState forces an awkward gossip lookup' -- false; it is on SessionLinkActions (face transport state) = where zenoh reads target.get_whatami().",
+        "Grounding (read): zenoh WhatAmI is an enum; is_valid_whatami half-reimplements its TryFrom<u8>; INIT/JOIN pack whatami 2-bit but LinkState carries the raw api byte = two conventions the typed round must unify.",
+        "F1 itself unchanged + still behaviour-neutral for all-peer; remediation is honesty/coverage only (no routing or wire behaviour change). No CRITICAL/MAJOR correctness defect found in the diff."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311te = F1 session-review remediation. The recurring trigger fired a 4-agent adversarial review; self 'textbook' overconfident AGAIN (the project pattern). Architecture/correctness UPHELD; honesty/SSOT smells fixed.",
+        "KEY: F1's structure is north-star-correct -- whatami is on the face transport state (SessionLinkActions), where zenoh's gossip reads target.get_whatami(); the next atom reads it there, no refactor.",
+        "TRACKED debt (own round, fuse w/ gossip-policy): bare u8 -> typed WhatAmI enum (clone zenoh whatami.rs; subsumes is_valid_whatami + 4 role-set dups + the wire<->api mirror). Same class as Zid/Locator debt.",
+        "TRACKED hazard: INIT/JOIN whatami=2-bit wire, LinkState=raw api byte, multicast_params=wire but add_link=api -- multicast->graph before the typed round stores wire1(Peer) as api1(Router). Fix then.",
+        "TRACKED: wz Init accepts reserved 0b11 whatami; zenoh rejects at decode. Wire the orphaned whatami_v1_valid into Init decode. Next F = gossip-policy (propagate_locators per-target gate network.rs:406-418).",
+        "LOCAL UNPUSHED: 311td(4e50794)+311te on origin/main=dd93ae5. Host lanes verified (build/tests/clippy/fmt + 4 demo axes); full run-ci + idle before push. Push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

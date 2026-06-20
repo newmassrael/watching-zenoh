@@ -111,8 +111,12 @@ use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export so the peer-loop caller (the demo) names the neighbour role by
-/// the same const the graph + forwarder use, not a bare `0x02` literal.
-pub use wz_routing_graph::{Zid, WHATAMI_CLIENT, WHATAMI_PEER, WHATAMI_ROUTER};
+/// the same const the graph + forwarder use, not a bare `0x02` literal. Only
+/// `WHATAMI_PEER` is in the demo's vocabulary; `WHATAMI_ROUTER` /
+/// `WHATAMI_CLIENT` are consumed internally by [`whatami_from_wire`], so they are
+/// imported (not re-exported) to keep the public surface to what callers name.
+pub use wz_routing_graph::{Zid, WHATAMI_PEER};
+use wz_routing_graph::{WHATAMI_CLIENT, WHATAMI_ROUTER};
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -1109,11 +1113,15 @@ fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
 /// Map the 2-bit INIT wire whatami (`SessionLinkActions::peer_whatami_wire` =
 /// `InitBody::whatami()` = `cbyte & 0x03`) to the graph's API-form role byte (the
 /// [`WHATAMI_ROUTER`] / [`WHATAMI_PEER`] / [`WHATAMI_CLIENT`] set). Inverse of the
-/// handshake's `init_cbyte` packing (`(api >> 1) & 0x03`); mirrors zenoh-pico
-/// `_z_whatami_from_uint8` (`1 << (b & 0x03)`, transport.c:35-37). Returns `None`
-/// for the reserved 4th bit-pattern (wire `0b11`) that a conforming encoder never
-/// emits — so a malformed peer cannot inject an out-of-set role into the graph
-/// (the valid role set is upheld by construction, not by a downstream check).
+/// handshake's `init_cbyte` packing (`(api >> 1) & 0x03`,
+/// `wz-session-core/src/handshake_encode.rs`). For the three valid bit-patterns it
+/// equals zenoh-pico `_z_whatami_from_uint8` (`1 << (b & 0x03)`,
+/// `codec/transport.c:35-37`); it DIVERGES at the reserved `0b11`, where pico
+/// returns 8 (an out-of-set role) but this returns `None`. A conforming encoder
+/// never emits `0b11`, so this narrows what a non-conforming peer can put on a
+/// graph node's role byte to the valid set — it does NOT reject the handshake
+/// itself (wz, unlike zenoh `init.rs`, does not reject a reserved whatami at INIT
+/// decode; tracked alongside the typed-`WhatAmI` follow-up).
 fn whatami_from_wire(wire: u8) -> Option<u8> {
     match wire & 0x03 {
         0 => Some(WHATAMI_ROUTER),
@@ -1127,14 +1135,25 @@ fn whatami_from_wire(wire: u8) -> Option<u8> {
 /// derived from the handshake (R311td "F1"). Mirrors [`peer_zid_routing`]: the
 /// raw wire datum lives in routing-agnostic session-core, and the routing
 /// interpretation (wire -> API form via [`whatami_from_wire`]) lives here at the
-/// driver boundary. Falls back to [`WHATAMI_PEER`] when the role is absent (a
-/// face registered before the INIT exchange) or non-conforming — a peer-mesh's
-/// default and the pre-F1 behaviour, so an all-peer deployment is unchanged.
+/// driver boundary. The two fall-back cases are kept DISTINCT (not collapsed into
+/// one silent default):
+/// - role ABSENT (`None`): a face registered before the INIT exchange populated
+///   the slot — silently the peer-mesh default [`WHATAMI_PEER`] (legitimate).
+/// - role NON-CONFORMING (a reserved wire pattern): `log::warn!` then default to
+///   [`WHATAMI_PEER`], matching the ingest path's warn-on-invalid-whatami
+///   (`wz-routing-graph` `process_linkstates`) so a protocol violation is logged
+///   on both paths, not swallowed silently here.
+///
+/// An all-peer deployment hits neither branch (wire Peer -> WHATAMI_PEER), so it
+/// is behaviour-unchanged.
 fn peer_whatami_routing(actions: &SessionLinkActions) -> u8 {
-    actions
-        .peer_whatami_wire()
-        .and_then(whatami_from_wire)
-        .unwrap_or(WHATAMI_PEER)
+    match actions.peer_whatami_wire() {
+        None => WHATAMI_PEER,
+        Some(wire) => whatami_from_wire(wire).unwrap_or_else(|| {
+            log::warn!("face handshake whatami wire={wire} non-conforming; recording as peer");
+            WHATAMI_PEER
+        }),
+    }
 }
 
 /// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
@@ -1491,6 +1510,37 @@ mod tests {
         assert_eq!(
             fwd.net.borrow().get_node(&zid(0xAA)).unwrap().whatami,
             Some(WHATAMI_PEER)
+        );
+    }
+
+    // The full risky chain through the REAL handshake (not a poked slot): a wire
+    // InitSyn -> handle_inbound (captures the raw 2-bit wire role) -> register
+    // (whatami_from_wire maps wire->API) -> Node.whatami holds the API-form role.
+    // Closes the gap between the session-core slot-capture test and the slot->node
+    // tests above; gated on the Init codec that the capture path needs.
+    #[cfg(feature = "codec-init-body")]
+    #[test]
+    fn register_records_whatami_end_to_end_through_handle_inbound() {
+        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let (actions, _sink) = recording_actions();
+        let initsyn = vec![
+            0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
+            0x05,
+            0x30, // version, cbyte (whatami Router wire 0, zid_len 4)
+            0xAA,
+            0xAA,
+            0xAA,
+            0xAA, // zid -> zid(0xAA)
+            0x00,
+            0x00,
+            0x00, // sn_res, batch_size
+        ];
+        actions.handle_inbound(&initsyn).expect("InitSyn parses");
+        fwd.register(FaceId(7), &actions);
+        assert_eq!(
+            fwd.net.borrow().get_node(&zid(0xAA)).unwrap().whatami,
+            Some(WHATAMI_ROUTER),
+            "a router peer's INIT role is captured and recorded end-to-end"
         );
     }
 
