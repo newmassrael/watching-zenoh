@@ -1307,7 +1307,10 @@ pub(crate) async fn run_peer(
     // at face-up, so the mesh converges for every peer_loop caller (the flood
     // is on the FaceForwarder seam now, not a hand-rolled select here).
     // `WHATAMI_PEER` is this node's role; `params.zid` is its id.
-    let forwarder = LinkstateForwarder::new(params.zid.clone(), WHATAMI_PEER);
+    // `&params.zid[..]` (not a clone): `new` takes `impl Into<Zid>`, so the
+    // session-layer byte zid converts at the boundary without a Vec clone
+    // (params.zid is still owned by `params`, passed on to peer_loop below).
+    let forwarder = LinkstateForwarder::new(&params.zid[..], WHATAMI_PEER);
 
     let loop_fut = peer_loop(
         FaceSources {

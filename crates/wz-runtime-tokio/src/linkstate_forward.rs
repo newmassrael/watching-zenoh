@@ -275,6 +275,16 @@ impl LinkstateForwarder {
     /// learned when the node was new). Both halves ride ONE list per face so
     /// they arrive atomically (zenoh `network.rs:643-644`: send all states at
     /// once to avoid premature node deletion on the other side).
+    ///
+    /// Source-face exclusion — a DELIBERATE divergence: wz skips the SOURCE FACE
+    /// ENTIRELY (sends it nothing). zenoh is finer — it withholds only the
+    /// `updated` nodes from the source (`network.rs:661` `link.zid != src`) but
+    /// still sends `new` nodes back on the source link. wz drops the whole
+    /// source face because every node it would echo back was advertised BY that
+    /// source (so the echo is redundant and sn-staleness would drop it anyway);
+    /// the coarser rule trades a negligible convergence-latency corner (a source
+    /// that learned a node via a different path learns ours one flood later) for
+    /// a simpler, less chatty re-flood.
     pub fn propagate(&self, source: FaceId, changes: &Changes) -> Result<usize, CodecError> {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
@@ -387,9 +397,15 @@ impl LinkstateForwarder {
     /// [`deregister`](FaceForwarder::deregister) call it the instant self's own
     /// link-state changes (a link gained / lost, sn bumped), so the new face is
     /// bootstrapped with the full topology and the existing faces learn the change
-    /// at once — no periodic tick (zenoh floods only on link change). The full
-    /// topology rather than a per-link delta is the wz simplification (the Details
-    /// split is D4); sn-staleness on each receiver drops the unchanged nodes.
+    /// at once — no periodic tick (zenoh floods only on link change).
+    ///
+    /// HONEST D4 scope: the `Details` full-for-new / links-only-for-updated split
+    /// (sm) is applied to the RECEIVE-side re-flood ([`propagate`](Self::propagate))
+    /// only. This SELF-originated event flood still sends the FULL topology to
+    /// every face (zenoh's `add_link` / `remove_link` send a minimal 2-entry
+    /// delta instead, `network.rs:861-903` / `:958-962`). sn-staleness on each
+    /// receiver drops the unchanged nodes, so it is correct but verbose; the
+    /// self-flood delta is a tracked follow-on, NOT done here.
     pub fn flood_self(&self) -> Result<usize, CodecError> {
         // `NetworkMessage` is not `Clone`, but `OamOwned` is — build the
         // carrier once and re-wrap a clone per face.
@@ -989,6 +1005,22 @@ impl LinkstateForwarder {
     pub fn interested(&self, keyexpr: &str) -> Vec<Zid> {
         self.subs.borrow().interested(keyexpr)
     }
+
+    /// Purge every node in `removed` from the subscription interest table — the
+    /// single SSOT for zenoh's `pubsub_remove_node`-over-a-removed-set action,
+    /// called from BOTH prune sites: a link-down (`deregister`, the
+    /// `remove_link` detached set) and an ingest that detached nodes (`forward`,
+    /// `changes.removed`). A gone node's interest must not keep a publisher's
+    /// any-interest gate spuriously armed. No-op for an empty set.
+    fn purge_detached_interest(&self, removed: &[Zid]) {
+        if removed.is_empty() {
+            return;
+        }
+        let mut subs = self.subs.borrow_mut();
+        for zid in removed {
+            subs.remove_peer(zid);
+        }
+    }
 }
 
 /// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
@@ -1102,12 +1134,7 @@ impl FaceForwarder for LinkstateForwarder {
                 // is still a valid subscriber, reached via the surviving path), as
                 // in zenoh — only the genuinely detached set is purged.
                 let removed = self.net.borrow_mut().remove_link(link);
-                if !removed.is_empty() {
-                    let mut subs = self.subs.borrow_mut();
-                    for zid in &removed {
-                        subs.remove_peer(zid);
-                    }
-                }
+                self.purge_detached_interest(&removed);
                 true
             } else {
                 false
@@ -1182,18 +1209,10 @@ impl FaceForwarder for LinkstateForwarder {
                         let changes = self.ingest_inbound_linkstate(id, list);
                         let _ = self.propagate(id, &changes);
                         // c3c-3 D3 — purge the subscription interest of every node
-                        // the ingest detached from the mesh (zenoh pubsub_remove_node
-                        // over changes.removed_nodes, handle_oam
-                        // hat/linkstate_peer/mod.rs:418-422). A node pruned by
-                        // remove_detached_nodes is unreachable, so its interest can no
-                        // longer be served and must not keep the any-interest gate
-                        // armed.
-                        if !changes.removed.is_empty() {
-                            let mut subs = self.subs.borrow_mut();
-                            for zid in &changes.removed {
-                                subs.remove_peer(zid);
-                            }
-                        }
+                        // the ingest detached from the mesh (the same
+                        // pubsub_remove_node action as the link-down path,
+                        // handle_oam hat/linkstate_peer/mod.rs:418-422).
+                        self.purge_detached_interest(&changes.removed);
                         // c3c-3 D2c — coalesce the spanning-tree recompute (and its
                         // pubsub_tree_change re-advertise to new children) onto the
                         // tick instead of recomputing inline: a burst of inbound

@@ -92,19 +92,24 @@ const OPT_H: u8 = 0x08;
 /// fraction so Bellman-Ford breaks ties deterministically.
 const JITTER_FRACTION: f64 = 0.01;
 
-/// The fixed 16-byte zero-padded little-endian array zenoh hashes for the
-/// edge-jitter tie-break (`ZenohIdProto::to_le_bytes()`) — now just the zid's
-/// canonical backing buffer ([`Zid::le16`]). Kept as a free fn so the
-/// `update_edge` hash sites read unchanged.
-fn zid_to_le_16(zid: &Zid) -> [u8; 16] {
-    zid.le16()
-}
-
 /// The wire `psid` for a local node — its petgraph `NodeIndex` as the
 /// compact integer a peer references the node by (zenoh `idx.index()`).
 /// Named once so the TX build does not re-spell the `as u64` cast.
 fn local_psid(idx: NodeIndex) -> u64 {
     idx.index() as u64
+}
+
+/// Assemble a `LinkStateList` from its entries, deriving `num_link_states`
+/// from the vec length — the single SSOT for the list tail, so the count can
+/// never desync from the entry count. Shared by every list builder
+/// ([`build_linkstate_list`](LinkstateNetwork::build_linkstate_list) /
+/// [`build_linkstate_split`](LinkstateNetwork::build_linkstate_split)). zenoh
+/// `make_msg` writes the list the same way (`network.rs:355-357`).
+fn into_list(link_states: Vec<LinkstateOwned>) -> LinkstateListOwned {
+    LinkstateListOwned {
+        num_link_states: link_states.len() as u64,
+        link_states,
+    }
 }
 
 /// A routing identity — a zenoh zid (1..=16 bytes). Stored as a fixed 16-byte
@@ -121,6 +126,16 @@ fn local_psid(idx: NodeIndex) -> u64 {
 /// deterministic cross-implementation jitter tie-break with a zenohd peer
 /// (`update_edge`, which orders the pair by `Ord` then hashes [`le16`](Self::le16))
 /// is unchanged by the representation switch.
+///
+/// Cross-impl note: this equivalence is stated against the OLD `Vec<u8>` (the
+/// thing being replaced — exact). The load-bearing property is equivalence to
+/// ZENOH, whose `ZenohIdProto` Ord is lexicographic over the 16-byte LE array.
+/// Both `Zid` and the old `Vec<u8>` agree with zenoh for every CANONICAL wire
+/// zid, because zenoh's codec trims trailing zeros (`size()`), so a received
+/// zid never has a trailing-zero byte — the only inputs where a zero-extended
+/// prefix could order differently. A non-canonical self zid (a handshake
+/// `Vec<u8>` with a trailing zero) is the one latent corner; the handshake
+/// supplies canonical zids, so it is unreachable today.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Zid {
     bytes: [u8; 16],
@@ -569,18 +584,67 @@ impl LinkstateNetwork {
         }
 
         let mut removed = Vec::new();
+        let mut removed_idxs: Vec<NodeIndex> = Vec::new();
         for idx in self.graph.node_indices().collect::<Vec<NodeIndex>>() {
             if !visit_map.is_visited(&idx) {
                 if let Some(node) = self.graph.remove_node(idx) {
                     // GC event (zenoh debug!s the same, `network.rs:1008`): a
                     // node left the reachable mesh and is pruned.
-                    log::debug!("pruning detached node {:02x?}", node.zid);
+                    log::debug!("pruning detached node {:?}", node.zid);
                     self.idx_by_zid.remove(&node.zid);
                     removed.push(node.zid);
+                    removed_idxs.push(idx);
                 }
             }
         }
+        if !removed_idxs.is_empty() {
+            self.scrub_trees(&removed_idxs);
+        }
         removed
+    }
+
+    /// Drop every reference to a freed `NodeIndex` from the cached spanning
+    /// trees + distances, maintaining the invariant: the trees NEVER reference
+    /// an index that has left the graph. This is load-bearing for safety, not
+    /// just tidiness — `StableUnGraph` REUSES a freed index on the next
+    /// `add_node`, and the tree recompute is COALESCED onto a later tick (D2c),
+    /// so a stale `trees` entry holding a freed index would, after a reuse,
+    /// resolve via `node_weight` to a DIFFERENT live node and silently misroute
+    /// a Push toward the wrong neighbour during the coalescing window. (The
+    /// `node_weight` guard in the accessors only catches a still-absent index;
+    /// it cannot catch a reused one.) Scrubbing the freed indices here leaves
+    /// the trees consistent-but-possibly-incomplete — affected routes resolve
+    /// to None (drop) until the tick recompute rebuilds them, exactly the
+    /// bounded staleness D2c already accepts, and NEVER an aliased misroute.
+    fn scrub_trees(&mut self, freed: &[NodeIndex]) {
+        for &f in freed {
+            // the tree ROOTED at a freed index is meaningless; a node that
+            // reuses the index must not read the departed node's tree.
+            if let Some(tree) = self.trees.get_mut(f.index()) {
+                *tree = Tree::default();
+            }
+            if let Some(dist) = self.distances.get_mut(f.index()) {
+                *dist = f64::INFINITY;
+            }
+        }
+        for tree in &mut self.trees {
+            tree.children.retain(|c| !freed.contains(c));
+            if tree.parent.is_some_and(|p| freed.contains(&p)) {
+                tree.parent = None;
+            }
+            // a freed index appearing as a direction VALUE (a first hop), or as
+            // a direction SLOT (a destination), is nulled.
+            for dir in &mut tree.directions {
+                if dir.is_some_and(|d| freed.contains(&d)) {
+                    *dir = None;
+                }
+            }
+            for &f in freed {
+                if let Some(slot) = tree.directions.get_mut(f.index()) {
+                    *slot = None;
+                }
+            }
+        }
     }
 
     /// Ingest a `LinkStateList` received on link `src_link_id`: learn its
@@ -634,7 +698,7 @@ impl LinkstateNetwork {
                 // graph holds an edge to a vertex it cannot index. Skip it
                 // rather than emit an unresolvable psid; zenoh error!s the same
                 // (`network.rs:317`).
-                log::error!("building linkstate: link dest {dest_zid:02x?} is not in the graph");
+                log::error!("building linkstate: link dest {dest_zid:?} is not in the graph");
             }
         }
         // options: P (zid) only in the FULL variant — the links-only variant
@@ -674,15 +738,12 @@ impl LinkstateNetwork {
     /// node, full state. Mirrors zenoh `make_msg` over all nodes
     /// (`network.rs:350-365`).
     pub fn build_linkstate_list(&self) -> LinkstateListOwned {
-        let link_states = self
-            .graph
-            .node_indices()
-            .map(|idx| self.make_link_state(idx, false))
-            .collect::<Vec<_>>();
-        LinkstateListOwned {
-            num_link_states: link_states.len() as u64,
-            link_states,
-        }
+        into_list(
+            self.graph
+                .node_indices()
+                .map(|idx| self.make_link_state(idx, false))
+                .collect(),
+        )
     }
 
     /// Build the re-flood payload `propagate_link_states` (c3d-2) sends onward
@@ -696,21 +757,18 @@ impl LinkstateNetwork {
     /// per-link `out` list (`network.rs:645-678`: new = `Details{zid:true}`,
     /// updated = `Details{zid:false}`).
     pub fn build_linkstate_split(&self, new: &[Zid], updated: &[Zid]) -> LinkstateListOwned {
-        let link_states = new
-            .iter()
-            .filter_map(|zid| self.get_idx(zid))
-            .map(|idx| self.make_link_state(idx, false))
-            .chain(
-                updated
-                    .iter()
-                    .filter_map(|zid| self.get_idx(zid))
-                    .map(|idx| self.make_link_state(idx, true)),
-            )
-            .collect::<Vec<_>>();
-        LinkstateListOwned {
-            num_link_states: link_states.len() as u64,
-            link_states,
-        }
+        into_list(
+            new.iter()
+                .filter_map(|zid| self.get_idx(zid))
+                .map(|idx| self.make_link_state(idx, false))
+                .chain(
+                    updated
+                        .iter()
+                        .filter_map(|zid| self.get_idx(zid))
+                        .map(|idx| self.make_link_state(idx, true)),
+                )
+                .collect(),
+        )
     }
 
     /// Resolve a received list from psid-space to zid-space against the
@@ -894,10 +952,20 @@ impl LinkstateNetwork {
                     (idx, was_placeholder)
                 }
             };
-            self.rebuild_edges(idx);
+            // A node this entry advertises but we did not yet know is introduced
+            // as a placeholder and must re-flood FULL so a downstream learns it
+            // (zenoh `new_nodes.push`, `network.rs:763`). Deduped — it may also
+            // carry its own entry later in the list (processed as `new` then).
+            for placeholder in self.rebuild_edges(idx) {
+                if !changes.new.contains(&placeholder) {
+                    changes.new.push(placeholder);
+                }
+            }
             let zid = self.graph[idx].zid;
             if is_new {
-                changes.new.push(zid);
+                if !changes.new.contains(&zid) {
+                    changes.new.push(zid);
+                }
             } else {
                 changes.updated.push(zid);
             }
@@ -920,10 +988,14 @@ impl LinkstateNetwork {
     /// `idx1` back (a mutual link), introducing a placeholder node for a
     /// not-yet-known destination, and pruning edges `idx1` no longer
     /// advertises. Mirrors zenoh's edge-rebuild loop (`network.rs:742-783`):
-    /// an edge exists iff both endpoints advertise the link.
-    fn rebuild_edges(&mut self, idx1: NodeIndex) {
+    /// an edge exists iff both endpoints advertise the link. Returns the zids
+    /// of any placeholders it INTRODUCED — zenoh pushes a reintroduced node
+    /// into `new_nodes` so it re-floods onward (`network.rs:755-764`), which
+    /// `process_linkstates` mirrors via `changes.new`.
+    fn rebuild_edges(&mut self, idx1: NodeIndex) -> Vec<Zid> {
         let zid1 = self.graph[idx1].zid;
         let link_zids: Vec<Zid> = self.graph[idx1].links.keys().cloned().collect();
+        let mut introduced = Vec::new();
 
         // add / update mutual edges; introduce unknown destinations so a
         // later mutual advertisement can complete the edge.
@@ -936,6 +1008,7 @@ impl LinkstateNetwork {
                 }
                 None => {
                     self.ensure_node(*dest);
+                    introduced.push(*dest);
                 }
             }
         }
@@ -951,6 +1024,7 @@ impl LinkstateNetwork {
         for edge in stale {
             self.graph.remove_edge(edge);
         }
+        introduced
     }
 
     /// Set the petgraph edge weight between two mutually-linked nodes. The
@@ -974,11 +1048,11 @@ impl LinkstateNetwork {
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         if zid1 > zid2 {
-            hasher.write(&zid_to_le_16(&zid2));
-            hasher.write(&zid_to_le_16(&zid1));
+            hasher.write(&zid2.le16());
+            hasher.write(&zid1.le16());
         } else {
-            hasher.write(&zid_to_le_16(&zid1));
-            hasher.write(&zid_to_le_16(&zid2));
+            hasher.write(&zid1.le16());
+            hasher.write(&zid2.le16());
         }
 
         let w1 = self.graph[idx1]
@@ -1205,6 +1279,66 @@ mod tests {
 
     fn zid(b: u8) -> Zid {
         Zid::from_slice(&[b, b, b, b])
+    }
+
+    #[test]
+    fn zid_ord_matches_vec_u8_ord_including_zero_extended_prefixes() {
+        // F2 (session-review): the canonical zero-padding makes the derived Zid
+        // Ord byte-for-byte identical to the trimmed Vec<u8> ordering it
+        // replaced. This is LOAD-BEARING for the cross-impl edge-jitter
+        // tie-break (update_edge orders the pair by Ord, then hashes le16) and
+        // was previously asserted only in prose. The decisive cases are
+        // zero-extended prefixes — where the [u8;16] bytes compare equal and the
+        // `len` field must break the tie the same way Vec<u8> does.
+        let cases: &[&[u8]] = &[
+            &[1],
+            &[1, 0],
+            &[1, 5],
+            &[2],
+            &[1, 9],
+            &[1, 9, 3],
+            &[0xff; 15],
+            &[0xff; 16],
+        ];
+        for a in cases {
+            for b in cases {
+                assert_eq!(
+                    Zid::from_slice(a).cmp(&Zid::from_slice(b)),
+                    a.to_vec().cmp(&b.to_vec()),
+                    "Zid Ord must match Vec<u8> Ord for {a:?} vs {b:?}"
+                );
+            }
+        }
+        // the specific prefix tie-break the invariant rests on.
+        assert!(Zid::from_slice(&[1]) < Zid::from_slice(&[1, 0]));
+        assert!(Zid::from_slice(&[1, 0]) < Zid::from_slice(&[1, 5]));
+    }
+
+    #[test]
+    fn zid_eq_hash_truncation_and_from_are_canonical() {
+        use std::collections::HashSet;
+        // Eq + Hash consistency — Zid is a HashMap/HashSet key (idx_by_zid,
+        // Link mappings, the subs table), so equal trimmed bytes must hash +
+        // compare equal regardless of how they were built.
+        assert_eq!(Zid::from_slice(&[1, 2, 3]), Zid::from_slice(&[1, 2, 3]));
+        let mut set = HashSet::new();
+        assert!(set.insert(Zid::from_slice(&[1, 2, 3])));
+        assert!(
+            !set.insert(Zid::from_slice(&[1, 2, 3])),
+            "an equal zid dedups in a HashSet (Eq/Hash agree)"
+        );
+        assert!(
+            set.insert(Zid::from_slice(&[1, 2, 4])),
+            "a distinct zid is a new member"
+        );
+        // a >16-byte slice truncates to the 16-byte canonical form.
+        let big = Zid::from_slice(&[0xAB; 17]);
+        assert_eq!(big.len(), 16);
+        assert_eq!(big.as_slice(), &[0xAB; 16]);
+        // From<&[u8]> / From<Vec<u8>> (the session(Vec<u8>) -> routing boundary)
+        // agree with from_slice.
+        assert_eq!(Zid::from(&[1, 2][..]), Zid::from_slice(&[1, 2]));
+        assert_eq!(Zid::from(vec![1, 2]), Zid::from_slice(&[1, 2]));
     }
 
     #[test]
@@ -1489,6 +1623,12 @@ mod tests {
         // both stay in the graph — still reachable via the 0x07 relay).
         net.ingest_linkstate_list(link, list(vec![entry(1, 2, None, Some(2), &[])]));
         assert_eq!(net.edge_count(), 0, "dropped link => edge pruned");
+        // explicitly: the edge went, but A and B did NOT (still reachable via the
+        // 0x07 relay) — so edge_count==0 is the edge prune, not a node prune.
+        assert!(
+            net.get_idx(&zid(0xAA)).is_some() && net.get_idx(&zid(0xBB)).is_some(),
+            "A and B survive (only the A<->B edge was pruned, not the nodes)"
+        );
     }
 
     #[test]
@@ -1858,6 +1998,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_reused_node_index_does_not_alias_a_stale_tree_entry() {
+        // F1 (session-review): StableUnGraph REUSES a freed index on the next
+        // add_node, and the tree recompute is COALESCED (D2c), so between a
+        // prune (which frees an index) and the next compute_trees a NEW node can
+        // reuse that index. The `node_weight` accessor guard only catches a
+        // still-absent index — it would resolve a REUSED one to the wrong live
+        // node and misroute. remove_detached_nodes scrubs the freed indices from
+        // the trees so no stale entry can alias the reused node.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let la = net.add_link(zid(0xAA), 2);
+        // self -- A -- C: C is reachable only via A, so self's tree routes toward
+        // C through A (directions[C] = A).
+        net.ingest_linkstate_list(
+            la,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(12, 5, Some(&zid(0xCC)), Some(2), &[11]), // C -> A
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12]), // A -> self, C
+            ]),
+        );
+        net.compute_trees();
+        let c_idx = net.get_idx(&zid(0xCC)).expect("C present");
+        assert_eq!(
+            net.next_hop(&zid(0x01), &zid(0xCC)),
+            Some(zid(0xAA)),
+            "self routes toward C via A"
+        );
+
+        // Prune C (A re-advertises without it) — freeing C's index. NO recompute
+        // (the coalesced D2c window).
+        let changes = net.ingest_linkstate_list(
+            la,
+            list(vec![entry(11, 6, Some(&zid(0xAA)), Some(2), &[10])]),
+        );
+        assert_eq!(changes.removed, vec![zid(0xCC)]);
+
+        // A new node D reuses C's freed StableGraph index.
+        let d_idx = net.ensure_node(zid(0xDD));
+        assert_eq!(d_idx, c_idx, "D reused C's freed index");
+
+        // Without the scrub these would alias to C's stale entries: next_hop
+        // would return C's old hop A, and tree_children_of(D) would return the
+        // departed C's stale tree. The scrub makes both resolve to nothing.
+        assert_eq!(
+            net.next_hop(&zid(0x01), &zid(0xDD)),
+            None,
+            "no stale next hop toward the reused-index node D (not C's old hop A)"
+        );
+        assert!(
+            net.tree_children_of(&zid(0xDD)).is_empty(),
+            "D has no tree rooted at the reused index (not C's stale tree)"
+        );
+    }
+
+    #[test]
+    fn a_reintroduced_placeholder_re_floods_as_new() {
+        // F3 (session-review): a node advertised as a link dest but not (or no
+        // longer) in the graph is reintroduced as a placeholder; zenoh pushes it
+        // into new_nodes so it re-floods onward (network.rs:763). It must appear
+        // in changes.new even though it carries no own entry in this list.
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0xAA), 2);
+        // A advertises self + B; B advertises A. The link learns psid 12 -> B.
+        net.ingest_linkstate_list(
+            l,
+            list(vec![
+                entry(10, 0, Some(&zid(0x01)), Some(2), &[]),
+                entry(12, 5, Some(&zid(0xBB)), Some(2), &[11]), // B -> A
+                entry(11, 5, Some(&zid(0xAA)), Some(2), &[10, 12]), // A -> self, B
+            ]),
+        );
+        // A drops B -> B detaches and is pruned (the link keeps the psid 12 -> B
+        // mapping).
+        net.ingest_linkstate_list(
+            l,
+            list(vec![entry(11, 6, Some(&zid(0xAA)), Some(2), &[10])]),
+        );
+        assert!(net.get_idx(&zid(0xBB)).is_none(), "B was pruned");
+        // A re-advertises a link to B (psid 12 still mapped) with NO B entry: B
+        // is reintroduced as a placeholder and re-floods as new.
+        let changes = net.ingest_linkstate_list(
+            l,
+            list(vec![entry(11, 7, Some(&zid(0xAA)), Some(2), &[10, 12])]),
+        );
+        assert!(
+            changes.new.contains(&zid(0xBB)),
+            "the reintroduced placeholder B is reported in changes.new for re-flood"
+        );
+    }
+
     // ── c3c-3 D4 Details split (full-for-new / links-only-for-updated) ──
 
     #[test]
@@ -1922,6 +2153,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_links_only_entry_for_an_unmapped_psid_is_dropped() {
+        // The D4 SAFETY boundary (session-review): a links-only re-flood (zid
+        // omitted) is valid ONLY against a prior full mapping. An entry with no
+        // zid whose psid the link never learned must be DROPPED — never admitted
+        // with a guessed identity. (Also path-covers the E2 unresolvable-psid
+        // error log in convert.)
+        let mut net = LinkstateNetwork::new(zid(0x01), 2);
+        let l = net.add_link(zid(0x07), 2);
+        let links_only_unmapped = LinkstateOwned {
+            options: 0, // P clear -> no zid (links-only)
+            psid: 50,   // never mapped on this link
+            sn: 5,
+            zid_len: None,
+            zid: None,
+            whatami: Some(2),
+            num_locators: None,
+            locators: None,
+            links_len: 0,
+            links: Vec::new(),
+            weights: None,
+        };
+        let changes = net.ingest_linkstate_list(l, list(vec![links_only_unmapped]));
+        assert!(
+            changes.new.is_empty() && changes.updated.is_empty(),
+            "an unmapped links-only entry is dropped, not admitted"
+        );
+        assert_eq!(
+            net.node_count(),
+            2,
+            "only self + the link peer 0x07; the zid-less unmapped node never entered the graph"
+        );
+    }
+
     /// Independently recompute the default-weight jittered edge weight the
     /// way zenoh does — hashing the 16-byte zero-padded zids. Used to pin
     /// that `update_edge` pads (not trims); a trimmed-bytes hash would
@@ -1930,8 +2195,8 @@ mod tests {
         use std::hash::Hasher;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let (lo, hi) = if a > b { (b, a) } else { (a, b) };
-        h.write(&super::zid_to_le_16(lo));
-        h.write(&super::zid_to_le_16(hi));
+        h.write(&lo.le16());
+        h.write(&hi.le16());
         let jitter = 1.0 + 0.01 * ((h.finish() as u32) as f64 / u32::MAX as f64);
         LinkEdgeWeight::DEFAULT as f64 * jitter
     }

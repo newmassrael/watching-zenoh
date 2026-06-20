@@ -143,24 +143,24 @@ impl LinkstatepeerSubs {
     /// target via [`keyexpr_intersect_patterns`] — the same SSOT the local
     /// subscriber registry uses (zenoh's intersection route matching). An
     /// O(subscriptions) scan; the resource-tree fold for sublinear matching is
-    /// a tracked performance deferral (see the module docs). A literal target
-    /// against a literal key reduces to byte equality, so exact interest is
-    /// unchanged. Peers are deduped across multiple matching keys.
+    /// a tracked performance deferral (see the module docs). Note: this runs on
+    /// the DATA path ([`interested_remote`](Self::interested_remote) is called
+    /// per forwarded Push / publish), so it is a per-message keyexpr-intersection
+    /// scan, not the prior single `HashMap::get`. A literal target against a
+    /// literal key reduces to byte equality, so exact interest is unchanged.
+    /// Peers are deduped across multiple matching keys via a `HashSet` (`Zid` is
+    /// `Copy + Hash`), not an O(matches²) linear membership scan.
     fn matching_peers(&self, target: &str, exclude: Option<&Zid>) -> Vec<Zid> {
         let target_chunks: Vec<&str> = target.split('/').collect();
-        let mut out: Vec<Zid> = Vec::new();
+        let mut out: HashSet<Zid> = HashSet::new();
         for (sub, peers) in &self.by_key {
             let sub_chunks: Vec<&str> = sub.split('/').collect();
             if !keyexpr_intersect_patterns(&sub_chunks, &target_chunks) {
                 continue;
             }
-            for peer in peers {
-                if exclude != Some(peer) && !out.contains(peer) {
-                    out.push(*peer);
-                }
-            }
+            out.extend(peers.iter().filter(|p| exclude != Some(*p)).copied());
         }
-        out
+        out.into_iter().collect()
     }
 
     /// The peers interested in `keyexpr`, as a snapshot — every interested peer
