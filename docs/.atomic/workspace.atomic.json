@@ -44390,6 +44390,58 @@
         "LOCAL UNPUSHED: 311tb(1e409cb) + 311tc on origin/main=f44d54f. Push only after explicit consent (pre-push full run-ci; idle)."
       ]
     },
+    "Round 311td": {
+      "decision_summary": "R311td: handshake whatami face-wiring (gossip-policy 'F1' prereq). The peer's WhatAmI captured at INIT is threaded into the graph, so a neighbour records its real role not a hardcoded peer.",
+      "changes_bullets": [
+        "F discovery atom 2 ('F1', gossip-policy prereq): the link-state graph records a neighbour's REAL WhatAmI (router/peer/client), replacing the WHATAMI_PEER hardcode in linkstate_forward register.",
+        "Capture (session-core): SessionLinkActions gains a peer_whatami slot + peer_whatami_wire(); both Init arms capture body.whatami() (raw 2-bit wire) beside remote_peer_zid; reset on re-handshake.",
+        "Convert (driver): whatami_from_wire maps the 2-bit wire role to the API-form byte (inverse of init_cbyte's (api>>1)&3; zenoh-pico _z_whatami_from_uint8); reserved 0b11 -> None (never emitted).",
+        "Thread (driver): peer_whatami_routing mirrors peer_zid_routing -- raw datum stays in routing-agnostic session-core, wire->API at the driver; absent/non-conforming falls back to WHATAMI_PEER.",
+        "Behaviour-neutral for all-peer: wire Peer(1) -> API 2 = WHATAMI_PEER (the old hardcode); spanning-tree stays whatami-agnostic. Only mixed-role meshes now record the true role."
+      ],
+      "verification_bullets": [
+        "Gates: wz-runtime-tokio routing-peer lib 365 (+3: whatami_from_wire mapping incl 0b11->None, register threads router+client roles, absent->WHATAMI_PEER fallback). session_fsm_inbound_dispatch 25 (+1).",
+        "Capture test (both directions): r311td reuses the proven r311qh wire frames, changing only the cbyte whatami bits; asserts peer_whatami_wire()=Some(0) (InitSyn Router) / Some(2) (InitAck Client).",
+        "clippy -D warnings + fmt clean (session-core, runtime-tokio). Demo builds all 4 routing axes. New pub field breaks no consumer (only the constructor builds SessionLinkActions; no struct literal elsewhere).",
+        "Grounding (direct read): zenoh-pico transport.c:31-37 (_z_whatami_to/from_uint8); init_body whatami()=cbyte&0x03; graph add_link stores Node.whatami; ingest is_valid_whatami guards the link-state path."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311td = F discovery atom 2 ('F1'): handshake whatami is now threaded onto the face, so the graph records a neighbour's real role. Behaviour-neutral for all-peer; unblocks the gossip-policy atom.",
+        "Next F (gossip-policy): port zenoh propagate_locators per-target gate (network.rs:406-418); thread the target's whatami into make_link_state to end the locator flood-to-all (divergence lib.rs:492-503).",
+        "Then autoconnect: connect_discovered_peer dials gossiped locators (node_locators ready); needs a driver dial seam + AutoConnect mask/strategy (zenoh common.rs:28-71). F1's whatami gates it.",
+        "Tracked defer: Vec<String> locator -> typed Locator newtype (the Zid=Vec<u8> debt repeat, own structural round). Lesson: verified wire->api against zenoh-pico transport.c by direct read, not memory.",
+        "LOCAL UNPUSHED: 311td on origin/main=dd93ae5. Verified host lanes (build/targeted tests/clippy/fmt + 4 demo axes); full run-ci pending. Push only after explicit consent (full run-ci; idle first)."
+      ],
+      "publishable_decision_summary": "R311td: handshake whatami face-wiring (gossip-policy 'F1' prereq). The peer's WhatAmI captured at INIT is threaded into the graph, so a neighbour records its real role not a hardcoded peer.",
+      "publishable_changes_bullets": [
+        "F discovery atom 2 ('F1', gossip-policy prereq): the link-state graph records a neighbour's REAL WhatAmI (router/peer/client), replacing the WHATAMI_PEER hardcode in linkstate_forward register.",
+        "Capture (session-core): SessionLinkActions gains a peer_whatami slot + peer_whatami_wire(); both Init arms capture body.whatami() (raw 2-bit wire) beside remote_peer_zid; reset on re-handshake.",
+        "Convert (driver): whatami_from_wire maps the 2-bit wire role to the API-form byte (inverse of init_cbyte's (api>>1)&3; zenoh-pico _z_whatami_from_uint8); reserved 0b11 -> None (never emitted).",
+        "Thread (driver): peer_whatami_routing mirrors peer_zid_routing -- raw datum stays in routing-agnostic session-core, wire->API at the driver; absent/non-conforming falls back to WHATAMI_PEER.",
+        "Behaviour-neutral for all-peer: wire Peer(1) -> API 2 = WHATAMI_PEER (the old hardcode); spanning-tree stays whatami-agnostic. Only mixed-role meshes now record the true role."
+      ],
+      "publishable_verification_bullets": [
+        "Gates: wz-runtime-tokio routing-peer lib 365 (+3: whatami_from_wire mapping incl 0b11->None, register threads router+client roles, absent->WHATAMI_PEER fallback). session_fsm_inbound_dispatch 25 (+1).",
+        "Capture test (both directions): r311td reuses the proven r311qh wire frames, changing only the cbyte whatami bits; asserts peer_whatami_wire()=Some(0) (InitSyn Router) / Some(2) (InitAck Client).",
+        "clippy -D warnings + fmt clean (session-core, runtime-tokio). Demo builds all 4 routing axes. New pub field breaks no consumer (only the constructor builds SessionLinkActions; no struct literal elsewhere).",
+        "Grounding (direct read): zenoh-pico transport.c:31-37 (_z_whatami_to/from_uint8); init_body whatami()=cbyte&0x03; graph add_link stores Node.whatami; ingest is_valid_whatami guards the link-state path."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311td = F discovery atom 2 ('F1'): handshake whatami is now threaded onto the face, so the graph records a neighbour's real role. Behaviour-neutral for all-peer; unblocks the gossip-policy atom.",
+        "Next F (gossip-policy): port zenoh propagate_locators per-target gate (network.rs:406-418); thread the target's whatami into make_link_state to end the locator flood-to-all (divergence lib.rs:492-503).",
+        "Then autoconnect: connect_discovered_peer dials gossiped locators (node_locators ready); needs a driver dial seam + AutoConnect mask/strategy (zenoh common.rs:28-71). F1's whatami gates it.",
+        "Tracked defer: Vec<String> locator -> typed Locator newtype (the Zid=Vec<u8> debt repeat, own structural round). Lesson: verified wire->api against zenoh-pico transport.c by direct read, not memory.",
+        "LOCAL UNPUSHED: 311td on origin/main=dd93ae5. Verified host lanes (build/targeted tests/clippy/fmt + 4 demo axes); full run-ci pending. Push only after explicit consent (full run-ci; idle first)."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

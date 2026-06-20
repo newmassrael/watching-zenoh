@@ -304,6 +304,18 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// role-agnostic remote identity a face exposes once Established. Reset on
     /// re-handshake alongside the other captured slots.
     pub remote_peer_zid: R::Mutex<Option<Vec<u8>>>,
+    /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
+    /// (`InitBody::whatami()` = `cbyte & 0x03`: 0 Router, 1 Peer, 2 Client),
+    /// captured at handshake from BOTH the inbound InitSyn (Accepting side) and
+    /// the inbound InitAck (Initiating side), alongside
+    /// [`remote_peer_zid`](Self::remote_peer_zid). Stored RAW — the 2-bit wire
+    /// datum, NOT the API-form role byte: session-core is `#![no_std]` and
+    /// routing-agnostic, so the routing boundary (the `linkstate_forward` driver)
+    /// maps it to the graph's API-form WHATAMI_* role, exactly as it maps the raw
+    /// `peer_zid` bytes to a routing `Zid`. Reset on re-handshake alongside the
+    /// other captured slots. The gossip-policy prerequisite ("F1"): the graph can
+    /// record a neighbour's real role instead of assuming peer.
+    pub peer_whatami: R::Mutex<Option<u8>>,
     /// R89 — `cookie` field captured from the most recent inbound
     /// `OpenSyn` frame (`InboundFrame::Open { is_ack: false, .. }`).
     /// Set by `handle_inbound` for the Accepting side; consumed by
@@ -682,6 +694,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             clock,
             inbound_peer_zid: R::new_mutex(None::<Vec<u8>>),
             remote_peer_zid: R::new_mutex(None::<Vec<u8>>),
+            peer_whatami: R::new_mutex(None::<u8>),
             inbound_opensyn_cookie: R::new_mutex(None::<Vec<u8>>),
             // R121f1 — default ext chains seed both Init roles with the
             // patch-extension entry that zenoh-pico's accept-side
@@ -830,6 +843,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// it is distinct from the R86 cookie-HMAC slot.
     pub fn peer_zid(&self) -> Option<Vec<u8>> {
         R::with_mutex_mut(&self.remote_peer_zid, |slot| slot.clone())
+    }
+
+    /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
+    /// (0 Router, 1 Peer, 2 Client), or `None` before the INIT exchange populated
+    /// it. The raw wire datum (see [`peer_whatami`](Self::peer_whatami)); the
+    /// routing boundary maps it to the graph's API-form role. Mirrors
+    /// [`peer_zid`](Self::peer_zid) — raw wire identity here, routing-form derived
+    /// at the driver — keeping session-core routing-agnostic.
+    pub fn peer_whatami_wire(&self) -> Option<u8> {
+        R::with_mutex_mut(&self.peer_whatami, |slot| *slot)
     }
 
     /// R311kd — the session's effective outbound frame budget: the
@@ -988,6 +1011,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 R::with_mutex_mut(&self.remote_peer_zid, |slot| {
                     *slot = Some(body.zid.as_slice().to_vec());
                 });
+                // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
+                // alongside its zid. Both Init arms capture it (a face may be
+                // opened from either side); the routing boundary maps wire -> the
+                // graph's API-form role. The gossip-policy prerequisite ("F1").
+                R::with_mutex_mut(&self.peer_whatami, |slot| {
+                    *slot = Some(body.whatami());
+                });
                 if let Some(cookie) = &body.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
                         *slot = Some(cookie.as_slice().to_vec());
@@ -1023,6 +1053,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // regardless of which side opened it.
                 R::with_mutex_mut(&self.remote_peer_zid, |slot| {
                     *slot = Some(body.zid.as_slice().to_vec());
+                });
+                // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
+                // alongside its zid; see the InitAck arm above for why both
+                // directions capture it (the gossip-policy "F1" prerequisite).
+                R::with_mutex_mut(&self.peer_whatami, |slot| {
+                    *slot = Some(body.whatami());
                 });
                 // R121d — capture the peer's announced sizing caps
                 // so `init_ack_params` can enforce the wire-spec
@@ -3411,6 +3447,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             R::with_mutex_mut(&self.last_outbound_at, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_zid, |slot| *slot = None);
             R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot = None);
+            R::with_mutex_mut(&self.peer_whatami, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot = None);
             // R311ke — the RX SN gate is handshake-scoped: the reopen
             // handshake's OpenSyn/OpenAck re-seeds both channels.

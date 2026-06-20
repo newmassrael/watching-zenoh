@@ -112,7 +112,7 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export so the peer-loop caller (the demo) names the neighbour role by
 /// the same const the graph + forwarder use, not a bare `0x02` literal.
-pub use wz_routing_graph::{Zid, WHATAMI_PEER};
+pub use wz_routing_graph::{Zid, WHATAMI_CLIENT, WHATAMI_PEER, WHATAMI_ROUTER};
 
 /// A [`FaceForwarder`] that maintains the [`LinkstateNetwork`] topology
 /// graph from the face lifecycle + inbound `OAM_LINKSTATE` messages. The
@@ -1106,6 +1106,37 @@ fn peer_zid_routing(actions: &SessionLinkActions) -> Option<Zid> {
         .and_then(|bytes| Zid::try_from(bytes).ok())
 }
 
+/// Map the 2-bit INIT wire whatami (`SessionLinkActions::peer_whatami_wire` =
+/// `InitBody::whatami()` = `cbyte & 0x03`) to the graph's API-form role byte (the
+/// [`WHATAMI_ROUTER`] / [`WHATAMI_PEER`] / [`WHATAMI_CLIENT`] set). Inverse of the
+/// handshake's `init_cbyte` packing (`(api >> 1) & 0x03`); mirrors zenoh-pico
+/// `_z_whatami_from_uint8` (`1 << (b & 0x03)`, transport.c:35-37). Returns `None`
+/// for the reserved 4th bit-pattern (wire `0b11`) that a conforming encoder never
+/// emits — so a malformed peer cannot inject an out-of-set role into the graph
+/// (the valid role set is upheld by construction, not by a downstream check).
+fn whatami_from_wire(wire: u8) -> Option<u8> {
+    match wire & 0x03 {
+        0 => Some(WHATAMI_ROUTER),
+        1 => Some(WHATAMI_PEER),
+        2 => Some(WHATAMI_CLIENT),
+        _ => None, // 0b11 reserved — never produced by `init_cbyte`
+    }
+}
+
+/// The neighbour's WhatAmI role for [`add_link`](LinkstateNetwork::add_link),
+/// derived from the handshake (R311td "F1"). Mirrors [`peer_zid_routing`]: the
+/// raw wire datum lives in routing-agnostic session-core, and the routing
+/// interpretation (wire -> API form via [`whatami_from_wire`]) lives here at the
+/// driver boundary. Falls back to [`WHATAMI_PEER`] when the role is absent (a
+/// face registered before the INIT exchange) or non-conforming — a peer-mesh's
+/// default and the pre-F1 behaviour, so an all-peer deployment is unchanged.
+fn peer_whatami_routing(actions: &SessionLinkActions) -> u8 {
+    actions
+        .peer_whatami_wire()
+        .and_then(whatami_from_wire)
+        .unwrap_or(WHATAMI_PEER)
+}
+
 /// Whether `zid` is one of `children` — the tree next hops a fan-out targets.
 /// The shared membership check the originate paths ([`publish`](LinkstateForwarder::publish)
 /// / [`declare_subscription`](LinkstateForwarder::declare_subscription)) and
@@ -1152,18 +1183,22 @@ impl FaceForwarder for LinkstateForwarder {
         // handshake (R311qi). Without a zid there is no graph identity to key
         // on, so the face is held (its send seam kept) but not connected — it
         // cannot route topology, and there is nothing to bootstrap it with.
-        // The real handshake whatami is not yet threaded onto the face (a
-        // tracked deferral — spanning-tree forwarding is whatami-agnostic;
-        // only gossip/autoconnect would need the true role), so a neighbour is
-        // recorded as WHATAMI_PEER.
+        // R311td ("F1") — the neighbour's real handshake WhatAmI is now threaded
+        // onto the face: `peer_whatami_routing` maps the wire role captured at the
+        // INIT exchange to the graph's API-form byte (absent / non-conforming ->
+        // WHATAMI_PEER, the peer-mesh default). Spanning-tree forwarding stays
+        // whatami-agnostic, so this is behaviour-neutral for an all-peer mesh; it
+        // is the gossip-policy / autoconnect prerequisite (those gate per the
+        // target's true role).
         let added = peer_zid_routing(actions).map(|neighbour| {
+            let neighbour_whatami = peer_whatami_routing(actions);
             let mut net = self.net.borrow_mut();
             // Whether this neighbour is NEW to the GRAPH (not merely a new face):
             // a second link to an already-known peer re-advertises only self's
             // links, not the neighbour again — zenoh add_link's `new` flag
             // (`network.rs:826`). Queried before add_link, under the one borrow.
             let neighbour_was_new = net.get_node(&neighbour).is_none();
-            let link_id = net.add_link(neighbour, WHATAMI_PEER);
+            let link_id = net.add_link(neighbour, neighbour_whatami);
             (link_id, neighbour, neighbour_was_new)
         });
         self.faces.borrow_mut().insert(
@@ -1372,6 +1407,18 @@ mod tests {
         (actions, sink)
     }
 
+    /// A peer face (as [`peer_face`]) that additionally records the remote's
+    /// WhatAmI as the raw 2-bit INIT wire form, so a test can assert the role
+    /// `register` threads into the graph (R311td "F1").
+    fn peer_face_whatami(
+        peer: Zid,
+        wire_whatami: u8,
+    ) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
+        let (actions, sink) = peer_face(peer);
+        TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(wire_whatami));
+        (actions, sink)
+    }
+
     /// A one-entry LinkStateList where the entry advertises its own zid.
     fn list_with_node(psid: u64, sn: u64, node: u8) -> LinkstateListOwned {
         LinkstateListOwned {
@@ -1399,6 +1446,52 @@ mod tests {
         fwd.register(FaceId(7), &face);
         // self + the neighbour node.
         assert_eq!(fwd.net.borrow().node_count(), 2);
+    }
+
+    #[test]
+    fn whatami_from_wire_maps_wire_to_api() {
+        // The 2-bit INIT wire role -> the graph's API-form byte (inverse of
+        // init_cbyte's `(api >> 1) & 3`; zenoh-pico `_z_whatami_from_uint8`).
+        assert_eq!(whatami_from_wire(0), Some(WHATAMI_ROUTER));
+        assert_eq!(whatami_from_wire(1), Some(WHATAMI_PEER));
+        assert_eq!(whatami_from_wire(2), Some(WHATAMI_CLIENT));
+        // 0b11 is the reserved pattern a conforming encoder never emits.
+        assert_eq!(whatami_from_wire(3), None);
+    }
+
+    #[test]
+    fn register_threads_real_handshake_whatami() {
+        // R311td "F1": the neighbour's real role (not a hardcoded peer) lands on
+        // its graph node — a router neighbour and a client neighbour each record
+        // their true WhatAmI, the gossip-policy/autoconnect prerequisite.
+        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let (router, _r) = peer_face_whatami(zid(0xAA), 0); // wire 0 = Router
+        let (client, _c) = peer_face_whatami(zid(0xBB), 2); // wire 2 = Client
+        fwd.register(FaceId(1), &router);
+        fwd.register(FaceId(2), &client);
+        let net = fwd.net.borrow();
+        assert_eq!(
+            net.get_node(&zid(0xAA)).unwrap().whatami,
+            Some(WHATAMI_ROUTER)
+        );
+        assert_eq!(
+            net.get_node(&zid(0xBB)).unwrap().whatami,
+            Some(WHATAMI_CLIENT)
+        );
+    }
+
+    #[test]
+    fn register_without_handshake_whatami_falls_back_to_peer() {
+        // A face whose handshake role never surfaced (the pre-F1 path / a peer
+        // mesh) keeps the WHATAMI_PEER default, so an all-peer deployment is
+        // behaviour-unchanged by F1.
+        let fwd = LinkstateForwarder::new(zid(0x01), 2);
+        let (face, _sink) = peer_face(zid(0xAA)); // no whatami slot set
+        fwd.register(FaceId(7), &face);
+        assert_eq!(
+            fwd.net.borrow().get_node(&zid(0xAA)).unwrap().whatami,
+            Some(WHATAMI_PEER)
+        );
     }
 
     #[test]

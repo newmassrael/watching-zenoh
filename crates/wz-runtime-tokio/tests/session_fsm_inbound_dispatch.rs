@@ -914,6 +914,70 @@ fn r311qh_peer_zid_captures_the_remote_zid_both_directions() {
     );
 }
 
+/// R311td — the WhatAmI role slot (`peer_whatami`, read via `peer_whatami_wire()`)
+/// captures the remote peer's role (the raw 2-bit INIT wire form) from BOTH
+/// handshake directions, alongside the routing zid (mirrors the r311qh test). The
+/// gossip-policy prerequisite "F1": the driver maps this wire role to the graph's
+/// API-form WHATAMI_* byte. Reuses the proven r311qh wire frames, changing only
+/// the cbyte's whatami bits, so the frames parse identically.
+#[test]
+fn r311td_peer_whatami_captures_the_remote_role_both_directions() {
+    use wz_runtime_tokio::session_glue::InboundFrame;
+
+    // ── Accepting side: InitSyn, cbyte 0x30 = whatami Router (wire 0), zid_len 4 ──
+    let acc_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
+    let acc = new_session_actions(acc_driver, fixture_session_init_params(), TokioTime::new());
+    assert!(acc.peer_whatami_wire().is_none(), "role starts empty");
+    let initsyn = vec![
+        0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
+        0x05,
+        0x30, // version, cbyte (whatami Router wire 0, zid_len 4)
+        0xB0,
+        0xB1,
+        0xB2,
+        0xB3, // zid
+        0x00,
+        0x00,
+        0x00, // sn_res, batch_size
+    ];
+    let frame = acc.handle_inbound(&initsyn).expect("InitSyn parses");
+    assert!(matches!(frame, InboundFrame::Init { is_ack: false, .. }));
+    assert_eq!(
+        acc.peer_whatami_wire(),
+        Some(0),
+        "Accepting side captures the InitSyn whatami (wire Router)"
+    );
+
+    // ── Initiating side: InitAck, cbyte 0x32 = whatami Client (wire 2), zid_len 4 ──
+    let ini_driver: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopDriver::default());
+    let ini = new_session_actions(ini_driver, fixture_session_init_params(), TokioTime::new());
+    let initack = vec![
+        0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
+        0x05,
+        0x32, // version, cbyte (whatami Client wire 2, zid_len 4)
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3, // zid
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x04, // sn_res, batch_size, cookie_len VLE = 4
+        0xDE,
+        0xAD,
+        0xBE,
+        0xEF, // cookie
+    ];
+    let frame = ini.handle_inbound(&initack).expect("InitAck parses");
+    assert!(matches!(frame, InboundFrame::Init { is_ack: true, .. }));
+    assert_eq!(
+        ini.peer_whatami_wire(),
+        Some(2),
+        "Initiating side captures the InitAck whatami (wire Client)"
+    );
+}
+
 /// R311kv — handle_inbound captures the peer's OPEN-advertised lease
 /// into `peer_open_lease_ms` (pico adopts it at the same arrival
 /// points, unicast/transport.c:193/269). The wire rides the R311ku
