@@ -44,8 +44,13 @@ pub mod access_control;
 pub mod downsampling;
 pub mod low_pass;
 
+use wz_access_control::{AclFlow, AclPolicy};
 use wz_routing_graph::Zid;
 use wz_session_core::network_message::NetworkMessage;
+
+use self::access_control::AclInterceptor;
+use self::downsampling::{DownsamplingInterceptor, DownsamplingRule};
+use self::low_pass::{LowPassInterceptor, LowPassRule};
 
 /// The per-message context an [`Interceptor`] reads — the wz mirror of zenoh
 /// `InterceptorContext`. The resolved subject (who is on the other end of the
@@ -79,7 +84,7 @@ pub trait Interceptor {
 /// The composable interceptor chain — zenoh `InterceptorsChain`. A message is
 /// admitted only when EVERY interceptor admits it; an EMPTY chain admits
 /// everything, which is access control DISABLED (zenoh `AclConfig.enabled =
-/// false`). A deploy installs an enforcer via the forwarder's `set_acl_policy`.
+/// false`). A deploy installs the chain via the forwarder's `set_interceptors`.
 #[derive(Default)]
 pub struct InterceptorChain {
     interceptors: Vec<Box<dyn Interceptor>>,
@@ -107,5 +112,54 @@ impl InterceptorChain {
     /// empty chain admits.
     pub fn admit(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
         self.interceptors.iter().all(|i| i.intercept(ctx, msg))
+    }
+}
+
+/// The full §5.16 interceptor configuration — the SINGLE funnel a deploy fills,
+/// the wz mirror of the config slices zenoh's `interceptor_factories` reads
+/// (`config.downsampling()` / `config.access_control()` /
+/// `config.low_pass_filter()`, `net/routing/interceptor/mod.rs:133-136`). The
+/// forwarder builds BOTH flow chains from one value of this via
+/// [`build_chain`](Self::build_chain), so a deploy configures the whole pipeline
+/// once rather than through three independent, order-dependent, append-only
+/// setters (the footgun the R311tx review flagged: re-calling a setter
+/// duplicated an interceptor, and the cross-setter order was unspecified).
+#[derive(Default)]
+pub struct InterceptorConfig {
+    /// The access-control policy, or `None` for no ACL enforcer (zenoh
+    /// `AclConfig.enabled = false`).
+    pub acl: Option<AclPolicy>,
+    /// The downsampling (rate-limit) rules; empty installs no downsampling
+    /// interceptor.
+    pub downsampling: Vec<DownsamplingRule>,
+    /// The low-pass (per-key payload-size cap) rules; empty installs no low-pass
+    /// interceptor.
+    pub low_pass: Vec<LowPassRule>,
+}
+
+impl InterceptorConfig {
+    /// Build the interceptor chain for `flow`, in zenoh's FIXED factory order:
+    /// downsampling, then access-control, then low-pass (zenoh
+    /// `interceptor_factories` `mod.rs:133-136`, minus the qos-overwrite wz does
+    /// not implement). The order is deterministic regardless of which features a
+    /// deploy enables — unlike per-setter append order, which depended on call
+    /// order. Each flow gets its OWN interceptor instances (a per-flow
+    /// downsampling timer, a per-flow ACL enforcer bound to `flow`), as zenoh
+    /// keeps separate per-flow enforcers. An empty config yields an empty chain
+    /// (access control disabled — every message admitted).
+    pub fn build_chain(&self, flow: AclFlow) -> InterceptorChain {
+        let mut chain = InterceptorChain::new();
+        if !self.downsampling.is_empty() {
+            chain.push(Box::new(DownsamplingInterceptor::new(
+                self.downsampling.clone(),
+            )));
+        }
+        if let Some(policy) = &self.acl {
+            chain.push(Box::new(AclInterceptor::new(policy.clone(), flow)));
+        }
+        if !self.low_pass.is_empty() {
+            chain.push(Box::new(LowPassInterceptor::new(self.low_pass.clone())));
+        }
+        chain
     }
 }

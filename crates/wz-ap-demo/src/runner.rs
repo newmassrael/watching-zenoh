@@ -1248,8 +1248,8 @@ pub(crate) async fn run_peer(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
         default_autoconnect_matcher, AclConfig, AclFlow, AclMessage, AclPolicy, AclRule,
-        AutoConnect, AutoConnectStrategy, DownsamplingRule, LinkstateForwarder, LowPassRule,
-        Permission, SubjectSelector, WhatAmI, Zid,
+        AutoConnect, AutoConnectStrategy, DownsamplingRule, InterceptorConfig, LinkstateForwarder,
+        LowPassRule, Permission, SubjectSelector, WhatAmI, Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint;
 
@@ -1345,14 +1345,20 @@ pub(crate) async fn run_peer(
     };
     forwarder.set_self_locators(self_locators);
 
+    // §5.16 interceptor pipeline — assemble ONE InterceptorConfig from the
+    // opt-in flags and install it via the single config seam (the wz mirror of
+    // zenoh's interceptor_factories(config)), in zenoh's fixed factory order.
+    // Absent every flag the config is empty and both chains stay empty (access
+    // control disabled, every message admitted).
+    let mut interceptor_config = InterceptorConfig::default();
+
     // `--acl-deny <keyexpr>`: opt this peer into §5.16 access control. An
-    // allow-default policy with one ingress deny rule on the keyexpr, for every
+    // allow-default policy with one deny rule per flow on the keyexpr, for every
     // peer subject — the smallest real ACL. It governs the data plane (Put /
     // Delete) AND the control plane (DeclareSubscriber), so a neighbour can
     // neither publish to nor subscribe on the denied keyexpr through this node;
-    // both are dropped at ingress (not relayed onward), the wz analogue of a
-    // router carrying an IngressAclEnforcer. Absent the flag the chain stays
-    // empty (access control disabled, every message admitted).
+    // both are dropped (not relayed onward), the wz analogue of a router carrying
+    // an IngressAclEnforcer.
     if let Some(deny_keyexpr) = interceptors.acl_deny.as_deref() {
         log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
         // A rule per FLOW (a rule carries a single flow): the keyexpr is denied
@@ -1370,44 +1376,48 @@ pub(crate) async fn run_peer(
             flow,
             permission: Permission::Deny,
         };
-        forwarder.set_acl_policy(AclPolicy::new(AclConfig {
+        interceptor_config.acl = Some(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
             rules: vec![deny_rule(AclFlow::Ingress), deny_rule(AclFlow::Egress)],
         }));
     }
 
     // `--downsample <keyexpr>`: opt this peer into §5.16 downsampling (QoS) — the
-    // rate-limit sibling of the ACL on the SAME interceptor chain. Egress data on
-    // the keyexpr is admitted at most once per 500 ms; faster ones are dropped.
-    // Off by default. Composes with `--acl-deny` (both run on the egress chain).
+    // rate-limit sibling of the ACL on the SAME interceptor chain. Data on the
+    // keyexpr is admitted at most once per 500 ms; faster ones are dropped. Off
+    // by default. Composes with `--acl-deny` (both run on the chain, both flows).
     if let Some(downsample_keyexpr) = interceptors.downsample.as_deref() {
         log::info!(
             "wz-ap-demo peer: downsampling enabled (--downsample {downsample_keyexpr} @ 500ms)"
         );
-        forwarder.set_downsampling(vec![DownsamplingRule {
+        interceptor_config.downsampling = vec![DownsamplingRule {
             key_exprs: vec![downsample_keyexpr.to_owned()],
             min_interval: Duration::from_millis(500),
-        }]);
+        }];
     }
 
     // `--max-payload <bytes>`: opt into §5.16 access-quota (a per-key payload-size
     // cap, zenoh low_pass) on EVERY keyexpr — a Put larger than the limit is
-    // dropped on egress. The third interceptor kind on the chain. Off by default;
-    // a non-numeric value is ignored with a warning.
+    // dropped. The third interceptor kind on the chain. Off by default; a
+    // non-numeric value is ignored with a warning.
     if let Some(max_payload) = interceptors.max_payload.as_deref() {
         match max_payload.parse::<usize>() {
             Ok(max_payload_size) => {
                 log::info!("wz-ap-demo peer: low-pass enabled (--max-payload {max_payload_size}B)");
-                forwarder.set_low_pass(vec![LowPassRule {
+                interceptor_config.low_pass = vec![LowPassRule {
                     key_exprs: vec!["**".to_owned()],
                     max_payload_size,
-                }]);
+                }];
             }
             Err(_) => log::warn!(
                 "wz-ap-demo peer: --max-payload '{max_payload}' is not a byte count; ignored"
             ),
         }
     }
+
+    // Install the assembled pipeline ONCE (replaces, never appends — idempotent,
+    // unlike the three former per-feature setters).
+    forwarder.set_interceptors(interceptor_config);
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
     // the per-local-whatami SSOT default (a Peer dials discovered routers/peers);

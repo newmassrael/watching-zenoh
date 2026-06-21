@@ -107,9 +107,6 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
-use crate::interceptor::access_control::AclInterceptor;
-use crate::interceptor::downsampling::DownsamplingInterceptor;
-use crate::interceptor::low_pass::LowPassInterceptor;
 use crate::interceptor::{InterceptorChain, InterceptorContext};
 use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -122,18 +119,23 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 /// re-typed at the call site.
 pub use wz_routing_graph::{AutoConnect, AutoConnectStrategy, WhatAmI, Zid};
 // R311tt — re-export the §5.16 access-control policy-construction surface
-// beside `set_acl_policy`, so a deploy builds an `AclPolicy` from one facade
+// beside `set_interceptors`, so a deploy builds an `AclPolicy` from one facade
 // path (`wz::runtime_tokio::linkstate_forward::{AclPolicy, ..}`) — the same
 // convenience the AutoConnect re-export above gives the autoconnect opt-in.
 pub use wz_access_control::{
     AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
 };
-// R311tw — the downsampling rule type, re-exported beside `set_downsampling` so
-// a deploy builds it from the same facade path as the ACL types above.
+// R311tw — the downsampling rule type, re-exported beside the other rule types
+// so a deploy builds it from the same facade path as the ACL types above.
 pub use crate::interceptor::downsampling::DownsamplingRule;
 // R311tx — the low-pass (per-key payload-size limit) rule type, re-exported
-// beside `set_low_pass` (the §5.16 access-quota realization).
+// beside the other rule types (the §5.16 access-quota realization).
 pub use crate::interceptor::low_pass::LowPassRule;
+// R311ty — the combined interceptor configuration, the single funnel a deploy
+// fills and installs via `set_interceptors` (the wz mirror of zenoh's
+// interceptor_factories(config)). Re-exported beside the rule types above so a
+// deploy builds the whole pipeline from one facade path.
+pub use crate::interceptor::InterceptorConfig;
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;
@@ -277,9 +279,9 @@ pub struct LinkstateForwarder {
     /// once per inbound message at the top of [`forward`](Self::forward), ahead
     /// of the kind-dispatch (the mesh-RELAY admission point). EMPTY by default =
     /// access control disabled (zenoh `AclConfig.enabled = false`, every message
-    /// admitted); a deploy installs an ACL via
-    /// [`set_acl_policy`](Self::set_acl_policy). `RefCell` because the policy is
-    /// set through a `&self` config seam, the same shape as the other knobs.
+    /// admitted); a deploy installs the chain via
+    /// [`set_interceptors`](Self::set_interceptors). `RefCell` because the chain
+    /// is set through a `&self` config seam, the same shape as the other knobs.
     ingress_interceptors: RefCell<InterceptorChain>,
     /// R311tv — the §5.16 access-control EGRESS interceptor chain, consulted per
     /// OUTBOUND message in [`fan_out`](Self::fan_out) keyed by the DESTINATION
@@ -380,72 +382,28 @@ impl LinkstateForwarder {
         rx
     }
 
-    /// Install an access-control policy (§5.16) — the config seam symmetric to
-    /// [`set_gossip_target`](Self::set_gossip_target) /
-    /// [`enable_autoconnect`](Self::enable_autoconnect). APPENDS an ingress and
-    /// an egress [`AclInterceptor`] backed by the SAME `policy` (shared, the rule
-    /// set is immutable; the flow selects which rules apply): an inbound message
-    /// is checked at [`forward`](Self::forward) before relay, and an OUTBOUND
-    /// message at [`fan_out`](Self::fan_out) keyed by the destination face — the
-    /// wz analogue of `acl_interceptor_factories` installing both an
-    /// `IngressAclEnforcer` and an `EgressAclEnforcer`. A driver that never calls
-    /// this keeps both chains free of an ACL enforcer (every message admitted by
-    /// it, zenoh `AclConfig.enabled = false`). A denied message is dropped and
-    /// witnessed by [`interceptor_dropped`](Self::interceptor_dropped).
+    /// Install the full §5.16 interceptor configuration — the SINGLE config seam,
+    /// symmetric to [`set_gossip_target`](Self::set_gossip_target) /
+    /// [`enable_autoconnect`](Self::enable_autoconnect). The wz mirror of zenoh's
+    /// `interceptor_factories(config)` (`net/routing/interceptor/mod.rs:122`): it
+    /// builds BOTH the ingress and the egress chain from `config` via
+    /// [`InterceptorConfig::build_chain`], in zenoh's FIXED factory order
+    /// (downsampling, then access-control, then low-pass), so the pipeline order
+    /// is deterministic regardless of which features the deploy enables.
     ///
-    /// APPENDS rather than replaces so the ACL composes with the other
-    /// interceptors on the chain (e.g. [`set_downsampling`](Self::set_downsampling))
-    /// — a setup-once seam, like every other config knob here, so accumulation
-    /// is the intended shape (zenoh's `interceptor_factories` likewise builds one
-    /// chain of all enabled interceptors).
-    pub fn set_acl_policy(&self, policy: AclPolicy) {
-        self.ingress_interceptors
-            .borrow_mut()
-            .push(Box::new(AclInterceptor::new(
-                policy.clone(),
-                AclFlow::Ingress,
-            )));
-        self.egress_interceptors
-            .borrow_mut()
-            .push(Box::new(AclInterceptor::new(policy, AclFlow::Egress)));
-    }
-
-    /// Install a §5.16 DOWNSAMPLING (rate-limit) policy — the QoS sibling of the
-    /// ACL on the interceptor chain, the wz mirror of zenoh's downsampling
-    /// interceptor. APPENDS a [`DownsamplingInterceptor`] to BOTH the ingress and
-    /// egress chains (zenoh downsampling defaults to ingress + egress), each its
-    /// OWN instance with its own per-rule timer (zenoh keeps separate per-flow
-    /// enforcers): a data Push whose keyexpr a rule governs is dropped if it
-    /// arrives sooner than the rule's minimum interval since the last one that
-    /// flow admitted, bounding the per-rule rate. Composes with the ACL enforcer
-    /// on the same chains (all run; any may drop). A drop is witnessed by
+    /// REPLACES both chains rather than appending, so it is idempotent — calling
+    /// it twice does not duplicate interceptors. This closes the R311tx-review
+    /// footgun of three independent append-only setters (a re-call duplicated an
+    /// interceptor, and the cross-setter order was unspecified): a deploy now
+    /// fills one [`InterceptorConfig`] and installs it ONCE at setup, exactly as
+    /// zenoh reads one `Config` once. An empty config leaves both chains empty
+    /// (access control disabled — every message admitted, zenoh
+    /// `AclConfig.enabled = false`). A denied / rate-limited / oversized message
+    /// is dropped and witnessed by
     /// [`interceptor_dropped`](Self::interceptor_dropped).
-    pub fn set_downsampling(&self, rules: Vec<DownsamplingRule>) {
-        self.ingress_interceptors
-            .borrow_mut()
-            .push(Box::new(DownsamplingInterceptor::new(rules.clone())));
-        self.egress_interceptors
-            .borrow_mut()
-            .push(Box::new(DownsamplingInterceptor::new(rules)));
-    }
-
-    /// Install a §5.16 LOW-PASS (per-key payload-size limit) policy — the
-    /// `access-quota` realization, the wz mirror of zenoh's low-pass interceptor.
-    /// APPENDS a [`LowPassInterceptor`] to BOTH the ingress and egress chains
-    /// (zenoh low_pass defaults to ingress + egress): a Put whose keyexpr a rule
-    /// governs is dropped when its payload exceeds the rule's byte limit, capping
-    /// the per-keyexpr message size. Composes with the ACL enforcer and the
-    /// downsampler on the same chains (all run; any may drop). A drop is witnessed
-    /// by [`interceptor_dropped`](Self::interceptor_dropped). zenoh has no
-    /// cumulative quota-accounting interceptor — the faithful per-key limit is
-    /// this payload-size cap (`low_pass`).
-    pub fn set_low_pass(&self, rules: Vec<LowPassRule>) {
-        self.ingress_interceptors
-            .borrow_mut()
-            .push(Box::new(LowPassInterceptor::new(rules.clone())));
-        self.egress_interceptors
-            .borrow_mut()
-            .push(Box::new(LowPassInterceptor::new(rules)));
+    pub fn set_interceptors(&self, config: InterceptorConfig) {
+        *self.ingress_interceptors.borrow_mut() = config.build_chain(AclFlow::Ingress);
+        *self.egress_interceptors.borrow_mut() = config.build_chain(AclFlow::Egress);
     }
 
     /// The number of messages ANY interceptor has dropped so far (ACL denial,
@@ -3112,7 +3070,10 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
         sink_a.reset();
         sink_b.reset();
-        fwd.set_acl_policy(deny_put_policy("demo/**"));
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(deny_put_policy("demo/**")),
+            ..Default::default()
+        });
 
         let outcome = DriverLoopOutcome::FramePayload {
             reliable: true,
@@ -3151,7 +3112,10 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
         sink_a.reset();
         sink_b.reset();
-        fwd.set_acl_policy(deny_put_policy("admin/**")); // denies admin, not demo
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(deny_put_policy("admin/**")), // denies admin, not demo
+            ..Default::default()
+        });
 
         let outcome = DriverLoopOutcome::FramePayload {
             reliable: true,
@@ -3186,16 +3150,19 @@ mod tests {
         let (face_a, _sa) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);
         advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
-        fwd.set_acl_policy(AclPolicy::new(AclConfig {
-            default_permission: Permission::Allow,
-            rules: vec![AclRule {
-                subject: SubjectSelector::Any,
-                key_exprs: vec!["admin/**".to_owned()],
-                messages: vec![AclMessage::DeclareSubscriber],
-                flow: AclFlow::Ingress,
-                permission: Permission::Deny,
-            }],
-        }));
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["admin/**".to_owned()],
+                    messages: vec![AclMessage::DeclareSubscriber],
+                    flow: AclFlow::Ingress,
+                    permission: Permission::Deny,
+                }],
+            })),
+            ..Default::default()
+        });
 
         let denied = build_declare_subscriber(0, 0, Some("admin/sub")).expect("build");
         let outcome = DriverLoopOutcome::FramePayload {
@@ -3255,16 +3222,19 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
         sink_a.reset();
         sink_b.reset();
-        fwd.set_acl_policy(AclPolicy::new(AclConfig {
-            default_permission: Permission::Allow,
-            rules: vec![AclRule {
-                subject: SubjectSelector::Any,
-                key_exprs: vec!["demo/**".to_owned()],
-                messages: vec![AclMessage::Put],
-                flow: AclFlow::Egress, // egress only — ingress is allowed
-                permission: Permission::Deny,
-            }],
-        }));
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["demo/**".to_owned()],
+                    messages: vec![AclMessage::Put],
+                    flow: AclFlow::Egress, // egress only — ingress is allowed
+                    permission: Permission::Deny,
+                }],
+            })),
+            ..Default::default()
+        });
 
         let outcome = DriverLoopOutcome::FramePayload {
             reliable: true,
@@ -3303,11 +3273,14 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
         sink_a.reset();
         sink_b.reset();
-        fwd.set_acl_policy(AclPolicy::new(AclConfig::allow_all())); // present but permissive
-        fwd.set_downsampling(vec![DownsamplingRule {
-            key_exprs: vec!["demo/**".to_owned()],
-            min_interval: std::time::Duration::from_secs(1),
-        }]);
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig::allow_all())), // present but permissive
+            downsampling: vec![DownsamplingRule {
+                key_exprs: vec!["demo/**".to_owned()],
+                min_interval: std::time::Duration::from_secs(1),
+            }],
+            ..Default::default()
+        });
 
         let mk = || DriverLoopOutcome::FramePayload {
             reliable: true,
@@ -3339,6 +3312,93 @@ mod tests {
     }
 
     #[test]
+    fn downsampling_precedes_the_acl_and_accounts_a_denied_message() {
+        // Locks the FIXED zenoh factory order (downsampling BEFORE access-control,
+        // `interceptor_factories` mod.rs:133-134) — observable because the chain's
+        // `admit` short-circuits (`all`) and the downsampler records its rate timer
+        // only on the messages IT admits. S denies `demo/secret` (ingress Put) but
+        // rate-limits all of `demo/**` at 1s; B subscribes demo/data.
+        //
+        // Two back-to-back Puts from A: (1) demo/secret — the downsampler runs
+        // FIRST, admits it and stamps the demo/** rule timer, THEN the ACL denies
+        // it; (2) demo/data (allowed by the ACL) arrives inside the 1s interval, so
+        // the downsampler — already stamped by the denied demo/secret — drops it
+        // before the ACL is even consulted. Net: the allowed demo/data is rate-
+        // limited BECAUSE the denied demo/secret consumed the rule's budget, which
+        // is zenoh-faithful (zenoh's downsampler likewise stamps a message its ACL
+        // later denies). Under the old ACL-first order demo/secret would short-
+        // circuit at the ACL, the downsampler would never see it, and demo/data
+        // would be the first message it saw — and would relay. So this asserts the
+        // new ordering, not the old.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["demo/secret".to_owned()],
+                    messages: vec![AclMessage::Put],
+                    flow: AclFlow::Ingress,
+                    permission: Permission::Deny,
+                }],
+            })),
+            downsampling: vec![DownsamplingRule {
+                key_exprs: vec!["demo/**".to_owned()],
+                min_interval: std::time::Duration::from_secs(1),
+            }],
+            ..Default::default()
+        });
+
+        // (1) demo/secret — downsampler stamps the rule timer, ACL then denies.
+        let secret = build_push_literal("demo/secret", b"x").expect("build");
+        let o1 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(secret))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&o1));
+
+        // (2) demo/data — allowed by the ACL, but inside the interval the timer the
+        // denied demo/secret already stamped causes the downsampler to drop it.
+        let o2 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&o2));
+
+        assert_eq!(
+            fwd.data_seen(),
+            0,
+            "demo/data is rate-limited: the denied demo/secret already consumed the \
+             demo/** rule budget (downsampling ran before the ACL, zenoh order)"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "so nothing relays to the interested child"
+        );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            2,
+            "two drops: demo/secret by the ACL, demo/data by the downsampler"
+        );
+    }
+
+    #[test]
     fn low_pass_drops_an_oversized_put_on_a_governed_keyexpr() {
         // The §5.16 access-quota realization (a per-key payload-size cap). S caps
         // demo/** payloads at 8 bytes. Low-pass runs on BOTH flows (zenoh default),
@@ -3355,10 +3415,13 @@ mod tests {
         declare_interest(&fwd, FaceId(1), "demo/data");
         sink_a.reset();
         sink_b.reset();
-        fwd.set_low_pass(vec![LowPassRule {
-            key_exprs: vec!["demo/**".to_owned()],
-            max_payload_size: 8,
-        }]);
+        fwd.set_interceptors(InterceptorConfig {
+            low_pass: vec![LowPassRule {
+                key_exprs: vec!["demo/**".to_owned()],
+                max_payload_size: 8,
+            }],
+            ..Default::default()
+        });
 
         let big = build_push_literal("demo/data", &[0u8; 32]).expect("build");
         let o1 = DriverLoopOutcome::FramePayload {
