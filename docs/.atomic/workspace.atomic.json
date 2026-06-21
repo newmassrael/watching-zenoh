@@ -45048,6 +45048,52 @@
         "LOCAL UNPUSHED: 311tk..to + 311tp on origin/main=4394d5a (6 ahead). Host lanes verified (driver 375 + 277, clippy both, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
       ]
     },
+    "Round 311tq": {
+      "decision_summary": "R311tq: textbook remediation -- wire wz-ap-demo --autoconnect, threading default_autoconnect_matcher + enable_autoconnect into FaceSources.dial_intents. Gossip-autoconnect is now LIVE in a deploy, not inert.",
+      "changes_bullets": [
+        "wz-ap-demo: new --peer ... --autoconnect flag (main.rs parse -> run_peer_mode -> run_peer). When set, run_peer builds AutoConnect::new(self_zid, default_autoconnect_matcher(Peer)=router|peer, GreaterZid) + enable_autoconnect -> rx, passed as FaceSources.dial_intents = Some(rx).",
+        "Off (default): dial_intents None -- the peer dials only its static --connect targets (prior behaviour exactly). The role matcher comes from the default_autoconnect_matcher SSOT (tp), never re-hardcoded; GreaterZid is the double-dial tie-break (the establishment dedup catches any residual race).",
+        "linkstate_forward re-exports AutoConnect/AutoConnectStrategy beside WhatAmI/Zid so the demo names the policy by the SSOT type. The forwarder's internal `use AutoConnect` merges into the pub use (no duplicate).",
+        "Closes the session-review finding that autoconnect was unreachable in every binary (no production caller). It is now reachable + manually e2e-able via two --peer --autoconnect nodes sharing a relay."
+      ],
+      "verification_bullets": [
+        "driver 375 routing-peer + 277 base, clippy -D clean (driver both + demo routing-peer), demo base (no routing-peer) builds + rejects --peer, fmt clean (driver + demo).",
+        "HONEST: this wires the deploy opt-in; an AUTOMATED 3-node gossip->discover->autoconnect e2e is still not written (the emit and dial halves are each tested, their composition is exercised manually via the demo + reasoned). Not claimed as auto-tested."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tq = textbook remediation: --autoconnect deploy opt-in. Gossip-autoconnect is LIVE (was inert in every binary). With tp (single-source faces + establishment dedup) the two top session-review structural findings are remediated.",
+        "REMAINING from the review (lower / debatable): (c-debate) gossip_target/autoconnect Cell+&self-setter vs construction-time immutable -- judged the &self-setter the established wz pattern (set_self_locators/set_gossip_multihop), a legit post-construction config seam, not a hack; keeping it.",
+        "(c) first_dialable_addr is TCP-numeric-only, bypassing the dial_locator/plan_endpoint SSOT (drops DNS Named) -- coupled to upgrading dial_face from raw TcpStream::connect to connect_and_open_session (its own atom).",
+        "REMAINING tests: the automated 3-node discovery->autoconnect e2e; the placeholder-whatami textbook alternative (thread entry whatami through Changes so the emit never reads node.whatami).",
+        "LOCAL UNPUSHED: 311tk..tp + 311tq on origin/main=4394d5a (7 ahead). Host lanes verified (driver 375+277, clippy both, demo both, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tq: textbook remediation -- wire wz-ap-demo --autoconnect, threading default_autoconnect_matcher + enable_autoconnect into FaceSources.dial_intents. Gossip-autoconnect is now LIVE in a deploy, not inert.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo: new --peer ... --autoconnect flag (main.rs parse -> run_peer_mode -> run_peer). When set, run_peer builds AutoConnect::new(self_zid, default_autoconnect_matcher(Peer)=router|peer, GreaterZid) + enable_autoconnect -> rx, passed as FaceSources.dial_intents = Some(rx).",
+        "Off (default): dial_intents None -- the peer dials only its static --connect targets (prior behaviour exactly). The role matcher comes from the default_autoconnect_matcher SSOT (tp), never re-hardcoded; GreaterZid is the double-dial tie-break (the establishment dedup catches any residual race).",
+        "linkstate_forward re-exports AutoConnect/AutoConnectStrategy beside WhatAmI/Zid so the demo names the policy by the SSOT type. The forwarder's internal `use AutoConnect` merges into the pub use (no duplicate).",
+        "Closes the session-review finding that autoconnect was unreachable in every binary (no production caller). It is now reachable + manually e2e-able via two --peer --autoconnect nodes sharing a relay."
+      ],
+      "publishable_verification_bullets": [
+        "driver 375 routing-peer + 277 base, clippy -D clean (driver both + demo routing-peer), demo base (no routing-peer) builds + rejects --peer, fmt clean (driver + demo).",
+        "HONEST: this wires the deploy opt-in; an AUTOMATED 3-node gossip->discover->autoconnect e2e is still not written (the emit and dial halves are each tested, their composition is exercised manually via the demo + reasoned). Not claimed as auto-tested."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tq = textbook remediation: --autoconnect deploy opt-in. Gossip-autoconnect is LIVE (was inert in every binary). With tp (single-source faces + establishment dedup) the two top session-review structural findings are remediated.",
+        "REMAINING from the review (lower / debatable): (c-debate) gossip_target/autoconnect Cell+&self-setter vs construction-time immutable -- judged the &self-setter the established wz pattern (set_self_locators/set_gossip_multihop), a legit post-construction config seam, not a hack; keeping it.",
+        "(c) first_dialable_addr is TCP-numeric-only, bypassing the dial_locator/plan_endpoint SSOT (drops DNS Named) -- coupled to upgrading dial_face from raw TcpStream::connect to connect_and_open_session (its own atom).",
+        "REMAINING tests: the automated 3-node discovery->autoconnect e2e; the placeholder-whatami textbook alternative (thread entry whatami through Changes so the emit never reads node.whatami).",
+        "LOCAL UNPUSHED: 311tk..tp + 311tq on origin/main=4394d5a (7 ahead). Host lanes verified (driver 375+277, clippy both, demo both, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

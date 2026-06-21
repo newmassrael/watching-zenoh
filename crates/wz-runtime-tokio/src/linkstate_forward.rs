@@ -104,16 +104,19 @@ use wz_session_core::push_routing_context::{
 };
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
-use wz_routing_graph::{AutoConnect, Changes, LinkId, LinkstateNetwork};
+use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
-/// Re-export `Zid` and the typed [`WhatAmI`] role so the peer-loop caller (the
-/// demo) and the forwarder name a neighbour's role by the same SSOT type
-/// (defined in `wz-codecs`, re-exported through the graph), not a bare byte.
-pub use wz_routing_graph::{WhatAmI, Zid};
+/// Re-export `Zid`, the typed [`WhatAmI`] role, and the gossip
+/// [`AutoConnect`] policy so the peer-loop caller (the demo) names them by the
+/// same SSOT type (defined in `wz-codecs` / the graph), not a bare byte. A deploy
+/// opting into autoconnect builds its policy from [`default_autoconnect_matcher`]
+/// (this module) + these re-exports, so the `router|peer` matcher is never
+/// re-typed at the call site.
+pub use wz_routing_graph::{AutoConnect, AutoConnectStrategy, WhatAmI, Zid};
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;

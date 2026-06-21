@@ -160,12 +160,17 @@ fn main() -> ExitCode {
             // that drives the UndeclareSubscriber propagation with no timing
             // window. Meaningful only alongside `--subscribe`.
             let unsubscribe_after_data = rest.iter().any(|a| a == "--unsubscribe-after-data");
+            // Gossip-autoconnect opt-in: discover peers off the link-state flood
+            // and DIAL the policy-admitted ones (a mesh that grows past the static
+            // `--connect` set). Off by default — a peer dials only `--connect`.
+            let autoconnect = rest.iter().any(|a| a == "--autoconnect");
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
                 publish_key,
                 subscribe_key,
                 unsubscribe_after_data,
+                autoconnect,
             );
         }
         #[cfg(not(feature = "routing-peer"))]
@@ -650,6 +655,7 @@ fn run_peer_mode(
     publish_key: Option<String>,
     subscribe_key: Option<String>,
     unsubscribe_after_data: bool,
+    autoconnect: bool,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -665,6 +671,7 @@ fn run_peer_mode(
         publish_key.as_deref(),
         subscribe_key.as_deref(),
         unsubscribe_after_data,
+        autoconnect,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

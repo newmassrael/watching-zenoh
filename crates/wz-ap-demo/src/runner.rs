@@ -1240,11 +1240,15 @@ pub(crate) async fn run_peer(
     publish_key: Option<&str>,
     subscribe_key: Option<&str>,
     unsubscribe_after_data: bool,
+    autoconnect: bool,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
-    use wz::runtime_tokio::linkstate_forward::{LinkstateForwarder, WhatAmI, Zid};
+    use wz::runtime_tokio::linkstate_forward::{
+        default_autoconnect_matcher, AutoConnect, AutoConnectStrategy, LinkstateForwarder, WhatAmI,
+        Zid,
+    };
     use wz::runtime_tokio::session_open::bind_endpoint;
 
     // Per-peer routing zid = this 2-byte prefix + the listen port (derived
@@ -1339,14 +1343,29 @@ pub(crate) async fn run_peer(
     };
     forwarder.set_self_locators(self_locators);
 
+    // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
+    // the per-local-whatami SSOT default (a Peer dials discovered routers/peers);
+    // `GreaterZid` is the double-dial tie-break (of a mutually-discovering pair,
+    // only the greater-zid end dials — and the establishment dedup drops any
+    // redundant link that still races through). The forwarder then emits a
+    // dial-intent for each admitted discovered peer, and the loop dials it. Absent
+    // the flag, `dial_intents` is `None` and the peer dials only its static
+    // `--connect` targets (the prior behaviour exactly).
+    let dial_intents = autoconnect.then(|| {
+        log::info!("wz-ap-demo peer: gossip-autoconnect enabled (--autoconnect)");
+        let policy = AutoConnect::new(
+            Zid::from_slice(&params.zid),
+            default_autoconnect_matcher(WhatAmI::Peer),
+            AutoConnectStrategy::GreaterZid,
+        );
+        forwarder.enable_autoconnect(policy)
+    });
+
     let loop_fut = peer_loop(
         FaceSources {
             listener,
             dial_targets: dials,
-            // The demo does not yet opt into gossip-autoconnect (a `--autoconnect`
-            // flag that calls `forwarder.enable_autoconnect` and threads the
-            // receiver here is a thin follow-up); static `--connect` dials only.
-            dial_intents: None,
+            dial_intents,
         },
         params,
         TokioTime::new(),
