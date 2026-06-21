@@ -2439,7 +2439,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // QueryableId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_queryable(wire_id, /*mapping_id=*/ 0, Some(keyexpr))
+                .prepare_declare_queryable(
+                    wire_id,
+                    /*mapping_id=*/ 0,
+                    Some(keyexpr),
+                    options.complete,
+                )
                 .map_err(map_queryable_err)?;
             self.send_network_message(
                 wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
@@ -2450,7 +2455,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`);
             // session-state bookkeeping AROUND the seam emit, like
             // declare_subscriber.
-            actions.cache_queryable_declaration(wire_id, /*mapping_id=*/ 0, Some(keyexpr));
+            actions.cache_queryable_declaration(
+                wire_id,
+                /*mapping_id=*/ 0,
+                Some(keyexpr),
+                options.complete,
+            );
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Queryable` stays free of the wire-codec types.
             let actions_for_drop = actions.clone();

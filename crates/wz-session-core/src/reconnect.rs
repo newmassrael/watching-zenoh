@@ -145,11 +145,14 @@ pub enum CachedDeclaration {
         suffix: Option<String>,
     },
     /// `send_declare_queryable(..)` — pruned by
-    /// `send_undeclare_queryable(queryable_id)`.
+    /// `send_undeclare_queryable(queryable_id)`. `complete` preserves the
+    /// BestMatching producer signal across a reconnect-replay (R311up), so a
+    /// complete queryable does not silently re-declare as incomplete.
     Queryable {
         queryable_id: u64,
         mapping_id: u64,
         suffix: Option<String>,
+        complete: bool,
     },
     /// `send_declare_token(..)` — pruned by
     /// `send_undeclare_token(token_id)`.

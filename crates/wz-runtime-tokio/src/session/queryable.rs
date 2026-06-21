@@ -10,9 +10,8 @@
 use super::*;
 
 /// R246 — options bundle for [`Session::declare_queryable`].
-/// Mirrors zenoh-pico's `z_queryable_options_t` minus the
-/// `complete` flag (which lands as a follow-up when the
-/// queryable-side completeness signal is wired). `#[non_exhaustive]`.
+/// Mirrors zenoh-pico's `z_queryable_options_t` — R311up wired the
+/// `complete` flag (the BestMatching producer signal). `#[non_exhaustive]`.
 ///
 ///
 /// R311o — type-ungated per `feedback_signature_stability` MEMORY
@@ -38,10 +37,20 @@ pub struct QueryableOptions {
     /// loopback Queries (R238+
     /// [`crate::query::QueryableRegistry::local_query`]).
     pub allowed_origin: Locality,
+    /// Whether this queryable declares itself COMPLETE — it can FULLY
+    /// answer queries for its keyexpr (e.g. a storage holding the whole
+    /// key space). zenoh-pico's `z_queryable_options_t::complete`. The
+    /// flag rides the declared `DeclareQueryable`'s `QueryableInfo` ext
+    /// and drives a router's BestMatching routing: a complete queryable
+    /// is the preferred (nearest-complete) target, and the sole target an
+    /// `AllComplete` query reaches. Default `false` (incomplete) — the
+    /// DEFAULT `QueryableInfo`, omitted on the wire (byte-identical to a
+    /// plain declaration).
+    pub complete: bool,
 }
 
 impl QueryableOptions {
-    /// Default options — `allowed_origin = Locality::Any`.
+    /// Default options — `allowed_origin = Locality::Any`, `complete = false`.
     pub fn new() -> Self {
         Self::default()
     }
@@ -49,6 +58,14 @@ impl QueryableOptions {
     /// Pin the queryable-side locality predicate.
     pub fn with_allowed_origin(mut self, locality: Locality) -> Self {
         self.allowed_origin = locality;
+        self
+    }
+
+    /// Declare this queryable COMPLETE (it can fully answer its keyexpr —
+    /// the BestMatching producer signal). See
+    /// [`complete`](QueryableOptions::complete).
+    pub fn with_complete(mut self, complete: bool) -> Self {
+        self.complete = complete;
         self
     }
 }

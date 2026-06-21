@@ -2284,6 +2284,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         queryable_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
+        complete: bool,
     ) -> Result<(), SendDeclareError> {
         #[cfg(feature = "declare-queryable")]
         {
@@ -2293,18 +2294,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // dispatch + reconnect-cache half (byte-stable-wire test callers +
             // any direct low-level caller). Mirror of the declare-subscriber
             // split landed in R311ou.
-            let declare =
-                self.prepare_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare = self.prepare_declare_queryable(
+                queryable_id,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+                complete,
+            )?;
             self.dispatch_declare(declare, /*reliable=*/ true)
                 .map_err(SendDeclareError::from)?;
             // A4 — record for post-reconnect replay (pico
-            // `_z_cache_declaration` on `_Z_RES_OK`).
-            self.cache_queryable_declaration(queryable_id, keyexpr_mapping_id, keyexpr_suffix);
+            // `_z_cache_declaration` on `_Z_RES_OK`), carrying `complete` so a
+            // complete queryable survives the replay.
+            self.cache_queryable_declaration(
+                queryable_id,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+                complete,
+            );
             Ok(())
         }
         #[cfg(not(feature = "declare-queryable"))]
         {
-            let _ = (queryable_id, keyexpr_mapping_id, keyexpr_suffix);
+            let _ = (queryable_id, keyexpr_mapping_id, keyexpr_suffix, complete);
             Err(SendDeclareError::FeatureDisabled)
         }
     }
@@ -2495,15 +2506,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         queryable_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
+        complete: bool,
     ) -> Result<wz_codecs::declare::DeclareOwned, SendDeclareError> {
         let reconstructed =
             self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
         check_outbound_keyexpr_pico_safe(&reconstructed)?;
-        Ok(build_declare_queryable(
-            queryable_id,
-            keyexpr_mapping_id,
-            keyexpr_suffix,
-        )?)
+        let mut declare =
+            build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
+        // Stamp the QueryableInfo completeness (distance 0 for a local
+        // declaration — the BestMatching producer input). DEFAULT / incomplete
+        // omits the ext, so a plain queryable stays byte-identical to before.
+        set_declare_queryable_info(
+            &mut declare,
+            crate::queryable_info::QueryableInfo {
+                complete,
+                distance: 0,
+            },
+        );
+        Ok(declare)
     }
 
     /// R311ow — append the post-emit reconnect-replay cache entry for a
@@ -2521,15 +2541,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         queryable_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
+        complete: bool,
     ) {
         #[cfg(feature = "session-reconnect")]
         self.cache_declaration(CachedDeclaration::Queryable {
             queryable_id,
             mapping_id: keyexpr_mapping_id,
             suffix: keyexpr_suffix.map(ToString::to_string),
+            complete,
         });
         #[cfg(not(feature = "session-reconnect"))]
-        let _ = (queryable_id, keyexpr_mapping_id, keyexpr_suffix);
+        let _ = (queryable_id, keyexpr_mapping_id, keyexpr_suffix, complete);
     }
 
     /// R283 — encode + dispatch a pre-built `Declare(...)` envelope on
@@ -3558,17 +3580,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 queryable_id,
                 mapping_id,
                 suffix,
+                complete,
             } => {
                 #[cfg(feature = "declare-queryable")]
                 {
-                    let declare =
+                    let mut declare =
                         build_declare_queryable(queryable_id, mapping_id, suffix.as_deref())
                             .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
+                    // Re-stamp the completeness so a complete queryable replays
+                    // complete, not silently incomplete (R311up).
+                    set_declare_queryable_info(
+                        &mut declare,
+                        crate::queryable_info::QueryableInfo {
+                            complete,
+                            distance: 0,
+                        },
+                    );
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
                 }
                 #[cfg(not(feature = "declare-queryable"))]
-                let _ = (queryable_id, mapping_id, suffix);
+                let _ = (queryable_id, mapping_id, suffix, complete);
             }
             CachedDeclaration::Token {
                 token_id,

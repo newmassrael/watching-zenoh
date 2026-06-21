@@ -1216,7 +1216,7 @@ mod tests {
     fn send_declare_queryable_rejects_with_feature_disabled_when_declare_queryable_off() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
-            actions.send_declare_queryable(1, 0, Some("home/temp")),
+            actions.send_declare_queryable(1, 0, Some("home/temp"), false),
             Err(SendDeclareError::FeatureDisabled),
             "declare-queryable OFF: send_declare_queryable must return the \
              typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
@@ -1578,7 +1578,7 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         // Direct literal bug-three pattern.
         let err = actions
-            .send_declare_queryable(1, 0, Some("**/foo/*"))
+            .send_declare_queryable(1, 0, Some("**/foo/*"), false)
             .expect_err("queryable inherits the same gate");
         assert!(matches!(
             err,
@@ -2609,7 +2609,7 @@ mod reconnect_tx_tests {
             .send_declare_subscriber(10, 0, Some("home/sub"))
             .expect("declare subscriber");
         actions
-            .send_declare_queryable(11, 0, Some("home/qry"))
+            .send_declare_queryable(11, 0, Some("home/qry"), false)
             .expect("declare queryable");
         actions
             .send_declare_token(12, 0, Some("home/tok"))
@@ -2658,6 +2658,80 @@ mod reconnect_tx_tests {
         // finding no match).
         actions.send_undeclare_subscriber(999);
         assert!(actions.declaration_cache_snapshot().is_empty());
+    }
+
+    /// R311up — a COMPLETE queryable stamps the QueryableInfo ext on the wire
+    /// (the BestMatching producer signal) AND the reconnect-replay cache
+    /// preserves the flag, so a complete queryable survives a reconnect without
+    /// silently re-declaring as incomplete. An incomplete one OMITS the ext
+    /// (DEFAULT, byte-identical to a plain declaration).
+    #[test]
+    fn a_complete_queryable_carries_completeness_on_the_wire_and_in_the_cache() {
+        use super::{parse_inbound, InboundFrame};
+        use wz_codecs::declare::DeclareOwnedVariant;
+        use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+        use wz_session_core::queryable_info::read_queryable_info;
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_declare_queryable(11, 0, Some("home/qry"), true)
+            .expect("complete queryable");
+        actions
+            .send_declare_queryable(12, 0, Some("home/inc"), false)
+            .expect("incomplete queryable");
+
+        let info_of = |frame: &[u8]| {
+            let InboundFrame::Frame { payload, .. } =
+                parse_inbound(frame).expect("parse emitted frame")
+            else {
+                panic!("emitted bytes are not a Frame");
+            };
+            match parse_frame_payload(&payload)
+                .expect("parse payload")
+                .first()
+            {
+                Some(NetworkMessage::Declare(d)) => match &d.body {
+                    DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
+                        read_queryable_info(q.extensions.as_ref())
+                    }
+                    _ => panic!("not a DeclareQueryable"),
+                },
+                other => panic!("expected a Declare, got {other:?}"),
+            }
+        };
+        assert!(
+            info_of(&driver.frame_bytes(0)).complete,
+            "the complete queryable carries complete=true on the wire",
+        );
+        assert!(
+            !info_of(&driver.frame_bytes(1)).complete,
+            "the incomplete queryable omits the QueryableInfo ext (DEFAULT)",
+        );
+
+        // The reconnect-replay cache preserves each completeness.
+        let cache = actions.declaration_cache_snapshot();
+        assert!(
+            cache.iter().any(|e| matches!(
+                e,
+                CachedDeclaration::Queryable {
+                    queryable_id: 11,
+                    complete: true,
+                    ..
+                }
+            )),
+            "the cached complete queryable preserves complete=true for replay",
+        );
+        assert!(
+            cache.iter().any(|e| matches!(
+                e,
+                CachedDeclaration::Queryable {
+                    queryable_id: 12,
+                    complete: false,
+                    ..
+                }
+            )),
+            "the cached incomplete queryable preserves complete=false",
+        );
     }
 
     /// `replay_declarations` after `reset_for_reopen` re-emits wire bytes

@@ -181,7 +181,7 @@ async fn assert_declare_replays_after_link_loss(
                     .expect("declare subscriber"),
                 ReplayDeclareKind::Queryable => session
                     .actions()
-                    .send_declare_queryable(10, 0, Some(keyexpr))
+                    .send_declare_queryable(10, 0, Some(keyexpr), /*complete=*/ false)
                     .expect("declare queryable"),
             };
             session

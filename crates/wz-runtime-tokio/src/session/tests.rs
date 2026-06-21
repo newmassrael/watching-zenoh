@@ -4104,6 +4104,25 @@ fn queryable_options_with_allowed_origin_pins_locality() {
     assert_eq!(opts.allowed_origin, Locality::SessionLocal);
 }
 
+#[test]
+fn queryable_options_with_complete_pins_completeness() {
+    // R311up — the BestMatching producer signal. Default is incomplete; the
+    // builder pins it and composes with the locality builder.
+    assert!(
+        !QueryableOptions::new().complete,
+        "default queryable is incomplete"
+    );
+    let opts = QueryableOptions::new()
+        .with_allowed_origin(Locality::Remote)
+        .with_complete(true);
+    assert!(opts.complete, "with_complete pins the flag");
+    assert_eq!(
+        opts.allowed_origin,
+        Locality::Remote,
+        "the two builders compose"
+    );
+}
+
 #[cfg(feature = "query-queryable")]
 #[test]
 fn declare_queryable_returns_handle_with_keyexpr_and_options() {
