@@ -46372,6 +46372,42 @@
         "LOCAL: R311uu on top of ut=2c22301 (origin/main=f2a64cd, now +9 ahead um..uu); host-gated. PUSH needs full run-ci (R311ui codec = MCU footprint + zenohd Z). North-star beyond 5.16: untouched Storage(5.11) / SHM."
       ]
     },
+    "Round 311uv": {
+      "decision_summary": "R311uv: query-routing fidelity — forward_request on an EMPTY route now sends a PROMPT ResponseFinal back to the querier (the uu session-review's one tracked fidelity gap). zenoh route_query (dispatcher/queries.rs:518-530) sends a single ResponseFinal{rid: msg.id} when the route is empty (no matching queryable, or under AllComplete no complete one), so the querier's get() terminates immediately instead of waiting out its own timeout. wz previously dropped silently. Now: just the final (no Err, unlike the timeout sweep), carrying the querier's rid, via send_to_face (egress ACL applies), no pending entry recorded.",
+      "changes_bullets": [
+        "linkstate_forward.rs forward_request: the `if children.is_empty() { return; }` silent drop -> build_response_final(request.rid) + send_to_face(inbound, ...) sends the prompt ResponseFinal back to the querier, then returns. Faithful to zenoh route_query's empty-route branch (dispatcher/queries.rs:518-530): just the final (the querier's rid, NO Err -- unlike the timeout sweep which also synthesizes an Err), NO pending entry recorded (nothing is awaited), routed via send_to_face so egress ACL applies exactly as the timeout final does.",
+        "Covers BOTH empty-route triggers: a keyexpr no queryable matches (the any-interest gate), AND uo's AllComplete with a matching-but-incomplete queryable (the case the uu review noted AllComplete widened). A default BestMatching query with an incomplete match still falls back to All and reaches it (non-empty route), so only a genuinely-empty route fires the prompt final."
+      ],
+      "verification_bullets": [
+        "routing-peer lib 430/430 (was 429; +1 new, 1 rewritten: forward_request_with_no_queryable_sends_a_prompt_final_to_the_querier [no relay to B; a ResponseFinal back to A with rid 99; no pending entry]; forward_request_all_complete_with_no_complete_queryable_sends_a_prompt_final [the AllComplete-incomplete empty-route case, the uo-widened trigger]). The prior forward_request_with_no_queryable_routes_nowhere asserted silence-back-to-A; corrected to the prompt-final behaviour. base default lib 279/279.",
+        "clippy -D clean (routing-peer --all-targets + --no-default-features --features routing-peer --all-targets); fmt clean. Host gate; FULL run-ci at push (this session pushes: user asked to close the gap + push)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311uv = query-routing fidelity: forward_request EMPTY route now sends a prompt ResponseFinal to the querier (zenoh route_query dispatcher/queries.rs:518-530), closing the uu session-review's one tracked fidelity gap. The querier's get() terminates promptly instead of waiting out its own timeout. Just the final (no Err), querier rid, egress-ACL via send_to_face, no pending entry. The QueryTarget BestMatching track (um..uu) + this fidelity close = the relay query plane is now zenoh-faithful for BOTH the populated and the empty route.",
+        "TRACKED debt (remaining): --no-default-features routing-peer 18 fails (flood/sent==0 root-cause), N-final fan-out (per-outface vs zenoh Arc-aggregated; Session-API scope).",
+        "LOCAL: R311uv on top of uu=fbcb898 (origin/main=f2a64cd, +10 ahead um..uv); host-gated. PUSH this session = full run-ci then push (user asked to close + push). North-star beyond 5.16: untouched Storage(5.11) / SHM."
+      ],
+      "publishable_decision_summary": "R311uv: query-routing fidelity — forward_request on an EMPTY route now sends a PROMPT ResponseFinal back to the querier (the uu session-review's one tracked fidelity gap). zenoh route_query (dispatcher/queries.rs:518-530) sends a single ResponseFinal{rid: msg.id} when the route is empty (no matching queryable, or under AllComplete no complete one), so the querier's get() terminates immediately instead of waiting out its own timeout. wz previously dropped silently. Now: just the final (no Err, unlike the timeout sweep), carrying the querier's rid, via send_to_face (egress ACL applies), no pending entry recorded.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs forward_request: the `if children.is_empty() { return; }` silent drop -> build_response_final(request.rid) + send_to_face(inbound, ...) sends the prompt ResponseFinal back to the querier, then returns. Faithful to zenoh route_query's empty-route branch (dispatcher/queries.rs:518-530): just the final (the querier's rid, NO Err -- unlike the timeout sweep which also synthesizes an Err), NO pending entry recorded (nothing is awaited), routed via send_to_face so egress ACL applies exactly as the timeout final does.",
+        "Covers BOTH empty-route triggers: a keyexpr no queryable matches (the any-interest gate), AND uo's AllComplete with a matching-but-incomplete queryable (the case the uu review noted AllComplete widened). A default BestMatching query with an incomplete match still falls back to All and reaches it (non-empty route), so only a genuinely-empty route fires the prompt final."
+      ],
+      "publishable_verification_bullets": [
+        "routing-peer lib 430/430 (was 429; +1 new, 1 rewritten: forward_request_with_no_queryable_sends_a_prompt_final_to_the_querier [no relay to B; a ResponseFinal back to A with rid 99; no pending entry]; forward_request_all_complete_with_no_complete_queryable_sends_a_prompt_final [the AllComplete-incomplete empty-route case, the uo-widened trigger]). The prior forward_request_with_no_queryable_routes_nowhere asserted silence-back-to-A; corrected to the prompt-final behaviour. base default lib 279/279.",
+        "clippy -D clean (routing-peer --all-targets + --no-default-features --features routing-peer --all-targets); fmt clean. Host gate; FULL run-ci at push (this session pushes: user asked to close the gap + push)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311uv = query-routing fidelity: forward_request EMPTY route now sends a prompt ResponseFinal to the querier (zenoh route_query dispatcher/queries.rs:518-530), closing the uu session-review's one tracked fidelity gap. The querier's get() terminates promptly instead of waiting out its own timeout. Just the final (no Err), querier rid, egress-ACL via send_to_face, no pending entry. The QueryTarget BestMatching track (um..uu) + this fidelity close = the relay query plane is now zenoh-faithful for BOTH the populated and the empty route.",
+        "TRACKED debt (remaining): --no-default-features routing-peer 18 fails (flood/sent==0 root-cause), N-final fan-out (per-outface vs zenoh Arc-aggregated; Session-API scope).",
+        "LOCAL: R311uv on top of uu=fbcb898 (origin/main=f2a64cd, +10 ahead um..uv); host-gated. PUSH this session = full run-ci then push (user asked to close + push). North-star beyond 5.16: untouched Storage(5.11) / SHM."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

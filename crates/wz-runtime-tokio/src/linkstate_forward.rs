@@ -1166,9 +1166,20 @@ impl LinkstateForwarder {
                 self.complete_query_directions(&keyexpr, &source_zid, &self_zid)
             }
         };
-        // A keyexpr no (complete, under AllComplete) queryable matches routes
-        // nowhere — empty children -> return.
+        // zenoh route_query EMPTY route (dispatcher/queries.rs:518-530): a keyexpr
+        // no (complete, under AllComplete) queryable matches routes nowhere — but
+        // rather than drop silently, send a PROMPT ResponseFinal back to the
+        // querier so its get() TERMINATES immediately instead of waiting out its
+        // own timeout. Just the final (no Err — unlike the timeout sweep, which
+        // also synthesizes an Err), carrying the querier's rid; NO pending entry
+        // is recorded (nothing is awaited). Routed via send_to_face so egress ACL
+        // applies, exactly as the timeout final does.
         if children.is_empty() {
+            let final_msg =
+                wz_session_core::response_final_build::build_response_final(request.rid);
+            self.send_to_face(inbound, reliable, || {
+                NetworkMessage::ResponseFinal(final_msg.clone())
+            });
             return;
         }
         // out_node_id + the literal keyexpr are the same for every outbound face,
@@ -6389,9 +6400,12 @@ mod tests {
     }
 
     #[test]
-    fn forward_request_with_no_queryable_routes_nowhere() {
-        // The any-interest gate, query-plane: a Request whose keyexpr no peer
-        // offers a queryable for is not relayed at all.
+    fn forward_request_with_no_queryable_sends_a_prompt_final_to_the_querier() {
+        // zenoh route_query EMPTY route (R311uv, dispatcher/queries.rs:518-530): a
+        // Request whose keyexpr no peer offers a queryable for is not RELAYED — but
+        // the relay sends a prompt ResponseFinal straight back to the querier so
+        // its get() terminates immediately instead of waiting out its own timeout.
+        // No pending entry is recorded (nothing is awaited).
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
@@ -6405,8 +6419,70 @@ mod tests {
         let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
             .expect("build request");
         fwd.forward_request(FaceId(0), true, &request);
-        assert_eq!(sink_b.frame_count(), 0, "no queryable -> no relay");
-        assert_eq!(sink_a.frame_count(), 0, "not back to the source either");
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "no queryable -> not relayed onward"
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "a prompt ResponseFinal routed back to the querier A",
+        );
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(0)).request_id,
+            99,
+            "the prompt final carries the querier's rid",
+        );
+        assert_eq!(
+            fwd.pending_len(),
+            0,
+            "no pending entry recorded — nothing is awaited on an empty route",
+        );
+    }
+
+    #[test]
+    fn forward_request_all_complete_with_no_complete_queryable_sends_a_prompt_final() {
+        // The empty-route final for the case uo's AllComplete widened (R311uv): a
+        // matching queryable EXISTS but is INCOMPLETE, so an AllComplete query has
+        // no target — the relay sends a prompt ResponseFinal back rather than
+        // leaving the querier to time out. (A default BestMatching query here would
+        // instead fall back to All and reach the incomplete B; only AllComplete
+        // empties the route.)
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_queryable_complete(&fwd, FaceId(1), "demo/q", 0, false); // B INCOMPLETE
+        sink_a.reset();
+        sink_b.reset();
+
+        let request = wz_session_core::request_build::build_request_query_with_target(
+            99,
+            0,
+            Some("demo/q"),
+            QueryTarget::AllComplete,
+        )
+        .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "no COMPLETE queryable -> AllComplete relays nowhere",
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "a prompt ResponseFinal back to the querier A",
+        );
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(0)).request_id,
+            99,
+            "the prompt final carries the querier's rid",
+        );
     }
 
     #[test]
