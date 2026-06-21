@@ -45288,6 +45288,54 @@
         "LOCAL UNPUSHED: Round 311tt + 311tu on origin/main=7c7e18e (2 ahead); push only after explicit consent — the full run-ci push gate is green for both. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
       ]
     },
+    "Round 311tv": {
+      "decision_summary": "R311tv: §5.16 access-control atom 3 — egress enforcement (the Mux twin of ingress). The forwarder runs the interceptor seam at BOTH the inbound forward() and outbound fan_out chokepoints, sharing one AclPolicy; egress closes the gap ingress cannot (a node's own originations cross only fan_out).",
+      "changes_bullets": [
+        "Two interceptor chains now (ingress_interceptors + egress_interceptors), the wz analogue of zenoh's DeMux (ingress) / Mux (egress) split. set_acl_policy installs an AclInterceptor per flow — Ingress consulted at forward(), Egress at fan_out — sharing the SAME AclPolicy (the rule set is immutable; a rule's flow selects where it applies).",
+        "admit_outbound(state, msg): consulted in fan_out after the per-face message is built and before it is sent. A denied outbound is dropped for THAT face (not sent, not counted) and witnessed by acl_denied. The destination subject is the face's zid already resolved in the fan_out loop; the egress chain lives in a separate RefCell so it does not conflict with the held faces borrow.",
+        "IngressContext renamed FaceContext: it serves BOTH directions — the subject is the peer on the other end of the link whether the message is inbound (ingress) or outbound (egress), so one context type backs both admit_inbound and admit_outbound.",
+        "Why egress is not mere symmetry: it closes the gap ingress cannot. A node's OWN originations (a publish) cross only fan_out, never forward()/ingress — so without egress they were never ACL-checked. Egress also enforces per-destination \"do not send keyexpr K to peer Z\". An Oam (link-state / gossip) carries no governed action, so topology propagation is never blocked.",
+        "demo --acl-deny <keyexpr> now installs an ingress AND an egress deny rule (a rule per flow) for the keyexpr — blocking K completely in both directions through this node."
+      ],
+      "verification_bullets": [
+        "routing-peer lib 383/383 incl an_egress_acl_deny_blocks_a_relay_but_not_reception (S allows ingress but denies egress on demo/**: a Put from A on demo/data is RECEIVED — data_seen++ — yet NOT relayed to the interested child B + acl_denied witness; the gap ingress cannot close). The atom-1/2 ingress tests (Put relay, DeclareSubscriber) still pass. wz-access-control 7/7 (unchanged — egress reuses the existing AclFlow::Egress + decision).",
+        "clippy -D clean (wz-access-control, wz-runtime-tokio routing-peer, wz-ap-demo routing-peer); fmt clean; base (non-routing-peer) build clean (interceptor gated out); demo build clean.",
+        "Full run-ci all required layers pass, judged by the unpiped RUNCI_EXIT=0: Layer A/A2/A3, the C* host lanes, Layer Q MCU (footprint unchanged — egress is AP-only forwarder code; the +12B text is the carried atom-1 keyexpr_includes_target delta), Layer Z zenohd interop 9/9."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tv = §5.16 access-control atom 3: EGRESS enforcement, the Mux twin of ingress. The interceptor seam now runs at BOTH chokepoints — the inbound forward() (ingress) and the outbound fan_out (egress) — the faithful zenoh DeMux/Mux pair, both backed by one shared AclPolicy. set_acl_policy installs an enforcer per flow; a rule carries its own flow.",
+        "Egress is load-bearing, not symmetry-for-symmetry: a node's own originations (publish) reach only fan_out, so ingress alone never gated them; egress also enforces per-destination \"do not send K to peer Z\". Oam (topology) carries no governed action, so link-state / gossip propagation is never blocked.",
+        "Remaining §5.16 (next atoms): Query / Reply / DeclareQueryable actions (need query routing wired into the linkstate forwarder first); interface / cert / username subjects = extauth (transport auth); downsampling + quota (NEW Interceptor impls — the composable chain was built for exactly this, the next atoms add siblings beside the ACL enforcer); YAML deploy-config loader (the typed AclConfig shape exists = one funnel); KeBoxTree sublinear; Session API ACL (the true local-delivery, a separate subsystem). access-downsampling / access-quota / access-extauth-* inventory stay reserved.",
+        "LOCAL UNPUSHED: Round 311tt + 311tu + 311tv on origin/main=7c7e18e (3 ahead); push only after explicit consent — the full run-ci push gate is green for all three. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
+      ],
+      "publishable_decision_summary": "R311tv: §5.16 access-control atom 3 — egress enforcement (the Mux twin of ingress). The forwarder runs the interceptor seam at BOTH the inbound forward() and outbound fan_out chokepoints, sharing one AclPolicy; egress closes the gap ingress cannot (a node's own originations cross only fan_out).",
+      "publishable_changes_bullets": [
+        "Two interceptor chains now (ingress_interceptors + egress_interceptors), the wz analogue of zenoh's DeMux (ingress) / Mux (egress) split. set_acl_policy installs an AclInterceptor per flow — Ingress consulted at forward(), Egress at fan_out — sharing the SAME AclPolicy (the rule set is immutable; a rule's flow selects where it applies).",
+        "admit_outbound(state, msg): consulted in fan_out after the per-face message is built and before it is sent. A denied outbound is dropped for THAT face (not sent, not counted) and witnessed by acl_denied. The destination subject is the face's zid already resolved in the fan_out loop; the egress chain lives in a separate RefCell so it does not conflict with the held faces borrow.",
+        "IngressContext renamed FaceContext: it serves BOTH directions — the subject is the peer on the other end of the link whether the message is inbound (ingress) or outbound (egress), so one context type backs both admit_inbound and admit_outbound.",
+        "Why egress is not mere symmetry: it closes the gap ingress cannot. A node's OWN originations (a publish) cross only fan_out, never forward()/ingress — so without egress they were never ACL-checked. Egress also enforces per-destination \"do not send keyexpr K to peer Z\". An Oam (link-state / gossip) carries no governed action, so topology propagation is never blocked.",
+        "demo --acl-deny <keyexpr> now installs an ingress AND an egress deny rule (a rule per flow) for the keyexpr — blocking K completely in both directions through this node."
+      ],
+      "publishable_verification_bullets": [
+        "routing-peer lib 383/383 incl an_egress_acl_deny_blocks_a_relay_but_not_reception (S allows ingress but denies egress on demo/**: a Put from A on demo/data is RECEIVED — data_seen++ — yet NOT relayed to the interested child B + acl_denied witness; the gap ingress cannot close). The atom-1/2 ingress tests (Put relay, DeclareSubscriber) still pass. wz-access-control 7/7 (unchanged — egress reuses the existing AclFlow::Egress + decision).",
+        "clippy -D clean (wz-access-control, wz-runtime-tokio routing-peer, wz-ap-demo routing-peer); fmt clean; base (non-routing-peer) build clean (interceptor gated out); demo build clean.",
+        "Full run-ci all required layers pass, judged by the unpiped RUNCI_EXIT=0: Layer A/A2/A3, the C* host lanes, Layer Q MCU (footprint unchanged — egress is AP-only forwarder code; the +12B text is the carried atom-1 keyexpr_includes_target delta), Layer Z zenohd interop 9/9."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tv = §5.16 access-control atom 3: EGRESS enforcement, the Mux twin of ingress. The interceptor seam now runs at BOTH chokepoints — the inbound forward() (ingress) and the outbound fan_out (egress) — the faithful zenoh DeMux/Mux pair, both backed by one shared AclPolicy. set_acl_policy installs an enforcer per flow; a rule carries its own flow.",
+        "Egress is load-bearing, not symmetry-for-symmetry: a node's own originations (publish) reach only fan_out, so ingress alone never gated them; egress also enforces per-destination \"do not send K to peer Z\". Oam (topology) carries no governed action, so link-state / gossip propagation is never blocked.",
+        "Remaining §5.16 (next atoms): Query / Reply / DeclareQueryable actions (need query routing wired into the linkstate forwarder first); interface / cert / username subjects = extauth (transport auth); downsampling + quota (NEW Interceptor impls — the composable chain was built for exactly this, the next atoms add siblings beside the ACL enforcer); YAML deploy-config loader (the typed AclConfig shape exists = one funnel); KeBoxTree sublinear; Session API ACL (the true local-delivery, a separate subsystem). access-downsampling / access-quota / access-extauth-* inventory stay reserved.",
+        "LOCAL UNPUSHED: Round 311tt + 311tu + 311tv on origin/main=7c7e18e (3 ahead); push only after explicit consent — the full run-ci push gate is green for all three. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

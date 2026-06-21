@@ -1355,19 +1355,24 @@ pub(crate) async fn run_peer(
     // empty (access control disabled, every message admitted).
     if let Some(deny_keyexpr) = acl_deny {
         log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
+        // A rule per FLOW (a rule carries a single flow): the keyexpr is denied
+        // BOTH on ingress (a neighbour cannot push/subscribe it through us) and
+        // on egress (we never relay it out, nor originate it toward a peer), so
+        // `--acl-deny K` blocks K completely in both directions.
+        let deny_rule = |flow| AclRule {
+            subject: SubjectSelector::Any,
+            key_exprs: vec![deny_keyexpr.to_owned()],
+            messages: vec![
+                AclMessage::Put,
+                AclMessage::Delete,
+                AclMessage::DeclareSubscriber,
+            ],
+            flow,
+            permission: Permission::Deny,
+        };
         forwarder.set_acl_policy(AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
-            rules: vec![AclRule {
-                subject: SubjectSelector::Any,
-                key_exprs: vec![deny_keyexpr.to_owned()],
-                messages: vec![
-                    AclMessage::Put,
-                    AclMessage::Delete,
-                    AclMessage::DeclareSubscriber,
-                ],
-                flow: AclFlow::Ingress,
-                permission: Permission::Deny,
-            }],
+            rules: vec![deny_rule(AclFlow::Ingress), deny_rule(AclFlow::Egress)],
         }));
     }
 

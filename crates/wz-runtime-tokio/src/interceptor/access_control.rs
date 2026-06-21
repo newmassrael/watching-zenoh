@@ -25,8 +25,9 @@ use super::{Interceptor, InterceptorContext};
 
 /// An access-control enforcer for one flow — the wz mirror of zenoh's
 /// `IngressAclEnforcer` / `EgressAclEnforcer`. Holds the (shared) compiled
-/// [`AclPolicy`] and the flow it enforces. The first atom installs one of these
-/// with [`AclFlow::Ingress`].
+/// [`AclPolicy`] and the flow it enforces. A policy install creates one per
+/// flow (an ingress enforcer consulted at the forwarder's inbound seam, an
+/// egress one at the outbound `fan_out`), both sharing the same rule set.
 pub struct AclInterceptor {
     policy: AclPolicy,
     flow: AclFlow,

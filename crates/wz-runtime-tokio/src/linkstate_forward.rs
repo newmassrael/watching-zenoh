@@ -265,15 +265,22 @@ pub struct LinkstateForwarder {
     /// (A5c).
     dial_tx: RefCell<Option<DialIntentSender>>,
 
-    /// R311tt — the §5.16 access-control interceptor chain, consulted once per
-    /// inbound message at the top of [`forward`](Self::forward), ahead of the
-    /// kind-dispatch (the mesh-RELAY admission point). EMPTY by default = access
-    /// control disabled (zenoh `AclConfig.enabled = false`, every message
+    /// R311tt — the §5.16 access-control INGRESS interceptor chain, consulted
+    /// once per inbound message at the top of [`forward`](Self::forward), ahead
+    /// of the kind-dispatch (the mesh-RELAY admission point). EMPTY by default =
+    /// access control disabled (zenoh `AclConfig.enabled = false`, every message
     /// admitted); a deploy installs an ACL via
     /// [`set_acl_policy`](Self::set_acl_policy). `RefCell` because the policy is
     /// set through a `&self` config seam, the same shape as the other knobs.
-    interceptors: RefCell<InterceptorChain>,
-    /// R311tt — count of inbound messages an interceptor DENIED: the
+    ingress_interceptors: RefCell<InterceptorChain>,
+    /// R311tv — the §5.16 access-control EGRESS interceptor chain, consulted per
+    /// OUTBOUND message in [`fan_out`](Self::fan_out) keyed by the DESTINATION
+    /// face's subject — the wz analogue of zenoh's `EgressAclEnforcer` in the
+    /// `Mux`, the twin of the ingress chain. EMPTY by default. It is what gates
+    /// this node's OWN originations (a `publish` never crosses `forward`, only
+    /// `fan_out`), so ingress alone could not cover them.
+    egress_interceptors: RefCell<InterceptorChain>,
+    /// R311tt — count of messages an interceptor DENIED (ingress or egress): the
     /// access-control witness, the deny twin of [`data_seen`](Self#structfield.data_seen)
     /// the e2e/unit tests assert against (zenoh logs each deny; wz counts it).
     acl_denied: Cell<usize>,
@@ -316,7 +323,8 @@ impl LinkstateForwarder {
             dial_tx: RefCell::new(None),
             // Access control off by default (an empty chain) — every inbound
             // message admitted, exactly as zenoh's `AclConfig.enabled = false`.
-            interceptors: RefCell::new(InterceptorChain::new()),
+            ingress_interceptors: RefCell::new(InterceptorChain::new()),
+            egress_interceptors: RefCell::new(InterceptorChain::new()),
             acl_denied: Cell::new(0),
         }
     }
@@ -362,19 +370,26 @@ impl LinkstateForwarder {
 
     /// Install an access-control policy (§5.16) — the config seam symmetric to
     /// [`set_gossip_target`](Self::set_gossip_target) /
-    /// [`enable_autoconnect`](Self::enable_autoconnect). Replaces the inbound
-    /// interceptor chain with a single ingress [`AclInterceptor`] backed by
-    /// `policy`; from now on each inbound message is checked at
-    /// [`forward`](Self::forward) before relay, and a denied one is dropped
-    /// (witnessed by [`acl_denied`](Self::acl_denied)). A driver that never
-    /// calls this keeps the empty chain — access control disabled, every
-    /// message admitted (zenoh `AclConfig.enabled = false`). The wz analogue of
-    /// `acl_interceptor_factories` installing an `IngressAclEnforcer`; the
-    /// egress enforcer joins when the egress seam lands.
+    /// [`enable_autoconnect`](Self::enable_autoconnect). Installs BOTH an ingress
+    /// and an egress [`AclInterceptor`] backed by the SAME `policy` (shared, the
+    /// rule set is immutable; the flow selects which rules apply): an inbound
+    /// message is checked at [`forward`](Self::forward) before relay, and an
+    /// OUTBOUND message at [`fan_out`](Self::fan_out) keyed by the destination
+    /// face — the wz analogue of `acl_interceptor_factories` installing both an
+    /// `IngressAclEnforcer` and an `EgressAclEnforcer`. A driver that never calls
+    /// this keeps both chains empty — access control disabled, every message
+    /// admitted (zenoh `AclConfig.enabled = false`). A denied message is dropped
+    /// and witnessed by [`acl_denied`](Self::acl_denied).
     pub fn set_acl_policy(&self, policy: AclPolicy) {
-        let mut chain = InterceptorChain::new();
-        chain.push(Box::new(AclInterceptor::new(policy, AclFlow::Ingress)));
-        *self.interceptors.borrow_mut() = chain;
+        let mut ingress = InterceptorChain::new();
+        ingress.push(Box::new(AclInterceptor::new(
+            policy.clone(),
+            AclFlow::Ingress,
+        )));
+        *self.ingress_interceptors.borrow_mut() = ingress;
+        let mut egress = InterceptorChain::new();
+        egress.push(Box::new(AclInterceptor::new(policy, AclFlow::Egress)));
+        *self.egress_interceptors.borrow_mut() = egress;
     }
 
     /// The number of inbound messages access control has DENIED so far — the
@@ -384,15 +399,14 @@ impl LinkstateForwarder {
         self.acl_denied.get()
     }
 
-    /// Whether the interceptor chain ADMITS this inbound `msg` arriving on face
-    /// `id`. The fast path: an empty chain (no ACL configured) admits without
-    /// touching the face table. Otherwise it builds the per-message
-    /// [`IngressContext`] off that face's state (subject zid + alias table) and
-    /// runs the chain. The single seam consulted at the top of
-    /// [`forward`](Self::forward), ahead of the kind-dispatch — never an inline
-    /// `if deny` per message arm.
+    /// Whether the INGRESS chain admits this inbound `msg` arriving on face `id`.
+    /// The fast path: an empty chain (no ACL configured) admits without touching
+    /// the face table. Otherwise it builds the per-message [`FaceContext`] off
+    /// that face's state (subject zid + alias table) and runs the chain. The
+    /// single seam consulted at the top of [`forward`](Self::forward), ahead of
+    /// the kind-dispatch — never an inline `if deny` per message arm.
     fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> bool {
-        let chain = self.interceptors.borrow();
+        let chain = self.ingress_interceptors.borrow();
         if chain.is_empty() {
             return true;
         }
@@ -401,23 +415,40 @@ impl LinkstateForwarder {
         let Some(face) = faces.get(&id) else {
             return true;
         };
-        chain.admit(&IngressContext { face }, msg)
+        chain.admit(&FaceContext { face }, msg)
+    }
+
+    /// Whether the EGRESS chain admits sending `msg` to the face whose `state`
+    /// the caller already holds (the destination subject is that face's zid).
+    /// The fast path: an empty chain admits without building a context.
+    /// Consulted per outbound message in [`fan_out`](Self::fan_out) — the wz
+    /// `Mux`-side twin of [`admit_inbound`](Self::admit_inbound). Takes the
+    /// already-borrowed `state` (not a `FaceId`) because `fan_out` holds the
+    /// `faces` borrow across the per-face loop.
+    fn admit_outbound(&self, state: &FaceState, msg: &NetworkMessage) -> bool {
+        let chain = self.egress_interceptors.borrow();
+        if chain.is_empty() {
+            return true;
+        }
+        chain.admit(&FaceContext { face: state }, msg)
     }
 }
 
-/// The per-inbound-message [`InterceptorContext`] for one face — borrows that
-/// face's state so an enforcer can read the subject (the peer's routing zid)
-/// and resolve a message keyexpr against the face's link-local alias table. The
+/// The per-message [`InterceptorContext`] for one face — borrows that face's
+/// state so an enforcer can read the subject (the peer's routing zid) and
+/// resolve a message keyexpr against the face's link-local alias table. Serves
+/// BOTH directions: the inbound face for ingress, the destination face for
+/// egress (the subject is the peer on the other end of the link either way). The
 /// wz analogue of the per-transport state zenoh's enforcer bakes in at
 /// `new_transport_unicast`; here it is built per message off the already-held
 /// face state (an `O(1)` field read, not a re-derivation — the per-face cache
 /// zenoh keeps is the deferred optimisation that the per-keyexpr decision cache
 /// would land beside).
-struct IngressContext<'a> {
+struct FaceContext<'a> {
     face: &'a FaceState,
 }
 
-impl InterceptorContext for IngressContext<'_> {
+impl InterceptorContext for FaceContext<'_> {
     fn subject(&self) -> Option<Zid> {
         peer_zid_routing(&self.face.actions)
     }
@@ -641,6 +672,15 @@ impl LinkstateForwarder {
             // from_slice is the right ctor (a wire zid would use try_from).
             let peer_zid = peer_zid_routing(&state.actions);
             if let Some(msg) = build(*id, peer_zid)? {
+                // R311tv — §5.16 EGRESS access control: gate the built message by
+                // the DESTINATION face's subject before it leaves. A denied
+                // outbound is dropped for THIS face (not sent, not counted) and
+                // witnessed — the wz `Mux`-side enforcement that also covers this
+                // node's own originations (a `publish` reaches only `fan_out`).
+                if !self.admit_outbound(state, &msg) {
+                    self.acl_denied.set(self.acl_denied.get() + 1);
+                    continue;
+                }
                 // a per-face send failure (link gone mid-fan-out) is skipped,
                 // not fatal to the rest — the face's own driver surfaces its
                 // teardown via deregister.
@@ -3133,6 +3173,52 @@ mod tests {
             "an allowed subscription registers"
         );
         assert_eq!(fwd.acl_denied(), 1, "the allowed declaration adds no deny");
+    }
+
+    #[test]
+    fn an_egress_acl_deny_blocks_a_relay_but_not_reception() {
+        // Egress enforcement — the gap ingress cannot close. S ALLOWS ingress but
+        // DENIES egress on demo/**: a Put from A on demo/data is RECEIVED at S
+        // (admitted at ingress, counted) yet NOT relayed to the interested child
+        // B (egress denies sending it out the B face), and the egress drop is
+        // witnessed. Egress gates what THIS node SENDS, keyed by the destination.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
+        sink_a.reset();
+        sink_b.reset();
+        fwd.set_acl_policy(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["demo/**".to_owned()],
+                messages: vec![AclMessage::Put],
+                flow: AclFlow::Egress, // egress only — ingress is allowed
+                permission: Permission::Deny,
+            }],
+        }));
+
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        assert_eq!(fwd.data_seen(), 1, "the Put is received (ingress allows)");
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "egress denies the relay out to the interested child"
+        );
+        assert_eq!(fwd.acl_denied(), 1, "the egress drop is witnessed");
     }
 
     #[test]
