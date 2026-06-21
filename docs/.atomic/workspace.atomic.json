@@ -45538,6 +45538,44 @@
         "LOCAL UNPUSHED: Round 311tz committed locally on origin/main=4200edc; push only after explicit consent — the full run-ci push gate is green."
       ]
     },
+    "Round 311ua": {
+      "decision_summary": "R311ua: query-routing atom 2a — the Request routing-context seam (read/set_request_source over the Request ext_nodeid), the Request twin of push/declare_routing_context reusing the ext_nodeid SSOT; the enabling seam for atom 2b's forward_request (routing a Query along the querier's tree toward queryables).",
+      "changes_bullets": [
+        "New crates/wz-session-core/src/request_routing_context.rs: read_request_source / set_request_source over the Request `ext_nodeid` extension (the routing SOURCE a relayed Query routes along), delegating the chain edit to the shared ext_nodeid SSOT and syncing only the Request-level header Z bit (0x80; zenoh request::flag::Z = 1<<7, request.rs:25; the wz codec decodes the chain only when header & 0x80). The Request twin of push_routing_context / declare_routing_context.",
+        "Extended the ext_nodeid SSOT gate from any(codec-push, codec-declare) to also include codec-request — the shared node_id-ext helper is now used by a THIRD carrier (Request), so it must compile whenever the Request codec is present. Verified by a codec-request-only build.",
+        "node_id == 0 = zenoh self-originated DEFAULT (omitted on the wire); a non-zero id names the querier peer's psid, resolved on receipt exactly as forward_push resolves a Push's source — so a relayed Query will route along the QUERIER's tree, not the relaying neighbour's (the property atom 2b's forward_request consumes for loop-free multi-hop)."
+      ],
+      "verification_bullets": [
+        "wz-session-core request_routing_context 7/7 incl set_then_read_round_trips_through_the_wire (the stamped ext_nodeid survives the Request codec encode->decode in zenoh's exts-after-keyexpr/before-body order, with the Query body preserved alongside). Full session-core suite 153/153 unbroken by the ext_nodeid gate change. codec-request-only build clean (isolating the new ext_nodeid gate combo).",
+        "clippy -D clean (codec-request); fmt clean. Host gate only per the run-ci-batch policy — the full run-ci runs once before the push that bundles atoms 2a+2b (a small wire seam, mechanical clone of declare_routing_context with wire round-trip coverage)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ua = query-routing atom 2a: the Request routing-context seam (read/set_request_source over Request ext_nodeid, reusing the ext_nodeid SSOT + a codec-request gate extension). The enabling seam for atom 2b — the project's atom3a/atom3b split precedent (declare_routing_context seam, then the propagation driver).",
+        "NEXT (atom 2b): forward_request — relay a Request along the QUERIER's tree (resolve_source via read_request_source, qabls.interested_remote, directions_toward) toward the matching queryables, PLUS the pending-query table + per-hop qid remapping (a per-outbound-face next_qid + a (face_out,qid_out)->(face_in,rid_in) return mapping) so atom-3's Response can route back. atom-3 = forward_response/final consume + free the pending table + timeout/final-aggregation.",
+        "LOCAL UNPUSHED: R311tz (atom 1, full run-ci green) + R311ua (atom 2a, host-gated seam) on origin/main=4200edc, both committed locally; full run-ci runs once before the batch push (the chosen run-ci-batch policy)."
+      ],
+      "publishable_decision_summary": "R311ua: query-routing atom 2a — the Request routing-context seam (read/set_request_source over the Request ext_nodeid), the Request twin of push/declare_routing_context reusing the ext_nodeid SSOT; the enabling seam for atom 2b's forward_request (routing a Query along the querier's tree toward queryables).",
+      "publishable_changes_bullets": [
+        "New crates/wz-session-core/src/request_routing_context.rs: read_request_source / set_request_source over the Request `ext_nodeid` extension (the routing SOURCE a relayed Query routes along), delegating the chain edit to the shared ext_nodeid SSOT and syncing only the Request-level header Z bit (0x80; zenoh request::flag::Z = 1<<7, request.rs:25; the wz codec decodes the chain only when header & 0x80). The Request twin of push_routing_context / declare_routing_context.",
+        "Extended the ext_nodeid SSOT gate from any(codec-push, codec-declare) to also include codec-request — the shared node_id-ext helper is now used by a THIRD carrier (Request), so it must compile whenever the Request codec is present. Verified by a codec-request-only build.",
+        "node_id == 0 = zenoh self-originated DEFAULT (omitted on the wire); a non-zero id names the querier peer's psid, resolved on receipt exactly as forward_push resolves a Push's source — so a relayed Query will route along the QUERIER's tree, not the relaying neighbour's (the property atom 2b's forward_request consumes for loop-free multi-hop)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core request_routing_context 7/7 incl set_then_read_round_trips_through_the_wire (the stamped ext_nodeid survives the Request codec encode->decode in zenoh's exts-after-keyexpr/before-body order, with the Query body preserved alongside). Full session-core suite 153/153 unbroken by the ext_nodeid gate change. codec-request-only build clean (isolating the new ext_nodeid gate combo).",
+        "clippy -D clean (codec-request); fmt clean. Host gate only per the run-ci-batch policy — the full run-ci runs once before the push that bundles atoms 2a+2b (a small wire seam, mechanical clone of declare_routing_context with wire round-trip coverage)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ua = query-routing atom 2a: the Request routing-context seam (read/set_request_source over Request ext_nodeid, reusing the ext_nodeid SSOT + a codec-request gate extension). The enabling seam for atom 2b — the project's atom3a/atom3b split precedent (declare_routing_context seam, then the propagation driver).",
+        "NEXT (atom 2b): forward_request — relay a Request along the QUERIER's tree (resolve_source via read_request_source, qabls.interested_remote, directions_toward) toward the matching queryables, PLUS the pending-query table + per-hop qid remapping (a per-outbound-face next_qid + a (face_out,qid_out)->(face_in,rid_in) return mapping) so atom-3's Response can route back. atom-3 = forward_response/final consume + free the pending table + timeout/final-aggregation.",
+        "LOCAL UNPUSHED: R311tz (atom 1, full run-ci green) + R311ua (atom 2a, host-gated seam) on origin/main=4200edc, both committed locally; full run-ci runs once before the batch push (the chosen run-ci-batch policy)."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

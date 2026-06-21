@@ -472,12 +472,17 @@ pub mod push_build;
 /// Shared `ext_nodeid` routing-context chain codec (P4 routing) — the SSOT
 /// for the `zextz64!(0x3, true)` NodeId extension Push and Declare both carry,
 /// plus the per-entry chain `Z`-bit normalisation. `push_routing_context` /
-/// `declare_routing_context` / `push_build` delegate here instead of each
-/// re-implementing the chain edits (R311ru consolidation of the prior
-/// triplication). Gated on `alloc` + whichever carrier codec is present.
+/// `declare_routing_context` / `request_routing_context` / `push_build`
+/// delegate here instead of each re-implementing the chain edits (R311ru
+/// consolidation of the prior triplication). Gated on `alloc` + whichever
+/// carrier codec is present.
 #[cfg(all(
     feature = "alloc",
-    any(feature = "codec-push", feature = "codec-declare")
+    any(
+        feature = "codec-push",
+        feature = "codec-declare",
+        feature = "codec-request"
+    )
 ))]
 pub mod ext_nodeid;
 
@@ -621,6 +626,16 @@ pub mod response_build;
 /// buffers and there is no Request frame to build without the codec.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 pub mod request_build;
+
+/// Request routing-context source `node_id` (P4 routing, query-routing atom
+/// 2a): `read_request_source` / `set_request_source` over the Request
+/// `ext_nodeid` extension — the seam naming the spanning-tree root a
+/// linkstate-peer relays a ROUTED Query (`Request`) along, toward the matching
+/// queryables (the Request twin of [`push_routing_context`] /
+/// [`declare_routing_context`]). `codec-request` gated (the Query carrier the
+/// routing context rides) and owned `Vec` output (alloc-gated).
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
+pub mod request_routing_context;
 
 /// R311dx — application-layer queryable registry (`QueryableRegistry`
 /// + `QueryReply` / `ReplyBody` / `QueryResponder` / `QueryableId`):
