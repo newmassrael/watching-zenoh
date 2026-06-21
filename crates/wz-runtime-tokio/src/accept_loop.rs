@@ -113,6 +113,39 @@ pub struct Face {
     pub peer_zid: Option<Vec<u8>>,
 }
 
+/// A request from the topology forwarder to the accept loop: dial a peer that
+/// gossip DISCOVERED and the autoconnect policy admitted. The sync ingest path
+/// cannot open an outbound link itself — it is not the async task that owns the
+/// in-flight-open [`FuturesUnordered`] — so it hands the loop this intent over an
+/// unbounded channel and the loop turns it into a `dial_face` (A5c). The wz
+/// analogue of the `(zid, locators)` pair zenoh's gossip passes to
+/// `runtime.connect_peer` (`hat/p2p_peer/gossip.rs:455`), minus the per-dial task
+/// spawn — wz routes the dial back to its single drive task instead.
+///
+/// `zid` is the trimmed wire bytes (the SAME representation as [`Face::peer_zid`],
+/// not the routing-graph `Zid`) deliberately: it keeps this type — and the
+/// channel arm the shared drive loop polls — free of the `routing-peer`-only
+/// graph crate, and it is exactly the form the loop's "already hold a face to
+/// this peer?" dedup (A5c) compares against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialIntent {
+    /// The discovered peer's zid (trimmed wire bytes) — so the loop can skip a
+    /// peer it already holds a face to rather than open a redundant second link.
+    pub zid: Vec<u8>,
+    /// The dial addresses the peer advertised in its link-state (its locators);
+    /// the loop (A5c) parses one into a socket address to connect to.
+    pub locators: Vec<String>,
+}
+
+/// The forwarder's sending end of the dial-intent channel — held inside the
+/// [`FaceForwarder`] and written (non-blocking) from the sync ingest path. The
+/// channel is UNBOUNDED because the producer is synchronous (mid graph-borrow)
+/// and must never await or block on a full queue; discovery is bounded by the
+/// mesh size in practice.
+pub type DialIntentSender = tokio::sync::mpsc::UnboundedSender<DialIntent>;
+/// The accept loop's receiving end, drained in the loop's `select!` (A5c).
+pub type DialIntentReceiver = tokio::sync::mpsc::UnboundedReceiver<DialIntent>;
+
 /// Observable lifecycle events the accept loop emits to its caller (the demo
 /// logs them; tests count them). The faces table is internal; these events are
 /// the observation seam — `FaceUp`/`FaceDown` bracket exactly the interval a

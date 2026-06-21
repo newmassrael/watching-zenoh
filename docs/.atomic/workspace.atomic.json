@@ -44806,6 +44806,56 @@
         "LOCAL UNPUSHED: 311tk on origin/main=4394d5a (tg/th/ti/tj pushed). Host lanes verified (graph 56, clippy, fmt, driver build). full run-ci + idle before push; push only after explicit consent."
       ]
     },
+    "Round 311tl": {
+      "decision_summary": "R311tl: gossip-policy A5b -- forwarder->accept-loop dial-intent channel. A discovered peer the AutoConnect policy admits is emitted as a DialIntent on an unbounded channel the accept loop will dial (A5c).",
+      "changes_bullets": [
+        "accept_loop.rs: new DialIntent { zid: Vec<u8>, locators } + DialIntentSender/Receiver (tokio unbounded). zid as Vec<u8> (= Face.peer_zid) keeps the shared drive loop free of the routing-peer-only graph crate.",
+        "LinkstateForwarder gains autoconnect: Cell<AutoConnect> (disabled default) + dial_tx + enable_autoconnect -> Receiver. The ingest emits a DialIntent per changes.new peer with locators passing should_autoconnect.",
+        "Gate placement = zenoh gossip.rs:444 (should_autoconnect inline before connect), so A5a's AutoConnect is consumed HERE (not A5c as the tk carry planned); A5c becomes purely the loop receive->dial.",
+        "Disabled default (empty matcher) emits nothing -- the prior log-only behaviour. Unbounded channel: the sync ingest (mid graph-borrow) must not block; an Err on send (loop gone) drops the intent.",
+        "wz-routing-graph fix (A5b prerequisite): process_linkstates update path now sets node.whatami. A link-target placeholder (whatami None) gets its role from its own later entry, else the role gate skips it forever (new once)."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio 370 lib tests (+4 autoconnect emit: admitted peer emits zid+locators, disabled empty-matcher emits nothing, client role excluded, GreaterZid emits only when self zid greater = one dialer per pair).",
+        "wz-routing-graph 57 tests (+1: a node placeholder'd by a linker gets its whatami from its own later entry). clippy -D clean (graph; driver routing-peer AND base no-feature build); fmt clean both crates.",
+        "Grounding (read): zenoh gossip.rs:423-465 (gossip -> should_autoconnect -> connect_peer(zid, locators)); the single-task FuturesUnordered model is why wz channels the dial back instead of spawning it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tl = gossip-policy A5b: the forwarder->accept-loop dial-intent channel. The forwarder emits a DialIntent for each autoconnect-admitted discovered peer; the loop does not consume it yet (A5c).",
+        "NEXT A5c: the loop select! arm drains the DialIntentReceiver; per intent, skip a peer already held (dedup DialIntent.zid vs Face.peer_zid) else parse a locator -> SocketAddr and push dial_face into opening.",
+        "A5c also: thread the receiver from enable_autoconnect into face_drive_loop (a FaceSources field or loop param) + a deploy opt-in (peer_loop sets the policy). Then real-TCP e2e: two peers gossip-discover + autoconnect.",
+        "DEFERRED (honest): emit fires on changes.new only -- a peer whose locators arrive on a LATER re-advertisement (updated, not new) is not re-evaluated; and no dial RETRY on failure (reconnect's job). zenoh re-checks per receive.",
+        "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl on origin/main=4394d5a. Host lanes verified (graph 57, driver 370 routing-peer + base clippy, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tl: gossip-policy A5b -- forwarder->accept-loop dial-intent channel. A discovered peer the AutoConnect policy admits is emitted as a DialIntent on an unbounded channel the accept loop will dial (A5c).",
+      "publishable_changes_bullets": [
+        "accept_loop.rs: new DialIntent { zid: Vec<u8>, locators } + DialIntentSender/Receiver (tokio unbounded). zid as Vec<u8> (= Face.peer_zid) keeps the shared drive loop free of the routing-peer-only graph crate.",
+        "LinkstateForwarder gains autoconnect: Cell<AutoConnect> (disabled default) + dial_tx + enable_autoconnect -> Receiver. The ingest emits a DialIntent per changes.new peer with locators passing should_autoconnect.",
+        "Gate placement = zenoh gossip.rs:444 (should_autoconnect inline before connect), so A5a's AutoConnect is consumed HERE (not A5c as the tk carry planned); A5c becomes purely the loop receive->dial.",
+        "Disabled default (empty matcher) emits nothing -- the prior log-only behaviour. Unbounded channel: the sync ingest (mid graph-borrow) must not block; an Err on send (loop gone) drops the intent.",
+        "wz-routing-graph fix (A5b prerequisite): process_linkstates update path now sets node.whatami. A link-target placeholder (whatami None) gets its role from its own later entry, else the role gate skips it forever (new once)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio 370 lib tests (+4 autoconnect emit: admitted peer emits zid+locators, disabled empty-matcher emits nothing, client role excluded, GreaterZid emits only when self zid greater = one dialer per pair).",
+        "wz-routing-graph 57 tests (+1: a node placeholder'd by a linker gets its whatami from its own later entry). clippy -D clean (graph; driver routing-peer AND base no-feature build); fmt clean both crates.",
+        "Grounding (read): zenoh gossip.rs:423-465 (gossip -> should_autoconnect -> connect_peer(zid, locators)); the single-task FuturesUnordered model is why wz channels the dial back instead of spawning it."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tl = gossip-policy A5b: the forwarder->accept-loop dial-intent channel. The forwarder emits a DialIntent for each autoconnect-admitted discovered peer; the loop does not consume it yet (A5c).",
+        "NEXT A5c: the loop select! arm drains the DialIntentReceiver; per intent, skip a peer already held (dedup DialIntent.zid vs Face.peer_zid) else parse a locator -> SocketAddr and push dial_face into opening.",
+        "A5c also: thread the receiver from enable_autoconnect into face_drive_loop (a FaceSources field or loop param) + a deploy opt-in (peer_loop sets the policy). Then real-TCP e2e: two peers gossip-discover + autoconnect.",
+        "DEFERRED (honest): emit fires on changes.new only -- a peer whose locators arrive on a LATER re-advertisement (updated, not new) is not re-evaluated; and no dial RETRY on failure (reconnect's job). zenoh re-checks per receive.",
+        "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl on origin/main=4394d5a. Host lanes verified (graph 57, driver 370 routing-peer + base clippy, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

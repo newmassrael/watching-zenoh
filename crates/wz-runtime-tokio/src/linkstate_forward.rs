@@ -104,9 +104,9 @@ use wz_session_core::push_routing_context::{
 };
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
-use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
+use wz_routing_graph::{AutoConnect, Changes, LinkId, LinkstateNetwork};
 
-use crate::accept_loop::{FaceForwarder, FaceId};
+use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
@@ -206,6 +206,20 @@ pub struct LinkstateForwarder {
     /// per local whatami is a later atom, so it has no setter yet. An all-peer
     /// deployment matches every face, so the gate is behaviour-neutral there.
     gossip_target: WhatAmIMatcher,
+    /// The gossip autoconnect policy (zenoh `AutoConnect`): whether a peer this
+    /// node DISCOVERS off a gossip flood should be dialed (the role matcher + zid
+    /// tie-break). Default [`AutoConnect::disabled`] — an empty matcher, so the
+    /// ingest emit gate is always false and a default driver produces no
+    /// dial-intents (the signature-stable prior behaviour). A deploy opts in via
+    /// [`enable_autoconnect`](Self::enable_autoconnect). `Cell` because the policy
+    /// is `Copy` and set once at setup through `&self`, like the other knobs.
+    autoconnect: Cell<AutoConnect>,
+    /// The sending end of the dial-intent channel, installed by
+    /// [`enable_autoconnect`](Self::enable_autoconnect). `None` until autoconnect
+    /// is enabled — the ingest emit is then a no-op. The accept loop holds the
+    /// matching [`DialIntentReceiver`] and turns each intent into an outbound dial
+    /// (A5c).
+    dial_tx: RefCell<Option<DialIntentSender>>,
 }
 
 impl LinkstateForwarder {
@@ -237,6 +251,10 @@ impl LinkstateForwarder {
             recomputes: Cell::new(0),
             // zenoh peer/router default gossip target (router|peer); never client.
             gossip_target: WhatAmIMatcher::empty().router().peer(),
+            // autoconnect off by default (an empty matcher) -> the ingest emit
+            // gate is always false, so a default driver produces no dial-intents.
+            autoconnect: Cell::new(AutoConnect::disabled(self_zid)),
+            dial_tx: RefCell::new(None),
         }
     }
 
@@ -248,6 +266,23 @@ impl LinkstateForwarder {
     /// never calls this advertises no locators (the prior behaviour exactly).
     pub fn set_self_locators(&self, locators: Vec<String>) {
         self.net.borrow_mut().set_self_locators(locators);
+    }
+
+    /// Enable gossip autoconnect: install `policy` and return the receiving end
+    /// of the dial-intent channel. From now on each peer the topology ingest
+    /// DISCOVERS (a `changes.new` node that advertised locators) whose role + zid
+    /// the policy admits ([`AutoConnect::should_autoconnect`]) is emitted as a
+    /// [`DialIntent`]; the accept loop drains the returned [`DialIntentReceiver`]
+    /// and opens an outbound dial (A5c). Call ONCE at setup, before the drive
+    /// loop starts; a driver that never calls this keeps the prior behaviour (no
+    /// autoconnect, an empty matcher). zenoh's gossip holds the same policy and
+    /// dials inline (`hat/p2p_peer/gossip.rs:444`); wz routes the dial back to its
+    /// single drive task over this channel instead of spawning it.
+    pub fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.autoconnect.set(policy);
+        *self.dial_tx.borrow_mut() = Some(tx);
+        rx
     }
 
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it against
@@ -276,17 +311,38 @@ impl LinkstateForwarder {
         };
         let mut net = self.net.borrow_mut();
         let changes = net.ingest_linkstate_list(link_id, list);
-        // Discovery observability: a node seen for the first time that
-        // advertised dial locators is a freshly-DISCOVERED peer — log where it
-        // is reachable. This is the data a future gossip/autoconnect step dials
-        // toward; until that consumer exists it is a pure diagnostic. `debug!`,
-        // not `info!`: with locators currently flooded unconditionally (the
-        // gossip-policy gate is a tracked follow-up), this fires for every new
-        // peer in any multi-peer mesh, so it is per-peer-noisy operational
-        // detail, not a steady-state event worth the info channel.
+        // Discovery: a node seen for the first time that advertised dial locators
+        // is a freshly-DISCOVERED peer. Two things happen per such peer:
+        //   1. log where it is reachable (`debug!`, not `info!`: it fires for
+        //      every new peer in any multi-peer mesh, so it is per-peer-noisy
+        //      operational detail, not a steady-state event);
+        //   2. (A5b) if the autoconnect policy admits it, emit a `DialIntent` the
+        //      accept loop turns into an outbound dial (A5c). Gated exactly as
+        //      zenoh's gossip (`hat/p2p_peer/gossip.rs:444`): the role + zid
+        //      tie-break (`should_autoconnect`) AND advertised locators. With
+        //      autoconnect disabled (the default, empty matcher) the gate is
+        //      always false, so this stays log-only — the prior behaviour.
+        let autoconnect = self.autoconnect.get();
         for zid in &changes.new {
-            if let Some(locators) = net.node_locators(zid) {
-                log::debug!("discovered peer {zid} reachable at {locators:?}");
+            let Some(locators) = net.node_locators(zid) else {
+                continue;
+            };
+            log::debug!("discovered peer {zid} reachable at {locators:?}");
+            // A `None` whatami (a node whose role has not surfaced) cannot pass
+            // the role matcher, so it is never a dial candidate.
+            let Some(whatami) = net.get_node(zid).and_then(|n| n.whatami) else {
+                continue;
+            };
+            if autoconnect.should_autoconnect(*zid, whatami) {
+                if let Some(tx) = self.dial_tx.borrow().as_ref() {
+                    // The unbounded send never blocks this sync ingest; an Err
+                    // means the receiver (the loop) is gone (shutdown), so the
+                    // intent is simply dropped.
+                    let _ = tx.send(DialIntent {
+                        zid: zid.as_slice().to_vec(),
+                        locators: locators.to_vec(),
+                    });
+                }
             }
         }
         drop(net);
@@ -1411,10 +1467,12 @@ mod tests {
     use super::*;
     use crate::runtime_impl::TokioRuntime;
     use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
-    use sce_forge_runtime::codec::SceBytes;
+    use sce_forge_runtime::codec::{SceBytes, SceString};
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
+    use wz_codecs::locator::LocatorOwned;
     use wz_codecs::wireexpr::WireexprOwnedVariant;
+    use wz_routing_graph::AutoConnectStrategy;
     use wz_runtime_core::runtime::Runtime;
 
     fn zid(b: u8) -> Zid {
@@ -1465,6 +1523,167 @@ mod tests {
                 weights: None,
             }],
         }
+    }
+
+    /// Ingest on the registered neighbour 0xAA's face (`FaceId(0)`) a 3-entry
+    /// flood that DISCOVERS a distant peer `node` (role `whatami_api`, advertising
+    /// `locs`): reachable `self_z` <-> 0xAA <-> `node`, so it survives the
+    /// detached-node prune and surfaces as a `changes.new` discovery the
+    /// autoconnect emit keys on. `node`'s own FULL entry is listed FIRST (the
+    /// natural new-before-linker flood shape — the role gate then reads its
+    /// whatami; the graph also recovers a placeholder's whatami on the update
+    /// path, so this order is for clarity, not correctness). psid 0 = self (a
+    /// stale, low-sn entry that only teaches the psid->zid mapping), psid 1 =
+    /// 0xAA, `psid_node` = the discovered node.
+    fn discover_distant(
+        fwd: &LinkstateForwarder,
+        self_z: u8,
+        node: u8,
+        whatami_api: u8,
+        locs: &[&str],
+        psid_node: u64,
+        sn: u64,
+    ) {
+        let mut node_entry = entry(psid_node, sn, node, &[1]); // node -> 0xAA (psid 1)
+        node_entry.whatami = Some(whatami_api);
+        node_entry.num_locators = Some(locs.len() as u64);
+        node_entry.locators = Some(
+            locs.iter()
+                .map(|s| LocatorOwned {
+                    locator_len: s.len() as u64,
+                    locator: SceString::from_view(s).unwrap(),
+                })
+                .collect(),
+        );
+        fwd.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, self_z, &[]),            // self mapping (stale-gated)
+                node_entry,                          // the distant node FIRST
+                entry(1, sn, 0xAA, &[0, psid_node]), // 0xAA -> self(0) + node
+            ]),
+        );
+    }
+
+    /// The zenoh peer default autoconnect matcher (router|peer), under the
+    /// strategy a test picks. The policy's own zid must equal the driver's self
+    /// zid for the `GreaterZid` tie-break to compare against the right operand.
+    fn autoconnect_policy(self_zid: Zid, strategy: AutoConnectStrategy) -> AutoConnect {
+        AutoConnect::new(self_zid, WhatAmIMatcher::empty().router().peer(), strategy)
+    }
+
+    #[test]
+    fn autoconnect_emits_a_dial_intent_for_an_admitted_discovered_peer() {
+        // A5b: with autoconnect enabled (router|peer, Always), a peer the ingest
+        // discovers (a `changes.new` node advertising locators + a peer role) is
+        // emitted as a dial-intent carrying its zid + locators.
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let mut rx =
+            fwd.enable_autoconnect(autoconnect_policy(zid(0x01), AutoConnectStrategy::Always));
+        let (face, _sink) = peer_face(zid(0xAA));
+        fwd.register(FaceId(0), &face);
+        // 0xBB is a 2-hop peer relayed by 0xAA: new, role peer, with a locator.
+        discover_distant(
+            &fwd,
+            0x01,
+            0xBB,
+            WhatAmI::Peer.to_api(),
+            &["tcp/10.0.0.187:7447"],
+            3,
+            5,
+        );
+        let intent = rx
+            .try_recv()
+            .expect("a dial-intent for the discovered peer");
+        assert_eq!(intent.zid, zid(0xBB).as_slice().to_vec());
+        assert_eq!(intent.locators, vec!["tcp/10.0.0.187:7447".to_string()]);
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one intent for one new peer"
+        );
+    }
+
+    #[test]
+    fn a_disabled_policy_emits_no_intent_even_with_the_channel_wired() {
+        // The signature-stable default: a disabled policy (empty matcher) never
+        // dials, even for an admitted-role peer with locators and a live channel.
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let mut rx = fwd.enable_autoconnect(AutoConnect::disabled(zid(0x01)));
+        let (face, _sink) = peer_face(zid(0xAA));
+        fwd.register(FaceId(0), &face);
+        discover_distant(
+            &fwd,
+            0x01,
+            0xBB,
+            WhatAmI::Peer.to_api(),
+            &["tcp/10.0.0.187:7447"],
+            3,
+            5,
+        );
+        assert!(rx.try_recv().is_err(), "a disabled policy never dials");
+    }
+
+    #[test]
+    fn a_role_unadmitted_discovered_peer_emits_no_intent() {
+        // The channel is wired and the policy enabled, but the discovered peer's
+        // role (client) is outside the router|peer matcher -> no dial-intent.
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let mut rx =
+            fwd.enable_autoconnect(autoconnect_policy(zid(0x01), AutoConnectStrategy::Always));
+        let (face, _sink) = peer_face(zid(0xAA));
+        fwd.register(FaceId(0), &face);
+        // 0xCC is discovered with a CLIENT role (api byte 4) + a locator.
+        discover_distant(
+            &fwd,
+            0x01,
+            0xCC,
+            WhatAmI::Client.to_api(),
+            &["tcp/10.0.0.204:7447"],
+            3,
+            5,
+        );
+        assert!(rx.try_recv().is_err(), "a client is not a dial candidate");
+    }
+
+    #[test]
+    fn greater_zid_strategy_emits_only_when_self_zid_is_greater() {
+        // GreaterZid double-dial avoidance, observed through the emit: self 0x05
+        // dials a discovered LESSER-zid peer (0x03) but defers on a GREATER one
+        // (0x09) -- so a mutually-discovering pair has exactly one dialer.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let mut rx = fwd.enable_autoconnect(autoconnect_policy(
+            zid(0x05),
+            AutoConnectStrategy::GreaterZid,
+        ));
+        let (face, _sink) = peer_face(zid(0xAA));
+        fwd.register(FaceId(0), &face);
+        discover_distant(
+            &fwd,
+            0x05,
+            0x03,
+            WhatAmI::Peer.to_api(),
+            &["tcp/10.0.0.3:7447"],
+            3,
+            5,
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "greater self zid dials the lesser-zid peer"
+        );
+        // A second discovery (distinct psid 4 / higher sn) of a GREATER-zid peer.
+        discover_distant(
+            &fwd,
+            0x05,
+            0x09,
+            WhatAmI::Peer.to_api(),
+            &["tcp/10.0.0.9:7447"],
+            4,
+            6,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "lesser self zid defers to the greater-zid peer"
+        );
     }
 
     #[test]

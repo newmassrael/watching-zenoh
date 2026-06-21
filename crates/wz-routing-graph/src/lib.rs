@@ -1297,6 +1297,16 @@ impl LinkstateNetwork {
                     let was_placeholder = node.sn == 0;
                     node.sn = ls.sn;
                     node.links = ls.links;
+                    // A node first seen as a link TARGET is a whatami-less
+                    // placeholder (`ensure_node`); its own real link-state — which
+                    // always carries a validated whatami — is where the role
+                    // becomes known, so record it here too, not only on the fresh
+                    // insert. For an already-known node re-advertising this is an
+                    // idempotent reaffirmation (a peer's role is stable). Without
+                    // it a placeholder->real transition would leave whatami `None`
+                    // forever (the node is `changes.new` only once), so a role
+                    // gate — the gossip-autoconnect emit — would skip it for good.
+                    node.whatami = Some(ls.whatami);
                     // preserve-on-None: a links-only re-advertisement (no `L`
                     // field) keeps the locators learned when the node was new;
                     // only an entry that actually carries locators overwrites
@@ -1978,6 +1988,30 @@ mod tests {
         );
         assert!(changes.updated.is_empty());
         assert!(net.get_node(&zid(0xAA)).is_none());
+    }
+
+    #[test]
+    fn a_placeholder_nodes_whatami_is_set_when_its_own_entry_arrives() {
+        // A node first seen as a link TARGET is a whatami-less placeholder
+        // (`ensure_node`); when its OWN link-state arrives — via the update path,
+        // not a fresh insert — its role must be recorded, else a role gate (the
+        // gossip-autoconnect emit) skips it forever (it is `changes.new` once).
+        let mut net = LinkstateNetwork::new(zid(0x01), WhatAmI::Peer);
+        let link = net.add_link(zid(0x07), WhatAmI::Peer);
+        // 0x07 (the relay) links to D (psid 1) FIRST, so D is placeholder'd
+        // before its own entry; D's own entry then advertises role ROUTER.
+        net.ingest_linkstate_list(
+            link,
+            list(vec![
+                relay(1, &[1]),
+                entry(1, 5, Some(&zid(0xDD)), Some(WhatAmI::Router.to_api()), &[7]),
+            ]),
+        );
+        assert_eq!(
+            net.get_node(&zid(0xDD)).and_then(|n| n.whatami),
+            Some(WhatAmI::Router),
+            "D's role from its own entry, though it was placeholder'd first",
+        );
     }
 
     #[test]
