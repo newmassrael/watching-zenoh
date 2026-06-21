@@ -45240,6 +45240,54 @@
         "North-star remaining: the rest of §5.16 (the breadth above), or the untouched Storage(§5.11) / SHM subsystems. Routing filter/failover/static was verified MATURE this session (filter complete). LOCAL UNPUSHED: Round 311tt on origin/main=7c7e18e (1 ahead); push only after explicit consent — the full run-ci push gate is already green."
       ]
     },
+    "Round 311tu": {
+      "decision_summary": "R311tu: §5.16 access-control atom 2 — extend the ingress ACL enforcer to the Delete and DeclareSubscriber actions on the same interceptor seam (new match arms, not new check sites); a verified read corrects the atom-1 'local-delivery' deferral (the routing peer has no separate local consumer).",
+      "changes_bullets": [
+        "AclMessage enum extended +Delete +DeclareSubscriber (wz-access-control). The engine AclPolicy::decision is action-generic, so the new actions flow through unchanged — only the enum + its doc grew.",
+        "acl_action adapter (interceptor/access_control.rs): a Push body now maps to Put OR Delete (CodecZenohMsgPut / CodecZenohMsgDel); a CodecZenohDeclSubscriber Declare maps to DeclareSubscriber. Each is a new arm in the existing match, not a new check site (the seam's payoff).",
+        "IngressContext.full_keyexpr (linkstate_forward.rs) gains a Declare arm: declare_subscriber_wireexpr + resolve_wireexpr, alias-aware against the inbound face's table — the same keyexpr resolution forward_subscription does for the registration path.",
+        "Verified finding (corrects the atom-1 deferral framing): the \"local-delivery gate\" deferral does NOT apply to the routing peer. Its only inbound consumer is forward() (accept_loop.rs:360); dispatch_iteration_event (local subscriber/queryable delivery) is the Session API path only (observer.rs:412+ SessionObserver). So atom-1's forward() gate already FULLY covers the routing peer; the true \"local delivery\" is a SEPARATE Session API subsystem (no forwarder/policy), not a clean atom. atom-2 broadens actions on the existing seam instead.",
+        "demo --acl-deny <keyexpr> now denies Put + Delete + DeclareSubscriber for the keyexpr, so a neighbour can neither publish to nor subscribe on it through this node — the intuitive \"block this keyexpr\" semantics, still LIVE."
+      ],
+      "verification_bullets": [
+        "wz-access-control 7/7 (incl a_rule_only_governs_its_listed_actions: a Delete+DeclareSubscriber rule denies those actions and leaves Put to the default). routing-peer lib 382/382 incl a_del_on_a_denied_keyexpr_is_denied (adapter: Del now governed) + an_acl_deny_drops_an_inbound_declare_subscriber (forwarder: a denied DeclareSubscriber is NOT registered (fwd.interested empty) + acl_denied witness; an allowed keyexpr still registers). The atom-1 Put relay-enforcement tests still pass.",
+        "clippy -D clean (wz-access-control, wz-runtime-tokio routing-peer, wz-ap-demo routing-peer); fmt clean; base (non-routing-peer) build clean (interceptor gated out).",
+        "Full run-ci all required layers pass, judged by the unpiped RUNCI_EXIT=0: Layer A/A2/A3, the C* host lanes, Layer Q MCU (footprint unchanged this round — no wz-session-core/MCU code change; the +12B text is the carried atom-1 keyexpr_includes_target delta), Layer Z zenohd interop 9/9."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tu = §5.16 access-control atom 2: the ingress ACL enforcer extended to the Delete (Push/Del) and DeclareSubscriber actions on the SAME interceptor seam (new match arms, not new check sites — the structure atom-1 built paying off). The DeclareSubscriber gate denies a peer's mesh subscription to a keyexpr.",
+        "Corrected framing (verified by direct read): atom-1's \"local-delivery gate\" deferral was based on an unchecked assumption. The routing peer has NO separate local-delivery consumer (forward() is its only inbound observer; dispatch_iteration_event is the Session API path). So atom-1 already fully covers the routing peer's inbound; the true \"local delivery\" is the Session API ACL, a separate larger subsystem (deferred).",
+        "Remaining §5.16 (next atoms): egress enforcement (the Mux twin — a fan_out gate, per-target subject); Query / Reply / DeclareQueryable actions (when query routing lands in the linkstate forwarder); interface/cert/username subjects = extauth (access-extauth-* need transport auth); downsampling + quota (new Interceptor impls on the chain); YAML deploy-config loader (the typed AclConfig shape exists = one funnel); KeBoxTree sublinear; Session API ACL (the true local-delivery). access-downsampling / access-quota / access-extauth-* inventory stay reserved.",
+        "LOCAL UNPUSHED: Round 311tt + 311tu on origin/main=7c7e18e (2 ahead); push only after explicit consent — the full run-ci push gate is green for both. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
+      ],
+      "publishable_decision_summary": "R311tu: §5.16 access-control atom 2 — extend the ingress ACL enforcer to the Delete and DeclareSubscriber actions on the same interceptor seam (new match arms, not new check sites); a verified read corrects the atom-1 'local-delivery' deferral (the routing peer has no separate local consumer).",
+      "publishable_changes_bullets": [
+        "AclMessage enum extended +Delete +DeclareSubscriber (wz-access-control). The engine AclPolicy::decision is action-generic, so the new actions flow through unchanged — only the enum + its doc grew.",
+        "acl_action adapter (interceptor/access_control.rs): a Push body now maps to Put OR Delete (CodecZenohMsgPut / CodecZenohMsgDel); a CodecZenohDeclSubscriber Declare maps to DeclareSubscriber. Each is a new arm in the existing match, not a new check site (the seam's payoff).",
+        "IngressContext.full_keyexpr (linkstate_forward.rs) gains a Declare arm: declare_subscriber_wireexpr + resolve_wireexpr, alias-aware against the inbound face's table — the same keyexpr resolution forward_subscription does for the registration path.",
+        "Verified finding (corrects the atom-1 deferral framing): the \"local-delivery gate\" deferral does NOT apply to the routing peer. Its only inbound consumer is forward() (accept_loop.rs:360); dispatch_iteration_event (local subscriber/queryable delivery) is the Session API path only (observer.rs:412+ SessionObserver). So atom-1's forward() gate already FULLY covers the routing peer; the true \"local delivery\" is a SEPARATE Session API subsystem (no forwarder/policy), not a clean atom. atom-2 broadens actions on the existing seam instead.",
+        "demo --acl-deny <keyexpr> now denies Put + Delete + DeclareSubscriber for the keyexpr, so a neighbour can neither publish to nor subscribe on it through this node — the intuitive \"block this keyexpr\" semantics, still LIVE."
+      ],
+      "publishable_verification_bullets": [
+        "wz-access-control 7/7 (incl a_rule_only_governs_its_listed_actions: a Delete+DeclareSubscriber rule denies those actions and leaves Put to the default). routing-peer lib 382/382 incl a_del_on_a_denied_keyexpr_is_denied (adapter: Del now governed) + an_acl_deny_drops_an_inbound_declare_subscriber (forwarder: a denied DeclareSubscriber is NOT registered (fwd.interested empty) + acl_denied witness; an allowed keyexpr still registers). The atom-1 Put relay-enforcement tests still pass.",
+        "clippy -D clean (wz-access-control, wz-runtime-tokio routing-peer, wz-ap-demo routing-peer); fmt clean; base (non-routing-peer) build clean (interceptor gated out).",
+        "Full run-ci all required layers pass, judged by the unpiped RUNCI_EXIT=0: Layer A/A2/A3, the C* host lanes, Layer Q MCU (footprint unchanged this round — no wz-session-core/MCU code change; the +12B text is the carried atom-1 keyexpr_includes_target delta), Layer Z zenohd interop 9/9."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tu = §5.16 access-control atom 2: the ingress ACL enforcer extended to the Delete (Push/Del) and DeclareSubscriber actions on the SAME interceptor seam (new match arms, not new check sites — the structure atom-1 built paying off). The DeclareSubscriber gate denies a peer's mesh subscription to a keyexpr.",
+        "Corrected framing (verified by direct read): atom-1's \"local-delivery gate\" deferral was based on an unchecked assumption. The routing peer has NO separate local-delivery consumer (forward() is its only inbound observer; dispatch_iteration_event is the Session API path). So atom-1 already fully covers the routing peer's inbound; the true \"local delivery\" is the Session API ACL, a separate larger subsystem (deferred).",
+        "Remaining §5.16 (next atoms): egress enforcement (the Mux twin — a fan_out gate, per-target subject); Query / Reply / DeclareQueryable actions (when query routing lands in the linkstate forwarder); interface/cert/username subjects = extauth (access-extauth-* need transport auth); downsampling + quota (new Interceptor impls on the chain); YAML deploy-config loader (the typed AclConfig shape exists = one funnel); KeBoxTree sublinear; Session API ACL (the true local-delivery). access-downsampling / access-quota / access-extauth-* inventory stay reserved.",
+        "LOCAL UNPUSHED: Round 311tt + 311tu on origin/main=7c7e18e (2 ahead); push only after explicit consent — the full run-ci push gate is green for both. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

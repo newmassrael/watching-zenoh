@@ -423,11 +423,15 @@ impl InterceptorContext for IngressContext<'_> {
     }
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
-        // Only a Push carries an application keyexpr in the first atom; resolve
-        // it alias-aware against THIS face's table (the same resolution
-        // `forward_push` does). Other kinds carry none, so the enforcer admits.
+        // Resolve the governed kinds' keyexpr alias-aware against THIS face's
+        // table — the same resolution `forward_push` (Push) and
+        // `forward_subscription` (DeclareSubscriber) do. An UndeclareSubscriber /
+        // alias declaration / other kind carries no governed keyexpr here, so the
+        // enforcer admits it.
         match msg {
             NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, &self.face.keyexpr_table),
+            NetworkMessage::Declare(d) => declare_subscriber_wireexpr(d)
+                .and_then(|we| resolve_wireexpr(&we.body, &self.face.keyexpr_table)),
             _ => None,
         }
     }
@@ -3070,6 +3074,65 @@ mod tests {
             1,
             "the admitted Put relays to the interested child"
         );
+    }
+
+    #[test]
+    fn an_acl_deny_drops_an_inbound_declare_subscriber() {
+        // Control-plane enforcement: S denies DeclareSubscriber on `admin/**`. A
+        // sourced DeclareSubscriber from A on admin/sub is dropped at S — the
+        // source's interest is NOT registered (so it never attracts a Push) and
+        // it is witnessed by acl_denied. A declaration on an unrelated keyexpr
+        // still registers, proving the gate is action- and keyexpr-selective.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.set_acl_policy(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["admin/**".to_owned()],
+                messages: vec![AclMessage::DeclareSubscriber],
+                flow: AclFlow::Ingress,
+                permission: Permission::Deny,
+            }],
+        }));
+
+        let denied = build_declare_subscriber(0, 0, Some("admin/sub")).expect("build");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(denied))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        assert_eq!(
+            fwd.acl_denied(),
+            1,
+            "the denied DeclareSubscriber is witnessed"
+        );
+        assert!(
+            fwd.interested("admin/sub").is_empty(),
+            "a denied subscription is not registered"
+        );
+
+        // An allowed keyexpr registers as usual (no extra deny).
+        let allowed = build_declare_subscriber(0, 0, Some("demo/sub")).expect("build");
+        let outcome2 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(allowed))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome2));
+        assert_eq!(
+            fwd.interested("demo/sub"),
+            vec![zid(0x0A)],
+            "an allowed subscription registers"
+        );
+        assert_eq!(fwd.acl_denied(), 1, "the allowed declaration adds no deny");
     }
 
     #[test]

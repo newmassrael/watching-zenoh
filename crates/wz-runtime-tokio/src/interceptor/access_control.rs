@@ -10,12 +10,14 @@
 //! subject + keyexpr off the [`InterceptorContext`], and asks the policy for a
 //! verdict.
 //!
-//! First atom: the `Put` action only (a Push carrying a `Put` body); every
-//! other kind — `Del`, the `Declare` family, `Query`/`Reply` — is admitted
+//! Governed actions: the data-plane `Put` / `Del` (a Push body) and the
+//! control-plane `DeclareSubscriber`. Every other kind — the rest of the
+//! `Declare` family, `Query` / `Reply`, the liveliness messages — is admitted
 //! here and gains its own arm as the action set grows. Because the per-kind
 //! dispatch is a `match`, adding an action is a new arm, not a new check site.
 
 use wz_access_control::{AclFlow, AclMessage, AclPolicy, Permission};
+use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::push::PushOwnedVariant;
 use wz_session_core::network_message::NetworkMessage;
 
@@ -37,15 +39,24 @@ impl AclInterceptor {
     }
 }
 
-/// The ACL action a message represents, or `None` for a kind this atom does not
-/// govern (which is then admitted). The wz analogue of zenoh's per-`NetworkBody`
-/// dispatch in `access_control.rs::intercept`: a `Put`-bodied Push maps to
-/// [`AclMessage::Put`]; `Del`, the `Declare` family, and `Query`/`Reply` are
-/// deferred actions, so they return `None` and admit.
+/// The ACL action a message represents, or `None` for a kind this enforcer does
+/// not govern (which is then admitted). The wz analogue of zenoh's
+/// per-`NetworkBody` dispatch in `access_control.rs::intercept`: a Push maps to
+/// [`Put`](AclMessage::Put) / [`Delete`](AclMessage::Delete) on its body, and a
+/// `DeclareSubscriber` maps to [`DeclareSubscriber`](AclMessage::DeclareSubscriber);
+/// an UndeclareSubscriber / keyexpr-alias declaration, `Query` / `Reply`, and the
+/// liveliness kinds are not governed yet, so they return `None` and admit.
 fn acl_action(msg: &NetworkMessage) -> Option<AclMessage> {
     match msg {
-        NetworkMessage::Push(p) if matches!(p.body, PushOwnedVariant::CodecZenohMsgPut(_)) => {
-            Some(AclMessage::Put)
+        NetworkMessage::Push(p) => match &p.body {
+            PushOwnedVariant::CodecZenohMsgPut(_) => Some(AclMessage::Put),
+            PushOwnedVariant::CodecZenohMsgDel(_) => Some(AclMessage::Delete),
+            _ => None,
+        },
+        NetworkMessage::Declare(d)
+            if matches!(d.body, DeclareOwnedVariant::CodecZenohDeclSubscriber(_)) =>
+        {
+            Some(AclMessage::DeclareSubscriber)
         }
         _ => None,
     }
@@ -107,7 +118,11 @@ mod tests {
             rules: vec![AclRule {
                 subject: SubjectSelector::Any,
                 key_exprs: vec!["admin/**".to_owned()],
-                messages: vec![AclMessage::Put],
+                messages: vec![
+                    AclMessage::Put,
+                    AclMessage::Delete,
+                    AclMessage::DeclareSubscriber,
+                ],
                 flow: AclFlow::Ingress,
                 permission: Permission::Deny,
             }],
@@ -139,9 +154,9 @@ mod tests {
     }
 
     #[test]
-    fn a_del_is_not_governed_by_the_put_atom() {
-        // The first atom enforces Put only; a Del on the denied keyexpr is
-        // admitted (it gains its own action arm in a later atom).
+    fn a_del_on_a_denied_keyexpr_is_denied() {
+        // Del is a governed action (maps to AclMessage::Delete); a Del on the
+        // denied keyexpr is dropped just like a Put.
         let acl = AclInterceptor::new(deny_admin_policy(), AclFlow::Ingress);
         let ctx = MockCtx {
             subject: Some(Zid::from_slice(&[0x0A])),
@@ -149,10 +164,7 @@ mod tests {
         let del = NetworkMessage::Push(Box::new(
             build_push_del_literal("admin/secret").expect("build"),
         ));
-        assert!(
-            acl.intercept(&ctx, &del),
-            "Del is not a governed action yet"
-        );
+        assert!(!acl.intercept(&ctx, &del), "admin/secret Del is denied");
     }
 
     #[test]

@@ -1346,11 +1346,13 @@ pub(crate) async fn run_peer(
     forwarder.set_self_locators(self_locators);
 
     // `--acl-deny <keyexpr>`: opt this peer into §5.16 access control. An
-    // allow-default policy with one ingress-Put deny rule on the keyexpr, for
-    // every peer subject — the smallest real ACL. From now on a neighbour's Put
-    // on a denied keyexpr is dropped at this node (not relayed onward), the wz
-    // analogue of a router carrying an IngressAclEnforcer. Absent the flag the
-    // chain stays empty (access control disabled, every message admitted).
+    // allow-default policy with one ingress deny rule on the keyexpr, for every
+    // peer subject — the smallest real ACL. It governs the data plane (Put /
+    // Delete) AND the control plane (DeclareSubscriber), so a neighbour can
+    // neither publish to nor subscribe on the denied keyexpr through this node;
+    // both are dropped at ingress (not relayed onward), the wz analogue of a
+    // router carrying an IngressAclEnforcer. Absent the flag the chain stays
+    // empty (access control disabled, every message admitted).
     if let Some(deny_keyexpr) = acl_deny {
         log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
         forwarder.set_acl_policy(AclPolicy::new(AclConfig {
@@ -1358,7 +1360,11 @@ pub(crate) async fn run_peer(
             rules: vec![AclRule {
                 subject: SubjectSelector::Any,
                 key_exprs: vec![deny_keyexpr.to_owned()],
-                messages: vec![AclMessage::Put],
+                messages: vec![
+                    AclMessage::Put,
+                    AclMessage::Delete,
+                    AclMessage::DeclareSubscriber,
+                ],
                 flow: AclFlow::Ingress,
                 permission: Permission::Deny,
             }],

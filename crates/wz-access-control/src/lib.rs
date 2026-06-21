@@ -83,16 +83,23 @@ pub enum AclFlow {
     Egress,
 }
 
-/// The action a rule restricts — zenoh `AclMessage`. The first atom enforces
-/// [`Put`](AclMessage::Put) (a data Push carrying a `Put` payload); the rest of
-/// zenoh's set (`Delete`, `Query`, `Reply`, `DeclareSubscriber`,
-/// `DeclareQueryable`, the liveliness actions) arrive as the enforcer adapter
-/// gains each message-kind arm — a non-breaking enum extension, since
-/// [`AclPolicy::decision`] is generic over the action.
+/// The action a rule restricts — zenoh `AclMessage`. Covers the actions a
+/// routing peer's inbound seam processes: the data-plane [`Put`](AclMessage::Put)
+/// / [`Delete`](AclMessage::Delete) (a Push body) and the control-plane
+/// [`DeclareSubscriber`](AclMessage::DeclareSubscriber). The rest of zenoh's set
+/// (`Query`, `Reply`, `DeclareQueryable`, the liveliness actions) arrive as the
+/// enforcer adapter gains each message-kind arm — a non-breaking enum extension,
+/// since [`AclPolicy::decision`] is generic over the action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AclMessage {
     /// A data Push with a `Put` payload.
     Put,
+    /// A data Push with a `Del` payload (a tombstone / key removal).
+    Delete,
+    /// A subscription interest declaration crossing the mesh — denying it stops
+    /// a peer from registering interest in the keyexpr (zenoh
+    /// `AclMessage::DeclareSubscriber`).
+    DeclareSubscriber,
 }
 
 /// Which subject a rule applies to — the auth-free subset of zenoh's
@@ -387,6 +394,42 @@ mod tests {
         // The deny rule is Ingress-flow; an Egress request is not governed by it.
         assert_eq!(
             policy.decision(&z, AclFlow::Egress, AclMessage::Put, "admin/cfg"),
+            Permission::Allow
+        );
+    }
+
+    #[test]
+    fn a_rule_only_governs_its_listed_actions() {
+        let z = zid(&[1]);
+        // A rule listing Delete + DeclareSubscriber (but NOT Put) governs those
+        // two actions and leaves Put to the allow default — the engine is
+        // action-generic, so the new actions flow through the same decision.
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["admin/**".to_owned()],
+                messages: vec![AclMessage::Delete, AclMessage::DeclareSubscriber],
+                flow: AclFlow::Ingress,
+                permission: Permission::Deny,
+            }],
+        });
+        assert_eq!(
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Delete, "admin/cfg"),
+            Permission::Deny
+        );
+        assert_eq!(
+            policy.decision(
+                &z,
+                AclFlow::Ingress,
+                AclMessage::DeclareSubscriber,
+                "admin/cfg"
+            ),
+            Permission::Deny
+        );
+        // Put is not in the rule's action set -> allow default carries it.
+        assert_eq!(
+            policy.decision(&z, AclFlow::Ingress, AclMessage::Put, "admin/cfg"),
             Permission::Allow
         );
     }
