@@ -164,6 +164,12 @@ fn main() -> ExitCode {
             // and DIAL the policy-admitted ones (a mesh that grows past the static
             // `--connect` set). Off by default — a peer dials only `--connect`.
             let autoconnect = rest.iter().any(|a| a == "--autoconnect");
+            // R311tt (§5.16 access control) — `--acl-deny <keyexpr>` opts this
+            // peer into ACL enforcement: an allow-default policy with one ingress
+            // Put deny rule on the keyexpr (every peer subject). A Put a neighbour
+            // floods on a denied keyexpr is dropped here, not relayed onward.
+            // Off by default — without the flag the peer enforces nothing.
+            let acl_deny = parse_pair(rest, "--acl-deny");
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -171,6 +177,7 @@ fn main() -> ExitCode {
                 subscribe_key,
                 unsubscribe_after_data,
                 autoconnect,
+                acl_deny,
             );
         }
         #[cfg(not(feature = "routing-peer"))]
@@ -656,6 +663,7 @@ fn run_peer_mode(
     subscribe_key: Option<String>,
     unsubscribe_after_data: bool,
     autoconnect: bool,
+    acl_deny: Option<String>,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -672,6 +680,7 @@ fn run_peer_mode(
         subscribe_key.as_deref(),
         unsubscribe_after_data,
         autoconnect,
+        acl_deny.as_deref(),
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

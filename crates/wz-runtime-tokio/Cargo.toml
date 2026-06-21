@@ -436,6 +436,11 @@ routing-routes = [
 routing-peer = [
     "routing-accept",
     "dep:wz-routing-graph",
+    # R311tt — the §5.16 access-control ACL policy kernel. The interceptor seam
+    # + enforcer adapter (which match on NetworkMessage) live in this crate
+    # under `routing-peer` and consume this pure engine, mirroring zenoh's
+    # access_control.rs(adapter)/authorization.rs(engine) split.
+    "dep:wz-access-control",
     "wz-codecs/codec-linkstate",
     "wz-session-core/codec-linkstate",
     # R311rd — a routing peer is a full mesh node: it carries the data plane
@@ -787,6 +792,12 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # owns the petgraph dependency now). Optional — pulled only by
 # `routing-peer` (AP/full-node mesh routing; the MCU profile never sees it).
 wz-routing-graph = { path = "../wz-routing-graph", optional = true }
+# R311tt — the §5.16 access-control ACL policy KERNEL (pure decision engine,
+# zenoh interceptor/authorization.rs mirror). Optional — pulled only by
+# `routing-peer`: the interceptor seam + enforcer adapter that match on
+# NetworkMessage live here in the runtime crate and consume this engine, the
+# same access_control.rs/authorization.rs split zenoh keeps.
+wz-access-control = { path = "../wz-access-control", optional = true }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec
 # emit/include of every codec-* is governed strictly by the matching
 # `codec-*` forward above. Without disabling defaults the codec

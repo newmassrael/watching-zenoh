@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-access-control — the §5.16 access-control policy kernel: the PURE ACL
+# decision engine (the wz mirror of zenoh
+# `net/routing/interceptor/authorization.rs` + the `zenoh-config` `AclConfig`
+# shape). A `(subject zid, flow, action, keyexpr) -> Permission` function over
+# rules; no async, no message types, no transport coupling. Kept in its own
+# crate (NOT wz-runtime-tokio) so the runtime-agnostic policy kernel mirrors
+# the established kernel/driver split — `wz-routing-graph` holds the topology
+# kernel while its `LinkstateForwarder` driver lives in wz-runtime-tokio;
+# `AutoConnect` (a sibling pure policy type) lives in wz-routing-graph for the
+# same reason. The interceptor SEAM + the enforcer ADAPTER that matches on
+# `NetworkMessage` bodies (zenoh `interceptor/mod.rs` + `access_control.rs`)
+# stay in wz-runtime-tokio (they reference the codec message types) and consume
+# this engine. std-allowed and AP-only (access control is the application-policy
+# layer above the wire spec; it never reaches the MCU).
+[package]
+name = "wz-access-control"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Access-control (ACL) policy decision engine (zenoh interceptor/authorization.rs mirror)."
+
+[lib]
+name = "wz_access_control"
+path = "src/lib.rs"
+
+[dependencies]
+# The routing identity `Zid` — the auth-free ACL subject (zenoh's
+# `SubjectProperty<ZenohId>`; cert/username subjects need transport auth and
+# are deferred to the extauth features). Reused, not re-invented, so the ACL
+# subject is the SAME identity the routing layer keys on.
+wz-routing-graph = { path = "../wz-routing-graph" }
+# The directional keyexpr-inclusion matcher SSOT
+# (`keyexpr_includes_target`): an ACL rule keyexpr must INCLUDE the message
+# keyexpr (`rule ⊇ msg`, zenoh `policy_decision_point`'s `nodes_including`),
+# NOT merely intersect it. Default features carry the wildcard kinds + the
+# `keyexpr-includes` toggle the scan needs.
+wz-session-core = { path = "../wz-session-core" }
+
+[lints]
+workspace = true

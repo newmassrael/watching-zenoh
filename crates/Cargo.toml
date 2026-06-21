@@ -49,6 +49,13 @@ members = [
     # RouteTable(wz-session-core)/RoutingForwarder(wz-runtime-tokio) split.
     # std-allowed (petgraph is std-only), pulled only by routing-peer.
     "wz-routing-graph",
+    # R311tt — the §5.16 access-control ACL policy KERNEL (pure decision engine,
+    # zenoh interceptor/authorization.rs mirror). Lifted out of wz-runtime-tokio
+    # for the same reason as wz-routing-graph: a runtime-agnostic policy kernel,
+    # AP-only, depending on wz-routing-graph (Zid) + wz-session-core (the
+    # keyexpr-inclusion matcher). The interceptor seam + enforcer adapter that
+    # touch NetworkMessage stay in wz-runtime-tokio.
+    "wz-access-control",
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
     # R311mo (Level B) — isolated multicast-only test crate for the tokio

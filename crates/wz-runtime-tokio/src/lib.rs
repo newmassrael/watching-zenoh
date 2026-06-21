@@ -536,6 +536,18 @@ pub mod routing_forward;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_forward;
 
+/// R311tt — the §5.16 access-control interceptor SEAM: the composable
+/// message-admission chain ([`interceptor::InterceptorChain`]) the ACL enforcer
+/// (and future downsampling / quota / qos enforcers) plug into, plus the ACL
+/// enforcer adapter ([`interceptor::access_control::AclInterceptor`]). The wz
+/// mirror of zenoh `net/routing/interceptor/{mod.rs,access_control.rs}`. The
+/// seam + adapter reference the codec `NetworkMessage` types, so they live in
+/// this runtime crate and consume the pure [`wz_access_control`] policy engine
+/// (zenoh's `authorization.rs`), kept message-type-free in its own crate.
+/// Gated on `routing-peer` (the forwarder it gates is).
+#[cfg(feature = "routing-peer")]
+pub mod interceptor;
+
 /// P4 linkstate-peer routing (step c3c-3 atom2) — the subscription interest
 /// table [`linkstate_subs::LinkstatepeerSubs`]: which peers are interested in
 /// which key expression. zenoh keeps this OFF the topology `Network` (it

@@ -1241,12 +1241,14 @@ pub(crate) async fn run_peer(
     subscribe_key: Option<&str>,
     unsubscribe_after_data: bool,
     autoconnect: bool,
+    acl_deny: Option<&str>,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
-        default_autoconnect_matcher, AutoConnect, AutoConnectStrategy, LinkstateForwarder, WhatAmI,
+        default_autoconnect_matcher, AclConfig, AclFlow, AclMessage, AclPolicy, AclRule,
+        AutoConnect, AutoConnectStrategy, LinkstateForwarder, Permission, SubjectSelector, WhatAmI,
         Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint;
@@ -1342,6 +1344,26 @@ pub(crate) async fn run_peer(
         vec![format!("tcp/{local}")]
     };
     forwarder.set_self_locators(self_locators);
+
+    // `--acl-deny <keyexpr>`: opt this peer into §5.16 access control. An
+    // allow-default policy with one ingress-Put deny rule on the keyexpr, for
+    // every peer subject — the smallest real ACL. From now on a neighbour's Put
+    // on a denied keyexpr is dropped at this node (not relayed onward), the wz
+    // analogue of a router carrying an IngressAclEnforcer. Absent the flag the
+    // chain stays empty (access control disabled, every message admitted).
+    if let Some(deny_keyexpr) = acl_deny {
+        log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
+        forwarder.set_acl_policy(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec![deny_keyexpr.to_owned()],
+                messages: vec![AclMessage::Put],
+                flow: AclFlow::Ingress,
+                permission: Permission::Deny,
+            }],
+        }));
+    }
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
     // the per-local-whatami SSOT default (a Peer dials discovered routers/peers);

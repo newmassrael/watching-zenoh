@@ -384,6 +384,49 @@ pub fn keyexpr_intersects_target(candidate: &str, target_chunks: &[&str]) -> boo
     keyexpr_intersect_patterns(&candidate_chunks, target_chunks)
 }
 
+/// Whether the rule keyexpr `superset` INCLUDES a message target already split
+/// into `target_chunks` — directional `superset ⊇ target`, the asymmetric twin
+/// of [`keyexpr_intersects_target`]. The single per-rule membership test the
+/// access-control ACL scan shares: a deny/allow scan splits the message keyexpr
+/// ONCE, then calls this per configured rule keyexpr; the rule is split here
+/// into a bounded chunk buffer and consulted via [`keyexpr_includes_patterns`].
+///
+/// This is the directional matcher zenoh's ACL uses — `policy_decision_point`
+/// asks whether a configured rule keyexpr `R` INCLUDES the message keyexpr `K`
+/// (`R ⊇ K`, `deny.nodes_including(key_expr)` /
+/// `allow.nodes_including(key_expr)`), NOT whether they merely intersect. The
+/// two diverge on real keyexprs (rule `home/*` does NOT include `home/**`, yet
+/// they intersect), so an ACL must scan with THIS predicate, not
+/// [`keyexpr_intersects_target`] (which is correct for pub/sub route matching,
+/// where overlap — not coverage — is the question). This is the awaited
+/// `routing / aggregation caller` the [`keyexpr_includes_patterns`] doc names.
+///
+/// A malformed message target (an empty chunk) is included by no rule — the
+/// same `target_chunks_well_formed` guard [`keyexpr_intersects_target`] applies,
+/// so a trailing-`/` target is denied under default-deny rather than silently
+/// matching. The rule (`superset`) is split into the bounded buffer exactly as
+/// the candidate is in [`keyexpr_intersects_target`]: a rule deeper than
+/// [`MAX_KEYEXPR_CHUNKS`] is conservatively no-match on the no-alloc backing,
+/// unbounded on the alloc (AP) one.
+#[cfg(feature = "keyexpr-includes")]
+pub fn keyexpr_includes_target(superset: &str, target_chunks: &[&str]) -> bool {
+    // A malformed message target matches no rule — guarded once here, ahead of
+    // the rule split, the directional mirror of `keyexpr_intersects_target`.
+    if !target_chunks_well_formed(target_chunks) {
+        return false;
+    }
+    let mut superset_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+    for chunk in superset.split('/') {
+        // No-alloc backing: a rule deeper than the declared bound cannot be
+        // represented, so it is conservatively no-match (the alloc backing never
+        // takes this arm). Same shape as `keyexpr_intersects_target`.
+        if superset_chunks.push(chunk).is_err() {
+            return false;
+        }
+    }
+    keyexpr_includes_patterns(&superset_chunks, target_chunks)
+}
+
 fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
     match (a.first(), b.first()) {
         (None, None) => true,
@@ -606,6 +649,33 @@ mod tests {
         // relies on); a disjoint-anchor candidate does not.
         assert!(keyexpr_intersects_target("home/**", &["home", "a", "b"]));
         assert!(!keyexpr_intersects_target("other/**", &["home", "a", "b"]));
+    }
+
+    #[cfg(all(
+        feature = "keyexpr-includes",
+        feature = "keyexpr-wildcard-double",
+        feature = "keyexpr-wildcard-single"
+    ))]
+    #[test]
+    fn includes_target_is_directional_not_intersection() {
+        // The ACL membership test: a rule keyexpr (superset) against a pre-split
+        // message target. A `**` rule INCLUDES a deeper concrete message; a
+        // disjoint anchor does not.
+        assert!(keyexpr_includes_target("admin/**", &["admin", "secret"]));
+        assert!(keyexpr_includes_target("admin/**", &["admin", "a", "b"]));
+        assert!(!keyexpr_includes_target("metrics/**", &["admin", "secret"]));
+        // A literal rule includes only its exact key.
+        assert!(keyexpr_includes_target("admin/cfg", &["admin", "cfg"]));
+        assert!(!keyexpr_includes_target("admin/cfg", &["admin", "other"]));
+        // The DIVERGENCE from intersection (the bug a naive `_intersects_target`
+        // reuse would have shipped): rule `home/*` does NOT INCLUDE a `home/**`
+        // target (a single-chunk wildcard cannot cover arbitrarily-many chunks),
+        // yet the two patterns DO intersect. An ACL must scan with inclusion, so
+        // a `deny home/*` rule must not spuriously match a `home/**` declaration.
+        assert!(!keyexpr_includes_target("home/*", &["home", "**"]));
+        assert!(keyexpr_intersects_target("home/*", &["home", "**"]));
+        // A malformed target is included by no rule (default-deny safe).
+        assert!(!keyexpr_includes_target("admin/**", &["admin", ""]));
     }
 
     #[cfg(feature = "keyexpr-wildcard-double")]

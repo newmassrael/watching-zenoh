@@ -107,6 +107,8 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
+use crate::interceptor::access_control::AclInterceptor;
+use crate::interceptor::{InterceptorChain, InterceptorContext};
 use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
@@ -117,6 +119,13 @@ use crate::session_glue::{IterationEvent, SessionLinkActions};
 /// (this module) + these re-exports, so the `router|peer` matcher is never
 /// re-typed at the call site.
 pub use wz_routing_graph::{AutoConnect, AutoConnectStrategy, WhatAmI, Zid};
+// R311tt — re-export the §5.16 access-control policy-construction surface
+// beside `set_acl_policy`, so a deploy builds an `AclPolicy` from one facade
+// path (`wz::runtime_tokio::linkstate_forward::{AclPolicy, ..}`) — the same
+// convenience the AutoConnect re-export above gives the autoconnect opt-in.
+pub use wz_access_control::{
+    AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+};
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;
@@ -255,6 +264,19 @@ pub struct LinkstateForwarder {
     /// matching [`DialIntentReceiver`] and turns each intent into an outbound dial
     /// (A5c).
     dial_tx: RefCell<Option<DialIntentSender>>,
+
+    /// R311tt — the §5.16 access-control interceptor chain, consulted once per
+    /// inbound message at the top of [`forward`](Self::forward), ahead of the
+    /// kind-dispatch (the mesh-RELAY admission point). EMPTY by default = access
+    /// control disabled (zenoh `AclConfig.enabled = false`, every message
+    /// admitted); a deploy installs an ACL via
+    /// [`set_acl_policy`](Self::set_acl_policy). `RefCell` because the policy is
+    /// set through a `&self` config seam, the same shape as the other knobs.
+    interceptors: RefCell<InterceptorChain>,
+    /// R311tt — count of inbound messages an interceptor DENIED: the
+    /// access-control witness, the deny twin of [`data_seen`](Self#structfield.data_seen)
+    /// the e2e/unit tests assert against (zenoh logs each deny; wz counts it).
+    acl_denied: Cell<usize>,
 }
 
 impl LinkstateForwarder {
@@ -292,6 +314,10 @@ impl LinkstateForwarder {
             // gate is always false, so a default driver produces no dial-intents.
             autoconnect: Cell::new(AutoConnect::disabled(self_zid)),
             dial_tx: RefCell::new(None),
+            // Access control off by default (an empty chain) — every inbound
+            // message admitted, exactly as zenoh's `AclConfig.enabled = false`.
+            interceptors: RefCell::new(InterceptorChain::new()),
+            acl_denied: Cell::new(0),
         }
     }
 
@@ -334,6 +360,80 @@ impl LinkstateForwarder {
         rx
     }
 
+    /// Install an access-control policy (§5.16) — the config seam symmetric to
+    /// [`set_gossip_target`](Self::set_gossip_target) /
+    /// [`enable_autoconnect`](Self::enable_autoconnect). Replaces the inbound
+    /// interceptor chain with a single ingress [`AclInterceptor`] backed by
+    /// `policy`; from now on each inbound message is checked at
+    /// [`forward`](Self::forward) before relay, and a denied one is dropped
+    /// (witnessed by [`acl_denied`](Self::acl_denied)). A driver that never
+    /// calls this keeps the empty chain — access control disabled, every
+    /// message admitted (zenoh `AclConfig.enabled = false`). The wz analogue of
+    /// `acl_interceptor_factories` installing an `IngressAclEnforcer`; the
+    /// egress enforcer joins when the egress seam lands.
+    pub fn set_acl_policy(&self, policy: AclPolicy) {
+        let mut chain = InterceptorChain::new();
+        chain.push(Box::new(AclInterceptor::new(policy, AclFlow::Ingress)));
+        *self.interceptors.borrow_mut() = chain;
+    }
+
+    /// The number of inbound messages access control has DENIED so far — the
+    /// deny twin of [`data_seen`](Self::data_seen). A pure witness (zero on a
+    /// healthy unrestricted mesh); the e2e/unit tests assert it.
+    pub fn acl_denied(&self) -> usize {
+        self.acl_denied.get()
+    }
+
+    /// Whether the interceptor chain ADMITS this inbound `msg` arriving on face
+    /// `id`. The fast path: an empty chain (no ACL configured) admits without
+    /// touching the face table. Otherwise it builds the per-message
+    /// [`IngressContext`] off that face's state (subject zid + alias table) and
+    /// runs the chain. The single seam consulted at the top of
+    /// [`forward`](Self::forward), ahead of the kind-dispatch — never an inline
+    /// `if deny` per message arm.
+    fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> bool {
+        let chain = self.interceptors.borrow();
+        if chain.is_empty() {
+            return true;
+        }
+        let faces = self.faces.borrow();
+        // An unknown face has no relay path anyway; admit (nothing to gate).
+        let Some(face) = faces.get(&id) else {
+            return true;
+        };
+        chain.admit(&IngressContext { face }, msg)
+    }
+}
+
+/// The per-inbound-message [`InterceptorContext`] for one face — borrows that
+/// face's state so an enforcer can read the subject (the peer's routing zid)
+/// and resolve a message keyexpr against the face's link-local alias table. The
+/// wz analogue of the per-transport state zenoh's enforcer bakes in at
+/// `new_transport_unicast`; here it is built per message off the already-held
+/// face state (an `O(1)` field read, not a re-derivation — the per-face cache
+/// zenoh keeps is the deferred optimisation that the per-keyexpr decision cache
+/// would land beside).
+struct IngressContext<'a> {
+    face: &'a FaceState,
+}
+
+impl InterceptorContext for IngressContext<'_> {
+    fn subject(&self) -> Option<Zid> {
+        peer_zid_routing(&self.face.actions)
+    }
+
+    fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
+        // Only a Push carries an application keyexpr in the first atom; resolve
+        // it alias-aware against THIS face's table (the same resolution
+        // `forward_push` does). Other kinds carry none, so the enforcer admits.
+        match msg {
+            NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, &self.face.keyexpr_table),
+            _ => None,
+        }
+    }
+}
+
+impl LinkstateForwarder {
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it against
     /// that face's graph link. Returns the ingest `Changes` the caller re-floods
     /// onward ([`propagate`](Self::propagate)). Does NOT recompute the spanning
@@ -1467,6 +1567,15 @@ impl FaceForwarder for LinkstateForwarder {
             return;
         };
         for message in messages {
+            // R311tt — §5.16 access control: consult the interceptor chain ONCE
+            // here, ahead of the kind-dispatch (the relay-admission point). A
+            // denied message is dropped — not counted as received data, not
+            // forwarded — and witnessed by `acl_denied`. The empty-chain fast
+            // path (no ACL configured) makes this a single predicate read.
+            if !self.admit_inbound(id, message) {
+                self.acl_denied.set(self.acl_denied.get() + 1);
+                continue;
+            }
             match message {
                 NetworkMessage::Oam(oam) => match try_parse_linkstate_oam(oam) {
                     LinkstateOam::Decoded(list) => {
@@ -1529,6 +1638,7 @@ mod tests {
     use crate::runtime_impl::TokioRuntime;
     use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
     use sce_forge_runtime::codec::{SceBytes, SceString};
+    use wz_access_control::{AclConfig, AclMessage, AclRule, Permission, SubjectSelector};
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
     use wz_codecs::locator::LocatorOwned;
@@ -2863,6 +2973,103 @@ mod tests {
         };
         fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
         assert_eq!(fwd.data_seen(), 1, "one received data Push counted");
+    }
+
+    // ── R311tt: §5.16 access control — ingress Put relay enforcement ──────
+
+    /// Build an allow-default policy with one ingress-Put deny rule on
+    /// `deny_keyexpr`, applied to every peer — the smallest real ACL.
+    fn deny_put_policy(deny_keyexpr: &str) -> AclPolicy {
+        AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec![deny_keyexpr.to_owned()],
+                messages: vec![AclMessage::Put],
+                flow: AclFlow::Ingress,
+                permission: Permission::Deny,
+            }],
+        })
+    }
+
+    #[test]
+    fn an_acl_deny_drops_an_inbound_put_before_relay() {
+        // Line A - S(self) - B; B subscribes demo/data. With S configured to DENY
+        // `demo/**` on ingress, a Put from A on demo/data is dropped at S: not
+        // counted as received data, not relayed to the interested child B, and
+        // witnessed by acl_denied. The relay-admission point the forward() seam
+        // gates (zenoh's IngressAclEnforcer over the mesh path).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S<->B
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes
+        sink_a.reset();
+        sink_b.reset();
+        fwd.set_acl_policy(deny_put_policy("demo/**"));
+
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        assert_eq!(fwd.acl_denied(), 1, "the denied Put is witnessed");
+        assert_eq!(
+            fwd.data_seen(),
+            0,
+            "a denied Put is not counted as received data"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "a denied Put is not relayed to the interested child"
+        );
+    }
+
+    #[test]
+    fn an_acl_allow_lets_an_inbound_put_relay() {
+        // The same topology, but the deny rule targets a DIFFERENT subtree
+        // (`admin/**`); the demo/data Put is admitted and relays to B exactly as
+        // without ACL — proving the gate is selective, not a blanket block.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+        fwd.set_acl_policy(deny_put_policy("admin/**")); // denies admin, not demo
+
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            fwd.acl_denied(),
+            0,
+            "demo/data is not denied by an admin/** rule"
+        );
+        assert_eq!(fwd.data_seen(), 1, "the admitted Put is counted");
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the admitted Put relays to the interested child"
+        );
     }
 
     #[test]
