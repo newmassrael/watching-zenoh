@@ -50487,23 +50487,6 @@
         "DECLARE codec (0x1E) — 9 declaration sub-types per zenoh-pico declarations.c, multi-round chain on the scale of RESPONSE (3 rounds). Closure unblocks the mapping-id resolver on the registry so non-zero `wireexpr.id` Pushes route through resolved-base + suffix concatenation.",
         "Symmetric dispatch for Reply / Err — R99 routes Push only. A future round adds the symmetric `Response` arm (`NetworkMessage::Response.body` peek-byte dispatches to reply / err; reply itself wraps a push_body so the keyexpr matching could pass through). Kind-filtered subscriptions (publish-only vs reply-also-accepted) are the textbook way to surface the new dispatch path."
       ]
-    },
-    "test": {
-      "decision_summary": "test summary",
-      "changes_bullets": [
-        "change1",
-        "change2"
-      ],
-      "verification_bullets": [
-        "verify1"
-      ],
-      "publishable_decision_summary": "REDACTED -- accidental test append used to bisect a parameter-deserialization failure (200-char cap on decision_summary). Superseded by Round 121h-perf-bump-3.",
-      "publishable_changes_bullets": [
-        "REDACTED -- accidental test bullet, no real change content"
-      ],
-      "publishable_verification_bullets": [
-        "REDACTED -- accidental test bullet, no real verification content"
-      ]
     }
   },
   "inventory_entries": {
