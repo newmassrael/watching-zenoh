@@ -454,6 +454,11 @@ routing-peer = [
     # declare_routing_context node_id seam are part of a routing peer's
     # contract.
     "codec-declare",
+    # R311ub — query routing (atom 2) relays a Request (Query) across the mesh
+    # toward the matching queryables (forward_request), so the Request wire
+    # surface + the request_routing_context node_id seam are part of a routing
+    # peer's contract — the query-plane twin of the codec-declare interest plane.
+    "codec-request",
     # R311rd — and it must FRAGMENT an oversize link-state flood: a large
     # mesh's full-topology OAM exceeds the link MTU (and the u16 frame cap),
     # so without this the flood is silently dropped at the stream guard.

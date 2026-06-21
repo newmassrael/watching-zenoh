@@ -87,6 +87,7 @@ use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::push::PushOwned;
+use wz_codecs::request::RequestOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
     build_declare_queryable, build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
@@ -102,6 +103,8 @@ use wz_session_core::push_build::{build_push_literal, set_push_keyexpr_literal};
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
+use wz_session_core::request_build::set_request_keyexpr_literal;
+use wz_session_core::request_routing_context::{read_request_source, set_request_source};
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
@@ -985,6 +988,87 @@ impl LinkstateForwarder {
         });
     }
 
+    /// A routed Query (`Request`) arrived on `inbound`: relay it toward the
+    /// matching QUERYABLES along the QUERIER's spanning tree — the query-plane
+    /// twin of [`forward_push`](Self::forward_push) (data toward subscribers).
+    /// Resolves the source (querier, tree root) from the Request's
+    /// routing-context node_id ([`read_request_source`]) exactly as forward_push
+    /// resolves a Push's source, reads the queryable interest
+    /// [`qabls`](Self#structfield.qabls) `interested_remote` for the keyexpr, and
+    /// routes toward those queryables' subtrees via
+    /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward).
+    /// A keyexpr no peer offers a queryable for routes nowhere. zenoh
+    /// `route_query` -> `compute_query_route` over the linkstate trees.
+    ///
+    /// SCOPE (atom 2b): the FORWARD half only — the Request is relayed with its
+    /// `rid` carried VERBATIM and the source re-stamped. The RETURN path (the
+    /// pending-query table + per-hop qid remapping so a `Response` routes back to
+    /// the querier) is atom 3; until it lands a routed Query reaches the queryable
+    /// but its Reply has no mesh return route. No hop-limit: zenoh bounds a Query
+    /// by the per-query timeout (atom 3), not a hop count, and a converged source
+    /// tree is acyclic (the transient-recompute loop window is the tracked
+    /// concern the atom-3 timeout closes).
+    fn forward_request(&self, inbound: FaceId, reliable: bool, request: &RequestOwned) {
+        // The inbound face's zid + graph link AND the RESOLVED keyexpr, one
+        // scoped borrow (an unresolvable alias drops the Request, as forward_push
+        // drops a Push).
+        let (inbound_zid, inbound_link, keyexpr) = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            let Some(keyexpr) = resolve_wireexpr(&request.keyexpr.body, &s.keyexpr_table) else {
+                return;
+            };
+            (peer_zid_routing(&s.actions), s.link, keyexpr)
+        };
+        // Resolve the source (querier, tree root) + this node's psid for it — the
+        // SAME shared seam forward_push uses; a routed Query floods along the
+        // querier's tree, not the relaying neighbour's.
+        let Some((source_zid, out_node_id)) =
+            self.resolve_source(inbound_zid, inbound_link, read_request_source(request))
+        else {
+            return;
+        };
+        // The query-route filter: forward only toward subtrees that hold a
+        // matching QUERYABLE — directions_toward over the keyexpr's
+        // interested-queryable set (excluding self, the local sink). A keyexpr no
+        // peer offers a queryable for routes nowhere.
+        let self_zid = *self.net.borrow().self_zid();
+        let interested = self.qabls.borrow().interested_remote(&keyexpr, &self_zid);
+        if interested.is_empty() {
+            return;
+        }
+        let children = self
+            .net
+            .borrow()
+            .directions_toward(&source_zid, &interested);
+        if children.is_empty() {
+            return;
+        }
+        // out_node_id + the literal keyexpr are the same for every outbound face,
+        // so build the re-stamped carrier ONCE; fan_out clones it to each
+        // queryable-ward child. The rid is carried VERBATIM (atom 2b — the qid
+        // remapping that lets the Reply route back is atom 3).
+        let mut carrier = request.clone();
+        set_request_source(&mut carrier, out_node_id);
+        // NORMALIZE the forwarded keyexpr to a literal (B1): a downstream child
+        // does not share THIS inbound link's alias table, so an aliased id would
+        // be unresolvable there — the same normalize forward_push does for a Push.
+        if set_request_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
+            return;
+        }
+        // Forward to the queryable-ward children in the source's tree — never to
+        // the inbound face, nor back toward the source's own neighbour (the
+        // shared re-forward predicate).
+        let _ = self.fan_out(reliable, None, |id, zid| {
+            Ok(
+                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
+                    .then(|| NetworkMessage::Request(Box::new(carrier.clone()))),
+            )
+        });
+    }
+
     /// Originate a data Put INTO the mesh from this node (a publishing peer) —
     /// build the carrier and flood it toward the INTERESTED subscribers in
     /// self's own spanning tree (this node is the source). The data-route
@@ -1845,6 +1929,14 @@ impl FaceForwarder for LinkstateForwarder {
                     DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {}
                     _ => self.forward_subscription(id, *reliable, declare),
                 },
+                // A routed Query: relay it toward the matching queryables along
+                // the querier's tree (the query-plane twin of the data Push).
+                // The Reply return path (Response/ResponseFinal) is atom 3 — those
+                // still fall to the `_` drop below until the pending-query table
+                // lands.
+                NetworkMessage::Request(request) => {
+                    self.forward_request(id, *reliable, request);
+                }
                 _ => {}
             }
         }
@@ -4957,6 +5049,184 @@ mod tests {
         assert!(
             fwd.interested("demo/q").is_empty(),
             "and it was NOT mis-routed into the subscriber table",
+        );
+    }
+
+    // ── §5.15 query routing atom 2b: Request routing toward queryables ──
+
+    /// The single forwarded Request decoded from a recorded wire frame — so a
+    /// test can assert its re-stamped routing source, verbatim rid, and the
+    /// B1-normalized literal keyexpr all landed ON THE WIRE.
+    fn forwarded_request(frame: &[u8]) -> RequestOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Request(r)) => *r,
+            other => panic!("expected a forwarded Request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_request_resolves_a_transit_source_and_routes_to_a_queryable() {
+        // The query-plane twin of forward_push_to_the_interested_subtree_only +
+        // the transit-source resolution: C declares a queryable for demo/q, then a
+        // routed Query for demo/q arrives on A's face sourced at B (node_id 7 =
+        // A's psid for B, the querier). Self resolves the source to B, reads the
+        // QUERYABLE interest (qabls), and routes along B's tree to C (which holds
+        // the queryable), re-stamped into self's psid for B — fed through the
+        // forward() dispatch so the Request arm is covered too. The carrier is a
+        // Request with a literal keyexpr and the rid carried VERBATIM (atom 2b).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // -> idx 1
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // -> idx 2
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        fwd.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S-C
+                                                          // C declares a queryable for demo/q (sourced from C, FaceId(1)'s peer).
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+        sink_a.reset();
+        sink_c.reset();
+
+        let mut request =
+            wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+                .expect("build request");
+        set_request_source(&mut request, 7); // node_id 7 = A's psid for B (the querier)
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Request(Box::new(request))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "routed to C (which holds the queryable) in B's tree"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
+        let fwd_req = forwarded_request(&sink_c.frame_bytes(0));
+        assert_eq!(
+            fwd_req.rid, 99,
+            "rid carried verbatim (atom 2b — qid remapping is atom 3)"
+        );
+        assert_eq!(
+            read_request_source(&fwd_req),
+            3,
+            "re-stamped into self's psid for the resolved source B (its idx, 3)"
+        );
+        match &fwd_req.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => {
+                assert_eq!(
+                    w.suffix.as_deref(),
+                    Some("demo/q"),
+                    "B1-normalized to a literal keyexpr"
+                );
+            }
+            _ => panic!("expected a literal keyexpr on the forwarded Request"),
+        }
+        // The N (suffix-present, 0x20) header bit MUST be set in sync with the
+        // literal keyexpr — a clear N with a suffix-bearing wireexpr offset-shifts
+        // the peer's decode of the Query body (set_request_keyexpr_literal).
+        assert_eq!(
+            fwd_req.header & 0x20,
+            0x20,
+            "the N bit is set for the normalized literal keyexpr"
+        );
+    }
+
+    #[test]
+    fn forward_request_fans_out_to_every_matching_queryable() {
+        // QueryTarget::All — zenoh's get() default is BestMatching (the nearest
+        // COMPLETE queryable), but a forward-only first cut without the queryable
+        // completeness info fans out to ALL matching queryable directions (the
+        // faithful QueryTarget::All; the BestMatching narrowing is a tracked atom-3
+        // divergence). S has neighbours A, B, C; a Request from A has B and C both
+        // as self's children. BOTH declare a queryable for demo/q -> relay to BOTH
+        // (the query-plane twin of forward_push_to_two_interested_subtrees).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05);
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q"); // B has a queryable
+        declare_queryable_interest(&fwd, FaceId(2), "demo/q"); // and so does C
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(sink_b.frame_count(), 1, "relayed to queryable B");
+        assert_eq!(sink_c.frame_count(), 1, "relayed to queryable C");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    #[test]
+    fn forward_request_with_no_queryable_routes_nowhere() {
+        // The any-interest gate, query-plane: a Request whose keyexpr no peer
+        // offers a queryable for is not relayed at all.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        sink_a.reset();
+        sink_b.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(sink_b.frame_count(), 0, "no queryable -> no relay");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source either");
+    }
+
+    #[test]
+    fn a_subscriber_does_not_attract_a_routed_query() {
+        // The query route reads qabls, NOT subs: a peer that only SUBSCRIBES to
+        // the keyexpr is not a query target (the planes are separate). B
+        // subscribes to demo/q but offers no queryable -> the Request routes
+        // nowhere, even though a Push for demo/q WOULD reach B.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/q"); // B SUBSCRIBES (not a queryable)
+        sink_a.reset();
+        sink_b.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "a subscriber is not a query target (qabls is read, not subs)"
         );
     }
 }

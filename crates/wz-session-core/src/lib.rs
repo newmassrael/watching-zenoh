@@ -469,6 +469,14 @@ pub mod handshake_encode;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
+/// Shared codec-agnostic `Wireexpr` constructors (`literal_wireexpr`) — the
+/// SSOT a forwarder normalizes an aliased keyexpr through before it crosses a
+/// link without the inbound alias table (c3c-3 B1). Relocated out of
+/// `push_build` so the Request forward path reuses it without the Push codec;
+/// `alloc`-gated only (owned-string output).
+#[cfg(feature = "alloc")]
+pub mod wireexpr_build;
+
 /// Shared `ext_nodeid` routing-context chain codec (P4 routing) — the SSOT
 /// for the `zextz64!(0x3, true)` NodeId extension Push and Declare both carry,
 /// plus the per-entry chain `Z`-bit normalisation. `push_routing_context` /

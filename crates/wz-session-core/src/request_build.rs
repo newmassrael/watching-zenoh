@@ -134,6 +134,27 @@ pub fn build_request_query(
     })
 }
 
+/// Re-express a `Request`'s keyexpr as the literal `suffix` (c3c-3 B1
+/// normalize) — the Request twin of
+/// [`set_push_keyexpr_literal`](crate::push_build::set_push_keyexpr_literal):
+/// set the keyexpr to a literal
+/// ([`literal_wireexpr`](crate::wireexpr_build::literal_wireexpr)) AND the
+/// header's `N` (suffix-present, `0x20`; zenoh `request::flag::N = 1 << 5`,
+/// `request.rs:23`) bit, which a literal keyexpr always carries. The two MUST
+/// stay in sync — a clear `N` with a suffix-bearing wireexpr offset-shifts the
+/// peer's decode of the following Query body. The linkstate forwarder calls
+/// this on the outbound carrier so a downstream link (no shared alias table)
+/// receives a self-contained literal Request, even when the inbound was a
+/// pure-aliased Request whose `N` bit was clear.
+pub fn set_request_keyexpr_literal(
+    request: &mut RequestOwned,
+    suffix: &str,
+) -> Result<(), CodecError> {
+    request.keyexpr = crate::wireexpr_build::literal_wireexpr(suffix)?;
+    request.header |= 0x20;
+    Ok(())
+}
+
 /// R311mu (Level B, B5b-2b-2) — metadata-bearing `Request(Query)`
 /// builder: the build half of the prior
 /// `SessionLinkActions::send_request_query_with_meta` (dispatch stays on

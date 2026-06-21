@@ -115,19 +115,12 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwne
 
 /// Build a literal (`id == 0`) keyexpr `Wireexpr` carrying `suffix` verbatim —
 /// the un-aliased wire form [`build_push_literal`] embeds, factored out as the
-/// SSOT literal-`Wireexpr` constructor. The linkstate forwarder NORMALIZES an
-/// inbound aliased keyexpr back to a literal with this before forwarding the
-/// message onward (c3c-3 B1): a downstream link does not share the inbound
-/// link's keyexpr-alias table, so an aliased id would be unresolvable there.
-pub fn literal_wireexpr(suffix: &str) -> Result<WireexprOwned, CodecError> {
-    Ok(WireexprOwned {
-        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-            id: 0,
-            suffix_len: Some(suffix.len() as u64),
-            suffix: Some(crate::codec_owned::owned_string(suffix)?),
-        }),
-    })
-}
+// `literal_wireexpr` (the SSOT literal-`Wireexpr` constructor) was relocated to
+// the codec-agnostic [`wireexpr_build`](crate::wireexpr_build) module so the
+// Request forward path can reuse it without the Push codec. Re-exported so the
+// Push builders below (and any external `push_build::literal_wireexpr` caller)
+// keep working unchanged.
+pub use crate::wireexpr_build::literal_wireexpr;
 
 /// Re-express a `Push`'s keyexpr as the literal `suffix` (c3c-3 B1 normalize):
 /// set the keyexpr to a literal ([`literal_wireexpr`]) AND the header's `N`
