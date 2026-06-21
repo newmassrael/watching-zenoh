@@ -77,7 +77,7 @@ pub fn set_push_source(push: &mut PushOwned, node_id: u16) {
 /// peer mesh is wz-only (zenoh-pico is client-only and never routes), so this id
 /// can never be mis-read by a zenoh node participating in the mesh. The control
 /// plane needs no hop-limit: a sourced subscription flood is bounded by the
-/// `LinkstatepeerSubs` register change-gate (re-flood only on a NEW interest),
+/// `LinkstatepeerInterest` register change-gate (re-flood only on a NEW interest),
 /// the state-convergent zenoh-parity loop bound.
 pub const HOPLIMIT_EXT_ID: u8 = 0x0a;
 /// The hop-limit ext header with no further extension following: `id (0x0a) |

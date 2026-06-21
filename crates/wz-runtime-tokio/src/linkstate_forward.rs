@@ -89,7 +89,7 @@ use wz_codecs::oam::OamOwned;
 use wz_codecs::push::PushOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
-    build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
+    build_declare_queryable, build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -108,7 +108,7 @@ use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::interceptor::{InterceptorChain, InterceptorContext};
-use crate::linkstate_subs::LinkstatepeerSubs;
+use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export `Zid`, the typed [`WhatAmI`] role, and the gossip
@@ -222,12 +222,23 @@ pub struct LinkstateForwarder {
     /// `DeclareSubscriber`s flooded across the mesh. The HAT-analogue interest
     /// state the data-route filter (atom4) reads to bound the Push fan-out to
     /// interested subtrees, INCLUDING this node's own subscription (registered
-    /// under its own zid, zenoh-faithful — see [`LinkstatepeerSubs`]). The
+    /// under its own zid, zenoh-faithful — see [`LinkstatepeerInterest`]). The
     /// data-route filter reads the self-excluding
-    /// [`interested_remote`](crate::linkstate_subs::LinkstatepeerSubs::interested_remote)
+    /// [`interested_remote`](crate::linkstate_interest::LinkstatepeerInterest::interested_remote)
     /// view. `RefCell` by the same single-task contract as the graph — borrowed
     /// only for a handler's synchronous duration.
-    subs: RefCell<LinkstatepeerSubs>,
+    subs: RefCell<LinkstatepeerInterest>,
+    /// The linkstate-peer QUERYABLE interest table — the query-plane twin of
+    /// [`subs`](Self#structfield.subs), learned from sourced `DeclareQueryable`s
+    /// flooded across the mesh (zenoh's per-`Resource` `linkstatepeer_qabls`,
+    /// `hat/linkstate_peer/mod.rs:517`). The SAME generic
+    /// [`LinkstatepeerInterest`] type, a SEPARATE instance: subscriptions bound a
+    /// Push fan-out, queryables bound a Query fan-out (the Request routing that
+    /// reads this lands in the next atom). Populated by
+    /// [`forward_queryable`](Self::forward_queryable); a peer's interest is
+    /// purged whole on its face-down (`purge_detached_interest`). `RefCell` by
+    /// the same single-task contract as `subs`.
+    qabls: RefCell<LinkstatepeerInterest>,
     /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
     /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
     /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
@@ -323,7 +334,8 @@ impl LinkstateForwarder {
             faces: RefCell::new(HashMap::new()),
             ingested: Cell::new(0),
             data_seen: Cell::new(0),
-            subs: RefCell::new(LinkstatepeerSubs::new()),
+            subs: RefCell::new(LinkstatepeerInterest::new()),
+            qabls: RefCell::new(LinkstatepeerInterest::new()),
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
@@ -848,7 +860,7 @@ impl LinkstateForwarder {
     /// toward an INTERESTED subscriber — the data-route filter (c3c-3 atom4):
     /// [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward)
     /// over the keyexpr's interested-peer set
-    /// ([`LinkstatepeerSubs`](crate::linkstate_subs::LinkstatepeerSubs)), NOT
+    /// ([`LinkstatepeerInterest`](crate::linkstate_interest::LinkstatepeerInterest)), NOT
     /// every tree child (the pre-atom4 broadcast). A keyexpr no peer subscribes
     /// to forwards nowhere (the any-interest gate). The inbound face (self's
     /// parent toward the source) is excluded, and each outbound copy is
@@ -876,7 +888,7 @@ impl LinkstateForwarder {
     /// wz-only (zenoh-pico is client-only and never routes), so the hop-limit ext
     /// (id `0x0a`, non-mandatory) rides only mesh-internal wz<->wz forwards and is
     /// invisible to a client. The CONTROL plane (a sourced subscription flood)
-    /// needs no hop-limit — it is bounded by the [`LinkstatepeerSubs`] register
+    /// needs no hop-limit — it is bounded by the [`LinkstatepeerInterest`] register
     /// change-gate (re-flood only on a NEW interest), the state-convergent bound.
     fn forward_push(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
         // The inbound face's zid + graph link (source resolution) AND the Push's
@@ -1112,27 +1124,86 @@ impl LinkstateForwarder {
         })
     }
 
-    /// A sourced `DeclareSubscriber` arrived on `inbound`: register the SOURCE
-    /// peer's interest in the declared keyexpr, and — only if this NEWLY
-    /// learned it — re-flood the declaration onward along the SOURCE's spanning
-    /// tree to self's tree children (excluding the inbound face), re-stamped
-    /// with this node's psid for the source. The "only on new"
-    /// ([`LinkstatepeerSubs::register`](crate::linkstate_subs::LinkstatepeerSubs::register)
-    /// returning `true`) is the change-gate that bounds the flood: a peer that
-    /// already knew the interest does not re-flood, so the declaration cannot
-    /// loop. zenoh `register_linkstatepeer_subscription`'s `if !contains {
-    /// insert; propagate }`. Resolves the source + re-stamp value through the
-    /// shared [`resolve_source`](Self::resolve_source) seam, exactly as
-    /// [`forward_push`](Self::forward_push) — the difference is the
-    /// control-plane spread floods ALL tree children (zenoh
-    /// `propagate_sourced_subscription` uses the tree `children`), not the
-    /// data-plane interest-filtered directions.
+    /// A sourced `DeclareSubscriber` arrived on `inbound`: the subscriber-plane
+    /// thin wrapper over [`forward_interest_declaration`](Self::forward_interest_declaration).
+    /// Supplies the subscriber body extractor, the subscription interest table
+    /// ([`subs`](Self#structfield.subs)) and the `DeclareSubscriber` carrier
+    /// builder; the shared helper does the source-resolve + register-gate +
+    /// re-flood. zenoh `register_linkstatepeer_subscription`.
     fn forward_subscription(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
         // Only a DeclareSubscriber body carries mesh interest. Its keyexpr may be
-        // aliased (c3c-3 B1b) — resolved below against the inbound face's table.
+        // aliased (c3c-3 B1b) — resolved by the shared helper against the inbound
+        // face's table.
         let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
             return;
         };
+        self.forward_interest_declaration(inbound, reliable, declare, wireexpr, &self.subs, |ke| {
+            build_declare_subscriber(0, 0, Some(ke))
+        });
+    }
+
+    /// A sourced `DeclareQueryable` arrived on `inbound`: the queryable-plane
+    /// twin of [`forward_subscription`](Self::forward_subscription) — same shared
+    /// [`forward_interest_declaration`](Self::forward_interest_declaration), only
+    /// the body extractor ([`declare_queryable_wireexpr`]), the interest table
+    /// ([`qabls`](Self#structfield.qabls)) and the `DeclareQueryable` carrier
+    /// builder ([`build_declare_queryable`]) differ. zenoh
+    /// `register_linkstatepeer_queryable` (`queries.rs`). Registers the source
+    /// peer's queryable interest and re-floods along the source's tree on a NEW
+    /// registration; the Request routing that consumes `qabls` lands in the next
+    /// atom.
+    fn forward_queryable(&self, inbound: FaceId, reliable: bool, declare: &DeclareOwned) {
+        let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
+            return;
+        };
+        self.forward_interest_declaration(
+            inbound,
+            reliable,
+            declare,
+            wireexpr,
+            &self.qabls,
+            |ke| build_declare_queryable(0, 0, Some(ke)),
+        );
+    }
+
+    /// The shared sourced-interest-declaration re-flood, SSOT for both the
+    /// subscriber ([`forward_subscription`](Self::forward_subscription)) and the
+    /// queryable ([`forward_queryable`](Self::forward_queryable)) planes: register
+    /// the SOURCE peer's interest in the declared keyexpr in `table`, and — only
+    /// if this NEWLY learned it — re-flood a CLEAN sourced literal declaration
+    /// onward along the SOURCE's spanning tree to self's tree children (excluding
+    /// the inbound face), re-stamped with this node's psid for the source. The
+    /// "only on new" ([`LinkstatepeerInterest::register`](crate::linkstate_interest::LinkstatepeerInterest::register)
+    /// returning `true`) is the change-gate that bounds the flood: a peer that
+    /// already knew the interest does not re-flood, so the declaration cannot
+    /// loop. zenoh `register_linkstatepeer_{subscription,queryable}`'s `if
+    /// !contains { insert; propagate }`. Resolves the source + re-stamp value
+    /// through the shared [`resolve_source`](Self::resolve_source) seam, exactly
+    /// as [`forward_push`](Self::forward_push) — the difference is the
+    /// control-plane spread floods ALL tree children (zenoh
+    /// `propagate_sourced_{subscription,queryable}` uses the tree `children`), not
+    /// the data-plane interest-filtered directions. `table` is the
+    /// subscriber/queryable interest instance; `build` mints the per-flow carrier
+    /// (`DeclareSubscriber` / `DeclareQueryable`) from the resolved LITERAL
+    /// keyexpr (B1b normalize — a downstream link does not share this link's alias
+    /// table, so it must see a literal; a sourced re-flood carries no id, id 0,
+    /// the keyexpr being the identity).
+    ///
+    /// Handles interest DECLARATIONS (new interest) only — withdrawals are NOT
+    /// unified here: the subscriber retraction is the standalone
+    /// [`forward_unsubscription`](Self::forward_unsubscription) (its
+    /// `UndeclareSubscriber` carries an ext_keyexpr), and the queryable retraction
+    /// is deferred (the `UndeclQueryable` codec carries no keyexpr — see the
+    /// `forward()` dispatch's UndeclareQueryable arm).
+    fn forward_interest_declaration(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        declare: &DeclareOwned,
+        wireexpr: &WireexprOwned,
+        table: &RefCell<LinkstatepeerInterest>,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
         // The inbound face's zid + graph link AND the RESOLVED keyexpr, in one
         // scoped borrow (an unresolvable alias drops the declaration).
         let (inbound_zid, inbound_link, keyexpr) = {
@@ -1152,21 +1223,20 @@ impl LinkstateForwarder {
         };
         // Register the resolved interest; re-flood ONLY on a new registration
         // (the loop-bounding change-gate).
-        if !self.subs.borrow_mut().register(&keyexpr, source_zid) {
+        if !table.borrow_mut().register(&keyexpr, source_zid) {
             return;
         }
         let children = self.net.borrow().tree_children_of(&source_zid);
         if children.is_empty() {
             return;
         }
-        // Re-flood a CLEAN sourced literal DeclareSubscriber built from the
-        // resolved keyexpr (B1b normalize): a downstream link does not share this
-        // link's alias table, so it must see a literal, and a sourced re-flood
-        // carries no subscriber id (id 0 — the keyexpr is the identity). Always
-        // rebuild, never re-emit the inbound body verbatim — the same UNIFORM
-        // normalize the data plane does (forward_push), so there is no
-        // aliased-vs-literal branch.
-        let Ok(mut carrier) = build_declare_subscriber(0, 0, Some(keyexpr.as_str())) else {
+        // Re-flood a CLEAN sourced literal declaration built from the resolved
+        // keyexpr (B1b normalize): a downstream link does not share this link's
+        // alias table, so it must see a literal, and a sourced re-flood carries no
+        // id (id 0 — the keyexpr is the identity). Always rebuild, never re-emit
+        // the inbound body verbatim — the same UNIFORM normalize the data plane
+        // does (forward_push), so there is no aliased-vs-literal branch.
+        let Ok(mut carrier) = build(keyexpr.as_str()) else {
             return;
         };
         set_declare_source(&mut carrier, out_node_id);
@@ -1188,7 +1258,7 @@ impl LinkstateForwarder {
     /// retraction onward along the SOURCE's spanning tree to self's tree children
     /// (excluding the inbound face), re-stamped with this node's psid for the
     /// source. The "only on held"
-    /// ([`LinkstatepeerSubs::withdraw`](crate::linkstate_subs::LinkstatepeerSubs::withdraw)
+    /// ([`LinkstatepeerInterest::withdraw`](crate::linkstate_interest::LinkstatepeerInterest::withdraw)
     /// returning `true`) is the change-gate bounding the flood — the exact mirror
     /// of [`forward_subscription`](Self::forward_subscription)'s "only on new",
     /// so a retraction cannot loop. zenoh
@@ -1249,39 +1319,71 @@ impl LinkstateForwarder {
         });
     }
 
-    /// Re-advertise known subscriptions to the NEW children a tree-recompute
-    /// added — zenoh's `pubsub_tree_change` (`pubsub.rs:641-678`). Called after a
+    /// Re-advertise known SUBSCRIPTIONS to the NEW children a tree-recompute
+    /// added — zenoh's `pubsub_tree_change` (`pubsub.rs:641-678`). The
+    /// subscriber-plane thin wrapper over
+    /// [`re_advertise_interest`](Self::re_advertise_interest).
+    fn re_advertise_subscriptions(&self, new_children: &[(Zid, Vec<Zid>)]) {
+        self.re_advertise_interest(new_children, &self.subs, |ke| {
+            build_declare_subscriber(0, 0, Some(ke))
+        });
+    }
+
+    /// Re-advertise known QUERYABLES to the NEW children a tree-recompute added —
+    /// zenoh's `queries_tree_change` (`queries.rs:663-697`), the query-plane twin
+    /// of [`re_advertise_subscriptions`](Self::re_advertise_subscriptions). Same
+    /// delta + same [`re_advertise_interest`](Self::re_advertise_interest) seam;
+    /// only the interest table (`qabls`) and the `DeclareQueryable` carrier
+    /// differ, so a queryable declared before a peer joined converges onto the new
+    /// branch exactly as a subscription does.
+    fn re_advertise_queryables(&self, new_children: &[(Zid, Vec<Zid>)]) {
+        self.re_advertise_interest(new_children, &self.qabls, |ke| {
+            build_declare_queryable(0, 0, Some(ke))
+        });
+    }
+
+    /// The shared tree-change re-advertise, SSOT for both the subscriber
+    /// ([`re_advertise_subscriptions`](Self::re_advertise_subscriptions)) and the
+    /// queryable ([`re_advertise_queryables`](Self::re_advertise_queryables))
+    /// planes. Called after a
     /// [`compute_trees`](wz_routing_graph::LinkstateNetwork::compute_trees) on a
     /// topology change (an inbound link-state, or a face loss) with THAT
     /// recompute's per-tree new-children DELTA (`(source, [new child, ..])`). A
-    /// subscription declared before a peer joined did not reach it; the recompute
+    /// declaration made before a peer joined did not reach it; the recompute
     /// makes the joiner a NEW child of some source's tree, and re-flooding the
-    /// source's `DeclareSubscriber` to that new child alone delivers the interest
+    /// source's declaration to that new child alone delivers the interest
     /// onto the new branch — without re-sending to children that already
     /// converged (c3c-3 D2; the prior version re-flooded to ALL current children
     /// and leaned on the receiver change-gate to dedup the redundant sends).
     ///
-    /// Structure mirrors zenoh `pubsub_tree_change`: the OUTER loop is over the
-    /// new-children delta (each source tree that grew), the INNER over the
-    /// subscriptions sourced at that tree (`*sub == tree_id`); each match floods
-    /// to the delta children via [`flood_to_children`](Self::flood_to_children).
-    /// ONE delta covers both remote-relayed and self-originated subscriptions: a
-    /// self-sourced pair resolves `local_psid_of(self) == 0`, so
-    /// `set_declare_source(0)` leaves it self-originated — the same wire a direct
-    /// `declare_subscription` emits — which is what lets a ONE-TIME
-    /// `declare_subscription` converge to a late-joining peer without a per-tick
-    /// re-declare. Loop-freedom is unchanged: the receiver's register change-gate
-    /// still bounds any onward flood; the delta only narrows WHO is re-sent to.
-    fn re_advertise_subscriptions(&self, new_children: &[(Zid, Vec<Zid>)]) {
+    /// Structure mirrors zenoh `pubsub_tree_change` / `queries_tree_change`: the
+    /// OUTER loop is over the new-children delta (each source tree that grew), the
+    /// INNER over the declarations sourced at that tree (`*src == tree_id`); each
+    /// match floods to the delta children via
+    /// [`flood_to_children`](Self::flood_to_children). ONE delta covers both
+    /// remote-relayed and self-originated declarations: a self-sourced pair
+    /// resolves `local_psid_of(self) == 0`, so `set_declare_source(0)` leaves it
+    /// self-originated — the same wire a direct `declare_*` emits — which is what
+    /// lets a ONE-TIME `declare_*` converge to a late-joining peer without a
+    /// per-tick re-declare. Loop-freedom is unchanged: the receiver's register
+    /// change-gate still bounds any onward flood; the delta only narrows WHO is
+    /// re-sent to. `table` selects the subscriber/queryable interest instance;
+    /// `build` mints the per-flow carrier from the literal keyexpr.
+    fn re_advertise_interest(
+        &self,
+        new_children: &[(Zid, Vec<Zid>)],
+        table: &RefCell<LinkstatepeerInterest>,
+        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+    ) {
         if new_children.is_empty() {
             return;
         }
         // Snapshot the (keyexpr, source) pairs so the table borrow is released
         // before the per-source graph borrow + fan_out below.
-        let pairs = self.subs.borrow().subscriptions();
+        let pairs = table.borrow().entries();
         for (source_zid, delta_children) in new_children {
             // this node's psid for the source (the re-stamp value; 0 for a
-            // self-sourced subscription, leaving it self-originated). Scoped graph
+            // self-sourced declaration, leaving it self-originated). Scoped graph
             // borrow released before flood_to_children (which re-borrows).
             let out_node_id = match self
                 .net
@@ -1292,11 +1394,11 @@ impl LinkstateForwarder {
                 Some(n) => n,
                 None => continue,
             };
-            for (keyexpr, sub_source) in &pairs {
-                if sub_source != source_zid {
+            for (keyexpr, decl_source) in &pairs {
+                if decl_source != source_zid {
                     continue;
                 }
-                let Ok(mut declare) = build_declare_subscriber(0, 0, Some(keyexpr)) else {
+                let Ok(mut declare) = build(keyexpr) else {
                     continue;
                 };
                 set_declare_source(&mut declare, out_node_id);
@@ -1308,17 +1410,19 @@ impl LinkstateForwarder {
     }
 
     /// The single spanning-tree recompute path (D2c SSOT): recompute the trees
-    /// and re-advertise known subscriptions to whatever new children the recompute
-    /// produced. The [`tick`](FaceForwarder::tick) calls this once per coalescing
-    /// window after [`schedule_recompute`](Self::schedule_recompute) marked a
-    /// topology change pending — so EVERY production recompute funnels through
-    /// here (zenoh's `TreesComputationWorker` body: `compute_trees` then
-    /// `pubsub_tree_change`). The `compute_trees` borrow is released before
-    /// `re_advertise_subscriptions` re-borrows.
+    /// and re-advertise known subscriptions AND queryables to whatever new
+    /// children the recompute produced. The [`tick`](FaceForwarder::tick) calls
+    /// this once per coalescing window after
+    /// [`schedule_recompute`](Self::schedule_recompute) marked a topology change
+    /// pending — so EVERY production recompute funnels through here (zenoh's
+    /// `TreesComputationWorker` body: `compute_trees` then `pubsub_tree_change` +
+    /// `queries_tree_change`). The `compute_trees` borrow is released before the
+    /// re-advertise re-borrows.
     fn recompute_and_advertise(&self) {
         let new_children = self.net.borrow_mut().compute_trees();
         self.recomputes.set(self.recomputes.get() + 1);
         self.re_advertise_subscriptions(&new_children);
+        self.re_advertise_queryables(&new_children);
     }
 
     /// Mark a spanning-tree recompute pending (D2c) — the coalescing entry the
@@ -1371,19 +1475,32 @@ impl LinkstateForwarder {
         self.subs.borrow().interested(keyexpr)
     }
 
-    /// Purge every node in `removed` from the subscription interest table — the
-    /// single SSOT for zenoh's `pubsub_remove_node`-over-a-removed-set action,
+    /// The peers with a QUERYABLE interested in `keyexpr` — the public-observer
+    /// twin of [`interested`](Self::interested), and the input the Request route
+    /// will feed to `directions_toward`. Empty if no peer declared a matching
+    /// queryable. `pub` symmetric with `interested` (itself pub for the demo's
+    /// shutdown summary): the current readers are this module's tests, and the
+    /// Request-routing / demo-summary atom adds the production consumer.
+    pub fn interested_queryables(&self, keyexpr: &str) -> Vec<Zid> {
+        self.qabls.borrow().interested(keyexpr)
+    }
+
+    /// Purge every node in `removed` from BOTH the subscription AND queryable
+    /// interest tables — the single SSOT for zenoh's
+    /// `pubsub_remove_node` + `queries_remove_node`-over-a-removed-set action,
     /// called from BOTH prune sites: a link-down (`deregister`, the
     /// `remove_link` detached set) and an ingest that detached nodes (`forward`,
-    /// `changes.removed`). A gone node's interest must not keep a publisher's
-    /// any-interest gate spuriously armed. No-op for an empty set.
+    /// `changes.removed`). A gone node's interest must not keep a publisher's /
+    /// querier's route gate spuriously armed. No-op for an empty set.
     fn purge_detached_interest(&self, removed: &[Zid]) {
         if removed.is_empty() {
             return;
         }
         let mut subs = self.subs.borrow_mut();
+        let mut qabls = self.qabls.borrow_mut();
         for zid in removed {
             subs.remove_peer(zid);
+            qabls.remove_peer(zid);
         }
     }
 }
@@ -1468,6 +1585,18 @@ fn is_tree_forward_target(
 fn declare_subscriber_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
     match &declare.body {
         DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => Some(&sub.keyexpr),
+        _ => None,
+    }
+}
+
+/// The keyexpr `Wireexpr` a `DeclareQueryable` declares interest in — `None` for
+/// a non-queryable Declare body. The query-plane twin of
+/// [`declare_subscriber_wireexpr`]; returns the raw `Wireexpr` (literal OR
+/// aliased) so the caller resolves it against the inbound face's alias table
+/// (B1b), exactly as the subscriber side.
+fn declare_queryable_wireexpr(declare: &DeclareOwned) -> Option<&WireexprOwned> {
+    match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclQueryable(q) => Some(&q.keyexpr),
         _ => None,
     }
 }
@@ -1685,6 +1814,35 @@ impl FaceForwarder for LinkstateForwarder {
                     DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
                         self.forward_unsubscription(id, *reliable, declare);
                     }
+                    // The query-plane twin of the subscriber declare: a sourced
+                    // DeclareQueryable registers the source peer's queryable
+                    // interest and re-floods along the source's tree, exactly as
+                    // forward_subscription does for subscriptions (zenoh
+                    // `declare_linkstatepeer_queryable`, `queries.rs`). Without
+                    // this explicit arm it fell to the `_` subscriber catch-all
+                    // and was silently dropped (its body is not a subscriber).
+                    DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
+                        self.forward_queryable(id, *reliable, declare);
+                    }
+                    // UndeclareQueryable: deferred (a CODEC limitation, not a
+                    // routing one). A sourced mesh retraction identifies the
+                    // declaration by its keyexpr (id == 0, as forward_unsubscription
+                    // does), but the wz-codecs `UndeclQueryable` body THIS arm
+                    // matches is `{ header: u8, id: u64 }` — id only, no keyexpr
+                    // extension (the generated type, not the fuller schema the SCE
+                    // forge fixture shows SCE *can* emit). Its subscriber twin
+                    // `UndeclSubscriber` instead carries `extensions`, which is
+                    // exactly why `forward_unsubscription` CAN read an ext_keyexpr
+                    // and this cannot — zenoh's `UndeclareQueryable` has
+                    // `ext_wire_expr` (`commons/zenoh-protocol/src/network/declare.rs:520-523`),
+                    // so faithfully wiring queryable undeclare needs a wz-codecs
+                    // SCHEMA extension first (a separate codec atom). Until then the
+                    // whole-peer face-down purge (`purge_detached_interest`) is the
+                    // safety net for a departed queryable; per-keyexpr
+                    // undeclare-while-connected is the tracked deferral. Dropped
+                    // here EXPLICITLY so it is NOT mis-routed to the subscriber
+                    // catch-all below (a regression the no-op-arm test guards).
+                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {}
                     _ => self.forward_subscription(id, *reliable, declare),
                 },
                 _ => {}
@@ -4579,5 +4737,226 @@ mod tests {
             Duration::from_millis(5),
         );
         assert_eq!(tuned.tick_period(), Some(Duration::from_millis(5)));
+    }
+
+    // ── §5.15/§5.16 query routing atom 1: queryable interest propagation ──
+
+    /// Send a sourced `DeclareQueryable` for `keyexpr` into the forwarder on
+    /// `face` — the queryable-plane twin of [`declare_interest`].
+    fn declare_queryable_interest(fwd: &LinkstateForwarder, face: FaceId, keyexpr: &str) {
+        let declare = build_declare_queryable(0, 0, Some(keyexpr)).expect("build qabl");
+        fwd.forward_queryable(face, true, &declare);
+    }
+
+    /// The LITERAL keyexpr of the single forwarded DeclareQueryable in a frame,
+    /// or `None` if it is not a DeclareQueryable / is still aliased — the
+    /// query-plane twin of [`forwarded_declare_keyexpr`], proving the re-flooded
+    /// queryable was normalized to a literal AND that a QUERYABLE (not a
+    /// subscriber) carrier went on the wire.
+    fn forwarded_declare_queryable_keyexpr(frame: &[u8]) -> Option<String> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => match &d.body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(q) => match &q.keyexpr.body {
+                    WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => {
+                        w.suffix.as_deref().map(str::to_string)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_queryable_floods_to_tree_children_and_registers() {
+        // The query-plane twin of
+        // forward_subscription_resolves_a_transit_source_from_the_link_psid: a
+        // sourced DeclareQueryable arrives on A's face with a NON-zero node_id =
+        // A's psid for B (a transit declaration). Self resolves it to source B,
+        // registers B's QUERYABLE interest, re-floods along B's tree to child C
+        // re-stamped — AND the wire carrier is a DeclareQueryable, not a
+        // DeclareSubscriber. The subscription plane stays empty (separate tables).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        fwd.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S-C
+        sink_a.reset();
+        sink_c.reset();
+
+        let mut declare = build_declare_queryable(0, 0, Some("demo/q")).expect("build");
+        set_declare_source(&mut declare, 7); // node_id 7 = A's psid for B
+        fwd.forward_queryable(FaceId(0), true, &declare);
+
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x0B)],
+            "registered the RESOLVED transit source B's queryable, not neighbour A",
+        );
+        assert!(
+            fwd.interested("demo/q").is_empty(),
+            "the SUBSCRIPTION plane is untouched — separate interest tables",
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "re-flooded to self's child C in B's tree"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
+        assert_eq!(
+            forwarded_declare_source(&sink_c.frame_bytes(0)),
+            3,
+            "re-stamped with self's psid for the resolved source B (its idx, 3)"
+        );
+        assert_eq!(
+            forwarded_declare_queryable_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
+            Some("demo/q"),
+            "the wire carrier is a literal DeclareQueryable (not a subscriber)",
+        );
+    }
+
+    #[test]
+    fn re_advertise_queryables_reaches_a_late_joining_child() {
+        // The query-plane twin of
+        // re_advertise_reaches_a_child_that_joined_after_the_declaration: a
+        // queryable declared before a peer joined converges onto the new branch
+        // exactly as a subscription does (zenoh queries_tree_change).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A only
+        declare_queryable_interest(&fwd, FaceId(0), "demo/q"); // A's qabl; no child -> nowhere
+
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(1), &face_c);
+        let new_children = advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        sink_c.reset(); // ignore any join-time frames
+
+        fwd.re_advertise_queryables(&new_children);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the late-joining child C learns A's earlier queryable via re-advertise",
+        );
+        assert_eq!(
+            forwarded_declare_queryable_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
+            Some("demo/q"),
+            "re-advertised as a literal DeclareQueryable",
+        );
+    }
+
+    #[test]
+    fn deregister_purges_the_departed_peers_queryable_interest() {
+        // The query-plane twin of deregister_purges_the_departed_peers_interest:
+        // a queryable's interest must not outlive its face (zenoh
+        // queries_remove_node on link-down). This face-down purge is the safety
+        // net that covers a departed queryable while per-keyexpr
+        // UndeclareQueryable stays deferred (the wz UndeclQueryable wire body
+        // carries no ext_keyexpr, so a sourced keyexpr-identified retraction
+        // cannot be expressed).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        declare_queryable_interest(&fwd, FaceId(0), "demo/q");
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x0A)],
+            "A's queryable interest registered",
+        );
+
+        fwd.deregister(FaceId(0));
+        assert!(
+            fwd.interested_queryables("demo/q").is_empty(),
+            "deregister purged A's queryable interest",
+        );
+    }
+
+    #[test]
+    fn a_queryable_and_a_subscription_on_one_key_are_tracked_independently() {
+        // The two interest planes share ONE generic table type but are SEPARATE
+        // instances: the same peer declaring BOTH a subscription and a queryable
+        // on the same keyexpr lands in both tables without cross-contamination,
+        // and a face-down purge clears both.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+
+        declare_interest(&fwd, FaceId(0), "demo/k"); // A subscribes
+        declare_queryable_interest(&fwd, FaceId(0), "demo/k"); // A also has a queryable
+        assert_eq!(fwd.interested("demo/k"), vec![zid(0x0A)], "sub plane has A");
+        assert_eq!(
+            fwd.interested_queryables("demo/k"),
+            vec![zid(0x0A)],
+            "qabl plane independently has A",
+        );
+
+        fwd.deregister(FaceId(0));
+        assert!(fwd.interested("demo/k").is_empty(), "sub plane purged");
+        assert!(
+            fwd.interested_queryables("demo/k").is_empty(),
+            "qabl plane purged too",
+        );
+    }
+
+    #[test]
+    fn an_undeclare_queryable_is_inert_until_a_codec_extension_lands() {
+        // Pins the deferral's behavioral consequence: an UndeclareQueryable
+        // arriving on a LIVE face hits the explicit no-op dispatch arm — it is
+        // NOT mis-routed to the subscriber catch-all, and it CANNOT withdraw the
+        // queryable interest (the wz `UndeclQueryable` body carries no keyexpr, so
+        // a per-keyexpr retraction is unexpressible; only a face-down purge
+        // removes it). So A's queryable interest SURVIVES the UndeclareQueryable —
+        // a regression that re-routed this body to a withdraw/registration path
+        // would change this and fail the test.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        declare_queryable_interest(&fwd, FaceId(0), "demo/q");
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x0A)],
+            "A's queryable interest registered",
+        );
+
+        // Feed an UndeclareQueryable through the forward() dispatch.
+        let undecl = wz_session_core::declare_build::build_undeclare_queryable(7);
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(undecl))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x0A)],
+            "UndeclareQueryable is inert — the queryable interest survives (withdrawal deferred)",
+        );
+        assert!(
+            fwd.interested("demo/q").is_empty(),
+            "and it was NOT mis-routed into the subscriber table",
+        );
     }
 }

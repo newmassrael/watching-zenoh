@@ -53,7 +53,7 @@
 //!
 //! zenoh folds rule keyexprs into a `KeBoxTree` for sublinear `nodes_including`
 //! lookup; this engine keeps an `O(rules)` linear scan — the same correct
-//! linear posture wz's subscription matcher takes (`linkstate_subs`), with the
+//! linear posture wz's interest matcher takes (`linkstate_interest`), with the
 //! tree a tracked perf follow-up. The decision PRECEDENCE (deny-first, then
 //! default, then allow) is the faithful part and is independent of the
 //! container.

@@ -548,16 +548,17 @@ pub mod linkstate_forward;
 #[cfg(feature = "routing-peer")]
 pub mod interceptor;
 
-/// P4 linkstate-peer routing (step c3c-3 atom2) — the subscription interest
-/// table [`linkstate_subs::LinkstatepeerSubs`]: which peers are interested in
-/// which key expression. zenoh keeps this OFF the topology `Network` (it
-/// hangs on the routing `Resource`), so wz mirrors that separation — the
-/// graph is [`wz_routing_graph`], this interest set is the HAT-analogue state
-/// the forwarder owns. Drives the subscription-filtered data route (atom4) by
-/// feeding the interested-peer set to `directions_toward`. Gated on
-/// `routing-peer`.
+/// P4 linkstate-peer routing (step c3c-3 atom2) — the peer interest table
+/// [`linkstate_interest::LinkstatepeerInterest`]: which peers are interested in
+/// which key expression. ONE generic type the forwarder instantiates per
+/// interest plane (subscriptions, queryables). zenoh keeps this OFF the topology
+/// `Network` (it hangs on the routing `Resource`), so wz mirrors that separation
+/// — the graph is [`wz_routing_graph`], these interest sets are the HAT-analogue
+/// state the forwarder owns. Drives the declaration-filtered data route (atom4)
+/// / query route by feeding the interested-peer set to `directions_toward`.
+/// Gated on `routing-peer`.
 #[cfg(feature = "routing-peer")]
-pub mod linkstate_subs;
+pub mod linkstate_interest;
 
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions

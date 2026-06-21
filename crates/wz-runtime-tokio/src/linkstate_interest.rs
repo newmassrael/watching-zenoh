@@ -1,48 +1,57 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Linkstate-peer subscription interest table (P4 routing, step c3c-3
-//! atom2) — which PEERS are interested in which key expression.
+//! Linkstate-peer interest table (P4 routing, step c3c-3 atom2) — which
+//! PEERS are interested in which key expression. ONE generic table type,
+//! instantiated TWICE by the forwarder: once for subscriptions
+//! (`DeclareSubscriber` interest, the data-route filter) and once for
+//! queryables (`DeclareQueryable` interest, the query-route filter). The two
+//! interest planes are structurally identical here — a keyexpr -> interested
+//! peer-set map with the same register / withdraw / face-down-purge / wildcard
+//! matching mechanics — so they share this one SSOT type rather than two clones.
 //!
 //! The wz analogue of zenoh's per-`Resource` `linkstatepeer_subs:
-//! HashSet<ZenohIdProto>` (`hat/linkstate_peer/mod.rs:515`). zenoh keeps
-//! this interest set OFF the topology `Network` (it hangs on the routing
-//! `Resource` in the HAT), so wz mirrors that separation: the topology graph
-//! is the pure [`wz_routing_graph::LinkstateNetwork`], and this interest
-//! table is a SEPARATE structure the forwarder (the HAT analogue) owns
+//! HashSet<ZenohIdProto>` AND `linkstatepeer_qabls: HashMap<ZenohIdProto, ..>`
+//! (`hat/linkstate_peer/mod.rs:515,517`) — zenoh keeps BOTH interest sets as the
+//! same per-resource peer-keyed shape, off the topology `Network` (they hang on
+//! the routing `Resource` in the HAT). wz mirrors that separation: the topology
+//! graph is the pure [`wz_routing_graph::LinkstateNetwork`], and these interest
+//! tables are SEPARATE structures the forwarder (the HAT analogue) owns
 //! alongside it. Pure host data — no async, no graph coupling beyond the
 //! [`Zid`] key type.
 //!
-//! How it is driven: a sourced `DeclareSubscriber` arriving from the mesh
-//! [`register`](LinkstatepeerSubs::register)s the advertising peer's
-//! interest (c3c-3 atom3); the data-route filter (c3c-3 atom4) reads
-//! [`interested_remote`](LinkstatepeerSubs::interested_remote) and feeds the
+//! How it is driven: a sourced `DeclareSubscriber` / `DeclareQueryable` arriving
+//! from the mesh [`register`](LinkstatepeerInterest::register)s the advertising
+//! peer's interest (c3c-3 atom3); the route filter reads
+//! [`interested_remote`](LinkstatepeerInterest::interested_remote) and feeds the
 //! peer set to [`wz_routing_graph::LinkstateNetwork::directions_toward`] so a
-//! Push is replicated only toward subtrees holding an interested subscriber —
-//! the bounded fan-out that replaces the current broadcast-to-every-tree-child.
+//! Push (subs) / Query (qabls) is replicated only toward subtrees holding an
+//! interested peer — the bounded fan-out that replaces a
+//! broadcast-to-every-tree-child.
 //!
-//! Single set, filter on read (zenoh-faithful): this node's OWN subscription is
+//! Single set, filter on read (zenoh-faithful): this node's OWN declaration is
 //! registered into the SAME set under its own zid — exactly as zenoh's
-//! `declare_simple_subscription` calls `register_linkstatepeer_subscription(..,
-//! tables.zid, ..)`. The "remote-only" view the data route needs is DERIVED by
-//! filtering self at read time ([`interested_remote`](LinkstatepeerSubs::interested_remote),
-//! mirroring zenoh's `remote_linkstatepeer_subs`), not by keeping a second
-//! structure. So "what is subscribed" has ONE source of truth: self-origination
-//! and remote interest are the same datum, distinguished by zid, and the
-//! tree-change re-advertise iterates them uniformly.
+//! `declare_simple_subscription` / `declare_simple_queryable` call
+//! `register_linkstatepeer_*(.., tables.zid, ..)`. The "remote-only" view the
+//! route needs is DERIVED by filtering self at read time
+//! ([`interested_remote`](LinkstatepeerInterest::interested_remote), mirroring
+//! zenoh's `remote_linkstatepeer_subs`), not by keeping a second structure. So
+//! "what is declared" has ONE source of truth: self-origination and remote
+//! interest are the same datum, distinguished by zid, and the tree-change
+//! re-advertise iterates them uniformly.
 //!
 //! Wildcard matching (c3c-3 B2): a lookup is the key-expression INTERSECTION
-//! of the published key against every registered subscription keyexpr, via the
+//! of the published key against every registered declaration keyexpr, via the
 //! shared [`keyexpr_intersects_target`] scan SSOT — the same per-candidate
 //! membership test the local [`SubscriberRegistry`](wz_session_core::SubscriberRegistry)
 //! uses through `declared_intersects` (zenoh's intersection route matching,
 //! `Resource::get_matches`). So a `demo/**` or
-//! `demo/*` subscription now attracts a concrete `demo/data` Push, while a
-//! literal subscription stays exact. STILL deferred (a performance, not a
-//! correctness, concern): zenoh folds subscriptions into a prefix RESOURCE
-//! TREE for sublinear matching; wz does an O(subscriptions) scan per lookup,
+//! `demo/*` declaration now attracts a concrete `demo/data` lookup, while a
+//! literal declaration stays exact. STILL deferred (a performance, not a
+//! correctness, concern): zenoh folds declarations into a prefix RESOURCE
+//! TREE for sublinear matching; wz does an O(declarations) scan per lookup,
 //! which is correct but linear — the tree is a tracked optimisation for large
-//! subscription sets, not modelled here.
+//! interest sets, not modelled here.
 
 use std::collections::{HashMap, HashSet};
 
@@ -50,32 +59,34 @@ use wz_routing_graph::Zid;
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 
 /// Per-key-expression set of interested PEER zids — the linkstate-peer
-/// subscription interest table. See the module docs for the zenoh mapping
-/// and the exact-match MVP scope.
+/// interest table, instantiated once per interest plane (subscriptions,
+/// queryables). See the module docs for the zenoh mapping and the exact-match
+/// MVP scope.
 #[derive(Debug, Default)]
-pub struct LinkstatepeerSubs {
-    /// subscription keyexpr (a literal OR a `*`/`**` pattern) -> the peers that
+pub struct LinkstatepeerInterest {
+    /// declared keyexpr (a literal OR a `*`/`**` pattern) -> the peers that
     /// declared interest in it. A key is present only while at least one peer
     /// is interested: the last peer's [`remove_peer`](Self::remove_peer) prunes
-    /// the entry. A lookup matches a published key against these keys by
-    /// keyexpr INTERSECTION ([`matching_peers`](Self::matching_peers)), so a
-    /// `demo/**` key attracts a `demo/data` Push.
+    /// the entry. A lookup matches a published / queried key against these keys
+    /// by keyexpr INTERSECTION ([`matching_peers`](Self::matching_peers)), so a
+    /// `demo/**` key attracts a `demo/data` lookup.
     by_key: HashMap<String, HashSet<Zid>>,
 }
 
-impl LinkstatepeerSubs {
+impl LinkstatepeerInterest {
     /// An empty interest table.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Record that `peer` is interested in `keyexpr` — a sourced
-    /// `DeclareSubscriber` from the mesh, or a redundant re-declare.
-    /// Idempotent. Returns `true` if this NEWLY added the interest (a real
-    /// change the caller may need to act on — re-propagate the declaration
-    /// onward, recompute a data route), `false` if the peer was already
+    /// `DeclareSubscriber` / `DeclareQueryable` from the mesh, or a redundant
+    /// re-declare. Idempotent. Returns `true` if this NEWLY added the interest (a
+    /// real change the caller may need to act on — re-propagate the declaration
+    /// onward, recompute a route), `false` if the peer was already
     /// recorded for that key. Mirrors zenoh
-    /// `register_linkstatepeer_subscription`'s `linkstatepeer_subs.insert`.
+    /// `register_linkstatepeer_subscription` / `register_linkstatepeer_queryable`'s
+    /// `linkstatepeer_{subs,qabls}.insert`.
     pub fn register(&mut self, keyexpr: &str, peer: Zid) -> bool {
         self.by_key
             .entry(keyexpr.to_owned())
@@ -106,12 +117,13 @@ impl LinkstatepeerSubs {
 
     /// Drop ALL of `peer`'s interests across every key — called from the
     /// forwarder's `deregister` when a peer's face goes down, so stale interest
-    /// never keeps a departed subscriber armed in the publisher's any-interest
-    /// gate. Returns the number of keys the peer was dropped from; emptied keys
-    /// are pruned. Mirrors zenoh's `pubsub_remove_node` link-down purge
-    /// (`hat/linkstate_peer/mod.rs`). (A per-keyexpr undeclare —
-    /// `UndeclareSubscriber` while the face stays up — is a separate tracked
-    /// deferral; only whole-peer departure is wired so far.)
+    /// never keeps a departed subscriber / queryable armed in the route gate.
+    /// Returns the number of keys the peer was dropped from; emptied keys are
+    /// pruned. Mirrors zenoh's `pubsub_remove_node` / `queries_remove_node`
+    /// link-down purge (`hat/linkstate_peer/mod.rs`). (A per-keyexpr undeclare
+    /// while the face stays up — `UndeclareSubscriber`, or `UndeclareQueryable`
+    /// once the codec carries an ext_keyexpr — is a separate tracked deferral;
+    /// only whole-peer departure is wired for queryables so far.)
     pub fn remove_peer(&mut self, peer: &Zid) -> usize {
         let mut dropped = 0;
         self.by_key.retain(|_key, set| {
@@ -125,13 +137,14 @@ impl LinkstatepeerSubs {
 
     /// Every `(keyexpr, interested-peer)` pair, as an owned snapshot — the input
     /// to the tree-change re-advertise (c3c-3 debt A2). On a topology change the
-    /// forwarder re-floods each pair's `DeclareSubscriber` (sourced from the
-    /// peer) toward that peer's recomputed tree children, so a node that joined
-    /// AFTER the declaration still learns it (zenoh `pubsub_tree_change`). Owned
-    /// (`String` / `Zid` clones) so the caller can re-flood without holding this
-    /// table's borrow across a graph borrow. Order is unspecified (`HashMap` /
-    /// `HashSet` iteration); the receiver change-gate dedups, so order is moot.
-    pub fn subscriptions(&self) -> Vec<(String, Zid)> {
+    /// forwarder re-floods each pair's `DeclareSubscriber` / `DeclareQueryable`
+    /// (sourced from the peer) toward that peer's recomputed tree children, so a
+    /// node that joined AFTER the declaration still learns it (zenoh
+    /// `pubsub_tree_change` / `queries_tree_change`). Owned (`String` / `Zid`
+    /// clones) so the caller can re-flood without holding this table's borrow
+    /// across a graph borrow. Order is unspecified (`HashMap` / `HashSet`
+    /// iteration); the receiver change-gate dedups, so order is moot.
+    pub fn entries(&self) -> Vec<(String, Zid)> {
         self.by_key
             .iter()
             .flat_map(|(key, peers)| peers.iter().map(move |p| (key.clone(), *p)))
@@ -209,7 +222,7 @@ mod tests {
 
     #[test]
     fn register_is_idempotent_and_reports_change() {
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         assert!(
             subs.register("demo/data", zid(0xAA)),
             "first interest is a change"
@@ -232,7 +245,7 @@ mod tests {
         // B2 widens matching to wildcards, but a LITERAL subscription must still
         // be exact: `demo/data` must NOT answer for a sibling or a prefix key
         // (intersection of two literals reduces to byte equality).
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("demo/data", zid(0xAA));
         assert_eq!(subs.interested("demo/data"), vec![zid(0xAA)]);
         assert!(
@@ -249,7 +262,7 @@ mod tests {
     fn a_wildcard_subscription_attracts_a_concrete_publish() {
         // B2: `**` (any depth) and `*` (one chunk) subscriptions now attract a
         // concrete Push by keyexpr intersection — the exact-match MVP missed it.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("demo/**", zid(0xAA));
         subs.register("demo/*", zid(0xBB));
         subs.register("other/**", zid(0xCC));
@@ -278,7 +291,7 @@ mod tests {
     fn a_peer_matching_via_two_patterns_appears_once() {
         // A peer subscribed via two keys that both cover the published key is
         // deduped across the matching keys.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("demo/**", zid(0xAA));
         subs.register("demo/data", zid(0xAA));
         assert_eq!(
@@ -293,7 +306,7 @@ mod tests {
         // A departed peer (face down) must lose interest everywhere, and a
         // key it was the sole subscriber of is pruned while a shared key
         // survives with the remaining peer.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("a", zid(0xAA));
         subs.register("b", zid(0xAA));
         subs.register("b", zid(0xBB));
@@ -316,7 +329,7 @@ mod tests {
     fn withdraw_removes_one_key_and_reports_change() {
         // A per-keyexpr retraction drops only the named key's interest; a
         // co-subscribed key survives, and the change-gate reports the removal.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("a", zid(0xAA));
         subs.register("b", zid(0xAA));
         assert!(subs.withdraw("a", &zid(0xAA)), "peer was interested in 'a'");
@@ -335,7 +348,7 @@ mod tests {
     fn withdraw_keeps_a_co_interested_peer() {
         // Withdrawing one peer leaves a key alive while another peer still wants
         // it — only the withdrawing peer's interest goes.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("k", zid(0xAA));
         subs.register("k", zid(0xBB));
         assert!(subs.withdraw("k", &zid(0xAA)));
@@ -350,7 +363,7 @@ mod tests {
     fn withdraw_is_idempotent_for_absent_interest() {
         // Withdrawing an interest never held (unknown key, or a peer that never
         // declared it) is a no-op the change-gate reports as false.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("k", zid(0xAA));
         // A peer that never declared 'k', and an unknown key, both report no
         // change.
@@ -375,11 +388,11 @@ mod tests {
     fn subscriptions_snapshots_every_keyexpr_peer_pair() {
         // The tree-change re-advertise input: one (keyexpr, peer) entry per
         // interested peer per key, across all keys.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("demo/a", zid(0xAA));
         subs.register("demo/a", zid(0xBB));
         subs.register("demo/b", zid(0xAA));
-        let mut got = subs.subscriptions();
+        let mut got = subs.entries();
         got.sort();
         let mut want = vec![
             ("demo/a".to_owned(), zid(0xAA)),
@@ -389,7 +402,7 @@ mod tests {
         want.sort();
         assert_eq!(got, want);
         assert!(
-            LinkstatepeerSubs::new().subscriptions().is_empty(),
+            LinkstatepeerInterest::new().entries().is_empty(),
             "an empty table yields no pairs"
         );
     }
@@ -399,7 +412,7 @@ mod tests {
         // The data-route view excludes this node's OWN subscription (zenoh
         // remote_linkstatepeer_subs): self is the local sink, delivered by the
         // session layer, not forwarded toward over the mesh.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         let me = zid(0x05);
         subs.register("k", me); // self subscribes
         subs.register("k", zid(0xAA)); // and a remote peer
@@ -430,7 +443,7 @@ mod tests {
         // not even a `**` subscriber, whose backtrack would otherwise absorb the
         // empty chunk and spuriously match. The control confirms the SAME `**`
         // subscription answers the well-formed key.
-        let mut subs = LinkstatepeerSubs::new();
+        let mut subs = LinkstatepeerInterest::new();
         subs.register("demo/**", zid(0xAA));
         assert!(
             subs.interested("demo/data/").is_empty(),
