@@ -93,6 +93,7 @@ use wz_codecs::response_final::ResponseFinalOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
     build_declare_queryable, build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
+    set_declare_queryable_info,
 };
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
@@ -1343,6 +1344,54 @@ impl LinkstateForwarder {
         // node_id 0 = self-originated (build_declare_subscriber emits no ext_nodeid);
         // literal keyexpr (mapping id 0 + suffix, the wz MVP form).
         let declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
+        self.flood_to_tree_children(&self_zid, || {
+            NetworkMessage::Declare(Box::new(declare.clone()))
+        })
+    }
+
+    /// Originate a LOCAL queryable INTO the mesh: this node offers a queryable for
+    /// `keyexpr` with the given `complete` flag (the BestMatching input — `true` =
+    /// this node can FULLY answer the keyexpr, e.g. a storage holding the whole
+    /// key space), so register self's queryable in
+    /// [`qabls`](Self#structfield.qabls) under its OWN zid and flood a sourced
+    /// `DeclareQueryable` — CARRYING the `QueryableInfo`
+    /// ([`set_declare_queryable_info`]) — to self's CHILDREN in self's own
+    /// spanning tree (this node is the source, node_id 0). Each child registers
+    /// self's queryable (with completeness) via
+    /// [`forward_queryable`](Self::forward_queryable) and re-floods. The
+    /// query-plane counterpart to [`declare_subscription`](Self::declare_subscription)
+    /// (subs) and the SELF-origination twin of
+    /// [`forward_queryable`](Self::forward_queryable) (which re-floods a RECEIVED
+    /// declaration). Mirrors zenoh `declare_queryable` ->
+    /// `declare_linkstatepeer_queryable` -> `propagate_sourced_queryable` with
+    /// source = self and the local `QueryableInfo`. Returns the number of
+    /// tree-child faces reached.
+    ///
+    /// `complete: false` is the DEFAULT `QueryableInfo`, which
+    /// [`set_declare_queryable_info`] OMITS (no ext, byte-identical to the no-info
+    /// wire — zenoh's omit-on-DEFAULT); only a `complete` queryable adds the ext
+    /// that drives a downstream relay's BestMatching select
+    /// ([`select_best_matching`](Self::select_best_matching)).
+    pub fn declare_queryable(&self, keyexpr: &str, complete: bool) -> Result<usize, CodecError> {
+        let self_zid = *self.net.borrow().self_zid();
+        // The local QueryableInfo: distance 0 (a local declaration is zero hops
+        // from itself — zenoh's client QueryableInfo carries distance 0). The
+        // per-hop increment on re-flood is the tracked downstream-carry follow-up;
+        // BestMatching reads the GRAPH distance anyway, not this carried value.
+        let info = QueryableInfo {
+            complete,
+            distance: 0,
+        };
+        // Register self's OWN queryable under its own zid — as zenoh's
+        // declare_simple_queryable registers under tables.zid — so the tree-change
+        // re-advertise re-floods it to peers that join LATER, iterated uniformly
+        // with remote queryables (the late-joiner convergence, like
+        // declare_subscription).
+        self.qabls.borrow_mut().register(keyexpr, self_zid, info);
+        // node_id 0 = self-originated; the completeness rides the body ext
+        // (omitted when DEFAULT/incomplete — the byte-identical no-info wire).
+        let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
+        set_declare_queryable_info(&mut declare, info);
         self.flood_to_tree_children(&self_zid, || {
             NetworkMessage::Declare(Box::new(declare.clone()))
         })
@@ -5451,6 +5500,48 @@ mod tests {
         }
     }
 
+    /// The QueryableInfo carried on the single forwarded DeclareQueryable in a
+    /// frame — the BestMatching completeness the producer / re-flood stamped (atom
+    /// 4). Reads the body ext through the production read_queryable_info SSOT, so
+    /// an OMITTED ext decodes to the DEFAULT (incomplete) QueryableInfo.
+    fn forwarded_declare_queryable_info(
+        frame: &[u8],
+    ) -> wz_session_core::queryable_info::QueryableInfo {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.first() {
+            Some(NetworkMessage::Declare(d)) => match &d.body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
+                    wz_session_core::queryable_info::read_queryable_info(q.extensions.as_ref())
+                }
+                _ => panic!("forwarded Declare is not a DeclareQueryable"),
+            },
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
+    /// Parse the single forwarded DeclareQueryable in a frame back into an owned
+    /// Declare — for an e2e hand-off where one forwarder's flooded declaration is
+    /// fed into another forwarder's forward_queryable (atom 4 producer -> relay).
+    fn parse_forwarded_declare(frame: &[u8]) -> DeclareOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Declare(d)) => *d,
+            other => panic!("expected a forwarded Declare, got {other:?}"),
+        }
+    }
+
     #[test]
     fn forward_queryable_floods_to_tree_children_and_registers() {
         // The query-plane twin of
@@ -5927,6 +6018,89 @@ mod tests {
             "the farther complete queryable E (distance 2, via D) is not selected",
         );
         assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    #[test]
+    fn declare_queryable_floods_completeness_and_registers_self() {
+        // atom 4 producer: declare_queryable(keyexpr, complete) registers self's
+        // OWN queryable AND floods a sourced DeclareQueryable CARRYING the
+        // completeness to tree children — the wire input a downstream relay's
+        // BestMatching select reads. A complete declaration stamps the ext; an
+        // incomplete one OMITS it (DEFAULT, the byte-identical no-info wire).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A (A is S's child)
+        sink_a.reset();
+
+        // 1) A COMPLETE queryable: self registered + the flood carries complete=true.
+        let reached = fwd.declare_queryable("demo/q", true).expect("declare");
+        assert_eq!(reached, 1, "flooded to the one tree child A");
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x05)],
+            "self's OWN queryable is registered under its own zid",
+        );
+        assert_eq!(
+            forwarded_declare_queryable_keyexpr(&sink_a.frame_bytes(0)).as_deref(),
+            Some("demo/q"),
+            "the carrier is a literal DeclareQueryable",
+        );
+        assert!(
+            forwarded_declare_queryable_info(&sink_a.frame_bytes(0)).complete,
+            "the flooded DeclareQueryable carries complete=true",
+        );
+        sink_a.reset();
+
+        // 2) An INCOMPLETE queryable on a fresh key: the flood OMITS the ext
+        //    (DEFAULT QueryableInfo) — the byte-identical no-info wire.
+        fwd.declare_queryable("demo/r", false).expect("declare");
+        assert!(
+            !forwarded_declare_queryable_info(&sink_a.frame_bytes(0)).complete,
+            "an incomplete queryable floods the DEFAULT (omitted) QueryableInfo",
+        );
+    }
+
+    #[test]
+    fn a_declared_complete_queryable_is_best_matching_selected_by_a_relay() {
+        // atom 4 e2e (producer -> relay -> BestMatching select): the producer C
+        // declares a COMPLETE queryable via declare_queryable; its flooded frame,
+        // fed into relay S's forward_queryable, makes S store C's completeness, so
+        // a Query from A at S BestMatching-selects C (not an All fan-out). Ties the
+        // producer API (atom 4) to the select (atom 3) over the real wire.
+        //
+        // Producer C (0x0C) with one child link to the relay S (0x05).
+        let producer = LinkstateForwarder::new(zid(0x0C), WhatAmI::Peer);
+        let (c_to_s, c_sink) = peer_face(zid(0x05));
+        producer.register(FaceId(0), &c_to_s);
+        advertise_link_back(&producer, FaceId(0), 0x05, 0x0C); // S is C's tree child
+        c_sink.reset();
+        let reached = producer.declare_queryable("demo/q", true).expect("declare");
+        assert_eq!(reached, 1, "C floods its complete queryable toward S");
+        let c_declare = parse_forwarded_declare(&c_sink.frame_bytes(0));
+
+        // Relay S (0x05) with the querier A (0x0A) and the producer C (0x0C).
+        let relay = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (s_to_a, a_sink) = peer_face(zid(0x0A));
+        let (s_to_c, s_c_sink) = peer_face(zid(0x0C));
+        relay.register(FaceId(0), &s_to_a);
+        relay.register(FaceId(1), &s_to_c);
+        advertise_link_back(&relay, FaceId(0), 0x0A, 0x05); // S-A
+        advertise_link_back(&relay, FaceId(1), 0x0C, 0x05); // S-C
+                                                            // S ingests C's flooded complete queryable (node_id 0 -> source = neighbour C).
+        relay.forward_queryable(FaceId(1), true, &c_declare);
+        a_sink.reset();
+        s_c_sink.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        relay.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            s_c_sink.frame_count(),
+            1,
+            "the Query BestMatching-routes to the COMPLETE queryable at C",
+        );
+        assert_eq!(a_sink.frame_count(), 0, "not back to the querier A");
     }
 
     #[test]
