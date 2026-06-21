@@ -35,6 +35,7 @@
 use wz_codecs::request::RequestOwned;
 
 use crate::ext_nodeid;
+use crate::query_mode::{QueryTarget, TARGET_EXT_ID};
 
 /// The Request-level header `Z` bit (zenoh `request::flag::Z = 1 << 7`): the
 /// extension chain is present. Identical bit to the Push / Declare twins, but on
@@ -61,6 +62,21 @@ pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
     } else {
         request.header &= !REQUEST_FLAG_Z;
     }
+}
+
+/// Read the [`QueryTarget`] a routed Query carries in its `ext_target`
+/// extension. Returns `None` when the ext is ABSENT (or carries the
+/// never-transmitted `0 = BEST_MATCHING`) — zenoh-pico's omit-on-BEST_MATCHING
+/// default (`ext_target = _ext_target != Z_QUERY_TARGET_BEST_MATCHING`,
+/// `network.c`), so a forwarder treats absence as `BestMatching` (route to the
+/// single nearest complete queryable, else All). The target ext is a zint over
+/// the SAME `Z64` body the `ext_nodeid` reader decodes, so this is a thin
+/// projection of the shared [`read_z64_ext`](crate::ext_nodeid::read_z64_ext)
+/// over [`TARGET_EXT_ID`], mapped through [`QueryTarget::from_wire_byte`] — no
+/// target-specific decoder.
+pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
+    ext_nodeid::read_z64_ext(request.extensions.as_ref(), TARGET_EXT_ID)
+        .and_then(QueryTarget::from_wire_byte)
 }
 
 #[cfg(test)]
@@ -119,6 +135,46 @@ mod tests {
         assert_eq!(exts[0].header, 0x33);
         // Request-level Z bit set because a chain is now present.
         assert_eq!(r.header & REQUEST_FLAG_Z, REQUEST_FLAG_Z);
+    }
+
+    #[test]
+    fn read_request_target_reads_the_ext_or_defaults_to_best_matching() {
+        use crate::query_mode::QueryTarget;
+        use crate::request_build::build_request_query_with_target;
+        // A plain Query carries NO target ext -> BestMatching (the wire default).
+        assert_eq!(
+            read_request_target(&request()),
+            None,
+            "absent ext_target = BestMatching default",
+        );
+        // An explicit All / AllComplete survives the build and reads back.
+        for t in [QueryTarget::All, QueryTarget::AllComplete] {
+            let r = build_request_query_with_target(42, 0, Some("demo/q"), t).expect("build");
+            assert_eq!(
+                read_request_target(&r),
+                Some(t),
+                "explicit target reads back through the ext chain",
+            );
+        }
+    }
+
+    #[test]
+    fn read_request_target_coexists_with_the_nodeid_ext() {
+        // forward_request reads BOTH read_request_source and read_request_target
+        // on the same Request: the readers key on the ext id (0x03 / 0x04), not
+        // chain position, so a routed Query carrying BOTH reads each independently.
+        use crate::query_mode::QueryTarget;
+        use crate::request_build::build_request_query_with_target;
+        let mut r =
+            build_request_query_with_target(42, 0, Some("demo/q"), QueryTarget::AllComplete)
+                .expect("build");
+        set_request_source(&mut r, 7); // add the nodeid ext alongside the target ext
+        assert_eq!(read_request_source(&r), 7, "the nodeid still reads");
+        assert_eq!(
+            read_request_target(&r),
+            Some(QueryTarget::AllComplete),
+            "the target still reads alongside the nodeid",
+        );
     }
 
     #[test]

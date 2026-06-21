@@ -40,7 +40,7 @@ use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
 use crate::codec_owned::{owned_bytes, owned_string};
 use crate::qos::{CongestionControl, Priority};
-use crate::query_mode::{ConsolidationMode, QueryTarget};
+use crate::query_mode::{ConsolidationMode, QueryTarget, TARGET_EXT_ID};
 use sce_forge_runtime::codec::CodecError;
 
 /// R121j-1 — build a `Request` network-message that carries a
@@ -598,9 +598,10 @@ impl RequestQueryBuilder {
         }
         if let Some(target) = self.request_target {
             request_exts.push(ExtEntryOwned {
-                // ENC_ZINT(0x20) | M(0x10) | id_target(0x04). Z bit
-                // set below as a chain step if a later ext follows.
-                header: 0x20 | 0x10 | 0x04,
+                // ENC_ZINT(0x20) | M(0x10) | TARGET_EXT_ID(0x04). Z bit
+                // set below as a chain step if a later ext follows. The id is
+                // the SSOT const the read_request_target reader also keys on.
+                header: 0x20 | 0x10 | TARGET_EXT_ID,
                 body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
                     value: target.wire_byte() as u64,
                 }),

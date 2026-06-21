@@ -72,6 +72,13 @@ pub enum QueryTarget {
     AllComplete,
 }
 
+/// The `ext_target` extension id — zenoh-pico's Request target ext
+/// (`_z_request_encode`, `network.c`), iext id `0x04`. The single definition
+/// shared by the `request_target` writer (`request_build.rs`) and the
+/// [`read_request_target`](crate::request_routing_context::read_request_target)
+/// reader, so the magic id lives in ONE place.
+pub const TARGET_EXT_ID: u8 = 0x04;
+
 impl QueryTarget {
     /// Wire byte value as written by zenoh-pico's `_z_zsize_encode`
     /// invocation in the `_z_request_encode` target-ext branch
@@ -82,6 +89,20 @@ impl QueryTarget {
         match self {
             Self::All => 1u8,
             Self::AllComplete => 2u8,
+        }
+    }
+
+    /// The inverse of [`wire_byte`](Self::wire_byte): map a decoded `ext_target`
+    /// wire byte back to the enum. `1 -> All`, `2 -> AllComplete`; ANY other
+    /// value — including `0 = BEST_MATCHING`, which is never transmitted (the
+    /// ext is omitted) — yields `None`, the BestMatching wire default a reader
+    /// infers from absence. Mirrors zenoh-pico's decode predicate (an absent /
+    /// `0` target ext means BEST_MATCHING).
+    pub const fn from_wire_byte(byte: u64) -> Option<Self> {
+        match byte {
+            1 => Some(Self::All),
+            2 => Some(Self::AllComplete),
+            _ => None,
         }
     }
 }
@@ -119,5 +140,25 @@ mod tests {
     fn query_target_wire_byte_matches_zenoh_pico_enum_values() {
         assert_eq!(QueryTarget::All.wire_byte(), 1u8);
         assert_eq!(QueryTarget::AllComplete.wire_byte(), 2u8);
+    }
+
+    /// `from_wire_byte` is the inverse of `wire_byte` and maps the absent /
+    /// `0 = BEST_MATCHING` (and any unknown) value to `None` — the wire default
+    /// a forwarder's target dispatch (atom 4b) reads.
+    #[test]
+    fn query_target_from_wire_byte_round_trips_and_defaults_to_best_matching() {
+        for t in [QueryTarget::All, QueryTarget::AllComplete] {
+            assert_eq!(QueryTarget::from_wire_byte(t.wire_byte() as u64), Some(t));
+        }
+        assert_eq!(
+            QueryTarget::from_wire_byte(0),
+            None,
+            "0 = BEST_MATCHING is never transmitted -> None (absent default)",
+        );
+        assert_eq!(
+            QueryTarget::from_wire_byte(99),
+            None,
+            "an unknown target byte falls back to the BestMatching default",
+        );
     }
 }
