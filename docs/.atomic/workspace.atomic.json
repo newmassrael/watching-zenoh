@@ -46296,6 +46296,42 @@
         "LOCAL: R311us on top of ur=f85c131 (origin/main=f2a64cd, now +7 ahead um..us); host-gated. PUSH needs full run-ci (R311ui codec = MCU footprint + zenohd Z). North-star beyond 5.16: untouched Storage(5.11) / SHM."
       ]
     },
+    "Round 311ut": {
+      "decision_summary": "R311ut: tracked-debt paydown — the err/reply builder funnel SSOT (the uk session-review finding). The three Response(Err) builders (build_response_err_literal / _aliased / _empty) each open-coded an IDENTICAL Err body (CodecZenohErr(ErrOwned { header: 0x05, no encoding, no exts, payload })); that triplicated body is extracted into ONE err_body(payload) helper. Each public builder now differs only in its distinct Response ENVELOPE (the N-flag header + keyexpr), delegating the body to the SSOT. Pure refactor — the byte-stable wire tests for all three builders stay green (identical bytes).",
+      "changes_bullets": [
+        "response_build.rs: + err_body(payload) -> Result<ResponseOwnedVariant> (the wz minimal Err body — MID 0x05, no E/Z, payload only; zenoh-pico _z_err_encode's minimal shape). The three build_response_err_* builders' IDENTICAL CodecZenohErr(ErrOwned { header: 0x05, encoding: None, extensions: None, payload }) blocks -> body: err_body(payload)?. ErrOwned is now constructed at ONE site (was 3).",
+        "The builders' genuine variation stays per-builder and is NOT over-abstracted: literal = header 0x1B|N + WireexprLocal{id:0, suffix}, aliased = header 0x1B|n_flag + {mapping_id, suffix?}, empty = header 0x1B + empty keyexpr (id:0, no suffix). Only the shared Err BODY (the duplicated part) is funneled; the envelope shape (the legitimate difference) is left in each builder."
+      ],
+      "verification_bullets": [
+        "session-core --all-features 689/689 (unchanged — pure refactor). The 5 Err builder tests (build_response_err_{literal,aliased,empty}_emits_zenoh_pico_compatible_wire_bytes + the 2 assert-panic guards) all green: the wire bytes are byte-IDENTICAL after the extraction, proving behaviour-preserved. routing-peer lib 428/428 (reap_timed_out_queries consumes build_response_err_empty — unchanged).",
+        "clippy -D clean (session-core --all-features --all-targets); fmt clean. Host gate; full run-ci at push (R311ui codec footprint + zenohd Z). NO new test — the existing per-builder wire-byte tests fully exercise err_body + prove byte-identity (the verification a body-only refactor needs)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ut = tracked-debt paydown: the err/reply builder funnel SSOT (the uk session-review finding). 3 identical CodecZenohErr(ErrOwned{header:0x05, no E/Z, payload}) bodies -> 1 err_body() helper; the 3 build_response_err_* builders delegate the body, keeping only their distinct envelope (header N flag + keyexpr). Pure refactor, byte-stable wire preserved. This clears the last named SSOT debt from the uk review.",
+        "TRACKED (remaining debt): --no-default-features --features routing-peer 13 pre-existing test fails (flood/sent==0, feature-dep; canonical lane = defaults-on 428/428), N-final fan-out (per-outface vs zenoh Arc-aggregated; Session-API scope). [ur=sync_header_z+MESSAGE_FLAG_Z, us=forwarder clock injection, ut=err_body funnel — the three named SSOT/DI debts from the uk review are now all cleared.]",
+        "LOCAL: R311ut on top of us=3cba26f (origin/main=f2a64cd, now +8 ahead um..ut); host-gated. PUSH needs full run-ci (R311ui codec = MCU footprint + zenohd Z). North-star beyond 5.16: untouched Storage(5.11) / SHM."
+      ],
+      "publishable_decision_summary": "R311ut: tracked-debt paydown — the err/reply builder funnel SSOT (the uk session-review finding). The three Response(Err) builders (build_response_err_literal / _aliased / _empty) each open-coded an IDENTICAL Err body (CodecZenohErr(ErrOwned { header: 0x05, no encoding, no exts, payload })); that triplicated body is extracted into ONE err_body(payload) helper. Each public builder now differs only in its distinct Response ENVELOPE (the N-flag header + keyexpr), delegating the body to the SSOT. Pure refactor — the byte-stable wire tests for all three builders stay green (identical bytes).",
+      "publishable_changes_bullets": [
+        "response_build.rs: + err_body(payload) -> Result<ResponseOwnedVariant> (the wz minimal Err body — MID 0x05, no E/Z, payload only; zenoh-pico _z_err_encode's minimal shape). The three build_response_err_* builders' IDENTICAL CodecZenohErr(ErrOwned { header: 0x05, encoding: None, extensions: None, payload }) blocks -> body: err_body(payload)?. ErrOwned is now constructed at ONE site (was 3).",
+        "The builders' genuine variation stays per-builder and is NOT over-abstracted: literal = header 0x1B|N + WireexprLocal{id:0, suffix}, aliased = header 0x1B|n_flag + {mapping_id, suffix?}, empty = header 0x1B + empty keyexpr (id:0, no suffix). Only the shared Err BODY (the duplicated part) is funneled; the envelope shape (the legitimate difference) is left in each builder."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --all-features 689/689 (unchanged — pure refactor). The 5 Err builder tests (build_response_err_{literal,aliased,empty}_emits_zenoh_pico_compatible_wire_bytes + the 2 assert-panic guards) all green: the wire bytes are byte-IDENTICAL after the extraction, proving behaviour-preserved. routing-peer lib 428/428 (reap_timed_out_queries consumes build_response_err_empty — unchanged).",
+        "clippy -D clean (session-core --all-features --all-targets); fmt clean. Host gate; full run-ci at push (R311ui codec footprint + zenohd Z). NO new test — the existing per-builder wire-byte tests fully exercise err_body + prove byte-identity (the verification a body-only refactor needs)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ut = tracked-debt paydown: the err/reply builder funnel SSOT (the uk session-review finding). 3 identical CodecZenohErr(ErrOwned{header:0x05, no E/Z, payload}) bodies -> 1 err_body() helper; the 3 build_response_err_* builders delegate the body, keeping only their distinct envelope (header N flag + keyexpr). Pure refactor, byte-stable wire preserved. This clears the last named SSOT debt from the uk review.",
+        "TRACKED (remaining debt): --no-default-features --features routing-peer 13 pre-existing test fails (flood/sent==0, feature-dep; canonical lane = defaults-on 428/428), N-final fan-out (per-outface vs zenoh Arc-aggregated; Session-API scope). [ur=sync_header_z+MESSAGE_FLAG_Z, us=forwarder clock injection, ut=err_body funnel — the three named SSOT/DI debts from the uk review are now all cleared.]",
+        "LOCAL: R311ut on top of us=3cba26f (origin/main=f2a64cd, now +8 ahead um..ut); host-gated. PUSH needs full run-ci (R311ui codec = MCU footprint + zenohd Z). North-star beyond 5.16: untouched Storage(5.11) / SHM."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

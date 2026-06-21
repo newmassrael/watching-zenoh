@@ -268,14 +268,7 @@ pub fn build_response_err_literal(
             }),
         },
         extensions: None,
-        body: ResponseOwnedVariant::CodecZenohErr(ErrOwned {
-            // MID 0x05 only; no E (encoding), no Z (exts).
-            header: 0x05,
-            encoding: None,
-            extensions: None,
-            payload_len: payload.len() as u64,
-            payload: owned_bytes(payload)?,
-        }),
+        body: err_body(payload)?,
     })
 }
 
@@ -310,13 +303,7 @@ pub fn build_response_err_aliased(
             }),
         },
         extensions: None,
-        body: ResponseOwnedVariant::CodecZenohErr(ErrOwned {
-            header: 0x05,
-            encoding: None,
-            extensions: None,
-            payload_len: payload.len() as u64,
-            payload: owned_bytes(payload)?,
-        }),
+        body: err_body(payload)?,
     })
 }
 
@@ -369,15 +356,25 @@ pub fn build_response_err_empty(
             }),
         },
         extensions: None,
-        body: ResponseOwnedVariant::CodecZenohErr(ErrOwned {
-            // MID 0x05 only; no E (encoding), no Z (exts).
-            header: 0x05,
-            encoding: None,
-            extensions: None,
-            payload_len: payload.len() as u64,
-            payload: owned_bytes(payload)?,
-        }),
+        body: err_body(payload)?,
     })
+}
+
+/// The wz minimal `Err` BODY — MID `0x05` only, NO E (encoding) / Z (exts), with
+/// just the always-present payload (zenoh-pico `_z_err_encode`'s minimal shape).
+/// The SSOT the three `build_response_err_*` builders share, so the Err body is
+/// authored ONCE; each public builder differs only in its Response ENVELOPE
+/// (header N flag + keyexpr), not in the body.
+#[cfg(feature = "codec-response")]
+fn err_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
+    // W3: bounded payload copy in, fallible past declared capacity.
+    Ok(ResponseOwnedVariant::CodecZenohErr(ErrOwned {
+        header: 0x05,
+        encoding: None,
+        extensions: None,
+        payload_len: payload.len() as u64,
+        payload: owned_bytes(payload)?,
+    }))
 }
 
 /// R121j-2b — fluent builder for `Response(Reply)` that composes the
