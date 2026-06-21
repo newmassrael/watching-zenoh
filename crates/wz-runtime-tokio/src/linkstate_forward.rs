@@ -1449,6 +1449,16 @@ impl FaceForwarder for LinkstateForwarder {
         }
     }
 
+    /// The linkstate peer's topology graph keys the self-edge on the peer zid, so
+    /// it must hold AT MOST ONE face per zid: two faces to one peer would give the
+    /// graph two links for one zid, and either face's teardown `remove_link`
+    /// (keyed on zid) would prune the still-live peer. The loop enforces it by
+    /// dropping a redundant second face at establishment — the wz analog of
+    /// zenoh's one-transport-per-zid (`init_transport_unicast`).
+    fn dedups_faces_by_zid(&self) -> bool {
+        true
+    }
+
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages, reliable, ..

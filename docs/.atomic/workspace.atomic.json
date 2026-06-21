@@ -45138,6 +45138,54 @@
         "LOCAL UNPUSHED: 311tk..tq + 311tr on origin/main=4394d5a (8 ahead). FULL run-ci re-run green (all lanes) is the push gate; push only after consent (given) + idle."
       ]
     },
+    "Round 311ts": {
+      "decision_summary": "R311ts: re-introduce the face-establishment zid-dedup GATED on the forwarder (FaceForwarder::dedups_faces_by_zid). The tr full-revert was an over-correction -- run-ci Layer E6 (peer mesh) then FAILED because the dedup was actually fixing the real two-faces-one-zid corruption. Gated: peer-mesh dedups, router holds N.",
+      "changes_bullets": [
+        "run-ci caught it AGAIN (RUNCI_EXIT=1, E6 wz_peer_mesh_withdraws_subscription_two_hops FAILED): the tr revert removed the establishment dedup, re-opening the corruption the mutual-`--connect` peer mesh hits (two faces to one neighbour zid -> remove_link prunes the live peer). The dedup was load-bearing for E6; the blanket version passed E6 but failed E3/E5 (router).",
+        "Fix = GATE the dedup, not revert it: new FaceForwarder::dedups_faces_by_zid() (default false). LinkstateForwarder (graph keys the self-edge on zid) returns true -> the loop drops a redundant second face to an already-held zid. RoutingForwarder/NoOpForwarder (FaceId-keyed) keep false -> hold N faces (the router's two same-fixture-zid clients).",
+        "This is the wz analog of zenoh's transport manager init_transport_unicast (one transport per zid) but scoped to the forwarders that key routing state on zid -- not blanket (broke the router) and not the graph layer (would diverge from zenoh's network.rs, which is sound only BECAUSE the layer above guarantees zid-uniqueness).",
+        "holds_zid/faces docs restored to note both uses (dial-intent dedup + the gated establishment dedup); the runner --autoconnect comment's establishment-dedup claim is true again for the peer mesh."
+      ],
+      "verification_bullets": [
+        "ALL three lanes green now: E3 wz_router_multi_peer 1 + E5 wz_router_forward 2 (dedup OFF -> router holds 2 same-zid) + E6 wz_peer_mesh 1 + wz_peer_data_forward 4 (dedup ON -> no corruption). driver 375 routing-peer + 277 base, clippy -D clean (driver both + demo), fmt clean. Full run-ci re-run before push.",
+        "Empirical proof the corruption is real + reachable in the COMMON peer mesh (not just an autoconnect race): E6 passes WITH the dedup, fails WITHOUT. Confirmed by direct read (lib.rs:803 remove_link by zid) + the adversarial review.",
+        "Process lesson re-confirmed (twice this push attempt): judge run-ci by the unpiped RUNCI_EXIT (a wrapper echo masked exit 1 both times); and a 'revert to unblock' can itself BE a regression -- the gated fix, not the revert, was right."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "R311ts = the textbook fix the two adversarial reviewers predicted: GATE the establishment zid-dedup on routing identity (FaceForwarder::dedups_faces_by_zid). Both the router (holds N) and the peer mesh (one-per-zid, corruption fixed) pass. The two-faces-one-zid corruption is CLOSED for the linkstate peer; the star router is unaffected.",
+        "RESIDUAL (narrow, tracked): the dedup DROPS a redundant face at establishment (zenoh MERGES it as a multilink transport). For wz's single-link-per-face model drop is adequate (E6 converges); a true multilink-merge is a larger transport-layer atom if wz grows multilink. add_link still bumps self.sn on a redundant call (now unreachable for the deduped path).",
+        "Demo fixture debt: args.rs:157 hardcodes zid 0x01020304 for every --connect/--router process; only --peer derives a distinct zid. The router test relies on this collision. A distinct-per-process zid would be more realistic (low priority; the dedup gate makes the router correct regardless).",
+        "Remaining review debts unchanged: first_dialable_addr->dial_locator SSOT; 3-node autoconnect e2e; placeholder-whatami textbook alternative; DialIntent.zid/Face.peer_zid Vec<u8>. North-star: c3c-3 filter/failover/static + Storage/Access/SHM.",
+        "LOCAL UNPUSHED: 311tk..tr + 311ts on origin/main=4394d5a (9 ahead). FULL run-ci re-run GREEN (all lanes incl E3/E5/E6/Q/Z, judged by RUNCI_EXIT=0) is the push gate; push after consent (given) + idle."
+      ],
+      "publishable_decision_summary": "R311ts: re-introduce the face-establishment zid-dedup GATED on the forwarder (FaceForwarder::dedups_faces_by_zid). The tr full-revert was an over-correction -- run-ci Layer E6 (peer mesh) then FAILED because the dedup was actually fixing the real two-faces-one-zid corruption. Gated: peer-mesh dedups, router holds N.",
+      "publishable_changes_bullets": [
+        "run-ci caught it AGAIN (RUNCI_EXIT=1, E6 wz_peer_mesh_withdraws_subscription_two_hops FAILED): the tr revert removed the establishment dedup, re-opening the corruption the mutual-`--connect` peer mesh hits (two faces to one neighbour zid -> remove_link prunes the live peer). The dedup was load-bearing for E6; the blanket version passed E6 but failed E3/E5 (router).",
+        "Fix = GATE the dedup, not revert it: new FaceForwarder::dedups_faces_by_zid() (default false). LinkstateForwarder (graph keys the self-edge on zid) returns true -> the loop drops a redundant second face to an already-held zid. RoutingForwarder/NoOpForwarder (FaceId-keyed) keep false -> hold N faces (the router's two same-fixture-zid clients).",
+        "This is the wz analog of zenoh's transport manager init_transport_unicast (one transport per zid) but scoped to the forwarders that key routing state on zid -- not blanket (broke the router) and not the graph layer (would diverge from zenoh's network.rs, which is sound only BECAUSE the layer above guarantees zid-uniqueness).",
+        "holds_zid/faces docs restored to note both uses (dial-intent dedup + the gated establishment dedup); the runner --autoconnect comment's establishment-dedup claim is true again for the peer mesh."
+      ],
+      "publishable_verification_bullets": [
+        "ALL three lanes green now: E3 wz_router_multi_peer 1 + E5 wz_router_forward 2 (dedup OFF -> router holds 2 same-zid) + E6 wz_peer_mesh 1 + wz_peer_data_forward 4 (dedup ON -> no corruption). driver 375 routing-peer + 277 base, clippy -D clean (driver both + demo), fmt clean. Full run-ci re-run before push.",
+        "Empirical proof the corruption is real + reachable in the COMMON peer mesh (not just an autoconnect race): E6 passes WITH the dedup, fails WITHOUT. Confirmed by direct read (lib.rs:803 remove_link by zid) + the adversarial review.",
+        "Process lesson re-confirmed (twice this push attempt): judge run-ci by the unpiped RUNCI_EXIT (a wrapper echo masked exit 1 both times); and a 'revert to unblock' can itself BE a regression -- the gated fix, not the revert, was right."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ts = the textbook fix the two adversarial reviewers predicted: GATE the establishment zid-dedup on routing identity (FaceForwarder::dedups_faces_by_zid). Both the router (holds N) and the peer mesh (one-per-zid, corruption fixed) pass. The two-faces-one-zid corruption is CLOSED for the linkstate peer; the star router is unaffected.",
+        "RESIDUAL (narrow, tracked): the dedup DROPS a redundant face at establishment (zenoh MERGES it as a multilink transport). For wz's single-link-per-face model drop is adequate (E6 converges); a true multilink-merge is a larger transport-layer atom if wz grows multilink. add_link still bumps self.sn on a redundant call (now unreachable for the deduped path).",
+        "Demo fixture debt: args.rs:157 hardcodes zid 0x01020304 for every --connect/--router process; only --peer derives a distinct zid. The router test relies on this collision. A distinct-per-process zid would be more realistic (low priority; the dedup gate makes the router correct regardless).",
+        "Remaining review debts unchanged: first_dialable_addr->dial_locator SSOT; 3-node autoconnect e2e; placeholder-whatami textbook alternative; DialIntent.zid/Face.peer_zid Vec<u8>. North-star: c3c-3 filter/failover/static + Storage/Access/SHM.",
+        "LOCAL UNPUSHED: 311tk..tr + 311ts on origin/main=4394d5a (9 ahead). FULL run-ci re-run GREEN (all lanes incl E3/E5/E6/Q/Z, judged by RUNCI_EXIT=0) is the push gate; push after consent (given) + idle."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
