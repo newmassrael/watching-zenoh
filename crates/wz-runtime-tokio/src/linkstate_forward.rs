@@ -88,6 +88,8 @@ use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
 use wz_codecs::push::PushOwned;
 use wz_codecs::request::RequestOwned;
+use wz_codecs::response::ResponseOwned;
+use wz_codecs::response_final::ResponseFinalOwned;
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_build::{
     build_declare_queryable, build_declare_subscriber, build_undeclare_subscriber_with_keyexpr,
@@ -105,6 +107,7 @@ use wz_session_core::push_routing_context::{
 };
 use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{read_request_source, set_request_source};
+use wz_session_core::response_build::set_response_keyexpr_literal;
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
@@ -112,6 +115,7 @@ use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::interceptor::{InterceptorChain, InterceptorContext};
 use crate::linkstate_interest::LinkstatepeerInterest;
+use crate::linkstate_pending::PendingQueries;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
 /// Re-export `Zid`, the typed [`WhatAmI`] role, and the gossip
@@ -242,6 +246,16 @@ pub struct LinkstateForwarder {
     /// purged whole on its face-down (`purge_detached_interest`). `RefCell` by
     /// the same single-task contract as `subs`.
     qabls: RefCell<LinkstatepeerInterest>,
+    /// The pending-query RETURN table (query-routing atom 3): the
+    /// per-outbound-face `out qid -> (inbound face, inbound rid)` map that routes
+    /// a routed Query's `Response` / `ResponseFinal` BACK to the querier — the wz
+    /// analogue of zenoh's per-`FaceState` `pending_queries`.
+    /// [`forward_request`](Self::forward_request) allocates a qid + records a
+    /// mapping per outbound face; [`forward_response`](Self::forward_response)
+    /// peeks it and [`forward_response_final`](Self::forward_response_final) takes
+    /// (frees) it; `deregister` drops a departed face's entries. `RefCell` by the
+    /// same single-task contract as the interest tables.
+    pending: RefCell<PendingQueries>,
     /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
     /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
     /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
@@ -339,6 +353,7 @@ impl LinkstateForwarder {
             data_seen: Cell::new(0),
             subs: RefCell::new(LinkstatepeerInterest::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
+            pending: RefCell::new(PendingQueries::new()),
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
@@ -1047,25 +1062,104 @@ impl LinkstateForwarder {
             return;
         }
         // out_node_id + the literal keyexpr are the same for every outbound face,
-        // so build the re-stamped carrier ONCE; fan_out clones it to each
-        // queryable-ward child. The rid is carried VERBATIM (atom 2b — the qid
-        // remapping that lets the Reply route back is atom 3).
-        let mut carrier = request.clone();
-        set_request_source(&mut carrier, out_node_id);
-        // NORMALIZE the forwarded keyexpr to a literal (B1): a downstream child
-        // does not share THIS inbound link's alias table, so an aliased id would
-        // be unresolvable there — the same normalize forward_push does for a Push.
-        if set_request_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
+        // so build the re-stamped TEMPLATE once; the per-face step below swaps in
+        // a freshly allocated qid. NORMALIZE the forwarded keyexpr to a literal
+        // (B1): a downstream child does not share THIS inbound link's alias table,
+        // the same normalize forward_push does for a Push.
+        let mut template = request.clone();
+        set_request_source(&mut template, out_node_id);
+        if set_request_keyexpr_literal(&mut template, &keyexpr).is_err() {
             return;
         }
-        // Forward to the queryable-ward children in the source's tree — never to
-        // the inbound face, nor back toward the source's own neighbour (the
-        // shared re-forward predicate).
+        // The inbound rid (this hop's upstream qid, or the querier's own rid for
+        // the first hop) — the value a Reply must be rewritten back to.
+        let src_rid = request.rid;
+        // Forward to the queryable-ward children in the source's tree (never to
+        // the inbound face nor back toward the source's neighbour — the shared
+        // predicate). atom 3: ALLOCATE a fresh local qid PER outbound face and
+        // record the return mapping (out qid -> (inbound, src_rid)), then stamp
+        // that qid as the outbound Request's rid — so a Response/ResponseFinal
+        // carrying it routes back via forward_response/_final. The per-face qid is
+        // why each child gets its OWN carrier (not one cloned template).
         let _ = self.fan_out(reliable, None, |id, zid| {
-            Ok(
-                is_tree_forward_target(id, zid, inbound, inbound_zid, &children)
-                    .then(|| NetworkMessage::Request(Box::new(carrier.clone()))),
-            )
+            if !is_tree_forward_target(id, zid, inbound, inbound_zid, &children) {
+                return Ok(None);
+            }
+            let qid = self.pending.borrow_mut().allocate(id, inbound, src_rid);
+            let mut carrier = template.clone();
+            carrier.rid = qid;
+            Ok(Some(NetworkMessage::Request(Box::new(carrier))))
+        });
+    }
+
+    /// A `Response` (a queryable's reply to a routed Query) arrived on `inbound`:
+    /// route it BACK toward the querier via the pending-query table — the reverse
+    /// of the forward hop. The response's `request_id` is the local qid THIS relay
+    /// stamped on the outbound Request it forwarded out `inbound`; look it up
+    /// ([`peek`](PendingQueries::peek), NOT taking — more replies may follow),
+    /// rewrite the `request_id` back to the recorded upstream rid, B1-normalize the
+    /// reply keyexpr to a literal, and unicast it to the recorded inbound face.
+    /// zenoh `route_send_response` (`dispatcher/queries.rs`): look up
+    /// `face.pending_queries`, rewrite `rid = query.src_qid`, send to
+    /// `query.src_face`. An unknown qid (no pending query — finalized / timed out /
+    /// never sent) drops silently.
+    fn forward_response(&self, inbound: FaceId, reliable: bool, response: &ResponseOwned) {
+        // Resolve the reply keyexpr against the inbound (forward-outbound) face's
+        // alias table — scoped borrow (an unresolvable alias drops the Response).
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&response.keyexpr.body, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        // The return target for the qid this Response carries on the inbound face.
+        let Some((orig_face, orig_rid)) = self.pending.borrow().peek(inbound, response.request_id)
+        else {
+            return;
+        };
+        // Rewrite the request_id back to the upstream rid + normalize the keyexpr,
+        // then unicast to the single upstream face (the pending table IS the
+        // return route — a back-hop, not a tree fan-out).
+        let mut carrier = response.clone();
+        carrier.request_id = orig_rid;
+        if set_response_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
+            return;
+        }
+        let _ = self.fan_out(reliable, None, |id, _zid| {
+            Ok((id == orig_face).then(|| NetworkMessage::Response(Box::new(carrier.clone()))))
+        });
+    }
+
+    /// A `ResponseFinal` (a queryable's end-of-replies marker) arrived on
+    /// `inbound`: route it BACK toward the querier and FREE the pending-query
+    /// entry — the [`take`](PendingQueries::take) twin of
+    /// [`forward_response`](Self::forward_response)'s peek. Rewrite the
+    /// `request_id` to the recorded upstream rid and unicast to the recorded
+    /// inbound face (a ResponseFinal carries no keyexpr, so no B1 normalize).
+    /// zenoh `route_send_response_final`: remove the pending entry, forward the
+    /// final to `query.src_face`. An unknown qid drops silently.
+    fn forward_response_final(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        response_final: &ResponseFinalOwned,
+    ) {
+        // TAKE the return target — the final closes the query and frees the entry.
+        let Some((orig_face, orig_rid)) = self
+            .pending
+            .borrow_mut()
+            .take(inbound, response_final.request_id)
+        else {
+            return;
+        };
+        let mut carrier = response_final.clone();
+        carrier.request_id = orig_rid;
+        let _ = self.fan_out(reliable, None, |id, _zid| {
+            Ok((id == orig_face).then(|| NetworkMessage::ResponseFinal(carrier.clone())))
         });
     }
 
@@ -1569,6 +1663,15 @@ impl LinkstateForwarder {
         self.qabls.borrow().interested(keyexpr)
     }
 
+    /// The number of live pending-query return entries across every face — the
+    /// query-routing work witness (atom 3). Rises as `forward_request` records a
+    /// return mapping per outbound face, falls as each `ResponseFinal` (or a
+    /// face-down purge) frees one. Exposed so a test (and a future timeout sweep)
+    /// can observe the pending-query state.
+    pub fn pending_len(&self) -> usize {
+        self.pending.borrow().len()
+    }
+
     /// Purge every node in `removed` from BOTH the subscription AND queryable
     /// interest tables — the single SSOT for zenoh's
     /// `pubsub_remove_node` + `queries_remove_node`-over-a-removed-set action,
@@ -1747,6 +1850,13 @@ impl FaceForwarder for LinkstateForwarder {
         // accepts by debouncing link-down too (`hat/linkstate_peer/mod.rs`
         // `schedule_compute_trees`, the link-down path). The recompute's
         // re-advertise is deferred with it (D2c).
+        //
+        // atom 3 — drop this face's pending-query return entries (it is keyed by
+        // FaceId, not the graph link, so EVERY face-down purges it, whether or not
+        // the face had a routing identity): a Response can never be routed toward
+        // (or expected back from) a dead face. zenoh tears down a face's
+        // `pending_queries` on close the same way.
+        self.pending.borrow_mut().remove_face(&id);
         let dropped_link = if let Some(state) = self.faces.borrow_mut().remove(&id) {
             if let Some(link) = state.link {
                 // remove_link drops the self<->neighbour edge and GC-prunes every
@@ -1930,12 +2040,20 @@ impl FaceForwarder for LinkstateForwarder {
                     _ => self.forward_subscription(id, *reliable, declare),
                 },
                 // A routed Query: relay it toward the matching queryables along
-                // the querier's tree (the query-plane twin of the data Push).
-                // The Reply return path (Response/ResponseFinal) is atom 3 — those
-                // still fall to the `_` drop below until the pending-query table
-                // lands.
+                // the querier's tree (the query-plane twin of the data Push),
+                // recording a pending-query return entry per outbound face.
                 NetworkMessage::Request(request) => {
                     self.forward_request(id, *reliable, request);
+                }
+                // A queryable's Reply: route it BACK toward the querier via the
+                // pending-query table (atom 3) — the reverse of the forward hop.
+                NetworkMessage::Response(response) => {
+                    self.forward_response(id, *reliable, response);
+                }
+                // The end-of-replies marker: route it back AND free the pending
+                // entry (the query is closed).
+                NetworkMessage::ResponseFinal(response_final) => {
+                    self.forward_response_final(id, *reliable, response_final);
                 }
                 _ => {}
             }
@@ -5120,9 +5238,14 @@ mod tests {
         );
         assert_eq!(sink_a.frame_count(), 0, "A is the inbound face (excluded)");
         let fwd_req = forwarded_request(&sink_c.frame_bytes(0));
-        assert_eq!(
+        assert_ne!(
             fwd_req.rid, 99,
-            "rid carried verbatim (atom 2b — qid remapping is atom 3)"
+            "rid REMAPPED to a local qid (atom 3 — not the querier's 99)"
+        );
+        assert_eq!(
+            fwd.pending_len(),
+            1,
+            "a pending-query return entry was recorded for the forwarded Request"
         );
         assert_eq!(
             read_request_source(&fwd_req),
@@ -5227,6 +5350,162 @@ mod tests {
             sink_b.frame_count(),
             0,
             "a subscriber is not a query target (qabls is read, not subs)"
+        );
+    }
+
+    // ── §5.15 query routing atom 3: the Reply RETURN path ──
+
+    /// The single forwarded Response decoded from a recorded wire frame.
+    fn forwarded_response(frame: &[u8]) -> ResponseOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Response(r)) => *r,
+            other => panic!("expected a forwarded Response, got {other:?}"),
+        }
+    }
+
+    /// The single forwarded ResponseFinal decoded from a recorded wire frame.
+    fn forwarded_response_final(frame: &[u8]) -> ResponseFinalOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::ResponseFinal(rf)) => rf,
+            other => panic!("expected a forwarded ResponseFinal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_query_routes_to_a_queryable_and_the_reply_routes_back() {
+        // The full query lifecycle through one relay S: A (querier side) — S — C
+        // (queryable side). A's Query routes to C with a REMAPPED qid + a recorded
+        // pending entry; C's Response + ResponseFinal route BACK to A with the
+        // request_id rewritten to A's original rid; the final frees the entry.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // querier side, FaceId 0
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // queryable side, FaceId 1
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S-C
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q"); // C holds the queryable
+        sink_a.reset();
+        sink_c.reset();
+
+        // 1) A routed Query from A (rid 99) routes to C, REMAPPED to a local qid +
+        //    a recorded pending return entry.
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the Query reached the queryable side C"
+        );
+        let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
+        assert_ne!(
+            qid, 99,
+            "the rid was REMAPPED to a local qid (not carried verbatim)"
+        );
+        assert_eq!(
+            fwd.pending_len(),
+            1,
+            "one pending-query return entry recorded"
+        );
+
+        // 2) C replies with a Response carrying that qid -> routes back to A, the
+        //    request_id rewritten to 99 (A's rid); the entry SURVIVES (more replies
+        //    may follow).
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
+                .expect("build response");
+        fwd.forward_response(FaceId(1), true, &response);
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "the Reply routed back to querier side A"
+        );
+        assert_eq!(
+            forwarded_response(&sink_a.frame_bytes(0)).request_id,
+            99,
+            "the response request_id rewritten back to the querier's rid"
+        );
+        assert_eq!(
+            fwd.pending_len(),
+            1,
+            "a Response (not final) keeps the entry"
+        );
+
+        // 3) C sends a ResponseFinal -> routes back AND frees the entry.
+        let rf = wz_session_core::response_final_build::build_response_final(qid);
+        fwd.forward_response_final(FaceId(1), true, &rf);
+        assert_eq!(sink_a.frame_count(), 2, "the final routed back to A too");
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(1)).request_id,
+            99,
+            "the final's request_id rewritten back to the querier's rid"
+        );
+        assert_eq!(fwd.pending_len(), 0, "the final freed the pending entry");
+    }
+
+    #[test]
+    fn an_unknown_response_qid_drops_without_routing() {
+        // A Response carrying a qid this relay never allocated has no pending entry
+        // -> it drops silently (no panic, nothing routed).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, _sc) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        sink_a.reset();
+
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(42, "demo/q", b"x")
+                .expect("build response");
+        fwd.forward_response(FaceId(1), true, &response);
+        assert_eq!(sink_a.frame_count(), 0, "an unknown qid routes nowhere");
+        assert_eq!(fwd.pending_len(), 0, "and records nothing");
+    }
+
+    #[test]
+    fn deregister_drops_a_faces_pending_queries() {
+        // A face going down must drop its pending-query return entries, so a Reply
+        // is never expected back from (or routed toward) a dead face.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        let (face_c, _sc) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request); // records pending on FaceId(1)
+        assert_eq!(
+            fwd.pending_len(),
+            1,
+            "a pending entry recorded on the out face"
+        );
+
+        fwd.deregister(FaceId(1)); // the queryable-side face goes down
+        assert_eq!(
+            fwd.pending_len(),
+            0,
+            "deregister purged the departed face's pending queries"
         );
     }
 }

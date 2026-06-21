@@ -459,6 +459,12 @@ routing-peer = [
     # surface + the request_routing_context node_id seam are part of a routing
     # peer's contract — the query-plane twin of the codec-declare interest plane.
     "codec-request",
+    # R311uc — query routing (atom 3) routes a Query's Response + ResponseFinal
+    # BACK to the querier across the mesh (forward_response / _final, keyed by the
+    # pending-query table), so the Response + ResponseFinal wire surfaces are part
+    # of a routing peer's contract (the reply twin of the codec-request forward).
+    "codec-response",
+    "codec-response-final",
     # R311rd — and it must FRAGMENT an oversize link-state flood: a large
     # mesh's full-topology OAM exceeds the link MTU (and the u16 frame cap),
     # so without this the flood is silently dropped at the stream guard.

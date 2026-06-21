@@ -1568,7 +1568,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-request",
         feature = "codec-declare",
         feature = "declare-interest",
-        feature = "codec-linkstate"
+        feature = "codec-linkstate",
+        feature = "codec-response",
+        feature = "codec-response-final"
     ))]
     pub fn send_network_message(
         &self,
@@ -1662,6 +1664,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let _ = express;
                 self.dispatch_oam(oam, reliable)
             }
+            // Response / ResponseFinal arms (R311uc): the linkstate-peer query
+            // RETURN path. The forwarder relays a queryable's Reply back toward the
+            // querier through this seam; like Declare/Request the reply carries no
+            // express batch window — `dispatch_response{,_final}` mints the SN,
+            // frames, and batch-absorbs reliably.
+            #[cfg(feature = "codec-response")]
+            crate::network_message::NetworkMessage::Response(response) => {
+                let _ = express;
+                self.dispatch_response(*response, reliable)
+            }
+            #[cfg(feature = "codec-response-final")]
+            crate::network_message::NetworkMessage::ResponseFinal(response_final) => {
+                let _ = express;
+                self.dispatch_response_final(response_final, reliable)
+            }
             // Not yet routed through the seam (or inbound-only). Honest no-emit
             // reject, never a panic — symmetric with the multicast arm. The
             // `reliable` discard keeps the param used when this is the only arm
@@ -1739,7 +1756,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
-    /// See [`Self::dispatch_push`].
+    /// See [`Self::dispatch_push`]. The linkstate-peer query RETURN path: a
+    /// queryable's `Response` (Reply / Err) relayed back toward the querier.
     #[cfg(feature = "codec-response")]
     fn dispatch_response(
         &self,

@@ -560,6 +560,16 @@ pub mod interceptor;
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_interest;
 
+/// P4 linkstate-peer routing (query-routing atom 3) — the pending-query return
+/// table [`linkstate_pending::PendingQueries`]: the per-outbound-face `out qid
+/// -> (inbound face, inbound rid)` map that routes a routed Query's `Response` /
+/// `ResponseFinal` BACK to the querier across the mesh (the reverse of the
+/// forward hop, reconstructed from this state, not the topology tree). The wz
+/// analogue of zenoh's per-`FaceState` `pending_queries`. Gated on
+/// `routing-peer`.
+#[cfg(feature = "routing-peer")]
+pub mod linkstate_pending;
+
 /// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
 /// [`session_open`]: `open_session_with_reconnect` wires the actions
 /// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs

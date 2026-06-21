@@ -83,6 +83,29 @@ use crate::source_info_ext::{encode_source_info_ext_body, encode_vle_u64_into};
 /// and emits the Responder ext (ext_id=0x03 ZBUF, zid+eid encoding
 /// per network.c:281-291); `_with_reply_del(...)` swaps the MsgPut
 /// arm for a MsgDel arm (delete instead of put as the reply payload).
+/// Re-express a `Response`'s keyexpr as the literal `suffix` (c3c-3 B1
+/// normalize) — the Response twin of
+/// [`set_request_keyexpr_literal`](crate::request_build::set_request_keyexpr_literal)
+/// and [`set_push_keyexpr_literal`](crate::push_build::set_push_keyexpr_literal):
+/// set the keyexpr to a literal
+/// ([`literal_wireexpr`](crate::wireexpr_build::literal_wireexpr)) AND the
+/// header's `N` (suffix-present, `0x20`; zenoh `response::flag::N = 1 << 5`,
+/// `response.rs:43`) bit, which a literal keyexpr always carries. The two MUST
+/// stay in sync — a clear `N` with a suffix-bearing wireexpr offset-shifts the
+/// peer's decode of the following Reply/Err body. The linkstate forwarder calls
+/// this when relaying a routed Query's `Response` back toward the querier, so a
+/// downstream link (no shared alias table) receives a self-contained literal
+/// Response.
+#[cfg(feature = "codec-response")]
+pub fn set_response_keyexpr_literal(
+    response: &mut ResponseOwned,
+    suffix: &str,
+) -> Result<(), CodecError> {
+    response.keyexpr = crate::wireexpr_build::literal_wireexpr(suffix)?;
+    response.header |= 0x20;
+    Ok(())
+}
+
 #[cfg(feature = "codec-response")]
 pub fn build_response_reply_literal(
     request_id: u64,
