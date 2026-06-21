@@ -63,7 +63,7 @@
 //! R292 drain chain composes per face later). Shutdown here stops accepting and
 //! drops in-flight faces (their sockets close; the detached writer tasks drain).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -438,12 +438,24 @@ enum DialDecision {
     NoLocator,
 }
 
-/// Weigh a [`DialIntent`] against the currently-held face zids: dedup first (a
-/// peer already held is never re-dialed), then pick a TCP-dialable locator. The
-/// forwarder already applied the autoconnect role + zid policy at emit (A5b), so
-/// this is only the loop-side "do I already have it / can I reach it" decision.
-fn dial_decision(held: &BTreeSet<Vec<u8>>, intent: &DialIntent) -> DialDecision {
-    if held.contains(&intent.zid) {
+/// Whether any currently-held face is to peer `zid` — the single dedup query both
+/// the dial-intent gate ([`dial_decision`]) and the face-establishment merge (the
+/// `Step::Opened` arm) consult, so a peer is never held by two faces at once
+/// (the zenoh `get_transport_unicast` / `init_transport_unicast` dedup). It is the
+/// keystone of the no-double-hold invariant: two graph links to one zid would let
+/// one teardown's `remove_link` (which keys on zid) prune the still-live peer.
+/// O(held faces) — a mesh node holds tens, and this runs only on a dial-intent or
+/// a face-up, never per message.
+fn holds_zid(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, zid: &[u8]) -> bool {
+    faces.values().any(|z| z.as_deref() == Some(zid))
+}
+
+/// Weigh a [`DialIntent`] against the held faces: dedup first (a peer already held
+/// is never re-dialed), then pick a TCP-dialable locator. The forwarder already
+/// applied the autoconnect role + zid policy at emit (A5b), so this is only the
+/// loop-side "do I already have it / can I reach it" decision.
+fn dial_decision(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, intent: &DialIntent) -> DialDecision {
+    if holds_zid(faces, &intent.zid) {
         return DialDecision::AlreadyHeld;
     }
     match first_dialable_addr(&intent.locators) {
@@ -508,20 +520,15 @@ where
     } = sources;
     tokio::pin!(shutdown);
 
-    // The live face-id set — only its membership and cardinality are read
-    // (`peak_concurrent` high-water + the held-count); the peer address and zid
-    // live authoritatively on the `Face` carried by each event, so the set
-    // stores no value (a `BTreeMap<_, SocketAddr>` value here would be
-    // write-only state duplication).
-    let mut faces: BTreeSet<FaceId> = BTreeSet::new();
-    // The zids of currently-held faces — so a gossip-autoconnect dial-intent for a
-    // peer this node ALREADY holds a face to is skipped (zenoh's
-    // `get_transport_unicast(&zid).is_some()` dedup, `gossip.rs:452`). Kept in
-    // lockstep with `faces` from each `Face::peer_zid` at face-up / face-down; a
-    // face whose handshake never surfaced a zid is simply not tracked (it matches
-    // no intent). Empty and untouched when autoconnect is off (`dial_intents`
-    // `None`), so the accept-only / static-dial loops keep their prior behaviour.
-    let mut held_zids: BTreeSet<Vec<u8>> = BTreeSet::new();
+    // The live faces, each mapped to its peer zid (`None` if the handshake never
+    // surfaced one). The value is READ — `holds_zid` scans it for the dedup that
+    // keeps a peer to ONE face (both the dial-intent gate and the
+    // face-establishment merge) — so this single map is the source for "who do I
+    // hold", replacing the prior value-less id set plus a parallel zid set (the
+    // write-only duplication the old comment warned against; the value is no
+    // longer write-only now that the dedup reads it). `peak_concurrent` and the
+    // held-count read its cardinality.
+    let mut faces: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
     let mut next_id: u64 = 0;
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
@@ -581,13 +588,26 @@ where
                             peer,
                             peer_zid: opened.peer_zid(),
                         };
-                        faces.insert(id);
-                        // Track the held face's zid for the autoconnect dedup; a
-                        // zid-less face (handshake did not surface one) is not
-                        // tracked and can match no dial-intent.
+                        // Face-establishment dedup (zenoh `init_transport_unicast`):
+                        // if a face to this peer's zid is already held, this is a
+                        // redundant second link (a static dial + an accept, or an
+                        // autoconnect dial that raced an in-flight one) — drop the
+                        // new one, keep the existing. Two graph links to one zid
+                        // would otherwise let the first teardown's `remove_link`
+                        // (keyed on zid) prune the still-live peer. A zid-less face
+                        // cannot be deduped, so it is held. This also makes the
+                        // dial-intent in-flight window benign: a racing second dial
+                        // is dropped HERE at establishment, never held.
                         if let Some(z) = &face.peer_zid {
-                            held_zids.insert(z.clone());
+                            if holds_zid(&faces, z) {
+                                log::debug!(
+                                    "dropping redundant face {} to an already-held peer",
+                                    id.0
+                                );
+                                continue;
+                            }
                         }
+                        faces.insert(id, face.peer_zid.clone());
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
                         // Register the face's send seam BEFORE moving `opened`
@@ -608,9 +628,6 @@ where
 
             Step::Driven((face, outcome)) => {
                 faces.remove(&face.id);
-                if let Some(z) = &face.peer_zid {
-                    held_zids.remove(z);
-                }
                 forwarder.deregister(face.id);
                 on_event(&AcceptEvent::FaceDown(face, outcome));
             }
@@ -622,7 +639,7 @@ where
                 // locator is TCP-dialable. A dialed face flows through the SAME
                 // `opening` -> `Step::Opened` path as a static dial, so it is
                 // registered + held + zid-tracked identically.
-                match dial_decision(&held_zids, &intent) {
+                match dial_decision(&faces, &intent) {
                     DialDecision::Dial(addr) => {
                         let id = FaceId(next_id);
                         next_id += 1;
@@ -808,19 +825,23 @@ mod tests {
 
     #[test]
     fn dial_decision_dedups_held_peers_and_requires_a_tcp_locator() {
-        use std::collections::BTreeSet;
         let acc = || DialIntent {
             zid: vec![0xAA; 4],
             locators: vec!["tcp/127.0.0.1:7447".into()],
         };
-        // Empty held set + a tcp locator -> dial that address.
-        let empty: BTreeSet<Vec<u8>> = BTreeSet::new();
+        // No held face + a tcp locator -> dial that address.
+        let empty: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
         assert!(matches!(
             dial_decision(&empty, &acc()),
             DialDecision::Dial(a) if a == "127.0.0.1:7447".parse().unwrap()
         ));
-        // The peer's zid already held -> skip (dedup), even with a valid locator.
-        let held: BTreeSet<Vec<u8>> = [vec![0xAA; 4]].into_iter().collect();
+        // A held face to the peer's zid -> skip (the dedup), even with a valid
+        // locator. A zid-less held face (None) matches no peer.
+        let mut held: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
+        held.insert(FaceId(0), Some(vec![0xAA; 4]));
+        held.insert(FaceId(1), None);
+        assert!(holds_zid(&held, &[0xAA; 4]));
+        assert!(!holds_zid(&held, &[0xBB; 4]), "a different zid is not held");
         assert!(matches!(
             dial_decision(&held, &acc()),
             DialDecision::AlreadyHeld

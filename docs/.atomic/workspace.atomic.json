@@ -45000,6 +45000,54 @@
         "LOCAL UNPUSHED: 311tk..tn + 311to on origin/main=4394d5a (5 ahead). Host lanes verified (graph 57, driver 375 + base, clippy both, fmt). full run-ci + idle before push; push only after explicit consent."
       ]
     },
+    "Round 311tp": {
+      "decision_summary": "R311tp: textbook remediation -- collapse held_zids into faces:BTreeMap<FaceId,zid> (single source) + face-establishment zid-dedup, fixing the two-faces-one-zid remove_link prune and making autoconnect's in-flight window benign.",
+      "changes_bullets": [
+        "accept_loop.rs: faces BTreeSet<FaceId> + a parallel held_zids BTreeSet -> ONE faces: BTreeMap<FaceId, Option<Vec<u8>>>. The doc-warned write-only duplication is gone; the zid value is now READ by the dedup. held_zids deleted.",
+        "new holds_zid(faces, zid) SSOT dedup query, used by BOTH the dial-intent gate (dial_decision) and the face-establishment merge. dial_decision now takes the faces map.",
+        "Step::Opened establishment dedup (zenoh init_transport_unicast): a face to an already-held zid is dropped (continue), keeping the existing -- so a peer is never held by two faces, and remove_link (keyed on zid) can no longer prune a live peer when a redundant face tears down. Fixes the PRE-EXISTING corruption.",
+        "This also makes the dial-intent in-flight gap benign: a racing second dial is dropped at establishment, not held -- no in-flight set needed (zenoh dedups at establishment too)."
+      ],
+      "verification_bullets": [
+        "driver 375 routing-peer + 277 base. dial_decision_dedups... now exercises holds_zid over the faces map incl the zid-less (None) face = not held. The real-TCP an_autoconnect_dial_intent test unchanged (passes). clippy -D clean both configs; fmt clean.",
+        "Establishment-dedup loop wiring is reasoned + its holds_zid query unit-tested; a deterministic e2e is impractical (the dropped redundant face is a non-event, and a timing-based assertion would be flaky -- forbidden).",
+        "Grounding (read): zenoh init_transport_unicast (manager.rs) dedups by zid at establishment; remove_link self-edge removal keys on zid (lib.rs:802)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "R311tp = textbook remediation: faces single-source + face-establishment zid-dedup. The held_zids duplication (accept_loop doc warning) is gone; the two-faces-one-zid corruption is closed at establishment (the in-flight dedup gap is now benign).",
+        "REMAINING textbook follow-ups from the session review: (b) demo --autoconnect opt-in (wire enable_autoconnect + default_autoconnect_matcher -> dial_intents, making autoconnect LIVE -- next).",
+        "(c-debate) gossip_target/autoconnect Cell+setter vs construction-time immutable; (c) first_dialable_addr -> dial_locator/plan_endpoint SSOT (DNS Named) when the richer-dial atom lands.",
+        "DialIntent.zid Vec<u8>: kept (defensible -- the shared drive loop stays free of the routing-peer Zid type); the pre-existing Face.peer_zid: Vec<u8> debt is upstream of it.",
+        "LOCAL UNPUSHED: 311tk..to + 311tp on origin/main=4394d5a (6 ahead). Host lanes verified (driver 375 + 277, clippy both, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tp: textbook remediation -- collapse held_zids into faces:BTreeMap<FaceId,zid> (single source) + face-establishment zid-dedup, fixing the two-faces-one-zid remove_link prune and making autoconnect's in-flight window benign.",
+      "publishable_changes_bullets": [
+        "accept_loop.rs: faces BTreeSet<FaceId> + a parallel held_zids BTreeSet -> ONE faces: BTreeMap<FaceId, Option<Vec<u8>>>. The doc-warned write-only duplication is gone; the zid value is now READ by the dedup. held_zids deleted.",
+        "new holds_zid(faces, zid) SSOT dedup query, used by BOTH the dial-intent gate (dial_decision) and the face-establishment merge. dial_decision now takes the faces map.",
+        "Step::Opened establishment dedup (zenoh init_transport_unicast): a face to an already-held zid is dropped (continue), keeping the existing -- so a peer is never held by two faces, and remove_link (keyed on zid) can no longer prune a live peer when a redundant face tears down. Fixes the PRE-EXISTING corruption.",
+        "This also makes the dial-intent in-flight gap benign: a racing second dial is dropped at establishment, not held -- no in-flight set needed (zenoh dedups at establishment too)."
+      ],
+      "publishable_verification_bullets": [
+        "driver 375 routing-peer + 277 base. dial_decision_dedups... now exercises holds_zid over the faces map incl the zid-less (None) face = not held. The real-TCP an_autoconnect_dial_intent test unchanged (passes). clippy -D clean both configs; fmt clean.",
+        "Establishment-dedup loop wiring is reasoned + its holds_zid query unit-tested; a deterministic e2e is impractical (the dropped redundant face is a non-event, and a timing-based assertion would be flaky -- forbidden).",
+        "Grounding (read): zenoh init_transport_unicast (manager.rs) dedups by zid at establishment; remove_link self-edge removal keys on zid (lib.rs:802)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tp = textbook remediation: faces single-source + face-establishment zid-dedup. The held_zids duplication (accept_loop doc warning) is gone; the two-faces-one-zid corruption is closed at establishment (the in-flight dedup gap is now benign).",
+        "REMAINING textbook follow-ups from the session review: (b) demo --autoconnect opt-in (wire enable_autoconnect + default_autoconnect_matcher -> dial_intents, making autoconnect LIVE -- next).",
+        "(c-debate) gossip_target/autoconnect Cell+setter vs construction-time immutable; (c) first_dialable_addr -> dial_locator/plan_endpoint SSOT (DNS Named) when the richer-dial atom lands.",
+        "DialIntent.zid Vec<u8>: kept (defensible -- the shared drive loop stays free of the routing-peer Zid type); the pre-existing Face.peer_zid: Vec<u8> debt is upstream of it.",
+        "LOCAL UNPUSHED: 311tk..to + 311tp on origin/main=4394d5a (6 ahead). Host lanes verified (driver 375 + 277, clippy both, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
