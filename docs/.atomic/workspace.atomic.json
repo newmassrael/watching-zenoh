@@ -44906,6 +44906,52 @@
         "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl(9658f0f)+311tm on origin/main=4394d5a (3 ahead). Host lanes verified (graph 57, driver 372 routing-peer + 277 base, clippy both, fmt, demo). full run-ci + idle before push; push only after explicit consent."
       ]
     },
+    "Round 311tn": {
+      "decision_summary": "R311tn: gossip-policy remainder -- gossip_target config seam. Add set_gossip_target + a per-local-whatami default (router/peer -> router|peer, client -> empty), replacing the const router|peer seed.",
+      "changes_bullets": [
+        "linkstate_forward.rs: new default_gossip_target(whatami) = zenoh scouting.gossip.target per-local default (router|peer for a router/peer, empty for a client). new() seeds gossip_target from self_whatami, not the const router|peer.",
+        "gossip_target field WhatAmIMatcher -> Cell<WhatAmIMatcher> + set_gossip_target(&self, matcher) setter -- the config seam a deploy uses to source the target per its local whatami (symmetric to enable_autoconnect / set_gossip_multihop).",
+        "fan_out gossip_gate Option<&WhatAmIMatcher> -> Option<WhatAmIMatcher> (by value; the matcher is a Copy 1-byte bitset), so the 3 gossip callers read the Cell once with no borrow. The 5 data callers pass None, unchanged.",
+        "Behaviour-neutral for current use: every wz forwarder is constructed Peer (or Router) -> default stays router|peer. Only a (hypothetical) client-local forwarder now correctly gossips to nobody. autoconnect's seam already exists (enable_autoconnect)."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio 374 routing-peer lib (+2): default_gossip_target_is_per_local_whatami (pure: router/peer -> router|peer, client -> empty) + set_gossip_target_overrides_the_flood_gate (set empty -> a peer face is gated out of the flood).",
+        "base lib 277 unchanged (linkstate_forward is routing-peer-only). clippy -D clean (routing-peer + base no-feature); fmt clean; wz-ap-demo builds (the forwarder ctor is unchanged).",
+        "Grounding (read): zenoh zenoh-config/src/defaults.rs gossip.target (router|peer for router/peer, empty for client) + gossip.autoconnect (peer -> router|peer, router/client -> empty)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tn = gossip-policy remainder: gossip_target gains a config seam (set_gossip_target) + a per-local-whatami default. With A4 (gossip gate) + A5 (autoconnect) the gossip+autoconnect mesh-discovery subsystem is config-complete.",
+        "DEFERRED (low, no producer): a deploy that reads config and calls set_gossip_target / enable_autoconnect per its whatami (the demo has no such flag yet; --autoconnect from the A5c carry is the same thin follow-up). The SEAMS now all exist.",
+        "NEXT north-star (the big remaining tracks): c3c-3 filter/failover/static routes, or the unstarted Storage / Access-control / SHM subsystems. The router/mesh (linkstate) + gossip + autoconnect core is done.",
+        "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl(9658f0f)+311tm(3672556)+311tn on origin/main=4394d5a (4 ahead). Host lanes verified (driver 374 routing-peer + 277 base, clippy both, fmt, demo). full run-ci + idle before push; push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tn: gossip-policy remainder -- gossip_target config seam. Add set_gossip_target + a per-local-whatami default (router/peer -> router|peer, client -> empty), replacing the const router|peer seed.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs: new default_gossip_target(whatami) = zenoh scouting.gossip.target per-local default (router|peer for a router/peer, empty for a client). new() seeds gossip_target from self_whatami, not the const router|peer.",
+        "gossip_target field WhatAmIMatcher -> Cell<WhatAmIMatcher> + set_gossip_target(&self, matcher) setter -- the config seam a deploy uses to source the target per its local whatami (symmetric to enable_autoconnect / set_gossip_multihop).",
+        "fan_out gossip_gate Option<&WhatAmIMatcher> -> Option<WhatAmIMatcher> (by value; the matcher is a Copy 1-byte bitset), so the 3 gossip callers read the Cell once with no borrow. The 5 data callers pass None, unchanged.",
+        "Behaviour-neutral for current use: every wz forwarder is constructed Peer (or Router) -> default stays router|peer. Only a (hypothetical) client-local forwarder now correctly gossips to nobody. autoconnect's seam already exists (enable_autoconnect)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio 374 routing-peer lib (+2): default_gossip_target_is_per_local_whatami (pure: router/peer -> router|peer, client -> empty) + set_gossip_target_overrides_the_flood_gate (set empty -> a peer face is gated out of the flood).",
+        "base lib 277 unchanged (linkstate_forward is routing-peer-only). clippy -D clean (routing-peer + base no-feature); fmt clean; wz-ap-demo builds (the forwarder ctor is unchanged).",
+        "Grounding (read): zenoh zenoh-config/src/defaults.rs gossip.target (router|peer for router/peer, empty for client) + gossip.autoconnect (peer -> router|peer, router/client -> empty)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tn = gossip-policy remainder: gossip_target gains a config seam (set_gossip_target) + a per-local-whatami default. With A4 (gossip gate) + A5 (autoconnect) the gossip+autoconnect mesh-discovery subsystem is config-complete.",
+        "DEFERRED (low, no producer): a deploy that reads config and calls set_gossip_target / enable_autoconnect per its whatami (the demo has no such flag yet; --autoconnect from the A5c carry is the same thin follow-up). The SEAMS now all exist.",
+        "NEXT north-star (the big remaining tracks): c3c-3 filter/failover/static routes, or the unstarted Storage / Access-control / SHM subsystems. The router/mesh (linkstate) + gossip + autoconnect core is done.",
+        "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl(9658f0f)+311tm(3672556)+311tn on origin/main=4394d5a (4 ahead). Host lanes verified (driver 374 routing-peer + 277 base, clippy both, fmt, demo). full run-ci + idle before push; push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

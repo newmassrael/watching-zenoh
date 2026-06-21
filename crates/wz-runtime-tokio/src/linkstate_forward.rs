@@ -149,6 +149,20 @@ struct FaceState {
     keyexpr_table: hashbrown::HashMap<u64, String>,
 }
 
+/// The default gossip target for a node of role `whatami` — zenoh's
+/// `scouting.gossip.target` per-local-whatami default
+/// (`commons/zenoh-config/src/defaults.rs`): a ROUTER or PEER gossips its
+/// link-state to routers and peers (`router|peer`); a CLIENT gossips to nobody
+/// (the empty set — a client floods no link-state). The
+/// [`LinkstateForwarder::new`] seed for its own role; a deploy config-sources a
+/// different set via [`LinkstateForwarder::set_gossip_target`].
+const fn default_gossip_target(whatami: WhatAmI) -> WhatAmIMatcher {
+    match whatami {
+        WhatAmI::Router | WhatAmI::Peer => WhatAmIMatcher::empty().router().peer(),
+        WhatAmI::Client => WhatAmIMatcher::empty(),
+    }
+}
+
 pub struct LinkstateForwarder {
     /// Shared single-task topology graph (`Rc<RefCell>`, not `Mutex`).
     net: Rc<RefCell<LinkstateNetwork>>,
@@ -200,12 +214,13 @@ pub struct LinkstateForwarder {
     /// `gossip_target`). A face whose handshake `whatami` is outside this set is
     /// skipped by every link-state flood ([`fan_out`](Self::fan_out)'s gossip
     /// gate), exactly like zenoh's per-target `send_on_link`
-    /// (`hat/p2p_peer/gossip.rs:238-252`). Seeded to the zenoh peer/router
-    /// default `router|peer` (a `client` face never receives gossip — zenoh
-    /// `bail`s if `client` is even configured as a target); config-sourcing it
-    /// per local whatami is a later atom, so it has no setter yet. An all-peer
-    /// deployment matches every face, so the gate is behaviour-neutral there.
-    gossip_target: WhatAmIMatcher,
+    /// (`hat/p2p_peer/gossip.rs:238-252`). Seeded per THIS node's role via
+    /// [`default_gossip_target`] (the zenoh `scouting.gossip.target` default: a
+    /// router or peer gossips to `router|peer`, a client to nobody) and
+    /// config-sourceable by a deploy through [`set_gossip_target`](Self::set_gossip_target).
+    /// `Cell` because the matcher is `Copy` and set through `&self`, like the
+    /// other policy knobs.
+    gossip_target: Cell<WhatAmIMatcher>,
     /// The gossip autoconnect policy (zenoh `AutoConnect`): whether a peer this
     /// node DISCOVERS off a gossip flood should be dialed (the role matcher + zid
     /// tie-break). Default [`AutoConnect::disabled`] — an empty matcher, so the
@@ -249,8 +264,10 @@ impl LinkstateForwarder {
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
-            // zenoh peer/router default gossip target (router|peer); never client.
-            gossip_target: WhatAmIMatcher::empty().router().peer(),
+            // The gossip target default for THIS node's role (zenoh's per-local
+            // `scouting.gossip.target`): router|peer for a router/peer, empty for
+            // a client. A deploy overrides via `set_gossip_target`.
+            gossip_target: Cell::new(default_gossip_target(self_whatami)),
             // autoconnect off by default (an empty matcher) -> the ingest emit
             // gate is always false, so a default driver produces no dial-intents.
             autoconnect: Cell::new(AutoConnect::disabled(self_zid)),
@@ -266,6 +283,18 @@ impl LinkstateForwarder {
     /// never calls this advertises no locators (the prior behaviour exactly).
     pub fn set_self_locators(&self, locators: Vec<String>) {
         self.net.borrow_mut().set_self_locators(locators);
+    }
+
+    /// Override the gossip target — the set of neighbour roles this node floods
+    /// its link-state to (zenoh's `scouting.gossip.target`). The
+    /// [`new`](Self::new) default is [`default_gossip_target`] for this node's
+    /// role; a deploy config-sources a different set here (e.g. a router that
+    /// gossips only to routers). The config seam symmetric to the other policy
+    /// knobs ([`enable_autoconnect`](Self::enable_autoconnect),
+    /// [`LinkstateNetwork::set_gossip_multihop`](wz_routing_graph::LinkstateNetwork::set_gossip_multihop));
+    /// a driver that never calls it keeps the per-role default.
+    pub fn set_gossip_target(&self, target: WhatAmIMatcher) {
+        self.gossip_target.set(target);
     }
 
     /// Enable gossip autoconnect: install `policy` and return the receiving end
@@ -383,7 +412,7 @@ impl LinkstateForwarder {
         // A clone of the graph handle so the per-face builder can borrow it
         // (the `Rc` is the cell; `fan_out` only holds the `faces` borrow).
         let net = self.net.clone();
-        self.fan_out(true, Some(&self.gossip_target), |id, zid| {
+        self.fan_out(true, Some(self.gossip_target.get()), |id, zid| {
             if id == source {
                 return Ok(None);
             }
@@ -458,15 +487,17 @@ impl LinkstateForwarder {
     /// loop. Holds only the `faces` borrow;
     /// a builder may borrow the graph (a distinct cell).
     /// `gossip_gate` is the per-target whatami gate: a link-state gossip flood
-    /// passes `Some(&self.gossip_target)` so a face whose role is outside the
+    /// passes `Some(self.gossip_target.get())` so a face whose role is outside the
     /// gossip target (a `client`) is skipped entirely — zenoh's per-target
     /// `send_on_link` (`hat/p2p_peer/gossip.rs:241`). A data-plane fan-out
     /// passes `None`: its selectivity is the tree/interest filter in the builder,
     /// not the role gate, so it must reach every held face the builder selects.
+    /// Taken by value — the matcher is a `Copy` one-byte bitset, so the caller
+    /// reads the `Cell` once and the gate needs no borrow.
     fn fan_out(
         &self,
         reliable: bool,
-        gossip_gate: Option<&WhatAmIMatcher>,
+        gossip_gate: Option<WhatAmIMatcher>,
         mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
@@ -538,7 +569,7 @@ impl LinkstateForwarder {
             };
             build_linkstate_oam_owned(&list)?
         };
-        self.fan_out(true, Some(&self.gossip_target), |id, zid| {
+        self.fan_out(true, Some(self.gossip_target.get()), |id, zid| {
             if id == new_face {
                 // the new link is bootstrapped with the FULL topology.
                 return Ok(Some(NetworkMessage::Oam(full.clone())));
@@ -566,7 +597,7 @@ impl LinkstateForwarder {
     /// mapped self. Reliable; returns the count of faces reached.
     fn flood_self_links_changed(&self) -> Result<usize, CodecError> {
         let oam = build_linkstate_oam_owned(&self.net.borrow().build_self_links_delta())?;
-        self.fan_out(true, Some(&self.gossip_target), |_id, _zid| {
+        self.fan_out(true, Some(self.gossip_target.get()), |_id, _zid| {
             Ok(Some(NetworkMessage::Oam(oam.clone())))
         })
     }
@@ -1847,6 +1878,42 @@ mod tests {
             client_sink.frame_count(),
             0,
             "a client face never receives gossip (the router|peer target excludes it)"
+        );
+    }
+
+    #[test]
+    fn default_gossip_target_is_per_local_whatami() {
+        // zenoh scouting.gossip.target default: a router or peer gossips to
+        // router|peer; a client gossips to nobody (the empty set).
+        let rp = WhatAmIMatcher::empty().router().peer();
+        assert_eq!(default_gossip_target(WhatAmI::Router), rp);
+        assert_eq!(default_gossip_target(WhatAmI::Peer), rp);
+        assert_eq!(
+            default_gossip_target(WhatAmI::Client),
+            WhatAmIMatcher::empty(),
+            "a client floods no link-state"
+        );
+    }
+
+    #[test]
+    fn set_gossip_target_overrides_the_flood_gate() {
+        // The config seam: the per-role default (a peer local -> router|peer)
+        // floods a peer face; after set_gossip_target(empty) the same face is
+        // gated out, the override a deploy uses to source the target per its
+        // local whatami.
+        let fwd = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let (peer, peer_sink) = peer_face_whatami(zid(0xAA), 1); // wire 1 = Peer
+        fwd.register(FaceId(0), &peer);
+        fwd.set_gossip_target(WhatAmIMatcher::empty());
+        // Clear the register-time flood (sent under the default target) so the
+        // next flood isolates the override's effect.
+        peer_sink.reset();
+        let sent = fwd.flood_self_links_changed().expect("flood self");
+        assert_eq!(sent, 0, "the empty gossip target gates out every face");
+        assert_eq!(
+            peer_sink.frame_count(),
+            0,
+            "the peer face received no gossip under the empty target"
         );
     }
 
