@@ -331,6 +331,15 @@ pub fn build_response_err_aliased(
 /// closing `ResponseFinal`, so the querier sees an explicit timeout error rather
 /// than a silent empty result.
 ///
+/// FIDELITY (honest): the EMPTY keyexpr matches zenoh's `WireExpr::empty()`
+/// (mapping = Sender, so the M bit is set, as here). The Response ENVELOPE
+/// follows wz's pico-calibrated omit-on-DEFAULT convention shared by every wz
+/// Response/ResponseFinal builder — it omits the `ext_qos` / `ext_respid`
+/// extensions that zenoh-Rust's timeout reply attaches (zenoh sets `Z=1` because
+/// `QoSType::RESPONSE` is non-default). A zenoh receiver still decodes this as a
+/// valid Err reply (default qos, no responder id); the omission is the
+/// established wz convention, not a byte-for-byte zenoh-Rust copy.
+///
 /// Wire shape (empty-keyexpr case):
 ///
 /// ```text
@@ -1059,8 +1068,9 @@ mod tests {
         assert_eq!(
             msg.wire(),
             expected,
-            "Response(Err) empty-keyexpr wire bytes must match zenoh's \
-             WireExpr::empty() timeout reply (queries.rs:312-330)",
+            "Response(Err) empty-keyexpr wire: the EMPTY keyexpr matches zenoh's \
+             WireExpr::empty() (M set); the envelope follows wz's pico-calibrated \
+             omit-on-DEFAULT convention (no qos/respid exts, unlike zenoh-Rust)",
         );
         // Inner-arm sanity: the body is an Err carrying the payload, and the
         // keyexpr is the empty local wireexpr (id=0, no suffix).

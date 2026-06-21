@@ -1177,8 +1177,8 @@ impl LinkstateForwarder {
         if set_response_keyexpr_literal(&mut carrier, &keyexpr).is_err() {
             return;
         }
-        let _ = self.fan_out(reliable, None, |id, _zid| {
-            Ok((id == orig_face).then(|| NetworkMessage::Response(Box::new(carrier.clone()))))
+        self.send_to_face(orig_face, reliable, || {
+            NetworkMessage::Response(Box::new(carrier.clone()))
         });
     }
 
@@ -1206,8 +1206,8 @@ impl LinkstateForwarder {
         };
         let mut carrier = response_final.clone();
         carrier.request_id = orig_rid;
-        let _ = self.fan_out(reliable, None, |id, _zid| {
-            Ok((id == orig_face).then(|| NetworkMessage::ResponseFinal(carrier.clone())))
+        self.send_to_face(orig_face, reliable, || {
+            NetworkMessage::ResponseFinal(carrier.clone())
         });
     }
 
@@ -1651,6 +1651,25 @@ impl LinkstateForwarder {
         self.re_advertise_queryables(&new_children);
     }
 
+    /// Unicast a message to the single face `face` — a back-hop on the
+    /// pending-query RETURN route, NOT a tree fan-out. The reply path
+    /// ([`forward_response`](Self::forward_response) /
+    /// [`forward_response_final`](Self::forward_response_final)) and the timeout
+    /// sweep ([`reap_timed_out_queries`](Self::reap_timed_out_queries)) all route
+    /// ONE message back to ONE recorded inbound face — this is the single seam
+    /// they share, the broadcast [`fan_out`](Self::fan_out) gated to the one
+    /// target so the egress ACL + drop-witness still apply. `build` is the
+    /// per-send message constructor (NetworkMessage is not `Clone`, so the carrier
+    /// is built for the matching face).
+    fn send_to_face(
+        &self,
+        face: FaceId,
+        reliable: bool,
+        mut build: impl FnMut() -> NetworkMessage,
+    ) {
+        let _ = self.fan_out(reliable, None, |id, _zid| Ok((id == face).then(&mut build)));
+    }
+
     /// Reap pending queries past their deadline — the wz form of zenoh's
     /// per-query `QueryCleanup::run` (`dispatcher/queries.rs:305-349`). The
     /// [`tick`](FaceForwarder::tick) calls this each coalescing window: it sweeps
@@ -1685,9 +1704,8 @@ impl LinkstateForwarder {
                 eq.inbound_rid,
                 b"Timeout",
             ) {
-                let _ = self.fan_out(true, None, |id, _zid| {
-                    Ok((id == eq.inbound)
-                        .then(|| NetworkMessage::Response(Box::new(err_msg.clone()))))
+                self.send_to_face(eq.inbound, true, || {
+                    NetworkMessage::Response(Box::new(err_msg.clone()))
                 });
             }
             // 2) The closing final via the SSOT builder (the same
@@ -1695,8 +1713,8 @@ impl LinkstateForwarder {
             //    the recorded upstream rid, unicast back to the inbound face.
             let final_msg =
                 wz_session_core::response_final_build::build_response_final(eq.inbound_rid);
-            let _ = self.fan_out(true, None, |id, _zid| {
-                Ok((id == eq.inbound).then(|| NetworkMessage::ResponseFinal(final_msg.clone())))
+            self.send_to_face(eq.inbound, true, || {
+                NetworkMessage::ResponseFinal(final_msg.clone())
             });
         }
     }
