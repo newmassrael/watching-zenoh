@@ -174,6 +174,10 @@ fn main() -> ExitCode {
             // egress data on the keyexpr to at most one per 500 ms, the QoS
             // sibling of the ACL on the same interceptor chain. Off by default.
             let downsample = parse_pair(rest, "--downsample");
+            // R311tx (§5.16 access-quota) — `--max-payload <bytes>` caps every
+            // keyexpr's Put payload size (zenoh low_pass); a larger Put is dropped
+            // on egress. Off by default.
+            let max_payload = parse_pair(rest, "--max-payload");
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -184,6 +188,7 @@ fn main() -> ExitCode {
                 InterceptorOpts {
                     acl_deny,
                     downsample,
+                    max_payload,
                 },
             );
         }
@@ -666,6 +671,7 @@ fn run_router_mode(addr: String) -> ExitCode {
 pub(crate) struct InterceptorOpts {
     pub(crate) acl_deny: Option<String>,
     pub(crate) downsample: Option<String>,
+    pub(crate) max_payload: Option<String>,
 }
 
 /// R311qg — peer-MESH mode entry: bind `listen`, dial each `dial_targets` peer,

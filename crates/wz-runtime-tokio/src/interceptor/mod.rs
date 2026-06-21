@@ -42,6 +42,7 @@
 
 pub mod access_control;
 pub mod downsampling;
+pub mod low_pass;
 
 use wz_routing_graph::Zid;
 use wz_session_core::network_message::NetworkMessage;

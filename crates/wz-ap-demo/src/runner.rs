@@ -1248,8 +1248,8 @@ pub(crate) async fn run_peer(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
         default_autoconnect_matcher, AclConfig, AclFlow, AclMessage, AclPolicy, AclRule,
-        AutoConnect, AutoConnectStrategy, DownsamplingRule, LinkstateForwarder, Permission,
-        SubjectSelector, WhatAmI, Zid,
+        AutoConnect, AutoConnectStrategy, DownsamplingRule, LinkstateForwarder, LowPassRule,
+        Permission, SubjectSelector, WhatAmI, Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint;
 
@@ -1388,6 +1388,25 @@ pub(crate) async fn run_peer(
             key_exprs: vec![downsample_keyexpr.to_owned()],
             min_interval: Duration::from_millis(500),
         }]);
+    }
+
+    // `--max-payload <bytes>`: opt into §5.16 access-quota (a per-key payload-size
+    // cap, zenoh low_pass) on EVERY keyexpr — a Put larger than the limit is
+    // dropped on egress. The third interceptor kind on the chain. Off by default;
+    // a non-numeric value is ignored with a warning.
+    if let Some(max_payload) = interceptors.max_payload.as_deref() {
+        match max_payload.parse::<usize>() {
+            Ok(max_payload_size) => {
+                log::info!("wz-ap-demo peer: low-pass enabled (--max-payload {max_payload_size}B)");
+                forwarder.set_low_pass(vec![LowPassRule {
+                    key_exprs: vec!["**".to_owned()],
+                    max_payload_size,
+                }]);
+            }
+            Err(_) => log::warn!(
+                "wz-ap-demo peer: --max-payload '{max_payload}' is not a byte count; ignored"
+            ),
+        }
     }
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is

@@ -109,6 +109,7 @@ use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::interceptor::access_control::AclInterceptor;
 use crate::interceptor::downsampling::DownsamplingInterceptor;
+use crate::interceptor::low_pass::LowPassInterceptor;
 use crate::interceptor::{InterceptorChain, InterceptorContext};
 use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -130,6 +131,9 @@ pub use wz_access_control::{
 // R311tw — the downsampling rule type, re-exported beside `set_downsampling` so
 // a deploy builds it from the same facade path as the ACL types above.
 pub use crate::interceptor::downsampling::DownsamplingRule;
+// R311tx — the low-pass (per-key payload-size limit) rule type, re-exported
+// beside `set_low_pass` (the §5.16 access-quota realization).
+pub use crate::interceptor::low_pass::LowPassRule;
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;
@@ -284,10 +288,14 @@ pub struct LinkstateForwarder {
     /// this node's OWN originations (a `publish` never crosses `forward`, only
     /// `fan_out`), so ingress alone could not cover them.
     egress_interceptors: RefCell<InterceptorChain>,
-    /// R311tt — count of messages an interceptor DENIED (ingress or egress): the
-    /// access-control witness, the deny twin of [`data_seen`](Self#structfield.data_seen)
-    /// the e2e/unit tests assert against (zenoh logs each deny; wz counts it).
-    acl_denied: Cell<usize>,
+    /// R311tt — count of messages ANY interceptor dropped, on either flow: an ACL
+    /// denial, a downsampling rate-limit, or a low-pass size-cap — the shared
+    /// interceptor-drop witness, the drop twin of
+    /// [`data_seen`](Self#structfield.data_seen) the e2e/unit tests assert against.
+    /// (zenoh keeps a per-interceptor stat; wz collapses to one count — a coarser
+    /// witness, since the chain's `admit` returns a single bool and does not
+    /// attribute the drop to a specific interceptor.)
+    interceptor_dropped: Cell<usize>,
 }
 
 impl LinkstateForwarder {
@@ -329,7 +337,7 @@ impl LinkstateForwarder {
             // message admitted, exactly as zenoh's `AclConfig.enabled = false`.
             ingress_interceptors: RefCell::new(InterceptorChain::new()),
             egress_interceptors: RefCell::new(InterceptorChain::new()),
-            acl_denied: Cell::new(0),
+            interceptor_dropped: Cell::new(0),
         }
     }
 
@@ -383,7 +391,7 @@ impl LinkstateForwarder {
     /// `IngressAclEnforcer` and an `EgressAclEnforcer`. A driver that never calls
     /// this keeps both chains free of an ACL enforcer (every message admitted by
     /// it, zenoh `AclConfig.enabled = false`). A denied message is dropped and
-    /// witnessed by [`acl_denied`](Self::acl_denied).
+    /// witnessed by [`interceptor_dropped`](Self::interceptor_dropped).
     ///
     /// APPENDS rather than replaces so the ACL composes with the other
     /// interceptors on the chain (e.g. [`set_downsampling`](Self::set_downsampling))
@@ -404,25 +412,48 @@ impl LinkstateForwarder {
 
     /// Install a §5.16 DOWNSAMPLING (rate-limit) policy — the QoS sibling of the
     /// ACL on the interceptor chain, the wz mirror of zenoh's downsampling
-    /// interceptor. APPENDS a [`DownsamplingInterceptor`] to the EGRESS chain
-    /// (zenoh downsamples on egress by default): a data Push whose keyexpr a rule
-    /// governs is dropped if it arrives sooner than the rule's minimum interval
-    /// since the last admitted one, bounding the per-keyexpr send rate. Composes
-    /// with [`set_acl_policy`](Self::set_acl_policy) on the same chain (both run;
-    /// either may drop). Proves the chain is genuinely composable — a second,
-    /// different interceptor kind beside the ACL enforcer. A drop is witnessed by
-    /// [`acl_denied`](Self::acl_denied) (the shared interceptor-drop witness).
+    /// interceptor. APPENDS a [`DownsamplingInterceptor`] to BOTH the ingress and
+    /// egress chains (zenoh downsampling defaults to ingress + egress), each its
+    /// OWN instance with its own per-rule timer (zenoh keeps separate per-flow
+    /// enforcers): a data Push whose keyexpr a rule governs is dropped if it
+    /// arrives sooner than the rule's minimum interval since the last one that
+    /// flow admitted, bounding the per-rule rate. Composes with the ACL enforcer
+    /// on the same chains (all run; any may drop). A drop is witnessed by
+    /// [`interceptor_dropped`](Self::interceptor_dropped).
     pub fn set_downsampling(&self, rules: Vec<DownsamplingRule>) {
+        self.ingress_interceptors
+            .borrow_mut()
+            .push(Box::new(DownsamplingInterceptor::new(rules.clone())));
         self.egress_interceptors
             .borrow_mut()
             .push(Box::new(DownsamplingInterceptor::new(rules)));
     }
 
-    /// The number of inbound messages access control has DENIED so far — the
-    /// deny twin of [`data_seen`](Self::data_seen). A pure witness (zero on a
+    /// Install a §5.16 LOW-PASS (per-key payload-size limit) policy — the
+    /// `access-quota` realization, the wz mirror of zenoh's low-pass interceptor.
+    /// APPENDS a [`LowPassInterceptor`] to BOTH the ingress and egress chains
+    /// (zenoh low_pass defaults to ingress + egress): a Put whose keyexpr a rule
+    /// governs is dropped when its payload exceeds the rule's byte limit, capping
+    /// the per-keyexpr message size. Composes with the ACL enforcer and the
+    /// downsampler on the same chains (all run; any may drop). A drop is witnessed
+    /// by [`interceptor_dropped`](Self::interceptor_dropped). zenoh has no
+    /// cumulative quota-accounting interceptor — the faithful per-key limit is
+    /// this payload-size cap (`low_pass`).
+    pub fn set_low_pass(&self, rules: Vec<LowPassRule>) {
+        self.ingress_interceptors
+            .borrow_mut()
+            .push(Box::new(LowPassInterceptor::new(rules.clone())));
+        self.egress_interceptors
+            .borrow_mut()
+            .push(Box::new(LowPassInterceptor::new(rules)));
+    }
+
+    /// The number of messages ANY interceptor has dropped so far (ACL denial,
+    /// downsampling rate-limit, or low-pass size-cap; ingress or egress) — the
+    /// drop twin of [`data_seen`](Self::data_seen). A pure witness (zero on a
     /// healthy unrestricted mesh); the e2e/unit tests assert it.
-    pub fn acl_denied(&self) -> usize {
-        self.acl_denied.get()
+    pub fn interceptor_dropped(&self) -> usize {
+        self.interceptor_dropped.get()
     }
 
     /// Whether the INGRESS chain admits this inbound `msg` arriving on face `id`.
@@ -704,7 +735,8 @@ impl LinkstateForwarder {
                 // witnessed — the wz `Mux`-side enforcement that also covers this
                 // node's own originations (a `publish` reaches only `fan_out`).
                 if !self.admit_outbound(state, &msg) {
-                    self.acl_denied.set(self.acl_denied.get() + 1);
+                    self.interceptor_dropped
+                        .set(self.interceptor_dropped.get() + 1);
                     continue;
                 }
                 // a per-face send failure (link gone mid-fan-out) is skipped,
@@ -1640,10 +1672,11 @@ impl FaceForwarder for LinkstateForwarder {
             // R311tt — §5.16 access control: consult the interceptor chain ONCE
             // here, ahead of the kind-dispatch (the relay-admission point). A
             // denied message is dropped — not counted as received data, not
-            // forwarded — and witnessed by `acl_denied`. The empty-chain fast
+            // forwarded — and witnessed by `interceptor_dropped`. The empty-chain fast
             // path (no ACL configured) makes this a single predicate read.
             if !self.admit_inbound(id, message) {
-                self.acl_denied.set(self.acl_denied.get() + 1);
+                self.interceptor_dropped
+                    .set(self.interceptor_dropped.get() + 1);
                 continue;
             }
             match message {
@@ -3067,7 +3100,7 @@ mod tests {
         // Line A - S(self) - B; B subscribes demo/data. With S configured to DENY
         // `demo/**` on ingress, a Put from A on demo/data is dropped at S: not
         // counted as received data, not relayed to the interested child B, and
-        // witnessed by acl_denied. The relay-admission point the forward() seam
+        // witnessed by interceptor_dropped. The relay-admission point the forward() seam
         // gates (zenoh's IngressAclEnforcer over the mesh path).
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
@@ -3090,7 +3123,7 @@ mod tests {
         };
         fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
 
-        assert_eq!(fwd.acl_denied(), 1, "the denied Put is witnessed");
+        assert_eq!(fwd.interceptor_dropped(), 1, "the denied Put is witnessed");
         assert_eq!(
             fwd.data_seen(),
             0,
@@ -3130,7 +3163,7 @@ mod tests {
         fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
 
         assert_eq!(
-            fwd.acl_denied(),
+            fwd.interceptor_dropped(),
             0,
             "demo/data is not denied by an admin/** rule"
         );
@@ -3147,7 +3180,7 @@ mod tests {
         // Control-plane enforcement: S denies DeclareSubscriber on `admin/**`. A
         // sourced DeclareSubscriber from A on admin/sub is dropped at S — the
         // source's interest is NOT registered (so it never attracts a Push) and
-        // it is witnessed by acl_denied. A declaration on an unrelated keyexpr
+        // it is witnessed by interceptor_dropped. A declaration on an unrelated keyexpr
         // still registers, proving the gate is action- and keyexpr-selective.
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, _sa) = peer_face(zid(0x0A));
@@ -3174,7 +3207,7 @@ mod tests {
         };
         fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
         assert_eq!(
-            fwd.acl_denied(),
+            fwd.interceptor_dropped(),
             1,
             "the denied DeclareSubscriber is witnessed"
         );
@@ -3198,7 +3231,11 @@ mod tests {
             vec![zid(0x0A)],
             "an allowed subscription registers"
         );
-        assert_eq!(fwd.acl_denied(), 1, "the allowed declaration adds no deny");
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the allowed declaration adds no deny"
+        );
     }
 
     #[test]
@@ -3244,17 +3281,18 @@ mod tests {
             0,
             "egress denies the relay out to the interested child"
         );
-        assert_eq!(fwd.acl_denied(), 1, "the egress drop is witnessed");
+        assert_eq!(fwd.interceptor_dropped(), 1, "the egress drop is witnessed");
     }
 
     #[test]
-    fn downsampling_composes_with_acl_on_the_egress_chain() {
-        // The egress chain runs BOTH a (permissive) ACL enforcer and a
-        // downsampler — proving the chain is genuinely composable. Topology
-        // A-S-B, B subscribes demo/data. Two back-to-back Puts on demo/data: the
-        // first relays to B; the second (microseconds later, well inside the 1s
-        // interval) is rate-limited by the downsampler and dropped, while the ACL
-        // admits both.
+    fn downsampling_composes_with_acl_on_the_interceptor_chain() {
+        // The chain runs BOTH a (permissive) ACL enforcer and a downsampler —
+        // proving it is genuinely composable. Topology A-S-B, B subscribes
+        // demo/data. Two back-to-back Puts on demo/data: the first is admitted
+        // (relays to B); the second (microseconds later, well inside the 1s
+        // interval) is rate-limited by the downsampler. Downsampling runs on BOTH
+        // flows (zenoh default), so the second is dropped at INGRESS — it is not
+        // even counted as received — while the ACL admits both.
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
@@ -3285,15 +3323,76 @@ mod tests {
 
         assert_eq!(
             fwd.data_seen(),
-            2,
-            "both Pushes were received (ingress allows)"
+            1,
+            "only the first is counted; the second is dropped at ingress"
         );
         assert_eq!(
             sink_b.frame_count(),
             1,
-            "first relayed; the second is rate-limited by the downsampler"
+            "the first relayed; the second is rate-limited by the downsampler"
         );
-        assert_eq!(fwd.acl_denied(), 1, "the downsampling drop is witnessed");
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the downsampling drop is witnessed"
+        );
+    }
+
+    #[test]
+    fn low_pass_drops_an_oversized_put_on_a_governed_keyexpr() {
+        // The §5.16 access-quota realization (a per-key payload-size cap). S caps
+        // demo/** payloads at 8 bytes. Low-pass runs on BOTH flows (zenoh default),
+        // so a 32-byte Put from A on demo/data is dropped at INGRESS — not counted,
+        // not relayed to the interested child B — and witnessed; a small Put still
+        // flows through and relays.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+        fwd.set_low_pass(vec![LowPassRule {
+            key_exprs: vec!["demo/**".to_owned()],
+            max_payload_size: 8,
+        }]);
+
+        let big = build_push_literal("demo/data", &[0u8; 32]).expect("build");
+        let o1 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(big))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&o1));
+        assert_eq!(
+            fwd.data_seen(),
+            0,
+            "the oversized Put is dropped at ingress, not even counted"
+        );
+        assert_eq!(sink_b.frame_count(), 0, "and not relayed");
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the low-pass drop is witnessed"
+        );
+
+        // A small Put (under the limit) still relays.
+        let small = build_push_literal("demo/data", b"hi").expect("build"); // 2 bytes
+        let o2 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(small))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&o2));
+        assert_eq!(sink_b.frame_count(), 1, "a Put under the limit relays");
+        assert_eq!(fwd.interceptor_dropped(), 1, "the small Put adds no drop");
     }
 
     #[test]
