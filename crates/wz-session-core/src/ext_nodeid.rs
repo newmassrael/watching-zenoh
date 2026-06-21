@@ -40,8 +40,16 @@ pub const EXT_ENC_Z64: u8 = 0x20;
 /// ext rides.
 pub const EXT_ENC_ZBUF: u8 = 0x40;
 /// Chain-continuation flag, zenoh `iext::FLAG_Z` (bit 7): another extension
-/// follows this one.
+/// follows THIS ext entry. Per-entry, layered by [`apply_chain_z_bits`].
 pub const EXT_FLAG_Z: u8 = 0x80;
+
+/// The MESSAGE-level header `Z` bit, zenoh `<msg>::flag::Z (1 << 7)`: the
+/// message (Push / Declare / Request, envelope OR body) carries an extension
+/// chain. SAME bit position as [`EXT_FLAG_Z`] but a DISTINCT layer — for a
+/// message with a SINGLE ext, the header `Z` is set (a chain is present) while
+/// that sole ext entry's `Z` is clear (it terminates the chain). The single
+/// definition the per-message source setters sync via [`sync_header_z`].
+pub const MESSAGE_FLAG_Z: u8 = 0x80;
 /// The `ext_nodeid` header with no further extension following: `id | M |
 /// Z64` = `0x33`.
 pub const NODEID_EXT_HEADER: u8 = NODEID_EXT_ID | EXT_FLAG_M | EXT_ENC_Z64;
@@ -51,6 +59,22 @@ pub const NODEID_EXT_HEADER: u8 = NODEID_EXT_ID | EXT_FLAG_M | EXT_ENC_Z64;
 /// reused by [`declare_ext_keyexpr`](crate::declare_ext_keyexpr).
 pub fn ext_id(header: u8) -> u8 {
     header & 0x0F
+}
+
+/// Sync a message header's `Z` bit to whether its extension chain is now
+/// present — the SSOT for the per-message source setters
+/// ([`set_source`](crate::push_routing_context::set_push_source) and the
+/// Declare / Request / hop-limit twins), which all did the identical
+/// `header |= MESSAGE_FLAG_Z` (chain present) / `header &= !MESSAGE_FLAG_Z`
+/// (chain empty) after an ext-chain edit. The ONE field that differs per
+/// message type is WHICH header byte; folding the shared bit-twiddle here makes
+/// each setter a two-liner and removes the per-module `*_FLAG_Z` duplication.
+pub fn sync_header_z(header: &mut u8, chain_present: bool) {
+    if chain_present {
+        *header |= MESSAGE_FLAG_Z;
+    } else {
+        *header &= !MESSAGE_FLAG_Z;
+    }
 }
 
 /// Set the chain-continuation `Z` bit on every entry except the last (which
@@ -172,6 +196,26 @@ mod tests {
     fn read_absent_is_zero() {
         assert_eq!(read_source(None), 0);
         assert_eq!(read_source(Some(&vec![other_ext()])), 0);
+    }
+
+    #[test]
+    fn sync_header_z_mirrors_chain_presence_touching_only_bit_7() {
+        // The SSOT the per-message source setters share (R311ur): set the header
+        // Z bit when a chain is present, clear it when empty, leaving every other
+        // header bit untouched and idempotent.
+        let mut header = EXT_FLAG_M; // a non-Z header bit already set
+        sync_header_z(&mut header, true);
+        assert_eq!(
+            header,
+            EXT_FLAG_M | MESSAGE_FLAG_Z,
+            "present -> Z set, other bits kept"
+        );
+        sync_header_z(&mut header, true);
+        assert_eq!(header, EXT_FLAG_M | MESSAGE_FLAG_Z, "idempotent on present");
+        sync_header_z(&mut header, false);
+        assert_eq!(header, EXT_FLAG_M, "empty -> Z cleared, other bits kept");
+        sync_header_z(&mut header, false);
+        assert_eq!(header, EXT_FLAG_M, "idempotent on empty");
     }
 
     #[test]

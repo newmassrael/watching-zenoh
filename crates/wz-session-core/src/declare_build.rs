@@ -293,14 +293,11 @@ pub fn set_declare_queryable_info(
         return false;
     };
     let present = crate::queryable_info::set_queryable_info(&mut d.extensions, info);
-    // Sync the body header `Z` bit with chain presence — the encode emits the
-    // chain present-if header.Z. `EXT_FLAG_Z` is the shared named const for the
-    // 0x80 chain-presence bit (no bare literal).
-    if present {
-        d.header |= crate::ext_nodeid::EXT_FLAG_Z;
-    } else {
-        d.header &= !crate::ext_nodeid::EXT_FLAG_Z;
-    }
+    // Sync the body header's message-level Z bit to chain presence via the SSOT
+    // helper (MESSAGE_FLAG_Z — the body HEADER bit, distinct from the per-entry
+    // EXT_FLAG_Z: for a single ext the header Z is set while that ext's own Z is
+    // clear).
+    crate::ext_nodeid::sync_header_z(&mut d.header, present);
     present
 }
 

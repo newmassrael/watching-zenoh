@@ -41,12 +41,6 @@ use wz_codecs::declare::DeclareOwned;
 
 use crate::ext_nodeid;
 
-/// The Declare-level header `Z` bit (zenoh `declare::flag::Z = 1 << 7`): the
-/// extension chain is present. Identical bit to Push's header `Z`, but on the
-/// Declare struct — the ONE field that differs from the Push twin; every other
-/// part of the edit lives in the shared [`ext_nodeid`](crate::ext_nodeid) SSOT.
-const DECLARE_FLAG_Z: u8 = 0x80;
-
 /// Read the routing-context source `node_id` from a Declare's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
@@ -61,18 +55,15 @@ pub fn read_declare_source(declare: &DeclareOwned) -> u16 {
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
 /// Declare-level header `Z` flag to the resulting chain.
 pub fn set_declare_source(declare: &mut DeclareOwned, node_id: u16) {
-    if ext_nodeid::set_source(&mut declare.extensions, node_id) {
-        declare.header |= DECLARE_FLAG_Z;
-    } else {
-        declare.header &= !DECLARE_FLAG_Z;
-    }
+    let present = ext_nodeid::set_source(&mut declare.extensions, node_id);
+    ext_nodeid::sync_header_z(&mut declare.header, present);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::declare_build::build_declare_subscriber;
-    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z};
+    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};
     use alloc::vec;
     use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
     use wz_codecs::ext_zint::ExtZint;
@@ -118,7 +109,7 @@ mod tests {
         // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (sole / last entry).
         assert_eq!(exts[0].header, 0x33);
         // Declare-level Z bit set because a chain is now present.
-        assert_eq!(d.header & DECLARE_FLAG_Z, DECLARE_FLAG_Z);
+        assert_eq!(d.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z);
     }
 
     #[test]
@@ -128,7 +119,7 @@ mod tests {
         set_declare_source(&mut d, 0);
         assert_eq!(read_declare_source(&d), 0);
         assert!(d.extensions.is_none(), "the sole ext is dropped to None");
-        assert_eq!(d.header & DECLARE_FLAG_Z, 0, "Declare Z bit cleared");
+        assert_eq!(d.header & MESSAGE_FLAG_Z, 0, "Declare Z bit cleared");
     }
 
     #[test]
@@ -146,7 +137,7 @@ mod tests {
         let mut d = declare_sub();
         // Seed a pre-existing (non-nodeid) extension.
         d.extensions = Some(vec![other_ext()]);
-        d.header |= DECLARE_FLAG_Z;
+        d.header |= MESSAGE_FLAG_Z;
 
         set_declare_source(&mut d, 7);
         let exts = d.extensions.as_ref().expect("chain present");
@@ -162,8 +153,8 @@ mod tests {
         assert_eq!(exts.len(), 1);
         assert_eq!(exts[0].header, 0x01 | EXT_ENC_Z64, "Z bit cleared (last)");
         assert_eq!(
-            d.header & DECLARE_FLAG_Z,
-            DECLARE_FLAG_Z,
+            d.header & MESSAGE_FLAG_Z,
+            MESSAGE_FLAG_Z,
             "chain still present"
         );
     }

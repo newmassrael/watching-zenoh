@@ -32,12 +32,6 @@ use wz_codecs::push::PushOwned;
 
 use crate::ext_nodeid::{self, EXT_ENC_Z64};
 
-/// The Push-level header `Z` bit (zenoh `push.rs` `Z = 1 << 7`): the extension
-/// chain is present. The ONE field that differs from the Declare twin — every
-/// other part of the `ext_nodeid` edit lives in the shared
-/// [`ext_nodeid`](crate::ext_nodeid) SSOT.
-const PUSH_FLAG_Z: u8 = 0x80;
-
 /// Read the routing-context source `node_id` from a Push's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
@@ -52,11 +46,8 @@ pub fn read_push_source(push: &PushOwned) -> u16 {
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
 /// Push-level header `Z` flag to the resulting chain.
 pub fn set_push_source(push: &mut PushOwned, node_id: u16) {
-    if ext_nodeid::set_source(&mut push.extensions, node_id) {
-        push.header |= PUSH_FLAG_Z;
-    } else {
-        push.header &= !PUSH_FLAG_Z;
-    }
+    let present = ext_nodeid::set_source(&mut push.extensions, node_id);
+    ext_nodeid::sync_header_z(&mut push.header, present);
 }
 
 /// The wz-proprietary mesh-internal HOP-LIMIT extension id — `0x0a`, a FREE id
@@ -102,22 +93,19 @@ pub fn read_push_hoplimit(push: &PushOwned) -> Option<u16> {
 /// `ext_nodeid` source on the same chain — the two ride distinct ids — and the
 /// resulting chain is id-ascending `[nodeid, hoplimit]` when both are present.
 pub fn set_push_hoplimit(push: &mut PushOwned, hop: u16) {
-    if ext_nodeid::set_z64_ext(
+    let present = ext_nodeid::set_z64_ext(
         &mut push.extensions,
         HOPLIMIT_EXT_ID,
         HOPLIMIT_EXT_HEADER,
         Some(hop as u64),
-    ) {
-        push.header |= PUSH_FLAG_Z;
-    } else {
-        push.header &= !PUSH_FLAG_Z;
-    }
+    );
+    ext_nodeid::sync_header_z(&mut push.header, present);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z};
+    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};
     use crate::push_build::build_push_literal;
     use alloc::vec;
     use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -159,7 +147,7 @@ mod tests {
         // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (sole / last entry).
         assert_eq!(exts[0].header, 0x33);
         // Push-level Z bit set because a chain is now present.
-        assert_eq!(p.header & PUSH_FLAG_Z, PUSH_FLAG_Z);
+        assert_eq!(p.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z);
     }
 
     #[test]
@@ -169,7 +157,7 @@ mod tests {
         set_push_source(&mut p, 0);
         assert_eq!(read_push_source(&p), 0);
         assert!(p.extensions.is_none(), "the sole ext is dropped to None");
-        assert_eq!(p.header & PUSH_FLAG_Z, 0, "Push Z bit cleared");
+        assert_eq!(p.header & MESSAGE_FLAG_Z, 0, "Push Z bit cleared");
     }
 
     #[test]
@@ -187,7 +175,7 @@ mod tests {
         let mut p = push();
         // Seed a pre-existing (non-nodeid) extension.
         p.extensions = Some(vec![other_ext()]);
-        p.header |= PUSH_FLAG_Z;
+        p.header |= MESSAGE_FLAG_Z;
 
         set_push_source(&mut p, 7);
         let exts = p.extensions.as_ref().expect("chain present");
@@ -202,7 +190,11 @@ mod tests {
         let exts = p.extensions.as_ref().expect("other ext remains");
         assert_eq!(exts.len(), 1);
         assert_eq!(exts[0].header, 0x01 | EXT_ENC_Z64, "Z bit cleared (last)");
-        assert_eq!(p.header & PUSH_FLAG_Z, PUSH_FLAG_Z, "chain still present");
+        assert_eq!(
+            p.header & MESSAGE_FLAG_Z,
+            MESSAGE_FLAG_Z,
+            "chain still present"
+        );
     }
 
     /// c3c-3 debt C2 — DIFFERENTIAL byte-parity for the Push `ext_nodeid` (NOT a
@@ -259,7 +251,11 @@ mod tests {
         assert_eq!(read_push_hoplimit(&p), None, "absent before any set");
         set_push_hoplimit(&mut p, 5);
         assert_eq!(read_push_hoplimit(&p), Some(5));
-        assert_eq!(p.header & PUSH_FLAG_Z, PUSH_FLAG_Z, "chain now present");
+        assert_eq!(
+            p.header & MESSAGE_FLAG_Z,
+            MESSAGE_FLAG_Z,
+            "chain now present"
+        );
     }
 
     #[test]

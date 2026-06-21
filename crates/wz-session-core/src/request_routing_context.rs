@@ -37,12 +37,6 @@ use wz_codecs::request::RequestOwned;
 use crate::ext_nodeid;
 use crate::query_mode::{QueryTarget, TARGET_EXT_ID};
 
-/// The Request-level header `Z` bit (zenoh `request::flag::Z = 1 << 7`): the
-/// extension chain is present. Identical bit to the Push / Declare twins, but on
-/// the Request struct — the ONE field that differs; the rest of the edit lives
-/// in the shared [`ext_nodeid`](crate::ext_nodeid) SSOT.
-const REQUEST_FLAG_Z: u8 = 0x80;
-
 /// Read the routing-context source `node_id` from a Request's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
@@ -57,11 +51,8 @@ pub fn read_request_source(request: &RequestOwned) -> u16 {
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
 /// Request-level header `Z` flag to the resulting chain.
 pub fn set_request_source(request: &mut RequestOwned, node_id: u16) {
-    if ext_nodeid::set_source(&mut request.extensions, node_id) {
-        request.header |= REQUEST_FLAG_Z;
-    } else {
-        request.header &= !REQUEST_FLAG_Z;
-    }
+    let present = ext_nodeid::set_source(&mut request.extensions, node_id);
+    ext_nodeid::sync_header_z(&mut request.header, present);
 }
 
 /// Read the [`QueryTarget`] a routed Query carries in its `ext_target`
@@ -82,7 +73,7 @@ pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z};
+    use crate::ext_nodeid::{EXT_ENC_Z64, EXT_FLAG_Z, MESSAGE_FLAG_Z};
     use crate::request_build::build_request_query;
     use alloc::vec;
     use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -111,7 +102,7 @@ mod tests {
             "builder emits no Request-level exts"
         );
         assert_eq!(
-            r.header & REQUEST_FLAG_Z,
+            r.header & MESSAGE_FLAG_Z,
             0,
             "Z bit clear with no ext chain"
         );
@@ -134,7 +125,7 @@ mod tests {
         // 0x03 (id) | 0x10 (M) | 0x20 (Z64), Z clear (sole / last entry).
         assert_eq!(exts[0].header, 0x33);
         // Request-level Z bit set because a chain is now present.
-        assert_eq!(r.header & REQUEST_FLAG_Z, REQUEST_FLAG_Z);
+        assert_eq!(r.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z);
     }
 
     #[test]
@@ -184,7 +175,7 @@ mod tests {
         set_request_source(&mut r, 0);
         assert_eq!(read_request_source(&r), 0);
         assert!(r.extensions.is_none(), "the sole ext is dropped to None");
-        assert_eq!(r.header & REQUEST_FLAG_Z, 0, "Request Z bit cleared");
+        assert_eq!(r.header & MESSAGE_FLAG_Z, 0, "Request Z bit cleared");
     }
 
     #[test]
@@ -202,7 +193,7 @@ mod tests {
         let mut r = request();
         // Seed a pre-existing (non-nodeid) extension.
         r.extensions = Some(vec![other_ext()]);
-        r.header |= REQUEST_FLAG_Z;
+        r.header |= MESSAGE_FLAG_Z;
 
         set_request_source(&mut r, 7);
         let exts = r.extensions.as_ref().expect("chain present");
@@ -217,7 +208,7 @@ mod tests {
         let exts = r.extensions.as_ref().expect("other ext remains");
         assert_eq!(exts.len(), 1);
         assert_eq!(exts[0].header, 0x01 | EXT_ENC_Z64, "Z bit cleared (last)");
-        assert_eq!(r.header & REQUEST_FLAG_Z, REQUEST_FLAG_Z, "chain present");
+        assert_eq!(r.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z, "chain present");
     }
 
     #[test]
