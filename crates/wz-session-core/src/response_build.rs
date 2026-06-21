@@ -320,6 +320,57 @@ pub fn build_response_err_aliased(
     })
 }
 
+/// Build a `Response(Err)` carrying the EMPTY keyexpr — the shape zenoh's
+/// per-query `QueryCleanup::run` routes back on a query timeout: a
+/// `Response { wire_expr: WireExpr::empty(), payload: Err("Timeout") }`
+/// (`net/routing/dispatcher/queries.rs:312-330`). Unlike the literal / aliased
+/// Err builders this carries NO keyexpr (id=0, no suffix, N flag clear): a
+/// timeout reply has no resource to name, only the request_id it closes and the
+/// error payload. The relay's tick sweep
+/// (`linkstate_forward.rs::reap_timed_out_queries`) emits this ahead of the
+/// closing `ResponseFinal`, so the querier sees an explicit timeout error rather
+/// than a silent empty result.
+///
+/// Wire shape (empty-keyexpr case):
+///
+/// ```text
+///   [Response.header = _Z_MID_N_RESPONSE(0x1B) | M(0x40, Local arm)]  // no N
+///   VLE(request_id)
+///   wireexpr Local: VLE(id=0)                                          // no suffix
+///   [Err.header = _Z_MID_Z_ERR(0x05)]                                  // no E, no Z
+///   VLE(payload.len())
+///   payload bytes
+/// ```
+#[cfg(feature = "codec-response")]
+pub fn build_response_err_empty(
+    request_id: u64,
+    payload: &[u8],
+) -> Result<ResponseOwned, CodecError> {
+    // W3: bounded payload copy in, fallible past declared capacity.
+    Ok(ResponseOwned {
+        // MID only; N (suffix) clear — the empty keyexpr carries no suffix. M
+        // (0x40) is codegen-derived from the Local arm on encode.
+        header: 0x1B,
+        request_id,
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                id: 0,
+                suffix_len: None,
+                suffix: None,
+            }),
+        },
+        extensions: None,
+        body: ResponseOwnedVariant::CodecZenohErr(ErrOwned {
+            // MID 0x05 only; no E (encoding), no Z (exts).
+            header: 0x05,
+            encoding: None,
+            extensions: None,
+            payload_len: payload.len() as u64,
+            payload: owned_bytes(payload)?,
+        }),
+    })
+}
+
 /// R121j-2b — fluent builder for `Response(Reply)` that composes the
 /// Reply-layer + Response-layer options on top of the minimal-shape
 /// baseline provided by [`build_response_reply_literal`] /
@@ -989,6 +1040,42 @@ mod tests {
                 assert_eq!(err.payload.as_slice(), b"fail");
             }
             _ => panic!("Response.body must be CodecZenohErr"),
+        }
+    }
+
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn build_response_err_empty_emits_empty_keyexpr_wire_bytes() {
+        // The timeout Err zenoh's QueryCleanup routes: empty keyexpr (id=0, no
+        // suffix, N clear) + Err("Timeout"). rid=42, payload "fail".
+        //   Response.header = MID(0x1B) | M(0x40) = 0x5B   (no N)
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr Local: id=0                            (no suffix_len/suffix)
+        //   Err.header = 0x05
+        //   payload_len(4) = 0x04, "fail"
+        let msg = build_response_err_empty(42, b"fail").unwrap();
+        let mut expected = vec![0x5B, 0x2A, 0x00, 0x05, 0x04];
+        expected.extend_from_slice(b"fail");
+        assert_eq!(
+            msg.wire(),
+            expected,
+            "Response(Err) empty-keyexpr wire bytes must match zenoh's \
+             WireExpr::empty() timeout reply (queries.rs:312-330)",
+        );
+        // Inner-arm sanity: the body is an Err carrying the payload, and the
+        // keyexpr is the empty local wireexpr (id=0, no suffix).
+        match &msg.body {
+            ResponseOwnedVariant::CodecZenohErr(err) => {
+                assert_eq!(err.payload.as_slice(), b"fail");
+            }
+            _ => panic!("Response.body must be CodecZenohErr"),
+        }
+        match &msg.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 0, "empty keyexpr id=0");
+                assert!(w.suffix.is_none(), "empty keyexpr carries no suffix");
+            }
+            _ => panic!("keyexpr must be a Local wireexpr"),
         }
     }
 

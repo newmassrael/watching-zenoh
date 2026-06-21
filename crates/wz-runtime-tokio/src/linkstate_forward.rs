@@ -1655,16 +1655,21 @@ impl LinkstateForwarder {
     /// per-query `QueryCleanup::run` (`dispatcher/queries.rs:305-349`). The
     /// [`tick`](FaceForwarder::tick) calls this each coalescing window: it sweeps
     /// the pending table ([`expired`](PendingQueries::expired)) for entries whose
-    /// `ResponseFinal` never arrived on a still-up face and, for each, routes a
-    /// synthesized `ResponseFinal` back to the querier — so the upstream relay
-    /// frees ITS entry and the querier's `get()` terminates, exactly zenoh's
-    /// `finalize_pending_query`. (zenoh ALSO routes an `Err("Timeout")` reply
-    /// ahead of the final; wz omits the Err body — originating a synthetic Err
-    /// Response is a separate codec-build atom, and the relay-layer correctness
-    /// the timeout exists for, no leak + no hang, is the final alone. The
-    /// querier-visible "timeout vs empty" distinction pairs with the deferred
-    /// Session-API client path.) The `expired` borrow is released before the
-    /// per-entry [`fan_out`](Self::fan_out) re-borrows the faces table.
+    /// `ResponseFinal` never arrived on a still-up face and, for each, routes two
+    /// synthesized messages back to the querier — exactly zenoh's `run()`: first
+    /// an `Err("Timeout")` reply (`route_send_response`), then the closing
+    /// `ResponseFinal` (`finalize_pending_query`). The final is the load-bearing
+    /// part (it frees the upstream relay's entry and terminates the querier's
+    /// `get()`); the Err gives the querier an explicit timeout error rather than
+    /// a silent empty result. Both carry the recorded upstream rid and unicast to
+    /// the recorded inbound face.
+    ///
+    /// Multi-hop note: an intermediate relay forwards the closing final (no
+    /// keyexpr) but may drop the empty-keyexpr Err at its `forward_response`
+    /// keyexpr resolution — the query still terminates (the final always
+    /// propagates); the multi-hop Err is graceful-degrade until the multi-hop e2e
+    /// path lands. The `expired` borrow is released before the per-entry
+    /// [`fan_out`](Self::fan_out) re-borrows the faces table.
     fn reap_timed_out_queries(&self) {
         let reaped = self.pending.borrow_mut().expired(Instant::now());
         if reaped.is_empty() {
@@ -1672,9 +1677,22 @@ impl LinkstateForwarder {
         }
         self.timed_out.set(self.timed_out.get() + reaped.len());
         for eq in reaped {
-            // Synthesize the closing final via the SSOT builder (the same
-            // `ResponseFinalOwned` an inbound final would forward), rewritten to
-            // the recorded upstream rid, and unicast it back to the inbound face.
+            // 1) The Err("Timeout") reply, empty keyexpr (zenoh WireExpr::empty()),
+            //    rid rewritten to the recorded upstream rid (the SSOT builder; the
+            //    tiny payload copy cannot overflow, so a build error just skips the
+            //    Err — the closing final below is the load-bearing part).
+            if let Ok(err_msg) = wz_session_core::response_build::build_response_err_empty(
+                eq.inbound_rid,
+                b"Timeout",
+            ) {
+                let _ = self.fan_out(true, None, |id, _zid| {
+                    Ok((id == eq.inbound)
+                        .then(|| NetworkMessage::Response(Box::new(err_msg.clone()))))
+                });
+            }
+            // 2) The closing final via the SSOT builder (the same
+            //    `ResponseFinalOwned` an inbound final would forward), rewritten to
+            //    the recorded upstream rid, unicast back to the inbound face.
             let final_msg =
                 wz_session_core::response_final_build::build_response_final(eq.inbound_rid);
             let _ = self.fan_out(true, None, |id, _zid| {
@@ -5852,16 +5870,37 @@ mod tests {
         // the TIMEOUT routed (the forwarded Query already sits in sink_c).
         sink_c.reset();
 
-        // C never replies. The tick sweep reaps the expired entry and routes the
-        // closing ResponseFinal back to the querier side A (FaceId 0), the
-        // request_id rewritten to A's original rid 99 — exactly what an inbound
-        // final would have carried.
+        // C never replies. The tick sweep reaps the expired entry and routes two
+        // messages back to the querier side A (FaceId 0), exactly zenoh
+        // QueryCleanup::run: an Err("Timeout") reply THEN the closing
+        // ResponseFinal, both with the request_id rewritten to A's original 99.
         fwd.tick();
         assert_eq!(fwd.pending_len(), 0, "the timeout freed the pending entry");
         assert_eq!(fwd.pending_timed_out(), 1, "one query reaped by the sweep");
-        assert_eq!(sink_a.frame_count(), 1, "a closing final routed back to A");
         assert_eq!(
-            forwarded_response_final(&sink_a.frame_bytes(0)).request_id,
+            sink_a.frame_count(),
+            2,
+            "an Err(Timeout) reply + the closing final routed back to A"
+        );
+        // Frame 0: the Err("Timeout") reply, rid rewritten to 99.
+        let err = forwarded_response(&sink_a.frame_bytes(0));
+        assert_eq!(
+            err.request_id, 99,
+            "the timeout Err carries the querier's rid"
+        );
+        match &err.body {
+            wz_codecs::response::ResponseOwnedVariant::CodecZenohErr(e) => {
+                assert_eq!(
+                    e.payload.as_slice(),
+                    b"Timeout",
+                    "the timeout reply body is the Timeout marker"
+                );
+            }
+            other => panic!("expected an Err(Timeout) reply, got {other:?}"),
+        }
+        // Frame 1: the closing final, rid rewritten to 99.
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(1)).request_id,
             99,
             "the synthesized final carries the querier's rid"
         );

@@ -45794,6 +45794,46 @@
         "LOCAL UNPUSHED: R311uf committed locally on origin/main=5a335ed; host-gated (full run-ci once before the next batch push). North-star beyond §5.16: untouched Storage(§5.11) / SHM."
       ]
     },
+    "Round 311ug": {
+      "decision_summary": "R311ug: query-timeout Err('Timeout') reply — completes R311uf's QueryCleanup port to full zenoh fidelity. The tick timeout sweep now routes an Err('Timeout') reply (empty keyexpr = zenoh WireExpr::empty()) AHEAD of the closing ResponseFinal, exactly zenoh QueryCleanup::run (route_send_response then finalize_pending_query). New build_response_err_empty SSOT builder (the empty-keyexpr Err shape: id=0, no suffix, N clear). Single-relay-faithful; the multi-hop Err is graceful-degrade (an intermediate relay forwards the keyexpr-less final but may drop the empty-keyexpr Err at forward_response resolution; the query still terminates via the final).",
+      "changes_bullets": [
+        "wz-session-core response_build.rs: new build_response_err_empty(request_id, payload) — the empty-keyexpr Response(Err) shape (header 0x1B = MID, no N; WireexprLocal{id:0, no suffix}; Err body), the wz form of zenoh's QueryCleanup timeout reply Response{ wire_expr: WireExpr::empty(), payload: Err('Timeout') } (dispatcher/queries.rs:312-330). The empty-keyexpr sibling of build_response_err_literal/_aliased (both assert a keyexpr; a timeout reply names no resource).",
+        "linkstate_forward.rs reap_timed_out_queries: now sends TWO messages per reaped entry, exactly zenoh QueryCleanup::run — first the Err('Timeout') reply (build_response_err_empty, rid rewritten to the upstream rid, fan_out to the inbound face), then the closing ResponseFinal (unchanged). The Err build is fallible (tiny payload, cannot overflow) — a build error skips just the Err, the load-bearing final still sends.",
+        "Multi-hop note (honest): the closing final (no keyexpr) forwards across relays unchanged; the empty-keyexpr Err may be dropped at an intermediate relay's forward_response keyexpr resolution, so the multi-hop Err is graceful-degrade until the multi-hop e2e path lands. Single-relay (the tested shape) is fully faithful: the querier gets Err('Timeout') + the final."
+      ],
+      "verification_bullets": [
+        "wz-session-core: build_response_err_empty_emits_empty_keyexpr_wire_bytes (exact wire bytes 0x5B|VLE(rid)|0x00|0x05|len|payload = zenoh WireExpr::empty() Err; inner-arm Err payload + empty Local keyexpr id=0/no-suffix). response_build 29/29; session-core default lib 153/153 no regression.",
+        "routing-peer lib 412/412 (the a_pending_query_times_out test now asserts BOTH frames: frame 0 = Err('Timeout') reply with rid rewritten to 99 + payload 'Timeout', frame 1 = the closing final with rid 99). base lib 277/277 no regression.",
+        "clippy -D clean (runtime-tokio routing-peer --all-targets, --no-default-features --features routing-peer, base; wz-session-core codec-response,alloc); fmt clean. Host gate only per the run-ci-batch policy; full run-ci runs once before the batch push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311ug = query-timeout Err('Timeout') reply: completes R311uf's QueryCleanup port to full zenoh fidelity (Err reply + closing final, the two messages zenoh's run() sends). New build_response_err_empty SSOT (empty-keyexpr Err). The relay query track's timeout path now matches zenoh: a queryable that dies without a final yields the querier an explicit Err('Timeout') + a clean query close, not a silent empty.",
+        "DEFERRED (carried, honest): (1) multi-hop Err forwarding — an intermediate relay's forward_response drops the empty-keyexpr Err at keyexpr resolution (the final still propagates, so the query terminates); pairs with the multi-hop e2e + Session-API client path. (2) per-query ext_timeout from the Request (wz uses one configured query_timeout). (3) QueryTarget::All vs BestMatching = a larger codec atom (Request has NO ext_target field, DeclareQueryable no completeness flag — both need codec/SCXML extension). (4) the multi-hop (2-relay) e2e test (heavy topology harness). (5) extauth / Session-API ACL / KeBoxTree.",
+        "LOCAL UNPUSHED: R311uf + R311ug on origin/main=5a335ed, committed locally; host-gated (full run-ci once before the next batch push). North-star beyond §5.16: untouched Storage(§5.11) / SHM."
+      ],
+      "publishable_decision_summary": "R311ug: query-timeout Err('Timeout') reply — completes R311uf's QueryCleanup port to full zenoh fidelity. The tick timeout sweep now routes an Err('Timeout') reply (empty keyexpr = zenoh WireExpr::empty()) AHEAD of the closing ResponseFinal, exactly zenoh QueryCleanup::run (route_send_response then finalize_pending_query). New build_response_err_empty SSOT builder (the empty-keyexpr Err shape: id=0, no suffix, N clear). Single-relay-faithful; the multi-hop Err is graceful-degrade (an intermediate relay forwards the keyexpr-less final but may drop the empty-keyexpr Err at forward_response resolution; the query still terminates via the final).",
+      "publishable_changes_bullets": [
+        "wz-session-core response_build.rs: new build_response_err_empty(request_id, payload) — the empty-keyexpr Response(Err) shape (header 0x1B = MID, no N; WireexprLocal{id:0, no suffix}; Err body), the wz form of zenoh's QueryCleanup timeout reply Response{ wire_expr: WireExpr::empty(), payload: Err('Timeout') } (dispatcher/queries.rs:312-330). The empty-keyexpr sibling of build_response_err_literal/_aliased (both assert a keyexpr; a timeout reply names no resource).",
+        "linkstate_forward.rs reap_timed_out_queries: now sends TWO messages per reaped entry, exactly zenoh QueryCleanup::run — first the Err('Timeout') reply (build_response_err_empty, rid rewritten to the upstream rid, fan_out to the inbound face), then the closing ResponseFinal (unchanged). The Err build is fallible (tiny payload, cannot overflow) — a build error skips just the Err, the load-bearing final still sends.",
+        "Multi-hop note (honest): the closing final (no keyexpr) forwards across relays unchanged; the empty-keyexpr Err may be dropped at an intermediate relay's forward_response keyexpr resolution, so the multi-hop Err is graceful-degrade until the multi-hop e2e path lands. Single-relay (the tested shape) is fully faithful: the querier gets Err('Timeout') + the final."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core: build_response_err_empty_emits_empty_keyexpr_wire_bytes (exact wire bytes 0x5B|VLE(rid)|0x00|0x05|len|payload = zenoh WireExpr::empty() Err; inner-arm Err payload + empty Local keyexpr id=0/no-suffix). response_build 29/29; session-core default lib 153/153 no regression.",
+        "routing-peer lib 412/412 (the a_pending_query_times_out test now asserts BOTH frames: frame 0 = Err('Timeout') reply with rid rewritten to 99 + payload 'Timeout', frame 1 = the closing final with rid 99). base lib 277/277 no regression.",
+        "clippy -D clean (runtime-tokio routing-peer --all-targets, --no-default-features --features routing-peer, base; wz-session-core codec-response,alloc); fmt clean. Host gate only per the run-ci-batch policy; full run-ci runs once before the batch push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ug = query-timeout Err('Timeout') reply: completes R311uf's QueryCleanup port to full zenoh fidelity (Err reply + closing final, the two messages zenoh's run() sends). New build_response_err_empty SSOT (empty-keyexpr Err). The relay query track's timeout path now matches zenoh: a queryable that dies without a final yields the querier an explicit Err('Timeout') + a clean query close, not a silent empty.",
+        "DEFERRED (carried, honest): (1) multi-hop Err forwarding — an intermediate relay's forward_response drops the empty-keyexpr Err at keyexpr resolution (the final still propagates, so the query terminates); pairs with the multi-hop e2e + Session-API client path. (2) per-query ext_timeout from the Request (wz uses one configured query_timeout). (3) QueryTarget::All vs BestMatching = a larger codec atom (Request has NO ext_target field, DeclareQueryable no completeness flag — both need codec/SCXML extension). (4) the multi-hop (2-relay) e2e test (heavy topology harness). (5) extauth / Session-API ACL / KeBoxTree.",
+        "LOCAL UNPUSHED: R311uf + R311ug on origin/main=5a335ed, committed locally; host-gated (full run-ci once before the next batch push). North-star beyond §5.16: untouched Storage(§5.11) / SHM."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
