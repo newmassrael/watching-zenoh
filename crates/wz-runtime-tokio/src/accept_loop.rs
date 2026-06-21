@@ -516,7 +516,7 @@ where
     let mut faces: BTreeSet<FaceId> = BTreeSet::new();
     // The zids of currently-held faces — so a gossip-autoconnect dial-intent for a
     // peer this node ALREADY holds a face to is skipped (zenoh's
-    // `get_transport_unicast(&zid).is_some()` dedup, `gossip.rs:451`). Kept in
+    // `get_transport_unicast(&zid).is_some()` dedup, `gossip.rs:452`). Kept in
     // lockstep with `faces` from each `Face::peer_zid` at face-up / face-down; a
     // face whose handshake never surfaced a zid is simply not tracked (it matches
     // no intent). Empty and untouched when autoconnect is off (`dial_intents`

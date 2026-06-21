@@ -163,6 +163,23 @@ const fn default_gossip_target(whatami: WhatAmI) -> WhatAmIMatcher {
     }
 }
 
+/// The default gossip-AUTOCONNECT matcher for a node of role `whatami` — zenoh's
+/// `scouting.gossip.autoconnect` per-local default
+/// (`commons/zenoh-config/src/defaults.rs`), the SIBLING of
+/// [`default_gossip_target`] and DELIBERATELY a different profile: a PEER
+/// autoconnects to discovered routers and peers (`router|peer`), but a ROUTER
+/// autoconnects to NOBODY (the empty set — routers are reached via configured
+/// links, not gossip-dialed), as does a CLIENT. The role-correct matcher a
+/// deploy passes to [`AutoConnect::new`] when it opts a node into autoconnect, so
+/// the `router|peer` literal is never re-hardcoded at the (role-blind) call site
+/// — a router that hardcoded `router|peer` would wrongly dial discovered peers.
+pub const fn default_autoconnect_matcher(whatami: WhatAmI) -> WhatAmIMatcher {
+    match whatami {
+        WhatAmI::Peer => WhatAmIMatcher::empty().router().peer(),
+        WhatAmI::Router | WhatAmI::Client => WhatAmIMatcher::empty(),
+    }
+}
+
 pub struct LinkstateForwarder {
     /// Shared single-task topology graph (`Rc<RefCell>`, not `Mutex`).
     net: Rc<RefCell<LinkstateNetwork>>,
@@ -1892,6 +1909,32 @@ mod tests {
             default_gossip_target(WhatAmI::Client),
             WhatAmIMatcher::empty(),
             "a client floods no link-state"
+        );
+    }
+
+    #[test]
+    fn default_autoconnect_matcher_is_per_local_whatami_and_differs_from_target() {
+        // zenoh scouting.gossip.autoconnect default: a PEER autoconnects to
+        // router|peer, but a ROUTER and a CLIENT autoconnect to NOBODY -- the
+        // deliberate asymmetry vs gossip.target (where a router DOES gossip to
+        // router|peer). A router that reused the target matcher here would wrongly
+        // dial discovered peers; the twin keeps the two profiles distinct.
+        let rp = WhatAmIMatcher::empty().router().peer();
+        assert_eq!(default_autoconnect_matcher(WhatAmI::Peer), rp);
+        assert_eq!(
+            default_autoconnect_matcher(WhatAmI::Router),
+            WhatAmIMatcher::empty(),
+            "a router autoconnects to nobody (unlike its gossip TARGET)"
+        );
+        assert_eq!(
+            default_autoconnect_matcher(WhatAmI::Client),
+            WhatAmIMatcher::empty()
+        );
+        // The router profiles differ between the two defaults -- the bug the twin
+        // prevents.
+        assert_ne!(
+            default_autoconnect_matcher(WhatAmI::Router),
+            default_gossip_target(WhatAmI::Router)
         );
     }
 

@@ -17,15 +17,18 @@
 //!   avoid).
 //!
 //! WHERE IT LIVES. zenoh defines `AutoConnect` in `net/common.rs` (a leaf
-//! shared module, sibling to the `network.rs` topology graph) and only the
-//! gossip HAT (`hat/p2p_peer/gossip.rs`) HOLDS an instance as a field. wz keeps
-//! the same split: the type lives here, in the routing-graph crate — the lowest
-//! crate that has both [`Zid`](crate::Zid) (for the zid tie-break) and
-//! [`WhatAmIMatcher`] (for the role gate) — and the runtime driver
-//! (`linkstate_forward`, the gossip-HAT analog) will hold an `AutoConnect`
-//! field that feeds its dial decision. This atom is the policy VOCABULARY; the
-//! discovery→dial wiring that calls [`should_autoconnect`](AutoConnect::should_autoconnect)
-//! is a later atom.
+//! shared module, sibling to the `network.rs` topology graph); the instance is a
+//! field of the gossip-side topology graph `Network` itself
+//! (`hat/p2p_peer/gossip.rs:101`), which is also where the gate + dial fire
+//! (`should_autoconnect` then `connect_peer`, inside the graph's ingest). wz
+//! keeps the type here, in the routing-graph crate — the lowest crate that has
+//! both [`Zid`](crate::Zid) (for the zid tie-break) and [`WhatAmIMatcher`] (for
+//! the role gate) — while the runtime driver (`linkstate_forward`) holds the
+//! `AutoConnect` field and applies the gate at emit. wz splits the gate
+//! (forwarder, sync) from the dial (accept-loop, async) over a channel because
+//! its sync ingest cannot open an outbound link; zenoh keeps both in the graph
+//! ingest. The whole chain (policy + emit + dial) is wired; activating it in a
+//! deploy is the remaining step.
 //!
 //! SIMPLIFICATION vs zenoh. zenoh sources the matcher and strategy from the
 //! scouting config, layered as `ModeDependent<TargetDependentValue<..>>` (per

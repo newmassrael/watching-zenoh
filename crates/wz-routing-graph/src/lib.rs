@@ -24,10 +24,11 @@
 //! advertisement is withdrawn (zenoh `network.rs:786,948,990`).
 //!
 //! EXPLICITLY DEFERRED (tracked, not silently dropped):
-//! - gossip-autoconnect DIAL wiring and the `local_mappings` forwarding table.
-//!   (The autoconnect POLICY vocabulary — [`AutoConnect`] / [`AutoConnectStrategy`],
-//!   the role + zid tie-break — now exists; the discovery→dial seam that
-//!   consumes it is the next atom. The receive-side onward re-flood
+//! - the `local_mappings` forwarding table, and PRODUCTION ACTIVATION of
+//!   gossip-autoconnect. (The autoconnect chain is wired end to end in code —
+//!   the [`AutoConnect`] / [`AutoConnectStrategy`] policy, the driver's discovery
+//!   emit, and the accept-loop dial — but no deploy enables it yet, so it is
+//!   inert at runtime; a deploy opt-in is the remaining step. The onward re-flood
 //!   `propagate_link_states`, `network.rs:804`, is DONE: the graph supplies
 //!   the [`build_linkstate_split`] payload builder — `new` nodes full,
 //!   `updated` nodes links-only, the D4 `Details` split — and the per-face
@@ -71,8 +72,8 @@ pub use wz_codecs::whatami::WhatAmI;
 mod autoconnect;
 /// The gossip autoconnect policy ([`AutoConnect`] / [`AutoConnectStrategy`]) —
 /// the role + zid tie-break a discovering peer consults before dialing a node
-/// it learned off a gossip flood. The policy vocabulary; the driver holds an
-/// instance and the discovery→dial wiring consumes it in a later atom.
+/// it learned off a gossip flood. The driver (`linkstate_forward`) holds an
+/// instance and applies the gate at its discovery emit; the accept-loop dials.
 pub use autoconnect::{AutoConnect, AutoConnectStrategy};
 
 /// Maximum zid length in bytes (zenoh `ZenohIdProto::MAX_SIZE`). zenoh
@@ -1297,16 +1298,26 @@ impl LinkstateNetwork {
                     let was_placeholder = node.sn == 0;
                     node.sn = ls.sn;
                     node.links = ls.links;
-                    // A node first seen as a link TARGET is a whatami-less
-                    // placeholder (`ensure_node`); its own real link-state — which
-                    // always carries a validated whatami — is where the role
-                    // becomes known, so record it here too, not only on the fresh
-                    // insert. For an already-known node re-advertising this is an
-                    // idempotent reaffirmation (a peer's role is stable). Without
-                    // it a placeholder->real transition would leave whatami `None`
-                    // forever (the node is `changes.new` only once), so a role
-                    // gate — the gossip-autoconnect emit — would skip it for good.
-                    node.whatami = Some(ls.whatami);
+                    // Backfill the role of a node first seen as a link TARGET (a
+                    // whatami-less `ensure_node` placeholder) when its own
+                    // link-state arrives via this update path. ONLY when the
+                    // stored role is still `None`: a known role is never
+                    // overwritten, so a re-advertisement that OMITS the W field
+                    // (which `convert_to_local_link_states` defaults to Router)
+                    // cannot flip an established Peer to Router.
+                    //
+                    // A wz-LOCAL divergence, NOT zenoh parity: zenoh's update path
+                    // never touches `whatami` (`network.rs:711-722` updates
+                    // sn/links/locators only) because its gossip reads the role
+                    // off the incoming ENTRY (`ls.whatami`), not the graph node.
+                    // wz's autoconnect emit reads `node.whatami` back from the
+                    // graph (the `Changes` it gets carry only zids), so wz must
+                    // keep a placeholder's stored role correct here. The textbook
+                    // alternative — thread the entry whatami through `Changes` so
+                    // the emit never reads the graph — is the larger follow-up.
+                    if node.whatami.is_none() {
+                        node.whatami = Some(ls.whatami);
+                    }
                     // preserve-on-None: a links-only re-advertisement (no `L`
                     // field) keeps the locators learned when the node was new;
                     // only an entry that actually carries locators overwrites
@@ -1934,9 +1945,11 @@ mod tests {
         // 0x07 relays node 0xAA (psid 10) behind it, so 0xAA is reachable and
         // the prune keeps it. 0xAA is listed BEFORE the relay so it is
         // inserted from its own entry (whatami Some(2)) rather than as a
-        // whatami-None placeholder created by the relay's advertisement —
-        // process_linkstates, like zenoh, sets whatami only at node creation
-        // (network.rs:711-722 updates sn/links, not whatami).
+        // whatami-None placeholder created by the relay's advertisement. (The
+        // update path DOES backfill a placeholder's role from its own later entry
+        // — see `a_placeholder_nodes_whatami_is_set_when_its_own_entry_arrives` —
+        // but only while the stored role is None; here 0xAA takes the insert arm,
+        // recording its role directly.)
         let changes = net.ingest_linkstate_list(
             link,
             list(vec![

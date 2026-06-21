@@ -44952,6 +44952,54 @@
         "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl(9658f0f)+311tm(3672556)+311tn on origin/main=4394d5a (4 ahead). Host lanes verified (driver 374 routing-peer + 277 base, clippy both, fmt, demo). full run-ci + idle before push; push only after explicit consent."
       ]
     },
+    "Round 311to": {
+      "decision_summary": "R311to: session review (4-agent adversarial) refutes the 'textbook' self-claim again. Remediate verified honesty+correctness+SSOT: safe placeholder-whatami, default_autoconnect_matcher twin, honest divergence docs.",
+      "changes_bullets": [
+        "Correctness: the A5b placeholder-whatami backfill (lib.rs) now sets node.whatami only when currently None -- a known role is never overwritten, so a W-absent re-advertisement (convert defaults absent W to Router) can no longer flip an established Peer to Router.",
+        "Honesty: that backfill is re-documented as a wz-LOCAL divergence (zenoh's update path never touches whatami; its gossip reads ls.whatami off the entry, wz reads node.whatami back); the contradicting test comment ('like zenoh, sets whatami only at creation') is corrected.",
+        "SSOT: new default_autoconnect_matcher(whatami) twin of default_gossip_target -- zenoh scouting.gossip.autoconnect (peer->router|peer, ROUTER->empty, client->empty), the deliberately-different profile, so a future --autoconnect deploy never re-hardcodes router|peer (wrong for a router). +test.",
+        "Honesty: stale 'next atom' module docs (graph lib.rs + autoconnect.rs + the re-export doc) corrected -- the dial chain IS wired (accept_loop), only production activation remains. AutoConnect doc fixed: zenoh's topology graph Network holds the instance, not 'the gossip HAT'. gossip.rs:451->452 citation."
+      ],
+      "verification_bullets": [
+        "graph 57 tests (placeholder test still passes with the is_none() guard), driver 375 routing-peer (+1 default_autoconnect_matcher: per-whatami + differs-from-target). clippy -D clean (graph + driver routing-peer + base no-feature); fmt clean.",
+        "4 independent adversarial reviewers (correctness/architecture/SSOT/honesty) each ran git diff 4394d5a..HEAD + read the zenoh reference; convergent findings were RE-VERIFIED against the code before remediation, not taken on the agents' word.",
+        "Direct-read confirmations: the placeholder/test-comment contradiction (lib.rs:1309 vs the test), the W-absent->Router flip (convert defaults None to Router), and the two-faces-one-zid remove_link-by-zid prune (lib.rs:802). Grounding: zenoh network.rs:711-722, gossip.rs, zenoh-config defaults.rs gossip.autoconnect."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311to = session-review remediation. The 4-agent adversarial review REFUTED the 'textbook/SSOT/north-star' self-claim AGAIN (recurring lesson: this trigger always needs independent review). Fixed the verified honesty + correctness + cheap-SSOT items.",
+        "STRUCTURAL FOLLOW-UP (real, NOT done, needs direction): (a) held_zids is a parallel set to `faces` = the write-only duplication the accept_loop doc explicitly warned against -- collapse `faces` into BTreeMap<FaceId, zid> as the single source.",
+        "STRUCTURAL: (b) demo --autoconnect opt-in -- autoconnect is inert in every binary (no production caller); (c) PRE-EXISTING (not this session): no zid-dedup at face establishment, so two faces to one zid -> remove_link removes the self-edge BY ZID (lib.rs:802) -> prunes a live peer. zenoh dedups at init_transport_unicast. Autoconnect's in-flight gap (dedup only vs established held_zids, not `opening`) would exacerbate it once wired -- gate activation on this.",
+        "STRUCTURAL: (d) gossip_target/autoconnect as Cell + &self setters vs zenoh's set-once-at-Network::new immutable (config-as-mutable-state, debatable); (e) first_dialable_addr is TCP-numeric-only, bypassing the dial_locator/plan_endpoint SSOT (drops DNS Named; fix when the richer-dial atom lands); (f) DialIntent.zid Vec<u8> defensible but propagates the pre-existing Face.peer_zid: Vec<u8> debt.",
+        "LOCAL UNPUSHED: 311tk..tn + 311to on origin/main=4394d5a (5 ahead). Host lanes verified (graph 57, driver 375 + base, clippy both, fmt). full run-ci + idle before push; push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311to: session review (4-agent adversarial) refutes the 'textbook' self-claim again. Remediate verified honesty+correctness+SSOT: safe placeholder-whatami, default_autoconnect_matcher twin, honest divergence docs.",
+      "publishable_changes_bullets": [
+        "Correctness: the A5b placeholder-whatami backfill (lib.rs) now sets node.whatami only when currently None -- a known role is never overwritten, so a W-absent re-advertisement (convert defaults absent W to Router) can no longer flip an established Peer to Router.",
+        "Honesty: that backfill is re-documented as a wz-LOCAL divergence (zenoh's update path never touches whatami; its gossip reads ls.whatami off the entry, wz reads node.whatami back); the contradicting test comment ('like zenoh, sets whatami only at creation') is corrected.",
+        "SSOT: new default_autoconnect_matcher(whatami) twin of default_gossip_target -- zenoh scouting.gossip.autoconnect (peer->router|peer, ROUTER->empty, client->empty), the deliberately-different profile, so a future --autoconnect deploy never re-hardcodes router|peer (wrong for a router). +test.",
+        "Honesty: stale 'next atom' module docs (graph lib.rs + autoconnect.rs + the re-export doc) corrected -- the dial chain IS wired (accept_loop), only production activation remains. AutoConnect doc fixed: zenoh's topology graph Network holds the instance, not 'the gossip HAT'. gossip.rs:451->452 citation."
+      ],
+      "publishable_verification_bullets": [
+        "graph 57 tests (placeholder test still passes with the is_none() guard), driver 375 routing-peer (+1 default_autoconnect_matcher: per-whatami + differs-from-target). clippy -D clean (graph + driver routing-peer + base no-feature); fmt clean.",
+        "4 independent adversarial reviewers (correctness/architecture/SSOT/honesty) each ran git diff 4394d5a..HEAD + read the zenoh reference; convergent findings were RE-VERIFIED against the code before remediation, not taken on the agents' word.",
+        "Direct-read confirmations: the placeholder/test-comment contradiction (lib.rs:1309 vs the test), the W-absent->Router flip (convert defaults None to Router), and the two-faces-one-zid remove_link-by-zid prune (lib.rs:802). Grounding: zenoh network.rs:711-722, gossip.rs, zenoh-config defaults.rs gossip.autoconnect."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311to = session-review remediation. The 4-agent adversarial review REFUTED the 'textbook/SSOT/north-star' self-claim AGAIN (recurring lesson: this trigger always needs independent review). Fixed the verified honesty + correctness + cheap-SSOT items.",
+        "STRUCTURAL FOLLOW-UP (real, NOT done, needs direction): (a) held_zids is a parallel set to `faces` = the write-only duplication the accept_loop doc explicitly warned against -- collapse `faces` into BTreeMap<FaceId, zid> as the single source.",
+        "STRUCTURAL: (b) demo --autoconnect opt-in -- autoconnect is inert in every binary (no production caller); (c) PRE-EXISTING (not this session): no zid-dedup at face establishment, so two faces to one zid -> remove_link removes the self-edge BY ZID (lib.rs:802) -> prunes a live peer. zenoh dedups at init_transport_unicast. Autoconnect's in-flight gap (dedup only vs established held_zids, not `opening`) would exacerbate it once wired -- gate activation on this.",
+        "STRUCTURAL: (d) gossip_target/autoconnect as Cell + &self setters vs zenoh's set-once-at-Network::new immutable (config-as-mutable-state, debatable); (e) first_dialable_addr is TCP-numeric-only, bypassing the dial_locator/plan_endpoint SSOT (drops DNS Named; fix when the richer-dial atom lands); (f) DialIntent.zid Vec<u8> defensible but propagates the pre-existing Face.peer_zid: Vec<u8> debt.",
+        "LOCAL UNPUSHED: 311tk..tn + 311to on origin/main=4394d5a (5 ahead). Host lanes verified (graph 57, driver 375 + base, clippy both, fmt). full run-ci + idle before push; push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
