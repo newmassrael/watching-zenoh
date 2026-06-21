@@ -105,6 +105,7 @@ use wz_session_core::push_build::{build_push_literal, set_push_keyexpr_literal};
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
+use wz_session_core::queryable_info::QueryableInfo;
 use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{read_request_source, set_request_source};
 use wz_session_core::response_build::set_response_keyexpr_literal;
@@ -209,6 +210,16 @@ pub const fn default_autoconnect_matcher(whatami: WhatAmI) -> WhatAmIMatcher {
     }
 }
 
+/// The interest table + the per-peer value to register into it, bundled for the
+/// shared [`forward_interest_declaration`](LinkstateForwarder::forward_interest_declaration)
+/// seam: the table's `V` ties the value's type (subs pass `((), &subs)`,
+/// queryables pass `(info, &qabls)`), and the bundle keeps the seam within the
+/// argument budget (a param-object, the R311lw precedent, not a `#[allow]`).
+struct InterestRegistration<'t, V> {
+    table: &'t RefCell<LinkstatepeerInterest<V>>,
+    value: V,
+}
+
 pub struct LinkstateForwarder {
     /// Shared single-task topology graph (`Rc<RefCell>`, not `Mutex`).
     net: Rc<RefCell<LinkstateNetwork>>,
@@ -234,7 +245,7 @@ pub struct LinkstateForwarder {
     /// [`interested_remote`](crate::linkstate_interest::LinkstatepeerInterest::interested_remote)
     /// view. `RefCell` by the same single-task contract as the graph — borrowed
     /// only for a handler's synchronous duration.
-    subs: RefCell<LinkstatepeerInterest>,
+    subs: RefCell<LinkstatepeerInterest<()>>,
     /// The linkstate-peer QUERYABLE interest table — the query-plane twin of
     /// [`subs`](Self#structfield.subs), learned from sourced `DeclareQueryable`s
     /// flooded across the mesh (zenoh's per-`Resource` `linkstatepeer_qabls`,
@@ -245,7 +256,7 @@ pub struct LinkstateForwarder {
     /// [`forward_queryable`](Self::forward_queryable); a peer's interest is
     /// purged whole on its face-down (`purge_detached_interest`). `RefCell` by
     /// the same single-task contract as `subs`.
-    qabls: RefCell<LinkstatepeerInterest>,
+    qabls: RefCell<LinkstatepeerInterest<QueryableInfo>>,
     /// The pending-query RETURN table (query-routing atom 3): the
     /// per-outbound-face `out qid -> (inbound face, inbound rid)` map that routes
     /// a routed Query's `Response` / `ResponseFinal` BACK to the querier — the wz
@@ -1269,7 +1280,7 @@ impl LinkstateForwarder {
     /// self-origination structure.
     pub fn declare_subscription(&self, keyexpr: &str) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
-        self.subs.borrow_mut().register(keyexpr, self_zid);
+        self.subs.borrow_mut().register(keyexpr, self_zid, ());
         // node_id 0 = self-originated (build_declare_subscriber emits no ext_nodeid);
         // literal keyexpr (mapping id 0 + suffix, the wz MVP form).
         let declare = build_declare_subscriber(0, 0, Some(keyexpr))?;
@@ -1363,9 +1374,19 @@ impl LinkstateForwarder {
         let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
             return;
         };
-        self.forward_interest_declaration(inbound, reliable, declare, wireexpr, &self.subs, |ke| {
-            build_declare_subscriber(0, 0, Some(ke))
-        });
+        // Subscriptions carry no per-peer value (V = ()); the value-diff gate
+        // reduces to new-peer for subs.
+        self.forward_interest_declaration(
+            inbound,
+            reliable,
+            declare,
+            wireexpr,
+            InterestRegistration {
+                table: &self.subs,
+                value: (),
+            },
+            |ke| build_declare_subscriber(0, 0, Some(ke)),
+        );
     }
 
     /// A sourced `DeclareQueryable` arrived on `inbound`: the queryable-plane
@@ -1382,12 +1403,25 @@ impl LinkstateForwarder {
         let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
             return;
         };
+        // The declared QueryableInfo (complete / distance) rides the DeclQueryable
+        // BODY's ext chain (R311ui/uj); read it so the qabls store records the
+        // peer's completeness — the value the value-diff gate compares and that
+        // BestMatching (atom 3) reads. Absent ext = zenoh DEFAULT (incomplete).
+        let info = match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(dq) => {
+                wz_session_core::queryable_info::read_queryable_info(dq.extensions.as_ref())
+            }
+            _ => wz_session_core::queryable_info::QueryableInfo::DEFAULT,
+        };
         self.forward_interest_declaration(
             inbound,
             reliable,
             declare,
             wireexpr,
-            &self.qabls,
+            InterestRegistration {
+                table: &self.qabls,
+                value: info,
+            },
             |ke| build_declare_queryable(0, 0, Some(ke)),
         );
     }
@@ -1421,13 +1455,13 @@ impl LinkstateForwarder {
     /// `UndeclareSubscriber` carries an ext_keyexpr), and the queryable retraction
     /// is deferred (the `UndeclQueryable` codec carries no keyexpr — see the
     /// `forward()` dispatch's UndeclareQueryable arm).
-    fn forward_interest_declaration(
+    fn forward_interest_declaration<V: PartialEq>(
         &self,
         inbound: FaceId,
         reliable: bool,
         declare: &DeclareOwned,
         wireexpr: &WireexprOwned,
-        table: &RefCell<LinkstatepeerInterest>,
+        reg: InterestRegistration<V>,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
         // The inbound face's zid + graph link AND the RESOLVED keyexpr, in one
@@ -1447,9 +1481,14 @@ impl LinkstateForwarder {
         else {
             return;
         };
-        // Register the resolved interest; re-flood ONLY on a new registration
-        // (the loop-bounding change-gate).
-        if !table.borrow_mut().register(&keyexpr, source_zid) {
+        // Register the resolved interest with its declared value; re-flood ONLY
+        // on a real change — a new peer OR a changed value (the loop-bounding
+        // value-diff change-gate, R311ul).
+        if !reg
+            .table
+            .borrow_mut()
+            .register(&keyexpr, source_zid, reg.value)
+        {
             return;
         }
         let children = self.net.borrow().tree_children_of(&source_zid);
@@ -1595,10 +1634,10 @@ impl LinkstateForwarder {
     /// change-gate still bounds any onward flood; the delta only narrows WHO is
     /// re-sent to. `table` selects the subscriber/queryable interest instance;
     /// `build` mints the per-flow carrier from the literal keyexpr.
-    fn re_advertise_interest(
+    fn re_advertise_interest<V>(
         &self,
         new_children: &[(Zid, Vec<Zid>)],
-        table: &RefCell<LinkstatepeerInterest>,
+        table: &RefCell<LinkstatepeerInterest<V>>,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
         if new_children.is_empty() {
@@ -5379,6 +5418,66 @@ mod tests {
             forwarded_declare_queryable_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
             Some("demo/q"),
             "the wire carrier is a literal DeclareQueryable (not a subscriber)",
+        );
+    }
+
+    #[test]
+    fn forward_queryable_stores_completeness_and_re_floods_only_on_a_value_change() {
+        // R311ul: forward_queryable READS the QueryableInfo from the
+        // DeclareQueryable body + stores it per-(key,peer), and the value-diff
+        // change-gate re-floods on a CHANGE (a complete flip) but not on a
+        // redundant re-declare. Observable via the re-flood to the tree child: an
+        // ingest that IGNORED the info would not detect the complete flip and so
+        // would NOT re-flood at step 3 — the test would fail.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // source-side (A = the source)
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // re-flood child
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05); // edge S-C
+        sink_a.reset();
+        sink_c.reset();
+
+        // A DeclareQueryable from A (node_id 0 = A-originated) carrying a
+        // QueryableInfo with the given `complete` flag.
+        let declare_with = |complete: bool| {
+            let mut d = build_declare_queryable(0, 0, Some("demo/q")).expect("build");
+            wz_session_core::declare_build::set_declare_queryable_info(
+                &mut d,
+                wz_session_core::queryable_info::QueryableInfo {
+                    complete,
+                    distance: 0,
+                },
+            );
+            d
+        };
+
+        // 1) First declare (complete) -> registered + re-flooded to child C.
+        fwd.forward_queryable(FaceId(0), true, &declare_with(true));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "a new queryable re-floods to the child"
+        );
+        sink_c.reset();
+
+        // 2) Redundant re-declare of the SAME complete value -> NO re-flood.
+        fwd.forward_queryable(FaceId(0), true, &declare_with(true));
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "an unchanged re-declare does not re-flood (value-diff gate)"
+        );
+
+        // 3) complete flips true -> false: a real value change -> re-flood (proves
+        //    the ingest READ the per-peer info; a DEFAULT-only ingest sees no
+        //    change here and would not re-flood).
+        fwd.forward_queryable(FaceId(0), true, &declare_with(false));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "a complete-flag flip re-floods (the value-diff gate fired)"
         );
     }
 
