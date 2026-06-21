@@ -354,6 +354,14 @@ pub struct LinkstateForwarder {
     /// abandoned query (a queryable that never sent its `ResponseFinal` on a
     /// still-up face); `0` on a healthy mesh where every query finalizes.
     timed_out: Cell<usize>,
+    /// The monotonic clock the pending-query deadlines are stamped + reaped
+    /// against — `Instant::now` in production ([`new`](Self::new) /
+    /// [`with_trees_delay`](Self::with_trees_delay)), injectable via
+    /// [`with_clock`](Self::with_clock) so a deterministic test can advance "now"
+    /// and assert a query is reaped AT — not before — its deadline. (`Instant` is
+    /// opaque, so a fake clock returns `base + offset`; the base cancels in every
+    /// deadline comparison, leaving the offset as the controllable virtual time.)
+    clock: Box<dyn Fn() -> Instant>,
 }
 
 impl LinkstateForwarder {
@@ -381,6 +389,30 @@ impl LinkstateForwarder {
     /// recomputes under churn; a longer one coalesces a heavier burst. This tunes
     /// the single coalescing path — it does not turn coalescing off.
     pub fn with_trees_delay(self_zid: Zid, self_whatami: WhatAmI, trees_delay: Duration) -> Self {
+        Self::build(self_zid, self_whatami, trees_delay, Box::new(Instant::now))
+    }
+
+    /// Construct with an INJECTED monotonic clock (dependency injection for
+    /// deterministic pending-query-timeout tests) and the default recompute
+    /// window. Production uses [`new`](Self::new) (the `Instant::now` clock); a
+    /// test passes a controllable `base + offset` closure to advance "now" across
+    /// a deadline and prove a query is reaped at — not before — its deadline.
+    pub fn with_clock(
+        self_zid: Zid,
+        self_whatami: WhatAmI,
+        clock: Box<dyn Fn() -> Instant>,
+    ) -> Self {
+        Self::build(self_zid, self_whatami, Self::DEFAULT_TREES_DELAY, clock)
+    }
+
+    /// The inner constructor every public constructor funnels through, so the
+    /// field initialiser lives ONCE (only the recompute delay + the clock vary).
+    fn build(
+        self_zid: Zid,
+        self_whatami: WhatAmI,
+        trees_delay: Duration,
+        clock: Box<dyn Fn() -> Instant>,
+    ) -> Self {
         Self {
             net: Rc::new(RefCell::new(LinkstateNetwork::new(self_zid, self_whatami))),
             faces: RefCell::new(HashMap::new()),
@@ -407,6 +439,7 @@ impl LinkstateForwarder {
             interceptor_dropped: Cell::new(0),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
             timed_out: Cell::new(0),
+            clock,
         }
     }
 
@@ -430,6 +463,14 @@ impl LinkstateForwarder {
     /// (already-recorded deadlines are not retroactively changed).
     pub fn set_query_timeout(&self, timeout: Duration) {
         self.query_timeout.set(timeout);
+    }
+
+    /// The current instant from the injected clock — the SINGLE read site the
+    /// pending-query deadline stamp ([`forward_request`](Self::forward_request))
+    /// and the timeout sweep ([`reap_timed_out_queries`](Self::reap_timed_out_queries))
+    /// share, so an injected test clock governs both halves of the deadline check.
+    fn now(&self) -> Instant {
+        (self.clock)()
     }
 
     /// Override the gossip target — the set of neighbour roles this node floods
@@ -1146,7 +1187,7 @@ impl LinkstateForwarder {
         // The deadline each pending entry is abandoned at if no ResponseFinal
         // routes back (zenoh `QueryCleanup`'s `sleep(timeout)`) — computed ONCE
         // for every child forwarded in this call; the tick sweep reaps it.
-        let deadline = Instant::now() + self.query_timeout.get();
+        let deadline = self.now() + self.query_timeout.get();
         // Forward to the queryable-ward children in the source's tree (never to
         // the inbound face nor back toward the source's neighbour — the shared
         // predicate). atom 3: ALLOCATE a fresh local qid PER outbound face and
@@ -1890,7 +1931,7 @@ impl LinkstateForwarder {
     /// path lands. The `expired` borrow is released before the per-entry
     /// [`fan_out`](Self::fan_out) re-borrows the faces table.
     fn reap_timed_out_queries(&self) {
-        let reaped = self.pending.borrow_mut().expired(Instant::now());
+        let reaped = self.pending.borrow_mut().expired(self.now());
         if reaped.is_empty() {
             return;
         }
@@ -6622,6 +6663,70 @@ mod tests {
             sink_c.frame_count(),
             0,
             "nothing routed toward the silent queryable"
+        );
+    }
+
+    #[test]
+    fn a_pending_query_is_reaped_only_after_its_non_zero_deadline_passes() {
+        // R311us — the clock-injection twin of the zero-timeout reap test: with a
+        // NON-ZERO timeout and an INJECTED clock, a pending query survives a sweep
+        // BEFORE its deadline and is reaped only once "now" reaches it. The
+        // zero-timeout test can only prove "reaped immediately"; this pins the
+        // deadline ARITHMETIC — reaped AT, not before. The fake clock returns
+        // `base + offset`; advancing `offset` is the controllable virtual time.
+        let base = Instant::now();
+        let offset = Rc::new(Cell::new(Duration::ZERO));
+        let offset_clock = offset.clone();
+        let fwd = LinkstateForwarder::with_clock(
+            zid(0x05),
+            WhatAmI::Peer,
+            Box::new(move || base + offset_clock.get()),
+        );
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // querier side
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // queryable side
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+        sink_a.reset();
+        sink_c.reset();
+
+        let timeout = Duration::from_millis(100);
+        fwd.set_query_timeout(timeout);
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request); // deadline = base + 0 + 100ms
+        assert_eq!(fwd.pending_len(), 1, "one pending return entry recorded");
+
+        // Just BEFORE the deadline: the sweep does NOT reap it.
+        offset.set(timeout - Duration::from_millis(1));
+        fwd.reap_timed_out_queries();
+        assert_eq!(
+            fwd.pending_len(),
+            1,
+            "not yet past the deadline -> survives"
+        );
+        assert_eq!(
+            fwd.pending_timed_out(),
+            0,
+            "nothing reaped before the deadline"
+        );
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "no premature timeout final to the querier",
+        );
+
+        // AT the deadline: reaped, and the Err(Timeout) + closing final route to A.
+        offset.set(timeout);
+        fwd.reap_timed_out_queries();
+        assert_eq!(fwd.pending_len(), 0, "reaped once now reached the deadline");
+        assert_eq!(fwd.pending_timed_out(), 1, "one query reaped by the sweep");
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "the Err(Timeout) reply + the closing final routed back to A",
         );
     }
 

@@ -46260,6 +46260,42 @@
         "LOCAL: R311ur on top of uq=a58fd21 (origin/main=f2a64cd, now +6 ahead um..ur); host-gated. PUSH needs full run-ci (R311ui codec = MCU footprint + zenohd Z). North-star beyond 5.16: untouched Storage(5.11) / SHM."
       ]
     },
+    "Round 311us": {
+      "decision_summary": "R311us: tracked-debt paydown — forwarder clock INJECTION (the uk session-review finding). LinkstateForwarder's two Instant::now() sites (the pending-query deadline stamp in forward_request + the timeout reap in reap_timed_out_queries) now read through an injected clock field (Box<dyn Fn() -> Instant>), defaulting to Instant::now in production (new / with_trees_delay) and injectable via the new with_clock constructor. This unblocks a DETERMINISTIC non-zero-timeout test: the zero-timeout test could only prove 'reaped immediately', while a base+offset injected clock now pins the deadline arithmetic — a query is reaped AT, not before, its deadline.",
+      "changes_bullets": [
+        "linkstate_forward.rs: + clock: Box<dyn Fn() -> Instant> field + a private now() that is the SINGLE read site the forward_request deadline stamp AND the reap_timed_out_queries sweep share. The two Instant::now() calls -> self.now(). Constructors funnel through a new private build(zid, whatami, trees_delay, clock) so the field initialiser lives once; new / with_trees_delay pass Box::new(Instant::now), the new pub with_clock passes a custom clock (DI for deterministic tests).",
+        "The deterministic test a_pending_query_is_reaped_only_after_its_non_zero_deadline_passes: a base+offset fake clock (Instant is opaque, so a fake returns base + a controllable offset; the base cancels in the deadline comparison, leaving offset as virtual time). forward_request stamps deadline = base + 0 + 100ms; a sweep at offset 99ms does NOT reap (survives, no premature final to the querier); a sweep at offset 100ms reaps + routes the Err(Timeout) + closing final back to A."
+      ],
+      "verification_bullets": [
+        "routing-peer lib 428/428 (was 427; +1: a_pending_query_is_reaped_only_after_its_non_zero_deadline_passes). The existing zero-timeout reap test (a_pending_query_times_out_and_finalizes_back_to_the_querier) + all 427 prior tests behavior-preserved — the default Instant::now clock keeps production behaviour identical (DI is construction-time only). base default lib 279/279.",
+        "clippy -D clean (routing-peer --all-targets + --no-default-features --features routing-peer --all-targets); fmt clean. Host gate; full run-ci at push (R311ui codec footprint + zenohd Z). NO wire change — pure construction-time dependency injection of the deadline clock."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311us = tracked-debt paydown: forwarder clock INJECTION (the uk session-review finding). LinkstateForwarder::with_clock injects a Box<dyn Fn() -> Instant>; new / with_trees_delay default to Instant::now. The two deadline-clock reads (the forward_request deadline stamp + the reap_timed_out_queries sweep) funnel through self.now(), unblocking a deterministic non-zero-timeout test that pins the deadline arithmetic (a query is reaped AT, not before, its deadline — the zero-timeout test could only prove \"immediately\"). DI per the project's inversion-of-control principle.",
+        "TRACKED (remaining debt): err/reply builder funnel (build_response_err_empty is a 4th Err-envelope copy -> a dedicated SSOT atom), --no-default-features --features routing-peer 13 pre-existing test fails (flood/sent==0, feature-dep; canonical lane = defaults-on), N-final fan-out (per-outface vs zenoh Arc-aggregated; Session-API scope). [ur cleared sync_header_z+_FLAG_Z; us cleared clock injection.]",
+        "LOCAL: R311us on top of ur=f85c131 (origin/main=f2a64cd, now +7 ahead um..us); host-gated. PUSH needs full run-ci (R311ui codec = MCU footprint + zenohd Z). North-star beyond 5.16: untouched Storage(5.11) / SHM."
+      ],
+      "publishable_decision_summary": "R311us: tracked-debt paydown — forwarder clock INJECTION (the uk session-review finding). LinkstateForwarder's two Instant::now() sites (the pending-query deadline stamp in forward_request + the timeout reap in reap_timed_out_queries) now read through an injected clock field (Box<dyn Fn() -> Instant>), defaulting to Instant::now in production (new / with_trees_delay) and injectable via the new with_clock constructor. This unblocks a DETERMINISTIC non-zero-timeout test: the zero-timeout test could only prove 'reaped immediately', while a base+offset injected clock now pins the deadline arithmetic — a query is reaped AT, not before, its deadline.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs: + clock: Box<dyn Fn() -> Instant> field + a private now() that is the SINGLE read site the forward_request deadline stamp AND the reap_timed_out_queries sweep share. The two Instant::now() calls -> self.now(). Constructors funnel through a new private build(zid, whatami, trees_delay, clock) so the field initialiser lives once; new / with_trees_delay pass Box::new(Instant::now), the new pub with_clock passes a custom clock (DI for deterministic tests).",
+        "The deterministic test a_pending_query_is_reaped_only_after_its_non_zero_deadline_passes: a base+offset fake clock (Instant is opaque, so a fake returns base + a controllable offset; the base cancels in the deadline comparison, leaving offset as virtual time). forward_request stamps deadline = base + 0 + 100ms; a sweep at offset 99ms does NOT reap (survives, no premature final to the querier); a sweep at offset 100ms reaps + routes the Err(Timeout) + closing final back to A."
+      ],
+      "publishable_verification_bullets": [
+        "routing-peer lib 428/428 (was 427; +1: a_pending_query_is_reaped_only_after_its_non_zero_deadline_passes). The existing zero-timeout reap test (a_pending_query_times_out_and_finalizes_back_to_the_querier) + all 427 prior tests behavior-preserved — the default Instant::now clock keeps production behaviour identical (DI is construction-time only). base default lib 279/279.",
+        "clippy -D clean (routing-peer --all-targets + --no-default-features --features routing-peer --all-targets); fmt clean. Host gate; full run-ci at push (R311ui codec footprint + zenohd Z). NO wire change — pure construction-time dependency injection of the deadline clock."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311us = tracked-debt paydown: forwarder clock INJECTION (the uk session-review finding). LinkstateForwarder::with_clock injects a Box<dyn Fn() -> Instant>; new / with_trees_delay default to Instant::now. The two deadline-clock reads (the forward_request deadline stamp + the reap_timed_out_queries sweep) funnel through self.now(), unblocking a deterministic non-zero-timeout test that pins the deadline arithmetic (a query is reaped AT, not before, its deadline — the zero-timeout test could only prove \"immediately\"). DI per the project's inversion-of-control principle.",
+        "TRACKED (remaining debt): err/reply builder funnel (build_response_err_empty is a 4th Err-envelope copy -> a dedicated SSOT atom), --no-default-features --features routing-peer 13 pre-existing test fails (flood/sent==0, feature-dep; canonical lane = defaults-on), N-final fan-out (per-outface vs zenoh Arc-aggregated; Session-API scope). [ur cleared sync_header_z+_FLAG_Z; us cleared clock injection.]",
+        "LOCAL: R311us on top of ur=f85c131 (origin/main=f2a64cd, now +7 ahead um..us); host-gated. PUSH needs full run-ci (R311ui codec = MCU footprint + zenohd Z). North-star beyond 5.16: untouched Storage(5.11) / SHM."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
