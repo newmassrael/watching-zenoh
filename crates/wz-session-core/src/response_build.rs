@@ -137,21 +137,7 @@ pub fn build_response_reply_literal(
             }),
         },
         extensions: None,
-        body: ResponseOwnedVariant::CodecZenohReply(ReplyOwned {
-            // MID 0x04 only; no C (consolidation), no Z (Reply exts).
-            header: 0x04,
-            consolidation: None,
-            extensions: None,
-            body: ReplyOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
-                // MID 0x01 only; no T/E/Z gates.
-                header: 0x01,
-                timestamp: None,
-                encoding: None,
-                extensions: None,
-                payload_len: payload.len() as u64,
-                payload: owned_bytes(payload)?,
-            }),
-        }),
+        body: reply_body(payload)?,
     })
 }
 
@@ -195,19 +181,7 @@ pub fn build_response_reply_aliased(
             }),
         },
         extensions: None,
-        body: ResponseOwnedVariant::CodecZenohReply(ReplyOwned {
-            header: 0x04,
-            consolidation: None,
-            extensions: None,
-            body: ReplyOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
-                header: 0x01,
-                timestamp: None,
-                encoding: None,
-                extensions: None,
-                payload_len: payload.len() as u64,
-                payload: owned_bytes(payload)?,
-            }),
-        }),
+        body: reply_body(payload)?,
     })
 }
 
@@ -358,6 +332,29 @@ pub fn build_response_err_empty(
         extensions: None,
         body: err_body(payload)?,
     })
+}
+
+/// The wz minimal `Reply(MsgPut)` BODY — Reply MID `0x04` (no C/Z) wrapping a
+/// Put MID `0x01` (no T/E/Z), payload only. The SSOT the literal / aliased reply
+/// builders share (the [`err_body`] twin on the Reply side); each public reply
+/// builder differs only in its Response ENVELOPE (header N flag + keyexpr), not
+/// the body.
+#[cfg(feature = "codec-response")]
+fn reply_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
+    // W3: bounded payload copy in, fallible past declared capacity.
+    Ok(ResponseOwnedVariant::CodecZenohReply(ReplyOwned {
+        header: 0x04,
+        consolidation: None,
+        extensions: None,
+        body: ReplyOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
+            header: 0x01,
+            timestamp: None,
+            encoding: None,
+            extensions: None,
+            payload_len: payload.len() as u64,
+            payload: owned_bytes(payload)?,
+        }),
+    }))
 }
 
 /// The wz minimal `Err` BODY — MID `0x05` only, NO E (encoding) / Z (exts), with

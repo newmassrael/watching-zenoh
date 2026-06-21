@@ -1247,8 +1247,12 @@ impl LinkstateForwarder {
             })
             // Nearest in graph-distance order — zenoh's `route.sort_by_key(|q|
             // q.info.distance)` (`queries.rs:1050`) followed by the first-complete
-            // `find`. Ties resolve to the first in iteration order (as zenoh's
-            // stable sort over its HashMap iteration does).
+            // `find`. A distance TIE is broken by the candidate scan order, which
+            // derives from `HashMap` iteration and is therefore unspecified — same
+            // as zenoh (its `sort_by_key` is stable over a `HashMap`-ordered
+            // route, so equal-distance ties are likewise unspecified). Harmless:
+            // every equal-distance complete queryable fully answers the query, so
+            // either is an equally-valid BestMatching target.
             .min_by(|(a, _), (b, _)| a.total_cmp(b))
             .map(|(_distance, hop)| hop)
     }
@@ -1460,14 +1464,11 @@ impl LinkstateForwarder {
     /// ([`select_best_matching`](Self::select_best_matching)).
     pub fn declare_queryable(&self, keyexpr: &str, complete: bool) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
-        // The local QueryableInfo: distance 0 (a local declaration is zero hops
-        // from itself — zenoh's client QueryableInfo carries distance 0). The
-        // per-hop increment on re-flood is the tracked downstream-carry follow-up;
-        // BestMatching reads the GRAPH distance anyway, not this carried value.
-        let info = QueryableInfo {
-            complete,
-            distance: 0,
-        };
+        // The local QueryableInfo (distance 0 — the SSOT local-declaration
+        // convention). The downstream re-flood carries this verbatim (R311uq, no
+        // per-hop increment); BestMatching reads the GRAPH distance, not this
+        // carried value.
+        let info = QueryableInfo::local(complete);
         // Register self's OWN queryable under its own zid — as zenoh's
         // declare_simple_queryable registers under tables.zid — so the tree-change
         // re-advertise re-floods it to peers that join LATER, iterated uniformly
@@ -2133,11 +2134,16 @@ fn build_declare_queryable_with_info(
 /// Whether a face is a valid forward target when RE-FORWARDING along a source
 /// tree: its `zid` is one of `children` (the next hops), it is NOT the inbound
 /// face, and its zid is not the inbound neighbour's (a parallel link back
-/// toward the source). The single selection predicate shared by
-/// [`forward_push`](LinkstateForwarder::forward_push) (data, directions-filtered
-/// `children`) and [`forward_subscription`](LinkstateForwarder::forward_subscription)
-/// (control, all tree `children`) — only the carrier each wraps differs, so the
-/// loop-exclusion mechanics live here once.
+/// toward the source). The single selection predicate shared by every
+/// tree-re-forward path — [`forward_push`](LinkstateForwarder::forward_push)
+/// (data, directions-filtered `children`),
+/// [`forward_subscription`](LinkstateForwarder::forward_subscription) /
+/// [`forward_unsubscription`](LinkstateForwarder::forward_unsubscription) /
+/// [`forward_interest_declaration`](LinkstateForwarder::forward_interest_declaration)
+/// (control, all tree `children`), and
+/// [`forward_request`](LinkstateForwarder::forward_request) (the query route) —
+/// only the carrier each wraps differs, so the loop-exclusion mechanics live
+/// here once.
 fn is_tree_forward_target(
     id: FaceId,
     zid: Option<Zid>,
@@ -6861,5 +6867,90 @@ mod tests {
             99,
             "the closing final reached A with the querier's rid",
         );
+    }
+
+    #[test]
+    fn a_complete_queryable_propagates_two_hops_and_best_matching_routes_to_it() {
+        // Multi-hop BestMatching e2e (R311uu — closes the uq coverage gap that had
+        // only a single-relay select test + propagation UNIT tests): a COMPLETE
+        // queryable at C, declared on S2, PROPAGATES its completeness to S1 (TWO
+        // hops away) via the real re-flood frame (the uq downstream carry); S1 then
+        // BestMatching-routes a default Query toward C by GRAPH distance, across
+        // two independent LinkstateForwarder instances. Topology A — S1 — S2 — C.
+        let s1 = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let s2 = LinkstateForwarder::new(zid(0x02), WhatAmI::Peer);
+        let (a_face, a_sink) = peer_face(zid(0x0A));
+        let (s2_on_s1, s1_to_s2) = peer_face(zid(0x02));
+        s1.register(FaceId(0), &a_face);
+        s1.register(FaceId(1), &s2_on_s1);
+        let (s1_on_s2, s2_to_s1) = peer_face(zid(0x01));
+        let (c_face, c_sink) = peer_face(zid(0x0C));
+        s2.register(FaceId(0), &s1_on_s2);
+        s2.register(FaceId(1), &c_face);
+        // The same A-S1-S2-C line each relay sees in the reply-unwind e2e.
+        advertise_link_back(&s1, FaceId(0), 0x0A, 0x01);
+        s1.ingest_inbound_linkstate(
+            FaceId(1),
+            list(vec![
+                entry(0, 1, 0x01, &[]),
+                entry(1, 5, 0x02, &[0, 2]),
+                entry(2, 5, 0x0C, &[1]),
+            ]),
+        );
+        s1.net.borrow_mut().compute_trees();
+        advertise_link_back(&s2, FaceId(1), 0x0C, 0x02);
+        s2.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x02, &[]),
+                entry(1, 5, 0x01, &[0, 2]),
+                entry(2, 5, 0x0A, &[1]),
+            ]),
+        );
+        s2.net.borrow_mut().compute_trees();
+        a_sink.reset();
+        s1_to_s2.reset();
+        s2_to_s1.reset();
+        c_sink.reset();
+
+        // 1) C declares a COMPLETE queryable on S2 (node_id 0 = C is S2's direct
+        //    neighbour). S2 stores C's completeness AND re-floods a CARRYING
+        //    DeclareQueryable toward its tree child S1 (the uq downstream carry).
+        declare_queryable_complete(&s2, FaceId(1), "demo/q", 0, true);
+        assert_eq!(
+            s2_to_s1.frame_count(),
+            1,
+            "S2 re-floods C's queryable toward its child S1",
+        );
+        assert!(
+            forwarded_declare_queryable_info(&s2_to_s1.frame_bytes(0)).complete,
+            "S2's re-flood CARRIES C's complete=true downstream to S1 (the uq carry)",
+        );
+
+        // 2) Feed S2's re-flood into S1 (the real inbound handler): S1 — TWO hops
+        //    from C — learns C is complete, registered back under the origin C.
+        let reflood = parse_forwarded_declare(&s2_to_s1.frame_bytes(0));
+        s1.forward_queryable(FaceId(1), true, &reflood);
+        assert_eq!(
+            s1.interested_queryables("demo/q"),
+            vec![zid(0x0C)],
+            "S1 registered C's queryable, resolved back to the origin C two hops away",
+        );
+        a_sink.reset();
+        s1_to_s2.reset();
+
+        // 3) A's default (BestMatching) Query into S1: S1 knows C is COMPLETE at
+        //    GRAPH distance 2, so it BestMatching-routes toward C (direction S2) —
+        //    the multi-hop select, not an All fan-out.
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        feed_message(&s1, FaceId(0), NetworkMessage::Request(Box::new(request)));
+        assert_eq!(
+            s1_to_s2.frame_count(),
+            1,
+            "S1 BestMatching-routes the Query toward C (nearest complete, 2 hops via S2)",
+        );
+        assert_eq!(a_sink.frame_count(), 0, "not routed back to the querier A");
+        assert_eq!(s1.pending_len(), 1, "S1 recorded a pending return entry");
     }
 }

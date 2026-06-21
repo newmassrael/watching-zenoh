@@ -63,6 +63,20 @@ impl QueryableInfo {
         complete: false,
         distance: 0,
     };
+
+    /// The `QueryableInfo` for a LOCALLY-declared queryable — distance `0` (a
+    /// node is zero hops from its own queryable; zenoh's client / simple
+    /// queryable carries distance 0). The single SSOT for the "local declaration
+    /// = distance 0" convention, so no producer site (the forwarder's
+    /// `declare_queryable`, the session's `prepare_declare_queryable`, the
+    /// reconnect replay) open-codes the `distance: 0` literal. BestMatching reads
+    /// the GRAPH distance anyway, not this carried value.
+    pub const fn local(complete: bool) -> Self {
+        Self {
+            complete,
+            distance: 0,
+        }
+    }
 }
 
 impl Default for QueryableInfo {

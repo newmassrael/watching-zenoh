@@ -2513,15 +2513,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         check_outbound_keyexpr_pico_safe(&reconstructed)?;
         let mut declare =
             build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
-        // Stamp the QueryableInfo completeness (distance 0 for a local
-        // declaration — the BestMatching producer input). DEFAULT / incomplete
-        // omits the ext, so a plain queryable stays byte-identical to before.
+        // Stamp the local QueryableInfo completeness (the BestMatching producer
+        // input). DEFAULT / incomplete omits the ext, so a plain queryable stays
+        // byte-identical to before.
         set_declare_queryable_info(
             &mut declare,
-            crate::queryable_info::QueryableInfo {
-                complete,
-                distance: 0,
-            },
+            crate::queryable_info::QueryableInfo::local(complete),
         );
         Ok(declare)
     }
@@ -3591,10 +3588,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // complete, not silently incomplete (R311up).
                     set_declare_queryable_info(
                         &mut declare,
-                        crate::queryable_info::QueryableInfo {
-                            complete,
-                            distance: 0,
-                        },
+                        crate::queryable_info::QueryableInfo::local(complete),
                     );
                     self.dispatch_declare(declare, /*reliable=*/ true)
                         .map_err(|e| ReplayDeclarationsError::Declare(e.into()))?;
