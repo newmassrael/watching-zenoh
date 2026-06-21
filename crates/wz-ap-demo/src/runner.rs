@@ -1343,6 +1343,10 @@ pub(crate) async fn run_peer(
         FaceSources {
             listener,
             dial_targets: dials,
+            // The demo does not yet opt into gossip-autoconnect (a `--autoconnect`
+            // flag that calls `forwarder.enable_autoconnect` and threads the
+            // receiver here is a thin follow-up); static `--connect` dials only.
+            dial_intents: None,
         },
         params,
         TokioTime::new(),

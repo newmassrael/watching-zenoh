@@ -44856,6 +44856,56 @@
         "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl on origin/main=4394d5a. Host lanes verified (graph 57, driver 370 routing-peer + base clippy, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
       ]
     },
+    "Round 311tm": {
+      "decision_summary": "R311tm: gossip-policy A5c -- dial+open+register wiring. The face loop drains dial-intents and dials each discovered peer not already held. A5 autoconnect (policy+emit+dial) is complete.",
+      "changes_bullets": [
+        "accept_loop.rs: FaceSources gains dial_intents: Option<DialIntentReceiver> (the dynamic dial source, twin of static dial_targets). face_drive_loop adds a recv_dial_intent select! arm + Step::Dial.",
+        "Step::Dial: dial_decision(held_zids, intent) -> Dial(addr)|AlreadyHeld|NoLocator. A discovered peer is dialed via dial_face unless already held (dedup) or no TCP locator; the dialed face flows the same opening->Opened->register path.",
+        "held_zids: BTreeSet<Vec<u8>> tracks held face zids (inserted at FaceUp, removed at FaceDown from Face.peer_zid) = zenoh get_transport_unicast dedup. first_dialable_addr reuses parse_locator SSOT (tcp/<addr> only, like dial_targets).",
+        "recv_dial_intent parks when dial_intents is None (accept-only/no opt-in) or the channel closes (forwarder gone), so the shared loop keeps its prior behaviour; cancel-safe tokio recv. accept_loop + peer_loop tests + demo pass dial_intents: None.",
+        "A5 complete: A5a AutoConnect type -> A5b forwarder emits DialIntent on gated discovery -> A5c loop dials+opens+registers. Demo --autoconnect CLI opt-in is a thin follow-up (enable_autoconnect is the API seam)."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio 372 routing-peer lib tests (+2): an_autoconnect_dial_intent_dials_the_discovered_peer (real loopback TCP: inject a DialIntent -> dialed=1, established=1) + dial_decision_dedups_held_peers_and_requires_a_tcp_locator (pure: dedup + locator pick).",
+        "base lib 277 (the dial_decision test runs ungated). clippy -D clean (driver routing-peer AND base no-feature); fmt clean; wz-ap-demo builds (the new FaceSources field threaded).",
+        "Grounding (read): zenoh gossip.rs:444-465 should_autoconnect -> spawn connect_peer; wz routes the dial back via the channel to the single FuturesUnordered drive task (no per-dial spawn, accept_loop doc)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tm = gossip-policy A5c: the loop dials discovered peers off the dial-intent channel. The A5 autoconnect subsystem (policy type + forwarder emit + loop dial) is COMPLETE and zenoh-faithful.",
+        "DEFERRED (honest): (1) demo --autoconnect CLI opt-in (thin: a flag -> forwarder.enable_autoconnect(policy) -> pass the rx as dial_intents); (2) in-flight dedup -- a peer with a dial IN PROGRESS (in opening, not yet held) is not deduped vs a 2nd intent (rare: A5b emits once per discovery).",
+        "DEFERRED: (3) TCP-only dial (non-tcp/DNS discovered locators skipped, same follow-up as dial_targets/dial_face); (4) full 3-node gossip->discover->autoconnect e2e (A5b tests emit, A5c tests dial; compose via the demo opt-in).",
+        "NEXT gossip-policy: config-source gossip_target/autoconnect per local whatami (a forwarder setter; A4a/A5 use const router|peer defaults). Otherwise the gossip+autoconnect mesh-discovery subsystem is done; remaining north-star = c3c-3 filter/failover/static + Storage/Access/SHM.",
+        "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl(9658f0f)+311tm on origin/main=4394d5a (3 ahead). Host lanes verified (graph 57, driver 372 routing-peer + 277 base, clippy both, fmt, demo). full run-ci + idle before push; push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tm: gossip-policy A5c -- dial+open+register wiring. The face loop drains dial-intents and dials each discovered peer not already held. A5 autoconnect (policy+emit+dial) is complete.",
+      "publishable_changes_bullets": [
+        "accept_loop.rs: FaceSources gains dial_intents: Option<DialIntentReceiver> (the dynamic dial source, twin of static dial_targets). face_drive_loop adds a recv_dial_intent select! arm + Step::Dial.",
+        "Step::Dial: dial_decision(held_zids, intent) -> Dial(addr)|AlreadyHeld|NoLocator. A discovered peer is dialed via dial_face unless already held (dedup) or no TCP locator; the dialed face flows the same opening->Opened->register path.",
+        "held_zids: BTreeSet<Vec<u8>> tracks held face zids (inserted at FaceUp, removed at FaceDown from Face.peer_zid) = zenoh get_transport_unicast dedup. first_dialable_addr reuses parse_locator SSOT (tcp/<addr> only, like dial_targets).",
+        "recv_dial_intent parks when dial_intents is None (accept-only/no opt-in) or the channel closes (forwarder gone), so the shared loop keeps its prior behaviour; cancel-safe tokio recv. accept_loop + peer_loop tests + demo pass dial_intents: None.",
+        "A5 complete: A5a AutoConnect type -> A5b forwarder emits DialIntent on gated discovery -> A5c loop dials+opens+registers. Demo --autoconnect CLI opt-in is a thin follow-up (enable_autoconnect is the API seam)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio 372 routing-peer lib tests (+2): an_autoconnect_dial_intent_dials_the_discovered_peer (real loopback TCP: inject a DialIntent -> dialed=1, established=1) + dial_decision_dedups_held_peers_and_requires_a_tcp_locator (pure: dedup + locator pick).",
+        "base lib 277 (the dial_decision test runs ungated). clippy -D clean (driver routing-peer AND base no-feature); fmt clean; wz-ap-demo builds (the new FaceSources field threaded).",
+        "Grounding (read): zenoh gossip.rs:444-465 should_autoconnect -> spawn connect_peer; wz routes the dial back via the channel to the single FuturesUnordered drive task (no per-dial spawn, accept_loop doc)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tm = gossip-policy A5c: the loop dials discovered peers off the dial-intent channel. The A5 autoconnect subsystem (policy type + forwarder emit + loop dial) is COMPLETE and zenoh-faithful.",
+        "DEFERRED (honest): (1) demo --autoconnect CLI opt-in (thin: a flag -> forwarder.enable_autoconnect(policy) -> pass the rx as dial_intents); (2) in-flight dedup -- a peer with a dial IN PROGRESS (in opening, not yet held) is not deduped vs a 2nd intent (rare: A5b emits once per discovery).",
+        "DEFERRED: (3) TCP-only dial (non-tcp/DNS discovered locators skipped, same follow-up as dial_targets/dial_face); (4) full 3-node gossip->discover->autoconnect e2e (A5b tests emit, A5c tests dial; compose via the demo opt-in).",
+        "NEXT gossip-policy: config-source gossip_target/autoconnect per local whatami (a forwarder setter; A4a/A5 use const router|peer defaults). Otherwise the gossip+autoconnect mesh-discovery subsystem is done; remaining north-star = c3c-3 filter/failover/static + Storage/Access/SHM.",
+        "LOCAL UNPUSHED: 311tk(d3d6fb3)+311tl(9658f0f)+311tm on origin/main=4394d5a (3 ahead). Host lanes verified (graph 57, driver 372 routing-peer + 277 base, clippy both, fmt, demo). full run-ci + idle before push; push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

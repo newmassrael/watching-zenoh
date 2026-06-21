@@ -85,6 +85,7 @@ use crate::session_glue::{
 use crate::session_open::{
     accept_and_open_session, initiate_and_open_session, DialedLink, OpenError, OpenedSession,
 };
+use wz_session_core::locator::{parse_locator, Proto};
 
 /// Backoff applied after an `accept()` error before re-arming the accept —
 /// zenoh's `TCP_ACCEPT_THROTTLE_TIME` (100ms, `io/zenoh-links/zenoh-link-tcp/src/
@@ -366,6 +367,10 @@ enum Step {
     /// cadence) — call [`FaceForwarder::tick`]. Only ever produced when a timer
     /// is armed (a forwarder that returned `Some` from `tick_period`).
     Tick,
+    /// A gossip-autoconnect [`DialIntent`] arrived on the dial-intent channel —
+    /// dial the discovered peer unless a face to it is already held. Only ever
+    /// produced when [`FaceSources::dial_intents`] is `Some`.
+    Dial(DialIntent),
 }
 
 /// Await the forwarder's periodic tick, or park forever when no timer is armed
@@ -383,18 +388,91 @@ async fn forwarder_tick(timer: &mut Option<tokio::time::Interval>) {
     }
 }
 
+/// Await the next gossip-autoconnect [`DialIntent`], or park forever when there
+/// is no dial-intent channel (autoconnect not enabled) — the dial-intent twin of
+/// [`forwarder_tick`], so the `select!` arm-set is fixed at compile time. When
+/// the channel CLOSES (every sender dropped — the forwarder is gone), the
+/// receiver is taken so subsequent polls park rather than hot-looping on the
+/// closed channel (a closed `recv()` resolves to `None` immediately). Cancel-safe
+/// (tokio `mpsc::UnboundedReceiver::recv`), so losing the race to a sibling arm
+/// never drops a buffered intent.
+async fn recv_dial_intent(rx: &mut Option<DialIntentReceiver>) -> DialIntent {
+    let closed = if let Some(r) = rx.as_mut() {
+        match r.recv().await {
+            Some(intent) => return intent,
+            None => true,
+        }
+    } else {
+        false
+    };
+    if closed {
+        *rx = None;
+    }
+    std::future::pending::<DialIntent>().await
+}
+
+/// The first locator a [`DialIntent`] carries that the TCP dial path
+/// ([`dial_face`]) can actually reach: a numeric `tcp/<addr:port>` endpoint
+/// (parsed through the locator SSOT [`parse_locator`]). A non-tcp scheme
+/// (`tls` / `udp` / `ws`) or a non-numeric / DNS address is skipped — the same
+/// TCP-only numeric scope as the static `dial_targets` (the richer
+/// scheme-dispatched / DNS dial is the same tracked `routing-peer` follow-up
+/// [`dial_face`] notes). `None` when no carried locator qualifies.
+fn first_dialable_addr(locators: &[String]) -> Option<SocketAddr> {
+    locators.iter().find_map(|loc| match parse_locator(loc) {
+        Ok(p) if p.proto == Proto::Tcp => Some(p.addr),
+        _ => None,
+    })
+}
+
+/// The outcome of weighing a [`DialIntent`] against the held faces — the pure
+/// dial decision the [`Step::Dial`] arm acts on (extracted so it is unit-testable
+/// without standing up a TCP loop).
+enum DialDecision {
+    /// Dial the discovered peer at this TCP address.
+    Dial(SocketAddr),
+    /// Skip — a face to this peer's zid is already held (the zenoh
+    /// `get_transport_unicast(&zid).is_some()` dedup).
+    AlreadyHeld,
+    /// Skip — none of the carried locators is TCP-dialable.
+    NoLocator,
+}
+
+/// Weigh a [`DialIntent`] against the currently-held face zids: dedup first (a
+/// peer already held is never re-dialed), then pick a TCP-dialable locator. The
+/// forwarder already applied the autoconnect role + zid policy at emit (A5b), so
+/// this is only the loop-side "do I already have it / can I reach it" decision.
+fn dial_decision(held: &BTreeSet<Vec<u8>>, intent: &DialIntent) -> DialDecision {
+    if held.contains(&intent.zid) {
+        return DialDecision::AlreadyHeld;
+    }
+    match first_dialable_addr(&intent.locators) {
+        Some(addr) => DialDecision::Dial(addr),
+        None => DialDecision::NoLocator,
+    }
+}
+
 /// Where a face-drive node's faces come from: the inbound `listener` it accepts
-/// on, and the outbound `dial_targets` it dials. A pure acceptor
-/// ([`accept_loop`]) has no dial targets; a peer-mesh node ([`peer_loop`]) has
-/// both. Bundling the two sources keeps the loop signature within the
-/// argument-count budget as the family grows, and names the real distinction
-/// between the two entry points.
+/// on, the outbound `dial_targets` it dials at startup, and the runtime
+/// `dial_intents` a gossip-autoconnect peer dials on discovery. A pure acceptor
+/// ([`accept_loop`]) has no dial targets and no dial intents; a peer-mesh node
+/// ([`peer_loop`]) has both static dial targets and (when a deploy enables
+/// autoconnect) the dynamic dial-intent stream. Bundling the sources keeps the
+/// loop signature within the argument-count budget as the family grows, and
+/// names the real distinction between the two entry points.
 pub struct FaceSources {
     /// The bound TCP listener for inbound peers (accept source).
     pub listener: TcpListener,
-    /// The peer addresses to dial at startup (outbound source); empty for a
-    /// pure acceptor.
+    /// The peer addresses to dial at startup (static outbound source); empty for
+    /// a pure acceptor.
     pub dial_targets: Vec<SocketAddr>,
+    /// The runtime dial-intent stream (the dynamic outbound source): the
+    /// [`LinkstateForwarder`](crate::linkstate_forward::LinkstateForwarder)'s
+    /// gossip-autoconnect emits a [`DialIntent`] per discovered, policy-admitted
+    /// peer; the loop dials each one it does not already hold a face to. `None`
+    /// when autoconnect is not enabled (an accept-only loop, or a peer-mesh node
+    /// that did not opt in) — then the loop never dials on discovery.
+    pub dial_intents: Option<DialIntentReceiver>,
 }
 
 /// Bind-once, hold-N: the shared multi-face drive core behind both
@@ -426,6 +504,7 @@ where
     let FaceSources {
         listener,
         dial_targets,
+        mut dial_intents,
     } = sources;
     tokio::pin!(shutdown);
 
@@ -435,6 +514,14 @@ where
     // stores no value (a `BTreeMap<_, SocketAddr>` value here would be
     // write-only state duplication).
     let mut faces: BTreeSet<FaceId> = BTreeSet::new();
+    // The zids of currently-held faces — so a gossip-autoconnect dial-intent for a
+    // peer this node ALREADY holds a face to is skipped (zenoh's
+    // `get_transport_unicast(&zid).is_some()` dedup, `gossip.rs:451`). Kept in
+    // lockstep with `faces` from each `Face::peer_zid` at face-up / face-down; a
+    // face whose handshake never surfaced a zid is simply not tracked (it matches
+    // no intent). Empty and untouched when autoconnect is off (`dial_intents`
+    // `None`), so the accept-only / static-dial loops keep their prior behaviour.
+    let mut held_zids: BTreeSet<Vec<u8>> = BTreeSet::new();
     let mut next_id: u64 = 0;
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
@@ -476,6 +563,7 @@ where
                 Step::Accepted(accepted.map(|(stream, peer)| (DialedLink::Tcp(stream), peer)))
             }
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
+            intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
         };
 
         match step {
@@ -494,6 +582,12 @@ where
                             peer_zid: opened.peer_zid(),
                         };
                         faces.insert(id);
+                        // Track the held face's zid for the autoconnect dedup; a
+                        // zid-less face (handshake did not surface one) is not
+                        // tracked and can match no dial-intent.
+                        if let Some(z) = &face.peer_zid {
+                            held_zids.insert(z.clone());
+                        }
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
                         // Register the face's send seam BEFORE moving `opened`
@@ -514,8 +608,44 @@ where
 
             Step::Driven((face, outcome)) => {
                 faces.remove(&face.id);
+                if let Some(z) = &face.peer_zid {
+                    held_zids.remove(z);
+                }
                 forwarder.deregister(face.id);
                 on_event(&AcceptEvent::FaceDown(face, outcome));
+            }
+
+            Step::Dial(intent) => {
+                // A gossip-discovered, policy-admitted peer (the forwarder applied
+                // the autoconnect role + zid gate at emit, A5b). Dial it as an
+                // outbound face unless a face to it is already held (dedup) or no
+                // locator is TCP-dialable. A dialed face flows through the SAME
+                // `opening` -> `Step::Opened` path as a static dial, so it is
+                // registered + held + zid-tracked identically.
+                match dial_decision(&held_zids, &intent) {
+                    DialDecision::Dial(addr) => {
+                        let id = FaceId(next_id);
+                        next_id += 1;
+                        summary.dialed += 1;
+                        opening.push(Box::pin(dial_face(
+                            id,
+                            addr,
+                            params.clone(),
+                            clock,
+                            tick_interval_ms,
+                        )));
+                    }
+                    DialDecision::AlreadyHeld => log::debug!(
+                        "autoconnect: already hold a face to peer {:02x?}; \
+                         skipping redundant dial",
+                        intent.zid
+                    ),
+                    DialDecision::NoLocator => log::debug!(
+                        "autoconnect: discovered peer advertised no TCP-dialable \
+                         locator ({:?}); skipping dial",
+                        intent.locators
+                    ),
+                }
             }
 
             Step::Accepted(Ok((accepted, peer))) => {
@@ -582,6 +712,8 @@ where
         FaceSources {
             listener,
             dial_targets: Vec::new(),
+            // accept-only: no static dials and no autoconnect dial-intent stream.
+            dial_intents: None,
         },
         params,
         clock,
@@ -672,6 +804,42 @@ mod tests {
     /// `watch`, not edge-triggered `Notify` — a receiver cannot miss the wakeup).
     async fn shutdown_on(mut go: watch::Receiver<bool>) {
         let _ = go.wait_for(|&v| v).await;
+    }
+
+    #[test]
+    fn dial_decision_dedups_held_peers_and_requires_a_tcp_locator() {
+        use std::collections::BTreeSet;
+        let acc = || DialIntent {
+            zid: vec![0xAA; 4],
+            locators: vec!["tcp/127.0.0.1:7447".into()],
+        };
+        // Empty held set + a tcp locator -> dial that address.
+        let empty: BTreeSet<Vec<u8>> = BTreeSet::new();
+        assert!(matches!(
+            dial_decision(&empty, &acc()),
+            DialDecision::Dial(a) if a == "127.0.0.1:7447".parse().unwrap()
+        ));
+        // The peer's zid already held -> skip (dedup), even with a valid locator.
+        let held: BTreeSet<Vec<u8>> = [vec![0xAA; 4]].into_iter().collect();
+        assert!(matches!(
+            dial_decision(&held, &acc()),
+            DialDecision::AlreadyHeld
+        ));
+        // No tcp locator (tls / non-numeric) -> skip.
+        let no_tcp = DialIntent {
+            zid: vec![0xBB; 4],
+            locators: vec!["tls/127.0.0.1:7447".into(), "nonsense".into()],
+        };
+        assert!(matches!(
+            dial_decision(&empty, &no_tcp),
+            DialDecision::NoLocator
+        ));
+        // first_dialable_addr picks the first TCP locator past non-tcp ones.
+        assert_eq!(
+            first_dialable_addr(&["udp/1.2.3.4:7447".into(), "tcp/9.9.9.9:7447".into()]),
+            Some("9.9.9.9:7447".parse().unwrap())
+        );
+        assert_eq!(first_dialable_addr(&[]), None);
     }
 
     /// An initiator that dials, opens to Established, then HOLDS (keeps driving so
@@ -1039,6 +1207,7 @@ mod tests {
             FaceSources {
                 listener: peer_listener,
                 dial_targets: vec![acc_addr],
+                dial_intents: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -1062,6 +1231,80 @@ mod tests {
             "the dialed face reached Established"
         );
         assert_eq!(summary.peak_concurrent, 1, "held the outbound face");
+    }
+
+    /// A5c: a gossip-autoconnect [`DialIntent`] makes the loop dial the
+    /// discovered peer over real TCP — the dynamic dial source, twin of the
+    /// static `dial_targets`. Inject one intent (as the forwarder's emit would,
+    /// A5b) carrying the acceptor's `tcp/<addr>` locator; the loop parses it,
+    /// dials, and holds the resulting face exactly like a static dial.
+    #[cfg(feature = "routing-peer")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_autoconnect_dial_intent_dials_the_discovered_peer() {
+        let (acc_listener, acc_addr) = bind_loopback().await;
+        let (peer_listener, _peer_addr) = bind_loopback().await;
+
+        // `go` flips when the autoconnected face is up; it ends BOTH loops.
+        let (go_tx, go_rx) = watch::channel(false);
+
+        let acceptor = accept_loop(
+            acc_listener,
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            |_event: &AcceptEvent| {},
+            &NoOpForwarder,
+        );
+
+        // A dial-intent for the acceptor (zid 0xAA) carrying its tcp locator —
+        // what the forwarder emits for a discovered, policy-admitted peer. Buffer
+        // it before the loop starts; `intent_tx` stays alive so the channel does
+        // not close (the loop parks on the arm after consuming the one intent).
+        let (intent_tx, intent_rx) = tokio::sync::mpsc::unbounded_channel();
+        intent_tx
+            .send(DialIntent {
+                zid: vec![0xAA; 4],
+                locators: vec![format!("tcp/{acc_addr}")],
+            })
+            .expect("buffer the dial-intent");
+
+        let on_event = move |event: &AcceptEvent| {
+            if let AcceptEvent::FaceUp(_) = event {
+                let _ = go_tx.send(true);
+            }
+        };
+        let peer = peer_loop(
+            FaceSources {
+                listener: peer_listener,
+                dial_targets: vec![],
+                dial_intents: Some(intent_rx),
+            },
+            peer_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (_acc, peer) = tokio::join!(acceptor, peer);
+            peer
+        })
+        .await
+        .expect("autoconnect dial completes within 20s");
+
+        assert_eq!(
+            summary.dialed, 1,
+            "the dial-intent triggered one outbound dial"
+        );
+        assert_eq!(summary.accepted, 0, "no inbound peer connected");
+        assert_eq!(
+            summary.established, 1,
+            "the autoconnected face reached Established"
+        );
+        drop(intent_tx);
     }
 
     /// The mesh keystone: a peer holds a DIALED face and an ACCEPTED face at
@@ -1106,6 +1349,7 @@ mod tests {
             FaceSources {
                 listener: peer_listener,
                 dial_targets: vec![acc_addr],
+                dial_intents: None,
             },
             peer_params(),
             TokioTime::new(),
