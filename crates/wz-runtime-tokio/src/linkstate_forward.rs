@@ -1575,7 +1575,11 @@ impl LinkstateForwarder {
                 table: &self.qabls,
                 value: info,
             },
-            |ke| build_declare_queryable(0, 0, Some(ke)),
+            // Carry the source's QueryableInfo DOWNSTREAM on the re-flood so a
+            // multi-hop relay learns its completeness (R311uq) — the same SSOT
+            // mint re_advertise_queryables uses. `info` is Copy, captured by the
+            // Fn closure.
+            move |ke| build_declare_queryable_with_info(ke, info),
         );
     }
 
@@ -1742,7 +1746,8 @@ impl LinkstateForwarder {
     /// subscriber-plane thin wrapper over
     /// [`re_advertise_interest`](Self::re_advertise_interest).
     fn re_advertise_subscriptions(&self, new_children: &[(Zid, Vec<Zid>)]) {
-        self.re_advertise_interest(new_children, &self.subs, |ke| {
+        // Subscriptions carry no per-peer value (V = ()): ignore it in the mint.
+        self.re_advertise_interest(new_children, &self.subs, |ke, _value| {
             build_declare_subscriber(0, 0, Some(ke))
         });
     }
@@ -1755,8 +1760,11 @@ impl LinkstateForwarder {
     /// differ, so a queryable declared before a peer joined converges onto the new
     /// branch exactly as a subscription does.
     fn re_advertise_queryables(&self, new_children: &[(Zid, Vec<Zid>)]) {
-        self.re_advertise_interest(new_children, &self.qabls, |ke| {
-            build_declare_queryable(0, 0, Some(ke))
+        // CARRY the per-peer QueryableInfo so the late-joining branch learns the
+        // queryable's completeness (R311uq) — the same SSOT mint forward_queryable
+        // re-floods with.
+        self.re_advertise_interest(new_children, &self.qabls, |ke, info| {
+            build_declare_queryable_with_info(ke, *info)
         });
     }
 
@@ -1787,17 +1795,17 @@ impl LinkstateForwarder {
     /// change-gate still bounds any onward flood; the delta only narrows WHO is
     /// re-sent to. `table` selects the subscriber/queryable interest instance;
     /// `build` mints the per-flow carrier from the literal keyexpr.
-    fn re_advertise_interest<V>(
+    fn re_advertise_interest<V: Clone>(
         &self,
         new_children: &[(Zid, Vec<Zid>)],
         table: &RefCell<LinkstatepeerInterest<V>>,
-        build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
+        build: impl Fn(&str, &V) -> Result<DeclareOwned, CodecError>,
     ) {
         if new_children.is_empty() {
             return;
         }
-        // Snapshot the (keyexpr, source) pairs so the table borrow is released
-        // before the per-source graph borrow + fan_out below.
+        // Snapshot the (keyexpr, source, value) entries so the table borrow is
+        // released before the per-source graph borrow + fan_out below.
         let pairs = table.borrow().entries();
         for (source_zid, delta_children) in new_children {
             // this node's psid for the source (the re-stamp value; 0 for a
@@ -1812,11 +1820,11 @@ impl LinkstateForwarder {
                 Some(n) => n,
                 None => continue,
             };
-            for (keyexpr, decl_source) in &pairs {
+            for (keyexpr, decl_source, value) in &pairs {
                 if decl_source != source_zid {
                     continue;
                 }
-                let Ok(mut declare) = build(keyexpr) else {
+                let Ok(mut declare) = build(keyexpr, value) else {
                     continue;
                 };
                 set_declare_source(&mut declare, out_node_id);
@@ -2058,6 +2066,27 @@ fn peer_whatami_routing(actions: &SessionLinkActions) -> WhatAmI {
 /// the re-forward paths ([`is_tree_forward_target`]) both build on.
 fn is_child(children: &[Zid], zid: Zid) -> bool {
     children.contains(&zid)
+}
+
+/// Build a literal sourced `DeclareQueryable` CARRYING the `QueryableInfo` — the
+/// SSOT carrier mint shared by BOTH queryable re-flood paths
+/// ([`forward_queryable`](LinkstateForwarder::forward_queryable)'s inbound
+/// re-flood AND
+/// [`re_advertise_queryables`](LinkstateForwarder::re_advertise_queryables)'
+/// tree-change re-flood), so a queryable's completeness propagates DOWNSTREAM
+/// identically on either path — what makes MULTI-HOP BestMatching work (a relay
+/// N hops from the queryable learns its completeness, then routes by the GRAPH
+/// distance to it). zenoh `propagate_sourced_queryable` re-floods the registered
+/// `QueryableInfo` VERBATIM — NO per-hop distance increment (BestMatching reads
+/// `net.distances`, not the carried distance). DEFAULT / incomplete omits the
+/// ext (byte-identical to the prior clean re-flood).
+fn build_declare_queryable_with_info(
+    keyexpr: &str,
+    info: QueryableInfo,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_queryable(0, 0, Some(keyexpr))?;
+    set_declare_queryable_info(&mut declare, info);
+    Ok(declare)
 }
 
 /// Whether a face is a valid forward target when RE-FORWARDING along a source
@@ -5705,6 +5734,51 @@ mod tests {
     }
 
     #[test]
+    fn forward_queryable_re_floods_the_completeness_downstream() {
+        // R311uq — the multi-hop carry: forward_queryable re-floods the source's
+        // QueryableInfo (not a clean declaration) to its tree child, so a relay N
+        // hops from the queryable learns its completeness and can route to it by
+        // GRAPH distance. S receives a COMPLETE DeclareQueryable sourced at B
+        // (transit via A), re-floods to child C — the carrier must carry
+        // complete=true (a clean re-flood would lose it, and C's BestMatching
+        // would fall back to All).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        fwd.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x05, &[]),
+                entry(1, 5, 0x0A, &[0, 7]),
+                entry(7, 5, 0x0B, &[1]),
+            ]),
+        );
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        sink_a.reset();
+        sink_c.reset();
+
+        // A COMPLETE DeclareQueryable sourced at B (node_id 7 = A's psid for B).
+        let mut declare = build_declare_queryable(0, 0, Some("demo/q")).expect("build");
+        set_declare_source(&mut declare, 7);
+        wz_session_core::declare_build::set_declare_queryable_info(
+            &mut declare,
+            wz_session_core::queryable_info::QueryableInfo {
+                complete: true,
+                distance: 0,
+            },
+        );
+        fwd.forward_queryable(FaceId(0), true, &declare);
+
+        assert_eq!(sink_c.frame_count(), 1, "re-flooded to child C in B's tree");
+        assert!(
+            forwarded_declare_queryable_info(&sink_c.frame_bytes(0)).complete,
+            "the re-flooded DeclareQueryable carries the source's complete=true downstream",
+        );
+    }
+
+    #[test]
     fn re_advertise_queryables_reaches_a_late_joining_child() {
         // The query-plane twin of
         // re_advertise_reaches_a_child_that_joined_after_the_declaration: a
@@ -5731,6 +5805,35 @@ mod tests {
             forwarded_declare_queryable_keyexpr(&sink_c.frame_bytes(0)).as_deref(),
             Some("demo/q"),
             "re-advertised as a literal DeclareQueryable",
+        );
+    }
+
+    #[test]
+    fn re_advertise_queryables_carries_completeness_to_a_late_joiner() {
+        // R311uq — the tree-change re-advertise also CARRIES the QueryableInfo, so
+        // a late-joining branch learns a complete queryable's completeness (not a
+        // clean re-flood). A declares a COMPLETE queryable before C joins; the
+        // re-advertise to C must carry complete=true.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S<->A only
+        declare_queryable_complete(&fwd, FaceId(0), "demo/q", 0, true); // A's COMPLETE qabl
+
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(1), &face_c);
+        let new_children = advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        sink_c.reset(); // ignore any join-time frames
+
+        fwd.re_advertise_queryables(&new_children);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the late-joining child C learns A's earlier queryable via re-advertise",
+        );
+        assert!(
+            forwarded_declare_queryable_info(&sink_c.frame_bytes(0)).complete,
+            "the re-advertised DeclareQueryable carries complete=true (multi-hop carry)",
         );
     }
 

@@ -124,18 +124,24 @@ impl<V> LinkstatepeerInterest<V> {
         dropped
     }
 
-    /// Every `(keyexpr, interested-peer)` pair, as an owned snapshot — the input
-    /// to the tree-change re-advertise (c3c-3 debt A2). On a topology change the
-    /// forwarder re-floods each pair's `DeclareSubscriber` / `DeclareQueryable`
-    /// (sourced from the peer) toward that peer's recomputed tree children. Owned
-    /// (`String` / `Zid` clones) so the caller can re-flood without holding this
-    /// table's borrow across a graph borrow. Value-agnostic: the re-advertise
-    /// re-floods the keyexpr+source; carrying the per-peer `V` onward (the
-    /// multi-hop QueryableInfo propagation) is a tracked follow-up.
-    pub fn entries(&self) -> Vec<(String, Zid)> {
+    /// Every `(keyexpr, interested-peer, declared value)` triple, as an owned
+    /// snapshot — the input to the tree-change re-advertise (c3c-3 debt A2). On a
+    /// topology change the forwarder re-floods each entry's `DeclareSubscriber` /
+    /// `DeclareQueryable` (sourced from the peer, CARRYING the value `V`) toward
+    /// that peer's recomputed tree children. Owned (`String` / `Zid` / `V`
+    /// clones) so the caller can re-flood without holding this table's borrow
+    /// across a graph borrow. Value-bearing (R311uq): the re-advertise re-floods
+    /// the keyexpr + source + per-peer `V`, so a queryable's completeness reaches
+    /// a late-joining branch exactly as a steady-state re-flood does — the
+    /// multi-hop QueryableInfo propagation. For `V = ()` (subs) the value is the
+    /// zero-size unit.
+    pub fn entries(&self) -> Vec<(String, Zid, V)>
+    where
+        V: Clone,
+    {
         self.by_key
             .iter()
-            .flat_map(|(key, peers)| peers.keys().map(move |p| (key.clone(), *p)))
+            .flat_map(|(key, peers)| peers.iter().map(move |(p, v)| (key.clone(), *p, v.clone())))
             .collect()
     }
 
@@ -483,16 +489,34 @@ mod tests {
         subs.register("demo/b", zid(0xAA), ());
         let mut got = subs.entries();
         got.sort();
+        // Value-bearing (R311uq): the subscription value is the unit ().
         let mut want = vec![
-            ("demo/a".to_owned(), zid(0xAA)),
-            ("demo/a".to_owned(), zid(0xBB)),
-            ("demo/b".to_owned(), zid(0xAA)),
+            ("demo/a".to_owned(), zid(0xAA), ()),
+            ("demo/a".to_owned(), zid(0xBB), ()),
+            ("demo/b".to_owned(), zid(0xAA), ()),
         ];
         want.sort();
         assert_eq!(got, want);
         assert!(
             LinkstatepeerInterest::<()>::new().entries().is_empty(),
-            "an empty table yields no pairs"
+            "an empty table yields no entries"
+        );
+    }
+
+    #[test]
+    fn entries_carry_the_per_peer_queryable_info() {
+        // R311uq — entries() is value-bearing so the tree-change re-advertise can
+        // carry a queryable's completeness onto a late-joining branch.
+        let mut qabls: LinkstatepeerInterest<QueryableInfo> = LinkstatepeerInterest::new();
+        let complete = QueryableInfo {
+            complete: true,
+            distance: 0,
+        };
+        qabls.register("demo/q", zid(0xAA), complete);
+        assert_eq!(
+            qabls.entries(),
+            vec![("demo/q".to_owned(), zid(0xAA), complete)],
+            "the entry carries the peer's QueryableInfo, not just the (key, peer) pair",
         );
     }
 
