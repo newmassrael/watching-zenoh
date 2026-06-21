@@ -97,6 +97,7 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
+use wz_session_core::keyexpr_match::keyexpr_includes_target;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
@@ -1097,19 +1098,25 @@ impl LinkstateForwarder {
         else {
             return;
         };
-        // The query-route filter: forward only toward subtrees that hold a
-        // matching QUERYABLE — directions_toward over the keyexpr's
-        // interested-queryable set (excluding self, the local sink). A keyexpr no
-        // peer offers a queryable for routes nowhere.
+        // The query-route SELECT (zenoh QueryTarget::BestMatching,
+        // dispatcher/queries.rs:243-266): route to the SINGLE nearest COMPLETE
+        // queryable for this keyexpr. With no complete queryable, fall back to
+        // QueryTarget::All — fan out toward EVERY matching queryable's subtree
+        // (directions_toward over the interested-queryable set, excluding self the
+        // local sink — the prior behaviour). A keyexpr no peer offers a queryable
+        // for routes nowhere (the fallback yields no interested peer, so empty
+        // children -> return).
         let self_zid = *self.net.borrow().self_zid();
-        let interested = self.qabls.borrow().interested_remote(&keyexpr, &self_zid);
-        if interested.is_empty() {
-            return;
-        }
-        let children = self
-            .net
-            .borrow()
-            .directions_toward(&source_zid, &interested);
+        let children =
+            match self.select_best_matching(&keyexpr, &source_zid, &self_zid, inbound_zid) {
+                Some(hop) => vec![hop],
+                None => {
+                    let interested = self.qabls.borrow().interested_remote(&keyexpr, &self_zid);
+                    self.net
+                        .borrow()
+                        .directions_toward(&source_zid, &interested)
+                }
+            };
         if children.is_empty() {
             return;
         }
@@ -1149,6 +1156,58 @@ impl LinkstateForwarder {
             carrier.rid = qid;
             Ok(Some(NetworkMessage::Request(Box::new(carrier))))
         });
+    }
+
+    /// zenoh `QueryTarget::BestMatching` (`dispatcher/queries.rs:243-266`): pick
+    /// the SINGLE nearest COMPLETE queryable for `keyexpr` and return the tree
+    /// direction (the next-hop neighbour toward it in the SOURCE's tree), or
+    /// `None` when no complete queryable matches — in which case
+    /// [`forward_request`](Self::forward_request) falls back to `QueryTarget::All`.
+    ///
+    /// "Complete for this query" mirrors zenoh's `complete && qabl_info.complete`
+    /// (`hat/linkstate_peer/queries.rs:723`): the queryable declared itself
+    /// complete AND its declaration keyexpr INCLUDES the full query keyexpr (a
+    /// `demo/*` queryable is not complete for a `demo/**` query, even with the
+    /// flag set). "Nearest" is the GRAPH distance from THIS node to the queryable
+    /// peer — zenoh's `insert_target_for_qabls` reads `net.distances[qabl_idx]`
+    /// (`queries.rs:724`), NOT the carried declaration distance, so there is no
+    /// per-hop distance arithmetic. The inbound direction is excluded (zenoh's
+    /// `qabl.direction.0.id != src_face.id` in the BestMatching `find`), and an
+    /// unreachable peer contributes nothing.
+    fn select_best_matching(
+        &self,
+        keyexpr: &str,
+        source_zid: &Zid,
+        self_zid: &Zid,
+        inbound_zid: Option<Zid>,
+    ) -> Option<Zid> {
+        let net = self.net.borrow();
+        let qabls = self.qabls.borrow();
+        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+        qabls
+            .matching_entries(keyexpr, Some(self_zid))
+            .into_iter()
+            .filter_map(|(decl, peer, info)| {
+                // Keep only queryables COMPLETE for THIS query (declared complete
+                // AND covering the full query keyexpr), then resolve the tree
+                // direction toward the peer + its graph distance. Skip the inbound
+                // direction (no routing a Query back at its source) and any
+                // unreachable peer.
+                if !(info.complete && keyexpr_includes_target(decl, &query_chunks)) {
+                    return None;
+                }
+                let hop = net.next_hop(source_zid, &peer)?;
+                if inbound_zid == Some(hop) {
+                    return None;
+                }
+                Some((net.distance_to(&peer)?, hop))
+            })
+            // Nearest in graph-distance order — zenoh's `route.sort_by_key(|q|
+            // q.info.distance)` (`queries.rs:1050`) followed by the first-complete
+            // `find`. Ties resolve to the first in iteration order (as zenoh's
+            // stable sort over its HashMap iteration does).
+            .min_by(|(a, _), (b, _)| a.total_cmp(b))
+            .map(|(_distance, hop)| hop)
     }
 
     /// A `Response` (a queryable's reply to a routed Query) arrived on `inbound`:
@@ -5337,6 +5396,34 @@ mod tests {
         fwd.forward_queryable(face, true, &declare);
     }
 
+    /// Declare a queryable for `keyexpr` from the peer reached by `source_node_id`
+    /// on `face` (node_id 0 = the direct neighbour IS the source; non-zero = a
+    /// transit source resolved through the face's psid table, as in
+    /// forward_queryable_floods_to_tree_children_and_registers), carrying a
+    /// QueryableInfo with the given `complete` flag — the BestMatching input
+    /// (atom 3) that [`declare_queryable_interest`]'s DEFAULT (incomplete) form
+    /// omits.
+    fn declare_queryable_complete(
+        fwd: &LinkstateForwarder,
+        face: FaceId,
+        keyexpr: &str,
+        source_node_id: u16,
+        complete: bool,
+    ) {
+        let mut declare = build_declare_queryable(0, 0, Some(keyexpr)).expect("build qabl");
+        if source_node_id != 0 {
+            set_declare_source(&mut declare, source_node_id);
+        }
+        wz_session_core::declare_build::set_declare_queryable_info(
+            &mut declare,
+            wz_session_core::queryable_info::QueryableInfo {
+                complete,
+                distance: 0,
+            },
+        );
+        fwd.forward_queryable(face, true, &declare);
+    }
+
     /// The LITERAL keyexpr of the single forwarded DeclareQueryable in a frame,
     /// or `None` if it is not a DeclareQueryable / is still aliased — the
     /// query-plane twin of [`forwarded_declare_keyexpr`], proving the re-flooded
@@ -5713,13 +5800,14 @@ mod tests {
 
     #[test]
     fn forward_request_fans_out_to_every_matching_queryable() {
-        // QueryTarget::All — zenoh's get() default is BestMatching (the nearest
-        // COMPLETE queryable), but a forward-only first cut without the queryable
-        // completeness info fans out to ALL matching queryable directions (the
-        // faithful QueryTarget::All; the BestMatching narrowing is a tracked atom-3
-        // divergence). S has neighbours A, B, C; a Request from A has B and C both
-        // as self's children. BOTH declare a queryable for demo/q -> relay to BOTH
-        // (the query-plane twin of forward_push_to_two_interested_subtrees).
+        // QueryTarget::All FALLBACK (atom 3): B and C each declare a DEFAULT
+        // (incomplete) queryable for demo/q, so BestMatching finds no COMPLETE
+        // queryable and falls back to QueryTarget::All — fan out toward ALL
+        // matching queryable directions. S has neighbours A, B, C; a Request from
+        // A has B and C both as self's children, so it relays to BOTH (the
+        // query-plane twin of forward_push_to_two_interested_subtrees). The
+        // complete-queryable narrowing is exercised by
+        // forward_request_best_matching_* below.
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         let (face_b, sink_b) = peer_face(zid(0x0B));
@@ -5741,6 +5829,103 @@ mod tests {
         fwd.forward_request(FaceId(0), true, &request);
         assert_eq!(sink_b.frame_count(), 1, "relayed to queryable B");
         assert_eq!(sink_c.frame_count(), 1, "relayed to queryable C");
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    #[test]
+    fn forward_request_best_matching_routes_only_to_the_complete_queryable() {
+        // QueryTarget::BestMatching (atom 3): when a COMPLETE queryable exists the
+        // Query routes to that ONE queryable, NOT the All fan-out. B declares a
+        // COMPLETE queryable for demo/q, C an INCOMPLETE one (both self's
+        // children, equal distance). BestMatching selects B alone; C — matching
+        // but incomplete — is not a target. Contrast
+        // forward_request_fans_out_to_every_matching_queryable, where both are
+        // incomplete and the All fallback reaches BOTH.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (face_c, sink_c) = peer_face(zid(0x0C));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        advertise_link_back(&fwd, FaceId(2), 0x0C, 0x05);
+        declare_queryable_complete(&fwd, FaceId(1), "demo/q", 0, true); // B complete
+        declare_queryable_complete(&fwd, FaceId(2), "demo/q", 0, false); // C incomplete
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "BestMatching routes to the COMPLETE queryable B",
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "the incomplete queryable C is not a BestMatching target",
+        );
+        assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+        assert_eq!(
+            fwd.pending_len(),
+            1,
+            "a single pending-query return entry for the one selected target",
+        );
+    }
+
+    #[test]
+    fn forward_request_best_matching_prefers_the_nearer_of_two_complete_queryables() {
+        // QueryTarget::BestMatching distance order (atom 3): among COMPLETE
+        // queryables, the GRAPH-nearest one wins (zenoh sorts the route by
+        // net.distances then takes the first complete). B is a direct neighbour
+        // (distance 1); E sits behind D (distance 2). BOTH declare a COMPLETE
+        // queryable for demo/q. A Request from A routes to B alone — never to D
+        // (the direction toward the farther E).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S -> idx 0
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        let (face_d, sink_d) = peer_face(zid(0x0D));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        fwd.register(FaceId(2), &face_d);
+        // A and B are direct neighbours (distance 1); E sits behind D (distance 2).
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05); // edge S-B
+        fwd.ingest_inbound_linkstate(
+            FaceId(2),
+            list(vec![
+                entry(0, 1, 0x05, &[]),     // self psid 0 -> teaches psid->zid
+                entry(1, 5, 0x0D, &[0, 7]), // D links to self(0) and E(psid 7) -> edge S-D
+                entry(7, 5, 0x0E, &[1]),    // E links to D(psid 1) -> E at distance 2
+            ]),
+        );
+        fwd.net.borrow_mut().compute_trees();
+        // B (distance 1) and E (distance 2, sourced via D's psid 7) both declare a
+        // COMPLETE queryable for demo/q.
+        declare_queryable_complete(&fwd, FaceId(1), "demo/q", 0, true); // B, direct source
+        declare_queryable_complete(&fwd, FaceId(2), "demo/q", 7, true); // E, transit via D
+        sink_a.reset();
+        sink_b.reset();
+        sink_d.reset();
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "routed to the NEAREST complete queryable B (distance 1)",
+        );
+        assert_eq!(
+            sink_d.frame_count(),
+            0,
+            "the farther complete queryable E (distance 2, via D) is not selected",
+        );
         assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
     }
 

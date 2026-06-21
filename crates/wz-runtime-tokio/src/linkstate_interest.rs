@@ -160,6 +160,40 @@ impl<V> LinkstatepeerInterest<V> {
         out.into_iter().collect()
     }
 
+    /// Every `(declaration-keyexpr, interested-peer, declared value V)` tuple
+    /// whose declaration keyexpr INTERSECTS `target`, optionally excluding
+    /// `exclude` (this node's own zid) — the VALUE-BEARING twin of
+    /// [`matching_peers`](Self::matching_peers). BestMatching needs the per-peer
+    /// `V` ([`QueryableInfo`](wz_session_core::queryable_info::QueryableInfo)) AND
+    /// the matched DECLARATION keyexpr (to test query-inclusion), both of which
+    /// the value-agnostic [`matching_peers`](Self::matching_peers) / route filter
+    /// discards. A peer that matches via several declarations yields one tuple
+    /// PER declaration — no dedup (the per-declaration value is the point),
+    /// mirroring zenoh's per-`(matched-resource, qabl)` iteration in
+    /// `insert_target_for_qabls` (`hat/linkstate_peer/queries.rs:710`), where each
+    /// matched resource carries its own `QueryableInfoType` and its own
+    /// includes-the-query verdict. Borrowed (`&str` / `&V`) — the BestMatching
+    /// select consumes them under the same table borrow.
+    pub(crate) fn matching_entries(
+        &self,
+        target: &str,
+        exclude: Option<&Zid>,
+    ) -> Vec<(&str, Zid, &V)> {
+        let target_chunks: Vec<&str> = target.split('/').collect();
+        let mut out: Vec<(&str, Zid, &V)> = Vec::new();
+        for (decl, peers) in &self.by_key {
+            if keyexpr_intersects_target(decl, &target_chunks) {
+                out.extend(
+                    peers
+                        .iter()
+                        .filter(|(peer, _value)| exclude != Some(*peer))
+                        .map(|(peer, value)| (decl.as_str(), *peer, value)),
+                );
+            }
+        }
+        out
+    }
+
     /// The peers interested in `keyexpr`, as a snapshot — every interested peer
     /// INCLUDING this node itself when it has a local declaration. Matches by
     /// keyexpr intersection. Order is unspecified.
@@ -275,6 +309,47 @@ mod tests {
         assert!(
             !qabls.register("demo/q", zid(0xCC), complete),
             "same complete value again -> no change",
+        );
+    }
+
+    #[test]
+    fn matching_entries_yields_the_per_peer_value_for_best_matching() {
+        // The value-bearing accessor BestMatching reads (atom 3): each matching
+        // (declaration, peer) pair WITH its stored QueryableInfo, one tuple PER
+        // declaration (no peer dedup — the per-declaration completeness is what
+        // the select needs), self excluded.
+        let mut qabls: LinkstatepeerInterest<QueryableInfo> = LinkstatepeerInterest::new();
+        let complete = QueryableInfo {
+            complete: true,
+            distance: 0,
+        };
+        let incomplete = QueryableInfo {
+            complete: false,
+            distance: 0,
+        };
+        qabls.register("demo/**", zid(0xAA), complete); // wildcard, complete
+        qabls.register("demo/q", zid(0xBB), incomplete); // literal, incomplete
+        let me = zid(0x05);
+        qabls.register("demo/q", me, complete); // self — excluded below
+
+        let mut got: Vec<(String, Zid, QueryableInfo)> = qabls
+            .matching_entries("demo/q", Some(&me))
+            .into_iter()
+            .map(|(decl, peer, info)| (decl.to_owned(), peer, *info))
+            .collect();
+        got.sort_by_key(|(_decl, peer, _info)| *peer);
+        assert_eq!(
+            got,
+            vec![
+                ("demo/**".to_owned(), zid(0xAA), complete),
+                ("demo/q".to_owned(), zid(0xBB), incomplete),
+            ],
+            "the wildcard (complete) and the literal (incomplete) declarations both \
+             match demo/q with their OWN per-peer value; the self declaration is excluded",
+        );
+        assert!(
+            qabls.matching_entries("other/key", None).is_empty(),
+            "a non-intersecting target matches no declaration",
         );
     }
 
