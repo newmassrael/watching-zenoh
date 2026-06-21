@@ -10,15 +10,18 @@
 //! subject + keyexpr off the [`InterceptorContext`], and asks the policy for a
 //! verdict.
 //!
-//! Governed actions: the data-plane `Put` / `Del` (a Push body) and the
-//! control-plane `DeclareSubscriber`. Every other kind — the rest of the
-//! `Declare` family, `Query` / `Reply`, the liveliness messages — is admitted
-//! here and gains its own arm as the action set grows. Because the per-kind
-//! dispatch is a `match`, adding an action is a new arm, not a new check site.
+//! Governed actions: the data-plane `Put` / `Del` (a Push or a write-Request
+//! body), the query plane `Query` (a Request's Query body) / `Reply` (a
+//! Response) / `DeclareQueryable`, and the control plane `DeclareSubscriber`.
+//! Every other kind — the rest of the `Declare` family, the keyless
+//! `ResponseFinal`, the liveliness messages — is admitted here and gains its own
+//! arm as the action set grows. Because the per-kind dispatch is a `match`,
+//! adding an action is a new arm, not a new check site.
 
 use wz_access_control::{AclFlow, AclMessage, AclPolicy, Permission};
 use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::push::PushOwnedVariant;
+use wz_codecs::request::RequestOwnedVariant;
 use wz_session_core::network_message::NetworkMessage;
 
 use super::{Interceptor, InterceptorContext};
@@ -42,11 +45,14 @@ impl AclInterceptor {
 
 /// The ACL action a message represents, or `None` for a kind this enforcer does
 /// not govern (which is then admitted). The wz analogue of zenoh's
-/// per-`NetworkBody` dispatch in `access_control.rs::intercept`: a Push maps to
-/// [`Put`](AclMessage::Put) / [`Delete`](AclMessage::Delete) on its body, and a
-/// `DeclareSubscriber` maps to [`DeclareSubscriber`](AclMessage::DeclareSubscriber);
-/// an UndeclareSubscriber / keyexpr-alias declaration, `Query` / `Reply`, and the
-/// liveliness kinds are not governed yet, so they return `None` and admit.
+/// per-`NetworkBody` dispatch in `access_control.rs::intercept`: a Push / Request
+/// maps to [`Put`](AclMessage::Put) / [`Delete`](AclMessage::Delete) /
+/// [`Query`](AclMessage::Query) on its body, a Response to
+/// [`Reply`](AclMessage::Reply), a `DeclareSubscriber` /  `DeclareQueryable` to
+/// [`DeclareSubscriber`](AclMessage::DeclareSubscriber) /
+/// [`DeclareQueryable`](AclMessage::DeclareQueryable). An UndeclareSubscriber /
+/// keyexpr-alias declaration, the keyless `ResponseFinal`, and the liveliness
+/// kinds are not governed, so they return `None` and admit.
 fn acl_action(msg: &NetworkMessage) -> Option<AclMessage> {
     match msg {
         NetworkMessage::Push(p) => match &p.body {
@@ -54,10 +60,28 @@ fn acl_action(msg: &NetworkMessage) -> Option<AclMessage> {
             PushOwnedVariant::CodecZenohMsgDel(_) => Some(AclMessage::Delete),
             _ => None,
         },
+        // A routed Request maps by its body, the same as a Push: a Query body is
+        // the query plane (governed as `Query`); a Put / Del body is a write
+        // routed via the request mechanism (governed as the data-plane action).
+        NetworkMessage::Request(r) => match &r.body {
+            RequestOwnedVariant::CodecZenohQuery(_) => Some(AclMessage::Query),
+            RequestOwnedVariant::CodecZenohMsgPut(_) => Some(AclMessage::Put),
+            RequestOwnedVariant::CodecZenohMsgDel(_) => Some(AclMessage::Delete),
+            _ => None,
+        },
+        // A query reply (a `Response`, Reply or Err body) — both bodies are a
+        // `Reply` action; the keyless `ResponseFinal` end-marker is not governed
+        // (it carries no keyexpr, so it admits via the `None` keyexpr path).
+        NetworkMessage::Response(_) => Some(AclMessage::Reply),
         NetworkMessage::Declare(d)
             if matches!(d.body, DeclareOwnedVariant::CodecZenohDeclSubscriber(_)) =>
         {
             Some(AclMessage::DeclareSubscriber)
+        }
+        NetworkMessage::Declare(d)
+            if matches!(d.body, DeclareOwnedVariant::CodecZenohDeclQueryable(_)) =>
+        {
+            Some(AclMessage::DeclareQueryable)
         }
         _ => None,
     }
@@ -128,6 +152,33 @@ mod tests {
                 permission: Permission::Deny,
             }],
         })
+    }
+
+    #[test]
+    fn acl_action_maps_the_query_plane() {
+        // R311ud — the query-plane action mapping: a Request(Query) -> Query, a
+        // Response -> Reply, a DeclareQueryable -> DeclareQueryable. The
+        // Request(Put|Del)-body -> Put|Delete arms are the faithful zenoh
+        // body-dispatch (and gate a Request-carried write rather than admit it),
+        // but wz emits only Request(Query) today, so they are not exercised here.
+        use wz_session_core::declare_build::build_declare_queryable;
+        use wz_session_core::request_build::build_request_query;
+        use wz_session_core::response_build::build_response_reply_literal;
+
+        let query = NetworkMessage::Request(Box::new(
+            build_request_query(1, 0, Some("demo/q")).expect("build query"),
+        ));
+        assert_eq!(acl_action(&query), Some(AclMessage::Query));
+
+        let reply = NetworkMessage::Response(Box::new(
+            build_response_reply_literal(1, "demo/q", b"x").expect("build reply"),
+        ));
+        assert_eq!(acl_action(&reply), Some(AclMessage::Reply));
+
+        let decl_qabl = NetworkMessage::Declare(Box::new(
+            build_declare_queryable(0, 0, Some("demo/q")).expect("build decl queryable"),
+        ));
+        assert_eq!(acl_action(&decl_qabl), Some(AclMessage::DeclareQueryable));
     }
 
     #[test]

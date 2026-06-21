@@ -100,6 +100,17 @@ pub enum AclMessage {
     /// a peer from registering interest in the keyexpr (zenoh
     /// `AclMessage::DeclareSubscriber`).
     DeclareSubscriber,
+    /// A routed query (a `Request` carrying a `Query`) — denying it stops a peer
+    /// from querying the keyexpr across the mesh (zenoh `AclMessage::Query`).
+    Query,
+    /// A queryable interest declaration crossing the mesh — denying it stops a
+    /// peer from registering a queryable for the keyexpr, the query-plane twin of
+    /// [`DeclareSubscriber`](AclMessage::DeclareSubscriber) (zenoh
+    /// `AclMessage::DeclareQueryable`).
+    DeclareQueryable,
+    /// A query reply (a `Response`, Reply or Err) — denying it stops a peer from
+    /// answering a query on the keyexpr (zenoh `AclMessage::Reply`).
+    Reply,
 }
 
 /// Which subject a rule applies to — the auth-free subset of zenoh's

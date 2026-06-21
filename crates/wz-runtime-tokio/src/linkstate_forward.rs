@@ -500,13 +500,21 @@ impl InterceptorContext for FaceContext<'_> {
 
     fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
         // Resolve the governed kinds' keyexpr alias-aware against THIS face's
-        // table — the same resolution `forward_push` (Push) and
-        // `forward_subscription` (DeclareSubscriber) do. An UndeclareSubscriber /
-        // alias declaration / other kind carries no governed keyexpr here, so the
-        // enforcer admits it.
+        // table — the same resolution the forward paths do (Push / Request /
+        // Response carry the keyexpr inline; a DeclareSubscriber / DeclareQueryable
+        // carries it in the declaration body). An UndeclareSubscriber / alias
+        // declaration / keyless ResponseFinal / other kind carries no governed
+        // keyexpr here, so the enforcer admits it.
         match msg {
             NetworkMessage::Push(p) => resolve_wireexpr(&p.keyexpr.body, &self.face.keyexpr_table),
+            NetworkMessage::Request(r) => {
+                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
+            }
+            NetworkMessage::Response(r) => {
+                resolve_wireexpr(&r.keyexpr.body, &self.face.keyexpr_table)
+            }
             NetworkMessage::Declare(d) => declare_subscriber_wireexpr(d)
+                .or_else(|| declare_queryable_wireexpr(d))
                 .and_then(|we| resolve_wireexpr(&we.body, &self.face.keyexpr_table)),
             _ => None,
         }
@@ -3570,6 +3578,218 @@ mod tests {
             fwd.interceptor_dropped(),
             1,
             "the allowed declaration adds no deny"
+        );
+    }
+
+    #[test]
+    fn an_acl_deny_drops_an_inbound_declare_queryable() {
+        // §5.16 query ACL (R311ud) — the query-plane twin of
+        // an_acl_deny_drops_an_inbound_declare_subscriber: S denies
+        // DeclareQueryable on admin/**. A sourced DeclareQueryable from A on
+        // admin/q is dropped at S — the source's queryable interest is NOT
+        // registered (so a Query never routes toward it) and it is witnessed by
+        // interceptor_dropped. A queryable on an unrelated keyexpr still registers.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sa) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["admin/**".to_owned()],
+                    messages: vec![AclMessage::DeclareQueryable],
+                    flow: AclFlow::Ingress,
+                    permission: Permission::Deny,
+                }],
+            })),
+            ..Default::default()
+        });
+
+        let denied = build_declare_queryable(0, 0, Some("admin/q")).expect("build");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(denied))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome));
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the denied DeclareQueryable is witnessed"
+        );
+        assert!(
+            fwd.interested_queryables("admin/q").is_empty(),
+            "a denied queryable is not registered"
+        );
+
+        // An allowed keyexpr registers the queryable as usual.
+        let allowed = build_declare_queryable(0, 0, Some("demo/q")).expect("build");
+        let outcome2 = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(allowed))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&outcome2));
+        assert_eq!(
+            fwd.interested_queryables("demo/q"),
+            vec![zid(0x0A)],
+            "an allowed queryable registers"
+        );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the allowed declaration adds no deny"
+        );
+    }
+
+    #[test]
+    fn an_acl_deny_drops_an_inbound_query_before_routing() {
+        // §5.16 query ACL (R311ud) — the routed-Query gate. C holds queryables for
+        // admin/q AND demo/q; S denies the Query action on admin/**. A Query from
+        // A on admin/q is dropped at S (witnessed, NOT routed to C, no pending
+        // entry recorded), while a Query on demo/q is admitted and routed — the
+        // gate is action- and keyexpr-selective.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // querier, FaceId 0
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // queryable, FaceId 1
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        // Register C's queryables directly (bypassing admit — this isolates the
+        // QUERY gate; the DeclareQueryable gate is the prior test).
+        declare_queryable_interest(&fwd, FaceId(1), "admin/q");
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["admin/**".to_owned()],
+                    messages: vec![AclMessage::Query],
+                    flow: AclFlow::Ingress,
+                    permission: Permission::Deny,
+                }],
+            })),
+            ..Default::default()
+        });
+        sink_a.reset();
+        sink_c.reset();
+
+        // A Query on the DENIED keyexpr is dropped before routing.
+        let denied = wz_session_core::request_build::build_request_query(7, 0, Some("admin/q"))
+            .expect("build");
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                reliable: true,
+                sn: 0,
+                messages: vec![NetworkMessage::Request(Box::new(denied))],
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the denied Query is witnessed"
+        );
+        assert_eq!(sink_c.frame_count(), 0, "a denied Query is not routed");
+        assert_eq!(fwd.pending_len(), 0, "and records no pending return entry");
+
+        // A Query on an ALLOWED keyexpr is routed toward the queryable.
+        let allowed = wz_session_core::request_build::build_request_query(8, 0, Some("demo/q"))
+            .expect("build");
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                reliable: true,
+                sn: 0,
+                messages: vec![NetworkMessage::Request(Box::new(allowed))],
+                has_ext: false,
+                extensions: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "an allowed Query routes to the queryable"
+        );
+        assert_eq!(fwd.pending_len(), 1, "and records a pending return entry");
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the allowed Query adds no deny"
+        );
+    }
+
+    #[test]
+    fn an_egress_acl_deny_blocks_a_relayed_reply() {
+        // §5.16 query ACL EGRESS (R311ud) — the reply-relay gate (the Reply twin
+        // of an_egress_acl_deny_blocks_a_relay_but_not_reception). S relays a Query
+        // to a queryable (recording a pending return entry), then DENIES Reply on
+        // demo/** egress: the queryable's Response is received but NOT relayed back
+        // to the querier (the egress gate drops it, witnessed); the pending entry
+        // SURVIVES (peek, not consumed — only a ResponseFinal frees it).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // querier, FaceId 0
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // queryable, FaceId 1
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+        sink_a.reset();
+        sink_c.reset(); // drop the setup topology frames so frame 0 is the Query
+
+        // Forward a Query to C (no ACL yet) -> records a pending entry + a qid.
+        let query =
+            wz_session_core::request_build::build_request_query(7, 0, Some("demo/q")).expect("q");
+        fwd.forward_request(FaceId(0), true, &query);
+        let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
+        sink_a.reset();
+        sink_c.reset();
+
+        // Now DENY Reply on demo/** EGRESS.
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: vec![AclRule {
+                    subject: SubjectSelector::Any,
+                    key_exprs: vec!["demo/**".to_owned()],
+                    messages: vec![AclMessage::Reply],
+                    flow: AclFlow::Egress,
+                    permission: Permission::Deny,
+                }],
+            })),
+            ..Default::default()
+        });
+
+        // C replies; the Response would route back to A, but egress denies it.
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
+                .expect("reply");
+        fwd.forward_response(FaceId(1), true, &response);
+        assert_eq!(
+            sink_a.frame_count(),
+            0,
+            "the denied Reply is NOT relayed back to the querier"
+        );
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "the egress Reply deny is witnessed"
+        );
+        assert_eq!(
+            fwd.pending_len(),
+            1,
+            "the pending entry survives (a Reply peeks, only a final frees)"
         );
     }
 

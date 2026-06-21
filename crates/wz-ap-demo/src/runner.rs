@@ -1362,9 +1362,10 @@ pub(crate) async fn run_peer(
     if let Some(deny_keyexpr) = interceptors.acl_deny.as_deref() {
         log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
         // A rule per FLOW (a rule carries a single flow): the keyexpr is denied
-        // BOTH on ingress (a neighbour cannot push/subscribe it through us) and
-        // on egress (we never relay it out, nor originate it toward a peer), so
-        // `--acl-deny K` blocks K completely in both directions.
+        // BOTH on ingress (a neighbour cannot push/subscribe/query/declare-a-
+        // queryable/reply on it through us) and on egress (we never relay it out,
+        // nor originate it toward a peer), so `--acl-deny K` blocks K completely
+        // across the data AND query planes in both directions.
         let deny_rule = |flow| AclRule {
             subject: SubjectSelector::Any,
             key_exprs: vec![deny_keyexpr.to_owned()],
@@ -1372,6 +1373,12 @@ pub(crate) async fn run_peer(
                 AclMessage::Put,
                 AclMessage::Delete,
                 AclMessage::DeclareSubscriber,
+                // The query plane (R311ud): denying K also blocks querying it,
+                // declaring a queryable for it, and replying on it — `--acl-deny K`
+                // closes K across the data AND query planes.
+                AclMessage::Query,
+                AclMessage::DeclareQueryable,
+                AclMessage::Reply,
             ],
             flow,
             permission: Permission::Deny,
