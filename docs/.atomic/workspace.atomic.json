@@ -45094,6 +45094,50 @@
         "LOCAL UNPUSHED: 311tk..tp + 311tq on origin/main=4394d5a (7 ahead). Host lanes verified (driver 375+277, clippy both, demo both, fmt). MCU unaffected. full run-ci + idle before push; push only after explicit consent."
       ]
     },
+    "Round 311tr": {
+      "decision_summary": "R311tr: revert the tp face-establishment zid-dedup -- it broke the pure acceptor/router (legitimately holds N same-zid faces; the demo's fixed fixture zid exposed it). The single-source faces map + dial-intent dedup stay; the two-faces-one-zid hazard re-tracks to the graph layer.",
+      "changes_bullets": [
+        "run-ci Layer E3/E5 caught the regression (RUNCI_EXIT=1, masked by a wrapper echo -- the 'judge by unpiped exit code' lesson): wz_router_holds_two_concurrent_peers + 2 wz_router_forward FAILED. Two demo --connect initiators share the fixed fixture zid 0x01020304 (only --peer derives a distinct zid), so the establishment dedup dropped the second face.",
+        "Root cause: the establishment dedup was the WRONG LAYER -- in the shared face_drive_loop it applied to the pure acceptor/router (NoOpForwarder, no routing graph), which legitimately holds N faces. The two-faces-one-zid hazard is a ROUTING-GRAPH concern (add_link/remove_link key the self-edge on zid).",
+        "Reverted the Step::Opened zid-dedup; KEPT the held_zids->faces:BTreeMap single-source collapse (clean; the value is read by the dial-intent dedup) and the dial_decision dial-intent dedup (autoconnect-only, never touches the acceptor).",
+        "The two-faces-one-zid corruption re-tracks as a PRE-EXISTING graph-layer debt: make add_link/remove_link zid-aware (refcount links per zid, or remove the self-edge only when the last link to a zid drops) -- fixes it at the source without touching the transport-agnostic face loop."
+      ],
+      "verification_bullets": [
+        "Layer E3 wz_router_multi_peer 1 pass + Layer E5 wz_router_forward 2 pass (the 3 reverted-from-FAIL). driver 375 routing-peer + 277 base, clippy -D clean (routing-peer/base/routing-routes), fmt clean. FULL run-ci re-run (all lanes incl E3/E5/Q/Z) before push.",
+        "The autoconnect dial-intent dedup (dial_decision/holds_zid) is unchanged and tested; the in-flight autoconnect double-dial window is back to the pre-existing two-faces-one-zid hazard (GreaterZid + one-emit-per-discovery make it rare), folded into the graph-layer debt."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "R311tr = revert the over-broad establishment zid-dedup (tp) -- it broke the pure router's legitimate hold-N. The single-source faces map + dial-intent dedup stay. LESSON re-confirmed: a transport-level dedup does not belong in the shared face-hold loop; judge run-ci by the unpiped RUNCI_EXIT, not a wrapper's exit.",
+        "RE-TRACKED DEBT (the corruption, unfixed again): two faces to one zid -> remove_link removes the self-edge by zid -> prunes a live peer. PRE-EXISTING. Proper fix = zid-aware add_link/remove_link in wz-routing-graph (refcount per zid / remove self-edge only on the last link), at the source, not the loop. Reachable via two static dials to one peer, dial+accept from one peer, or an autoconnect in-flight race.",
+        "Remaining review debts unchanged: first_dialable_addr->dial_locator SSOT; 3-node autoconnect e2e; placeholder-whatami textbook alternative (thread entry whatami through Changes); DialIntent.zid/Face.peer_zid Vec<u8>. North-star: c3c-3 filter/failover/static + Storage/Access/SHM.",
+        "LOCAL UNPUSHED: 311tk..tq + 311tr on origin/main=4394d5a (8 ahead). FULL run-ci re-run green (all lanes) is the push gate; push only after consent (given) + idle."
+      ],
+      "publishable_decision_summary": "R311tr: revert the tp face-establishment zid-dedup -- it broke the pure acceptor/router (legitimately holds N same-zid faces; the demo's fixed fixture zid exposed it). The single-source faces map + dial-intent dedup stay; the two-faces-one-zid hazard re-tracks to the graph layer.",
+      "publishable_changes_bullets": [
+        "run-ci Layer E3/E5 caught the regression (RUNCI_EXIT=1, masked by a wrapper echo -- the 'judge by unpiped exit code' lesson): wz_router_holds_two_concurrent_peers + 2 wz_router_forward FAILED. Two demo --connect initiators share the fixed fixture zid 0x01020304 (only --peer derives a distinct zid), so the establishment dedup dropped the second face.",
+        "Root cause: the establishment dedup was the WRONG LAYER -- in the shared face_drive_loop it applied to the pure acceptor/router (NoOpForwarder, no routing graph), which legitimately holds N faces. The two-faces-one-zid hazard is a ROUTING-GRAPH concern (add_link/remove_link key the self-edge on zid).",
+        "Reverted the Step::Opened zid-dedup; KEPT the held_zids->faces:BTreeMap single-source collapse (clean; the value is read by the dial-intent dedup) and the dial_decision dial-intent dedup (autoconnect-only, never touches the acceptor).",
+        "The two-faces-one-zid corruption re-tracks as a PRE-EXISTING graph-layer debt: make add_link/remove_link zid-aware (refcount links per zid, or remove the self-edge only when the last link to a zid drops) -- fixes it at the source without touching the transport-agnostic face loop."
+      ],
+      "publishable_verification_bullets": [
+        "Layer E3 wz_router_multi_peer 1 pass + Layer E5 wz_router_forward 2 pass (the 3 reverted-from-FAIL). driver 375 routing-peer + 277 base, clippy -D clean (routing-peer/base/routing-routes), fmt clean. FULL run-ci re-run (all lanes incl E3/E5/Q/Z) before push.",
+        "The autoconnect dial-intent dedup (dial_decision/holds_zid) is unchanged and tested; the in-flight autoconnect double-dial window is back to the pre-existing two-faces-one-zid hazard (GreaterZid + one-emit-per-discovery make it rare), folded into the graph-layer debt."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tr = revert the over-broad establishment zid-dedup (tp) -- it broke the pure router's legitimate hold-N. The single-source faces map + dial-intent dedup stay. LESSON re-confirmed: a transport-level dedup does not belong in the shared face-hold loop; judge run-ci by the unpiped RUNCI_EXIT, not a wrapper's exit.",
+        "RE-TRACKED DEBT (the corruption, unfixed again): two faces to one zid -> remove_link removes the self-edge by zid -> prunes a live peer. PRE-EXISTING. Proper fix = zid-aware add_link/remove_link in wz-routing-graph (refcount per zid / remove self-edge only on the last link), at the source, not the loop. Reachable via two static dials to one peer, dial+accept from one peer, or an autoconnect in-flight race.",
+        "Remaining review debts unchanged: first_dialable_addr->dial_locator SSOT; 3-node autoconnect e2e; placeholder-whatami textbook alternative (thread entry whatami through Changes); DialIntent.zid/Face.peer_zid Vec<u8>. North-star: c3c-3 filter/failover/static + Storage/Access/SHM.",
+        "LOCAL UNPUSHED: 311tk..tq + 311tr on origin/main=4394d5a (8 ahead). FULL run-ci re-run green (all lanes) is the push gate; push only after consent (given) + idle."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

@@ -438,14 +438,14 @@ enum DialDecision {
     NoLocator,
 }
 
-/// Whether any currently-held face is to peer `zid` — the single dedup query both
-/// the dial-intent gate ([`dial_decision`]) and the face-establishment merge (the
-/// `Step::Opened` arm) consult, so a peer is never held by two faces at once
-/// (the zenoh `get_transport_unicast` / `init_transport_unicast` dedup). It is the
-/// keystone of the no-double-hold invariant: two graph links to one zid would let
-/// one teardown's `remove_link` (which keys on zid) prune the still-live peer.
-/// O(held faces) — a mesh node holds tens, and this runs only on a dial-intent or
-/// a face-up, never per message.
+/// Whether any currently-held face is to peer `zid` — the dial-intent dedup query
+/// ([`dial_decision`]): a gossip-autoconnect dial-intent for a peer this node
+/// already holds a face to is not re-dialed (zenoh's `get_transport_unicast`
+/// check before `connect_peer`). O(held faces) — a mesh node holds tens, and this
+/// runs only on a dial-intent, never per message. (It is NOT used as a
+/// face-establishment dedup: the shared loop also drives the pure acceptor /
+/// router, which legitimately holds N faces; the two-faces-one-zid routing hazard
+/// is fixed in the graph layer, not here.)
 fn holds_zid(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, zid: &[u8]) -> bool {
     faces.values().any(|z| z.as_deref() == Some(zid))
 }
@@ -521,13 +521,12 @@ where
     tokio::pin!(shutdown);
 
     // The live faces, each mapped to its peer zid (`None` if the handshake never
-    // surfaced one). The value is READ — `holds_zid` scans it for the dedup that
-    // keeps a peer to ONE face (both the dial-intent gate and the
-    // face-establishment merge) — so this single map is the source for "who do I
-    // hold", replacing the prior value-less id set plus a parallel zid set (the
-    // write-only duplication the old comment warned against; the value is no
-    // longer write-only now that the dedup reads it). `peak_concurrent` and the
-    // held-count read its cardinality.
+    // surfaced one). The value is READ — `holds_zid` scans it for the
+    // gossip-autoconnect dial-intent dedup (don't re-dial a peer already held) —
+    // so this single map is the source for "who do I hold", replacing the prior
+    // value-less id set plus a parallel zid set (the duplication the old comment
+    // warned against; the value is no longer write-only now that the dial dedup
+    // reads it). `peak_concurrent` and the held-count read its cardinality.
     let mut faces: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
     let mut next_id: u64 = 0;
     let mut summary = AcceptLoopSummary::default();
@@ -588,25 +587,14 @@ where
                             peer,
                             peer_zid: opened.peer_zid(),
                         };
-                        // Face-establishment dedup (zenoh `init_transport_unicast`):
-                        // if a face to this peer's zid is already held, this is a
-                        // redundant second link (a static dial + an accept, or an
-                        // autoconnect dial that raced an in-flight one) — drop the
-                        // new one, keep the existing. Two graph links to one zid
-                        // would otherwise let the first teardown's `remove_link`
-                        // (keyed on zid) prune the still-live peer. A zid-less face
-                        // cannot be deduped, so it is held. This also makes the
-                        // dial-intent in-flight window benign: a racing second dial
-                        // is dropped HERE at establishment, never held.
-                        if let Some(z) = &face.peer_zid {
-                            if holds_zid(&faces, z) {
-                                log::debug!(
-                                    "dropping redundant face {} to an already-held peer",
-                                    id.0
-                                );
-                                continue;
-                            }
-                        }
+                        // NO face-establishment zid-dedup here: this shared loop
+                        // also drives the pure acceptor / router, which LEGITIMATELY
+                        // holds N faces and must not drop a second face that happens
+                        // to share a zid (e.g. two demo `--connect` clients on the
+                        // fixed fixture zid). The two-faces-one-zid hazard is a
+                        // ROUTING-GRAPH concern (`add_link`/`remove_link` key the
+                        // self-edge on zid), so its fix belongs in the graph layer,
+                        // not in this transport-agnostic face-hold loop — tracked.
                         faces.insert(id, face.peer_zid.clone());
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
