@@ -80,7 +80,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
@@ -326,6 +326,18 @@ pub struct LinkstateForwarder {
     /// witness, since the chain's `admit` returns a single bool and does not
     /// attribute the drop to a specific interceptor.)
     interceptor_dropped: Cell<usize>,
+    /// The per-query timeout — how long a forwarded Query's pending return entry
+    /// lives before [`tick`](FaceForwarder::tick) abandons it (zenoh's
+    /// `queries_default_timeout`, default 10s). `forward_request` stamps each
+    /// allocated entry with `Instant::now() + this`; the tick sweep reaps any
+    /// past its deadline. `Cell` because it is `Copy` and set through a `&self`
+    /// config seam, like the other policy knobs.
+    query_timeout: Cell<Duration>,
+    /// Count of pending queries reaped by the timeout sweep — the GC witness, the
+    /// timeout twin of [`recomputes`](Self#structfield.recomputes). Rises once per
+    /// abandoned query (a queryable that never sent its `ResponseFinal` on a
+    /// still-up face); `0` on a healthy mesh where every query finalizes.
+    timed_out: Cell<usize>,
 }
 
 impl LinkstateForwarder {
@@ -333,6 +345,13 @@ impl LinkstateForwarder {
     /// (`hat/mod.rs:56`). The SPF-throttle delay a [`new`](Self::new) forwarder
     /// uses unless [`with_trees_delay`](Self::with_trees_delay) overrides it.
     pub const DEFAULT_TREES_DELAY: Duration = Duration::from_millis(100);
+
+    /// The default per-query timeout — zenoh's `queries_default_timeout`
+    /// (`commons/zenoh-config/src/defaults.rs`, 10000ms). A forwarded Query's
+    /// pending return entry is abandoned this long after it is recorded if no
+    /// `ResponseFinal` has routed back. A deploy overrides via
+    /// [`set_query_timeout`](Self::set_query_timeout).
+    pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_millis(10_000);
 
     /// A driver seeded with the local node (this peer's zid + whatami), using the
     /// default [`DEFAULT_TREES_DELAY`](Self::DEFAULT_TREES_DELAY) recompute window.
@@ -370,6 +389,8 @@ impl LinkstateForwarder {
             ingress_interceptors: RefCell::new(InterceptorChain::new()),
             egress_interceptors: RefCell::new(InterceptorChain::new()),
             interceptor_dropped: Cell::new(0),
+            query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
+            timed_out: Cell::new(0),
         }
     }
 
@@ -381,6 +402,18 @@ impl LinkstateForwarder {
     /// never calls this advertises no locators (the prior behaviour exactly).
     pub fn set_self_locators(&self, locators: Vec<String>) {
         self.net.borrow_mut().set_self_locators(locators);
+    }
+
+    /// Override the per-query timeout (zenoh's `queries_default_timeout`) — how
+    /// long a forwarded Query's pending return entry lives before the tick sweep
+    /// abandons it. The [`with_trees_delay`](Self::with_trees_delay) /
+    /// [`new`](Self::new) default is
+    /// [`DEFAULT_QUERY_TIMEOUT`](Self::DEFAULT_QUERY_TIMEOUT) (10s); a deploy
+    /// tunes it, a test drives a short (or zero) window. Set through `&self` like
+    /// the other policy knobs; takes effect on the NEXT `forward_request`
+    /// (already-recorded deadlines are not retroactively changed).
+    pub fn set_query_timeout(&self, timeout: Duration) {
+        self.query_timeout.set(timeout);
     }
 
     /// Override the gossip target — the set of neighbour roles this node floods
@@ -1082,6 +1115,10 @@ impl LinkstateForwarder {
         // The inbound rid (this hop's upstream qid, or the querier's own rid for
         // the first hop) — the value a Reply must be rewritten back to.
         let src_rid = request.rid;
+        // The deadline each pending entry is abandoned at if no ResponseFinal
+        // routes back (zenoh `QueryCleanup`'s `sleep(timeout)`) — computed ONCE
+        // for every child forwarded in this call; the tick sweep reaps it.
+        let deadline = Instant::now() + self.query_timeout.get();
         // Forward to the queryable-ward children in the source's tree (never to
         // the inbound face nor back toward the source's neighbour — the shared
         // predicate). atom 3: ALLOCATE a fresh local qid PER outbound face and
@@ -1093,7 +1130,10 @@ impl LinkstateForwarder {
             if !is_tree_forward_target(id, zid, inbound, inbound_zid, &children) {
                 return Ok(None);
             }
-            let qid = self.pending.borrow_mut().allocate(id, inbound, src_rid);
+            let qid = self
+                .pending
+                .borrow_mut()
+                .allocate(id, inbound, src_rid, deadline);
             let mut carrier = template.clone();
             carrier.rid = qid;
             Ok(Some(NetworkMessage::Request(Box::new(carrier))))
@@ -1611,6 +1651,38 @@ impl LinkstateForwarder {
         self.re_advertise_queryables(&new_children);
     }
 
+    /// Reap pending queries past their deadline — the wz form of zenoh's
+    /// per-query `QueryCleanup::run` (`dispatcher/queries.rs:305-349`). The
+    /// [`tick`](FaceForwarder::tick) calls this each coalescing window: it sweeps
+    /// the pending table ([`expired`](PendingQueries::expired)) for entries whose
+    /// `ResponseFinal` never arrived on a still-up face and, for each, routes a
+    /// synthesized `ResponseFinal` back to the querier — so the upstream relay
+    /// frees ITS entry and the querier's `get()` terminates, exactly zenoh's
+    /// `finalize_pending_query`. (zenoh ALSO routes an `Err("Timeout")` reply
+    /// ahead of the final; wz omits the Err body — originating a synthetic Err
+    /// Response is a separate codec-build atom, and the relay-layer correctness
+    /// the timeout exists for, no leak + no hang, is the final alone. The
+    /// querier-visible "timeout vs empty" distinction pairs with the deferred
+    /// Session-API client path.) The `expired` borrow is released before the
+    /// per-entry [`fan_out`](Self::fan_out) re-borrows the faces table.
+    fn reap_timed_out_queries(&self) {
+        let reaped = self.pending.borrow_mut().expired(Instant::now());
+        if reaped.is_empty() {
+            return;
+        }
+        self.timed_out.set(self.timed_out.get() + reaped.len());
+        for eq in reaped {
+            // Synthesize the closing final via the SSOT builder (the same
+            // `ResponseFinalOwned` an inbound final would forward), rewritten to
+            // the recorded upstream rid, and unicast it back to the inbound face.
+            let final_msg =
+                wz_session_core::response_final_build::build_response_final(eq.inbound_rid);
+            let _ = self.fan_out(true, None, |id, _zid| {
+                Ok((id == eq.inbound).then(|| NetworkMessage::ResponseFinal(final_msg.clone())))
+            });
+        }
+    }
+
     /// Mark a spanning-tree recompute pending (D2c) — the coalescing entry the
     /// topology-change handlers call instead of recomputing inline. The next
     /// [`tick`](FaceForwarder::tick) flushes it via
@@ -1673,11 +1745,19 @@ impl LinkstateForwarder {
 
     /// The number of live pending-query return entries across every face — the
     /// query-routing work witness (atom 3). Rises as `forward_request` records a
-    /// return mapping per outbound face, falls as each `ResponseFinal` (or a
-    /// face-down purge) frees one. Exposed so a test (and a future timeout sweep)
-    /// can observe the pending-query state.
+    /// return mapping per outbound face, falls as each `ResponseFinal` (a
+    /// face-down purge, or a timeout sweep) frees one. Exposed so a test (and the
+    /// timeout sweep) can observe the pending-query state.
     pub fn pending_len(&self) -> usize {
         self.pending.borrow().len()
+    }
+
+    /// The number of pending queries the timeout sweep has reaped — the GC
+    /// witness ([`reap_timed_out_queries`](Self::reap_timed_out_queries)), rising
+    /// once per query abandoned for want of a `ResponseFinal` on a still-up face.
+    /// `0` on a healthy mesh; a test drives a short timeout to exercise it.
+    pub fn pending_timed_out(&self) -> usize {
+        self.timed_out.get()
     }
 
     /// Purge every node in `removed` from BOTH the subscription AND queryable
@@ -1938,6 +2018,10 @@ impl FaceForwarder for LinkstateForwarder {
         if self.trees_dirty.replace(false) {
             self.recompute_and_advertise();
         }
+        // Reap pending queries whose `ResponseFinal` never arrived on a still-up
+        // face (zenoh's per-query `QueryCleanup` timeout) on the same coalescing
+        // cadence — a cheap empty sweep when nothing timed out.
+        self.reap_timed_out_queries();
     }
 
     /// The linkstate peer's topology graph keys the self-edge on the peer zid, so
@@ -5726,6 +5810,65 @@ mod tests {
             fwd.pending_len(),
             0,
             "deregister purged the departed face's pending queries"
+        );
+    }
+
+    #[test]
+    fn a_pending_query_times_out_and_finalizes_back_to_the_querier() {
+        // A queryable that never sends its ResponseFinal on a STILL-UP face must
+        // not leak the relay's pending entry: the tick sweep abandons it after the
+        // query timeout and routes a synthesized ResponseFinal back to the querier
+        // (zenoh's per-query QueryCleanup -> finalize_pending_query). Same A — S —
+        // C shape as the happy-path reply test, but C stays silent.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer); // S
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // querier side, FaceId 0
+        let (face_c, sink_c) = peer_face(zid(0x0C)); // queryable side, FaceId 1
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_c);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0C, 0x05);
+        declare_queryable_interest(&fwd, FaceId(1), "demo/q");
+        // Flush the setup recompute first, so the LATER sweeping tick emits ONLY
+        // the timeout final (not a re-advertise from a pending topology change).
+        fwd.tick();
+        sink_a.reset();
+        sink_c.reset();
+
+        // A zero timeout makes the entry forward_request records expire at once —
+        // the next tick reaps it. (Set before forward_request: the deadline is
+        // stamped at allocate time, not at sweep time.)
+        fwd.set_query_timeout(Duration::ZERO);
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the Query reached the queryable side C"
+        );
+        assert_eq!(fwd.pending_len(), 1, "one pending return entry recorded");
+        assert_eq!(fwd.pending_timed_out(), 0, "nothing reaped yet");
+        // Clear the queryable-side sink so the post-sweep assertion isolates what
+        // the TIMEOUT routed (the forwarded Query already sits in sink_c).
+        sink_c.reset();
+
+        // C never replies. The tick sweep reaps the expired entry and routes the
+        // closing ResponseFinal back to the querier side A (FaceId 0), the
+        // request_id rewritten to A's original rid 99 — exactly what an inbound
+        // final would have carried.
+        fwd.tick();
+        assert_eq!(fwd.pending_len(), 0, "the timeout freed the pending entry");
+        assert_eq!(fwd.pending_timed_out(), 1, "one query reaped by the sweep");
+        assert_eq!(sink_a.frame_count(), 1, "a closing final routed back to A");
+        assert_eq!(
+            forwarded_response_final(&sink_a.frame_bytes(0)).request_id,
+            99,
+            "the synthesized final carries the querier's rid"
+        );
+        assert_eq!(
+            sink_c.frame_count(),
+            0,
+            "nothing routed toward the silent queryable"
         );
     }
 }
