@@ -44756,6 +44756,56 @@
         "LOCAL UNPUSHED: 311tg(aed313f)+311th(f01a841)+311ti(c4d6b33)+311tj on origin/main=a03f221. Host lanes verified; MCU unaffected. full run-ci + idle before push. Push only after explicit consent."
       ]
     },
+    "Round 311tk": {
+      "decision_summary": "R311tk: gossip-policy A5a -- port the zenoh AutoConnect policy type (role WhatAmIMatcher + AutoConnectStrategy zid tie-break) to wz-routing-graph; the vocabulary the discovery->dial seam consumes next.",
+      "changes_bullets": [
+        "wz-routing-graph: new module autoconnect.rs -- AutoConnect { zid, matcher, strategy } + AutoConnectStrategy { Always(default), GreaterZid }. Ported from zenoh net/common.rs AutoConnect.",
+        "should_autoconnect(to, what) = matcher.matches(what) && (Always => true | GreaterZid => self.zid > to). The GreaterZid arm is the double-dial avoidance: only the greater-zid end of a pair dials.",
+        "Placement mirrors zenoh: type in the graph crate (lowest crate with both Zid + WhatAmIMatcher = zenoh's net/common.rs leaf); the driver holds the instance in A5c (= zenoh Gossip.autoconnect).",
+        "Flattens zenoh ModeDependent<TargetDependent<..>> config to one matcher + one strategy (the gossip_target/A4a simplification); semantics identical for the single-strategy default deploy.",
+        "pub re-export from lib.rs; the graph deferred-note refreshed (autoconnect POLICY now exists, the dial wiring is the next atom). No driver field yet, so no dead field until A5c consumes it."
+      ],
+      "verification_bullets": [
+        "wz-routing-graph 56 tests (the +5 autoconnect: disabled never dials, Always ignores zid, matcher gate excludes client, GreaterZid dials only the strictly-greater end, a GreaterZid pair has exactly one dialer).",
+        "clippy -D warnings clean (graph + downstream wz-runtime-tokio --features routing-peer); fmt clean. Pure Copy type, no MCU dep (the graph crate is absent from the MCU footprint).",
+        "Grounding (read): zenoh net/common.rs should_autoconnect = matcher.matches && (Always|GreaterZid self.zid>to); AutoConnectStrategy default Always, peer gossip.autoconnect default router|peer."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tk = gossip-policy A5a: the AutoConnect policy type (role matcher + GreaterZid zid tie-break) lands in wz-routing-graph. The vocabulary only; no production consumer yet (tested in isolation).",
+        "NEXT A5b: a forwarder->accept-loop dial-intent channel -- the discovery seam (sync forwarder ingest) must hand a dial future to the async accept_loop FuturesUnordered.",
+        "THEN A5c: dial+open+register wiring -- the driver holds an AutoConnect field (zenoh Gossip.autoconnect), calls should_autoconnect on a discovered (zid, whatami), dials via node_locators on pass.",
+        "DESIGN: AutoConnect is Copy (a cheap per-decision value, not shared state); disabled() = empty matcher = the signature-stable current no-autoconnect default. A deploy opts in with a non-empty matcher.",
+        "LOCAL UNPUSHED: 311tk on origin/main=4394d5a (tg/th/ti/tj pushed). Host lanes verified (graph 56, clippy, fmt, driver build). full run-ci + idle before push; push only after explicit consent."
+      ],
+      "publishable_decision_summary": "R311tk: gossip-policy A5a -- port the zenoh AutoConnect policy type (role WhatAmIMatcher + AutoConnectStrategy zid tie-break) to wz-routing-graph; the vocabulary the discovery->dial seam consumes next.",
+      "publishable_changes_bullets": [
+        "wz-routing-graph: new module autoconnect.rs -- AutoConnect { zid, matcher, strategy } + AutoConnectStrategy { Always(default), GreaterZid }. Ported from zenoh net/common.rs AutoConnect.",
+        "should_autoconnect(to, what) = matcher.matches(what) && (Always => true | GreaterZid => self.zid > to). The GreaterZid arm is the double-dial avoidance: only the greater-zid end of a pair dials.",
+        "Placement mirrors zenoh: type in the graph crate (lowest crate with both Zid + WhatAmIMatcher = zenoh's net/common.rs leaf); the driver holds the instance in A5c (= zenoh Gossip.autoconnect).",
+        "Flattens zenoh ModeDependent<TargetDependent<..>> config to one matcher + one strategy (the gossip_target/A4a simplification); semantics identical for the single-strategy default deploy.",
+        "pub re-export from lib.rs; the graph deferred-note refreshed (autoconnect POLICY now exists, the dial wiring is the next atom). No driver field yet, so no dead field until A5c consumes it."
+      ],
+      "publishable_verification_bullets": [
+        "wz-routing-graph 56 tests (the +5 autoconnect: disabled never dials, Always ignores zid, matcher gate excludes client, GreaterZid dials only the strictly-greater end, a GreaterZid pair has exactly one dialer).",
+        "clippy -D warnings clean (graph + downstream wz-runtime-tokio --features routing-peer); fmt clean. Pure Copy type, no MCU dep (the graph crate is absent from the MCU footprint).",
+        "Grounding (read): zenoh net/common.rs should_autoconnect = matcher.matches && (Always|GreaterZid self.zid>to); AutoConnectStrategy default Always, peer gossip.autoconnect default router|peer."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tk = gossip-policy A5a: the AutoConnect policy type (role matcher + GreaterZid zid tie-break) lands in wz-routing-graph. The vocabulary only; no production consumer yet (tested in isolation).",
+        "NEXT A5b: a forwarder->accept-loop dial-intent channel -- the discovery seam (sync forwarder ingest) must hand a dial future to the async accept_loop FuturesUnordered.",
+        "THEN A5c: dial+open+register wiring -- the driver holds an AutoConnect field (zenoh Gossip.autoconnect), calls should_autoconnect on a discovered (zid, whatami), dials via node_locators on pass.",
+        "DESIGN: AutoConnect is Copy (a cheap per-decision value, not shared state); disabled() = empty matcher = the signature-stable current no-autoconnect default. A deploy opts in with a non-empty matcher.",
+        "LOCAL UNPUSHED: 311tk on origin/main=4394d5a (tg/th/ti/tj pushed). Host lanes verified (graph 56, clippy, fmt, driver build). full run-ci + idle before push; push only after explicit consent."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

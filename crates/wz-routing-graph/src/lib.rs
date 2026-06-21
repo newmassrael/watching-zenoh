@@ -24,8 +24,10 @@
 //! advertisement is withdrawn (zenoh `network.rs:786,948,990`).
 //!
 //! EXPLICITLY DEFERRED (tracked, not silently dropped):
-//! - gossip / autoconnect propagation, locator ingest, and the
-//!   `local_mappings` forwarding table. (The receive-side onward re-flood
+//! - gossip-autoconnect DIAL wiring and the `local_mappings` forwarding table.
+//!   (The autoconnect POLICY vocabulary — [`AutoConnect`] / [`AutoConnectStrategy`],
+//!   the role + zid tie-break — now exists; the discovery→dial seam that
+//!   consumes it is the next atom. The receive-side onward re-flood
 //!   `propagate_link_states`, `network.rs:804`, is DONE: the graph supplies
 //!   the [`build_linkstate_split`] payload builder — `new` nodes full,
 //!   `updated` nodes links-only, the D4 `Details` split — and the per-face
@@ -65,6 +67,13 @@ use wz_codecs::locator::{LocatorOwned, MAX_LOCATORS_PER_NODE, MAX_LOCATOR_LEN};
 /// validates it through the type, so an out-of-set role is unrepresentable in
 /// the graph rather than guarded by a hand-rolled match).
 pub use wz_codecs::whatami::WhatAmI;
+
+mod autoconnect;
+/// The gossip autoconnect policy ([`AutoConnect`] / [`AutoConnectStrategy`]) —
+/// the role + zid tie-break a discovering peer consults before dialing a node
+/// it learned off a gossip flood. The policy vocabulary; the driver holds an
+/// instance and the discovery→dial wiring consumes it in a later atom.
+pub use autoconnect::{AutoConnect, AutoConnectStrategy};
 
 /// Maximum zid length in bytes (zenoh `ZenohIdProto::MAX_SIZE`). zenoh
 /// rejects an oversized zid at DECODE (the zid codec caps at this); the wz
