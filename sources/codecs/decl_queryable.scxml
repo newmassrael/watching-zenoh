@@ -40,6 +40,14 @@
     <sce:variant-dispatch flag="header.M"/>
     <sce:flag-bind input="N" source="header.N"/>
   </sce:import>
+  <!-- R311ui: the documented queryable-info ext is realized as the Z-gated
+       generic ext_entry tlv-chain (the same shape declare.scxml uses for its
+       qos/timestamp exts). The QueryableInfo ext (ext_id 0x01, ZInt-valued:
+       complete @ bit 0, distance in the upper bits) rides this chain; its
+       SEMANTIC interpretation lives in the routing layer (BestMatching), the
+       codec carries the entries opaquely. Default state (no ext) keeps Z=0 and
+       the byte-identical `[0x44, 0x00, 0x00]` wire. -->
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x04"/>
@@ -49,5 +57,9 @@
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
   </datamodel>
 </scxml>

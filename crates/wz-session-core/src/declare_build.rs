@@ -267,6 +267,9 @@ pub fn build_declare_queryable(
                     suffix: suffix_string,
                 }),
             },
+            // R311ui: no QueryableInfo ext by default (zenoh DEFAULT { complete:
+            // false, distance: 0 }) — Z stays clear, byte-identical no-ext wire.
+            extensions: None,
         }),
     })
 }
@@ -488,6 +491,8 @@ pub fn build_declare_queryable_nonlocal(
                     suffix: suffix_string,
                 }),
             },
+            // R311ui: no QueryableInfo ext by default (backward-compat no-ext wire).
+            extensions: None,
         }),
     })
 }
@@ -1022,6 +1027,61 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn a_decl_queryable_carries_a_z64_info_ext_across_a_wire_round_trip() {
+        // R311ui: the decl_queryable codec now carries the Z-gated ext_entry
+        // chain (the QueryableInfo ext rides it; its typed packing + ingest land
+        // in the next atoms). Prove the wire CAPACITY: a Z64 ext on a
+        // DeclareQueryable body survives an encode -> decode round-trip, and the
+        // default (no ext) keeps the body Z bit clear (backward-compat — the
+        // sibling wire-byte test locks the no-ext bytes to zenoh-pico).
+        use crate::ext_nodeid::{read_z64_ext, set_z64_ext, EXT_ENC_Z64, EXT_FLAG_M};
+        use sce_forge_runtime::codec::SceCursor;
+        use wz_codecs::declare::Declare;
+        let ext_id = 0x01u8; // zenoh's QueryableInfo iext id
+        let ext_header = ext_id | EXT_FLAG_M | EXT_ENC_Z64;
+
+        let mut declare = build_declare_queryable(9, 0, Some("demo/q")).unwrap();
+        let DeclareOwnedVariant::CodecZenohDeclQueryable(d) = &mut declare.body else {
+            panic!("expected a DeclQueryable body");
+        };
+        // Inject a Z64 ext into the body + sync its Z bit (the encode emits the
+        // chain present-if header.Z).
+        assert!(
+            set_z64_ext(&mut d.extensions, ext_id, ext_header, Some(1)),
+            "the ext chain is now non-empty",
+        );
+        d.header |= 0x80;
+
+        let bytes = declare.wire();
+        let mut cursor = SceCursor::new(&bytes);
+        let decoded = Declare::decode(&mut cursor)
+            .and_then(|x| x.try_into_owned())
+            .expect("decode declare");
+        let DeclareOwnedVariant::CodecZenohDeclQueryable(d2) = &decoded.body else {
+            panic!("body must survive as a DeclQueryable");
+        };
+        assert_eq!(
+            d2.header & 0x80,
+            0x80,
+            "the body Z bit set when an ext rides"
+        );
+        assert_eq!(
+            read_z64_ext(d2.extensions.as_ref(), ext_id),
+            Some(1),
+            "the Z64 info ext survived the DeclareQueryable wire round-trip",
+        );
+
+        // Default (no info ext): no extensions, body Z clear — the backward-compat
+        // shape the sibling wire-byte test locks to zenoh-pico's no-ext output.
+        let plain = build_declare_queryable(9, 0, Some("demo/q")).unwrap();
+        let DeclareOwnedVariant::CodecZenohDeclQueryable(dp) = &plain.body else {
+            panic!("expected a DeclQueryable body");
+        };
+        assert!(dp.extensions.is_none(), "default carries no info ext");
+        assert_eq!(dp.header & 0x80, 0, "default keeps the body Z bit clear");
     }
 
     /// R121i-b — Wire-byte regression gate: the bytes emitted by
