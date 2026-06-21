@@ -274,6 +274,35 @@ pub fn build_declare_queryable(
     })
 }
 
+/// R311uj — stamp a [`QueryableInfo`](crate::queryable_info::QueryableInfo) onto
+/// a built `Declare(DeclQueryable)`: the producer seam for
+/// QueryTarget::BestMatching (a complete queryable, or one at a known distance,
+/// advertises it so a relay can prefer the nearest complete one). zenoh's
+/// omit-on-DEFAULT — the DEFAULT `{ complete: false, distance: 0 }` leaves the
+/// body ext-free (header `Z` clear, byte-identical to the no-info builder
+/// output), any other value rides the body's `Z`-gated ext chain (R311ui
+/// capacity). Returns whether an ext is now present; a no-op `false` if `declare`
+/// is not a DeclQueryable. The post-build twin of `set_declare_source` (the
+/// envelope routing-context ext setter), here on the BODY's ext chain.
+#[cfg(feature = "codec-declare")]
+pub fn set_declare_queryable_info(
+    declare: &mut DeclareOwned,
+    info: crate::queryable_info::QueryableInfo,
+) -> bool {
+    let DeclareOwnedVariant::CodecZenohDeclQueryable(d) = &mut declare.body else {
+        return false;
+    };
+    let present = crate::queryable_info::set_queryable_info(&mut d.extensions, info);
+    // Sync the body header `Z` bit with chain presence — the encode emits the
+    // chain present-if header.Z.
+    if present {
+        d.header |= 0x80;
+    } else {
+        d.header &= !0x80;
+    }
+    present
+}
+
 /// R121i-b — build a `Declare` network-message that registers a
 /// liveliness token on the peer for `(keyexpr_mapping_id,
 /// keyexpr_suffix)`. Mirrors zenoh-pico `_z_decl_token_encode` at
@@ -1082,6 +1111,53 @@ mod tests {
         };
         assert!(dp.extensions.is_none(), "default carries no info ext");
         assert_eq!(dp.header & 0x80, 0, "default keeps the body Z bit clear");
+    }
+
+    #[test]
+    fn a_declare_queryable_carries_a_typed_queryable_info_across_the_wire() {
+        // R311uj: the typed QueryableInfo producer + accessor over the R311ui
+        // wire capacity, with zenoh's EXACT z64 packing (complete @ bit 0,
+        // distance << 8). Build -> stamp info -> wire -> decode -> read it back.
+        use crate::queryable_info::{read_queryable_info, QueryableInfo};
+        use sce_forge_runtime::codec::SceCursor;
+        use wz_codecs::declare::Declare;
+
+        let info = QueryableInfo {
+            complete: true,
+            distance: 3,
+        };
+        let mut declare = build_declare_queryable(9, 0, Some("demo/q")).unwrap();
+        assert!(
+            set_declare_queryable_info(&mut declare, info),
+            "a non-default QueryableInfo rides the body ext chain",
+        );
+
+        let bytes = declare.wire();
+        let mut cursor = SceCursor::new(&bytes);
+        let decoded = Declare::decode(&mut cursor)
+            .and_then(|x| x.try_into_owned())
+            .expect("decode declare");
+        let DeclareOwnedVariant::CodecZenohDeclQueryable(d) = &decoded.body else {
+            panic!("body must survive as a DeclQueryable");
+        };
+        assert_eq!(
+            read_queryable_info(d.extensions.as_ref()),
+            info,
+            "the typed QueryableInfo survived the wire round-trip (zenoh-exact packing)",
+        );
+
+        // DEFAULT info leaves the body ext-free (Z clear) — omit-on-DEFAULT, the
+        // byte-identical no-info shape.
+        let mut plain = build_declare_queryable(9, 0, Some("demo/q")).unwrap();
+        assert!(
+            !set_declare_queryable_info(&mut plain, QueryableInfo::DEFAULT),
+            "DEFAULT omits the ext",
+        );
+        let DeclareOwnedVariant::CodecZenohDeclQueryable(dp) = &plain.body else {
+            panic!("expected a DeclQueryable body");
+        };
+        assert!(dp.extensions.is_none(), "DEFAULT carries no ext");
+        assert_eq!(dp.header & 0x80, 0, "DEFAULT keeps the body Z bit clear");
     }
 
     /// R121i-b — Wire-byte regression gate: the bytes emitted by

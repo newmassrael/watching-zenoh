@@ -494,6 +494,14 @@ pub mod wireexpr_build;
 ))]
 pub mod ext_nodeid;
 
+/// QueryableInfo (`complete` / `distance`) extension on a DeclareQueryable
+/// (P4 routing, QueryTarget::BestMatching) — `read_queryable_info` /
+/// `set_queryable_info` over the body's ext chain, a thin projection of the
+/// shared [`ext_nodeid`] z64-chain SSOT. Gated on `alloc` + `codec-declare`
+/// (the carrier codec).
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+pub mod queryable_info;
+
 /// Push routing-context source `node_id` (P4 routing, linkstate port step
 /// c3c-1): `read_push_source` / `set_push_source` over the Push `ext_nodeid`
 /// extension — the data-plane forward seam naming the spanning-tree root a
