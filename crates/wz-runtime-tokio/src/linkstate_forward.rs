@@ -5910,4 +5910,137 @@ mod tests {
             "nothing routed toward the silent queryable"
         );
     }
+
+    /// Feed an already-decoded [`NetworkMessage`] into `fwd` on `face` as one
+    /// inbound frame — the shuttle primitive for the two-relay e2e: one relay's
+    /// recorded wire frame is decoded and replayed into the next relay's real
+    /// `forward()` inbound path (decode + dispatch), exercising the full hop.
+    fn feed_message(fwd: &LinkstateForwarder, face: FaceId, msg: NetworkMessage) {
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![msg],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(face, IterationEvent::Poll(&outcome));
+    }
+
+    #[test]
+    fn a_query_routes_across_two_relays_and_the_reply_unwinds_both_hops() {
+        // The TWO-INSTANCE composition the single-relay tests cannot cover: a
+        // query crosses A — S1 — S2 — C through two independent LinkstateForwarder
+        // instances, the qid remapped AT EACH hop (S1 allocates qid_a, S2 allocates
+        // qid_b keyed on qid_a), and the Reply + ResponseFinal unwind back through
+        // BOTH pending tables (qid_b -> qid_a -> A's rid 99). Frames are shuttled
+        // relay-to-relay through the real wire-decode + forward() inbound path.
+        let s1 = LinkstateForwarder::new(zid(0x01), WhatAmI::Peer);
+        let s2 = LinkstateForwarder::new(zid(0x02), WhatAmI::Peer);
+        // S1 faces: 0 = A (querier side), 1 = S2.
+        let (a_face, a_sink) = peer_face(zid(0x0A));
+        let (s2_on_s1, s1_to_s2) = peer_face(zid(0x02));
+        s1.register(FaceId(0), &a_face);
+        s1.register(FaceId(1), &s2_on_s1);
+        // S2 faces: 0 = S1, 1 = C (queryable side).
+        let (s1_on_s2, s2_to_s1) = peer_face(zid(0x01));
+        let (c_face, c_sink) = peer_face(zid(0x0C));
+        s2.register(FaceId(0), &s1_on_s2);
+        s2.register(FaceId(1), &c_face);
+
+        // Topology A-S1-S2-C on each relay (line: a unique path to C from any
+        // source). S1 learns A direct (FaceId0) + the S2-C chain (FaceId1); S2
+        // learns C direct (FaceId1) + the S1-A chain (FaceId0).
+        advertise_link_back(&s1, FaceId(0), 0x0A, 0x01);
+        s1.ingest_inbound_linkstate(
+            FaceId(1),
+            list(vec![
+                entry(0, 1, 0x01, &[]),
+                entry(1, 5, 0x02, &[0, 2]),
+                entry(2, 5, 0x0C, &[1]),
+            ]),
+        );
+        s1.net.borrow_mut().compute_trees();
+        advertise_link_back(&s2, FaceId(1), 0x0C, 0x02);
+        s2.ingest_inbound_linkstate(
+            FaceId(0),
+            list(vec![
+                entry(0, 1, 0x02, &[]),
+                entry(1, 5, 0x01, &[0, 2]),
+                entry(2, 5, 0x0A, &[1]),
+            ]),
+        );
+        s2.net.borrow_mut().compute_trees();
+        // C's queryable, registered on S2 (direct) and on S1 (learned via S2): both
+        // relays must route the query toward the queryable direction.
+        declare_queryable_interest(&s2, FaceId(1), "demo/q");
+        declare_queryable_interest(&s1, FaceId(1), "demo/q");
+        a_sink.reset();
+        s1_to_s2.reset();
+        s2_to_s1.reset();
+        c_sink.reset();
+
+        // 1) A's Query (rid 99) into S1 -> forwarded to S2 with a remapped qid_a.
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        feed_message(&s1, FaceId(0), NetworkMessage::Request(Box::new(request)));
+        assert_eq!(s1_to_s2.frame_count(), 1, "S1 forwarded the Query to S2");
+        let req_s2 = forwarded_request(&s1_to_s2.frame_bytes(0));
+        let qid_a = req_s2.rid;
+        assert_ne!(qid_a, 99, "S1 remapped the rid to its own local qid_a");
+        assert_eq!(s1.pending_len(), 1, "S1 recorded one pending entry");
+
+        // 2) S1's forwarded Query into S2 -> forwarded to C with a remapped qid_b.
+        feed_message(&s2, FaceId(0), NetworkMessage::Request(Box::new(req_s2)));
+        assert_eq!(s2_to_s1.frame_count(), 0, "S2 does not echo back to S1");
+        assert_eq!(c_sink.frame_count(), 1, "S2 forwarded the Query on to C");
+        let req_c = forwarded_request(&c_sink.frame_bytes(0));
+        let qid_b = req_c.rid;
+        // qid_a and qid_b are INDEPENDENT per-(relay, face) counters, so both
+        // legitimately start at 1 — the remap is per-relay STATE (each relay maps
+        // its own qid back to the rid it received), not a distinct value. The proof
+        // it composed is the reply unwinding below (qid_b -> qid_a -> 99).
+        assert_eq!(s2.pending_len(), 1, "S2 recorded its own pending entry");
+
+        // 3) C's Reply (carrying qid_b) into S2 -> back to S1 with request_id qid_a.
+        let reply =
+            wz_session_core::response_build::build_response_reply_literal(qid_b, "demo/q", b"hi")
+                .expect("build reply");
+        feed_message(&s2, FaceId(1), NetworkMessage::Response(Box::new(reply)));
+        assert_eq!(
+            s2_to_s1.frame_count(),
+            1,
+            "S2 routed the Reply back toward S1"
+        );
+        let resp_s1 = forwarded_response(&s2_to_s1.frame_bytes(0));
+        assert_eq!(
+            resp_s1.request_id, qid_a,
+            "S2 rewrote request_id back to qid_a"
+        );
+
+        // 4) S1's relayed Reply into S1 -> back to A with request_id 99.
+        feed_message(&s1, FaceId(1), NetworkMessage::Response(Box::new(resp_s1)));
+        assert_eq!(a_sink.frame_count(), 1, "the Reply reached the querier A");
+        assert_eq!(
+            forwarded_response(&a_sink.frame_bytes(0)).request_id,
+            99,
+            "S1 rewrote request_id back to A's original 99 — the reply unwound both hops"
+        );
+        // Both pending entries survive a Reply (more replies may follow).
+        assert_eq!(s2.pending_len(), 1, "S2 keeps its entry past a Reply");
+        assert_eq!(s1.pending_len(), 1, "S1 keeps its entry past a Reply");
+
+        // 5) C's ResponseFinal (qid_b) -> S2 (frees) -> S1 (frees) -> A (rid 99).
+        let rf = wz_session_core::response_final_build::build_response_final(qid_b);
+        feed_message(&s2, FaceId(1), NetworkMessage::ResponseFinal(rf));
+        assert_eq!(s2.pending_len(), 0, "the final freed S2's entry");
+        let final_s1 = forwarded_response_final(&s2_to_s1.frame_bytes(1));
+        assert_eq!(final_s1.request_id, qid_a, "S2 rewrote the final to qid_a");
+        feed_message(&s1, FaceId(1), NetworkMessage::ResponseFinal(final_s1));
+        assert_eq!(s1.pending_len(), 0, "the final freed S1's entry too");
+        assert_eq!(
+            forwarded_response_final(&a_sink.frame_bytes(1)).request_id,
+            99,
+            "the closing final reached A with the querier's rid",
+        );
+    }
 }

@@ -45834,6 +45834,44 @@
         "LOCAL UNPUSHED: R311uf + R311ug on origin/main=5a335ed, committed locally; host-gated (full run-ci once before the next batch push). North-star beyond §5.16: untouched Storage(§5.11) / SHM."
       ]
     },
+    "Round 311uh": {
+      "decision_summary": "R311uh: multi-hop (2-relay) query e2e test — the cross-instance composition the single-relay tests cannot cover, closing the R311ue honesty gap (the track was END-TO-END at the relay layer but single-relay-tested). A query crosses A-S1-S2-C through two independent LinkstateForwarder instances with the qid remapped at each hop, and the Reply + ResponseFinal unwind back through BOTH pending tables; frames are shuttled relay-to-relay through the real wire-decode + forward() inbound path. Test-only, no production change.",
+      "changes_bullets": [
+        "linkstate_forward.rs test: a_query_routes_across_two_relays_and_the_reply_unwinds_both_hops — two LinkstateForwarder instances (S1=0x01, S2=0x02) wired A-S1-S2-C (line topology via crafted ingest_inbound_linkstate + advertise_link_back on each; C's queryable on both). A's Query feeds S1.forward(), its output frame is wire-decoded and replayed into S2.forward(), S2's output reaches C; the Reply + Final shuttle back the reverse way.",
+        "feed_message(fwd, face, msg) test helper: wraps an already-decoded NetworkMessage as one inbound DriverLoopOutcome::FramePayload and drives fwd.forward() — the shuttle primitive replaying one relay's recorded wire frame into the next relay's real decode + dispatch path.",
+        "Verified the cross-instance qid chaining + reply unwind: S1 maps qid_a -> A's rid 99, S2 maps qid_b -> qid_a; the Reply rewrites qid_b -> qid_a at S2 then qid_a -> 99 at S1; the Final frees both pending tables. (qid_a == qid_b == 1 is CORRECT: per-(relay,face) counters are independent; the remap is per-relay STATE proven by the unwind, not by distinct qid values — a first-draft assertion to the contrary was corrected.)"
+      ],
+      "verification_bullets": [
+        "routing-peer lib 413/413 (was 412; +1: a_query_routes_across_two_relays_and_the_reply_unwinds_both_hops — query routes A->S1->S2->C through two real instances incl cross-hop source re-stamp + resolution + double B1 keyexpr normalize; Reply request_id qid_b->qid_a->99; Final frees S2 then S1). Test-only: no production code touched.",
+        "clippy -D clean (routing-peer --all-targets, --no-default-features --features routing-peer, base); fmt clean; base lib 277/277 unaffected (the change is in the routing-peer-gated test module). Host gate only per the run-ci-batch policy; full run-ci once before the batch push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311uh = multi-hop (2-relay) query e2e: the cross-instance composition test, closing the R311ue honesty gap (the relay query track is now validated END-TO-END across two real forwarder instances, not just single-relay). Query routes A-S1-S2-C with per-hop qid remap; Reply + Final unwind both pending tables. The query-routing track (atoms 1-4 + uf timeout + ug Err + this) is now relay-layer complete AND multi-hop-validated.",
+        "DEFERRED (carried, honest): (1) multi-hop Err('Timeout') forwarding still graceful-degrades (an intermediate relay's forward_response drops the empty-keyexpr Err; the final propagates) — the e2e harness now exists to test/fix it if pursued. (2) QueryTarget::All vs BestMatching = a codec atom (Request has no ext_target, DeclareQueryable no completeness flag). (3) the CLIENT-visible end-to-end (session.get() over the mesh + querier-side N-finals) is Session-API scope. (4) extauth / Session-API ACL / KeBoxTree.",
+        "LOCAL UNPUSHED: R311uf + ug + uh on origin/main=5a335ed, committed locally; host-gated (full run-ci once before the next batch push). North-star beyond §5.16: untouched Storage(§5.11) / SHM."
+      ],
+      "publishable_decision_summary": "R311uh: multi-hop (2-relay) query e2e test — the cross-instance composition the single-relay tests cannot cover, closing the R311ue honesty gap (the track was END-TO-END at the relay layer but single-relay-tested). A query crosses A-S1-S2-C through two independent LinkstateForwarder instances with the qid remapped at each hop, and the Reply + ResponseFinal unwind back through BOTH pending tables; frames are shuttled relay-to-relay through the real wire-decode + forward() inbound path. Test-only, no production change.",
+      "publishable_changes_bullets": [
+        "linkstate_forward.rs test: a_query_routes_across_two_relays_and_the_reply_unwinds_both_hops — two LinkstateForwarder instances (S1=0x01, S2=0x02) wired A-S1-S2-C (line topology via crafted ingest_inbound_linkstate + advertise_link_back on each; C's queryable on both). A's Query feeds S1.forward(), its output frame is wire-decoded and replayed into S2.forward(), S2's output reaches C; the Reply + Final shuttle back the reverse way.",
+        "feed_message(fwd, face, msg) test helper: wraps an already-decoded NetworkMessage as one inbound DriverLoopOutcome::FramePayload and drives fwd.forward() — the shuttle primitive replaying one relay's recorded wire frame into the next relay's real decode + dispatch path.",
+        "Verified the cross-instance qid chaining + reply unwind: S1 maps qid_a -> A's rid 99, S2 maps qid_b -> qid_a; the Reply rewrites qid_b -> qid_a at S2 then qid_a -> 99 at S1; the Final frees both pending tables. (qid_a == qid_b == 1 is CORRECT: per-(relay,face) counters are independent; the remap is per-relay STATE proven by the unwind, not by distinct qid values — a first-draft assertion to the contrary was corrected.)"
+      ],
+      "publishable_verification_bullets": [
+        "routing-peer lib 413/413 (was 412; +1: a_query_routes_across_two_relays_and_the_reply_unwinds_both_hops — query routes A->S1->S2->C through two real instances incl cross-hop source re-stamp + resolution + double B1 keyexpr normalize; Reply request_id qid_b->qid_a->99; Final frees S2 then S1). Test-only: no production code touched.",
+        "clippy -D clean (routing-peer --all-targets, --no-default-features --features routing-peer, base); fmt clean; base lib 277/277 unaffected (the change is in the routing-peer-gated test module). Host gate only per the run-ci-batch policy; full run-ci once before the batch push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311uh = multi-hop (2-relay) query e2e: the cross-instance composition test, closing the R311ue honesty gap (the relay query track is now validated END-TO-END across two real forwarder instances, not just single-relay). Query routes A-S1-S2-C with per-hop qid remap; Reply + Final unwind both pending tables. The query-routing track (atoms 1-4 + uf timeout + ug Err + this) is now relay-layer complete AND multi-hop-validated.",
+        "DEFERRED (carried, honest): (1) multi-hop Err('Timeout') forwarding still graceful-degrades (an intermediate relay's forward_response drops the empty-keyexpr Err; the final propagates) — the e2e harness now exists to test/fix it if pursued. (2) QueryTarget::All vs BestMatching = a codec atom (Request has no ext_target, DeclareQueryable no completeness flag). (3) the CLIENT-visible end-to-end (session.get() over the mesh + querier-side N-finals) is Session-API scope. (4) extauth / Session-API ACL / KeBoxTree.",
+        "LOCAL UNPUSHED: R311uf + ug + uh on origin/main=5a335ed, committed locally; host-gated (full run-ci once before the next batch push). North-star beyond §5.16: untouched Storage(§5.11) / SHM."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
