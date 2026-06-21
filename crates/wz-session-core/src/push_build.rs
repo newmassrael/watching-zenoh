@@ -131,9 +131,7 @@ pub use crate::wireexpr_build::literal_wireexpr;
 /// link (no shared alias table) receives a self-contained literal Push, even
 /// when the inbound was a pure-aliased Push whose `N` bit was clear.
 pub fn set_push_keyexpr_literal(push: &mut PushOwned, suffix: &str) -> Result<(), CodecError> {
-    push.keyexpr = literal_wireexpr(suffix)?;
-    push.header |= 0x20;
-    Ok(())
+    crate::wireexpr_build::set_literal_keyexpr_fields(&mut push.keyexpr, &mut push.header, suffix)
 }
 
 /// R121g — build a `Push` network-message that references a peer-

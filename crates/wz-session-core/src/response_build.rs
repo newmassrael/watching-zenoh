@@ -101,9 +101,11 @@ pub fn set_response_keyexpr_literal(
     response: &mut ResponseOwned,
     suffix: &str,
 ) -> Result<(), CodecError> {
-    response.keyexpr = crate::wireexpr_build::literal_wireexpr(suffix)?;
-    response.header |= 0x20;
-    Ok(())
+    crate::wireexpr_build::set_literal_keyexpr_fields(
+        &mut response.keyexpr,
+        &mut response.header,
+        suffix,
+    )
 }
 
 #[cfg(feature = "codec-response")]

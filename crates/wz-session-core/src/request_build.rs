@@ -150,9 +150,11 @@ pub fn set_request_keyexpr_literal(
     request: &mut RequestOwned,
     suffix: &str,
 ) -> Result<(), CodecError> {
-    request.keyexpr = crate::wireexpr_build::literal_wireexpr(suffix)?;
-    request.header |= 0x20;
-    Ok(())
+    crate::wireexpr_build::set_literal_keyexpr_fields(
+        &mut request.keyexpr,
+        &mut request.header,
+        suffix,
+    )
 }
 
 /// R311mu (Level B, B5b-2b-2) — metadata-bearing `Request(Query)`

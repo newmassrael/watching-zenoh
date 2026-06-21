@@ -30,3 +30,25 @@ pub fn literal_wireexpr(suffix: &str) -> Result<WireexprOwned, CodecError> {
         }),
     })
 }
+
+/// The network-message header `N` (Named — suffix present) bit, uniform across
+/// Push / Request / Response (zenoh `{push,request,response}::flag::N = 1 << 5`).
+/// A literal keyexpr (a suffix) always carries it.
+pub const NAMED_FLAG: u8 = 0x20;
+
+/// Re-express a message's keyexpr fields as the literal `suffix` — the SSOT
+/// behind `set_{push,request,response}_keyexpr_literal`: set the `keyexpr` field
+/// to a literal ([`literal_wireexpr`]) AND the header's [`NAMED_FLAG`], which a
+/// literal keyexpr always carries. The two MUST stay in sync — a clear `N` with a
+/// suffix-bearing wireexpr offset-shifts the peer's decode of the following body.
+/// Takes the two fields by `&mut` (disjoint borrows of the message struct) so the
+/// per-message wrappers are a one-line delegation with no duplicated logic.
+pub fn set_literal_keyexpr_fields(
+    keyexpr: &mut WireexprOwned,
+    header: &mut u8,
+    suffix: &str,
+) -> Result<(), CodecError> {
+    *keyexpr = literal_wireexpr(suffix)?;
+    *header |= NAMED_FLAG;
+    Ok(())
+}
