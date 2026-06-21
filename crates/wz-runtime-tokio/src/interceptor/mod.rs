@@ -41,6 +41,7 @@
 //! rule, on the structure that the rest of §5.16 extends rather than replaces.
 
 pub mod access_control;
+pub mod downsampling;
 
 use wz_routing_graph::Zid;
 use wz_session_core::network_message::NetworkMessage;

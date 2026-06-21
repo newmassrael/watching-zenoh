@@ -108,6 +108,7 @@ use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
 use crate::interceptor::access_control::AclInterceptor;
+use crate::interceptor::downsampling::DownsamplingInterceptor;
 use crate::interceptor::{InterceptorChain, InterceptorContext};
 use crate::linkstate_subs::LinkstatepeerSubs;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -126,6 +127,9 @@ pub use wz_routing_graph::{AutoConnect, AutoConnectStrategy, WhatAmI, Zid};
 pub use wz_access_control::{
     AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
 };
+// R311tw — the downsampling rule type, re-exported beside `set_downsampling` so
+// a deploy builds it from the same facade path as the ACL types above.
+pub use crate::interceptor::downsampling::DownsamplingRule;
 // The gossip-target role set lives in the codec layer beside `WhatAmI`; the
 // forwarder consumes it to gate which faces a link-state flood reaches.
 use wz_codecs::whatami::WhatAmIMatcher;
@@ -370,26 +374,48 @@ impl LinkstateForwarder {
 
     /// Install an access-control policy (§5.16) — the config seam symmetric to
     /// [`set_gossip_target`](Self::set_gossip_target) /
-    /// [`enable_autoconnect`](Self::enable_autoconnect). Installs BOTH an ingress
-    /// and an egress [`AclInterceptor`] backed by the SAME `policy` (shared, the
-    /// rule set is immutable; the flow selects which rules apply): an inbound
-    /// message is checked at [`forward`](Self::forward) before relay, and an
-    /// OUTBOUND message at [`fan_out`](Self::fan_out) keyed by the destination
-    /// face — the wz analogue of `acl_interceptor_factories` installing both an
+    /// [`enable_autoconnect`](Self::enable_autoconnect). APPENDS an ingress and
+    /// an egress [`AclInterceptor`] backed by the SAME `policy` (shared, the rule
+    /// set is immutable; the flow selects which rules apply): an inbound message
+    /// is checked at [`forward`](Self::forward) before relay, and an OUTBOUND
+    /// message at [`fan_out`](Self::fan_out) keyed by the destination face — the
+    /// wz analogue of `acl_interceptor_factories` installing both an
     /// `IngressAclEnforcer` and an `EgressAclEnforcer`. A driver that never calls
-    /// this keeps both chains empty — access control disabled, every message
-    /// admitted (zenoh `AclConfig.enabled = false`). A denied message is dropped
-    /// and witnessed by [`acl_denied`](Self::acl_denied).
+    /// this keeps both chains free of an ACL enforcer (every message admitted by
+    /// it, zenoh `AclConfig.enabled = false`). A denied message is dropped and
+    /// witnessed by [`acl_denied`](Self::acl_denied).
+    ///
+    /// APPENDS rather than replaces so the ACL composes with the other
+    /// interceptors on the chain (e.g. [`set_downsampling`](Self::set_downsampling))
+    /// — a setup-once seam, like every other config knob here, so accumulation
+    /// is the intended shape (zenoh's `interceptor_factories` likewise builds one
+    /// chain of all enabled interceptors).
     pub fn set_acl_policy(&self, policy: AclPolicy) {
-        let mut ingress = InterceptorChain::new();
-        ingress.push(Box::new(AclInterceptor::new(
-            policy.clone(),
-            AclFlow::Ingress,
-        )));
-        *self.ingress_interceptors.borrow_mut() = ingress;
-        let mut egress = InterceptorChain::new();
-        egress.push(Box::new(AclInterceptor::new(policy, AclFlow::Egress)));
-        *self.egress_interceptors.borrow_mut() = egress;
+        self.ingress_interceptors
+            .borrow_mut()
+            .push(Box::new(AclInterceptor::new(
+                policy.clone(),
+                AclFlow::Ingress,
+            )));
+        self.egress_interceptors
+            .borrow_mut()
+            .push(Box::new(AclInterceptor::new(policy, AclFlow::Egress)));
+    }
+
+    /// Install a §5.16 DOWNSAMPLING (rate-limit) policy — the QoS sibling of the
+    /// ACL on the interceptor chain, the wz mirror of zenoh's downsampling
+    /// interceptor. APPENDS a [`DownsamplingInterceptor`] to the EGRESS chain
+    /// (zenoh downsamples on egress by default): a data Push whose keyexpr a rule
+    /// governs is dropped if it arrives sooner than the rule's minimum interval
+    /// since the last admitted one, bounding the per-keyexpr send rate. Composes
+    /// with [`set_acl_policy`](Self::set_acl_policy) on the same chain (both run;
+    /// either may drop). Proves the chain is genuinely composable — a second,
+    /// different interceptor kind beside the ACL enforcer. A drop is witnessed by
+    /// [`acl_denied`](Self::acl_denied) (the shared interceptor-drop witness).
+    pub fn set_downsampling(&self, rules: Vec<DownsamplingRule>) {
+        self.egress_interceptors
+            .borrow_mut()
+            .push(Box::new(DownsamplingInterceptor::new(rules)));
     }
 
     /// The number of inbound messages access control has DENIED so far — the
@@ -3219,6 +3245,55 @@ mod tests {
             "egress denies the relay out to the interested child"
         );
         assert_eq!(fwd.acl_denied(), 1, "the egress drop is witnessed");
+    }
+
+    #[test]
+    fn downsampling_composes_with_acl_on_the_egress_chain() {
+        // The egress chain runs BOTH a (permissive) ACL enforcer and a
+        // downsampler — proving the chain is genuinely composable. Topology
+        // A-S-B, B subscribes demo/data. Two back-to-back Puts on demo/data: the
+        // first relays to B; the second (microseconds later, well inside the 1s
+        // interval) is rate-limited by the downsampler and dropped, while the ACL
+        // admits both.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+        sink_a.reset();
+        sink_b.reset();
+        fwd.set_acl_policy(AclPolicy::new(AclConfig::allow_all())); // present but permissive
+        fwd.set_downsampling(vec![DownsamplingRule {
+            key_exprs: vec!["demo/**".to_owned()],
+            min_interval: std::time::Duration::from_secs(1),
+        }]);
+
+        let mk = || DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        let o1 = mk();
+        fwd.forward(FaceId(0), IterationEvent::Poll(&o1));
+        let o2 = mk();
+        fwd.forward(FaceId(0), IterationEvent::Poll(&o2));
+
+        assert_eq!(
+            fwd.data_seen(),
+            2,
+            "both Pushes were received (ingress allows)"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "first relayed; the second is rate-limited by the downsampler"
+        );
+        assert_eq!(fwd.acl_denied(), 1, "the downsampling drop is witnessed");
     }
 
     #[test]

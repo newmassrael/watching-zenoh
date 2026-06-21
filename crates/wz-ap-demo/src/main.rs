@@ -170,6 +170,10 @@ fn main() -> ExitCode {
             // floods on a denied keyexpr is dropped here, not relayed onward.
             // Off by default — without the flag the peer enforces nothing.
             let acl_deny = parse_pair(rest, "--acl-deny");
+            // R311tw (§5.16 downsampling) — `--downsample <keyexpr>` rate-limits
+            // egress data on the keyexpr to at most one per 500 ms, the QoS
+            // sibling of the ACL on the same interceptor chain. Off by default.
+            let downsample = parse_pair(rest, "--downsample");
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -177,7 +181,10 @@ fn main() -> ExitCode {
                 subscribe_key,
                 unsubscribe_after_data,
                 autoconnect,
-                acl_deny,
+                InterceptorOpts {
+                    acl_deny,
+                    downsample,
+                },
             );
         }
         #[cfg(not(feature = "routing-peer"))]
@@ -651,6 +658,16 @@ fn run_router_mode(addr: String) -> ExitCode {
     }
 }
 
+/// R311tw — the §5.16 interceptor opt-ins (`--acl-deny` / `--downsample`)
+/// bundled into one parameter object, so the peer entry points stay under the
+/// argument-count lint as the interceptor flag set grows — the same param-object
+/// shape R311lw used for `run_session`. Each is `None` unless its flag was given.
+#[cfg(feature = "routing-peer")]
+pub(crate) struct InterceptorOpts {
+    pub(crate) acl_deny: Option<String>,
+    pub(crate) downsample: Option<String>,
+}
+
 /// R311qg — peer-MESH mode entry: bind `listen`, dial each `dial_targets` peer,
 /// and hold both directions' faces (the `routing-peer` foundation, hold-only).
 /// Mirrors [`run_router_mode`] — a router has no per-face application behaviour,
@@ -663,7 +680,7 @@ fn run_peer_mode(
     subscribe_key: Option<String>,
     unsubscribe_after_data: bool,
     autoconnect: bool,
-    acl_deny: Option<String>,
+    interceptors: InterceptorOpts,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
     let runtime = match build_demo_runtime() {
@@ -680,7 +697,7 @@ fn run_peer_mode(
         subscribe_key.as_deref(),
         unsubscribe_after_data,
         autoconnect,
-        acl_deny.as_deref(),
+        &interceptors,
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

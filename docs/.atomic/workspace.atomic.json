@@ -45336,6 +45336,54 @@
         "LOCAL UNPUSHED: Round 311tt + 311tu + 311tv on origin/main=7c7e18e (3 ahead); push only after explicit consent — the full run-ci push gate is green for all three. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
       ]
     },
+    "Round 311tw": {
+      "decision_summary": "R311tw: §5.16 access-control atom 4 — the downsampling (rate-limit) interceptor, the QoS sibling of the ACL on the composable chain and the composability proof (a second, different interceptor beside the ACL); set_* seams now APPEND. A clippy arg-count lint drove a textbook param-object refactor (InterceptorOpts) of the demo peer entry points.",
+      "changes_bullets": [
+        "interceptor/downsampling.rs (zenoh downsampling.rs analog): DownsamplingRule (key_exprs + min_interval) + DownsamplingInterceptor. intercept rate-limits a data Push per CONCRETE keyexpr — admitted at most once per min_interval, dropped if it arrives sooner (the wz analogue of zenoh's now - latest_message_timestamp >= threshold). Reuses keyexpr_includes_target; the control plane (declarations / OAM) is never throttled.",
+        "Composability realized — the payoff of the seam the adversarial review insisted on: set_acl_policy now APPENDS (was replace) its ingress/egress AclInterceptors, and set_downsampling APPENDS a DownsamplingInterceptor to the egress chain, so both run on the same chain (chain.admit = all). A setup-once seam, like the other config knobs. A second, DIFFERENT kind of interceptor runs beside the ACL — proving the chain is genuinely composable, not a single-interceptor facade.",
+        "admit_at(now, keyexpr): the testable rate core (intercept calls it with Instant::now()) — deterministic tests via Instant + Duration arithmetic, no wall-clock flake. State is per-concrete-keyexpr last-admitted instants (RefCell<HashMap>), faithful to zenoh's per-Resource timestamp.",
+        "demo --downsample <keyexpr>: rate-limits egress data on the keyexpr to one per 500 ms, LIVE, composing with --acl-deny on the same chain.",
+        "Param-object refactor (textbook fix, NOT an #[allow] workaround): the new --downsample flag pushed run_peer / run_peer_mode to 8 args (clippy too_many_arguments 8/7); bundled --acl-deny + --downsample into an InterceptorOpts parameter object — the same shape R311lw used for run_session."
+      ],
+      "verification_bullets": [
+        "routing-peer lib 386/386 incl rate_limits_a_governed_keyexpr_by_the_minimum_interval, concrete_keyexprs_under_one_rule_are_tracked_independently (per-keyexpr, faithful to zenoh), downsampling_composes_with_acl_on_the_egress_chain (a permissive ACL + the downsampler both run: the first Put relays, the second back-to-back one is rate-limited and dropped, witnessed by acl_denied). The atom-1..3 ACL tests still pass. wz-access-control 7/7.",
+        "clippy -D clean (wz-runtime-tokio routing-peer + wz-ap-demo routing-peer; the arg-count lint was resolved by the param object, not a #[allow]); fmt clean; base (non-routing-peer) build clean (interceptor gated out); demo build clean.",
+        "Full run-ci all required layers pass, judged by the unpiped RUNCI_EXIT=0: Layer A/A2/A3, the C* host lanes, Layer Q MCU (footprint unchanged — downsampling is AP-only forwarder/interceptor code; the +12B text is the carried atom-1 keyexpr_includes_target delta), Layer Z zenohd interop 9/9."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "R311tw = §5.16 access-control atom 4: the DOWNSAMPLING (rate-limit) interceptor — the QoS sibling of the ACL on the composable chain, AND the composability PROOF (a second, different interceptor kind running beside the ACL enforcer). The set_* seams now APPEND, so the ACL + downsampler compose; the interceptor seam the review demanded is validated end to end, not a single-interceptor facade.",
+        "Tracked: the downsampling last-admitted map is per-concrete-keyexpr and unbounded (zenoh bounds it via the resource tree lifecycle); a GC / cap bound is a perf follow-up. The acl_denied witness now counts ALL interceptor drops (ACL + downsampling), as its doc states.",
+        "Remaining §5.16 (next atoms): Query / Reply / DeclareQueryable actions (need query routing wired into the linkstate forwarder first); interface / cert / username subjects = extauth (transport auth, TLS); quota (another Interceptor sibling); YAML deploy-config loader (BLOCKED — no deploy.yaml parser exists yet, the demo is all args, args.rs:110 names the future topology-schema migration; an ACL-only parser would be a one-off smell); KeBoxTree sublinear; Session API ACL (the true local-delivery). access-downsampling is now PARTIALLY realized (the interceptor exists; the config-source is the demo flag); access-quota / access-extauth-* stay reserved.",
+        "LOCAL UNPUSHED: Round 311tt + 311tu + 311tv + 311tw on origin/main=7c7e18e (4 ahead); push only after explicit consent — the full run-ci push gate is green for all four. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
+      ],
+      "publishable_decision_summary": "R311tw: §5.16 access-control atom 4 — the downsampling (rate-limit) interceptor, the QoS sibling of the ACL on the composable chain and the composability proof (a second, different interceptor beside the ACL); set_* seams now APPEND. A clippy arg-count lint drove a textbook param-object refactor (InterceptorOpts) of the demo peer entry points.",
+      "publishable_changes_bullets": [
+        "interceptor/downsampling.rs (zenoh downsampling.rs analog): DownsamplingRule (key_exprs + min_interval) + DownsamplingInterceptor. intercept rate-limits a data Push per CONCRETE keyexpr — admitted at most once per min_interval, dropped if it arrives sooner (the wz analogue of zenoh's now - latest_message_timestamp >= threshold). Reuses keyexpr_includes_target; the control plane (declarations / OAM) is never throttled.",
+        "Composability realized — the payoff of the seam the adversarial review insisted on: set_acl_policy now APPENDS (was replace) its ingress/egress AclInterceptors, and set_downsampling APPENDS a DownsamplingInterceptor to the egress chain, so both run on the same chain (chain.admit = all). A setup-once seam, like the other config knobs. A second, DIFFERENT kind of interceptor runs beside the ACL — proving the chain is genuinely composable, not a single-interceptor facade.",
+        "admit_at(now, keyexpr): the testable rate core (intercept calls it with Instant::now()) — deterministic tests via Instant + Duration arithmetic, no wall-clock flake. State is per-concrete-keyexpr last-admitted instants (RefCell<HashMap>), faithful to zenoh's per-Resource timestamp.",
+        "demo --downsample <keyexpr>: rate-limits egress data on the keyexpr to one per 500 ms, LIVE, composing with --acl-deny on the same chain.",
+        "Param-object refactor (textbook fix, NOT an #[allow] workaround): the new --downsample flag pushed run_peer / run_peer_mode to 8 args (clippy too_many_arguments 8/7); bundled --acl-deny + --downsample into an InterceptorOpts parameter object — the same shape R311lw used for run_session."
+      ],
+      "publishable_verification_bullets": [
+        "routing-peer lib 386/386 incl rate_limits_a_governed_keyexpr_by_the_minimum_interval, concrete_keyexprs_under_one_rule_are_tracked_independently (per-keyexpr, faithful to zenoh), downsampling_composes_with_acl_on_the_egress_chain (a permissive ACL + the downsampler both run: the first Put relays, the second back-to-back one is rate-limited and dropped, witnessed by acl_denied). The atom-1..3 ACL tests still pass. wz-access-control 7/7.",
+        "clippy -D clean (wz-runtime-tokio routing-peer + wz-ap-demo routing-peer; the arg-count lint was resolved by the param object, not a #[allow]); fmt clean; base (non-routing-peer) build clean (interceptor gated out); demo build clean.",
+        "Full run-ci all required layers pass, judged by the unpiped RUNCI_EXIT=0: Layer A/A2/A3, the C* host lanes, Layer Q MCU (footprint unchanged — downsampling is AP-only forwarder/interceptor code; the +12B text is the carried atom-1 keyexpr_includes_target delta), Layer Z zenohd interop 9/9."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311tw = §5.16 access-control atom 4: the DOWNSAMPLING (rate-limit) interceptor — the QoS sibling of the ACL on the composable chain, AND the composability PROOF (a second, different interceptor kind running beside the ACL enforcer). The set_* seams now APPEND, so the ACL + downsampler compose; the interceptor seam the review demanded is validated end to end, not a single-interceptor facade.",
+        "Tracked: the downsampling last-admitted map is per-concrete-keyexpr and unbounded (zenoh bounds it via the resource tree lifecycle); a GC / cap bound is a perf follow-up. The acl_denied witness now counts ALL interceptor drops (ACL + downsampling), as its doc states.",
+        "Remaining §5.16 (next atoms): Query / Reply / DeclareQueryable actions (need query routing wired into the linkstate forwarder first); interface / cert / username subjects = extauth (transport auth, TLS); quota (another Interceptor sibling); YAML deploy-config loader (BLOCKED — no deploy.yaml parser exists yet, the demo is all args, args.rs:110 names the future topology-schema migration; an ACL-only parser would be a one-off smell); KeBoxTree sublinear; Session API ACL (the true local-delivery). access-downsampling is now PARTIALLY realized (the interceptor exists; the config-source is the demo flag); access-quota / access-extauth-* stay reserved.",
+        "LOCAL UNPUSHED: Round 311tt + 311tu + 311tv + 311tw on origin/main=7c7e18e (4 ahead); push only after explicit consent — the full run-ci push gate is green for all four. North-star beyond §5.16: untouched Storage(§5.11) / SHM; routing filter/failover/static is mature (verified this session)."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [

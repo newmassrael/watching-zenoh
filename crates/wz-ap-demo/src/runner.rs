@@ -1241,15 +1241,15 @@ pub(crate) async fn run_peer(
     subscribe_key: Option<&str>,
     unsubscribe_after_data: bool,
     autoconnect: bool,
-    acl_deny: Option<&str>,
+    interceptors: &crate::InterceptorOpts,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
         default_autoconnect_matcher, AclConfig, AclFlow, AclMessage, AclPolicy, AclRule,
-        AutoConnect, AutoConnectStrategy, LinkstateForwarder, Permission, SubjectSelector, WhatAmI,
-        Zid,
+        AutoConnect, AutoConnectStrategy, DownsamplingRule, LinkstateForwarder, Permission,
+        SubjectSelector, WhatAmI, Zid,
     };
     use wz::runtime_tokio::session_open::bind_endpoint;
 
@@ -1353,7 +1353,7 @@ pub(crate) async fn run_peer(
     // both are dropped at ingress (not relayed onward), the wz analogue of a
     // router carrying an IngressAclEnforcer. Absent the flag the chain stays
     // empty (access control disabled, every message admitted).
-    if let Some(deny_keyexpr) = acl_deny {
+    if let Some(deny_keyexpr) = interceptors.acl_deny.as_deref() {
         log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
         // A rule per FLOW (a rule carries a single flow): the keyexpr is denied
         // BOTH on ingress (a neighbour cannot push/subscribe it through us) and
@@ -1374,6 +1374,20 @@ pub(crate) async fn run_peer(
             default_permission: Permission::Allow,
             rules: vec![deny_rule(AclFlow::Ingress), deny_rule(AclFlow::Egress)],
         }));
+    }
+
+    // `--downsample <keyexpr>`: opt this peer into §5.16 downsampling (QoS) — the
+    // rate-limit sibling of the ACL on the SAME interceptor chain. Egress data on
+    // the keyexpr is admitted at most once per 500 ms; faster ones are dropped.
+    // Off by default. Composes with `--acl-deny` (both run on the egress chain).
+    if let Some(downsample_keyexpr) = interceptors.downsample.as_deref() {
+        log::info!(
+            "wz-ap-demo peer: downsampling enabled (--downsample {downsample_keyexpr} @ 500ms)"
+        );
+        forwarder.set_downsampling(vec![DownsamplingRule {
+            key_exprs: vec![downsample_keyexpr.to_owned()],
+            min_interval: Duration::from_millis(500),
+        }]);
     }
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
