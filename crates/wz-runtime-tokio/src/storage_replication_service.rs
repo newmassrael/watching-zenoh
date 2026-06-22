@@ -79,6 +79,22 @@ pub fn digest_keyexpr(config: &ReplicationConfig, local_zid: &[u8]) -> String {
     )
 }
 
+/// Extract the `<zid-hex>` component from a digest keyexpr
+/// `@-digest/<zid-hex>/<config-fp>` — the inverse of [`digest_keyexpr`]'s zid
+/// slot. The subscriber identifies the diverging peer from this (the Digest
+/// payload carries no zid; only the keyexpr does), so the aligner can target
+/// that peer's aligner queryable. Returns `None` for a keyexpr that is not a
+/// well-formed digest keyexpr (wrong prefix, missing/empty component, or a
+/// trailing segment). zenoh `digest_key_expr_formatter::parse` (core.rs:333);
+/// wz's keyexprs are plain `/`-delimited, so a split suffices.
+pub fn digest_keyexpr_zid_hex(keyexpr: &str) -> Option<&str> {
+    let (zid_hex, fp) = keyexpr.strip_prefix("@-digest/")?.split_once('/')?;
+    if zid_hex.is_empty() || fp.is_empty() || fp.contains('/') {
+        return None;
+    }
+    Some(zid_hex)
+}
+
 /// Builds the `(keyexpr, encoded-digest-bytes)` a publication carries, given
 /// the wall-clock NTP64 `now` (injected so the build is deterministically
 /// testable). The Hot-era upper bound is the current interval,
@@ -184,20 +200,22 @@ pub fn digest_subscribe_keyexpr(config: &ReplicationConfig) -> String {
 }
 
 /// Process one received peer Digest: decode it, build the local digest at
-/// `now`, diff them, and hand any divergence to `on_diff`. zenoh's
-/// `spawn_digest_subscriber` per-sample body (core.rs:331-399) up to the point
-/// it would query the aligner — wz stops at producing the [`DigestDiff`] (the
-/// typed aligner handoff; the aligner is the next track). A payload that fails
-/// to decode, or a peer on an incompatible configuration
+/// `now`, diff them, and hand any divergence to `on_diff` along with the peer's
+/// zid hex (`peer_zid_hex`, parsed from the digest keyexpr) so the aligner can
+/// target that peer. zenoh's `spawn_digest_subscriber` per-sample body
+/// (core.rs:331-399) up to the point it queries the aligner — wz produces the
+/// [`DigestDiff`] + peer identity (the typed aligner handoff). A payload that
+/// fails to decode, or a peer on an incompatible configuration
 /// ([`Digest::diff`](wz_session_core::storage_replication::Digest::diff) returns
 /// `None` on a config-fingerprint mismatch), is ignored — never fatal. Pure
 /// over the shared state: the deterministically tested core of the subscriber.
 fn handle_peer_digest<B: StorageBackend>(
     state: &Arc<Mutex<StorageState<B>>>,
     config: &ReplicationConfig,
+    peer_zid_hex: &str,
     peer_bytes: &[u8],
     now: u64,
-    on_diff: &mut dyn FnMut(DigestDiff),
+    on_diff: &mut dyn FnMut(&str, DigestDiff),
 ) {
     let peer = match wire::decode(peer_bytes) {
         Ok(peer) => peer,
@@ -209,16 +227,18 @@ fn handle_peer_digest<B: StorageBackend>(
         guard.replication_digest(config, hot_upper)
     };
     if let Some(diff) = local.diff(peer) {
-        on_diff(diff);
+        on_diff(peer_zid_hex, diff);
     }
 }
 
 /// A live peer-digest subscriber bound to a [`Session`]: receives peer Digests
-/// on `@-digest/*/<config-fp>` and, for each, hands a [`DigestDiff`] to the
-/// caller's `on_diff` callback whenever this replica diverges from the peer.
-/// The callback is the **aligner handoff seam**: this track produces the
-/// DigestDiff; the aligner track (next) consumes it to pull the diverging
-/// entries. Dropping it undeclares the subscriber (RAII).
+/// on `@-digest/*/<config-fp>` and, for each, hands a [`DigestDiff`] (plus the
+/// diverging peer's zid hex, parsed from the digest keyexpr) to the caller's
+/// `on_diff` callback whenever this replica diverges from the peer. The callback
+/// is the **aligner handoff seam**: this track produces the `(peer_zid_hex,
+/// DigestDiff)`; the aligner's `spawn_digest_aligner` (the `storage-aligner`
+/// driver) consumes it to pull the diverging entries from that peer. Dropping it
+/// undeclares the subscriber (RAII).
 ///
 /// The subscriber uses [`Locality::Remote`] so a replica does not process its
 /// OWN published digest (zenoh `allowed_origin(Locality::Remote)`,
@@ -232,12 +252,13 @@ impl<R: SessionRuntime> DigestSubscriber<R> {
     /// [`StorageService`](crate::storage_service::StorageService) (pass its
     /// `shared_state()`), so the local digest each diff compares against
     /// reflects the live stored data. `on_diff` is invoked once per received
-    /// peer digest that diverges from this replica.
+    /// peer digest that diverges from this replica, with the peer's zid hex
+    /// (from the digest keyexpr) and the [`DigestDiff`].
     pub fn declare<T, B>(
         session: &Session<R, T, Unicast>,
         state: Arc<Mutex<StorageState<B>>>,
         config: ReplicationConfig,
-        mut on_diff: impl FnMut(DigestDiff) + Send + 'static,
+        mut on_diff: impl FnMut(&str, DigestDiff) + Send + 'static,
     ) -> Result<Self, SubscribeError>
     where
         T: TimeSource + 'static,
@@ -249,13 +270,19 @@ impl<R: SessionRuntime> DigestSubscriber<R> {
             digest_subscribe_keyexpr(&config),
             SubscribeOptions::default().with_allowed_origin(Locality::Remote),
             move |view: &dyn SampleView| {
-                handle_peer_digest(
-                    &state,
-                    &config,
-                    view.payload(),
-                    wall_clock_ntp64(),
-                    &mut on_diff,
-                );
+                // The peer zid is the digest keyexpr's <zid-hex> component (the
+                // Digest payload carries no zid); skip a sample whose keyexpr
+                // does not parse as a digest keyexpr.
+                if let Some(peer_zid_hex) = digest_keyexpr_zid_hex(view.keyexpr()) {
+                    handle_peer_digest(
+                        &state,
+                        &config,
+                        peer_zid_hex,
+                        view.payload(),
+                        wall_clock_ntp64(),
+                        &mut on_diff,
+                    );
+                }
             },
         )?;
         Ok(Self {
@@ -334,8 +361,16 @@ mod tests {
 
         let arc = Arc::new(Mutex::new(local));
         let mut got = None;
-        handle_peer_digest(&arc, &config, &peer_bytes, now, &mut |d| got = Some(d));
+        let mut got_zid = String::new();
+        handle_peer_digest(&arc, &config, "ab01", &peer_bytes, now, &mut |zid, d| {
+            got_zid = zid.to_string();
+            got = Some(d);
+        });
         assert_eq!(got, expected);
+        assert_eq!(
+            got_zid, "ab01",
+            "the peer zid hex threads through to on_diff"
+        );
     }
 
     #[test]
@@ -348,7 +383,9 @@ mod tests {
 
         let arc = Arc::new(Mutex::new(local));
         let mut called = false;
-        handle_peer_digest(&arc, &config, &peer_bytes, now, &mut |_| called = true);
+        handle_peer_digest(&arc, &config, "ab01", &peer_bytes, now, &mut |_zid, _| {
+            called = true
+        });
         assert!(!called, "an identical peer produces no diff");
     }
 
@@ -360,9 +397,10 @@ mod tests {
         handle_peer_digest(
             &arc,
             &config,
+            "ab01",
             &[0xff, 0x00, 0x01],
             wall_clock_ntp64(),
-            &mut |_| called = true,
+            &mut |_zid, _| called = true,
         );
         assert!(!called, "a corrupt digest payload is ignored, not fatal");
     }
@@ -380,9 +418,14 @@ mod tests {
 
         let arc = Arc::new(Mutex::new(state_with(&["demo/a"], now)));
         let mut called = false;
-        handle_peer_digest(&arc, &local_config, &peer_bytes, now, &mut |_| {
-            called = true
-        });
+        handle_peer_digest(
+            &arc,
+            &local_config,
+            "ab01",
+            &peer_bytes,
+            now,
+            &mut |_zid, _| called = true,
+        );
         assert!(
             !called,
             "a peer on an incompatible configuration is ignored (config-fp mismatch)"
@@ -413,10 +456,29 @@ mod tests {
         let storage =
             StorageService::declare(&session, "demo/**", vec![0x01]).expect("storage declares");
         let config = cfg();
-        let sub = DigestSubscriber::declare(&session, storage.shared_state(), config, |_diff| {});
+        let sub =
+            DigestSubscriber::declare(&session, storage.shared_state(), config, |_zid, _diff| {});
         assert!(
             sub.is_ok(),
             "the peer-digest subscriber declares on @-digest/*/<fp>"
+        );
+    }
+
+    #[test]
+    fn digest_keyexpr_zid_hex_extracts_the_peer_zid() {
+        let config = cfg();
+        // Round-trip: a published digest keyexpr parses back to the same zid hex
+        // (the zid renders via ZenohId Display: [0x01, 0xab] -> "ab01").
+        let ke = digest_keyexpr(&config, &[0x01, 0xab]);
+        assert_eq!(digest_keyexpr_zid_hex(&ke), Some("ab01"));
+        // Malformed keyexprs are rejected.
+        assert_eq!(digest_keyexpr_zid_hex("@-digest/ab01"), None, "missing fp");
+        assert_eq!(digest_keyexpr_zid_hex("foo/ab01/9"), None, "wrong prefix");
+        assert_eq!(digest_keyexpr_zid_hex("@-digest//9"), None, "empty zid");
+        assert_eq!(
+            digest_keyexpr_zid_hex("@-digest/ab01/9/x"),
+            None,
+            "trailing segment"
         );
     }
 
