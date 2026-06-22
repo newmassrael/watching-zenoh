@@ -46723,6 +46723,50 @@
         "LOCAL: R311va on top of uz=3cfd99c (origin/main=ef56758, +5 ahead uw..va); host-gated, NOT pushed (await user consent). Push needs full run-ci (touches wz-runtime-tokio defaults: QueryReply field + ReplyOut seam + ResponseReplyBuilder wire). Untouched north-star: §5.11 replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
       ]
     },
+    "Round 311vb": {
+      "decision_summary": "R311vb: session-review remediation 1/3 — newer-wins zid tiebreak now reproduces uhlc ID Ord exactly. 4-agent adversarial review (the 교과서/SSOT/북극성/비용무관 trigger) of R311uw..va found the gate's timestamp_strictly_newer compared length-trimmed Vec<u8> zids lexicographically, which diverges from uhlc (ID=[u8;16] repr(transparent) derived Ord over the zero-padded LE array, id.rs:56-59) for any non-canonically-encoded zid -> silent wrong newer-wins -> Put loss / tombstone failure. Fix: timestamp_order_key(ts)=(time,[u8;16]) SSOT zero-pads the zid; timestamp_strictly_newer + storage_history's version-sort both key off it (comparator SSOT). +1 regression test.",
+      "changes_bullets": [
+        "storage_state.rs: timestamp_order_key(ts) -> (u64, [u8;16]) SSOT — zero-pads the trimmed LE zid to the full 16-byte array uhlc ID compares (uhlc id.rs:56-59 ID=[u8;16] #[repr(transparent)] derived Ord over the LE array).",
+        "timestamp_strictly_newer now = timestamp_order_key(a) > timestamp_order_key(b); the prior a.zid > b.zid Vec lexicographic diverged from uhlc for a non-canonically-encoded zid (trailing zero not trimmed, or author-chosen local_zid).",
+        "storage_history.rs: order_key removed; binary_search_by now uses the shared timestamp_order_key — version-list sort + newer-wins gate single-source the uhlc ordering (comparator SSOT).",
+        "Test: timestamp_tiebreak_matches_uhlc_zero_padded_id_not_trimmed_vec_lex — [0x05]==[0x05,0x00] (same uhlc id, neither newer); [0x05,0x01] newer at equal time. Fails under the old trimmed-Vec compare."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features storage-history --lib storage: 26/26 (was 25 + the uhlc-tiebreak regression).",
+        "clippy -D warnings clean (--features storage-history --all-targets); fmt --check clean.",
+        "Direct-read arbitration: uhlc-0.8.1 id.rs:56-59 (ID([u8;16]) repr(transparent) derived Ord) + to_le_bytes id.rs:84; the trimmed-vs-padded divergence confirmed for non-canonical zid."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vb = session-review remediation 1/3 (the recurring 교과서/SSOT/북극성/비용무관 trigger -> 4-agent adversarial review of R311uw..va, never self-assess). Bug-hunt agent's HIGH finding fixed: the newer-wins zid tiebreak now reproduces uhlc ID Ord exactly (zero-padded 16-byte LE) instead of a trimmed-Vec lexicographic compare that silently mis-ordered non-canonical zids -> wrong newer-wins -> Put loss / tombstone failure. Comparator SSOT'd across storage_state + storage_history.",
+        "NEXT remediation atoms: R311vc = fallback wall-clock NTP64 (removes the counter-vs-NTP64 silent-drop data-loss; honesty Q3 + bug #6) + move apply_sample/answer_query into the kernel (architecture finding 1) + honesty docs (citation :584->:574-578/607-611, encoding-Option divergence, headline framing). R311vd = encoding-on-reply faithful pass-through (fidelity #8 + honesty Q4: StoredData.encoding is currently dead/write-only; zenoh replies .encoding(entry.encoding) service.rs:575-577; make the 'serve back faithfully' docstring TRUE).",
+        "4-agent verdict: structure textbook-grade (3-layer split, divergence docs, signature-stable seams, honest deferred atoms); headline SSOT (gated_reply_timestamp dup) = CLEAN forced (codec-push/codec-response gate-split). 6 real defects found, this closes #1+#5.",
+        "LOCAL: R311vb on top of va=44298b2 (origin/main=ef56758, +6 ahead); host-gated, NOT pushed."
+      ],
+      "publishable_decision_summary": "R311vb: session-review remediation 1/3 — newer-wins zid tiebreak now reproduces uhlc ID Ord exactly. 4-agent adversarial review (the 교과서/SSOT/북극성/비용무관 trigger) of R311uw..va found the gate's timestamp_strictly_newer compared length-trimmed Vec<u8> zids lexicographically, which diverges from uhlc (ID=[u8;16] repr(transparent) derived Ord over the zero-padded LE array, id.rs:56-59) for any non-canonically-encoded zid -> silent wrong newer-wins -> Put loss / tombstone failure. Fix: timestamp_order_key(ts)=(time,[u8;16]) SSOT zero-pads the zid; timestamp_strictly_newer + storage_history's version-sort both key off it (comparator SSOT). +1 regression test.",
+      "publishable_changes_bullets": [
+        "storage_state.rs: timestamp_order_key(ts) -> (u64, [u8;16]) SSOT — zero-pads the trimmed LE zid to the full 16-byte array uhlc ID compares (uhlc id.rs:56-59 ID=[u8;16] #[repr(transparent)] derived Ord over the LE array).",
+        "timestamp_strictly_newer now = timestamp_order_key(a) > timestamp_order_key(b); the prior a.zid > b.zid Vec lexicographic diverged from uhlc for a non-canonically-encoded zid (trailing zero not trimmed, or author-chosen local_zid).",
+        "storage_history.rs: order_key removed; binary_search_by now uses the shared timestamp_order_key — version-list sort + newer-wins gate single-source the uhlc ordering (comparator SSOT).",
+        "Test: timestamp_tiebreak_matches_uhlc_zero_padded_id_not_trimmed_vec_lex — [0x05]==[0x05,0x00] (same uhlc id, neither newer); [0x05,0x01] newer at equal time. Fails under the old trimmed-Vec compare."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features storage-history --lib storage: 26/26 (was 25 + the uhlc-tiebreak regression).",
+        "clippy -D warnings clean (--features storage-history --all-targets); fmt --check clean.",
+        "Direct-read arbitration: uhlc-0.8.1 id.rs:56-59 (ID([u8;16]) repr(transparent) derived Ord) + to_le_bytes id.rs:84; the trimmed-vs-padded divergence confirmed for non-canonical zid."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vb = session-review remediation 1/3 (the recurring 교과서/SSOT/북극성/비용무관 trigger -> 4-agent adversarial review of R311uw..va, never self-assess). Bug-hunt agent's HIGH finding fixed: the newer-wins zid tiebreak now reproduces uhlc ID Ord exactly (zero-padded 16-byte LE) instead of a trimmed-Vec lexicographic compare that silently mis-ordered non-canonical zids -> wrong newer-wins -> Put loss / tombstone failure. Comparator SSOT'd across storage_state + storage_history.",
+        "NEXT remediation atoms: R311vc = fallback wall-clock NTP64 (removes the counter-vs-NTP64 silent-drop data-loss; honesty Q3 + bug #6) + move apply_sample/answer_query into the kernel (architecture finding 1) + honesty docs (citation :584->:574-578/607-611, encoding-Option divergence, headline framing). R311vd = encoding-on-reply faithful pass-through (fidelity #8 + honesty Q4: StoredData.encoding is currently dead/write-only; zenoh replies .encoding(entry.encoding) service.rs:575-577; make the 'serve back faithfully' docstring TRUE).",
+        "4-agent verdict: structure textbook-grade (3-layer split, divergence docs, signature-stable seams, honest deferred atoms); headline SSOT (gated_reply_timestamp dup) = CLEAN forced (codec-push/codec-response gate-split). 6 real defects found, this closes #1+#5.",
+        "LOCAL: R311vb on top of va=44298b2 (origin/main=ef56758, +6 ahead); host-gated, NOT pushed."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [

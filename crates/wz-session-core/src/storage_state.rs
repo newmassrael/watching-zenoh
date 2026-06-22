@@ -78,12 +78,39 @@ use crate::keyexpr_match::keyexpr_intersects_target;
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 
-/// Whether timestamp `a` is *strictly newer* than `b`. Lexicographic
-/// `(time, zid)` — the uhlc `Timestamp` `Ord` semantic
-/// (`uhlc-0.8.1/src/timestamp.rs:33-37`: derived `Ord` over `time: NTP64`
-/// then `id: ID`). The single comparison the newer-wins gate keys off.
+/// The uhlc-faithful ordering key for a timestamp: `(time, zid-as-16-byte
+/// little-endian array)`. The SSOT both the newer-wins gate
+/// ([`timestamp_strictly_newer`]) and the version-list sort
+/// ([`crate::storage_history`]) compare on, so one place encodes uhlc's
+/// `Timestamp` `Ord` contract.
+///
+/// uhlc's `Timestamp` derives `Ord` over `(time: NTP64, id: ID)`
+/// (`uhlc-0.8.1/src/timestamp.rs:33-38`), and `ID` is a `[u8; 16]`
+/// (`#[repr(transparent)]`, `id.rs:56-59`) holding the id's FULL
+/// little-endian bytes, zero-padded — so uhlc compares the whole 16-byte
+/// array. wz's wire/[`TimestampHint`] `zid` is the same LE bytes but
+/// length-TRIMMED (zenoh-pico `_z_id_len` drops trailing zero high bytes).
+/// Comparing the trimmed `Vec`s lexicographically diverges from uhlc for a
+/// non-canonically-encoded zid (a peer's, or a carelessly chosen
+/// `local_zid`): the dropped high bytes are NOT guaranteed zero in general,
+/// so a shorter zid is not always uhlc-less-than a longer one. Zero-padding
+/// both to the full 16-byte array before comparison reproduces uhlc's
+/// answer exactly (the trimmed bytes are the LE prefix; the pad supplies
+/// the zero high bytes uhlc compares against). A zid longer than 16 (a
+/// malformed input) is truncated to 16 — uhlc ids are exactly 16 bytes.
+pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
+    let mut zid16 = [0u8; 16];
+    let n = ts.zid.len().min(16);
+    zid16[..n].copy_from_slice(&ts.zid[..n]);
+    (ts.time, zid16)
+}
+
+/// Whether timestamp `a` is *strictly newer* than `b`, by the uhlc
+/// `Timestamp` `Ord` semantic — `(time, 16-byte LE id)` lexicographic (see
+/// [`timestamp_order_key`]). The single comparison the newer-wins gate
+/// keys off.
 pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
-    a.time > b.time || (a.time == b.time && a.zid > b.zid)
+    timestamp_order_key(a) > timestamp_order_key(b)
 }
 
 /// The storage service gate: a [`StorageBackend`] plus the newer-wins
@@ -310,6 +337,37 @@ mod tests {
         let r2 = s.process_put("demo/a", vec![3], None, ts(10, 1));
         assert_eq!(r2, StorageInsertionResult::Outdated);
         assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+    }
+
+    #[test]
+    fn timestamp_tiebreak_matches_uhlc_zero_padded_id_not_trimmed_vec_lex() {
+        // uhlc compares the FULL 16-byte zero-padded LE id array, so a
+        // non-canonically-encoded zid (a trailing zero not trimmed) is the
+        // SAME id as its trimmed form: [0x05] == [0x05, 0x00]. A naive
+        // trimmed-Vec lexicographic compare would WRONGLY rank
+        // [0x05] < [0x05, 0x00] (shorter-is-less), flipping a newer-wins
+        // decision. The zero-padded comparator treats them as equal.
+        let a = TimestampHint {
+            time: 10,
+            zid: vec![0x05],
+        };
+        let b = TimestampHint {
+            time: 10,
+            zid: vec![0x05, 0x00],
+        };
+        assert!(
+            !timestamp_strictly_newer(&a, &b) && !timestamp_strictly_newer(&b, &a),
+            "[0x05] and [0x05,0x00] are the same uhlc id — neither is newer"
+        );
+        // A genuinely higher 16-byte LE id IS newer at equal time.
+        let c = TimestampHint {
+            time: 10,
+            zid: vec![0x05, 0x01],
+        };
+        assert!(
+            timestamp_strictly_newer(&c, &a),
+            "a higher high-byte (0x05,0x01 > 0x05 padded) is strictly newer"
+        );
     }
 
     #[test]

@@ -45,14 +45,7 @@ use alloc::vec::Vec;
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 
-/// Ordering key for a timestamp: lexicographic `(time, zid)`, the uhlc
-/// `Timestamp` `Ord` semantic (the same order
-/// [`crate::storage_state::timestamp_strictly_newer`] compares on). A
-/// tuple of `Ord` types is `Ord`, so this drives `binary_search_by` over
-/// the version list.
-fn order_key(ts: &TimestampHint) -> (u64, &[u8]) {
-    (ts.time, ts.zid.as_slice())
-}
+use crate::storage_state::timestamp_order_key;
 
 /// In-memory [`History::All`] [`StorageBackend`]: a
 /// `key -> Vec<StoredData>` map, each key's versions kept sorted by
@@ -107,8 +100,12 @@ impl StorageBackend for HistoryStorage {
         // binary search both locates an exact-timestamp duplicate (replace)
         // and yields the insertion point that keeps the list ordered.
         match versions
-            .binary_search_by(|v| order_key(&v.timestamp).cmp(&order_key(&data.timestamp)))
-        {
+            // Sorted by the uhlc-faithful (time, 16-byte LE zid) key — the
+            // SSOT comparator the newer-wins gate also uses, so version
+            // ordering and the gate agree on what "newer" means.
+            .binary_search_by(|v| {
+                timestamp_order_key(&v.timestamp).cmp(&timestamp_order_key(&data.timestamp))
+            }) {
             Ok(pos) => versions[pos] = data,
             Err(pos) => versions.insert(pos, data),
         }
