@@ -375,6 +375,396 @@ pub enum AlignmentReply {
     Retrieval(EventMetadata),
 }
 
+/// The storage-aligner wire codec — byte-exact encode/decode of the aligner
+/// types to the format a real zenoh `zenoh-plugin-storage-manager` replica
+/// publishes, the twin of [`crate::storage_replication::wire`].
+///
+/// This atom lands the leaf value type — [`EventMetadata`] and the
+/// [`TimestampHint`] / [`Action`] it embeds; the [`AlignmentQuery`] /
+/// [`AlignmentReply`] envelopes that carry it are the next atom. As with the
+/// digest codec, the layout is hand-rolled (no `bincode` dependency in the
+/// no_std kernel) and pinned to the real `bincode` 1.3 by a `#[cfg(test)]`
+/// cross-check.
+///
+/// ## Byte layout (bincode 1.3 default: LE, fixint, u64 lengths)
+///
+/// zenoh's `EventMetadata` (log.rs:100-106) derives serde; bincode renders it
+/// field-by-field in declaration order:
+///
+/// ```text
+/// stripped_key                       : Option -> u8 tag (1=Some), then String
+/// timestamp                          : Timestamp (see below)
+/// timestamp_last_non_wildcard_update : Option -> u8 tag, then Timestamp if Some
+/// action                             : Action  -> u32 LE variant index
+/// ```
+///
+/// A `Timestamp` (uhlc, derived serde, timestamp.rs:33) is its two newtype
+/// fields in order: `NTP64(u64)` -> 8 LE bytes, then `ID([u8; 16])` -> 16 bytes
+/// (a fixed array, no length prefix). A `String` is a u64 length then the UTF-8
+/// bytes. An `Option` is a single `u8` tag (0=None, 1=Some) — NOT a u32, as
+/// serde's `Option` uses `serialize_some`/`serialize_none`, distinct from an
+/// enum's u32 variant index. An `Action` IS a plain enum, so its index is a
+/// u32.
+///
+/// ## wz emission vs zenoh
+///
+/// wz emits `stripped_key = Some(key)` (no strip_prefix, so the key is always
+/// present) and `timestamp_last_non_wildcard_update = Some(timestamp)`
+/// (re-supplying the field wz's kernel type omits — with no wildcard updates it
+/// always equals `timestamp`). wz emits only `action` 0/1 (Put/Delete). On
+/// decode it discards `timestamp_last_non_wildcard_update` (wildcard-only) and
+/// rejects an inbound wildcard action (2/3) or a `None` stripped_key with a
+/// typed error — the named non-converging residual until wz storage gains
+/// wildcard updates / strip_prefix.
+pub mod wire {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use super::{Action, EventMetadata};
+    use crate::sample::TimestampHint;
+    use crate::storage_state::zid_to_le_array;
+
+    /// Failure decoding an aligner wire structure from bytes.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum AlignmentDecodeError {
+        /// The buffer ended before a fixed-width field could be read.
+        UnexpectedEof,
+        /// A length prefix exceeds the bytes that remain — corrupt or hostile.
+        LengthOverflow,
+        /// Bytes remained after a complete structure was decoded.
+        TrailingBytes,
+        /// An `Option` tag byte that was neither 0 nor 1.
+        BadOptionTag(u8),
+        /// An `Action` variant index wz cannot represent: 2 (WildcardPut) or
+        /// 3 (WildcardDelete) — wz storage has no wildcard updates — or an
+        /// unknown index. The named non-converging residual for a real zenoh
+        /// wildcard event.
+        UnsupportedAction(u32),
+        /// A `None` stripped_key (a zenoh strip-prefix-exact match); wz carries
+        /// no strip_prefix, so its key is always present.
+        MissingKey,
+        /// A stripped_key whose bytes are not valid UTF-8.
+        BadUtf8,
+    }
+
+    fn push_u32(out: &mut Vec<u8>, v: u32) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_u64(out: &mut Vec<u8>, v: u64) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_string(out: &mut Vec<u8>, s: &str) {
+        push_u64(out, s.len() as u64);
+        out.extend_from_slice(s.as_bytes());
+    }
+
+    /// A [`TimestampHint`] as zenoh's bincode `Timestamp`: the NTP64 time word
+    /// (u64 LE), then the 16-byte zero-padded id ([`zid_to_le_array`], the SSOT
+    /// shared with the newer-wins comparator and the event fingerprint).
+    fn push_timestamp(out: &mut Vec<u8>, ts: &TimestampHint) {
+        push_u64(out, ts.time);
+        out.extend_from_slice(&zid_to_le_array(&ts.zid));
+    }
+
+    fn push_event_metadata(out: &mut Vec<u8>, e: &EventMetadata) {
+        out.push(1); // stripped_key: Some
+        push_string(out, e.key());
+        push_timestamp(out, e.timestamp());
+        out.push(1); // timestamp_last_non_wildcard_update: Some(timestamp)
+        push_timestamp(out, e.timestamp());
+        push_u32(
+            out,
+            match e.action() {
+                Action::Put => 0,
+                Action::Delete => 1,
+            },
+        );
+    }
+
+    /// Encode one [`EventMetadata`] to the zenoh bincode wire bytes.
+    pub fn encode_event_metadata(e: &EventMetadata) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_event_metadata(&mut out, e);
+        out
+    }
+
+    /// A cursor over the input bytes that reads fixed-width little-endian
+    /// fields and refuses to read past the end.
+    struct Reader<'a> {
+        buf: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Reader<'a> {
+        fn new(buf: &'a [u8]) -> Self {
+            Self { buf, pos: 0 }
+        }
+
+        fn remaining(&self) -> usize {
+            self.buf.len() - self.pos
+        }
+
+        fn read_u8(&mut self) -> Result<u8, AlignmentDecodeError> {
+            let b = *self
+                .buf
+                .get(self.pos)
+                .ok_or(AlignmentDecodeError::UnexpectedEof)?;
+            self.pos += 1;
+            Ok(b)
+        }
+
+        fn read_u32(&mut self) -> Result<u32, AlignmentDecodeError> {
+            let slice = self.read_bytes(4)?;
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(slice);
+            Ok(u32::from_le_bytes(bytes))
+        }
+
+        fn read_u64(&mut self) -> Result<u64, AlignmentDecodeError> {
+            let slice = self.read_bytes(8)?;
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(slice);
+            Ok(u64::from_le_bytes(bytes))
+        }
+
+        fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], AlignmentDecodeError> {
+            let end = self
+                .pos
+                .checked_add(n)
+                .ok_or(AlignmentDecodeError::UnexpectedEof)?;
+            let slice = self
+                .buf
+                .get(self.pos..end)
+                .ok_or(AlignmentDecodeError::UnexpectedEof)?;
+            self.pos = end;
+            Ok(slice)
+        }
+
+        /// Read a bincode `String`: a u64 length then that many UTF-8 bytes
+        /// (the length is guarded against the remaining buffer before slicing,
+        /// so a hostile length fails fast instead of allocating).
+        fn read_string(&mut self) -> Result<String, AlignmentDecodeError> {
+            let len = self.read_u64()?;
+            let len: usize = len
+                .try_into()
+                .map_err(|_| AlignmentDecodeError::LengthOverflow)?;
+            if len > self.remaining() {
+                return Err(AlignmentDecodeError::LengthOverflow);
+            }
+            let slice = self.read_bytes(len)?;
+            core::str::from_utf8(slice)
+                .map(String::from)
+                .map_err(|_| AlignmentDecodeError::BadUtf8)
+        }
+
+        /// Read zenoh's bincode `Timestamp`: NTP64 (u64) + the 16-byte id. The
+        /// id's trailing zero bytes are trimmed back to wz's canonical
+        /// length-trimmed [`TimestampHint::zid`] form (the inverse of
+        /// [`zid_to_le_array`]); re-encoding zero-pads it again, so the round
+        /// trip is exact.
+        fn read_timestamp(&mut self) -> Result<TimestampHint, AlignmentDecodeError> {
+            let time = self.read_u64()?;
+            let id = self.read_bytes(16)?;
+            let trimmed_len = id.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+            Ok(TimestampHint {
+                time,
+                zid: id[..trimmed_len].to_vec(),
+            })
+        }
+
+        /// Read an `Option` tag: 0 => None, 1 => Some, anything else => error.
+        fn read_option_tag(&mut self) -> Result<bool, AlignmentDecodeError> {
+            match self.read_u8()? {
+                0 => Ok(false),
+                1 => Ok(true),
+                other => Err(AlignmentDecodeError::BadOptionTag(other)),
+            }
+        }
+
+        fn read_event_metadata(&mut self) -> Result<EventMetadata, AlignmentDecodeError> {
+            // stripped_key: Option<OwnedKeyExpr>. wz has no strip_prefix, so a
+            // `None` key cannot be represented.
+            let key = if self.read_option_tag()? {
+                self.read_string()?
+            } else {
+                return Err(AlignmentDecodeError::MissingKey);
+            };
+            let timestamp = self.read_timestamp()?;
+            // timestamp_last_non_wildcard_update: discarded (wildcard-only).
+            if self.read_option_tag()? {
+                let _ = self.read_timestamp()?;
+            }
+            let action = match self.read_u32()? {
+                0 => Action::Put,
+                1 => Action::Delete,
+                other => return Err(AlignmentDecodeError::UnsupportedAction(other)),
+            };
+            Ok(EventMetadata {
+                key,
+                timestamp,
+                action,
+            })
+        }
+    }
+
+    /// Decode one [`EventMetadata`] from the zenoh bincode wire bytes; rejects
+    /// trailing bytes.
+    pub fn decode_event_metadata(bytes: &[u8]) -> Result<EventMetadata, AlignmentDecodeError> {
+        let mut r = Reader::new(bytes);
+        let e = r.read_event_metadata()?;
+        if r.remaining() != 0 {
+            return Err(AlignmentDecodeError::TrailingBytes);
+        }
+        Ok(e)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use alloc::string::String;
+        use alloc::vec;
+        use alloc::vec::Vec;
+        use serde::{Deserialize, Serialize};
+
+        // Serde mirrors of zenoh's types, serialized with the real bincode 1.3
+        // (dev-dep) as byte-compat ground truth. The newtypes are single-field
+        // tuple structs exactly as in uhlc / zenoh, so serde renders each as
+        // its inner value (a newtype struct adds no bytes).
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct MNtp64(u64);
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct MId([u8; 16]);
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct MTimestamp {
+            time: MNtp64,
+            id: MId,
+        }
+        // zenoh's Action: the wildcard variants carry an OwnedKeyExpr, which
+        // serializes as a String. Declaration order fixes the u32 indices
+        // (Put=0, Delete=1, WildcardPut=2, WildcardDelete=3).
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        enum MAction {
+            Put,
+            Delete,
+            WildcardPut(String),
+            WildcardDelete(String),
+        }
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct MEventMetadata {
+            stripped_key: Option<String>,
+            timestamp: MTimestamp,
+            timestamp_last_non_wildcard_update: Option<MTimestamp>,
+            action: MAction,
+        }
+
+        fn mts(ts: &TimestampHint) -> MTimestamp {
+            let mut id = [0u8; 16];
+            let n = ts.zid.len().min(16);
+            id[..n].copy_from_slice(&ts.zid[..n]);
+            MTimestamp {
+                time: MNtp64(ts.time),
+                id: MId(id),
+            }
+        }
+
+        fn mirror_of(e: &EventMetadata) -> MEventMetadata {
+            MEventMetadata {
+                stripped_key: Some(e.key().into()),
+                timestamp: mts(e.timestamp()),
+                timestamp_last_non_wildcard_update: Some(mts(e.timestamp())),
+                action: match e.action() {
+                    Action::Put => MAction::Put,
+                    Action::Delete => MAction::Delete,
+                },
+            }
+        }
+
+        fn ts(time: u64, zid: Vec<u8>) -> TimestampHint {
+            TimestampHint { time, zid }
+        }
+
+        /// THE fidelity test: wz's hand-rolled EventMetadata bytes are
+        /// byte-identical to what the real bincode 1.3 (the version + default
+        /// config zenoh uses) produces for the equivalent EventMetadata.
+        #[test]
+        fn encode_event_metadata_is_byte_identical_to_bincode_1_3() {
+            let put = EventMetadata::put(
+                "demo/long/key",
+                ts(0x1122_3344_5566_7788, vec![0x01, 0x02, 0x03]),
+            );
+            assert_eq!(
+                encode_event_metadata(&put),
+                bincode::serialize(&mirror_of(&put)).unwrap()
+            );
+
+            let del = EventMetadata::delete("x", ts(7, vec![0xff; 16]));
+            assert_eq!(
+                encode_event_metadata(&del),
+                bincode::serialize(&mirror_of(&del)).unwrap()
+            );
+        }
+
+        /// Cross-impl interop: wz's bytes are readable by the exact bincode 1.3
+        /// zenoh deserializes with, AND bytes bincode 1.3 produces are readable
+        /// by wz — both directions.
+        #[test]
+        fn wz_and_bincode_1_3_read_each_others_event_metadata() {
+            let e = EventMetadata::put("demo/a", ts(42, vec![0x09, 0x08]));
+            let mirror = mirror_of(&e);
+
+            let wz = encode_event_metadata(&e);
+            let read: MEventMetadata =
+                bincode::deserialize(&wz).expect("zenoh's bincode reads wz's bytes");
+            assert_eq!(read, mirror);
+
+            let zen = bincode::serialize(&mirror).unwrap();
+            assert_eq!(decode_event_metadata(&zen), Ok(e));
+        }
+
+        #[test]
+        fn event_metadata_round_trips() {
+            let e = EventMetadata::delete("k", ts(99, vec![0x01]));
+            assert_eq!(decode_event_metadata(&encode_event_metadata(&e)), Ok(e));
+        }
+
+        #[test]
+        fn decode_rejects_a_wildcard_action_as_unsupported() {
+            // A real zenoh WildcardPut(=2) event: wz cannot represent it.
+            let mut wz = encode_event_metadata(&EventMetadata::put("k", ts(1, vec![0x01])));
+            let n = wz.len();
+            wz[n - 4..].copy_from_slice(&2u32.to_le_bytes());
+            assert_eq!(
+                decode_event_metadata(&wz),
+                Err(AlignmentDecodeError::UnsupportedAction(2))
+            );
+        }
+
+        #[test]
+        fn decode_rejects_trailing_bytes_and_truncation() {
+            let mut wz = encode_event_metadata(&EventMetadata::put("k", ts(1, vec![0x01])));
+            wz.push(0x00);
+            assert_eq!(
+                decode_event_metadata(&wz),
+                Err(AlignmentDecodeError::TrailingBytes)
+            );
+
+            let wz2 = encode_event_metadata(&EventMetadata::put("k", ts(1, vec![0x01])));
+            assert!(decode_event_metadata(&wz2[..3]).is_err());
+        }
+
+        #[test]
+        fn decode_rejects_a_none_stripped_key() {
+            // Option tag 0 (None) for stripped_key -> wz has no strip_prefix.
+            assert_eq!(
+                decode_event_metadata(&[0u8]),
+                Err(AlignmentDecodeError::MissingKey)
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
