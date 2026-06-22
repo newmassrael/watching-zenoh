@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Round 311 A8c-2a — the storage-aligner DRIVER, ANSWER half
-//! (§5.11 storage domain, aligner): the AP-side tokio binding that answers a
-//! peer replica's alignment query, replying with the entries the peer needs
-//! to converge.
+//! Round 311 A8c-2a/A8c-2b — the storage-aligner DRIVER (§5.11 storage domain,
+//! aligner): the AP-side tokio binding for both legs of the alignment
+//! exchange. The ANSWER leg ([`AlignerService`]) answers a peer's alignment
+//! query with the entries it needs; the ASK leg ([`query_replica_aligner`])
+//! pulls a peer's diverging entries until this replica converges.
 //!
 //! The no_std kernel ([`wz_session_core::storage_aligner`] +
 //! [`StorageState::answer_alignment_query`](wz_session_core::storage_state::StorageState::answer_alignment_query))
@@ -58,29 +59,71 @@
 //!   divergence note). This module is unaffected — it consumes the kernel's
 //!   `Vec`, however the kernel produced it.
 //!
-//! ## NON-goals (this atom, A8c-2a)
+//! ## ASK side (A8c-2b)
 //!
-//! The ASK side — `spawn_query_replica_aligner` (the pull loop) +
-//! [`process_alignment_reply`](wz_session_core::storage_state::StorageState::process_alignment_reply)
-//! follow (A8c-2b) — and the
+//! [`query_replica_aligner`] is the dual: it spawns a task that pulls a peer's
+//! diverging entries. It serializes an [`AlignmentQuery`] onto a query
+//! attachment, GETs the peer's aligner keyexpr
+//! ([`Session::query`](crate::session::Session::query)) with the right
+//! consolidation ([`consolidation_for`]), decodes each reply
+//! ([`decode_reply`]) into an [`AlignmentReply`] (+ a Put `Retrieval`'s
+//! value), and feeds it to the kernel
+//! [`process_alignment_reply`](wz_session_core::storage_state::StorageState::process_alignment_reply),
+//! which returns an [`AlignmentFollowup`] the driver follows
+//! ([`next_query`]) — issuing the next, finer query until convergence. zenoh
+//! `spawn_query_replica_aligner` + `process_alignment_reply`
+//! (core.rs:484-577, core/aligner_reply.rs:99-303): zenoh spawns a fresh task
+//! per followup; wz drains a work queue (the same request tree, one task).
+//!
+//! ## NON-goals (this module)
+//!
+//! A8c-2a (answer queryable) + A8c-2b (the ASK pull loop) are here. The
+//! remaining seam is A8c-2c: wiring the
 //! [`DigestSubscriber`](crate::storage_replication_service::DigestSubscriber)
-//! `on_diff` → ask-loop wiring + facade forward (A8c-2c). This atom is the
-//! answer queryable only.
+//! `on_diff` callback to spawn [`query_replica_aligner`] with the
+//! `AlignmentQuery::Diff(diff)`, plus the facade forward + a run-ci lane. The
+//! live two-replica convergence over the wire (the Remote-only answer
+//! queryable cannot be exercised by a single-session loopback) rides the A11
+//! e2e; here the pure decode / consolidation / followup helpers are unit
+//! tested and the answer→pull convergence is proven deterministically off the
+//! wire ([`tests`]).
 
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::locality::Locality;
+use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
-use wz_session_core::storage_aligner::wire::{decode_alignment_query, encode_alignment_reply};
+use wz_session_core::reply_sink::ReplyView;
+use wz_session_core::sample::EncodingHint;
+use wz_session_core::storage_aligner::wire::{
+    decode_alignment_query, decode_alignment_reply, encode_alignment_query, encode_alignment_reply,
+};
+use wz_session_core::storage_aligner::{
+    AlignmentFollowup, AlignmentQuery, AlignmentReply, RetrievedValue,
+};
 use wz_session_core::storage_backend::StorageBackend;
 use wz_session_core::storage_replication::{zid_to_zenoh_hex, ReplicationConfig};
 use wz_session_core::storage_state::StorageState;
 
-use crate::session::{Queryable, QueryableError, QueryableOptions, Session, Unicast};
+use crate::session::{QueryOptions, Queryable, QueryableError, QueryableOptions, Session, Unicast};
 use crate::session_glue::SessionLinkActions;
 use crate::storage_service::wall_clock_ntp64;
+
+/// Per-query alignment timeout. The ASK pull loop awaits each query's terminal
+/// `ResponseFinal` (which fires `on_final`); this timeout guarantees that fires
+/// even when the targeted replica is unreachable — the session emits Err+Final
+/// on query-timeout GC, so a spawned alignment task never hangs on a silent
+/// peer. zenoh relies on its session's default get timeout (10s); wz matches it
+/// explicitly so the followup loop is bounded.
+const ALIGNER_QUERY_TIMEOUT_MS: u32 = 10_000;
+
+/// One decoded aligner reply: the typed [`AlignmentReply`] plus the
+/// [`RetrievedValue`] a Put `Retrieval` carries (`None` for a metadata reply).
+/// The kernel [`process_alignment_reply`](wz_session_core::storage_state::StorageState::process_alignment_reply)
+/// input. Factored to a `type` per `clippy::type_complexity`.
+type DecodedReply = (AlignmentReply, Option<RetrievedValue>);
 
 /// The keyexpr this replica's aligner queryable answers on:
 /// `@zid/<zid-hex>/<config-fp>/aligner`. zenoh `aligner_key_expr_formatter`
@@ -221,13 +264,228 @@ where
     }
 }
 
+// ============================================================================
+// ASK side (A8c-2b) — the pull loop.
+// ============================================================================
+
+/// The query consolidation an [`AlignmentQuery`] is issued with.
+///
+/// `Discovery` wants the single most-reactive replica, so `Monotonic` forwards
+/// only the first answer (zenoh core.rs:506-515). Every other query may produce
+/// several Samples — one reply per event — so `None` keeps them all
+/// (core.rs:499-504); `Monotonic`/`Latest` would consolidate all but one away.
+fn consolidation_for(query: &AlignmentQuery) -> ConsolidationMode {
+    match query {
+        AlignmentQuery::Discovery => ConsolidationMode::Monotonic,
+        _ => ConsolidationMode::None,
+    }
+}
+
+/// Project a Put reply's body into the [`RetrievedValue`] a `Retrieval`
+/// carries: the payload bytes + the value encoding (`put_encoding`, the inner
+/// `MsgPut` E-flag; A8b). zenoh reads the value off the reply `sample`
+/// (aligner_query.rs:300-302).
+fn retrieved_value(view: &dyn ReplyView) -> RetrievedValue {
+    RetrievedValue {
+        payload: view.payload().to_vec(),
+        encoding: view.put_encoding().map(|(packed_id, schema)| EncodingHint {
+            packed_id,
+            schema: schema.map(String::from),
+        }),
+    }
+}
+
+/// Decode one inbound aligner reply into the kernel's `(AlignmentReply, value)`
+/// input. The serialized [`AlignmentReply`] rides the reply attachment (A8b
+/// `ReplyView::attachment`); a reply with no attachment, or one that fails to
+/// decode, is skipped (zenoh core.rs:539-557) — `None`, never fatal. Only a
+/// `Retrieval` carries a value (the stored payload + encoding); every metadata
+/// reply is an empty-payload Put whose body the kernel ignores, so its value is
+/// `None`. Pure over the [`ReplyView`] — the testable core of the on_reply
+/// callback.
+fn decode_reply(view: &dyn ReplyView) -> Option<DecodedReply> {
+    let attachment = view.attachment()?;
+    let reply = decode_alignment_reply(attachment).ok()?;
+    let value = matches!(reply, AlignmentReply::Retrieval(_)).then(|| retrieved_value(view));
+    Some((reply, value))
+}
+
+/// Map a kernel [`AlignmentFollowup`] to the next query to issue, if any.
+///
+/// - `Done` → nothing; this branch converged.
+/// - `Query(q)` → re-query the SAME peer for finer detail (an Intervals /
+///   SubIntervals / Events diff; zenoh re-uses `replica_aligner_ke`,
+///   aligner_reply.rs:154/195/219).
+/// - `DiscoveredReplica(zid)` → align with the discovered replica via `All` on
+///   ITS own aligner keyexpr (zenoh derives it from the zid,
+///   aligner_reply.rs:118-133).
+fn next_query(
+    followup: AlignmentFollowup,
+    current_ke: &str,
+    config: &ReplicationConfig,
+) -> Option<(String, AlignmentQuery)> {
+    match followup {
+        AlignmentFollowup::Done => None,
+        AlignmentFollowup::Query(query) => Some((current_ke.to_string(), query)),
+        AlignmentFollowup::DiscoveredReplica(zid) => {
+            Some((aligner_keyexpr(config, &zid), AlignmentQuery::All))
+        }
+    }
+}
+
+/// The wildcard keyexpr the INITIAL alignment (`Discovery`) queries:
+/// `@zid/*/<config-fp>/aligner` — any replica on this configuration. The
+/// `Monotonic` consolidation then selects the single most-reactive responder
+/// (zenoh initial alignment); its `Discovery` reply carries that replica's zid,
+/// from which the follow-up `All` derives the specific aligner keyexpr. The
+/// digest-driven path instead targets a specific peer via [`aligner_keyexpr`].
+pub fn discovery_keyexpr(config: &ReplicationConfig) -> String {
+    format!("@zid/*/{}/aligner", config.fingerprint().value())
+}
+
+/// Issue one alignment query on `peer_aligner_ke` carrying `query_bytes` and
+/// collect every decoded reply, returning once the terminal `ResponseFinal`
+/// fires. The query is fire-and-forget at the [`Session::query`] seam; the
+/// session drive loop delivers replies through `on_reply` (decoded by
+/// [`decode_reply`]) and the terminal `on_final`, which this awaits via a
+/// oneshot. A rejected query (e.g. `query-get` disabled) yields no replies.
+async fn issue_and_collect<R, T>(
+    session: &Session<R, T, Unicast>,
+    peer_aligner_ke: &str,
+    query_bytes: Vec<u8>,
+    consolidation: ConsolidationMode,
+) -> Vec<DecodedReply>
+where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let replies: Arc<Mutex<Vec<DecodedReply>>> = Arc::new(Mutex::new(Vec::new()));
+    let replies_cb = Arc::clone(&replies);
+    let (final_tx, final_rx) = tokio::sync::oneshot::channel::<()>();
+    // `on_final` is `FnMut`; wrap the one-shot sender so the first fire sends
+    // and any later fire is a no-op (take()).
+    let final_tx = Arc::new(Mutex::new(Some(final_tx)));
+
+    let issued = session.query(
+        peer_aligner_ke,
+        QueryOptions::get()
+            .with_attachment(query_bytes)
+            .with_consolidation(consolidation)
+            .with_timeout_ms(ALIGNER_QUERY_TIMEOUT_MS),
+        move |view: &dyn ReplyView| {
+            if let Some(decoded) = decode_reply(view) {
+                replies_cb
+                    .lock()
+                    .expect("aligner reply buffer poisoned")
+                    .push(decoded);
+            }
+        },
+        move |_rid: u64| {
+            if let Some(tx) = final_tx
+                .lock()
+                .expect("aligner final oneshot poisoned")
+                .take()
+            {
+                let _ = tx.send(());
+            }
+        },
+    );
+
+    // A rejected query yields nothing; never fatal to the alignment loop.
+    if issued.is_err() {
+        return Vec::new();
+    }
+
+    // Block until the terminal ResponseFinal (or the query-timeout Err+Final).
+    let _ = final_rx.await;
+
+    let mut guard = replies.lock().expect("aligner reply buffer poisoned");
+    core::mem::take(&mut *guard)
+}
+
+/// Drive the alignment exchange against a peer to convergence: issue
+/// `initial_query` on `peer_aligner_ke`, process each reply through the kernel,
+/// and follow every [`AlignmentFollowup`] (a finer same-peer query, or an `All`
+/// against a discovered replica) until the request tree is exhausted. zenoh
+/// spawns a fresh task per followup (core.rs:559-572, aligner_reply.rs); wz
+/// drains a work queue in one task — the same tree, no per-step spawn (the wz
+/// answer + process are synchronous over the locked state). The state lock is
+/// only ever held across the synchronous `process_alignment_reply` calls, never
+/// across the query await.
+async fn run_alignment<R, T, B>(
+    session: &Session<R, T, Unicast>,
+    state: &Arc<Mutex<StorageState<B>>>,
+    config: &ReplicationConfig,
+    peer_aligner_ke: String,
+    initial_query: AlignmentQuery,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    B: StorageBackend,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let mut pending = vec![(peer_aligner_ke, initial_query)];
+    while let Some((ke, query)) = pending.pop() {
+        let consolidation = consolidation_for(&query);
+        let replies =
+            issue_and_collect(session, &ke, encode_alignment_query(&query), consolidation).await;
+
+        // Process the batch under the lock in a tight scope, collecting the
+        // followups; the guard (a non-Send std lock) never spans the next await.
+        let mut followups = Vec::new();
+        {
+            let mut guard = state.lock().expect("storage state mutex poisoned");
+            for (reply, value) in replies {
+                let followup = guard.process_alignment_reply(config, reply, value);
+                if let Some(step) = next_query(followup, &ke, config) {
+                    followups.push(step);
+                }
+            }
+        }
+        pending.extend(followups);
+    }
+}
+
+/// Spawn an alignment pull against a peer replica's aligner queryable: a
+/// detached task that drives [`run_alignment`] to convergence and resolves its
+/// [`JoinHandle`](tokio::task::JoinHandle). `state` is shared with the
+/// [`StorageService`](crate::storage_service::StorageService) (pass its
+/// `shared_state()`), so pulled entries land in the live store. `peer_aligner_ke`
+/// is the targeted replica's aligner keyexpr ([`aligner_keyexpr`] for a
+/// digest-driven `Diff` pull, or [`discovery_keyexpr`] for an initial
+/// `Discovery`); `initial_query` is what to ask first (`Diff(diff)` from the
+/// digest subscriber's `on_diff`, or `Discovery`). zenoh
+/// `spawn_query_replica_aligner` (core.rs:484-577).
+pub fn query_replica_aligner<R, T, B>(
+    session: &Session<R, T, Unicast>,
+    state: Arc<Mutex<StorageState<B>>>,
+    config: ReplicationConfig,
+    peer_aligner_ke: String,
+    initial_query: AlignmentQuery,
+) -> tokio::task::JoinHandle<()>
+where
+    R: SessionRuntime + 'static,
+    T: TimeSource + Send + Sync + 'static,
+    B: StorageBackend + Send + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+    Session<R, T, Unicast>: Clone + Send + 'static,
+{
+    let session = session.clone();
+    tokio::spawn(async move {
+        run_alignment(&session, &state, &config, peer_aligner_ke, initial_query).await;
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wz_session_core::query_sink::BorrowedQuery;
-    use wz_session_core::sample::{EncodingHint, TimestampHint};
-    use wz_session_core::storage_aligner::wire::encode_alignment_query;
-    use wz_session_core::storage_aligner::{AlignmentQuery, AlignmentReply};
+    use wz_session_core::reply_sink::{BorrowedReply, ReplyKind};
+    use wz_session_core::sample::TimestampHint;
     use wz_session_core::storage_backend::MemoryStorage;
 
     fn cfg() -> ReplicationConfig {
@@ -454,6 +712,203 @@ mod tests {
         assert!(
             aligner.is_ok(),
             "the aligner answer queryable declares on @zid/<zid>/<fp>/aligner"
+        );
+    }
+
+    // ----- ASK side (A8c-2b) -----
+
+    fn reply_view<'a>(
+        keyexpr: &'a str,
+        payload: &'a [u8],
+        attachment: Option<&'a [u8]>,
+        put_encoding: Option<(u32, Option<&'a str>)>,
+    ) -> BorrowedReply<'a> {
+        BorrowedReply {
+            rid: 1,
+            keyexpr,
+            kind: ReplyKind::Put,
+            payload,
+            err_encoding: None,
+            attachment,
+            put_encoding,
+        }
+    }
+
+    #[test]
+    fn consolidation_is_monotonic_for_discovery_else_none() {
+        // Discovery -> Monotonic (single most-reactive replica); every other
+        // query -> None (keep every per-event reply).
+        assert!(matches!(
+            consolidation_for(&AlignmentQuery::Discovery),
+            ConsolidationMode::Monotonic
+        ));
+        assert!(matches!(
+            consolidation_for(&AlignmentQuery::All),
+            ConsolidationMode::None
+        ));
+        assert!(matches!(
+            consolidation_for(&AlignmentQuery::Events(Vec::new())),
+            ConsolidationMode::None
+        ));
+    }
+
+    #[test]
+    fn discovery_keyexpr_is_wildcard_zid() {
+        let config = cfg();
+        assert_eq!(
+            discovery_keyexpr(&config),
+            format!("@zid/*/{}/aligner", config.fingerprint().value())
+        );
+    }
+
+    #[test]
+    fn decode_reply_skips_a_reply_with_no_attachment() {
+        let view = reply_view("@zid/aa/1/aligner", &[], None, None);
+        assert!(
+            decode_reply(&view).is_none(),
+            "a reply without an attachment is skipped (zenoh core.rs:540-543)"
+        );
+    }
+
+    #[test]
+    fn decode_reply_skips_a_corrupt_attachment() {
+        let view = reply_view("@zid/aa/1/aligner", &[], Some(&[0xff, 0x00, 0x01]), None);
+        assert!(
+            decode_reply(&view).is_none(),
+            "an undecodable attachment is skipped, not fatal"
+        );
+    }
+
+    #[test]
+    fn decode_reply_metadata_reply_has_no_value() {
+        // A Discovery (metadata) reply: attachment only, empty payload -> the
+        // decoded value is None.
+        let attachment = encode_alignment_reply(&AlignmentReply::Discovery(vec![0xaa]));
+        let view = reply_view("@zid/aa/1/aligner", &[], Some(&attachment), None);
+        let (reply, value) = decode_reply(&view).expect("a Discovery reply decodes");
+        assert!(matches!(reply, AlignmentReply::Discovery(_)));
+        assert!(value.is_none(), "a metadata reply carries no value");
+    }
+
+    #[test]
+    fn decode_reply_retrieval_carries_payload_and_encoding() {
+        // A Retrieval reply: the value rides the reply body (payload +
+        // put_encoding), read off the ReplyView regardless of the EventMetadata.
+        let config = cfg();
+        let zid = vec![0x01];
+        let now = wall_clock_ntp64();
+        let source = state_with_put("demo/a", vec![1], now);
+        let responses =
+            source
+                .lock()
+                .unwrap()
+                .answer_alignment_query(&config, &AlignmentQuery::All, &zid, now);
+        let retrieval = responses
+            .into_iter()
+            .find(|r| matches!(r.reply, AlignmentReply::Retrieval(_)))
+            .expect("All yields a Retrieval");
+        let attachment = encode_alignment_reply(&retrieval.reply);
+
+        let view = reply_view(
+            "@zid/01/1/aligner",
+            &[5, 6],
+            Some(&attachment),
+            Some((7, Some("text/plain"))),
+        );
+        let (reply, value) = decode_reply(&view).expect("a Retrieval reply decodes");
+        assert!(matches!(reply, AlignmentReply::Retrieval(_)));
+        let value = value.expect("a Retrieval carries a value");
+        assert_eq!(value.payload, vec![5, 6]);
+        assert_eq!(
+            value.encoding,
+            Some(EncodingHint {
+                packed_id: 7,
+                schema: Some("text/plain".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn next_query_maps_each_followup() {
+        let config = cfg();
+        let ke = "@zid/01/9/aligner";
+
+        assert!(
+            next_query(AlignmentFollowup::Done, ke, &config).is_none(),
+            "Done converges -- no next query"
+        );
+
+        let (q_ke, q) =
+            next_query(AlignmentFollowup::Query(AlignmentQuery::All), ke, &config).unwrap();
+        assert_eq!(q_ke.as_str(), ke, "a finer query re-targets the same peer");
+        assert!(matches!(q, AlignmentQuery::All));
+
+        let (d_ke, d_q) = next_query(
+            AlignmentFollowup::DiscoveredReplica(vec![0x01]),
+            ke,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            d_ke,
+            aligner_keyexpr(&config, &[0x01]),
+            "a discovered replica is aligned on its own aligner keyexpr"
+        );
+        assert!(
+            matches!(d_q, AlignmentQuery::All),
+            "a discovered replica is pulled with All"
+        );
+    }
+
+    #[test]
+    fn all_pull_converges_the_destination_to_the_source() {
+        let config = cfg();
+        let zid = vec![0x01];
+        let now = wall_clock_ntp64();
+        let source = state_with_put("demo/a", vec![9, 8, 7], now);
+        let ke = aligner_keyexpr(&config, &zid);
+
+        // The source answers an All query (the replies a real aligner emits).
+        let responses =
+            source
+                .lock()
+                .unwrap()
+                .answer_alignment_query(&config, &AlignmentQuery::All, &zid, now);
+        assert!(
+            !responses.is_empty(),
+            "All over a stored Put yields replies"
+        );
+
+        // The destination starts empty and pulls each reply through the ASK
+        // path: decode_reply (driver) -> process_alignment_reply (kernel).
+        let mut dest = StorageState::new(MemoryStorage::new());
+        for response in &responses {
+            let attachment = encode_alignment_reply(&response.reply);
+            let (payload, put_encoding): (&[u8], Option<(u32, Option<&str>)>) =
+                match &response.value {
+                    Some(v) => (
+                        &v.payload,
+                        v.encoding
+                            .as_ref()
+                            .map(|e| (e.packed_id, e.schema.as_deref())),
+                    ),
+                    None => (&[], None),
+                };
+            let view = reply_view(&ke, payload, Some(&attachment), put_encoding);
+            let (reply, value) = decode_reply(&view).expect("the reply decodes");
+            let followup = dest.process_alignment_reply(&config, reply, value);
+            assert!(
+                matches!(followup, AlignmentFollowup::Done),
+                "an All-flow Retrieval applies terminally"
+            );
+        }
+
+        // The destination digest now equals the source's: they converged.
+        let hot = config.classify(now).0;
+        assert_eq!(
+            dest.replication_digest(&config, hot),
+            source.lock().unwrap().replication_digest(&config, hot),
+            "after pulling All, the destination converges to the source"
         );
     }
 }

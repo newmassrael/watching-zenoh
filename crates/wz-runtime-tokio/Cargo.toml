@@ -274,6 +274,14 @@ storage-aligner = [
     "storage-replication",
     "query-attachment",
     "pubsub-attachment",
+    # A8c-2b ASK side: the pull loop GETs the peer's aligner queryable.
+    # query-consolidation implies query-get (the Session::query seam) which
+    # implies query-reply (the reply RX path + ReplyView::attachment /
+    # put_encoding, A8b). query-timeout bounds each query so the followup loop
+    # never hangs on an unreachable replica (the session emits Err+Final on
+    # timeout, firing on_final).
+    "query-consolidation",
+    "query-timeout",
 ]
 codec-init-body = ["wz-codecs/codec-init-body", "wz-session-core/codec-init-body"]
 codec-open-body = ["wz-codecs/codec-open-body", "wz-session-core/codec-open-body"]
