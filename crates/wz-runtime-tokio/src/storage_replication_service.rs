@@ -89,7 +89,19 @@ pub fn digest_keyexpr(config: &ReplicationConfig, local_zid: &[u8]) -> String {
 /// wz's keyexprs are plain `/`-delimited, so a split suffices.
 pub fn digest_keyexpr_zid_hex(keyexpr: &str) -> Option<&str> {
     let (zid_hex, fp) = keyexpr.strip_prefix("@-digest/")?.split_once('/')?;
-    if zid_hex.is_empty() || fp.is_empty() || fp.contains('/') {
+    // The zid chunk must be canonical lowercase hex -- exactly what
+    // [`zid_to_zenoh_hex`] always emits, so a legit peer never fails this -- and
+    // the fp a single non-empty chunk. Rejecting a non-hex zid is
+    // defense-in-depth: a crafted/non-conformant peer keyexpr like
+    // `@-digest/a$*/<fp>` would otherwise splice a keyexpr WILDCARD into the
+    // aligner query keyexpr [`aligner_keyexpr_for_hex`], fanning a targeted
+    // `Diff` pull (and this replica's DigestDiff) out to many replicas instead
+    // of the one diverging peer.
+    if fp.is_empty()
+        || fp.contains('/')
+        || zid_hex.is_empty()
+        || !zid_hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return None;
     }
     Some(zid_hex)
@@ -479,6 +491,24 @@ mod tests {
             digest_keyexpr_zid_hex("@-digest/ab01/9/x"),
             None,
             "trailing segment"
+        );
+        // Defense-in-depth: a non-hex zid chunk (a crafted/non-conformant peer
+        // splicing a keyexpr wildcard) is rejected so it cannot become a
+        // wildcard aligner query keyexpr.
+        assert_eq!(
+            digest_keyexpr_zid_hex("@-digest/a$*/9"),
+            None,
+            "wildcard zid chunk rejected"
+        );
+        assert_eq!(
+            digest_keyexpr_zid_hex("@-digest/**/9"),
+            None,
+            "wildcard zid chunk rejected"
+        );
+        assert_eq!(
+            digest_keyexpr_zid_hex("@-digest/ZZ/9"),
+            None,
+            "non-hex zid rejected"
         );
     }
 

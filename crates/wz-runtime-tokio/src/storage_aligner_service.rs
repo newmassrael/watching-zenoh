@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Round 311 A8c-2a/A8c-2b — the storage-aligner DRIVER (§5.11 storage domain,
-//! aligner): the AP-side tokio binding for both legs of the alignment
-//! exchange. The ANSWER leg ([`AlignerService`]) answers a peer's alignment
-//! query with the entries it needs; the ASK leg ([`query_replica_aligner`])
-//! pulls a peer's diverging entries until this replica converges.
+//! Round 311 A8c-2a/A8c-2b/A8c-2c — the storage-aligner DRIVER (§5.11 storage
+//! domain, aligner): the AP-side tokio binding for the alignment exchange. The
+//! ANSWER leg ([`AlignerService`]) answers a peer's alignment query with the
+//! entries it needs; the ASK leg ([`query_replica_aligner`]) pulls a peer's
+//! diverging entries until this replica converges; the WIRE seam
+//! ([`spawn_digest_aligner`]) auto-triggers an ASK pull from the digest
+//! subscriber's `on_diff` when a divergence is detected.
 //!
 //! The no_std kernel ([`wz_session_core::storage_aligner`] +
 //! [`StorageState::answer_alignment_query`](wz_session_core::storage_state::StorageState::answer_alignment_query))
@@ -75,20 +77,20 @@
 //! (core.rs:484-577, core/aligner_reply.rs:99-303): zenoh spawns a fresh task
 //! per followup; wz drains a work queue (the same request tree, one task).
 //!
-//! ## NON-goals (this module)
+//! ## Coverage + the remaining live leg
 //!
-//! A8c-2a (answer queryable) + A8c-2b (the ASK pull loop) are here. The
-//! remaining seam is A8c-2c: wiring the
-//! [`DigestSubscriber`](crate::storage_replication_service::DigestSubscriber)
-//! `on_diff` callback to spawn [`query_replica_aligner`] with the
-//! `AlignmentQuery::Diff(diff)`, plus the facade forward + a run-ci lane. The
-//! live two-replica convergence over the wire (the Remote-only answer
-//! queryable cannot be exercised by a single-session loopback) rides the A11
-//! e2e; here the pure decode / consolidation / followup helpers are unit
-//! tested and the answer→pull convergence is proven deterministically off the
-//! wire ([`tests`]).
+//! A8c-2a (answer queryable), A8c-2b (the ASK pull loop), and A8c-2c (the
+//! `on_diff` → [`spawn_digest_aligner`] auto-wiring + facade + run-ci) are all
+//! here. The pure decode / consolidation / followup helpers are unit tested and
+//! the answer→pull convergence is proven deterministically off the wire
+//! ([`tests`]). The async transport itself — [`issue_and_collect`] /
+//! [`run_alignment`] / the `on_diff`→pull spawn — is exercised only by the live
+//! **two-replica** A11 e2e, because the answer queryable + digest subscriber are
+//! both [`Locality::Remote`] and so cannot be driven by a single-session
+//! loopback; that is the one remaining live leg.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
@@ -101,7 +103,7 @@ use wz_session_core::storage_aligner::wire::{
     decode_alignment_query, decode_alignment_reply, encode_alignment_query, encode_alignment_reply,
 };
 use wz_session_core::storage_aligner::{
-    AlignmentFollowup, AlignmentQuery, AlignmentReply, RetrievedValue,
+    Action, AlignmentFollowup, AlignmentQuery, AlignmentReply, RetrievedValue,
 };
 use wz_session_core::storage_backend::StorageBackend;
 use wz_session_core::storage_replication::{zid_to_zenoh_hex, DigestDiff, ReplicationConfig};
@@ -114,13 +116,40 @@ use crate::session_glue::SessionLinkActions;
 use crate::storage_replication_service::DigestSubscriber;
 use crate::storage_service::wall_clock_ntp64;
 
-/// Per-query alignment timeout. The ASK pull loop awaits each query's terminal
-/// `ResponseFinal` (which fires `on_final`); this timeout guarantees that fires
-/// even when the targeted replica is unreachable — the session emits Err+Final
-/// on query-timeout GC, so a spawned alignment task never hangs on a silent
-/// peer. zenoh relies on its session's default get timeout (10s); wz matches it
-/// explicitly so the followup loop is bounded.
+/// Per-query alignment timeout. The wire query is issued with this
+/// `with_timeout_ms`, so a session that runs the reply-timeout **sweep** fires
+/// the proper Err+Final (hence `on_final`) when the targeted replica is silent.
+/// zenoh's session default get timeout is 10s (zenoh-config `defaults.rs:151`
+/// `queries_default_timeout`); wz matches it.
+///
+/// The sweep ([`ReplyRegistry::sweep_timed_out`](crate::reply::ReplyRegistry))
+/// is a SEPARATE task — R268 relocated it out of `drive_session_until_terminal`
+/// — so the pull loop must NOT assume it is running. [`issue_and_collect`]
+/// therefore also wraps the `on_final` await in a [`tokio::time::timeout`]
+/// backstop ([`ALIGNER_QUERY_TIMEOUT_MS`] + [`ALIGNER_BACKSTOP_SLACK_MS`]): a
+/// sweep-equipped session resolves on the real Err+Final first; a session
+/// without a sweep still resolves on the backstop, so a spawned alignment task
+/// is SELF-BOUNDED and never hangs on a silent peer regardless of how the
+/// session is driven.
 const ALIGNER_QUERY_TIMEOUT_MS: u32 = 10_000;
+
+/// Extra wait the [`issue_and_collect`] backstop allows beyond the wire
+/// `with_timeout_ms` before giving up on `on_final`, so a sweep-equipped
+/// session's real Err+Final wins the race and the backstop only trips when no
+/// sweep is reclaiming the query.
+const ALIGNER_BACKSTOP_SLACK_MS: u64 = 1_000;
+
+/// Defensive cap on the number of queries one [`run_alignment`] issues. A
+/// conformant peer's refinement tree is shallow (Cold → Intervals →
+/// SubIntervals → Events → Retrieval) and finite, so a real alignment stays far
+/// below this. A hostile/buggy peer, however, can answer ANY query with fresh
+/// `Discovery` replies to grow the followup queue without bound (zenoh has the
+/// same exposure via unbounded task spawns, `aligner_reply.rs:106-138`); wz's
+/// single-task drain makes a cheap cap natural. Hitting it abandons THIS pass —
+/// the next digest tick re-triggers if the replica is still diverged, so a
+/// genuinely deep alignment still converges over successive ticks, it is only
+/// bounded per pass. A generous defensive bound, not a tuning knob.
+const MAX_ALIGNMENT_QUERIES: usize = 100_000;
 
 /// One decoded aligner reply: the typed [`AlignmentReply`] plus the
 /// [`RetrievedValue`] a Put `Retrieval` carries (`None` for a metadata reply).
@@ -285,7 +314,8 @@ where
 /// `Discovery` wants the single most-reactive replica, so `Monotonic` forwards
 /// only the first answer (zenoh core.rs:506-515). Every other query may produce
 /// several Samples — one reply per event — so `None` keeps them all
-/// (core.rs:499-504); `Monotonic`/`Latest` would consolidate all but one away.
+/// (the `ConsolidationMode::None` default, core.rs:504); `Monotonic`/`Latest`
+/// would consolidate all but one away.
 fn consolidation_for(query: &AlignmentQuery) -> ConsolidationMode {
     match query {
         AlignmentQuery::Discovery => ConsolidationMode::Monotonic,
@@ -293,10 +323,11 @@ fn consolidation_for(query: &AlignmentQuery) -> ConsolidationMode {
     }
 }
 
-/// Project a Put reply's body into the [`RetrievedValue`] a `Retrieval`
+/// Project a Put reply's body into the [`RetrievedValue`] a Put `Retrieval`
 /// carries: the payload bytes + the value encoding (`put_encoding`, the inner
-/// `MsgPut` E-flag; A8b). zenoh reads the value off the reply `sample`
-/// (aligner_query.rs:300-302).
+/// `MsgPut` E-flag; A8b). zenoh reads the value off the received reply `sample`
+/// (`process_event_retrieval` destructures `SampleFields { payload, encoding }`,
+/// aligner_reply.rs:367-369).
 fn retrieved_value(view: &dyn ReplyView) -> RetrievedValue {
     RetrievedValue {
         payload: view.payload().to_vec(),
@@ -311,14 +342,23 @@ fn retrieved_value(view: &dyn ReplyView) -> RetrievedValue {
 /// input. The serialized [`AlignmentReply`] rides the reply attachment (A8b
 /// `ReplyView::attachment`); a reply with no attachment, or one that fails to
 /// decode, is skipped (zenoh core.rs:539-557) — `None`, never fatal. Only a
-/// `Retrieval` carries a value (the stored payload + encoding); every metadata
-/// reply is an empty-payload Put whose body the kernel ignores, so its value is
-/// `None`. Pure over the [`ReplyView`] — the testable core of the on_reply
-/// callback.
+/// **Put** `Retrieval` carries a value (the stored payload + encoding); a
+/// **Delete** `Retrieval` and every metadata reply carry `None` — matching the
+/// answer side, which emits a value only for a Put `Retrieval`
+/// (storage_state.rs answer engine) and an empty-payload Put otherwise. The
+/// value-presence is derived from the event [`Action`] discriminant (the single
+/// source the answer + kernel-consume sides also key on), not from the
+/// `Retrieval` variant alone. Pure over the [`ReplyView`] — the testable core
+/// of the on_reply callback.
 fn decode_reply(view: &dyn ReplyView) -> Option<DecodedReply> {
     let attachment = view.attachment()?;
     let reply = decode_alignment_reply(attachment).ok()?;
-    let value = matches!(reply, AlignmentReply::Retrieval(_)).then(|| retrieved_value(view));
+    let value = match &reply {
+        AlignmentReply::Retrieval(meta) if meta.action() == Action::Put => {
+            Some(retrieved_value(view))
+        }
+        _ => None,
+    };
     Some((reply, value))
 }
 
@@ -410,8 +450,16 @@ where
         return Vec::new();
     }
 
-    // Block until the terminal ResponseFinal (or the query-timeout Err+Final).
-    let _ = final_rx.await;
+    // Wait for the terminal `on_final` (the peer's ResponseFinal, or the
+    // query-timeout sweep's Err+Final), BOUNDED by a backstop so a spawned
+    // alignment task cannot hang on a peer that never answers AND a session that
+    // is not running the reply-timeout sweep (the sweep is a separate task, not
+    // part of `drive_session_until_terminal` -- R268). A sweep-equipped session
+    // resolves on the real Err+Final well inside the backstop; otherwise the
+    // backstop trips and we process whatever replies arrived. Self-bounded.
+    let backstop =
+        Duration::from_millis(u64::from(ALIGNER_QUERY_TIMEOUT_MS) + ALIGNER_BACKSTOP_SLACK_MS);
+    let _ = tokio::time::timeout(backstop, final_rx).await;
 
     let mut guard = replies.lock().expect("aligner reply buffer poisoned");
     core::mem::take(&mut *guard)
@@ -440,10 +488,28 @@ async fn run_alignment<R, T, B>(
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
     let mut pending = vec![(peer_aligner_ke, initial_query)];
+    let mut issued = 0usize;
     while let Some((ke, query)) = pending.pop() {
+        // Defensive bound (see MAX_ALIGNMENT_QUERIES): abandon this pass if a
+        // peer drives the followup queue past the cap; the next digest tick
+        // re-triggers if the replica is still diverged.
+        if issued >= MAX_ALIGNMENT_QUERIES {
+            break;
+        }
+        issued += 1;
+
         let consolidation = consolidation_for(&query);
-        let replies =
+        let mut replies =
             issue_and_collect(session, &ke, encode_alignment_query(&query), consolidation).await;
+
+        // Discovery selects a SINGLE replica: Monotonic should deliver one
+        // reply, but zenoh defensively stops after the first (core.rs:567-572).
+        // Mirror that so several Discovery replies do not fan out into several
+        // `All` pulls. Every other query keeps all replies
+        // (ConsolidationMode::None -- one reply per event).
+        if matches!(query, AlignmentQuery::Discovery) {
+            replies.truncate(1);
+        }
 
         // Process the batch under the lock in a tight scope, collecting the
         // followups; the guard (a non-Send std lock) never spans the next await.
@@ -889,6 +955,29 @@ mod tests {
                 schema: Some("text/plain".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn decode_reply_delete_retrieval_has_no_value() {
+        use wz_session_core::storage_aligner::EventMetadata;
+        // A Delete Retrieval is a Put-form reply (empty payload) carrying a
+        // Retrieval(meta) whose action is Delete. The kernel applies the delete
+        // from the metadata alone, so decode_reply must NOT manufacture a value
+        // -- matching the answer side, which emits value=None for a Delete
+        // Retrieval. The value-presence keys on the event Action, not the
+        // Retrieval variant.
+        let meta = EventMetadata::delete(
+            "demo/a",
+            TimestampHint {
+                time: 1,
+                zid: vec![0x01],
+            },
+        );
+        let attachment = encode_alignment_reply(&AlignmentReply::Retrieval(meta));
+        let view = reply_view("@zid/01/9/aligner", &[], Some(&attachment), None);
+        let (reply, value) = decode_reply(&view).expect("a Delete Retrieval reply decodes");
+        assert!(matches!(reply, AlignmentReply::Retrieval(_)));
+        assert!(value.is_none(), "a Delete Retrieval carries no value");
     }
 
     #[test]
