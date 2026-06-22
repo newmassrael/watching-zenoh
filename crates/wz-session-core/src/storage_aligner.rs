@@ -459,7 +459,6 @@ pub enum AlignmentFollowup {
 /// wildcard updates / strip_prefix.
 pub mod wire {
     use alloc::collections::{BTreeMap, BTreeSet};
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -468,6 +467,10 @@ pub mod wire {
         IntervalIdx, SubIntervalIdx,
     };
     use crate::sample::TimestampHint;
+    // The zid <-> zenoh-hex SSOT lives with the other zid encodings in
+    // storage_replication (shared with the digest keyexpr); the Discovery arm
+    // is one consumer.
+    use crate::storage_replication::{zenoh_hex_to_zid, zid_to_zenoh_hex};
     use crate::storage_state::zid_to_le_array;
 
     /// Failure decoding an aligner wire structure from bytes.
@@ -747,28 +750,6 @@ pub mod wire {
         }
     }
 
-    /// A zid as the lowercase hex string zenoh's `ZenohId` serializes (a
-    /// bincode `String`): the 16-byte LE id read as a `u128`, printed
-    /// big-endian hex, with a single leading zero stripped — uhlc `ID` Display
-    /// (id.rs:281-291) via zenoh `ZenohIdProto::serialize_str` (mod.rs:226-232).
-    fn zid_to_zenoh_hex(zid: &[u8]) -> String {
-        let id = u128::from_le_bytes(zid_to_le_array(zid));
-        let s = format!("{id:02x}");
-        let stripped = s.strip_prefix('0').unwrap_or(s.as_str());
-        stripped.into()
-    }
-
-    /// The inverse of [`zid_to_zenoh_hex`]: parse the hex as a `u128`, take its
-    /// little-endian bytes, and trim trailing zeros back to wz's canonical
-    /// length-trimmed zid (zenoh `ZenohIdProto::from_str`, mod.rs:168). A hex
-    /// string longer than a `u128` (or non-hex) is rejected.
-    fn zenoh_hex_to_zid(hex: &str) -> Result<Vec<u8>, AlignmentDecodeError> {
-        let id = u128::from_str_radix(hex, 16).map_err(|_| AlignmentDecodeError::BadZid)?;
-        let bytes = id.to_le_bytes();
-        let trimmed_len = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-        Ok(bytes[..trimmed_len].to_vec())
-    }
-
     impl Reader<'_> {
         fn read_interval_set(&mut self) -> Result<BTreeSet<IntervalIdx>, AlignmentDecodeError> {
             let len = self.read_u64()?;
@@ -939,7 +920,9 @@ pub mod wire {
     pub fn decode_alignment_reply(bytes: &[u8]) -> Result<AlignmentReply, AlignmentDecodeError> {
         let mut r = Reader::new(bytes);
         let reply = match r.read_u32()? {
-            0 => AlignmentReply::Discovery(zenoh_hex_to_zid(&r.read_string()?)?),
+            0 => AlignmentReply::Discovery(
+                zenoh_hex_to_zid(&r.read_string()?).ok_or(AlignmentDecodeError::BadZid)?,
+            ),
             1 => AlignmentReply::Intervals(r.read_fingerprint_map()?),
             2 => AlignmentReply::SubIntervals(r.read_sub_fingerprint_map()?),
             3 => AlignmentReply::EventsMetadata(r.read_events()?),

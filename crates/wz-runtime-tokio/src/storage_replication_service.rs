@@ -48,7 +48,7 @@ use wz_session_core::link::SessionRuntime;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 use wz_session_core::storage_backend::StorageBackend;
-use wz_session_core::storage_replication::{wire, DigestDiff, ReplicationConfig};
+use wz_session_core::storage_replication::{wire, zid_to_zenoh_hex, DigestDiff, ReplicationConfig};
 use wz_session_core::storage_state::StorageState;
 
 use crate::session::{
@@ -60,13 +60,23 @@ use crate::storage_service::wall_clock_ntp64;
 /// The keyexpr a replica publishes its Digest on:
 /// `@-digest/<zid-hex>/<config-fp>`. zenoh `digest_key_expr_formatter`
 /// `@-digest/${zid:*}/${hash_configuration:*}` (core.rs:45-48), filled with
-/// the replica zid and the configuration fingerprint (core.rs:136-148). wz
-/// formats the zid as lowercase hex of its bytes and the fingerprint as the
-/// `u64`'s decimal `Display` (matching zenoh's keformat substitution of the
-/// `Fingerprint` it `Deref`s to `u64`).
+/// the replica zid and the configuration fingerprint (core.rs:136-148).
+///
+/// Both components go through zenoh's `keformat` `set<S: Display>` (key_expr
+/// `format/mod.rs:487-493`), i.e. each is rendered via its [`Display`]: the zid
+/// as zenoh's `ZenohId` Display (the
+/// [`zid_to_zenoh_hex`](wz_session_core::storage_replication::zid_to_zenoh_hex)
+/// SSOT — LE id read as a `u128`, big-endian hex, one leading zero stripped,
+/// NOT a naive per-byte hex) and the fingerprint as the `u64`'s decimal
+/// `Display` (`Fingerprint` `Deref`s to `u64`). Using the shared SSOT keeps
+/// this byte-identical to a real zenoh's keyexpr and consistent with the
+/// aligner's `AlignmentReply::Discovery` zid encoding.
 pub fn digest_keyexpr(config: &ReplicationConfig, local_zid: &[u8]) -> String {
-    let zid_hex: String = local_zid.iter().map(|b| format!("{b:02x}")).collect();
-    format!("@-digest/{}/{}", zid_hex, config.fingerprint().value())
+    format!(
+        "@-digest/{}/{}",
+        zid_to_zenoh_hex(local_zid),
+        config.fingerprint().value()
+    )
 }
 
 /// Builds the `(keyexpr, encoded-digest-bytes)` a publication carries, given
@@ -413,10 +423,13 @@ mod tests {
     #[test]
     fn digest_keyexpr_is_zenoh_formatted() {
         let config = cfg();
+        // The zid renders via zenoh's ZenohId Display (LE -> u128 -> big-endian
+        // hex), so [0x01, 0xab] -> u128 0xab01 -> "ab01" -- NOT a per-byte
+        // "01ab". This is what a real zenoh keformat produces.
         let ke = digest_keyexpr(&config, &[0x01, 0xab]);
         assert_eq!(
             ke,
-            format!("@-digest/01ab/{}", config.fingerprint().value())
+            format!("@-digest/ab01/{}", config.fingerprint().value())
         );
     }
 

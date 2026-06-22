@@ -414,6 +414,39 @@ pub(crate) fn event_fingerprint(key: &str, timestamp: &TimestampHint) -> Fingerp
     Fingerprint::from(hasher.digest())
 }
 
+/// A zid rendered as the lowercase hex string zenoh prints a `ZenohId` as —
+/// the SSOT for the zid component of every replication keyexpr (the digest
+/// `@-digest/<zid-hex>/<fp>` and the aligner `@zid/<zid-hex>/<fp>/aligner`) and
+/// the `AlignmentReply::Discovery` body.
+///
+/// zenoh fills those keyexprs via `keformat`'s `set<S: Display>` (key_expr
+/// `format/mod.rs:487-493`), so the zid is rendered through its
+/// [`Display`](core::fmt::Display): `ZenohId` → `ZenohIdProto`
+/// (`zenoh-protocol` `core/mod.rs:191-192`) → uhlc `ID` Display
+/// (`uhlc-0.8.1/src/id.rs:281-291`) = the **16-byte little-endian id read as a
+/// `u128`, printed big-endian hex, with a single leading zero stripped**. So
+/// the printed string is the zid bytes *reversed* (LE→`u128`→BE hex), NOT a
+/// naive per-byte hex of the wire order. This single function is the only place
+/// that recipe lives, shared by the digest publisher and the aligner.
+pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
+    let id = u128::from_le_bytes(zid_to_le_array(zid));
+    let s = alloc::format!("{id:02x}");
+    let stripped = s.strip_prefix('0').unwrap_or(s.as_str());
+    stripped.into()
+}
+
+/// The inverse of [`zid_to_zenoh_hex`]: parse the lowercase hex back to the
+/// length-trimmed zid bytes ([`TimestampHint::zid`] form), or `None` if it is
+/// not a `<= 16`-byte id. zenoh `ZenohIdProto::from_str`
+/// (`core/mod.rs:168-183`). The aligner uses this to read the zid a digest /
+/// aligner keyexpr or an `AlignmentReply::Discovery` carries.
+pub fn zenoh_hex_to_zid(hex: &str) -> Option<alloc::vec::Vec<u8>> {
+    let id = u128::from_str_radix(hex, 16).ok()?;
+    let bytes = id.to_le_bytes();
+    let trimmed_len = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    Some(bytes[..trimmed_len].to_vec())
+}
+
 /// A concise, comparable summary of a replica's stored set — XOR-rolled
 /// [`Fingerprint`]s bucketed by event time, grouped into three eras of
 /// increasing temporal granularity. zenoh `digest::Digest` (digest.rs:77-83).
@@ -1228,6 +1261,38 @@ mod tests {
         let trimmed = event_fingerprint("demo/a", &ts(100, vec![0x01]));
         let padded = event_fingerprint("demo/a", &ts(100, vec![0x01, 0x00, 0x00]));
         assert_eq!(trimmed, padded);
+    }
+
+    /// The zid-as-zenoh-hex SSOT: a zid renders as zenoh's `ZenohId` Display —
+    /// the LE bytes read as a `u128` then big-endian hex with one leading zero
+    /// stripped, i.e. the bytes appear REVERSED, NOT a per-byte hex of the wire
+    /// order. This is the recipe both the digest keyexpr and the aligner's
+    /// `AlignmentReply::Discovery` share, so getting it wrong would silently
+    /// break keyexpr / zid interop with a real zenoh.
+    #[test]
+    fn zid_to_zenoh_hex_matches_zenoh_display() {
+        // [0x1a,0x2b,0x3c] LE -> u128 0x3c2b1a -> "3c2b1a" (reversed, no strip).
+        assert_eq!(zid_to_zenoh_hex(&[0x1a, 0x2b, 0x3c]), "3c2b1a");
+        // [0x01,0xab] LE -> u128 0xab01 -> "ab01" (NOT the per-byte "01ab").
+        assert_eq!(zid_to_zenoh_hex(&[0x01, 0xab]), "ab01");
+        // Single low byte -> one leading zero stripped.
+        assert_eq!(zid_to_zenoh_hex(&[0x0a]), "a");
+        assert_eq!(zid_to_zenoh_hex(&[0x01]), "1");
+    }
+
+    #[test]
+    fn zid_zenoh_hex_round_trips_and_rejects_garbage() {
+        for zid in [
+            alloc::vec![0x1a, 0x2b, 0x3c],
+            alloc::vec![0x01],
+            alloc::vec![0xff; 16],
+            alloc::vec![0x01, 0x02], // a trailing-non-zero pair
+        ] {
+            assert_eq!(zenoh_hex_to_zid(&zid_to_zenoh_hex(&zid)), Some(zid));
+        }
+        // Non-hex / over-long inputs are rejected.
+        assert_eq!(zenoh_hex_to_zid("zz"), None);
+        assert_eq!(zenoh_hex_to_zid(&"f".repeat(33)), None); // > 16 bytes
     }
 
     // -- Digest build (era partition + XOR rollup) ----------------------
