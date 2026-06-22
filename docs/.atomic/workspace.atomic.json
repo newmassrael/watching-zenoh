@@ -46967,6 +46967,46 @@
         "Storage domain remaining (north-star): storage-replication + storage-aligner (multi-replica convergence). Residual named: cross-process e2e binary, query-reply loopback test, receive-side reply-ts."
       ]
     },
+    "Round 311vh": {
+      "decision_summary": "R311vh: storage-replication primitives atom (replication 1/N) -- Fingerprint, interval/sub-interval time classification, configuration fingerprint, and per-event fingerprint a replica's Digest is assembled from; a byte-exact no_std mirror of zenoh replication::{digest,classification,configuration,log}.",
+      "changes_bullets": [
+        "storage_replication.rs (new, storage-replication feat): Fingerprint(u64) with XOR/BitXorAssign/From<u64>/value(); IntervalIdx/SubIntervalIdx newtypes; ReplicationConfig{storage_key_expr,prefix,interval_ms,sub_intervals,hot,warm,propagation_delay_ms} + fingerprint() (xxh3 over zenoh's exact field order + LE widths, configuration.rs:64-72) + defaults() (zenoh ReplicaConfig defaults) + classify() (ms-since-epoch integer division, configuration.rs:193-220); ntp64_to_ms() reproducing uhlc NTP64->Duration->millis with div_ceil (ntp64.rs:95,109-118); event_fingerprint(key,ts) = xxh3(key + time.to_le_bytes + zid16) (log.rs:232-244).",
+        "storage_state.rs: extracted the zid->[u8;16] zero-pad normalization out of timestamp_order_key into a shared pub(crate) zid_to_le_array, so the newer-wins comparator and event_fingerprint share ONE zid encoding (SSOT), matching uhlc ID::to_le_bytes canonical 16 bytes (id.rs:84). Behaviour-preserving extract.",
+        "Cargo.toml: storage-replication = [storage-backend, dep:xxhash-rust] feature (implies storage-backend, NOT storage-history: zenoh's digest assumes History::Latest); xxhash-rust 0.8 (default-features=false, features=[xxh3]) optional dep. lib.rs: pub mod storage_replication gate."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-replication: storage_replication 11/11 (Fingerprint XOR algebra; xxh3_dependency_is_canonical pins xxh3-64(\"\")=0x2d06800538d394c2, the byte-compat foundation; ntp64_to_ms uhlc-exact incl the div_ceil fraction case; classify integer-division buckets; config-fp deterministic + sensitive to every field; event_fp deterministic/field-sensitive + zid length-normalised).",
+        "clippy -D clean (session-core storage-replication --all-targets); fmt clean. Regression: session-core --lib 155/155 default (the storage_state zid_to_le_array extract is behaviour-preserving)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vh = storage-replication primitives atom (replication 1/N, §5.11): Fingerprint + interval/sub-interval classification + config-fp + event-fp, a byte-exact no_std mirror of zenoh replication digest primitives (xxhash-rust xxh3; LE field order matched; uhlc NTP64->ms reproduced incl div_ceil; SSOT zid16 shared with newer-wins). Pure logic, no Digest assembly/Session/async yet.",
+        "storage-replication track plan (digest pub/sub; aligner = next track): R1 primitives DONE -> R2 Interval/SubInterval buckets + Digest{config_fp,cold_fp,warm:per-interval,hot:per-subinterval} build w/ 3-era classification (log.rs:544-590, digest.rs:77-83) -> R3 Digest::diff->DigestDiff (digest.rs:109-170) -> R4 bincode-compatible Digest wire codec (isolated SSOT module; core.rs:229-232) -> R5 StorageState->Digest from latest snapshot incl tombstones -> R6 driver periodic publish loop (@-digest/<zid>/<config-fp>, core.rs:45-48,125-274) -> R7 driver subscribe Remote-only + diff->observer (aligner handoff seam) -> R8 feature/facade forward + inventory storage-replication reserved->ACTIVE + full run-ci + session-review -> R9 cross-impl interop vs real zenohd storage-manager.",
+        "Fidelity decision (user 교과서/북극성/no-deferral/비용무관 standard): faithful algorithm + byte-exact wire (xxh3 + bincode-compatible codec + exact config-fp), NOT a private wz format; the un-versioned plugin bincode coupling is contained by isolating the wire codec in one module (R4) + the R9 interop regression test. R9 digest-track scope = mutual parse + config-fp match + diff detect; full convergence needs the aligner queryable (storage-aligner track).",
+        "LOCAL: R311vh on be8e731 (origin/main=be8e731); host-gated kernel atom, NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8. storage-replication inventory still reserved (flips ACTIVE at R8 when end-to-end)."
+      ],
+      "publishable_decision_summary": "R311vh: storage-replication primitives atom (replication 1/N) -- Fingerprint, interval/sub-interval time classification, configuration fingerprint, and per-event fingerprint a replica's Digest is assembled from; a byte-exact no_std mirror of zenoh replication::{digest,classification,configuration,log}.",
+      "publishable_changes_bullets": [
+        "storage_replication.rs (new, storage-replication feat): Fingerprint(u64) with XOR/BitXorAssign/From<u64>/value(); IntervalIdx/SubIntervalIdx newtypes; ReplicationConfig{storage_key_expr,prefix,interval_ms,sub_intervals,hot,warm,propagation_delay_ms} + fingerprint() (xxh3 over zenoh's exact field order + LE widths, configuration.rs:64-72) + defaults() (zenoh ReplicaConfig defaults) + classify() (ms-since-epoch integer division, configuration.rs:193-220); ntp64_to_ms() reproducing uhlc NTP64->Duration->millis with div_ceil (ntp64.rs:95,109-118); event_fingerprint(key,ts) = xxh3(key + time.to_le_bytes + zid16) (log.rs:232-244).",
+        "storage_state.rs: extracted the zid->[u8;16] zero-pad normalization out of timestamp_order_key into a shared pub(crate) zid_to_le_array, so the newer-wins comparator and event_fingerprint share ONE zid encoding (SSOT), matching uhlc ID::to_le_bytes canonical 16 bytes (id.rs:84). Behaviour-preserving extract.",
+        "Cargo.toml: storage-replication = [storage-backend, dep:xxhash-rust] feature (implies storage-backend, NOT storage-history: zenoh's digest assumes History::Latest); xxhash-rust 0.8 (default-features=false, features=[xxh3]) optional dep. lib.rs: pub mod storage_replication gate."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-replication: storage_replication 11/11 (Fingerprint XOR algebra; xxh3_dependency_is_canonical pins xxh3-64(\"\")=0x2d06800538d394c2, the byte-compat foundation; ntp64_to_ms uhlc-exact incl the div_ceil fraction case; classify integer-division buckets; config-fp deterministic + sensitive to every field; event_fp deterministic/field-sensitive + zid length-normalised).",
+        "clippy -D clean (session-core storage-replication --all-targets); fmt clean. Regression: session-core --lib 155/155 default (the storage_state zid_to_le_array extract is behaviour-preserving)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vh = storage-replication primitives atom (replication 1/N, §5.11): Fingerprint + interval/sub-interval classification + config-fp + event-fp, a byte-exact no_std mirror of zenoh replication digest primitives (xxhash-rust xxh3; LE field order matched; uhlc NTP64->ms reproduced incl div_ceil; SSOT zid16 shared with newer-wins). Pure logic, no Digest assembly/Session/async yet.",
+        "storage-replication track plan (digest pub/sub; aligner = next track): R1 primitives DONE -> R2 Interval/SubInterval buckets + Digest{config_fp,cold_fp,warm:per-interval,hot:per-subinterval} build w/ 3-era classification (log.rs:544-590, digest.rs:77-83) -> R3 Digest::diff->DigestDiff (digest.rs:109-170) -> R4 bincode-compatible Digest wire codec (isolated SSOT module; core.rs:229-232) -> R5 StorageState->Digest from latest snapshot incl tombstones -> R6 driver periodic publish loop (@-digest/<zid>/<config-fp>, core.rs:45-48,125-274) -> R7 driver subscribe Remote-only + diff->observer (aligner handoff seam) -> R8 feature/facade forward + inventory storage-replication reserved->ACTIVE + full run-ci + session-review -> R9 cross-impl interop vs real zenohd storage-manager.",
+        "Fidelity decision (user 교과서/북극성/no-deferral/비용무관 standard): faithful algorithm + byte-exact wire (xxh3 + bincode-compatible codec + exact config-fp), NOT a private wz format; the un-versioned plugin bincode coupling is contained by isolating the wire codec in one module (R4) + the R9 interop regression test. R9 digest-track scope = mutual parse + config-fp match + diff detect; full convergence needs the aligner queryable (storage-aligner track).",
+        "LOCAL: R311vh on be8e731 (origin/main=be8e731); host-gated kernel atom, NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8. storage-replication inventory still reserved (flips ACTIVE at R8 when end-to-end)."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [

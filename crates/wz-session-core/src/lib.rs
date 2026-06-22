@@ -712,6 +712,21 @@ pub mod storage_state;
 #[cfg(feature = "storage-history")]
 pub mod storage_history;
 
+/// Round 311vh — the storage-replication *primitives* atom (§5.11 storage,
+/// replication 1/N): the [`storage_replication::Fingerprint`], the
+/// time-bucket classification ([`storage_replication::IntervalIdx`] /
+/// [`storage_replication::SubIntervalIdx`]), the
+/// [`storage_replication::ReplicationConfig`] + its compatibility
+/// fingerprint, and the [`storage_replication::event_fingerprint`] a
+/// replica's Digest is assembled from. Pure no_std xxh3 logic — a faithful,
+/// byte-exact mirror of zenoh's `zenoh-plugin-storage-manager`
+/// `replication::{digest,classification,configuration,log}`. The Digest
+/// assembly + diff + wire codec + the publish/subscribe driver are the
+/// follow-up atoms. Gated on `storage-replication` (implies
+/// `storage-backend`).
+#[cfg(feature = "storage-replication")]
+pub mod storage_replication;
+
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
 /// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
 /// mirror of `query`, routing inbound `Response(Reply|Err)` +

@@ -504,6 +504,19 @@ storage-backend = ["alloc"]
 # feature so a History::All storage is declarable end-to-end.
 storage-history = ["storage-backend"]
 
+# Round 311vh — storage-replication (§5.11 storage domain, replication 1/N).
+# Gates the `storage_replication` module: the digest primitives (Fingerprint,
+# interval/sub-interval classification, configuration + per-event xxh3
+# fingerprints) a replica's Digest is assembled from, a faithful mirror of
+# zenoh's `zenoh-plugin-storage-manager` `replication::{digest,classification,
+# configuration,log}`. Implies `storage-backend` (the Digest is built from a
+# storage's stored set, and replication runs on a History::Latest backend —
+# NOT `storage-history`: zenoh's digest assumes Latest). Pulls `xxhash-rust`
+# (xxh3) so the fingerprints are byte-exact with a real zenoh replica. The
+# wz-runtime-tokio / wz facade forward this same-named feature once the
+# publish/subscribe driver lands.
+storage-replication = ["storage-backend", "dep:xxhash-rust"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).
@@ -552,6 +565,13 @@ sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-
 # resolves `HashMap<u64, String>::get` without leaning on the
 # wz-runtime-tokio side enabling it transitively.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
+# Round 311vh — xxh3 hasher for the storage-replication digest primitives
+# (storage_replication.rs). Optional, pulled only by `storage-replication`.
+# default-features = false keeps it no_std (xxh3 is a pure computation, no
+# std/alloc needed); the `xxh3` feature is the exact algorithm zenoh's
+# replication uses (`xxhash_rust::xxh3`, digest.rs:24), so wz fingerprints
+# are byte-identical to a real zenoh replica's.
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
 # R311du — log facade for the SubscriberRegistry keyexpr-resolution warn
 # path (register_with_locality emits log::warn! when a registered keyexpr
 # fails canonicalization). no_std-compatible facade; mirrors the

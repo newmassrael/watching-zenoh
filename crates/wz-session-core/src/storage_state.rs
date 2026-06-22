@@ -104,10 +104,25 @@ use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, St
 /// the zero high bytes uhlc compares against). A zid longer than 16 (a
 /// malformed input) is truncated to 16 — uhlc ids are exactly 16 bytes.
 pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
+    (ts.time, zid_to_le_array(&ts.zid))
+}
+
+/// Normalise a (length-trimmed) `zid` to the full 16-byte little-endian
+/// array uhlc's `ID` canonically holds (`[u8; 16]`,
+/// `uhlc-0.8.1/src/id.rs:58-59`; `ID::to_le_bytes` returns the full
+/// `[u8; 16]`, id.rs:84). wz's wire / [`TimestampHint`] `zid` is those LE
+/// bytes with trailing zero high bytes dropped (zenoh-pico `_z_id_len`);
+/// zero-padding back to 16 reproduces the canonical id exactly. This is the
+/// SSOT zid encoding shared by the newer-wins ordering key
+/// ([`timestamp_order_key`]) and, when `storage-replication` is enabled, the
+/// replication event fingerprint — so "which is newer" and "is this the same
+/// event" agree on the id bytes. A `zid` longer than 16 (malformed input) is
+/// truncated to 16, matching uhlc's fixed id width.
+pub(crate) fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
     let mut zid16 = [0u8; 16];
-    let n = ts.zid.len().min(16);
-    zid16[..n].copy_from_slice(&ts.zid[..n]);
-    (ts.time, zid16)
+    let n = zid.len().min(16);
+    zid16[..n].copy_from_slice(&zid[..n]);
+    zid16
 }
 
 /// Whether timestamp `a` is *strictly newer* than `b`, by the uhlc
