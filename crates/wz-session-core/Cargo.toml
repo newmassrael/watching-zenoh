@@ -517,6 +517,18 @@ storage-history = ["storage-backend"]
 # publish/subscribe driver lands.
 storage-replication = ["storage-backend", "dep:xxhash-rust"]
 
+# Round 311vr — storage-aligner (§5.11 storage domain, aligner 1/N). Gates the
+# `storage_aligner` module: the alignment event metadata (`Action` +
+# `EventMetadata`) a replica exchanges to pull the entries a `DigestDiff`
+# localised, a faithful mirror of zenoh's `zenoh-plugin-storage-manager`
+# `replication::{log,core::aligner_query,core::aligner_reply}`. Implies
+# `storage-replication` (the aligner consumes a `DigestDiff` and reuses the
+# `event_fingerprint` / `Fingerprint` the Digest is built from, so an event's
+# identity agrees between the digest and the aligner). The wz-runtime-tokio /
+# wz facade forward this same-named feature once the aligner queryable +
+# query driver lands.
+storage-aligner = ["storage-replication"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

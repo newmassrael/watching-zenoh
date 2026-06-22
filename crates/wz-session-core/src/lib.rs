@@ -727,6 +727,21 @@ pub mod storage_history;
 #[cfg(feature = "storage-replication")]
 pub mod storage_replication;
 
+/// Round 311vr — the storage-aligner *event metadata* atom (§5.11 storage,
+/// aligner 1/N): the [`storage_aligner::Action`] + [`storage_aligner::EventMetadata`]
+/// a replica exchanges to pull the entries a
+/// [`storage_replication::DigestDiff`] localised. The metadata's
+/// [`fingerprint`](storage_aligner::EventMetadata::fingerprint) reuses the
+/// [`storage_replication::event_fingerprint`] SSOT, so an event's identity
+/// agrees between the digest and the aligner. Pure no_std logic — a faithful
+/// mirror of zenoh's `zenoh-plugin-storage-manager` `replication::log`
+/// metadata, minus the wildcard actions wz storage cannot produce. The
+/// AlignmentQuery / AlignmentReply protocol + the answer / pull engines + the
+/// aligner driver are the follow-up atoms. Gated on `storage-aligner`
+/// (implies `storage-replication`).
+#[cfg(feature = "storage-aligner")]
+pub mod storage_aligner;
+
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
 /// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
 /// mirror of `query`, routing inbound `Response(Reply|Err)` +
