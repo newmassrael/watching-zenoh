@@ -1608,6 +1608,8 @@ mod tests {
             rid: 11,
             keyexpr_literal: "sensors/a".to_string(),
             body: ReplyBody::Put(b"value".to_vec()),
+            encoding: None,
+            timestamp: None,
             responder: None,
         };
         let inbound: InboundReply = qr.into();
@@ -1627,6 +1629,8 @@ mod tests {
             rid: 12,
             keyexpr_literal: "sensors/b".to_string(),
             body: ReplyBody::Del,
+            encoding: None,
+            timestamp: None,
             responder: Some((vec![0xaa, 0xbb], 5)),
         };
         let inbound: InboundReply = qr.into();

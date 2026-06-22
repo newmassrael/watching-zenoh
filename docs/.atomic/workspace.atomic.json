@@ -46933,6 +46933,40 @@
         "LOCAL: R311vf on ve=3d9a459 (origin/main=ef56758, +10 ahead uw..vf); host-gated, NOT pushed. North-star storage domain remaining: storage-replication + storage-aligner (multi-replica)."
       ]
     },
+    "Round 311vg": {
+      "decision_summary": "R311vg: run-ci compile fix closing the storage remediation. The R311va (timestamp) + R311vd (encoding) QueryReply::Reply field additions missed the two From<QueryReply>-for-InboundReply test literals in reply.rs (the query-queryable reply-plane test module, reply.rs:1607/1626); the per-atom local test runs used narrower feature unions that never compiled that module, so full run-ci's Layer C1 (cargo test --workspace) / C1f / C1g / C2 caught the E0063 missing-field errors. Filled both with encoding: None + timestamp: None; full run-ci re-run is GREEN end to end (zero FAIL lanes, incl MCU Q + zenohd Z 9/9). Reaffirms: full run-ci is the pre-push gate, not per-feature local cargo test.",
+      "changes_bullets": [
+        "reply.rs: the two From<QueryReply> for InboundReply test literals (from_query_reply_put/del_projects_to_inbound, reply.rs:1607/1626) get encoding: None + timestamp: None — they construct QueryReply::Reply and were missed when R311va added timestamp and R311vd added encoding (they live in the query-queryable reply-plane test module, not the feature subsets the local per-atom test runs used)."
+      ],
+      "verification_bullets": [
+        "full run-ci (scripts/run-ci.sh) GREEN end to end: RUNCI_EXIT=0, zero FAIL lanes. All layers pass incl C1 (cargo test --workspace), C1f/C1g (reply/observer dispatch planes), C2 (clippy --workspace --all-targets -D warnings), C3/C4*, D/E*, F, G, Q (MCU qemu mps2/microbit), Z (zenohd interop 9/9).",
+        "This run-ci is the authoritative gate: the prior run (pre-fix) failed C1/C1f/C1g/C2 with E0063 missing encoding+timestamp on reply.rs:1607/1626 — exactly the reply-plane test module the per-feature local runs (--features storage-history,query-*) did not compile. The full-lane CI caught it; fixed + re-run green."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vg = run-ci compile fix closing the storage remediation: the va/vd QueryReply::Reply field additions (timestamp, encoding) missed the two reply.rs From<QueryReply> test literals in the query-queryable reply-plane test module; per-atom local testing on narrower feature unions never compiled them, full run-ci's C1/C1f/C1g/C2 did. Lesson reaffirmed: full run-ci (ALL host lanes) is the gate before push, not per-feature local cargo test.",
+        "Storage track state: in-memory storage (Latest + History::All, per-version reply encoding+timestamp) end-to-end; 4-agent session review (uw..va) remediated (vb zid + comparator SSOT, vc fallback wall-clock NTP64, vd encoding round-trip, ve kernel placement, vf live-session test) + vg CI fix. full run-ci GREEN. PUSHING this session (user consent).",
+        "Storage domain remaining (north-star): storage-replication + storage-aligner (multi-replica convergence). Residual named: cross-process e2e binary, query-reply loopback test, receive-side reply-ts."
+      ],
+      "publishable_decision_summary": "R311vg: run-ci compile fix closing the storage remediation. The R311va (timestamp) + R311vd (encoding) QueryReply::Reply field additions missed the two From<QueryReply>-for-InboundReply test literals in reply.rs (the query-queryable reply-plane test module, reply.rs:1607/1626); the per-atom local test runs used narrower feature unions that never compiled that module, so full run-ci's Layer C1 (cargo test --workspace) / C1f / C1g / C2 caught the E0063 missing-field errors. Filled both with encoding: None + timestamp: None; full run-ci re-run is GREEN end to end (zero FAIL lanes, incl MCU Q + zenohd Z 9/9). Reaffirms: full run-ci is the pre-push gate, not per-feature local cargo test.",
+      "publishable_changes_bullets": [
+        "reply.rs: the two From<QueryReply> for InboundReply test literals (from_query_reply_put/del_projects_to_inbound, reply.rs:1607/1626) get encoding: None + timestamp: None — they construct QueryReply::Reply and were missed when R311va added timestamp and R311vd added encoding (they live in the query-queryable reply-plane test module, not the feature subsets the local per-atom test runs used)."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci (scripts/run-ci.sh) GREEN end to end: RUNCI_EXIT=0, zero FAIL lanes. All layers pass incl C1 (cargo test --workspace), C1f/C1g (reply/observer dispatch planes), C2 (clippy --workspace --all-targets -D warnings), C3/C4*, D/E*, F, G, Q (MCU qemu mps2/microbit), Z (zenohd interop 9/9).",
+        "This run-ci is the authoritative gate: the prior run (pre-fix) failed C1/C1f/C1g/C2 with E0063 missing encoding+timestamp on reply.rs:1607/1626 — exactly the reply-plane test module the per-feature local runs (--features storage-history,query-*) did not compile. The full-lane CI caught it; fixed + re-run green."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vg = run-ci compile fix closing the storage remediation: the va/vd QueryReply::Reply field additions (timestamp, encoding) missed the two reply.rs From<QueryReply> test literals in the query-queryable reply-plane test module; per-atom local testing on narrower feature unions never compiled them, full run-ci's C1/C1f/C1g/C2 did. Lesson reaffirmed: full run-ci (ALL host lanes) is the gate before push, not per-feature local cargo test.",
+        "Storage track state: in-memory storage (Latest + History::All, per-version reply encoding+timestamp) end-to-end; 4-agent session review (uw..va) remediated (vb zid + comparator SSOT, vc fallback wall-clock NTP64, vd encoding round-trip, ve kernel placement, vf live-session test) + vg CI fix. full run-ci GREEN. PUSHING this session (user consent).",
+        "Storage domain remaining (north-star): storage-replication + storage-aligner (multi-replica convergence). Residual named: cross-process e2e binary, query-reply loopback test, receive-side reply-ts."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
