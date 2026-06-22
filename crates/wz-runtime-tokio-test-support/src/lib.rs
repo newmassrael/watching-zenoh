@@ -58,6 +58,34 @@ pub fn fixture_session_init_params() -> SessionInitParams {
     }
 }
 
+/// Session-open params for dialing a REAL zenoh 1.5.0 router (zenohd or any
+/// foreign zenoh peer) — the INTEROP shape `wz-ap-demo`'s initiator path uses:
+/// `version: 0x09`, a real `batch_size`, and `seq_num_res`/`req_id_res = 2`.
+/// This differs from [`fixture_session_init_params`], whose `version: 0x05` /
+/// `batch_size: 0` are wz<->wz internal-test values a STRICT zenohd rejects at
+/// InitSyn. Shared from the test-support SSOT so the in-process zenohd
+/// storage-replication interop e2e (and any future cross-impl test that opens a
+/// `Session` in-process against a foreign peer) sources ONE copy of these
+/// params rather than re-declaring the shape inline. (`wz-ap-demo`'s
+/// `demo_session_init_params` is `pub(crate)` to that binary, so it cannot be
+/// the shared source for an in-process test.)
+pub fn zenohd_interop_session_init_params() -> SessionInitParams {
+    SessionInitParams {
+        version: 0x09,
+        whatami: WhatAmI::Client,
+        zid: vec![0x0c, 0x0a, 0x10, 0x00],
+        seq_num_res: 2,
+        req_id_res: 2,
+        batch_size: 65535,
+        lease_ms: 10_000,
+        initial_sn: 0,
+        cookie: Vec::new(),
+        // Deterministic 32-byte test key (same discipline as the fixture).
+        cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+            .expect("32-byte test key satisfies >= 32 invariant"),
+    }
+}
+
 // The frame-recording `RecordingLinkDriver` + `recording_actions`
 // builders that used to live here moved to `wz-runtime-tokio`'s
 // crate-local `#[cfg(test)] mod test_fixtures`: they are consumed ONLY

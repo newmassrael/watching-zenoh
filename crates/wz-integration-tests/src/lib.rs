@@ -345,6 +345,30 @@ pub mod common {
         path
     }
 
+    /// Locate the `zenoh-plugin-storage-manager` dynamic plugin
+    /// (`libzenoh_plugin_storage_manager.so`): the `WZ_STORAGE_MANAGER_SO`
+    /// env override, else `scripts/build-zenohd.sh`'s
+    /// `target/zenohd/libzenoh_plugin_storage_manager.so` install. Loaded by
+    /// zenohd via `--plugin "storage_manager:<path>"` for the A10 storage
+    /// replication interop (`tests/wz_zenohd_storage_replication.rs`). The
+    /// plugin must be built from the SAME zenoh source as `zenohd_binary`
+    /// (matching version + rustc) so the plugin ABI-compat hash matches and
+    /// zenohd loads it; `build-zenohd.sh` builds both from one checkout.
+    /// Panics with the build hint if absent — the same prereq discipline as
+    /// [`zenohd_binary`].
+    pub fn storage_manager_plugin() -> PathBuf {
+        if let Ok(p) = std::env::var("WZ_STORAGE_MANAGER_SO") {
+            return PathBuf::from(p);
+        }
+        let path = project_root().join("target/zenohd/libzenoh_plugin_storage_manager.so");
+        assert!(
+            path.is_file(),
+            "storage-manager plugin missing at {}; set WZ_STORAGE_MANAGER_SO or run scripts/build-zenohd.sh first",
+            path.display()
+        );
+        path
+    }
+
     /// Rewind the file to the start and slurp the entire current
     /// contents into a UTF-8 string, replacing any non-UTF-8 byte
     /// sequence with the U+FFFD replacement character. Used to

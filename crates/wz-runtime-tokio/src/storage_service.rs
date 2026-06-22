@@ -91,7 +91,14 @@ use crate::session_glue::SessionLinkActions;
 /// competes fairly under newer-wins instead of being dominated by every
 /// real NTP64. NOT an HLC (no logical counter, not guaranteed monotonic
 /// across NTP steps); the §5.18 HLC is the proper source.
-pub(crate) fn wall_clock_ntp64() -> u64 {
+///
+/// `pub` because it is the wall-clock NTP64 SSOT for the storage stack:
+/// the fallback stamp, the digest publisher / subscriber Hot-era upper
+/// bound ([`crate::storage_replication_service`]), and the aligner answer
+/// `now` ([`crate::storage_aligner_service`]) all read it, and a downstream
+/// consumer seeding a [`StorageState`] (or the two-replica convergence
+/// e2e) needs the SAME recipe rather than a re-derived duplicate.
+pub fn wall_clock_ntp64() -> u64 {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();

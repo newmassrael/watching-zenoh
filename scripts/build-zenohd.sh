@@ -80,6 +80,16 @@ if [[ -n "$ZH" ]]; then
     CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build -p zenohd --release \
         --manifest-path "$ZH/Cargo.toml"
     SRC_BIN="$BUILD_DIR/release/zenohd"
+    # R311wo (A10) — also build the storage-manager plugin (cdylib) from the SAME
+    # checkout, so its ABI-compat hash (zenoh version + rustc) matches the zenohd
+    # binary and zenohd loads it via `--plugin`. The storage replication interop
+    # test (wz_zenohd_storage_replication.rs) needs it. Only source A can produce
+    # the cdylib: `cargo install` (source B) yields binaries, not the plugin .so,
+    # so a crates.io build leaves it absent and the interop test SKIPs.
+    echo "build-zenohd: building zenoh-plugin-storage-manager (release) ..." >&2
+    CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
+        -p zenoh-plugin-storage-manager --release --manifest-path "$ZH/Cargo.toml"
+    SO_SRC="$BUILD_DIR/release/libzenoh_plugin_storage_manager.so"
 else
     # Source B — deterministic crates.io install (fresh-clone reproducible).
     # --locked pins to the published Cargo.lock; --root keeps the install tree
@@ -89,9 +99,18 @@ else
     cargo "+$TOOLCHAIN" install "zenohd@$ZENOHD_VERSION" --locked \
         --root "$BUILD_DIR/cargo-install" --bin zenohd
     SRC_BIN="$BUILD_DIR/cargo-install/bin/zenohd"
+    # No plugin cdylib from `cargo install`; the A10 interop test SKIPs without it.
+    SO_SRC=""
 fi
 
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$SRC_BIN" "$INSTALL_DIR/zenohd"
 echo "build-zenohd: installed -> $INSTALL_DIR/zenohd" >&2
 "$INSTALL_DIR/zenohd" --version 2>&1 | tail -1 >&2
+if [[ -n "$SO_SRC" && -f "$SO_SRC" ]]; then
+    install -m 0755 "$SO_SRC" "$INSTALL_DIR/libzenoh_plugin_storage_manager.so"
+    echo "build-zenohd: installed -> $INSTALL_DIR/libzenoh_plugin_storage_manager.so" >&2
+else
+    echo "build-zenohd: storage-manager plugin NOT provisioned (source B / crates.io);" >&2
+    echo "  the wz<->zenohd storage replication interop test will SKIP." >&2
+fi

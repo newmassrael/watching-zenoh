@@ -90,6 +90,19 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     "transport-fragmentation",
     "transport-multicast",
+    # R311wo (A10) — the storage replication interop e2e
+    # (tests/wz_zenohd_storage_replication.rs) drives an IN-PROCESS wz storage
+    # replica (StorageState + spawn_digest_aligner) against a foreign zenohd
+    # storage-manager, so this dev-dep build of wz-runtime-tokio needs its
+    # storage driver surface. R311wq — honesty fix: the ISOLATED
+    # `cargo test -p wz-runtime-tokio` build stays at its default feature set
+    # (279 lib tests, verified). The earlier claim here — that resolver=2 keeps
+    # this feature off the `cargo test --workspace` build of wz-runtime-tokio —
+    # was WRONG: under `--workspace` a dev-dep feature DOES unify onto the
+    # shared wz-runtime-tokio build, so its storage lib tests additionally run
+    # there. That is purely additive coverage (the default isolated build is
+    # untouched), but the unification claim is not made anymore.
+    "storage-aligner",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the

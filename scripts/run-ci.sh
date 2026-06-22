@@ -955,17 +955,27 @@ layer_c1y_cargo_test_routing_peer() {
 #      to prove the storage driver composes standalone (storage-aligner pulls its
 #      full set: storage-replication + query-{queryable,consolidation,timeout,
 #      attachment} + pubsub-{attachment,encoding,timestamp} + transport-unicast);
-#   4. builds the wz facade under `--features storage-aligner` so the
-#      `wz-runtime-tokio?/storage-aligner` forward (R311wl) stays wired.
-# The live two-replica digest->aligner convergence e2e is the A11 follow-up.
+#   4. builds the wz facade under `--features storage-aligner` AND
+#      `--features storage-history` (R311wp/A9) so BOTH storage facade forwards
+#      stay wired: storage-aligner covers backend+replication+aligner (it
+#      implies them), but storage-history is ORTHOGONAL (replication runs on a
+#      Latest store, so storage-aligner does NOT imply it), so its
+#      `wz-runtime-tokio?/storage-history` forward needs its own facade build.
+# A11 (R311wn): the live two-replica digest->aligner convergence e2e
+# (`--test storage_aligner_convergence_e2e`) is now run here — the ONE place the
+# full path executes over a real link (the digest subscriber + aligner queryable
+# are Locality::Remote, so no single-session loopback can drive them). `--lib`
+# excludes integration tests, so the e2e needs its own `--test` invocation.
 layer_c1z_cargo_test_storage_driver() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet \
+        && cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-aligner --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-history --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features storage-aligner --quiet -- -D warnings \
-        && cargo build -p wz --features storage-aligner --quiet)
+        && cargo build -p wz --features storage-aligner --quiet \
+        && cargo build -p wz --features storage-history --quiet)
 }
 
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
@@ -3095,6 +3105,17 @@ layer_z_zenohd_interop() {
     # e2e tests, so serial execution costs only wall-clock, not coverage.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
+    # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
+    # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a
+    # checkout); SKIP if absent (a crates.io-only zenohd has no plugin .so).
+    local plugin="${WZ_STORAGE_MANAGER_SO:-$PWD/target/zenohd/libzenoh_plugin_storage_manager.so}"
+    if [[ ! -f "$plugin" ]]; then
+        echo "Layer Z: storage-manager plugin not built ($plugin); SKIP the replication interop leg"
+        return 0
+    fi
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" WZ_STORAGE_MANAGER_SO="$plugin" \
+        cargo test -p wz-integration-tests \
+        --test wz_zenohd_storage_replication -- --ignored --quiet --test-threads=1) || return 1
 }
 
 # ─── Layer E3 — multi-peer ROUTER e2e (R311qa) ─────────────────────
