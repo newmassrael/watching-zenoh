@@ -417,10 +417,15 @@ pub enum AlignmentReply {
 /// typed error — the named non-converging residual until wz storage gains
 /// wildcard updates / strip_prefix.
 pub mod wire {
+    use alloc::collections::{BTreeMap, BTreeSet};
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use super::{Action, EventMetadata};
+    use super::{
+        Action, AlignmentQuery, AlignmentReply, DigestDiff, EventMetadata, Fingerprint,
+        IntervalIdx, SubIntervalIdx,
+    };
     use crate::sample::TimestampHint;
     use crate::storage_state::zid_to_le_array;
 
@@ -433,7 +438,8 @@ pub mod wire {
         LengthOverflow,
         /// Bytes remained after a complete structure was decoded.
         TrailingBytes,
-        /// An `Option` tag byte that was neither 0 nor 1.
+        /// A 0/1 tag byte (an `Option` discriminant or a `bool`) that was
+        /// neither 0 nor 1.
         BadOptionTag(u8),
         /// An `Action` variant index wz cannot represent: 2 (WildcardPut) or
         /// 3 (WildcardDelete) — wz storage has no wildcard updates — or an
@@ -445,6 +451,11 @@ pub mod wire {
         MissingKey,
         /// A stripped_key whose bytes are not valid UTF-8.
         BadUtf8,
+        /// An [`AlignmentQuery`] / [`AlignmentReply`] enum tag with no known
+        /// variant.
+        UnknownVariant(u32),
+        /// A Discovery zid hex string that does not parse as a `<= 16`-byte id.
+        BadZid,
     }
 
     fn push_u32(out: &mut Vec<u8>, v: u32) {
@@ -620,6 +631,286 @@ pub mod wire {
         Ok(e)
     }
 
+    // ---- AlignmentQuery / AlignmentReply envelopes (aligner 5/N) ----
+    //
+    // bincode renders an enum as a u32 LE variant index then the variant's
+    // fields; a set / map / Vec as a u64 length then its elements / pairs; a
+    // newtype index (IntervalIdx, SubIntervalIdx, Fingerprint) as its inner
+    // u64. The envelopes are built on the push_*/Reader helpers above.
+
+    /// Rejects a length that could not fit in the bytes that remain
+    /// (`len * min_entry_bytes > remaining`, or overflow), so a hostile
+    /// `u64::MAX` length fails fast instead of looping. Twin of the digest
+    /// codec's guard.
+    fn check_len(len: u64, min_entry_bytes: usize, r: &Reader) -> Result<(), AlignmentDecodeError> {
+        match (len as usize).checked_mul(min_entry_bytes) {
+            Some(n) if n <= r.remaining() => Ok(()),
+            _ => Err(AlignmentDecodeError::LengthOverflow),
+        }
+    }
+
+    fn push_interval_set(out: &mut Vec<u8>, set: &BTreeSet<IntervalIdx>) {
+        push_u64(out, set.len() as u64);
+        for idx in set {
+            push_u64(out, idx.value());
+        }
+    }
+
+    fn push_subinterval_map(
+        out: &mut Vec<u8>,
+        map: &BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>,
+    ) {
+        push_u64(out, map.len() as u64);
+        for (idx, subs) in map {
+            push_u64(out, idx.value());
+            push_u64(out, subs.len() as u64);
+            for sub in subs {
+                push_u64(out, sub.value());
+            }
+        }
+    }
+
+    fn push_digest_diff(out: &mut Vec<u8>, diff: &DigestDiff) {
+        out.push(u8::from(diff.cold_eras_differ()));
+        push_interval_set(out, diff.warm_eras_differences());
+        push_subinterval_map(out, diff.hot_eras_differences());
+    }
+
+    fn push_events(out: &mut Vec<u8>, events: &[EventMetadata]) {
+        push_u64(out, events.len() as u64);
+        for e in events {
+            push_event_metadata(out, e);
+        }
+    }
+
+    fn push_fingerprint_map(out: &mut Vec<u8>, map: &BTreeMap<IntervalIdx, Fingerprint>) {
+        push_u64(out, map.len() as u64);
+        for (idx, fp) in map {
+            push_u64(out, idx.value());
+            push_u64(out, fp.value());
+        }
+    }
+
+    fn push_sub_fingerprint_map(
+        out: &mut Vec<u8>,
+        map: &BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>>,
+    ) {
+        push_u64(out, map.len() as u64);
+        for (idx, subs) in map {
+            push_u64(out, idx.value());
+            push_u64(out, subs.len() as u64);
+            for (sub, fp) in subs {
+                push_u64(out, sub.value());
+                push_u64(out, fp.value());
+            }
+        }
+    }
+
+    /// A zid as the lowercase hex string zenoh's `ZenohId` serializes (a
+    /// bincode `String`): the 16-byte LE id read as a `u128`, printed
+    /// big-endian hex, with a single leading zero stripped — uhlc `ID` Display
+    /// (id.rs:281-291) via zenoh `ZenohIdProto::serialize_str` (mod.rs:226-232).
+    fn zid_to_zenoh_hex(zid: &[u8]) -> String {
+        let id = u128::from_le_bytes(zid_to_le_array(zid));
+        let s = format!("{id:02x}");
+        let stripped = s.strip_prefix('0').unwrap_or(s.as_str());
+        stripped.into()
+    }
+
+    /// The inverse of [`zid_to_zenoh_hex`]: parse the hex as a `u128`, take its
+    /// little-endian bytes, and trim trailing zeros back to wz's canonical
+    /// length-trimmed zid (zenoh `ZenohIdProto::from_str`, mod.rs:168). A hex
+    /// string longer than a `u128` (or non-hex) is rejected.
+    fn zenoh_hex_to_zid(hex: &str) -> Result<Vec<u8>, AlignmentDecodeError> {
+        let id = u128::from_str_radix(hex, 16).map_err(|_| AlignmentDecodeError::BadZid)?;
+        let bytes = id.to_le_bytes();
+        let trimmed_len = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        Ok(bytes[..trimmed_len].to_vec())
+    }
+
+    impl Reader<'_> {
+        fn read_interval_set(&mut self) -> Result<BTreeSet<IntervalIdx>, AlignmentDecodeError> {
+            let len = self.read_u64()?;
+            check_len(len, 8, self)?;
+            let mut set = BTreeSet::new();
+            for _ in 0..len {
+                set.insert(IntervalIdx::from(self.read_u64()?));
+            }
+            Ok(set)
+        }
+
+        fn read_subinterval_map(
+            &mut self,
+        ) -> Result<BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>, AlignmentDecodeError> {
+            let len = self.read_u64()?;
+            check_len(len, 16, self)?; // idx(8) + a (>=0) sub len(8)
+            let mut map = BTreeMap::new();
+            for _ in 0..len {
+                let idx = IntervalIdx::from(self.read_u64()?);
+                let sub_len = self.read_u64()?;
+                check_len(sub_len, 8, self)?;
+                let mut subs = BTreeSet::new();
+                for _ in 0..sub_len {
+                    subs.insert(SubIntervalIdx::from(self.read_u64()?));
+                }
+                map.insert(idx, subs);
+            }
+            Ok(map)
+        }
+
+        fn read_digest_diff(&mut self) -> Result<DigestDiff, AlignmentDecodeError> {
+            // A bincode `bool` is a 0/1 byte, same shape as an Option tag.
+            let cold_eras_differ = self.read_option_tag()?;
+            let warm_eras_differences = self.read_interval_set()?;
+            let hot_eras_differences = self.read_subinterval_map()?;
+            Ok(DigestDiff {
+                cold_eras_differ,
+                warm_eras_differences,
+                hot_eras_differences,
+            })
+        }
+
+        fn read_fingerprint_map(
+            &mut self,
+        ) -> Result<BTreeMap<IntervalIdx, Fingerprint>, AlignmentDecodeError> {
+            let len = self.read_u64()?;
+            check_len(len, 16, self)?;
+            let mut map = BTreeMap::new();
+            for _ in 0..len {
+                let idx = IntervalIdx::from(self.read_u64()?);
+                let fp = Fingerprint::from(self.read_u64()?);
+                map.insert(idx, fp);
+            }
+            Ok(map)
+        }
+
+        fn read_sub_fingerprint_map(
+            &mut self,
+        ) -> Result<
+            BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>>,
+            AlignmentDecodeError,
+        > {
+            let len = self.read_u64()?;
+            check_len(len, 16, self)?;
+            let mut map = BTreeMap::new();
+            for _ in 0..len {
+                let idx = IntervalIdx::from(self.read_u64()?);
+                let sub_len = self.read_u64()?;
+                check_len(sub_len, 16, self)?;
+                let mut subs = BTreeMap::new();
+                for _ in 0..sub_len {
+                    let sub = SubIntervalIdx::from(self.read_u64()?);
+                    let fp = Fingerprint::from(self.read_u64()?);
+                    subs.insert(sub, fp);
+                }
+                map.insert(idx, subs);
+            }
+            Ok(map)
+        }
+
+        fn read_events(&mut self) -> Result<Vec<EventMetadata>, AlignmentDecodeError> {
+            let len = self.read_u64()?;
+            // min EventMetadata: Some-tag(1)+keylen(8)+ts(24)+tlnwu-tag(1)+action(4).
+            check_len(len, 38, self)?;
+            let mut events = Vec::new();
+            for _ in 0..len {
+                events.push(self.read_event_metadata()?);
+            }
+            Ok(events)
+        }
+    }
+
+    /// Encode an [`AlignmentQuery`] to the zenoh bincode wire bytes.
+    pub fn encode_alignment_query(query: &AlignmentQuery) -> Vec<u8> {
+        let mut out = Vec::new();
+        match query {
+            AlignmentQuery::Discovery => push_u32(&mut out, 0),
+            AlignmentQuery::All => push_u32(&mut out, 1),
+            AlignmentQuery::Diff(diff) => {
+                push_u32(&mut out, 2);
+                push_digest_diff(&mut out, diff);
+            }
+            AlignmentQuery::Intervals(set) => {
+                push_u32(&mut out, 3);
+                push_interval_set(&mut out, set);
+            }
+            AlignmentQuery::SubIntervals(map) => {
+                push_u32(&mut out, 4);
+                push_subinterval_map(&mut out, map);
+            }
+            AlignmentQuery::Events(events) => {
+                push_u32(&mut out, 5);
+                push_events(&mut out, events);
+            }
+        }
+        out
+    }
+
+    /// Decode an [`AlignmentQuery`] from the zenoh bincode wire bytes; rejects
+    /// trailing bytes and an unknown variant tag.
+    pub fn decode_alignment_query(bytes: &[u8]) -> Result<AlignmentQuery, AlignmentDecodeError> {
+        let mut r = Reader::new(bytes);
+        let q = match r.read_u32()? {
+            0 => AlignmentQuery::Discovery,
+            1 => AlignmentQuery::All,
+            2 => AlignmentQuery::Diff(r.read_digest_diff()?),
+            3 => AlignmentQuery::Intervals(r.read_interval_set()?),
+            4 => AlignmentQuery::SubIntervals(r.read_subinterval_map()?),
+            5 => AlignmentQuery::Events(r.read_events()?),
+            other => return Err(AlignmentDecodeError::UnknownVariant(other)),
+        };
+        if r.remaining() != 0 {
+            return Err(AlignmentDecodeError::TrailingBytes);
+        }
+        Ok(q)
+    }
+
+    /// Encode an [`AlignmentReply`] to the zenoh bincode wire bytes.
+    pub fn encode_alignment_reply(reply: &AlignmentReply) -> Vec<u8> {
+        let mut out = Vec::new();
+        match reply {
+            AlignmentReply::Discovery(zid) => {
+                push_u32(&mut out, 0);
+                push_string(&mut out, &zid_to_zenoh_hex(zid));
+            }
+            AlignmentReply::Intervals(map) => {
+                push_u32(&mut out, 1);
+                push_fingerprint_map(&mut out, map);
+            }
+            AlignmentReply::SubIntervals(map) => {
+                push_u32(&mut out, 2);
+                push_sub_fingerprint_map(&mut out, map);
+            }
+            AlignmentReply::EventsMetadata(events) => {
+                push_u32(&mut out, 3);
+                push_events(&mut out, events);
+            }
+            AlignmentReply::Retrieval(e) => {
+                push_u32(&mut out, 4);
+                push_event_metadata(&mut out, e);
+            }
+        }
+        out
+    }
+
+    /// Decode an [`AlignmentReply`] from the zenoh bincode wire bytes; rejects
+    /// trailing bytes and an unknown variant tag.
+    pub fn decode_alignment_reply(bytes: &[u8]) -> Result<AlignmentReply, AlignmentDecodeError> {
+        let mut r = Reader::new(bytes);
+        let reply = match r.read_u32()? {
+            0 => AlignmentReply::Discovery(zenoh_hex_to_zid(&r.read_string()?)?),
+            1 => AlignmentReply::Intervals(r.read_fingerprint_map()?),
+            2 => AlignmentReply::SubIntervals(r.read_sub_fingerprint_map()?),
+            3 => AlignmentReply::EventsMetadata(r.read_events()?),
+            4 => AlignmentReply::Retrieval(r.read_event_metadata()?),
+            other => return Err(AlignmentDecodeError::UnknownVariant(other)),
+        };
+        if r.remaining() != 0 {
+            return Err(AlignmentDecodeError::TrailingBytes);
+        }
+        Ok(reply)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -760,6 +1051,289 @@ pub mod wire {
             assert_eq!(
                 decode_event_metadata(&[0u8]),
                 Err(AlignmentDecodeError::MissingKey)
+            );
+        }
+
+        // ---- AlignmentQuery / AlignmentReply envelope cross-checks ----
+
+        use crate::storage_replication::{build_digest, ReplicationConfig};
+
+        // Serde mirrors of the envelope types + their leaf newtypes (the
+        // newtypes render as their inner u64, exactly as zenoh's).
+        #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+        struct Ii(u64);
+        #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+        struct Si(u64);
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Fp(u64);
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct MDigestDiff {
+            cold_eras_differ: bool,
+            warm_eras_differences: BTreeSet<Ii>,
+            hot_eras_differences: BTreeMap<Ii, BTreeSet<Si>>,
+        }
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        enum MAlignmentQuery {
+            Discovery,
+            All,
+            Diff(MDigestDiff),
+            Intervals(BTreeSet<Ii>),
+            SubIntervals(BTreeMap<Ii, BTreeSet<Si>>),
+            Events(Vec<MEventMetadata>),
+        }
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        enum MAlignmentReply {
+            Discovery(String),
+            Intervals(BTreeMap<Ii, Fp>),
+            SubIntervals(BTreeMap<Ii, BTreeMap<Si, Fp>>),
+            EventsMetadata(Vec<MEventMetadata>),
+            Retrieval(MEventMetadata),
+        }
+
+        fn mirror_diff(d: &DigestDiff) -> MDigestDiff {
+            MDigestDiff {
+                cold_eras_differ: d.cold_eras_differ(),
+                warm_eras_differences: d
+                    .warm_eras_differences()
+                    .iter()
+                    .map(|i| Ii(i.value()))
+                    .collect(),
+                hot_eras_differences: d
+                    .hot_eras_differences()
+                    .iter()
+                    .map(|(i, subs)| (Ii(i.value()), subs.iter().map(|s| Si(s.value())).collect()))
+                    .collect(),
+            }
+        }
+
+        // A DigestDiff built from two real snapshots (a peer with one extra
+        // hot-era key), exercising the hot drill-down path of the diff.
+        fn a_digest_diff() -> DigestDiff {
+            let cfg = ReplicationConfig::new("demo/**", None, 1000, 2, 2, 2, 250);
+            let a = ts(9u64 << 32, vec![0x01]);
+            let b = ts((9u64 << 32) | (1u64 << 31), vec![0x01]);
+            let local = build_digest(&cfg, [("k/a", &a)], IntervalIdx::from(10));
+            let peer = build_digest(&cfg, [("k/a", &a), ("k/b", &b)], IntervalIdx::from(10));
+            local.diff(peer).expect("the peer's extra key -> a diff")
+        }
+
+        #[test]
+        fn encode_alignment_query_is_byte_identical_to_bincode_1_3() {
+            assert_eq!(
+                encode_alignment_query(&AlignmentQuery::Discovery),
+                bincode::serialize(&MAlignmentQuery::Discovery).unwrap()
+            );
+            assert_eq!(
+                encode_alignment_query(&AlignmentQuery::All),
+                bincode::serialize(&MAlignmentQuery::All).unwrap()
+            );
+
+            let diff = a_digest_diff();
+            assert_eq!(
+                encode_alignment_query(&AlignmentQuery::Diff(diff.clone())),
+                bincode::serialize(&MAlignmentQuery::Diff(mirror_diff(&diff))).unwrap()
+            );
+
+            let set: BTreeSet<IntervalIdx> = [IntervalIdx::from(2), IntervalIdx::from(9)]
+                .into_iter()
+                .collect();
+            let mset: BTreeSet<Ii> = set.iter().map(|i| Ii(i.value())).collect();
+            assert_eq!(
+                encode_alignment_query(&AlignmentQuery::Intervals(set)),
+                bincode::serialize(&MAlignmentQuery::Intervals(mset)).unwrap()
+            );
+
+            let mut sub: BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>> = BTreeMap::new();
+            sub.insert(
+                IntervalIdx::from(9),
+                [SubIntervalIdx::from(0), SubIntervalIdx::from(1)]
+                    .into_iter()
+                    .collect(),
+            );
+            let msub: BTreeMap<Ii, BTreeSet<Si>> = sub
+                .iter()
+                .map(|(i, s)| (Ii(i.value()), s.iter().map(|x| Si(x.value())).collect()))
+                .collect();
+            assert_eq!(
+                encode_alignment_query(&AlignmentQuery::SubIntervals(sub)),
+                bincode::serialize(&MAlignmentQuery::SubIntervals(msub)).unwrap()
+            );
+
+            let events = vec![
+                EventMetadata::put("k/a", ts(42, vec![1, 2])),
+                EventMetadata::delete("k/b", ts(43, vec![3])),
+            ];
+            let mevents: Vec<MEventMetadata> = events.iter().map(mirror_of).collect();
+            assert_eq!(
+                encode_alignment_query(&AlignmentQuery::Events(events)),
+                bincode::serialize(&MAlignmentQuery::Events(mevents)).unwrap()
+            );
+        }
+
+        #[test]
+        fn encode_alignment_reply_is_byte_identical_to_bincode_1_3() {
+            // Discovery: zenoh serializes the ZenohId as a hex String; the
+            // expected hex is hand-computed from uhlc's Display (LE bytes read
+            // as a u128, big-endian hex) so this is not circular.
+            assert_eq!(
+                encode_alignment_reply(&AlignmentReply::Discovery(vec![0x1a, 0x2b, 0x3c])),
+                bincode::serialize(&MAlignmentReply::Discovery("3c2b1a".into())).unwrap()
+            );
+
+            let mut ivl: BTreeMap<IntervalIdx, Fingerprint> = BTreeMap::new();
+            ivl.insert(IntervalIdx::from(2), Fingerprint::from(0xAA));
+            ivl.insert(IntervalIdx::from(7), Fingerprint::from(0xBB));
+            let mivl: BTreeMap<Ii, Fp> = ivl
+                .iter()
+                .map(|(i, f)| (Ii(i.value()), Fp(f.value())))
+                .collect();
+            assert_eq!(
+                encode_alignment_reply(&AlignmentReply::Intervals(ivl)),
+                bincode::serialize(&MAlignmentReply::Intervals(mivl)).unwrap()
+            );
+
+            let mut subs: BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>> =
+                BTreeMap::new();
+            let mut inner = BTreeMap::new();
+            inner.insert(SubIntervalIdx::from(0), Fingerprint::from(9));
+            inner.insert(SubIntervalIdx::from(1), Fingerprint::from(10));
+            subs.insert(IntervalIdx::from(9), inner);
+            let msubs: BTreeMap<Ii, BTreeMap<Si, Fp>> = subs
+                .iter()
+                .map(|(i, m)| {
+                    (
+                        Ii(i.value()),
+                        m.iter()
+                            .map(|(s, f)| (Si(s.value()), Fp(f.value())))
+                            .collect(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                encode_alignment_reply(&AlignmentReply::SubIntervals(subs)),
+                bincode::serialize(&MAlignmentReply::SubIntervals(msubs)).unwrap()
+            );
+
+            let meta = EventMetadata::put("k/r", ts(7, vec![0x05]));
+            assert_eq!(
+                encode_alignment_reply(&AlignmentReply::Retrieval(meta.clone())),
+                bincode::serialize(&MAlignmentReply::Retrieval(mirror_of(&meta))).unwrap()
+            );
+
+            let events = vec![EventMetadata::delete("k/x", ts(1, vec![0x01]))];
+            let mevents: Vec<MEventMetadata> = events.iter().map(mirror_of).collect();
+            assert_eq!(
+                encode_alignment_reply(&AlignmentReply::EventsMetadata(events)),
+                bincode::serialize(&MAlignmentReply::EventsMetadata(mevents)).unwrap()
+            );
+        }
+
+        #[test]
+        fn wz_and_bincode_1_3_read_each_others_alignment_query() {
+            let diff = a_digest_diff();
+            let q = AlignmentQuery::Diff(diff.clone());
+            let mirror = MAlignmentQuery::Diff(mirror_diff(&diff));
+
+            let wz = encode_alignment_query(&q);
+            let read: MAlignmentQuery =
+                bincode::deserialize(&wz).expect("zenoh's bincode reads wz's query bytes");
+            assert_eq!(read, mirror);
+
+            let zen = bincode::serialize(&mirror).unwrap();
+            assert_eq!(decode_alignment_query(&zen), Ok(q));
+        }
+
+        #[test]
+        fn wz_and_bincode_1_3_read_each_others_alignment_reply() {
+            let mut subs: BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>> =
+                BTreeMap::new();
+            let mut inner = BTreeMap::new();
+            inner.insert(SubIntervalIdx::from(2), Fingerprint::from(0xDEAD));
+            subs.insert(IntervalIdx::from(9), inner);
+            let reply = AlignmentReply::SubIntervals(subs.clone());
+            let msubs: BTreeMap<Ii, BTreeMap<Si, Fp>> = subs
+                .iter()
+                .map(|(i, m)| {
+                    (
+                        Ii(i.value()),
+                        m.iter()
+                            .map(|(s, f)| (Si(s.value()), Fp(f.value())))
+                            .collect(),
+                    )
+                })
+                .collect();
+            let mirror = MAlignmentReply::SubIntervals(msubs);
+
+            let wz = encode_alignment_reply(&reply);
+            let read: MAlignmentReply =
+                bincode::deserialize(&wz).expect("zenoh's bincode reads wz's reply bytes");
+            assert_eq!(read, mirror);
+
+            let zen = bincode::serialize(&mirror).unwrap();
+            assert_eq!(decode_alignment_reply(&zen), Ok(reply));
+        }
+
+        #[test]
+        fn alignment_query_round_trips_every_variant() {
+            let diff = a_digest_diff();
+            let mut sub: BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>> = BTreeMap::new();
+            sub.insert(
+                IntervalIdx::from(9),
+                [SubIntervalIdx::from(1)].into_iter().collect(),
+            );
+            for q in [
+                AlignmentQuery::Discovery,
+                AlignmentQuery::All,
+                AlignmentQuery::Diff(diff),
+                AlignmentQuery::Intervals([IntervalIdx::from(3)].into_iter().collect()),
+                AlignmentQuery::SubIntervals(sub),
+                AlignmentQuery::Events(vec![EventMetadata::put("k", ts(5, vec![0x01]))]),
+            ] {
+                assert_eq!(decode_alignment_query(&encode_alignment_query(&q)), Ok(q));
+            }
+        }
+
+        #[test]
+        fn alignment_reply_round_trips_every_variant() {
+            let mut ivl = BTreeMap::new();
+            ivl.insert(IntervalIdx::from(2), Fingerprint::from(7));
+            let mut subs = BTreeMap::new();
+            let mut inner = BTreeMap::new();
+            inner.insert(SubIntervalIdx::from(0), Fingerprint::from(8));
+            subs.insert(IntervalIdx::from(9), inner);
+            for r in [
+                AlignmentReply::Discovery(vec![0x1a, 0x2b, 0x3c]),
+                AlignmentReply::Intervals(ivl),
+                AlignmentReply::SubIntervals(subs),
+                AlignmentReply::EventsMetadata(vec![EventMetadata::delete("k", ts(5, vec![0x01]))]),
+                AlignmentReply::Retrieval(EventMetadata::put("k", ts(6, vec![0x02]))),
+            ] {
+                assert_eq!(decode_alignment_reply(&encode_alignment_reply(&r)), Ok(r));
+            }
+        }
+
+        #[test]
+        fn discovery_zid_hex_matches_uhlc_display() {
+            // LE bytes read as a u128 then big-endian hex => the bytes appear
+            // reversed; a single leading zero is stripped.
+            assert_eq!(zid_to_zenoh_hex(&[0x1a, 0x2b, 0x3c]), "3c2b1a");
+            assert_eq!(zid_to_zenoh_hex(&[0x0a]), "a");
+            assert_eq!(zid_to_zenoh_hex(&[0x01]), "1");
+        }
+
+        #[test]
+        fn decode_rejects_an_unknown_envelope_variant() {
+            // Query tag 6 (no variant) / reply tag 5 (no variant).
+            assert_eq!(
+                decode_alignment_query(&6u32.to_le_bytes()),
+                Err(AlignmentDecodeError::UnknownVariant(6))
+            );
+            assert_eq!(
+                decode_alignment_reply(&5u32.to_le_bytes()),
+                Err(AlignmentDecodeError::UnknownVariant(5))
             );
         }
     }
