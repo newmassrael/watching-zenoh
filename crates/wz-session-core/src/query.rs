@@ -102,7 +102,7 @@ use alloc::vec::Vec;
 // no-alloc control plane (queryable table + per-row keyexpr pattern).
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
-use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
+use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
 // `CodecError` is referenced only by `into_response`, which lives in the
 // `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
@@ -155,10 +155,6 @@ use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
-// R311gb (Track 2) — the keyexpr matcher backs the un-gated
-// control-plane `Queryable::matches`, so its import is unconditional
-// (the matcher lives in `keyexpr_match`, no-alloc since R311fz).
-use crate::pubsub::keyexpr_pattern_matches;
 // R311gb (Track 2) — the seam traits (`QuerySink` bounds the table,
 // `QueryView` / `ReplyOut` are the no-heap `dispatch_borrowed` fire
 // contracts) are unconditional (no_std-safe in `query_sink`).
@@ -298,13 +294,23 @@ impl<C: QuerySink> Queryable<C> {
         if !allowed {
             return false;
         }
-        let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-        for c in self.pattern.split('/') {
-            if chunks.push(c).is_err() {
+        // A query reaches a queryable iff their keyexprs INTERSECT (zenoh query
+        // routing). The query SELECTOR may itself carry wildcards — e.g. a
+        // replication aligner's initial-alignment `@zid/*/<fp>/aligner`
+        // Discovery, which must reach a queryable declared on the concrete
+        // `@zid/<zid>/<fp>/aligner` — so the inbound `keyexpr` cannot be treated
+        // as a concrete literal (the prior `keyexpr_pattern_matches(self, query)`
+        // matched the query's `*` character-literally and missed it). Split the
+        // query into target chunks and intersect against this queryable's
+        // pattern, the same seam `declare::declared_intersects` already uses. For
+        // a concrete query this is identical to the prior pattern match.
+        let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+        for c in keyexpr.split('/') {
+            if target.push(c).is_err() {
                 return false;
             }
         }
-        keyexpr_pattern_matches(&chunks, keyexpr)
+        keyexpr_intersects_target(&self.pattern, &target)
     }
 }
 
@@ -1613,6 +1619,52 @@ mod tests {
         }
         assert_eq!(invocations.load(Ordering::SeqCst), 3);
         assert_eq!(replies.len(), 3);
+    }
+
+    #[test]
+    fn concrete_queryable_answers_wildcard_query_selector() {
+        // The mirror of the wildcard-PATTERN test above: a CONCRETE queryable
+        // must answer a query whose SELECTOR carries a wildcard. Query routing is
+        // keyexpr INTERSECTION, not "the queryable pattern matches the query as a
+        // literal". This is the gap the storage-aligner initial-alignment
+        // `Discovery` surfaced cross-impl — a real zenohd GETs the wildcard
+        // `@zid/*/<fp>/aligner`, which must reach a queryable declared on the
+        // concrete `@zid/<zid>/<fp>/aligner`; before the `Queryable::matches`
+        // intersection fix the `*` was matched character-literally and missed it.
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("@zid/100a0c/3912/aligner", move |_q, responder| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            responder.reply(b"ok");
+        });
+
+        let mut replies = Vec::new();
+        // A wildcard selector that INTERSECTS the concrete queryable → fires.
+        reg.dispatch_request(
+            &request_query(1, 0, Some("@zid/*/3912/aligner")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "a concrete queryable must answer a wildcard query selector (intersection)"
+        );
+        assert_eq!(replies.len(), 1);
+
+        // A wildcard selector that does NOT intersect (the fingerprint chunk
+        // differs) must NOT fire — the match is intersection, not match-all.
+        reg.dispatch_request(
+            &request_query(2, 0, Some("@zid/*/9999/aligner")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "a non-intersecting wildcard selector must not fire the queryable"
+        );
     }
 
     #[test]

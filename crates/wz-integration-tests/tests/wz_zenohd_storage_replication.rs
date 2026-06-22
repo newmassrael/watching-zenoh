@@ -33,13 +33,18 @@
 //! decodes zenohd's digest and round-trips an `AlignmentQuery`/reply with
 //! zenohd's aligner — not by separately scraping zenohd's logs.
 //!
-//! ## What this does NOT prove (the one-directional scope)
+//! ## Both replication directions (ASK + ANSWER), cross-impl
 //!
-//! This is the ASK direction ONLY: wz PULLS from zenohd. wz's ANSWER side — a
-//! foreign peer querying a wz [`AlignerService`] and decoding wz's reply — is
-//! exercised only wz<->wz (the A11 convergence e2e), NEVER cross-impl here. The
-//! mirror (zenohd / a foreign pico aligning FROM a wz replica that holds data)
-//! is unproven and is named future work, not a claim this test makes.
+//! This file proves BOTH directions against the real zenoh:
+//! - [`wz_replica_converges_to_zenohd_storage_manager`] — the ASK direction: an
+//!   empty wz replica PULLS from a zenohd that holds an entry (wz's digest
+//!   subscriber + `process_alignment_reply`).
+//! - [`zenohd_converges_to_wz_replica`] — the ANSWER direction (the mirror): an
+//!   empty zenohd replica PULLS from a wz replica that holds an entry,
+//!   exercising wz's [`AlignerService`] answer queryable + `DigestPublisher`
+//!   against the REAL zenoh aligner ASK. This closes the gap the ASK test alone
+//!   left — wz's ANSWER side was previously validated only wz<->wz (the A11
+//!   convergence e2e), never cross-impl.
 //!
 //! ## Divergence setup (wz's replica state starts empty)
 //!
@@ -78,10 +83,13 @@ use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     connect_and_open_session, DialConfig, OpenedSession, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::storage_aligner_service::spawn_digest_aligner;
+use wz_runtime_tokio::storage_aligner_service::{spawn_digest_aligner, AlignerService};
+use wz_runtime_tokio::storage_replication_service::DigestPublisher;
+use wz_runtime_tokio::storage_service::wall_clock_ntp64;
 use wz_runtime_tokio::sync::Mutex;
 use wz_runtime_tokio_test_support::zenohd_interop_session_init_params;
 use wz_session_core::locator::parse_any_locator;
+use wz_session_core::sample::TimestampHint;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::storage_backend::MemoryStorage;
 use wz_session_core::storage_replication::ReplicationConfig;
@@ -101,6 +109,13 @@ const SEED_VALUE: &str = "hello-zenohd-replica";
 /// `ReplicationConfig` MUST hash to this same value or the two never meet on the
 /// `@-digest/<zid>/<fp>` keyexpr — this is the cross-impl wire-parity anchor.
 const ZENOHD_CONFIG_FINGERPRINT: u64 = 3912446778783065544;
+/// The ANSWER-direction entry: the key/value wz holds and an empty zenohd must
+/// pull off wz's aligner. A distinct key from [`DATA_KEY`] so the two tests read
+/// clearly (each spawns its own zenohd, so there is no shared state). Unlike the
+/// pico-seeded ASK value, wz seeds this directly, so the read-back is exact (no
+/// pico "[ N] " iteration prefix).
+const WZ_DATA_KEY: &str = "data/test/y";
+const WZ_SEED_VALUE: &str = "hello-from-wz-replica";
 
 /// Spawn a zenohd router with the storage-manager plugin loaded and one
 /// memory-backed storage on `STORAGE_KEYEXPR` with replication enabled (1s
@@ -318,5 +333,183 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
     assert!(
         got.contains(SEED_VALUE),
         "wz pulled zenohd's value (containing the seed marker) via cross-impl alignment; got {got:?}"
+    );
+}
+
+/// Run a ONE-SHOT foreign pico `z_get` against zenohd for `key` and return its
+/// captured stdout. zenohd answers from its storage queryable (the
+/// storage-manager declares a COMPLETE queryable on the storage keyexpr), so
+/// once zenohd has converged (pulled wz's entry over the aligner) the reply line
+/// `>> Received ... ('<key>': '<value>')` carries wz's value. `z_get` is a
+/// one-shot client, so the caller RE-PROBES until the value appears
+/// (poll-on-condition, [[feedback-no-flaky-ever]]) rather than relying on a
+/// single query winning the convergence race. A foreign pico client is used (not
+/// the wz session) so the read-back is an independent witness of zenohd's store,
+/// decoupled from wz's own aligner/digest machinery.
+fn zget_once(key: &str, port: u16) -> String {
+    let z_get = zenoh_pico_cli_binary("z_get");
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let out = tempfile::tempfile().expect("tempfile for z_get stdout");
+    let out_writer = out.try_clone().expect("dup z_get stdout handle");
+    let mut out_reader = out;
+    let mut child = ChildGuard::wrap(
+        "z_get probe (zenoh-pico)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_get)
+            .args(["-k", key, "-e", &endpoint, "-m", "client"])
+            .stdout(Stdio::from(out_writer))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn z_get via stdbuf"),
+    );
+    // z_get opens, queries once, prints replies, then idles; give it a bounded
+    // window to receive a reply, then reap it (the next probe re-queries).
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut captured;
+    loop {
+        captured = read_captured(&mut out_reader);
+        if captured.contains(">> Received") || Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.child_mut().kill();
+    let _ = child.child_mut().wait();
+    captured
+}
+
+/// The MIRROR of [`wz_replica_converges_to_zenohd_storage_manager`] — the ANSWER
+/// direction: an EMPTY zenohd storage replica converges to an in-process wz
+/// replica that HOLDS an entry zenohd lacks, exercising wz's ANSWER side
+/// (`AlignerService`) over the wire against the REAL zenoh aligner ASK — the
+/// cross-impl direction A11 proved only wz<->wz.
+///
+/// ## Convergence path (initial alignment)
+///
+/// An empty zenohd replica bootstraps via INITIAL ALIGNMENT (storages_mgt
+/// service.rs:13-26 awaits `initial_alignment()` when its log is empty, BEFORE
+/// the steady-state digest pub/sub starts). zenohd GETs `@zid/*/<fp>/aligner`
+/// (a WILDCARD selector) with `AlignmentQuery::Discovery` (core.rs:73-107); wz's
+/// aligner queryable, declared on the concrete `@zid/<wz-zid>/<fp>/aligner`,
+/// answers `Discovery(wz-zid)`; zenohd then GETs wz's concrete aligner with
+/// `AlignmentQuery::All` and lands every streamed `Retrieval`. The steady-state
+/// digest path (wz's `DigestPublisher` → zenohd's `@-digest/*` subscriber →
+/// concrete `Diff` query) is the fallback once initial alignment's one-shot GET
+/// times out; the generous `z_get` poll budget covers both.
+///
+/// This is the test that drove the wz fidelity fix in `Queryable::matches`: the
+/// initial-alignment Discovery is a WILDCARD query selector, and wz previously
+/// matched the inbound query as a concrete literal (so `@zid/*/..` never reached
+/// the concrete `@zid/<wz-zid>/..` queryable). Query routing is keyexpr
+/// INTERSECTION; the fix makes wz answer it.
+///
+/// No wz-side seeding race: wz holds the entry in its own `StorageState` for the
+/// whole test (not a one-shot Put) and the aligner queryable stays declared for
+/// the session lifetime. Convergence is witnessed by an INDEPENDENT foreign pico
+/// `z_get` against zenohd's store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "binary-dep e2e (zenohd storage-manager replication); needs target/zenohd/{zenohd,libzenoh_plugin_storage_manager.so}; run via Layer Z / --ignored"]
+async fn zenohd_converges_to_wz_replica() {
+    // Same replication config as the ASK test — pin the cross-impl fingerprint
+    // parity before any I/O (wz and zenohd only meet on @-digest/<zid>/<fp> and
+    // @zid/<zid>/<fp>/aligner if their config fingerprints are EQUAL).
+    let config = ReplicationConfig::new(STORAGE_KEYEXPR, None, 1000, 5, 6, 30, 250);
+    assert_eq!(
+        config.fingerprint().value(),
+        ZENOHD_CONFIG_FINGERPRINT,
+        "wz's replication config fingerprint must equal the real zenohd's, or the \
+         two never meet on @-digest/<zid>/<fp>"
+    );
+
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
+    // zenohd's storage starts EMPTY (no seed) — it must gain the entry ONLY by
+    // aligning FROM wz.
+    let _zenohd = spawn_zenohd_storage_replica(port);
+    drop(port_res);
+
+    // ── Dial zenohd in-process. wz's storage zid is its session zid, read from
+    //    the SAME SSOT `connect_to_zenohd` opens the session with (deterministic,
+    //    so no drift) — zenohd learns this zid (from wz's `Discovery` reply, or
+    //    its digest keyexpr) and GETs the concrete `@zid/<that-zid>/<fp>/aligner`
+    //    with `All`, which is exactly where wz declares its aligner queryable.
+    let wz_zid = zenohd_interop_session_init_params().zid;
+    let mut opened = connect_to_zenohd(port).await;
+    let timeouts = SessionTimeouts::spec_defaults();
+
+    // ── The wz SOURCE replica: a StorageState holding the entry zenohd lacks,
+    //    stamped with a wall-clock NTP64 timestamp so it lands in a live era (a
+    //    zenoh storage requires a timestamp).
+    let replica: Arc<StdMutex<StorageState<MemoryStorage>>> =
+        Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
+    replica.lock().unwrap().process_put(
+        WZ_DATA_KEY,
+        WZ_SEED_VALUE.as_bytes().to_vec(),
+        None,
+        TimestampHint {
+            time: wall_clock_ntp64(),
+            zid: wz_zid.clone(),
+        },
+    );
+
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    let session = TokioSession::new(opened.actions.clone(), observer, Arc::new(opened.clock));
+
+    // ── wz's ANSWER side: declare the aligner answer queryable
+    //    (@zid/<wz-zid>/<fp>/aligner, Remote) + spawn the periodic digest
+    //    publisher (@-digest/<wz-zid>/<fp>). Both reach zenohd through its
+    //    routing tables; the handles are held for the whole test (RAII).
+    let _aligner =
+        AlignerService::declare(&session, replica.clone(), config.clone(), wz_zid.clone())
+            .expect("wz declares its aligner answer queryable");
+    let _digest_pub =
+        DigestPublisher::spawn(&session, replica.clone(), config.clone(), wz_zid.clone());
+
+    let session_drive = session.clone();
+    let drive = drive_session_until_terminal(
+        &mut opened.inbound,
+        &opened.actions,
+        &mut opened.engine,
+        None,
+        &opened.clock,
+        &timeouts,
+        move |event| session_drive.dispatch_iteration_event(event),
+    );
+
+    // ── Witness convergence: poll a foreign pico z_get against zenohd until it
+    //    returns wz's value. z_get is one-shot + blocking, so each probe runs on
+    //    a blocking thread, leaving the wz drive loop free to answer zenohd's
+    //    inbound alignment queries. Generous budget over zenohd's 1s digest
+    //    interval; converges once zenohd has pulled + stored wz's entry.
+    let scenario = async move {
+        for _ in 0..30 {
+            let captured = tokio::task::spawn_blocking(move || zget_once(WZ_DATA_KEY, port))
+                .await
+                .expect("z_get probe thread");
+            if captured.contains(WZ_SEED_VALUE) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        panic!("zenohd did not converge (foreign z_get never returned wz's value) within budget");
+    };
+
+    tokio::select! {
+        _ = drive => panic!("wz drive loop ended unexpectedly (zenohd link lost?)"),
+        _ = scenario => {}
+    }
+
+    // ── Converged: zenohd pulled wz's entry over the real zenoh replication
+    //    aligner. wz still holds its source entry (sanity — the source side is
+    //    unchanged by answering an alignment query).
+    let guard = replica.lock().unwrap();
+    let stored = guard
+        .get(WZ_DATA_KEY)
+        .expect("wz still holds its source entry after answering zenohd's alignment");
+    assert_eq!(
+        stored.payload,
+        WZ_SEED_VALUE.as_bytes(),
+        "wz's source entry is unchanged by serving the cross-impl alignment"
     );
 }
