@@ -119,6 +119,15 @@ pub struct BorrowedReply<'a> {
     pub payload: &'a [u8],
     /// Encoding hint for an Err reply, if any.
     pub err_encoding: Option<(u32, Option<&'a str>)>,
+    /// A8b — attachment carried by a Put reply (the inner-MsgPut push-body ext
+    /// id 0x03), or `None`. Carried so a synthesised [`BorrowedReply`] is a
+    /// FULL [`ReplyView`] — i.e. `InboundReply::from_view` is lossless for a
+    /// `BorrowedReply` source too, not only the wire `InboundReply` (the A8c
+    /// session-review gap).
+    pub attachment: Option<&'a [u8]>,
+    /// A8b — value encoding carried by a Put reply (`packed_id` + schema), or
+    /// `None`. The Put-arm twin of [`Self::err_encoding`].
+    pub put_encoding: Option<(u32, Option<&'a str>)>,
 }
 
 impl ReplyView for BorrowedReply<'_> {
@@ -136,6 +145,14 @@ impl ReplyView for BorrowedReply<'_> {
     }
     fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
         self.err_encoding
+            .as_ref()
+            .map(|(id, schema)| (*id, schema.as_deref()))
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.attachment
+    }
+    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+        self.put_encoding
             .as_ref()
             .map(|(id, schema)| (*id, schema.as_deref()))
     }
@@ -249,6 +266,8 @@ mod tests {
             kind: ReplyKind::Put,
             payload: b"21.5",
             err_encoding: None,
+            attachment: None,
+            put_encoding: None,
         });
         sink.on_reply(&BorrowedReply {
             rid: 7,
@@ -256,6 +275,8 @@ mod tests {
             kind: ReplyKind::Del,
             payload: b"",
             err_encoding: None,
+            attachment: None,
+            put_encoding: None,
         });
         sink.on_final(7);
 
@@ -275,6 +296,8 @@ mod tests {
             kind: ReplyKind::Err,
             payload: b"boom",
             err_encoding: Some((4, Some("text/plain"))),
+            attachment: None,
+            put_encoding: None,
         };
         assert_eq!(view.kind(), ReplyKind::Err);
         assert_eq!(view.payload(), b"boom");
@@ -308,6 +331,8 @@ mod tests {
             kind: ReplyKind::Put,
             payload: b"x",
             err_encoding: None,
+            attachment: None,
+            put_encoding: None,
         });
         sink.on_reply(&BorrowedReply {
             rid: 1,
@@ -315,6 +340,8 @@ mod tests {
             kind: ReplyKind::Put,
             payload: b"y",
             err_encoding: None,
+            attachment: None,
+            put_encoding: None,
         });
         sink.on_final(1);
 

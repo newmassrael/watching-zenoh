@@ -241,6 +241,9 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
             kind: ReplyKind::Put,
             payload: &[],
             err_encoding: None,
+            // A liveliness reply carries no value side-bands (Put-token only).
+            attachment: None,
+            put_encoding: None,
         };
         let mut fired: usize = 0;
         for pending in self.pending.iter_mut() {

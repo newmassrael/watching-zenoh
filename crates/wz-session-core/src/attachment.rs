@@ -46,8 +46,11 @@ const ATTACHMENT_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
 /// emits the entry with `Z` clear (terminator) so a caller appending it
 /// as the sole / last entry needs no fix-up.
 pub fn encode_attachment_ext(ext_id: u8, payload: &[u8]) -> Result<ExtEntryOwned, CodecError> {
-    // W3: the ext_zbuf value owned mirror is bounded `heapless::Vec<u8, 32>`
-    // (the codec's declared max-size); copy in, fallible past 32 bytes.
+    // W3: the ext_zbuf `value` owned mirror is `SceBytes<32>` — under `alloc`
+    // an UNBOUNDED `Vec` (the `32` is advisory; proven by the 200-byte reply
+    // (A8a) + query (A8c-1) attachment tests), under `no_std` a
+    // `heapless::Vec<u8, 32>` that returns `TooManyElements` past 32. So this
+    // is fallible only on the `no_std` profile; under `alloc` any length rides.
     Ok(ExtEntryOwned {
         header: ATTACHMENT_EXT_HEADER_ENC_ZBUF | ext_id,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {

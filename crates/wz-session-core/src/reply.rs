@@ -327,10 +327,14 @@ impl InboundReply {
     }
 }
 
-/// A8b — gate a loopback Put reply's staged attachment so a SessionLocal
-/// reply surfaces exactly what a wire (Remote) reply would: the wire decode
-/// is gated on `pubsub-attachment`, so with the gate off neither path carries
-/// an attachment.
+/// A8b — gate a loopback Put reply's staged attachment on the SAME inner
+/// `pubsub-attachment` feature the wire decode uses, so when both reply paths
+/// are present a SessionLocal reply surfaces the same attachment a wire
+/// (Remote) reply would (and with the gate off neither carries one). NB the
+/// OUTER arms differ — a build with `query-queryable` but no `pubsub-put` /
+/// `query-reply` has this loopback arm yet drops the wire Put reply entirely
+/// (the pre-existing R311fm gating); the parity claim is about the side-band
+/// CONTENT when both arms exist, not about which arms a subset compiles.
 #[cfg(all(feature = "query-queryable", feature = "alloc"))]
 fn loopback_put_attachment(attachment: Option<Vec<u8>>) -> Option<Vec<u8>> {
     #[cfg(feature = "pubsub-attachment")]
@@ -457,10 +461,10 @@ impl From<QueryReply> for InboundReply {
                 let body = match body {
                     ReplyBody::Put(payload) => InboundReplyBody::Put {
                         payload,
-                        // Gate the metadata so a loopback (SessionLocal) reply
-                        // surfaces exactly what a wire (Remote) reply would:
-                        // the wire decode is gated on the same features, so a
-                        // build with the gate off carries neither.
+                        // Gate the side-bands on the same `pubsub-attachment` /
+                        // `pubsub-encoding` the wire decode uses (see
+                        // loopback_put_attachment), so the CONTENT matches a
+                        // wire reply when both paths are present.
                         attachment: loopback_put_attachment(attachment),
                         encoding: loopback_put_encoding(encoding),
                     },
@@ -1316,6 +1320,98 @@ mod tests {
         assert_eq!(reply.put_encoding(), Some((13, None)));
     }
 
+    /// A8c session-review — the aligner's HEADLINE reply shape: an
+    /// EMPTY-payload Put carrying a LARGE (> the 32-byte no_std ExtZbuf bound)
+    /// attachment — a serialized AlignmentReply metadata blob with no stored
+    /// value. Proves the empty payload survives AND the over-32 attachment
+    /// round-trips through the FULL wire decode (`dispatch_response`), not just
+    /// the builder struct — the two gaps the review found untested.
+    #[cfg(feature = "pubsub-attachment")]
+    #[test]
+    fn dispatch_response_surfaces_empty_payload_metadata_reply() {
+        use crate::reply_sink::ReplyView;
+        use crate::response_build::ResponseReplyBuilder;
+
+        let big: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        assert!(big.len() > 32, "exceeds the no_std ExtZbuf bound");
+
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let cb = captured.clone();
+        reg.register(
+            7,
+            1,
+            None,
+            move |r| cb.lock().unwrap().push(InboundReply::from_view(r)),
+            |_| {},
+        );
+
+        // Metadata-only reply: empty payload + the big attachment (Put arm —
+        // the attachment is Put-only, so even a value-less reply is a Put).
+        let resp = ResponseReplyBuilder::new(7, 0, Some("demo/a"), b"")
+            .attachment(&big)
+            .build()
+            .unwrap();
+        reg.dispatch_response(&resp, &HashMap::new());
+
+        let snap = captured.lock().unwrap();
+        assert_eq!(snap.len(), 1);
+        let reply = &snap[0];
+        assert_eq!(reply.kind(), ReplyKind::Put);
+        match &reply.body {
+            InboundReplyBody::Put {
+                payload,
+                attachment,
+                encoding,
+            } => {
+                assert!(payload.is_empty(), "metadata-only reply: empty payload");
+                assert_eq!(
+                    attachment.as_deref(),
+                    Some(big.as_slice()),
+                    "the full >32B attachment survived the wire decode"
+                );
+                assert_eq!(*encoding, None);
+            }
+            other => panic!("expected Put, got {other:?}"),
+        }
+        assert_eq!(reply.attachment(), Some(big.as_slice()));
+    }
+
+    /// A8c session-review — `InboundReply::from_view` is lossless for a
+    /// `BorrowedReply` source too, not only the wire `InboundReply`: a
+    /// synthesised `BorrowedReply` carrying an attachment + put_encoding
+    /// projects through `from_view` with both preserved (closes the latent gap
+    /// where `BorrowedReply` could not represent the side-bands, so the
+    /// elevated-to-SSOT `from_view` silently dropped them for that source).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn from_view_is_lossless_for_a_borrowed_reply_attachment() {
+        use crate::reply_sink::{BorrowedReply, ReplyView};
+        let view = BorrowedReply {
+            rid: 5,
+            keyexpr: "a/b",
+            kind: ReplyKind::Put,
+            payload: b"v",
+            err_encoding: None,
+            attachment: Some(b"align"),
+            put_encoding: Some((9, Some("text/plain"))),
+        };
+        let owned = InboundReply::from_view(&view);
+        assert_eq!(owned.attachment(), Some(&b"align"[..]));
+        assert_eq!(owned.put_encoding(), Some((9, Some("text/plain"))));
+        match owned.body {
+            InboundReplyBody::Put {
+                attachment,
+                encoding,
+                ..
+            } => {
+                assert_eq!(attachment.as_deref(), Some(&b"align"[..]));
+                assert_eq!(encoding, Some((9, Some("text/plain".to_string()))));
+            }
+            other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
     #[test]
     fn dispatch_response_fires_on_reply_for_del_body() {
         let mut reg = ReplyRegistry::new();
@@ -1822,8 +1918,9 @@ mod tests {
     /// A8b — the loopback receive twin: a `QueryReply` staged with an
     /// attachment + encoding (the A8a emit) projects through
     /// `From<QueryReply>` so a SessionLocal reply surfaces the same metadata
-    /// a wire (Remote) reply would. Gated on the same features as the wire
-    /// decode, so loopback and wire carry identical information.
+    /// a wire (Remote) reply would. The side-bands are gated on the same
+    /// `pubsub-attachment` / `pubsub-encoding` as the wire decode, so the two
+    /// paths carry the same CONTENT when both are present.
     #[cfg(all(
         feature = "query-queryable",
         feature = "pubsub-attachment",
@@ -2158,6 +2255,8 @@ mod tests {
             kind: ReplyKind::Put,
             payload: b"v",
             err_encoding: None,
+            attachment: None,
+            put_encoding: None,
         });
         assert_eq!(fired, 1);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -2167,6 +2266,8 @@ mod tests {
             kind: ReplyKind::Put,
             payload: b"",
             err_encoding: None,
+            attachment: None,
+            put_encoding: None,
         });
         assert_eq!(none, 0, "non-matching rid does not fire");
     }

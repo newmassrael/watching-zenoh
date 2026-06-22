@@ -1041,9 +1041,16 @@ layer_c1e_cargo_test_query() {
 # keeps pub/sub genuinely OFF (default would pull nothing extra here, but
 # the explicit form documents the getter-only intent and guards against a
 # future default change re-enabling a publisher feature).
+# A8c session-review: the maximal invocation also enables pubsub-attachment +
+# pubsub-encoding + query-reply so the A8a/A8b reply-attachment seam tests
+# (dispatch_response_surfaces_*, from_query_reply_put_surfaces_*,
+# from_view_is_lossless_*) run in an EXPLICIT lane, not only via the implicit
+# C1 workspace union (which depended on wz-runtime-tokio's defaults forwarding
+# both features — exactly the "silent drop on a defaults change" this lane
+# guards against).
 layer_c1f_cargo_test_reply() {
     (cd crates \
-        && cargo test -p wz-session-core --features codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable --quiet \
+        && cargo test -p wz-session-core --features codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable,pubsub-attachment,pubsub-encoding,query-reply --quiet \
         && cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final,query-reply --quiet)
 }
 

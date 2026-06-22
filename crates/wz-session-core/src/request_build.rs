@@ -431,30 +431,27 @@ impl RequestQueryBuilder {
     /// `query-attachment` (wire-data helper) so a `codec-request` subset that
     /// does not compose query attachments carries no attachment encode path.
     ///
-    /// **Size (A8c-1):** under `no_std` the shared ExtZbuf `value` carrier is
-    /// `heapless::Vec<u8, 32>` (`ext_zbuf.scxml` `sce:max-size="32"`), so an
-    /// over-32 attachment is structurally unrepresentable; the
-    /// `not(alloc)`-gated assert fails fast at the call site rather than deep
-    /// in the codec. Under `alloc` the carrier is an unbounded `Vec` (the `N`
-    /// is advisory — every `sce:max-size` field degrades to unbounded under
-    /// `alloc`, proven by the 200-byte reply attachment, A8a), matching
-    /// zenoh's unbounded query `ZBytes`, so a larger attachment — e.g. a
-    /// storage `AlignmentQuery::Diff` / `Intervals` / `Events`, which exceeds
-    /// 32 bytes — rides intact and no cap applies. A wz `no_std` peer (which
-    /// never runs the alloc-only storage / aligner) would reject an over-32
-    /// attachment on decode; zenoh and alloc-wz peers accept it.
+    /// **Size (A8c-1, corrected by the A8c session-review):** there is NO
+    /// builder-side size cap. This whole module is
+    /// `#[cfg(all(alloc, codec-request))]` (lib.rs), so it only ever compiles
+    /// with the `alloc` feature, where the ExtZbuf `value` carrier is an
+    /// unbounded `Vec` (the `N` of `SceBytes<N>` is advisory under `alloc` —
+    /// every `sce:max-size` field degrades to unbounded, proven by the
+    /// 200-byte reply attachment, A8a), matching zenoh's unbounded query
+    /// `ZBytes`. So a large attachment — e.g. a storage
+    /// `AlignmentQuery::Diff` / `Intervals` / `Events`, which exceeds 32
+    /// bytes — rides intact. [`QUERY_EXT_ZBUF_MAX_LEN`] (`32`) is the `no_std`
+    /// DECODE bound only: a `no_std` wz peer decodes the ext into a
+    /// `heapless::Vec<u8, 32>` and rejects an over-32 attachment with
+    /// `CodecError::TooManyElements` (a clean type-level reject, not
+    /// corruption). The A8c-1 `#[cfg(not(alloc))]` assert that lived here was
+    /// dead code (this module never compiles under `not(alloc)`) and was
+    /// removed; zenoh and alloc-wz peers accept arbitrarily large ZBuf.
     #[cfg(feature = "query-attachment")]
     pub fn query_attachment(mut self, attachment: &[u8]) -> Self {
         assert!(
             !attachment.is_empty(),
             "RequestQueryBuilder::query_attachment requires a non-empty attachment slice",
-        );
-        #[cfg(not(feature = "alloc"))]
-        assert!(
-            attachment.len() <= QUERY_EXT_ZBUF_MAX_LEN,
-            "attachment slice length {} exceeds the no_std ExtZbuf bound ({})",
-            attachment.len(),
-            QUERY_EXT_ZBUF_MAX_LEN,
         );
         self.query_attachment = Some(attachment.to_vec());
         self
@@ -753,15 +750,20 @@ pub fn build_request_query_with_parameters(
 /// variable-length upstream (no codec-level bound).
 ///
 /// R121j-1c originally asserted this bound on EVERY `query_attachment` call.
-/// **A8c-1 (storage-aligner) relaxed it to `no_std`-only**: under `alloc` the
-/// `value` carrier is an unbounded `Vec` (the `N` is advisory — every
-/// `sce:max-size` field degrades to unbounded under `alloc`), matching zenoh's
-/// unbounded query `ZBytes`, so a larger attachment (e.g. an `AlignmentQuery`)
-/// rides intact. The constant remains the documented `no_std` bound and the
-/// `not(alloc)` assert in `query_attachment` / `build_request_query_with_attachment`
-/// still fails fast there. A wz `no_std` peer would reject an over-32
-/// attachment on decode; zenoh and alloc-wz peers accept arbitrarily large
-/// ZBuf payloads, so wz-emit -> {zenoh, alloc-wz}-receive is unaffected.
+/// **A8c-1 (storage-aligner) intended to relax it to `no_std`-only; the A8c
+/// session-review corrected that**: the `request_build` module is
+/// `#[cfg(all(alloc, codec-request))]` (lib.rs), so the builder ONLY compiles
+/// under `alloc`, where the `value` carrier is an unbounded `Vec` (the `N` is
+/// advisory — every `sce:max-size` field degrades to unbounded under `alloc`),
+/// matching zenoh's unbounded query `ZBytes`. So a larger attachment (e.g. an
+/// `AlignmentQuery`) rides intact and there is no builder-side cap at all (the
+/// `not(alloc)` assert A8c-1 added was dead code in an alloc-only module and
+/// was removed). This constant survives purely as the documented `no_std`
+/// DECODE bound: a `no_std` wz peer decodes the ext into a
+/// `heapless::Vec<u8, 32>` and rejects an over-32 attachment with
+/// `CodecError::TooManyElements` (a clean type-level reject, not corruption).
+/// zenoh and alloc-wz peers accept arbitrarily large ZBuf payloads, so
+/// wz-emit -> {zenoh, alloc-wz}-receive is unaffected.
 pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 
 /// R121j-1c — build a `Request(Query)` with a single attachment
@@ -807,10 +809,10 @@ pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 /// ext from the wire and emit only the bare Query header (the
 /// caller's intent is then plain `build_request_query`).
 ///
-/// `attachment.len() > QUERY_EXT_ZBUF_MAX_LEN` is rejected only under
-/// `no_std` (the heapless ExtZbuf bound); under `alloc` the carrier is
-/// unbounded and a larger attachment (e.g. an `AlignmentQuery`) rides intact
-/// (A8c-1). See the constant's doc-comment.
+/// There is no builder-side size cap (this module is alloc-only and the
+/// ExtZbuf carrier is unbounded under `alloc`), so a larger attachment — e.g.
+/// an `AlignmentQuery` — rides intact. [`QUERY_EXT_ZBUF_MAX_LEN`] is the
+/// `no_std` DECODE bound only; see the constant's doc-comment.
 ///
 /// Source-info and body(Value) extensions are NOT covered by this
 /// helper — separate concerns with their own sub-codec wiring
