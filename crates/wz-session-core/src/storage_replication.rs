@@ -752,6 +752,8 @@ pub mod wire {
     use alloc::vec::Vec;
 
     use super::{Digest, Fingerprint, IntervalIdx, SubIntervalIdx};
+    // The bincode-1.3 cursor + length helpers are shared with the aligner codec.
+    use crate::wire_bincode::{check_len, push_u64, Reader, WireError};
 
     /// Failure decoding a [`Digest`] from bytes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,8 +767,13 @@ pub mod wire {
         TrailingBytes,
     }
 
-    fn push_u64(out: &mut Vec<u8>, v: u64) {
-        out.extend_from_slice(&v.to_le_bytes());
+    impl From<WireError> for DigestDecodeError {
+        fn from(e: WireError) -> Self {
+            match e {
+                WireError::UnexpectedEof => Self::UnexpectedEof,
+                WireError::LengthOverflow => Self::LengthOverflow,
+            }
+        }
     }
 
     /// Encodes a [`Digest`] to the zenoh bincode wire bytes (deterministic:
@@ -792,48 +799,6 @@ pub mod wire {
             }
         }
         out
-    }
-
-    /// A cursor over the input bytes that reads fixed-width little-endian
-    /// `u64`s and refuses to read past the end.
-    struct Reader<'a> {
-        buf: &'a [u8],
-        pos: usize,
-    }
-
-    impl<'a> Reader<'a> {
-        fn new(buf: &'a [u8]) -> Self {
-            Self { buf, pos: 0 }
-        }
-
-        fn read_u64(&mut self) -> Result<u64, DigestDecodeError> {
-            let end = self
-                .pos
-                .checked_add(8)
-                .ok_or(DigestDecodeError::UnexpectedEof)?;
-            let slice = self
-                .buf
-                .get(self.pos..end)
-                .ok_or(DigestDecodeError::UnexpectedEof)?;
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(slice);
-            self.pos = end;
-            Ok(u64::from_le_bytes(bytes))
-        }
-
-        fn remaining(&self) -> usize {
-            self.buf.len() - self.pos
-        }
-    }
-
-    /// Rejects a map length that could not possibly fit in the bytes that
-    /// remain (`len * min_entry_bytes > remaining`, or an overflow), so a
-    /// hostile `u64::MAX` length fails fast instead of allocating/looping.
-    fn check_len(len: u64, min_entry_bytes: usize, r: &Reader) -> Result<(), DigestDecodeError> {
-        match (len as usize).checked_mul(min_entry_bytes) {
-            Some(n) if n <= r.remaining() => Ok(()),
-            _ => Err(DigestDecodeError::LengthOverflow),
-        }
     }
 
     /// Decodes a [`Digest`] from the zenoh bincode wire bytes. Accepts maps in

@@ -727,6 +727,13 @@ pub mod storage_history;
 #[cfg(feature = "storage-replication")]
 pub mod storage_replication;
 
+/// Round 311wa — the shared no_std bincode-1.3 wire primitives (the single
+/// LE-fixint cursor + length helpers) both the replication Digest codec and the
+/// aligner codec build on, so the bincode-1.3 framing contract lives in one
+/// place. Gated on `storage-replication` (the aligner feature implies it).
+#[cfg(feature = "storage-replication")]
+pub(crate) mod wire_bincode;
+
 /// Round 311vr — the storage-aligner *event metadata* atom (§5.11 storage,
 /// aligner 1/N): the [`storage_aligner::Action`] + [`storage_aligner::EventMetadata`]
 /// a replica exchanges to pull the entries a

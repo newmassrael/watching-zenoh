@@ -500,6 +500,10 @@ pub mod wire {
     // is one consumer.
     use crate::storage_replication::{zenoh_hex_to_zid, zid_to_zenoh_hex};
     use crate::storage_state::zid_to_le_array;
+    // The genuinely-shared bincode-1.3 cursor core + length guard (the digest
+    // codec uses these too); the aligner-only widths (u8/u32 reads, String,
+    // push_u32) layer on top here since the digest never had them.
+    use crate::wire_bincode::{check_len, push_u64, Reader, WireError};
 
     /// Failure decoding an aligner wire structure from bytes.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,14 +534,32 @@ pub mod wire {
         BadZid,
     }
 
+    impl From<WireError> for AlignmentDecodeError {
+        fn from(e: WireError) -> Self {
+            match e {
+                WireError::UnexpectedEof => Self::UnexpectedEof,
+                WireError::LengthOverflow => Self::LengthOverflow,
+            }
+        }
+    }
+
+    /// Minimum encoded size of one collection element, for the `check_len`
+    /// fast-reject of a hostile length — named, not magic literals, so the
+    /// byte-width arithmetic is self-documenting.
+    const U64_BYTES: usize = 8; // one IntervalIdx / SubIntervalIdx / Fingerprint
+    const PAIR_BYTES: usize = 16; // an (idx, value) or (idx, sub-len) pair = two u64s
+    /// Smallest a valid `EventMetadata` can encode to: Some-tag(1), key-len(8),
+    /// Timestamp(24), tlnwu-tag(1), action(4); the key bytes and an optional
+    /// tlnwu Timestamp only add to it.
+    const MIN_EVENT_BYTES: usize = 1 + 8 + 24 + 1 + 4;
+
+    /// Append a `u32` as 4 little-endian bytes (a bincode enum-variant index /
+    /// `Action` tag — an aligner-only width the digest codec never emits).
     fn push_u32(out: &mut Vec<u8>, v: u32) {
         out.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn push_u64(out: &mut Vec<u8>, v: u64) {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-
+    /// Append a bincode `String`: a `u64` length then the UTF-8 bytes.
     fn push_string(out: &mut Vec<u8>, s: &str) {
         push_u64(out, s.len() as u64);
         out.extend_from_slice(s.as_bytes());
@@ -573,61 +595,27 @@ pub mod wire {
         out
     }
 
-    /// A cursor over the input bytes that reads fixed-width little-endian
-    /// fields and refuses to read past the end.
-    struct Reader<'a> {
-        buf: &'a [u8],
-        pos: usize,
-    }
-
-    impl<'a> Reader<'a> {
-        fn new(buf: &'a [u8]) -> Self {
-            Self { buf, pos: 0 }
-        }
-
-        fn remaining(&self) -> usize {
-            self.buf.len() - self.pos
-        }
-
+    /// The aligner's domain decoders, layered on the shared bincode cursor
+    /// ([`crate::wire_bincode::Reader`]): the structural reads (u8 / u32 / u64 /
+    /// bytes / string + the length guards) are shared with the digest codec;
+    /// these add the aligner's typed shapes. A shared [`WireError`] lifts into
+    /// [`AlignmentDecodeError`] via `?` (the `From` impl above).
+    impl Reader<'_> {
+        /// Read a single byte (a bincode `u8` / Option-or-bool tag).
         fn read_u8(&mut self) -> Result<u8, AlignmentDecodeError> {
-            let b = *self
-                .buf
-                .get(self.pos)
-                .ok_or(AlignmentDecodeError::UnexpectedEof)?;
-            self.pos += 1;
-            Ok(b)
+            Ok(self.read_bytes(1)?[0])
         }
 
+        /// Read a `u32` as 4 little-endian bytes (a bincode enum-variant index).
         fn read_u32(&mut self) -> Result<u32, AlignmentDecodeError> {
-            let slice = self.read_bytes(4)?;
             let mut bytes = [0u8; 4];
-            bytes.copy_from_slice(slice);
+            bytes.copy_from_slice(self.read_bytes(4)?);
             Ok(u32::from_le_bytes(bytes))
         }
 
-        fn read_u64(&mut self) -> Result<u64, AlignmentDecodeError> {
-            let slice = self.read_bytes(8)?;
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(slice);
-            Ok(u64::from_le_bytes(bytes))
-        }
-
-        fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], AlignmentDecodeError> {
-            let end = self
-                .pos
-                .checked_add(n)
-                .ok_or(AlignmentDecodeError::UnexpectedEof)?;
-            let slice = self
-                .buf
-                .get(self.pos..end)
-                .ok_or(AlignmentDecodeError::UnexpectedEof)?;
-            self.pos = end;
-            Ok(slice)
-        }
-
-        /// Read a bincode `String`: a u64 length then that many UTF-8 bytes
-        /// (the length is guarded against the remaining buffer before slicing,
-        /// so a hostile length fails fast instead of allocating).
+        /// Read a bincode `String`: a u64 length then that many UTF-8 bytes (the
+        /// length guarded against the remaining buffer before slicing, so a
+        /// hostile length fails fast).
         fn read_string(&mut self) -> Result<String, AlignmentDecodeError> {
             let len = self.read_u64()?;
             let len: usize = len
@@ -636,8 +624,7 @@ pub mod wire {
             if len > self.remaining() {
                 return Err(AlignmentDecodeError::LengthOverflow);
             }
-            let slice = self.read_bytes(len)?;
-            core::str::from_utf8(slice)
+            core::str::from_utf8(self.read_bytes(len)?)
                 .map(String::from)
                 .map_err(|_| AlignmentDecodeError::BadUtf8)
         }
@@ -657,7 +644,7 @@ pub mod wire {
             })
         }
 
-        /// Read an `Option` tag: 0 => None, 1 => Some, anything else => error.
+        /// Read an `Option` / `bool` tag: 0 => false, 1 => true, else error.
         fn read_option_tag(&mut self) -> Result<bool, AlignmentDecodeError> {
             match self.read_u8()? {
                 0 => Ok(false),
@@ -708,18 +695,8 @@ pub mod wire {
     // bincode renders an enum as a u32 LE variant index then the variant's
     // fields; a set / map / Vec as a u64 length then its elements / pairs; a
     // newtype index (IntervalIdx, SubIntervalIdx, Fingerprint) as its inner
-    // u64. The envelopes are built on the push_*/Reader helpers above.
-
-    /// Rejects a length that could not fit in the bytes that remain
-    /// (`len * min_entry_bytes > remaining`, or overflow), so a hostile
-    /// `u64::MAX` length fails fast instead of looping. Twin of the digest
-    /// codec's guard.
-    fn check_len(len: u64, min_entry_bytes: usize, r: &Reader) -> Result<(), AlignmentDecodeError> {
-        match (len as usize).checked_mul(min_entry_bytes) {
-            Some(n) if n <= r.remaining() => Ok(()),
-            _ => Err(AlignmentDecodeError::LengthOverflow),
-        }
-    }
+    // u64. The envelopes are built on the shared bincode primitives + the
+    // domain Reader methods above. `check_len` is the shared length guard.
 
     fn push_interval_set(out: &mut Vec<u8>, set: &BTreeSet<IntervalIdx>) {
         push_u64(out, set.len() as u64);
@@ -781,7 +758,7 @@ pub mod wire {
     impl Reader<'_> {
         fn read_interval_set(&mut self) -> Result<BTreeSet<IntervalIdx>, AlignmentDecodeError> {
             let len = self.read_u64()?;
-            check_len(len, 8, self)?;
+            check_len(len, U64_BYTES, self)?;
             let mut set = BTreeSet::new();
             for _ in 0..len {
                 set.insert(IntervalIdx::from(self.read_u64()?));
@@ -793,12 +770,12 @@ pub mod wire {
             &mut self,
         ) -> Result<BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>, AlignmentDecodeError> {
             let len = self.read_u64()?;
-            check_len(len, 16, self)?; // idx(8) + a (>=0) sub len(8)
+            check_len(len, PAIR_BYTES, self)?; // idx(8) + a (>=0) sub len(8)
             let mut map = BTreeMap::new();
             for _ in 0..len {
                 let idx = IntervalIdx::from(self.read_u64()?);
                 let sub_len = self.read_u64()?;
-                check_len(sub_len, 8, self)?;
+                check_len(sub_len, U64_BYTES, self)?;
                 let mut subs = BTreeSet::new();
                 for _ in 0..sub_len {
                     subs.insert(SubIntervalIdx::from(self.read_u64()?));
@@ -824,7 +801,7 @@ pub mod wire {
             &mut self,
         ) -> Result<BTreeMap<IntervalIdx, Fingerprint>, AlignmentDecodeError> {
             let len = self.read_u64()?;
-            check_len(len, 16, self)?;
+            check_len(len, PAIR_BYTES, self)?;
             let mut map = BTreeMap::new();
             for _ in 0..len {
                 let idx = IntervalIdx::from(self.read_u64()?);
@@ -841,12 +818,12 @@ pub mod wire {
             AlignmentDecodeError,
         > {
             let len = self.read_u64()?;
-            check_len(len, 16, self)?;
+            check_len(len, PAIR_BYTES, self)?;
             let mut map = BTreeMap::new();
             for _ in 0..len {
                 let idx = IntervalIdx::from(self.read_u64()?);
                 let sub_len = self.read_u64()?;
-                check_len(sub_len, 16, self)?;
+                check_len(sub_len, PAIR_BYTES, self)?;
                 let mut subs = BTreeMap::new();
                 for _ in 0..sub_len {
                     let sub = SubIntervalIdx::from(self.read_u64()?);
@@ -861,7 +838,7 @@ pub mod wire {
         fn read_events(&mut self) -> Result<Vec<EventMetadata>, AlignmentDecodeError> {
             let len = self.read_u64()?;
             // min EventMetadata: Some-tag(1)+keylen(8)+ts(24)+tlnwu-tag(1)+action(4).
-            check_len(len, 38, self)?;
+            check_len(len, MIN_EVENT_BYTES, self)?;
             let mut events = Vec::new();
             for _ in 0..len {
                 events.push(self.read_event_metadata()?);
