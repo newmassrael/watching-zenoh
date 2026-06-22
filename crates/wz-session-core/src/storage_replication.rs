@@ -674,9 +674,17 @@ pub fn build_digest<'a>(
 ///   replication driver reuses it.
 ///
 /// A `#[cfg(test)]` cross-check serializes a serde mirror with the actual
-/// bincode 1.3 (a dev-dependency) and asserts these bytes match it, so the
-/// hand-rolled format is pinned to ground truth; the R9 interop atom confirms
-/// it against a live zenoh replica.
+/// bincode 1.3 (a dev-dependency) and asserts the bytes match AND that each
+/// side reads the other's bytes (both directions), so the hand-rolled format
+/// is pinned to the exact library + serde structure zenoh uses.
+///
+/// Residual (honest scope): a fully LIVE digest exchange with a running
+/// `zenoh-plugin-storage-manager` replica is not yet exercised — it needs the
+/// plugin provisioned (not in the repo CI harness) and, for actual
+/// convergence, the aligner (a replica that diffs wz's digest replies with an
+/// alignment query, which wz answers only once the storage-aligner track
+/// lands). The byte-level compatibility this module guarantees is the
+/// prerequisite; the live exchange is the storage-aligner track's territory.
 ///
 /// ## Byte layout (bincode 1.3 default: LE, fixint, `u64` lengths)
 ///
@@ -840,19 +848,19 @@ pub mod wire {
         use alloc::collections::BTreeMap;
         use alloc::vec;
         use alloc::vec::Vec;
-        use serde::Serialize;
+        use serde::{Deserialize, Serialize};
 
         // A serde mirror of zenoh's Digest, serialized with the real bincode
         // 1.3 (dev-dep) to provide byte-compat ground truth. The newtypes are
         // single-field tuple structs, exactly as in zenoh, so serde encodes
         // each as its inner u64 (a newtype_struct).
-        #[derive(Serialize)]
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
         struct Fp(u64);
-        #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
         struct Ii(u64);
-        #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
         struct Si(u64);
-        #[derive(Serialize)]
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
         struct MirrorDigest {
             configuration_fingerprint: Fp,
             cold_era_fingerprint: Fp,
@@ -934,6 +942,29 @@ pub mod wire {
                 encode(&full),
                 bincode::serialize(&mirror_of(&full)).unwrap()
             );
+        }
+
+        /// R9 cross-impl interop: wz's bytes are READABLE by the exact bincode
+        /// 1.3 zenoh deserializes with, AND bytes bincode 1.3 produces are
+        /// readable by wz — both directions, not just encode-equality. This is
+        /// the strongest cross-impl proof available without provisioning a live
+        /// zenoh storage-manager replica (see the module-level residual note):
+        /// it pins wz<->zenoh digest wire compatibility to the real lib + the
+        /// serde structure of zenoh's `Digest` (digest.rs:77-83).
+        #[test]
+        fn wz_and_bincode_1_3_read_each_others_digest_bytes() {
+            let d = sample_digest();
+            let mirror = mirror_of(&d);
+
+            // Direction 1: wz encodes -> zenoh's deserializer reads it.
+            let wz_bytes = encode(&d);
+            let read_by_zenoh: MirrorDigest =
+                bincode::deserialize(&wz_bytes).expect("zenoh's bincode reads wz's bytes");
+            assert_eq!(read_by_zenoh, mirror);
+
+            // Direction 2: zenoh encodes -> wz decodes it.
+            let zenoh_bytes = bincode::serialize(&mirror).unwrap();
+            assert_eq!(decode(&zenoh_bytes), Ok(d));
         }
 
         #[test]
@@ -1128,6 +1159,42 @@ mod tests {
             fp,
             ReplicationConfig::new("demo/**", None, 10_000, 5, 6, 30, 500).fingerprint()
         );
+    }
+
+    /// Locks the config-fingerprint byte recipe to zenoh `Configuration::new`
+    /// (configuration.rs:64-72): key_expr bytes, optional prefix bytes,
+    /// interval as `u128` LE, sub_intervals as 8 LE bytes, hot / warm as
+    /// `u64` LE, propagation_delay as `u128` LE — in that exact order. The
+    /// config fingerprint gates digest exchange (the keyexpr segment + the
+    /// `Digest::diff` short-circuit), so a field-order or width drift would
+    /// silently stop wz from ever exchanging digests with a real zenoh
+    /// replica. This catches such a drift (a recipe lock, not an independent
+    /// oracle — the live zenoh value is the R9 residual).
+    #[test]
+    fn config_fingerprint_recipe_matches_zenoh_field_order() {
+        let no_prefix = ReplicationConfig::new("demo/**", None, 10_000, 5, 6, 30, 250);
+        let mut h = Xxh3::default();
+        h.update(b"demo/**");
+        h.update(&10_000u128.to_le_bytes());
+        h.update(&5u64.to_le_bytes());
+        h.update(&6u64.to_le_bytes());
+        h.update(&30u64.to_le_bytes());
+        h.update(&250u128.to_le_bytes());
+        assert_eq!(no_prefix.fingerprint(), Fingerprint::from(h.digest()));
+
+        // The prefix is hashed immediately after the key_expr, before the
+        // numeric fields (configuration.rs:65-67).
+        let with_prefix =
+            ReplicationConfig::new("demo/**", Some("p".into()), 10_000, 5, 6, 30, 250);
+        let mut hp = Xxh3::default();
+        hp.update(b"demo/**");
+        hp.update(b"p");
+        hp.update(&10_000u128.to_le_bytes());
+        hp.update(&5u64.to_le_bytes());
+        hp.update(&6u64.to_le_bytes());
+        hp.update(&30u64.to_le_bytes());
+        hp.update(&250u128.to_le_bytes());
+        assert_eq!(with_prefix.fingerprint(), Fingerprint::from(hp.digest()));
     }
 
     // -- event fingerprint ----------------------------------------------

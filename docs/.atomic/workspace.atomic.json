@@ -47271,6 +47271,42 @@
         "LOCAL: R311vo on a7f06b0 (origin/main=be8e731, +8 ahead vh..vo); NOT pushed. Named residuals: (1) live zenohd-storage-manager-replication digest interop needs the storage-manager plugin provisioned AND the ALIGNER for full convergence (zenohd diffs wz's digest then sends an aligner query back, which wz answers only once storage-aligner lands); (2) propagation-delay/jitter publisher tuning (needs a seeded RNG). storage-aligner is the next TRACK (consumes DigestDiff)."
       ]
     },
+    "Round 311vp": {
+      "decision_summary": "R311vp: storage-replication cross-impl byte interop atom (replication 9/N) -- proves wz and the exact bincode 1.3 zenoh uses read each other's Digest bytes bidirectionally, and locks the config-fingerprint byte recipe to zenoh's field order; the live zenoh-storage-manager replica exchange is an honestly-scoped residual (needs the plugin + the aligner).",
+      "changes_bullets": [
+        "storage_replication.rs wire tests: wz_and_bincode_1_3_read_each_others_digest_bytes - wz encode -> bincode 1.3 deserialize (zenoh reads wz's bytes) AND bincode 1.3 serialize -> wz decode (wz reads zenoh's bytes), both directions equal. The serde mirror gains Deserialize + PartialEq + Debug. The strongest cross-impl byte proof short of a live replica.",
+        "config_fingerprint_recipe_matches_zenoh_field_order: locks the config-fp xxh3 recipe to zenoh Configuration::new field order + widths (configuration.rs:64-72), incl the prefix position; a drift would silently stop digest exchange with a real zenoh.",
+        "Module doc: corrected the R4 overclaim ('R9 confirms against a live zenoh replica') to the honest scope - bidirectional byte interop vs the real bincode 1.3 lib; the live storage-manager exchange is a named residual (plugin harness + the aligner for convergence)."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-replication: storage_replication 33/33 (31 prior + bidirectional bincode-1.3 interop + config-fp recipe lock). clippy -D clean (storage-replication --all-targets); fmt clean. full run-ci was GREEN at R311vo (RUNCI_EXIT=0, all host lanes incl MCU Q + zenohd Z 9/9); this atom adds kernel test-only coverage, no production-code change beyond the honesty doc fix."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vp = storage-replication cross-impl byte interop (replication 9/N, §5.11): wz <-> real bincode 1.3 read each other's Digest bytes BIDIRECTIONALLY (not just encode-equality) + config-fp recipe locked to zenoh's field order (configuration.rs:64-72). Wire compatibility with zenoh is byte-proven against the exact lib + the serde structure of zenoh's Digest. HONEST residual: a live zenoh-plugin-storage-manager replica digest exchange is NOT exercised - it needs the plugin provisioned (absent from repo CI) and, for convergence, the ALIGNER (zenohd diffs wz's digest then queries the aligner, answered only once storage-aligner lands). The byte-level compat is the prerequisite; the live exchange is storage-aligner-track territory.",
+        "storage-replication DIGEST TRACK COMPLETE (R1 vh, R2 vi, R3 vj, R4 vk, R5 vl, R6 vm, R7 vn, R8 vo, R9 vp; +9 commits): produce + compare + wire + publish + subscribe + diff + facade/inventory + full-run-ci-green + cross-impl byte interop. zenoh-faithful (xxh3 fingerprints, bincode 1.3 wire, 3-era digest, asymmetric diff, @-digest keyexpr, Remote-only subscriber). NEXT: 4-agent adversarial session review (textbook/SSOT/north-star/cost-irrelevant standard), then push on explicit user consent. The storage-aligner track (consumes DigestDiff to pull diverging entries) is the next TRACK.",
+        "LOCAL: R311vp on 199b23c (origin/main=be8e731, +9 ahead vh..vp); NOT pushed; push awaits explicit consent. Residuals: live zenohd-storage-manager digest interop (needs plugin + aligner), propagation-delay/jitter publisher tuning (needs seeded RNG), incremental-log optimization (currently recompute-from-snapshot per StorageState::replication_digest divergence note)."
+      ],
+      "publishable_decision_summary": "R311vp: storage-replication cross-impl byte interop atom (replication 9/N) -- proves wz and the exact bincode 1.3 zenoh uses read each other's Digest bytes bidirectionally, and locks the config-fingerprint byte recipe to zenoh's field order; the live zenoh-storage-manager replica exchange is an honestly-scoped residual (needs the plugin + the aligner).",
+      "publishable_changes_bullets": [
+        "storage_replication.rs wire tests: wz_and_bincode_1_3_read_each_others_digest_bytes - wz encode -> bincode 1.3 deserialize (zenoh reads wz's bytes) AND bincode 1.3 serialize -> wz decode (wz reads zenoh's bytes), both directions equal. The serde mirror gains Deserialize + PartialEq + Debug. The strongest cross-impl byte proof short of a live replica.",
+        "config_fingerprint_recipe_matches_zenoh_field_order: locks the config-fp xxh3 recipe to zenoh Configuration::new field order + widths (configuration.rs:64-72), incl the prefix position; a drift would silently stop digest exchange with a real zenoh.",
+        "Module doc: corrected the R4 overclaim ('R9 confirms against a live zenoh replica') to the honest scope - bidirectional byte interop vs the real bincode 1.3 lib; the live storage-manager exchange is a named residual (plugin harness + the aligner for convergence)."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-replication: storage_replication 33/33 (31 prior + bidirectional bincode-1.3 interop + config-fp recipe lock). clippy -D clean (storage-replication --all-targets); fmt clean. full run-ci was GREEN at R311vo (RUNCI_EXIT=0, all host lanes incl MCU Q + zenohd Z 9/9); this atom adds kernel test-only coverage, no production-code change beyond the honesty doc fix."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vp = storage-replication cross-impl byte interop (replication 9/N, §5.11): wz <-> real bincode 1.3 read each other's Digest bytes BIDIRECTIONALLY (not just encode-equality) + config-fp recipe locked to zenoh's field order (configuration.rs:64-72). Wire compatibility with zenoh is byte-proven against the exact lib + the serde structure of zenoh's Digest. HONEST residual: a live zenoh-plugin-storage-manager replica digest exchange is NOT exercised - it needs the plugin provisioned (absent from repo CI) and, for convergence, the ALIGNER (zenohd diffs wz's digest then queries the aligner, answered only once storage-aligner lands). The byte-level compat is the prerequisite; the live exchange is storage-aligner-track territory.",
+        "storage-replication DIGEST TRACK COMPLETE (R1 vh, R2 vi, R3 vj, R4 vk, R5 vl, R6 vm, R7 vn, R8 vo, R9 vp; +9 commits): produce + compare + wire + publish + subscribe + diff + facade/inventory + full-run-ci-green + cross-impl byte interop. zenoh-faithful (xxh3 fingerprints, bincode 1.3 wire, 3-era digest, asymmetric diff, @-digest keyexpr, Remote-only subscriber). NEXT: 4-agent adversarial session review (textbook/SSOT/north-star/cost-irrelevant standard), then push on explicit user consent. The storage-aligner track (consumes DigestDiff to pull diverging entries) is the next TRACK.",
+        "LOCAL: R311vp on 199b23c (origin/main=be8e731, +9 ahead vh..vp); NOT pushed; push awaits explicit consent. Residuals: live zenohd-storage-manager digest interop (needs plugin + aligner), propagation-delay/jitter publisher tuning (needs seeded RNG), incremental-log optimization (currently recompute-from-snapshot per StorageState::replication_digest divergence note)."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
