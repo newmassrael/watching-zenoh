@@ -241,6 +241,20 @@ storage-backend = [
 # available so a `StorageService::declare_with_backend(.., HistoryStorage)`
 # is usable end-to-end. Implies storage-backend.
 storage-history = ["storage-backend", "wz-session-core/storage-history"]
+# Round 311vm — storage-replication (§5.11 storage, replication driver). The
+# digest publisher/subscriber DRIVER (`storage_replication_service`). Forwards
+# the no_std kernel digest stack (wz-session-core/storage-replication =
+# Fingerprint / Digest / diff / wire codec) and storage-backend (the digest
+# reflects the SAME live StorageState the StorageService captures into). Adds
+# `codec-push` because the digest is PUBLISHED to remote replicas on
+# `@-digest/<zid>/<config-fp>` (the publish remote leg is codec-push-gated) and
+# `declare-subscriber` for the peer-digest subscriber. Implies storage-backend.
+storage-replication = [
+    "wz-session-core/storage-replication",
+    "storage-backend",
+    "codec-push",
+    "declare-subscriber",
+]
 codec-init-body = ["wz-codecs/codec-init-body", "wz-session-core/codec-init-body"]
 codec-open-body = ["wz-codecs/codec-open-body", "wz-session-core/codec-open-body"]
 # R311b — codec-keep-alive forwards the wz-codecs gate. Session lease

@@ -516,6 +516,18 @@ pub mod session_open;
 #[cfg(feature = "storage-backend")]
 pub mod storage_service;
 
+/// Round 311vm — the storage-replication DRIVER, digest publisher half
+/// (§5.11 storage, replication 6/N): the tokio binding that periodically
+/// publishes this storage's replication
+/// [`wz_session_core::storage_replication::Digest`] on
+/// `@-digest/<zid>/<config-fp>` so peer replicas can detect divergence. It
+/// shares the live [`storage_service::StorageService`] state (the digest
+/// reflects the actual stored data), and the spawned publish loop is
+/// RAII-bound (dropping the [`storage_replication_service::DigestPublisher`]
+/// aborts it). Gated on `storage-replication` (implies storage-backend).
+#[cfg(feature = "storage-replication")]
+pub mod storage_replication_service;
+
 /// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
 /// foundation. Binds once and holds N concurrent peer faces (bind -> accept
 /// loop -> per-face open + drive), the increment zenoh's role-agnostic

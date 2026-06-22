@@ -91,7 +91,7 @@ use crate::session_glue::SessionLinkActions;
 /// competes fairly under newer-wins instead of being dominated by every
 /// real NTP64. NOT an HLC (no logical counter, not guaranteed monotonic
 /// across NTP steps); the §5.18 HLC is the proper source.
-fn wall_clock_ntp64() -> u64 {
+pub(crate) fn wall_clock_ntp64() -> u64 {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -199,6 +199,17 @@ where
     {
         let guard = self.state.lock().expect("storage state mutex poisoned");
         f(&guard)
+    }
+
+    /// Clone the shared `Arc<Mutex<StorageState>>` so the replication digest
+    /// driver ([`crate::storage_replication_service`]) can digest the SAME
+    /// live stored data this storage captures. The replication seam: a
+    /// replica's published digest must reflect its storage's actual state, so
+    /// the digest publisher and the capture/answer service share one gate
+    /// rather than maintaining a second copy.
+    #[cfg(feature = "storage-replication")]
+    pub fn shared_state(&self) -> Arc<Mutex<StorageState<B>>> {
+        Arc::clone(&self.state)
     }
 }
 
