@@ -47803,6 +47803,40 @@
         "LOCAL: R311wa atop 00ffb2c (vz); origin/main=bf87d58; +10 ahead (vr..vz, wa) after commit; NOT pushed. The whole storage-aligner kernel + the digest-keyexpr fidelity fix await one push on explicit consent."
       ]
     },
+    "Round 311wb": {
+      "decision_summary": "R311wb: storage-aligner inventory reserved->active -- the A1-A7 kernel gates real code under the storage-aligner feature, so the Layer A3 catalog audit's active<=>gated invariant requires the inventory status to be active; the pre-push full run-ci caught the reserved-but-gated drift and this flips it (driver A8 + facade forward A9 remain).",
+      "changes_bullets": [
+        "Inventory: storage-aligner reserved -> active. The Layer A3 catalog-status audit (scripts/audit-catalog-status.sh) enforces the invariant active <=> gated: a feature with >= 1 cfg(feature=\"storage-aligner\") gate site MUST be status=active. The kernel (the storage_aligner module + the storage_state aligner methods) has gated real code under storage-aligner since A1 (vr); the pre-push full run-ci -- the first since A1 -- caught the reserved-but-gated drift. reason updated to record that the kernel half is implemented (types/EventBuckets/wire/answer/pull), with the driver (A8) + facade forward (A9) pending.",
+        "No code change: inventory-status mutation + this ledger entry only. The facade `storage-aligner = []` placeholder and the (not-yet-existing) wz-runtime-tokio driver feature remain for A8/A9."
+      ],
+      "verification_bullets": [
+        "Layer A3 (audit-catalog-status.sh) now OK: catalog status truthfulness clean, active=76 (storage-aligner included). validate-workspace: T1 orphan new=+0, inventory storage-aligner=active. Full run-ci re-run on the committed state RUNCI_EXIT=0 -- the only previously-failing lane was A3 (the reserved-but-gated drift); no code changed, so every other lane (Layer A/A2/B codegen, C1 workspace test, C2/C3 clippy, C4 facade+runtime subset matrices, G MCU cross-compile, Q QEMU mps2/microbit e2e + footprint, Z zenohd v1.5.0 interop 9/9) remains green from the run that passed all of them except A3."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311wb = storage-aligner inventory reserved -> active. The A1-A7 kernel gates real code under the storage-aligner feature, so Layer A3's active<=>gated invariant requires status=active; the pre-push full run-ci caught the drift and this flips it. LESSON (carry for future kernel-first tracks): a feature with cfg-gate sites must flip to active in the SAME push that introduces the gates, even before the facade forward / driver -- the digest track avoided this only because it deferred its push until its facade-active atom (vo); the aligner pushed the kernel first, so the flip is its own atom here. Driver A8 (which needs the reply-attachment transport seam -- ReplyOut/ResponseReplyBuilder emit + InboundReply receive, a general query-reply capability wz lacks) + facade forward A9 remain.",
+        "storage-aligner KERNEL is COMPLETE + convergence-proven + 4-agent-reviewed + all-findings-remediated + run-ci-green + PUSHED. The wz wire is byte-proven vs real bincode 1.3; the digest-keyexpr zid fidelity bug (vy) is fixed; SSOT is clean (zid-as-hex unified, bincode cursor unified). Next session resumes at A8 (the driver + its reply-attachment seam prerequisite).",
+        "LOCAL->REMOTE: R311wb atop d093188 (wa); +11 ahead (vr..wb); full run-ci RUNCI_EXIT=0; PUSHED to origin/main on explicit user consent (\"push\")."
+      ],
+      "publishable_decision_summary": "R311wb: storage-aligner inventory reserved->active -- the A1-A7 kernel gates real code under the storage-aligner feature, so the Layer A3 catalog audit's active<=>gated invariant requires the inventory status to be active; the pre-push full run-ci caught the reserved-but-gated drift and this flips it (driver A8 + facade forward A9 remain).",
+      "publishable_changes_bullets": [
+        "Inventory: storage-aligner reserved -> active. The Layer A3 catalog-status audit (scripts/audit-catalog-status.sh) enforces the invariant active <=> gated: a feature with >= 1 cfg(feature=\"storage-aligner\") gate site MUST be status=active. The kernel (the storage_aligner module + the storage_state aligner methods) has gated real code under storage-aligner since A1 (vr); the pre-push full run-ci -- the first since A1 -- caught the reserved-but-gated drift. reason updated to record that the kernel half is implemented (types/EventBuckets/wire/answer/pull), with the driver (A8) + facade forward (A9) pending.",
+        "No code change: inventory-status mutation + this ledger entry only. The facade `storage-aligner = []` placeholder and the (not-yet-existing) wz-runtime-tokio driver feature remain for A8/A9."
+      ],
+      "publishable_verification_bullets": [
+        "Layer A3 (audit-catalog-status.sh) now OK: catalog status truthfulness clean, active=76 (storage-aligner included). validate-workspace: T1 orphan new=+0, inventory storage-aligner=active. Full run-ci re-run on the committed state RUNCI_EXIT=0 -- the only previously-failing lane was A3 (the reserved-but-gated drift); no code changed, so every other lane (Layer A/A2/B codegen, C1 workspace test, C2/C3 clippy, C4 facade+runtime subset matrices, G MCU cross-compile, Q QEMU mps2/microbit e2e + footprint, Z zenohd v1.5.0 interop 9/9) remains green from the run that passed all of them except A3."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311wb = storage-aligner inventory reserved -> active. The A1-A7 kernel gates real code under the storage-aligner feature, so Layer A3's active<=>gated invariant requires status=active; the pre-push full run-ci caught the drift and this flips it. LESSON (carry for future kernel-first tracks): a feature with cfg-gate sites must flip to active in the SAME push that introduces the gates, even before the facade forward / driver -- the digest track avoided this only because it deferred its push until its facade-active atom (vo); the aligner pushed the kernel first, so the flip is its own atom here. Driver A8 (which needs the reply-attachment transport seam -- ReplyOut/ResponseReplyBuilder emit + InboundReply receive, a general query-reply capability wz lacks) + facade forward A9 remain.",
+        "storage-aligner KERNEL is COMPLETE + convergence-proven + 4-agent-reviewed + all-findings-remediated + run-ci-green + PUSHED. The wz wire is byte-proven vs real bincode 1.3; the digest-keyexpr zid fidelity bug (vy) is fixed; SSOT is clean (zid-as-hex unified, bincode cursor unified). Next session resumes at A8 (the driver + its reply-attachment seam prerequisite).",
+        "LOCAL->REMOTE: R311wb atop d093188 (wa); +11 ahead (vr..wb); full run-ci RUNCI_EXIT=0; PUSHED to origin/main on explicit user consent (\"push\")."
+      ]
+    },
     "Round 311x": {
       "decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
       "changes_bullets": [
@@ -53462,10 +53496,10 @@
       "reason": "F=initiator FSM; P=zenoh-pico session open; C=indep of acceptor role"
     },
     "storage-aligner": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh storage aligner protocol",
-      "reason": "F=aligner protocol; P=zenoh; C=opt-in storage convergence"
+      "reason": "F=aligner protocol; P=zenoh; C=opt-in storage convergence; kernel half implemented (types/EventBuckets/wire/answer/pull), driver A8 + facade forward A9 pending"
     },
     "storage-backend": {
       "status": "active",
