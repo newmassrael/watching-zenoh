@@ -48011,6 +48011,44 @@
         "LOCAL: R311wf atop bf20c56 (we); origin/main=4df4aaa; +4 ahead (wc, wd, we, wf) after commit; NOT pushed (await explicit consent)."
       ]
     },
+    "Round 311wg": {
+      "decision_summary": "R311wg: fix the Layer Q MCU build error R311wf introduced -- the BorrowedReply attachment/put_encoding field addition missed the deploy/mcu-noheap-probe/src/main.rs construction site (outside crates/, so the wf grep did not see it), breaking the no-heap probe cross-compile on all four MCU targets. The pre-push full run-ci Q lane caught it; this adds the two None fields. wf's 8 sites is actually 9. Build-only, no behavior change; full run-ci re-run RUNCI_EXIT=0.",
+      "changes_bullets": [
+        "deploy/mcu-noheap-probe/src/main.rs: the dispatch_borrowed BorrowedReply construction (the no-heap reply-registry probe) gains attachment: None + put_encoding: None, matching the R311wf BorrowedReply field addition. A probe reply carries no value side-bands. Build-only; no behavior change."
+      ],
+      "verification_bullets": [
+        "Was: Layer Q FAIL on all four MCU targets (E0063 missing fields attachment/put_encoding in BorrowedReply -- microbit/mps2-an385/an386/an500 mcu-noheap-probe cross-compile). cargo build --release --target {thumbv6m-none-eabi, thumbv7m-none-eabi, thumbv7em-none-eabihf} on deploy/mcu-noheap-probe now Finished clean.",
+        "Full run-ci re-run on the fixed tree: RUNCI_EXIT=0 -- every host lane green (Layer A/A2/B codegen, C1 workspace + C1f augmented reply lane, C2/C3 clippy, C4 facade+runtime subset, G MCU cross-compile, Q QEMU mps2/microbit e2e + footprint, Z zenohd v1.5.0 interop 9/9). Q.2.mps2-an505 KNOWN_SKIP is the pre-existing cortex-m-rt 0.7 ARMv8-M lockup, not this change.",
+        "LESSON: a struct field addition must sweep EVERY construction site repo-wide, not just crates/ -- the deploy/ MCU probes (+ examples) are separate cargo cross-compile targets the host test lanes (cargo test -p ...) never build; only Layer Q does. The wf review-remediation grep was scoped to crates/ and missed deploy/; the pre-push full run-ci Q lane is the gate that caught it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311wg = Layer Q MCU build fix for the wf BorrowedReply field addition. The wf grep was scoped to crates/ and missed the deploy/mcu-noheap-probe/src/main.rs BorrowedReply construction (a separate no_std cross-compile target); the pre-push full run-ci Q lane caught the E0063 on all four MCU targets. Added attachment: None + put_encoding: None. wf's \"8 construction sites\" is actually 9. Build-only, no behavior change; full run-ci re-run RUNCI_EXIT=0.",
+        "LESSON (carry, durable): repo-wide struct-field sweeps must include deploy/ + examples/ (separate cargo targets), not only crates/ -- the host cargo-test lanes don't build them; only Layer Q (MCU cross-compile) does, so full run-ci is the gate that catches a missed no_std construction site. This is why \"full run-ci before push\" (all host lanes, judged by RUNCI_EXIT) is non-negotiable.",
+        "A8 transport seam = done + 4-agent-reviewed + remediated + Q-clean + full-run-ci-green. NEXT = A8c-2 the DRIVER (wz-runtime-tokio storage_aligner_service.rs: answer queryable + ask pull loop + on_diff wiring).",
+        "LOCAL->REMOTE: R311wg atop 7e76dcf (wf); +5 ahead (wc, wd, we, wf, wg); full run-ci RUNCI_EXIT=0; pushing to origin/main on the user's explicit consent (\"push\")."
+      ],
+      "publishable_decision_summary": "R311wg: fix the Layer Q MCU build error R311wf introduced -- the BorrowedReply attachment/put_encoding field addition missed the deploy/mcu-noheap-probe/src/main.rs construction site (outside crates/, so the wf grep did not see it), breaking the no-heap probe cross-compile on all four MCU targets. The pre-push full run-ci Q lane caught it; this adds the two None fields. wf's 8 sites is actually 9. Build-only, no behavior change; full run-ci re-run RUNCI_EXIT=0.",
+      "publishable_changes_bullets": [
+        "deploy/mcu-noheap-probe/src/main.rs: the dispatch_borrowed BorrowedReply construction (the no-heap reply-registry probe) gains attachment: None + put_encoding: None, matching the R311wf BorrowedReply field addition. A probe reply carries no value side-bands. Build-only; no behavior change."
+      ],
+      "publishable_verification_bullets": [
+        "Was: Layer Q FAIL on all four MCU targets (E0063 missing fields attachment/put_encoding in BorrowedReply -- microbit/mps2-an385/an386/an500 mcu-noheap-probe cross-compile). cargo build --release --target {thumbv6m-none-eabi, thumbv7m-none-eabi, thumbv7em-none-eabihf} on deploy/mcu-noheap-probe now Finished clean.",
+        "Full run-ci re-run on the fixed tree: RUNCI_EXIT=0 -- every host lane green (Layer A/A2/B codegen, C1 workspace + C1f augmented reply lane, C2/C3 clippy, C4 facade+runtime subset, G MCU cross-compile, Q QEMU mps2/microbit e2e + footprint, Z zenohd v1.5.0 interop 9/9). Q.2.mps2-an505 KNOWN_SKIP is the pre-existing cortex-m-rt 0.7 ARMv8-M lockup, not this change.",
+        "LESSON: a struct field addition must sweep EVERY construction site repo-wide, not just crates/ -- the deploy/ MCU probes (+ examples) are separate cargo cross-compile targets the host test lanes (cargo test -p ...) never build; only Layer Q does. The wf review-remediation grep was scoped to crates/ and missed deploy/; the pre-push full run-ci Q lane is the gate that caught it."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311wg = Layer Q MCU build fix for the wf BorrowedReply field addition. The wf grep was scoped to crates/ and missed the deploy/mcu-noheap-probe/src/main.rs BorrowedReply construction (a separate no_std cross-compile target); the pre-push full run-ci Q lane caught the E0063 on all four MCU targets. Added attachment: None + put_encoding: None. wf's \"8 construction sites\" is actually 9. Build-only, no behavior change; full run-ci re-run RUNCI_EXIT=0.",
+        "LESSON (carry, durable): repo-wide struct-field sweeps must include deploy/ + examples/ (separate cargo targets), not only crates/ -- the host cargo-test lanes don't build them; only Layer Q (MCU cross-compile) does, so full run-ci is the gate that catches a missed no_std construction site. This is why \"full run-ci before push\" (all host lanes, judged by RUNCI_EXIT) is non-negotiable.",
+        "A8 transport seam = done + 4-agent-reviewed + remediated + Q-clean + full-run-ci-green. NEXT = A8c-2 the DRIVER (wz-runtime-tokio storage_aligner_service.rs: answer queryable + ask pull loop + on_diff wiring).",
+        "LOCAL->REMOTE: R311wg atop 7e76dcf (wf); +5 ahead (wc, wd, we, wf, wg); full run-ci RUNCI_EXIT=0; pushing to origin/main on the user's explicit consent (\"push\")."
+      ]
+    },
     "Round 311x": {
       "decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
       "changes_bullets": [

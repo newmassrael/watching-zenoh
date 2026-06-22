@@ -309,6 +309,9 @@ fn main() -> ! {
             kind: ReplyKind::Put,
             payload: b"v",
             err_encoding: None,
+            // A8b — no value side-bands on this no-heap probe reply.
+            attachment: None,
+            put_encoding: None,
         });
         require(
             "reply",
