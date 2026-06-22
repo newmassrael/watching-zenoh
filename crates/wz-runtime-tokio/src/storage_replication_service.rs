@@ -381,9 +381,12 @@ mod tests {
 
     // A live-session test that the peer-digest subscriber declares against a
     // real session on the @-digest/*/<fp> keyexpr (Remote-only). The
-    // cross-session firing (a remote peer's digest -> diff -> on_diff) is the
-    // R9 interop atom + a two-instance e2e; here the decode/diff/observer core
-    // is covered by the handle_peer_digest unit tests above.
+    // cross-session firing (a remote peer's digest -> diff -> on_diff) needs a
+    // TWO-INSTANCE e2e: the subscriber is Remote-only, so a single-session
+    // loopback (which is SessionLocal-origin) cannot exercise it by
+    // construction. Here the decode/diff/observer core is covered by the
+    // handle_peer_digest unit tests above; the live two-replica exchange rides
+    // the storage-aligner track's e2e (it also needs the aligner to converge).
     #[cfg(feature = "declare-subscriber")]
     #[test]
     fn digest_subscriber_declares_on_the_subscribe_keyexpr() {

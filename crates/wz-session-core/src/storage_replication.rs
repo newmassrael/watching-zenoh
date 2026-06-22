@@ -40,7 +40,7 @@
 //! - [`ReplicationConfig::classify`] =
 //!   `Configuration::get_time_classification` (configuration.rs:193-220):
 //!   millisecond-since-epoch integer division into (interval, sub-interval).
-//! - [`event_fingerprint`] = `Event::compute_fingerprint` (log.rs:232-244):
+//! - `event_fingerprint` = `Event::compute_fingerprint` (log.rs:232-244):
 //!   xxh3 over the stored key, the timestamp's NTP64 time, and the 16-byte
 //!   id.
 //!
@@ -102,7 +102,7 @@ use crate::storage_state::zid_to_le_array;
 /// XOR of the fingerprints it contains. XOR is associative and commutative,
 /// so the result is independent of insertion order and a fingerprint can be
 /// maintained incrementally — inserting and removing an event are both a
-/// single XOR of its [`event_fingerprint`].
+/// single XOR of its `event_fingerprint`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Default)]
 #[repr(transparent)]
 pub struct Fingerprint(pub(crate) u64);
@@ -184,11 +184,13 @@ impl From<u64> for SubIntervalIdx {
 /// # Invariants
 ///
 /// `sub_intervals >= 1` and `interval_ms >= sub_intervals` (so the
-/// sub-interval width `interval_ms / sub_intervals` is at least 1ms).
-/// [`classify`](ReplicationConfig::classify) divides by that width; a zero
-/// width panics, exactly as zenoh's `get_time_classification`
-/// (configuration.rs:212-213) would. [`defaults`](ReplicationConfig::defaults)
-/// satisfies both.
+/// sub-interval width `interval_ms / sub_intervals` is at least 1ms) —
+/// **enforced by [`new`](ReplicationConfig::new)**, which asserts them so a
+/// misconfiguration fails fast and clearly at construction rather than as a
+/// cryptic divide-by-zero deep in [`classify`](ReplicationConfig::classify).
+/// zenoh leaves this implicit, panicking only later in its
+/// `get_time_classification` (configuration.rs:212-213).
+/// [`defaults`](ReplicationConfig::defaults) satisfies both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicationConfig {
     storage_key_expr: String,
@@ -221,6 +223,14 @@ impl ReplicationConfig {
         propagation_delay_ms: u64,
     ) -> Self {
         let storage_key_expr = storage_key_expr.into();
+        // Make the documented invariant load-bearing: an invalid config fails
+        // fast and clearly here, not as a cryptic divide-by-zero in classify().
+        assert!(
+            sub_intervals >= 1 && interval_ms >= sub_intervals,
+            "ReplicationConfig requires sub_intervals >= 1 and \
+             interval_ms >= sub_intervals (got interval_ms={interval_ms}, \
+             sub_intervals={sub_intervals})"
+        );
 
         let mut hasher = Xxh3::default();
         hasher.update(storage_key_expr.as_bytes());
@@ -250,8 +260,8 @@ impl ReplicationConfig {
 
     /// A [`ReplicationConfig`] with zenoh's default replica parameters for
     /// the given `storage_key_expr`, no prefix. zenoh `ReplicaConfig`
-    /// defaults (`zenoh-backend-traits/src/config.rs:92-150`): 10s interval,
-    /// 5 sub-intervals, 6 hot, 30 warm, 250ms propagation delay.
+    /// defaults (`plugins/zenoh-backend-traits/src/config.rs:92-150`): 10s
+    /// interval, 5 sub-intervals, 6 hot, 30 warm, 250ms propagation delay.
     pub fn defaults(storage_key_expr: impl Into<String>) -> Self {
         Self::new(storage_key_expr, None, 10_000, 5, 6, 30, 250)
     }
@@ -305,11 +315,10 @@ impl ReplicationConfig {
     /// then `interval = ms / interval_ms` and `sub_interval =
     /// (ms - interval_ms * interval) / (interval_ms / sub_intervals)`.
     ///
-    /// # Panics
-    ///
-    /// Panics if `interval_ms / sub_intervals == 0` (the sub-interval width
-    /// is zero) — see the [`ReplicationConfig`] invariants. zenoh's
-    /// equivalent divides by the same width and would likewise panic.
+    /// Cannot divide by zero: the sub-interval width `interval_ms /
+    /// sub_intervals` is `>= 1` by the [`ReplicationConfig`] invariants, which
+    /// [`new`](ReplicationConfig::new) asserts at construction — so a config
+    /// that reaches here is always valid.
     pub fn classify(&self, time: u64) -> (IntervalIdx, SubIntervalIdx) {
         let ms = ntp64_to_ms(time);
         let interval_ms = self.interval_ms as u128;
@@ -397,7 +406,7 @@ fn ntp64_to_ms(time: u64) -> u128 {
 /// distinguishing power and hashing it would cost time (log.rs:226-231). The
 /// `(key, time, id)` triple is exactly what the newer-wins comparator orders
 /// on, so two replicas that hold the same event compute the same fingerprint.
-pub fn event_fingerprint(key: &str, timestamp: &TimestampHint) -> Fingerprint {
+pub(crate) fn event_fingerprint(key: &str, timestamp: &TimestampHint) -> Fingerprint {
     let mut hasher = Xxh3::default();
     hasher.update(key.as_bytes());
     hasher.update(&timestamp.time.to_le_bytes());
@@ -568,7 +577,7 @@ impl DigestDiff {
 ///
 /// `events` is the distinct latest `(key, timestamp)` per key — exactly what
 /// [`crate::storage_backend::StorageBackend::get_all_entries`] yields. Each
-/// event is hashed ([`event_fingerprint`]) and XOR-accumulated into its
+/// event is hashed (`event_fingerprint`) and XOR-accumulated into its
 /// `(interval, sub-interval)` bucket; the bucket fingerprints then roll up by
 /// era:
 /// - intervals `< warm_lower` XOR into the single `cold_era_fingerprint`;

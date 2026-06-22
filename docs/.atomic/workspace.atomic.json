@@ -47307,6 +47307,44 @@
         "LOCAL: R311vp on 199b23c (origin/main=be8e731, +9 ahead vh..vp); NOT pushed; push awaits explicit consent. Residuals: live zenohd-storage-manager digest interop (needs plugin + aligner), propagation-delay/jitter publisher tuning (needs seeded RNG), incremental-log optimization (currently recompute-from-snapshot per StorageState::replication_digest divergence note)."
       ]
     },
+    "Round 311vq": {
+      "decision_summary": "R311vq: storage-replication 4-agent adversarial session-review remediation (review of R311vh..vp) -- enforce the ReplicationConfig invariant at construction, guard the History::All empty-digest boundary, tighten honesty docs, and minimize the API surface; review verdict was textbook-faithful with only minor findings, all fixed.",
+      "changes_bullets": [
+        "ReplicationConfig::new now asserts sub_intervals>=1 && interval_ms>=sub_intervals (the documented invariant was honor-system; now load-bearing) -> classify can no longer divide by zero; classify # Panics doc softened accordingly. A robustness improvement over zenoh's implicit later panic.",
+        "StorageState::replication_digest: doc warning + debug_assert(latest_mode()) for the History::All boundary - `latest` is populated only in Latest mode, so an All backend silently yielded an EMPTY digest; now caught loudly in debug + documented (replication assumes Latest, mirroring zenoh).",
+        "event_fingerprint pub -> pub(crate) (internal hash helper, no external consumer; its 3 public-doc links demoted to plain spans so public docs don't reference a private item). defaults() citation gained the plugins/ path prefix. DigestSubscriber test comment corrected: cross-session firing needs a TWO-INSTANCE e2e - a Remote-only subscriber cannot be loopback-tested in one session (R9 was byte-interop, not firing)."
+      ],
+      "verification_bullets": [
+        "4-agent adversarial review (fidelity / correctness / structure / honesty) of R311vh..vp, verdict: byte + semantically faithful (citations EXACT, the u32-secs-truncation hypothesis self-refuted), operating-range sound (no deadlock / over-read; ntp64->ms bit-exact vs uhlc), textbook-grade structure (zid + wall_clock SSOT, kernel/driver layering, wire isolation all exemplary), claims match delivery. All findings minor; the 5 actionable ones fixed here.",
+        "session-core --features storage-replication: storage_ 54/54 (storage_replication 33 + storage_state 21). runtime-tokio --features storage-replication,pubsub-allow-loop: storage_replication_service 9/9. clippy -D clean (both crates --all-targets); fmt clean. (full run-ci was GREEN at R311vo; re-run on the remediated state pending.)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vq = storage-replication 4-agent adversarial session-review remediation (review of R311vh..vp). Verdict textbook-grade: fidelity EXACT, correctness operating-range-sound, structure exemplary (SSOT/layering/wire-isolation), claims honest. Fixes: ReplicationConfig::new asserts the invariant (no more cryptic classify div-by-zero); replication_digest debug_assert + doc for the History::All empty-digest boundary; event_fingerprint pub->pub(crate) (+ doc links demoted); defaults() citation plugins/ prefix; subscriber test comment honesty (a Remote-only subscriber can't be single-session-loopback-tested -> two-instance e2e).",
+        "storage-replication DIGEST TRACK COMPLETE + reviewed (R1 vh, R2 vi, R3 vj, R4 vk, R5 vl, R6 vm, R7 vn, R8 vo facade+run-ci, R9 vp byte-interop, vq review remediation; +10 commits). full run-ci was GREEN at vo; re-running on the remediated state before declaring push-ready. NEXT TRACK: storage-aligner (consumes DigestDiff to pull diverging entries; also carries the live two-replica / zenohd-storage-manager convergence e2e).",
+        "LOCAL: R311vq on 7bd3681 (origin/main=be8e731, +10 ahead vh..vq); NOT pushed; push awaits explicit consent. Named residuals: live zenohd-storage-manager digest exchange (needs plugin + aligner), two-instance subscriber-firing e2e, propagation-delay/jitter publisher tuning (seeded RNG), incremental-log optimization (currently recompute-from-snapshot)."
+      ],
+      "publishable_decision_summary": "R311vq: storage-replication 4-agent adversarial session-review remediation (review of R311vh..vp) -- enforce the ReplicationConfig invariant at construction, guard the History::All empty-digest boundary, tighten honesty docs, and minimize the API surface; review verdict was textbook-faithful with only minor findings, all fixed.",
+      "publishable_changes_bullets": [
+        "ReplicationConfig::new now asserts sub_intervals>=1 && interval_ms>=sub_intervals (the documented invariant was honor-system; now load-bearing) -> classify can no longer divide by zero; classify # Panics doc softened accordingly. A robustness improvement over zenoh's implicit later panic.",
+        "StorageState::replication_digest: doc warning + debug_assert(latest_mode()) for the History::All boundary - `latest` is populated only in Latest mode, so an All backend silently yielded an EMPTY digest; now caught loudly in debug + documented (replication assumes Latest, mirroring zenoh).",
+        "event_fingerprint pub -> pub(crate) (internal hash helper, no external consumer; its 3 public-doc links demoted to plain spans so public docs don't reference a private item). defaults() citation gained the plugins/ path prefix. DigestSubscriber test comment corrected: cross-session firing needs a TWO-INSTANCE e2e - a Remote-only subscriber cannot be loopback-tested in one session (R9 was byte-interop, not firing)."
+      ],
+      "publishable_verification_bullets": [
+        "4-agent adversarial review (fidelity / correctness / structure / honesty) of R311vh..vp, verdict: byte + semantically faithful (citations EXACT, the u32-secs-truncation hypothesis self-refuted), operating-range sound (no deadlock / over-read; ntp64->ms bit-exact vs uhlc), textbook-grade structure (zid + wall_clock SSOT, kernel/driver layering, wire isolation all exemplary), claims match delivery. All findings minor; the 5 actionable ones fixed here.",
+        "session-core --features storage-replication: storage_ 54/54 (storage_replication 33 + storage_state 21). runtime-tokio --features storage-replication,pubsub-allow-loop: storage_replication_service 9/9. clippy -D clean (both crates --all-targets); fmt clean. (full run-ci was GREEN at R311vo; re-run on the remediated state pending.)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vq = storage-replication 4-agent adversarial session-review remediation (review of R311vh..vp). Verdict textbook-grade: fidelity EXACT, correctness operating-range-sound, structure exemplary (SSOT/layering/wire-isolation), claims honest. Fixes: ReplicationConfig::new asserts the invariant (no more cryptic classify div-by-zero); replication_digest debug_assert + doc for the History::All empty-digest boundary; event_fingerprint pub->pub(crate) (+ doc links demoted); defaults() citation plugins/ prefix; subscriber test comment honesty (a Remote-only subscriber can't be single-session-loopback-tested -> two-instance e2e).",
+        "storage-replication DIGEST TRACK COMPLETE + reviewed (R1 vh, R2 vi, R3 vj, R4 vk, R5 vl, R6 vm, R7 vn, R8 vo facade+run-ci, R9 vp byte-interop, vq review remediation; +10 commits). full run-ci was GREEN at vo; re-running on the remediated state before declaring push-ready. NEXT TRACK: storage-aligner (consumes DigestDiff to pull diverging entries; also carries the live two-replica / zenohd-storage-manager convergence e2e).",
+        "LOCAL: R311vq on 7bd3681 (origin/main=be8e731, +10 ahead vh..vq); NOT pushed; push awaits explicit consent. Named residuals: live zenohd-storage-manager digest exchange (needs plugin + aligner), two-instance subscriber-firing e2e, propagation-delay/jitter publisher tuning (seeded RNG), incremental-log optimization (currently recompute-from-snapshot)."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [

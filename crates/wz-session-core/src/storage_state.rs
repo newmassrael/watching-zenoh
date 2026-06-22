@@ -354,12 +354,31 @@ impl<B: StorageBackend> StorageState<B> {
     /// [`StorageBackend::get_all_entries`], which drops deleted keys. zenoh
     /// records Delete events in its replication log for the same reason
     /// (log.rs:44-49 — `Action::Delete` is a first-class logged event).
+    ///
+    /// # History::Latest only
+    ///
+    /// Replication assumes a `History::Latest` backend, mirroring zenoh
+    /// (replication only runs on Latest storages). The digest is built from
+    /// [`latest`](StorageState), which is populated **only** in
+    /// [`latest_mode`](StorageState::latest_mode) (the newer-wins gate). On a
+    /// `History::All` backend `latest` stays empty, so this would return an
+    /// EMPTY digest regardless of stored data — a replica would silently
+    /// advertise "I have nothing". That is a misconfiguration (the
+    /// `storage-replication` feature deliberately does not imply
+    /// `storage-history`); the `debug_assert` below catches it loudly in
+    /// debug builds instead of letting it fail silently.
     #[cfg(feature = "storage-replication")]
     pub fn replication_digest(
         &self,
         config: &ReplicationConfig,
         hot_era_upper_bound: IntervalIdx,
     ) -> Digest {
+        debug_assert!(
+            self.latest_mode(),
+            "replication_digest assumes a History::Latest backend; a \
+             History::All backend leaves `latest` empty and yields an empty \
+             digest (zenoh's digest likewise assumes Latest)"
+        );
         build_digest(
             config,
             self.latest.iter().map(|(key, ts)| (key.as_str(), ts)),
