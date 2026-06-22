@@ -86,6 +86,7 @@
 //!   [`IntervalIdx::value`] / [`SubIntervalIdx::value`] instead, reserving
 //!   `Deref` for smart-pointer-like types. Same data, idiomatic surface.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 
 use xxhash_rust::xxh3::Xxh3;
@@ -322,6 +323,38 @@ impl ReplicationConfig {
             SubIntervalIdx::from(sub_interval as u64),
         )
     }
+
+    /// The lowest interval index in the Hot era, given that era's upper
+    /// bound. zenoh `Configuration::hot_era_lower_bound`
+    /// (configuration.rs:143-145): `hot_upper - hot + 1`.
+    ///
+    /// Saturating, so a small `hot_era_upper_bound` (early in the epoch, or
+    /// a unit test) cannot underflow. zenoh's plain subtraction assumes
+    /// epoch-scale indices and would panic below the bound; the two agree
+    /// over the entire operating range.
+    pub fn hot_era_lower_bound(&self, hot_era_upper_bound: IntervalIdx) -> IntervalIdx {
+        IntervalIdx::from(
+            hot_era_upper_bound
+                .value()
+                .saturating_sub(self.hot)
+                .saturating_add(1),
+        )
+    }
+
+    /// The lowest interval index in the Warm era, given the **Hot** era's
+    /// upper bound. zenoh `Configuration::warm_era_lower_bound`
+    /// (configuration.rs:166-168): `hot_upper - hot - warm + 1` (the
+    /// argument is the Hot upper bound, not the Warm one). Saturating, as for
+    /// [`hot_era_lower_bound`](ReplicationConfig::hot_era_lower_bound).
+    pub fn warm_era_lower_bound(&self, hot_era_upper_bound: IntervalIdx) -> IntervalIdx {
+        IntervalIdx::from(
+            hot_era_upper_bound
+                .value()
+                .saturating_sub(self.hot)
+                .saturating_sub(self.warm)
+                .saturating_add(1),
+        )
+    }
 }
 
 /// Converts an NTP64 `time` to milliseconds since the UNIX epoch,
@@ -370,6 +403,149 @@ pub fn event_fingerprint(key: &str, timestamp: &TimestampHint) -> Fingerprint {
     hasher.update(&timestamp.time.to_le_bytes());
     hasher.update(&zid_to_le_array(&timestamp.zid));
     Fingerprint::from(hasher.digest())
+}
+
+/// A concise, comparable summary of a replica's stored set — XOR-rolled
+/// [`Fingerprint`]s bucketed by event time, grouped into three eras of
+/// increasing temporal granularity. zenoh `digest::Digest` (digest.rs:77-83).
+///
+/// Granularity rises with recency, so the diff drill-down (the next atom)
+/// localises a divergence cheaply:
+/// - **Cold** (oldest): a single [`Fingerprint`] over all cold intervals;
+/// - **Warm**: one [`Fingerprint`] per interval;
+/// - **Hot** (newest): one [`Fingerprint`] per sub-interval, grouped by
+///   interval.
+///
+/// `configuration_fingerprint` ([`ReplicationConfig::fingerprint`]) is
+/// carried so a receiver rejects a digest from an incompatibly-configured
+/// replica before comparing anything (the diff short-circuit).
+///
+/// The maps diverge from zenoh's `HashMap` to `BTreeMap` (the no_std kernel
+/// has no std hasher, as elsewhere in wz storage). This is wire-compatible: a
+/// length-prefixed map serialises and deserialises independently of entry
+/// order, so a `BTreeMap` round-trips a zenoh `HashMap` digest and vice versa
+/// (the R4 codec atom).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Digest {
+    pub(crate) configuration_fingerprint: Fingerprint,
+    pub(crate) cold_era_fingerprint: Fingerprint,
+    pub(crate) warm_era_fingerprints: BTreeMap<IntervalIdx, Fingerprint>,
+    pub(crate) hot_era_fingerprints: BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>>,
+}
+
+impl Digest {
+    /// The configuration compatibility fingerprint (the digest-exchange gate).
+    pub fn configuration_fingerprint(&self) -> Fingerprint {
+        self.configuration_fingerprint
+    }
+
+    /// The single Cold-era fingerprint (XOR of all cold intervals).
+    pub fn cold_era_fingerprint(&self) -> Fingerprint {
+        self.cold_era_fingerprint
+    }
+
+    /// The per-interval Warm-era fingerprints.
+    pub fn warm_era_fingerprints(&self) -> &BTreeMap<IntervalIdx, Fingerprint> {
+        &self.warm_era_fingerprints
+    }
+
+    /// The per-sub-interval Hot-era fingerprints, grouped by interval.
+    pub fn hot_era_fingerprints(
+        &self,
+    ) -> &BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>> {
+        &self.hot_era_fingerprints
+    }
+}
+
+/// Builds the [`Digest`] of a replica's stored set, given the Hot era's upper
+/// bound (typically the last elapsed interval). zenoh
+/// `LogLatest::digest_from` (log.rs:557-590).
+///
+/// `events` is the distinct latest `(key, timestamp)` per key — exactly what
+/// [`crate::storage_backend::StorageBackend::get_all_entries`] yields. Each
+/// event is hashed ([`event_fingerprint`]) and XOR-accumulated into its
+/// `(interval, sub-interval)` bucket; the bucket fingerprints then roll up by
+/// era:
+/// - intervals `< warm_lower` XOR into the single `cold_era_fingerprint`;
+/// - intervals in `[warm_lower, hot_lower)` contribute their interval
+///   fingerprint to `warm_era_fingerprints`, **only when non-zero**
+///   (log.rs:576);
+/// - intervals `>= hot_lower` contribute their per-sub-interval fingerprints
+///   to `hot_era_fingerprints`, **dropping zero sub-intervals**
+///   (`sub_intervals_fingerprints`, classification.rs:161-167).
+///
+/// Intervals strictly newer than `hot_era_upper_bound` are excluded
+/// (log.rs:567), so two replicas comparing against the same upper bound see
+/// the same era partition. The non-zero filters are required for digest
+/// equality: an absent entry and a zero entry diff differently.
+///
+/// # Design divergence
+///
+/// zenoh maintains an incremental `LogLatest` (XOR-updated on every event)
+/// and reads the digest off it. wz recomputes the digest from the storage
+/// snapshot each publish cycle, so the buckets here are transient and no
+/// parallel log is kept. The resulting [`Digest`] is identical — only the
+/// computation strategy differs (recompute vs incremental). An incremental
+/// log is a throughput optimisation for very large stores, a documented
+/// future atom if profiling demands it.
+pub fn build_digest<'a>(
+    config: &ReplicationConfig,
+    events: impl IntoIterator<Item = (&'a str, &'a TimestampHint)>,
+    hot_era_upper_bound: IntervalIdx,
+) -> Digest {
+    // 1. XOR-accumulate every event into its (interval, sub-interval) bucket.
+    let mut buckets: BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>> = BTreeMap::new();
+    for (key, timestamp) in events {
+        let (interval_idx, sub_interval_idx) = config.classify(timestamp.time);
+        let fp = event_fingerprint(key, timestamp);
+        *buckets
+            .entry(interval_idx)
+            .or_default()
+            .entry(sub_interval_idx)
+            .or_default() ^= fp;
+    }
+
+    let hot_lower = config.hot_era_lower_bound(hot_era_upper_bound);
+    let warm_lower = config.warm_era_lower_bound(hot_era_upper_bound);
+
+    let mut cold_era_fingerprint = Fingerprint::default();
+    let mut warm_era_fingerprints = BTreeMap::new();
+    let mut hot_era_fingerprints = BTreeMap::new();
+
+    // 2. Roll bucket fingerprints up by era. The BTreeMap iterates ascending,
+    //    so the cheapest comparison (cold — the most and oldest intervals) is
+    //    tested first, mirroring zenoh's ordering note (log.rs:569-572).
+    for (interval_idx, sub_map) in buckets {
+        if interval_idx > hot_era_upper_bound {
+            continue; // strictly newer than the hot upper bound (log.rs:567)
+        }
+        // An interval's fingerprint is the XOR of its sub-interval fingerprints.
+        let interval_fp = sub_map
+            .values()
+            .copied()
+            .fold(Fingerprint::default(), |acc, fp| acc ^ fp);
+
+        if interval_idx < warm_lower {
+            cold_era_fingerprint ^= interval_fp;
+        } else if interval_idx < hot_lower {
+            if interval_fp != Fingerprint::default() {
+                warm_era_fingerprints.insert(interval_idx, interval_fp);
+            }
+        } else {
+            let subs: BTreeMap<SubIntervalIdx, Fingerprint> = sub_map
+                .into_iter()
+                .filter(|(_, fp)| *fp != Fingerprint::default())
+                .collect();
+            hot_era_fingerprints.insert(interval_idx, subs);
+        }
+    }
+
+    Digest {
+        configuration_fingerprint: config.fingerprint(),
+        cold_era_fingerprint,
+        warm_era_fingerprints,
+        hot_era_fingerprints,
+    }
 }
 
 #[cfg(test)]
@@ -527,5 +703,146 @@ mod tests {
         let trimmed = event_fingerprint("demo/a", &ts(100, vec![0x01]));
         let padded = event_fingerprint("demo/a", &ts(100, vec![0x01, 0x00, 0x00]));
         assert_eq!(trimmed, padded);
+    }
+
+    // -- Digest build (era partition + XOR rollup) ----------------------
+
+    /// hot=2, warm=3, interval 10s, 5 sub-intervals, hot_upper=10 gives
+    /// era bounds warm_lower=6, hot_lower=9: intervals <6 cold, [6,9) warm,
+    /// >=9 hot.
+    fn era_cfg() -> ReplicationConfig {
+        ReplicationConfig::new("demo/**", None, 10_000, 5, 2, 3, 250)
+    }
+
+    /// An NTP64 `time` at exactly `secs` seconds past the epoch (zero
+    /// fraction); ms = secs * 1000, so the interval is `secs / 10`.
+    fn at_secs(secs: u64) -> u64 {
+        secs << 32
+    }
+
+    #[test]
+    fn build_digest_partitions_events_into_eras() {
+        let cfg = era_cfg();
+        // interval 3 (cold), interval 7 (warm), interval 9 sub 2 (hot).
+        let cold = ts(at_secs(35), vec![0x01]);
+        let warm = ts(at_secs(75), vec![0x01]);
+        let hot = ts(at_secs(95), vec![0x01]);
+        let events = [("demo/a", &cold), ("demo/b", &warm), ("demo/c", &hot)];
+
+        let digest = build_digest(&cfg, events, IntervalIdx::from(10));
+
+        assert_eq!(digest.configuration_fingerprint(), cfg.fingerprint());
+        // Cold: the single cold event's fingerprint.
+        assert_eq!(
+            digest.cold_era_fingerprint(),
+            event_fingerprint("demo/a", &cold)
+        );
+        // Warm: exactly interval 7, fingerprint == the event's (one event,
+        // one sub-interval, so the interval fingerprint is the event's).
+        assert_eq!(digest.warm_era_fingerprints().len(), 1);
+        assert_eq!(
+            digest.warm_era_fingerprints().get(&IntervalIdx::from(7)),
+            Some(&event_fingerprint("demo/b", &warm))
+        );
+        // Hot: interval 9, sub-interval 2 (95000ms -> rem 5000 / 2000 = 2).
+        assert_eq!(digest.hot_era_fingerprints().len(), 1);
+        let hot_subs = digest
+            .hot_era_fingerprints()
+            .get(&IntervalIdx::from(9))
+            .expect("interval 9 is in the hot era");
+        assert_eq!(
+            hot_subs.get(&SubIntervalIdx::from(2)),
+            Some(&event_fingerprint("demo/c", &hot))
+        );
+    }
+
+    #[test]
+    fn build_digest_xor_rolls_up_a_warm_interval() {
+        let cfg = era_cfg();
+        // Two events in interval 7 (warm), different sub-intervals: 71000ms
+        // -> sub 0, 75000ms -> sub 2. The warm interval fingerprint is the
+        // XOR of the two sub-interval (single-event) fingerprints.
+        let e0 = ts(at_secs(71), vec![0x01]);
+        let e2 = ts(at_secs(75), vec![0x01]);
+        let events = [("demo/a", &e0), ("demo/b", &e2)];
+
+        let digest = build_digest(&cfg, events, IntervalIdx::from(10));
+
+        let expected = event_fingerprint("demo/a", &e0) ^ event_fingerprint("demo/b", &e2);
+        assert_eq!(
+            digest.warm_era_fingerprints().get(&IntervalIdx::from(7)),
+            Some(&expected)
+        );
+    }
+
+    #[test]
+    fn build_digest_hot_keeps_per_sub_interval_granularity() {
+        let cfg = era_cfg();
+        // Interval 9 (hot), two distinct sub-intervals: 94000ms -> sub 2,
+        // 98000ms -> sub 4. Both must appear separately under interval 9.
+        let s2 = ts(at_secs(94), vec![0x01]);
+        let s4 = ts(at_secs(98), vec![0x01]);
+        let events = [("demo/a", &s2), ("demo/b", &s4)];
+
+        let digest = build_digest(&cfg, events, IntervalIdx::from(10));
+
+        let subs = digest
+            .hot_era_fingerprints()
+            .get(&IntervalIdx::from(9))
+            .expect("interval 9 hot");
+        assert_eq!(subs.len(), 2);
+        assert_eq!(
+            subs.get(&SubIntervalIdx::from(2)),
+            Some(&event_fingerprint("demo/a", &s2))
+        );
+        assert_eq!(
+            subs.get(&SubIntervalIdx::from(4)),
+            Some(&event_fingerprint("demo/b", &s4))
+        );
+    }
+
+    #[test]
+    fn build_digest_excludes_intervals_newer_than_hot_upper() {
+        let cfg = era_cfg();
+        // hot_upper = 5, but the event is at interval 9 -> excluded entirely.
+        let future = ts(at_secs(95), vec![0x01]);
+        let events = [("demo/a", &future)];
+
+        let digest = build_digest(&cfg, events, IntervalIdx::from(5));
+
+        assert_eq!(digest.cold_era_fingerprint(), Fingerprint::default());
+        assert!(digest.warm_era_fingerprints().is_empty());
+        assert!(digest.hot_era_fingerprints().is_empty());
+    }
+
+    #[test]
+    fn build_digest_drops_self_cancelling_buckets() {
+        let cfg = era_cfg();
+        // The SAME event twice in a warm interval XORs to zero -> the
+        // interval must NOT appear (the non-zero filter, log.rs:576). An
+        // absent entry and a zero entry must diff differently, so this filter
+        // is load-bearing for digest equality.
+        let e = ts(at_secs(75), vec![0x01]);
+        let events = [("demo/a", &e), ("demo/a", &e)];
+
+        let digest = build_digest(&cfg, events, IntervalIdx::from(10));
+
+        assert!(
+            digest.warm_era_fingerprints().is_empty(),
+            "a net-zero interval is filtered out, not stored as zero"
+        );
+    }
+
+    #[test]
+    fn build_digest_empty_store_is_empty_but_carries_config_fp() {
+        let cfg = era_cfg();
+        let events: [(&str, &TimestampHint); 0] = [];
+
+        let digest = build_digest(&cfg, events, IntervalIdx::from(10));
+
+        assert_eq!(digest.configuration_fingerprint(), cfg.fingerprint());
+        assert_eq!(digest.cold_era_fingerprint(), Fingerprint::default());
+        assert!(digest.warm_era_fingerprints().is_empty());
+        assert!(digest.hot_era_fingerprints().is_empty());
     }
 }

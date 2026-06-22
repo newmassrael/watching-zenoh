@@ -47007,6 +47007,44 @@
         "LOCAL: R311vh on be8e731 (origin/main=be8e731); host-gated kernel atom, NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8. storage-replication inventory still reserved (flips ACTIVE at R8 when end-to-end)."
       ]
     },
+    "Round 311vi": {
+      "decision_summary": "R311vi: storage-replication Digest build atom (replication 2/N) -- the Digest 4-field structure (config_fp / cold / warm-per-interval / hot-per-subinterval) + 3-era classification + XOR rollup, built from a storage snapshot via build_digest; a faithful mirror of zenoh LogLatest::digest_from.",
+      "changes_bullets": [
+        "storage_replication.rs: Digest{configuration_fingerprint, cold_era_fingerprint, warm_era_fingerprints: BTreeMap<IntervalIdx,Fingerprint>, hot_era_fingerprints: BTreeMap<IntervalIdx,BTreeMap<SubIntervalIdx,Fingerprint>>} (digest.rs:77-83) + accessors; ReplicationConfig::hot_era_lower_bound / warm_era_lower_bound (saturating; configuration.rs:143-168).",
+        "build_digest(config, events, hot_upper): XOR-accumulate each event_fingerprint into its (interval,sub) bucket, then era rollup (idx<warm_lower -> cold XOR; [warm_lower,hot_lower) -> warm per-interval if non-zero; >=hot_lower -> hot per-sub dropping zero subs); intervals > hot_upper excluded. Mirrors LogLatest::digest_from (log.rs:557-590) + sub_intervals_fingerprints (classification.rs:161-167).",
+        "Design divergence (documented): wz recomputes the digest from the storage snapshot each cycle (transient buckets), NOT zenoh's incremental LogLatest; identical Digest, different compute strategy. Maps are BTreeMap not HashMap (no_std hasher) - wire-compatible (a length-prefixed map is order-independent)."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-replication: storage_replication 17/17 (11 R1 + 6 new: era partition cold/warm/hot; warm interval-fp = XOR of its sub events; hot per-sub granularity; intervals > hot_upper excluded; self-cancelling bucket dropped via the non-zero filter; empty store empty but carries config_fp).",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. Default-feature code unchanged: the new code is storage-replication-gated; the only non-gated change was R1's behaviour-preserving storage_state extract (session-core --lib 155/155 at R1)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vi = storage-replication Digest build atom (replication 2/N, §5.11): Digest 4-field struct (config_fp / cold / warm-per-interval / hot-per-subinterval; 3-era increasing granularity) + era bounds + build_digest XOR rollup from a (key,ts) snapshot. Faithful mirror of zenoh LogLatest::digest_from; wz recomputes from snapshot (no incremental log) - documented divergence, identical Digest.",
+        "storage-replication track: R1 primitives DONE (311vh=ae1224f), R2 Digest build DONE -> NEXT R3 Digest::diff -> DigestDiff{cold_eras_differ, warm:Set<IntervalIdx>, hot:Map<IntervalIdx,Set<SubIntervalIdx>>} (digest.rs:109-170: config-fp short-circuit + hot/warm retain-differences drill-down + cold compare) -> R4 bincode-compatible wire codec (isolated SSOT) -> R5 StorageState->Digest snapshot incl tombstones -> R6 driver publish loop -> R7 driver subscribe+diff->observer -> R8 facade/inventory/run-ci/review -> R9 cross-impl interop.",
+        "LOCAL: R311vi on ae1224f (origin/main=be8e731, +2 ahead vh+vi); host-gated kernel atoms, NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8."
+      ],
+      "publishable_decision_summary": "R311vi: storage-replication Digest build atom (replication 2/N) -- the Digest 4-field structure (config_fp / cold / warm-per-interval / hot-per-subinterval) + 3-era classification + XOR rollup, built from a storage snapshot via build_digest; a faithful mirror of zenoh LogLatest::digest_from.",
+      "publishable_changes_bullets": [
+        "storage_replication.rs: Digest{configuration_fingerprint, cold_era_fingerprint, warm_era_fingerprints: BTreeMap<IntervalIdx,Fingerprint>, hot_era_fingerprints: BTreeMap<IntervalIdx,BTreeMap<SubIntervalIdx,Fingerprint>>} (digest.rs:77-83) + accessors; ReplicationConfig::hot_era_lower_bound / warm_era_lower_bound (saturating; configuration.rs:143-168).",
+        "build_digest(config, events, hot_upper): XOR-accumulate each event_fingerprint into its (interval,sub) bucket, then era rollup (idx<warm_lower -> cold XOR; [warm_lower,hot_lower) -> warm per-interval if non-zero; >=hot_lower -> hot per-sub dropping zero subs); intervals > hot_upper excluded. Mirrors LogLatest::digest_from (log.rs:557-590) + sub_intervals_fingerprints (classification.rs:161-167).",
+        "Design divergence (documented): wz recomputes the digest from the storage snapshot each cycle (transient buckets), NOT zenoh's incremental LogLatest; identical Digest, different compute strategy. Maps are BTreeMap not HashMap (no_std hasher) - wire-compatible (a length-prefixed map is order-independent)."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-replication: storage_replication 17/17 (11 R1 + 6 new: era partition cold/warm/hot; warm interval-fp = XOR of its sub events; hot per-sub granularity; intervals > hot_upper excluded; self-cancelling bucket dropped via the non-zero filter; empty store empty but carries config_fp).",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. Default-feature code unchanged: the new code is storage-replication-gated; the only non-gated change was R1's behaviour-preserving storage_state extract (session-core --lib 155/155 at R1)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vi = storage-replication Digest build atom (replication 2/N, §5.11): Digest 4-field struct (config_fp / cold / warm-per-interval / hot-per-subinterval; 3-era increasing granularity) + era bounds + build_digest XOR rollup from a (key,ts) snapshot. Faithful mirror of zenoh LogLatest::digest_from; wz recomputes from snapshot (no incremental log) - documented divergence, identical Digest.",
+        "storage-replication track: R1 primitives DONE (311vh=ae1224f), R2 Digest build DONE -> NEXT R3 Digest::diff -> DigestDiff{cold_eras_differ, warm:Set<IntervalIdx>, hot:Map<IntervalIdx,Set<SubIntervalIdx>>} (digest.rs:109-170: config-fp short-circuit + hot/warm retain-differences drill-down + cold compare) -> R4 bincode-compatible wire codec (isolated SSOT) -> R5 StorageState->Digest snapshot incl tombstones -> R6 driver publish loop -> R7 driver subscribe+diff->observer -> R8 facade/inventory/run-ci/review -> R9 cross-impl interop.",
+        "LOCAL: R311vi on ae1224f (origin/main=be8e731, +2 ahead vh+vi); host-gated kernel atoms, NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
