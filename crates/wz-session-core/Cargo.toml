@@ -610,6 +610,16 @@ wz-session-core-test-support = { path = "../wz-session-core-test-support" }
 # an isolated subset excluding a codec gets neither the wz-codecs codec
 # nor the TestWire impl; the dev-dep edge is inert in non-test builds.
 wz-codecs-test-support = { path = "../wz-codecs-test-support" }
+# Round 311vk — byte-compat ground truth for the storage-replication wire
+# codec (storage_replication::wire). The production codec is hand-rolled +
+# no_std (bincode 1.x is std-only; 2.x's default format differs from 1.x's),
+# so it cannot depend on bincode. These TEST-ONLY deps let a test serialize a
+# serde mirror of the Digest with the EXACT bincode 1.3 default config zenoh
+# uses (zenoh workspace `bincode = "1.3.3"`; serialize_into/deserialize,
+# core.rs:229/356) and assert the hand-rolled bytes match it — proving wire
+# compatibility without running zenoh. Inert in the production / MCU artifact.
+bincode = "1.3"
+serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

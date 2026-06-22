@@ -653,6 +653,350 @@ pub fn build_digest<'a>(
     }
 }
 
+/// The storage-replication Digest **wire codec** (replication 4/N): byte-exact
+/// encode/decode of a [`Digest`] to the format zenoh's replication publishes,
+/// isolated here so the single place coupled to zenoh's (un-versioned)
+/// serialization can be audited and changed in one spot.
+///
+/// zenoh serializes the Digest with `bincode` 1.3 default config
+/// (core.rs:229-232, deserialize :356): little-endian, fixed-width integers,
+/// and `u64` length prefixes for maps. This module reproduces that byte layout
+/// by hand instead of depending on the `bincode` crate, because:
+///
+/// - bincode 1.x is `std::io`-based (std-only) and so cannot live in this
+///   no_std kernel, while bincode 2.x's default format differs from 1.x's —
+///   neither drops in;
+/// - the layout is small and fully specified, so a hand-rolled codec is the
+///   explicit, self-documenting SSOT (the wire format is visible here, not
+///   hidden behind a dependency's default-config quirk that a version bump
+///   could change silently);
+/// - it stays dependency-free and unit-testable in no_std, and a future MCU
+///   replication driver reuses it.
+///
+/// A `#[cfg(test)]` cross-check serializes a serde mirror with the actual
+/// bincode 1.3 (a dev-dependency) and asserts these bytes match it, so the
+/// hand-rolled format is pinned to ground truth; the R9 interop atom confirms
+/// it against a live zenoh replica.
+///
+/// ## Byte layout (bincode 1.3 default: LE, fixint, `u64` lengths)
+///
+/// A newtype struct (`Fingerprint(u64)` etc.) serializes as its inner `u64`
+/// (8 LE bytes); a map is a `u64` length then that many key/value pairs; a
+/// struct is its fields concatenated in declaration order. So a [`Digest`]:
+///
+/// ```text
+/// configuration_fingerprint : u64
+/// cold_era_fingerprint      : u64
+/// warm_era_fingerprints     : u64 len, then len * [ IntervalIdx:u64, Fingerprint:u64 ]
+/// hot_era_fingerprints      : u64 len, then len * [ IntervalIdx:u64,
+///                              (u64 len, then len * [ SubIntervalIdx:u64, Fingerprint:u64 ]) ]
+/// ```
+///
+/// [`encode`](wire::encode) emits the maps in `BTreeMap` (sorted) order, so
+/// two wz replicas produce identical bytes. [`decode`](wire::decode) reads a
+/// length then that many pairs, so it accepts zenoh's arbitrary `HashMap`
+/// order too — the format is order-independent on read, which is what makes
+/// wz<->zenoh interop work despite the map-type divergence.
+pub mod wire {
+    use alloc::collections::BTreeMap;
+    use alloc::vec::Vec;
+
+    use super::{Digest, Fingerprint, IntervalIdx, SubIntervalIdx};
+
+    /// Failure decoding a [`Digest`] from bytes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DigestDecodeError {
+        /// The buffer ended before a fixed-width field could be read.
+        UnexpectedEof,
+        /// A length prefix exceeds the bytes that remain — a corrupt or
+        /// hostile buffer. Rejected before allocating or looping.
+        LengthOverflow,
+        /// Bytes remained after a complete [`Digest`] was decoded.
+        TrailingBytes,
+    }
+
+    fn push_u64(out: &mut Vec<u8>, v: u64) {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Encodes a [`Digest`] to the zenoh bincode wire bytes (deterministic:
+    /// maps emit in sorted order).
+    pub fn encode(digest: &Digest) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_u64(&mut out, digest.configuration_fingerprint.value());
+        push_u64(&mut out, digest.cold_era_fingerprint.value());
+
+        push_u64(&mut out, digest.warm_era_fingerprints.len() as u64);
+        for (idx, fp) in &digest.warm_era_fingerprints {
+            push_u64(&mut out, idx.value());
+            push_u64(&mut out, fp.value());
+        }
+
+        push_u64(&mut out, digest.hot_era_fingerprints.len() as u64);
+        for (idx, subs) in &digest.hot_era_fingerprints {
+            push_u64(&mut out, idx.value());
+            push_u64(&mut out, subs.len() as u64);
+            for (sub_idx, fp) in subs {
+                push_u64(&mut out, sub_idx.value());
+                push_u64(&mut out, fp.value());
+            }
+        }
+        out
+    }
+
+    /// A cursor over the input bytes that reads fixed-width little-endian
+    /// `u64`s and refuses to read past the end.
+    struct Reader<'a> {
+        buf: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Reader<'a> {
+        fn new(buf: &'a [u8]) -> Self {
+            Self { buf, pos: 0 }
+        }
+
+        fn read_u64(&mut self) -> Result<u64, DigestDecodeError> {
+            let end = self
+                .pos
+                .checked_add(8)
+                .ok_or(DigestDecodeError::UnexpectedEof)?;
+            let slice = self
+                .buf
+                .get(self.pos..end)
+                .ok_or(DigestDecodeError::UnexpectedEof)?;
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(slice);
+            self.pos = end;
+            Ok(u64::from_le_bytes(bytes))
+        }
+
+        fn remaining(&self) -> usize {
+            self.buf.len() - self.pos
+        }
+    }
+
+    /// Rejects a map length that could not possibly fit in the bytes that
+    /// remain (`len * min_entry_bytes > remaining`, or an overflow), so a
+    /// hostile `u64::MAX` length fails fast instead of allocating/looping.
+    fn check_len(len: u64, min_entry_bytes: usize, r: &Reader) -> Result<(), DigestDecodeError> {
+        match (len as usize).checked_mul(min_entry_bytes) {
+            Some(n) if n <= r.remaining() => Ok(()),
+            _ => Err(DigestDecodeError::LengthOverflow),
+        }
+    }
+
+    /// Decodes a [`Digest`] from the zenoh bincode wire bytes. Accepts maps in
+    /// any order (zenoh emits `HashMap` order); rejects truncated, oversized,
+    /// or trailing-byte buffers.
+    pub fn decode(bytes: &[u8]) -> Result<Digest, DigestDecodeError> {
+        let mut r = Reader::new(bytes);
+        let configuration_fingerprint = Fingerprint::from(r.read_u64()?);
+        let cold_era_fingerprint = Fingerprint::from(r.read_u64()?);
+
+        let warm_len = r.read_u64()?;
+        check_len(warm_len, 16, &r)?; // each warm entry: IntervalIdx + Fingerprint
+        let mut warm_era_fingerprints = BTreeMap::new();
+        for _ in 0..warm_len {
+            let idx = IntervalIdx::from(r.read_u64()?);
+            let fp = Fingerprint::from(r.read_u64()?);
+            warm_era_fingerprints.insert(idx, fp);
+        }
+
+        let hot_len = r.read_u64()?;
+        check_len(hot_len, 16, &r)?; // each hot entry is >= IntervalIdx + a (0) len
+        let mut hot_era_fingerprints = BTreeMap::new();
+        for _ in 0..hot_len {
+            let idx = IntervalIdx::from(r.read_u64()?);
+            let sub_len = r.read_u64()?;
+            check_len(sub_len, 16, &r)?; // each sub entry: SubIntervalIdx + Fingerprint
+            let mut subs = BTreeMap::new();
+            for _ in 0..sub_len {
+                let sub_idx = SubIntervalIdx::from(r.read_u64()?);
+                let fp = Fingerprint::from(r.read_u64()?);
+                subs.insert(sub_idx, fp);
+            }
+            hot_era_fingerprints.insert(idx, subs);
+        }
+
+        if r.remaining() != 0 {
+            return Err(DigestDecodeError::TrailingBytes);
+        }
+
+        Ok(Digest {
+            configuration_fingerprint,
+            cold_era_fingerprint,
+            warm_era_fingerprints,
+            hot_era_fingerprints,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::super::{
+            build_digest, Fingerprint, IntervalIdx, ReplicationConfig, TimestampHint,
+        };
+        use super::{decode, encode, DigestDecodeError};
+        use alloc::collections::BTreeMap;
+        use alloc::vec;
+        use alloc::vec::Vec;
+        use serde::Serialize;
+
+        // A serde mirror of zenoh's Digest, serialized with the real bincode
+        // 1.3 (dev-dep) to provide byte-compat ground truth. The newtypes are
+        // single-field tuple structs, exactly as in zenoh, so serde encodes
+        // each as its inner u64 (a newtype_struct).
+        #[derive(Serialize)]
+        struct Fp(u64);
+        #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+        struct Ii(u64);
+        #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+        struct Si(u64);
+        #[derive(Serialize)]
+        struct MirrorDigest {
+            configuration_fingerprint: Fp,
+            cold_era_fingerprint: Fp,
+            warm_era_fingerprints: BTreeMap<Ii, Fp>,
+            hot_era_fingerprints: BTreeMap<Ii, BTreeMap<Si, Fp>>,
+        }
+
+        fn mirror_of(d: &Digest) -> MirrorDigest {
+            MirrorDigest {
+                configuration_fingerprint: Fp(d.configuration_fingerprint().value()),
+                cold_era_fingerprint: Fp(d.cold_era_fingerprint().value()),
+                warm_era_fingerprints: d
+                    .warm_era_fingerprints()
+                    .iter()
+                    .map(|(i, f)| (Ii(i.value()), Fp(f.value())))
+                    .collect(),
+                hot_era_fingerprints: d
+                    .hot_era_fingerprints()
+                    .iter()
+                    .map(|(i, subs)| {
+                        (
+                            Ii(i.value()),
+                            subs.iter()
+                                .map(|(s, f)| (Si(s.value()), Fp(f.value())))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            }
+        }
+
+        use super::super::Digest;
+
+        fn ts(time: u64, zid: Vec<u8>) -> TimestampHint {
+            TimestampHint { time, zid }
+        }
+
+        fn at_secs(secs: u64) -> u64 {
+            secs << 32
+        }
+
+        fn sample_digest() -> Digest {
+            // hot=2, warm=3, hot_upper=10 -> cold<6, warm[6,9), hot>=9.
+            let cfg = ReplicationConfig::new("demo/**", None, 10_000, 5, 2, 3, 250);
+            let cold = ts(at_secs(35), vec![0x01]); // interval 3 (cold)
+            let warm_a = ts(at_secs(71), vec![0x01]); // interval 7 sub 0
+            let warm_b = ts(at_secs(85), vec![0x01]); // interval 8 sub 2
+            let hot_a = ts(at_secs(94), vec![0x01]); // interval 9 sub 2
+            let hot_b = ts(at_secs(98), vec![0x01]); // interval 9 sub 4
+            build_digest(
+                &cfg,
+                [
+                    ("demo/a", &cold),
+                    ("demo/b", &warm_a),
+                    ("demo/c", &warm_b),
+                    ("demo/d", &hot_a),
+                    ("demo/e", &hot_b),
+                ],
+                IntervalIdx::from(10),
+            )
+        }
+
+        /// THE fidelity test: the hand-rolled bytes are byte-identical to what
+        /// the real bincode 1.3 (the version + default config zenoh uses)
+        /// produces for the same logical Digest — across empty / cold / warm /
+        /// hot / multi shapes.
+        #[test]
+        fn encode_is_byte_identical_to_bincode_1_3() {
+            let cfg = ReplicationConfig::new("demo/**", None, 10_000, 5, 2, 3, 250);
+
+            let empty = build_digest(&cfg, [], IntervalIdx::from(10));
+            assert_eq!(
+                encode(&empty),
+                bincode::serialize(&mirror_of(&empty)).unwrap()
+            );
+
+            let full = sample_digest();
+            assert_eq!(
+                encode(&full),
+                bincode::serialize(&mirror_of(&full)).unwrap()
+            );
+        }
+
+        #[test]
+        fn encode_decode_round_trips() {
+            let d = sample_digest();
+            assert_eq!(decode(&encode(&d)), Ok(d));
+        }
+
+        #[test]
+        fn decode_rejects_truncated_buffer() {
+            let bytes = encode(&sample_digest());
+            // Truncated inside the fixed header -> a field read hits the end.
+            assert_eq!(decode(&bytes[..4]), Err(DigestDecodeError::UnexpectedEof));
+            // Truncated mid-body -> rejected: the length guard catches the
+            // short tail (a declared length no longer fits) before any
+            // over-read can happen. Either rejection variant is acceptable;
+            // what matters is that a short buffer never panics or over-reads.
+            assert!(decode(&bytes[..bytes.len() - 1]).is_err());
+        }
+
+        #[test]
+        fn decode_rejects_trailing_bytes() {
+            let cfg = ReplicationConfig::new("demo/**", None, 10_000, 5, 2, 3, 250);
+            let mut bytes = encode(&build_digest(&cfg, [], IntervalIdx::from(10)));
+            bytes.push(0xFF);
+            assert_eq!(decode(&bytes), Err(DigestDecodeError::TrailingBytes));
+        }
+
+        #[test]
+        fn decode_rejects_hostile_length() {
+            // config(8) + cold(8) + warm_len = u64::MAX -> overflow guard.
+            let mut bytes = vec![0u8; 16];
+            bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+            assert_eq!(decode(&bytes), Err(DigestDecodeError::LengthOverflow));
+        }
+
+        #[test]
+        fn decode_accepts_unsorted_map_order_like_zenoh_hashmap() {
+            // Two warm entries written DESCENDING by index, as a HashMap might
+            // emit them; decode must still recover both (order-independent).
+            let mut b = Vec::new();
+            b.extend_from_slice(&0u64.to_le_bytes()); // configuration_fingerprint
+            b.extend_from_slice(&0u64.to_le_bytes()); // cold_era_fingerprint
+            b.extend_from_slice(&2u64.to_le_bytes()); // warm len
+            b.extend_from_slice(&9u64.to_le_bytes()); // idx 9
+            b.extend_from_slice(&0xAAu64.to_le_bytes()); // fp
+            b.extend_from_slice(&2u64.to_le_bytes()); // idx 2 (out of order)
+            b.extend_from_slice(&0xBBu64.to_le_bytes()); // fp
+            b.extend_from_slice(&0u64.to_le_bytes()); // hot len 0
+
+            let d = decode(&b).expect("unsorted map decodes");
+            assert_eq!(
+                d.warm_era_fingerprints().get(&IntervalIdx::from(9)),
+                Some(&Fingerprint::from(0xAA))
+            );
+            assert_eq!(
+                d.warm_era_fingerprints().get(&IntervalIdx::from(2)),
+                Some(&Fingerprint::from(0xBB))
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -47083,6 +47083,44 @@
         "LOCAL: R311vj on 6f8040c (origin/main=be8e731, +3 ahead vh+vi+vj); host-gated kernel atoms, NOT pushed. Kernel logic R1-R3 = Digest produce+compare complete; R4 makes it wire-shippable. Per-atom gates green; full run-ci is the pre-push gate at R8."
       ]
     },
+    "Round 311vk": {
+      "decision_summary": "R311vk: storage-replication Digest wire codec atom (replication 4/N) -- byte-exact hand-rolled encode/decode of Digest to/from zenoh's bincode 1.3 wire format, isolated in storage_replication::wire; proven byte-identical to real bincode 1.3 via a dev-dep cross-check (no bincode in the production no_std build).",
+      "changes_bullets": [
+        "storage_replication.rs::wire: encode(&Digest)->Vec<u8> + decode(&[u8])->Result<Digest,DigestDecodeError> hand-rolled to zenoh's bincode 1.3 default byte layout (LE, fixint, u64 length prefixes; newtype=inner u64; map=u64 len + pairs; struct=fields in order; core.rs:229-232/356). Deterministic encode (BTreeMap sorted); order-independent decode (accepts zenoh HashMap order). check_len guards reject hostile/oversized lengths before alloc.",
+        "Production stays dependency-free + no_std (bincode 1.x is std-only; 2.x format differs). wire is the single isolated place coupled to zenoh's un-versioned serialization (the R4 fidelity-decision containment; R9 interop is the regression gate).",
+        "Cargo.toml [dev-dependencies]: bincode 1.3 + serde(derive), TEST-ONLY, to prove the hand-rolled bytes == real bincode 1.3 output for a serde Digest mirror. Inert in production / MCU artifact."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-replication: storage_replication 31/31 (25 prior + 6 wire: encode_is_byte_identical_to_bincode_1_3 = THE byte-compat proof (empty + full shapes); encode/decode round-trip; truncated buffer -> err (no over-read); trailing bytes -> TrailingBytes; hostile u64::MAX length -> LengthOverflow; unsorted map order decodes like a zenoh HashMap).",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. The bincode-1.3 cross-check is the local ground truth for wire compatibility; R9 confirms against a live zenoh replica."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vk = storage-replication Digest wire codec atom (replication 4/N, §5.11): storage_replication::wire encode/decode, hand-rolled byte-exact to zenoh bincode 1.3 (LE/fixint/u64-len; core.rs:229-232). Proven byte-identical to real bincode 1.3 via a dev-dep serde-mirror cross-check; production stays no_std + dependency-free. The single isolated coupling point to zenoh's un-versioned serialization (the R4 containment decision).",
+        "storage-replication track: R1 prims (vh=ae1224f), R2 build (vi=6f8040c), R3 diff (vj=ea5e5a7), R4 wire codec DONE -> NEXT R5 StorageState->Digest from latest snapshot incl tombstones (StorageState::replication_digest via build_digest over the latest map; tombstones included since the latest map keeps delete ts) -> R6 driver periodic publish loop (@-digest/<zid>/<config-fp>, encode, session.publish) -> R7 driver subscribe Remote-only + decode + diff->observer (aligner handoff) -> R8 facade/inventory reserved->ACTIVE/run-ci/review -> R9 cross-impl interop vs real zenohd.",
+        "Kernel digest stack R1-R4 = produce + compare + wire complete. R5 binds it to the live storage; R6/R7 are the tokio driver. LOCAL: R311vk on ea5e5a7 (origin/main=be8e731, +4 ahead vh..vk); NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8. User authorized auto-progress to R9; push awaits explicit consent."
+      ],
+      "publishable_decision_summary": "R311vk: storage-replication Digest wire codec atom (replication 4/N) -- byte-exact hand-rolled encode/decode of Digest to/from zenoh's bincode 1.3 wire format, isolated in storage_replication::wire; proven byte-identical to real bincode 1.3 via a dev-dep cross-check (no bincode in the production no_std build).",
+      "publishable_changes_bullets": [
+        "storage_replication.rs::wire: encode(&Digest)->Vec<u8> + decode(&[u8])->Result<Digest,DigestDecodeError> hand-rolled to zenoh's bincode 1.3 default byte layout (LE, fixint, u64 length prefixes; newtype=inner u64; map=u64 len + pairs; struct=fields in order; core.rs:229-232/356). Deterministic encode (BTreeMap sorted); order-independent decode (accepts zenoh HashMap order). check_len guards reject hostile/oversized lengths before alloc.",
+        "Production stays dependency-free + no_std (bincode 1.x is std-only; 2.x format differs). wire is the single isolated place coupled to zenoh's un-versioned serialization (the R4 fidelity-decision containment; R9 interop is the regression gate).",
+        "Cargo.toml [dev-dependencies]: bincode 1.3 + serde(derive), TEST-ONLY, to prove the hand-rolled bytes == real bincode 1.3 output for a serde Digest mirror. Inert in production / MCU artifact."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-replication: storage_replication 31/31 (25 prior + 6 wire: encode_is_byte_identical_to_bincode_1_3 = THE byte-compat proof (empty + full shapes); encode/decode round-trip; truncated buffer -> err (no over-read); trailing bytes -> TrailingBytes; hostile u64::MAX length -> LengthOverflow; unsorted map order decodes like a zenoh HashMap).",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. The bincode-1.3 cross-check is the local ground truth for wire compatibility; R9 confirms against a live zenoh replica."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vk = storage-replication Digest wire codec atom (replication 4/N, §5.11): storage_replication::wire encode/decode, hand-rolled byte-exact to zenoh bincode 1.3 (LE/fixint/u64-len; core.rs:229-232). Proven byte-identical to real bincode 1.3 via a dev-dep serde-mirror cross-check; production stays no_std + dependency-free. The single isolated coupling point to zenoh's un-versioned serialization (the R4 containment decision).",
+        "storage-replication track: R1 prims (vh=ae1224f), R2 build (vi=6f8040c), R3 diff (vj=ea5e5a7), R4 wire codec DONE -> NEXT R5 StorageState->Digest from latest snapshot incl tombstones (StorageState::replication_digest via build_digest over the latest map; tombstones included since the latest map keeps delete ts) -> R6 driver periodic publish loop (@-digest/<zid>/<config-fp>, encode, session.publish) -> R7 driver subscribe Remote-only + decode + diff->observer (aligner handoff) -> R8 facade/inventory reserved->ACTIVE/run-ci/review -> R9 cross-impl interop vs real zenohd.",
+        "Kernel digest stack R1-R4 = produce + compare + wire complete. R5 binds it to the live storage; R6/R7 are the tokio driver. LOCAL: R311vk on ea5e5a7 (origin/main=be8e731, +4 ahead vh..vk); NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8. User authorized auto-progress to R9; push awaits explicit consent."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
