@@ -86,7 +86,7 @@
 //!   [`IntervalIdx::value`] / [`SubIntervalIdx::value`] instead, reserving
 //!   `Deref` for smart-pointer-like types. Same data, idiomatic surface.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 
 use xxhash_rust::xxh3::Xxh3;
@@ -454,6 +454,111 @@ impl Digest {
         &self,
     ) -> &BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>> {
         &self.hot_era_fingerprints
+    }
+
+    /// Compares this (local) [`Digest`] against a peer's and returns a
+    /// [`DigestDiff`] of what the peer has that this replica differs on or
+    /// lacks — or `None` if the two are aligned. zenoh `Digest::diff`
+    /// (digest.rs:109-170).
+    ///
+    /// The comparison is **asymmetric and from `self`'s perspective**: it
+    /// surfaces only buckets where `other` differs or holds something `self`
+    /// does not. Buckets that `self` has and `other` lacks are *not* reported
+    /// here — the peer discovers those when it runs `remote.diff(local)`.
+    /// Each replica runs `local.diff(remote)` on a received digest, so
+    /// between them every divergence is found exactly once on the side that
+    /// must pull (the aligner step).
+    ///
+    /// Returns `None` immediately if the configuration fingerprints differ
+    /// (digest.rs:110-112): the replicas are active on different key_expr
+    /// subsets or interval shapes and must never reconcile.
+    pub fn diff(&self, mut other: Digest) -> Option<DigestDiff> {
+        // Incompatible configurations never compare.
+        if self.configuration_fingerprint != other.configuration_fingerprint {
+            return None;
+        }
+
+        // Hot era (sub-interval granularity): drop from `other` every
+        // sub-interval whose fingerprint matches `self`'s for the same
+        // (interval, sub-interval). What remains in `other` is what it
+        // differs on or holds alone (digest.rs:120-134).
+        for (interval_idx, self_subs) in &self.hot_era_fingerprints {
+            if let Some(other_subs) = other.hot_era_fingerprints.get_mut(interval_idx) {
+                other_subs.retain(|other_idx, other_fp| match self_subs.get(other_idx) {
+                    Some(fp) => *other_fp != *fp,
+                    None => true,
+                });
+            }
+        }
+        other
+            .hot_era_fingerprints
+            .retain(|_, subs| !subs.is_empty());
+
+        // Warm era (interval granularity): same retain, against `self`'s
+        // warm fingerprints (digest.rs:138-145).
+        other.warm_era_fingerprints.retain(|other_idx, other_fp| {
+            match self.warm_era_fingerprints.get(other_idx) {
+                Some(fp) => *other_fp != *fp,
+                None => true,
+            }
+        });
+
+        // Anything left in hot/warm => a real divergence; report it, and fold
+        // in whether the cold rollups also differ (digest.rs:147-159).
+        if !other.hot_era_fingerprints.is_empty() || !other.warm_era_fingerprints.is_empty() {
+            return Some(DigestDiff {
+                cold_eras_differ: self.cold_era_fingerprint != other.cold_era_fingerprint,
+                warm_eras_differences: other.warm_era_fingerprints.into_keys().collect(),
+                hot_eras_differences: other
+                    .hot_era_fingerprints
+                    .into_iter()
+                    .map(|(interval_idx, subs)| (interval_idx, subs.into_keys().collect()))
+                    .collect(),
+            });
+        }
+
+        // Hot/warm aligned; only the cold rollup differs (digest.rs:161-167).
+        if self.cold_era_fingerprint != other.cold_era_fingerprint {
+            return Some(DigestDiff {
+                cold_eras_differ: true,
+                warm_eras_differences: BTreeSet::new(),
+                hot_eras_differences: BTreeMap::new(),
+            });
+        }
+
+        None
+    }
+}
+
+/// The differences between two [`Digest`]s, as seen from the local replica
+/// running [`Digest::diff`]. zenoh `digest::DigestDiff` (digest.rs:93-98).
+///
+/// This is the last digest-track artifact: the typed work-list the aligner
+/// (the next track) consumes to pull the diverging entries. For the Cold
+/// era a single `bool` (the era is one fingerprint); for the Warm era the
+/// set of diverging [`IntervalIdx`]; for the Hot era the diverging
+/// [`SubIntervalIdx`]s grouped by [`IntervalIdx`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestDiff {
+    pub(crate) cold_eras_differ: bool,
+    pub(crate) warm_eras_differences: BTreeSet<IntervalIdx>,
+    pub(crate) hot_eras_differences: BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>,
+}
+
+impl DigestDiff {
+    /// Whether the single Cold-era fingerprints differ.
+    pub fn cold_eras_differ(&self) -> bool {
+        self.cold_eras_differ
+    }
+
+    /// The Warm-era intervals that diverge.
+    pub fn warm_eras_differences(&self) -> &BTreeSet<IntervalIdx> {
+        &self.warm_eras_differences
+    }
+
+    /// The Hot-era sub-intervals that diverge, grouped by interval.
+    pub fn hot_eras_differences(&self) -> &BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>> {
+        &self.hot_eras_differences
     }
 }
 
@@ -844,5 +949,163 @@ mod tests {
         assert_eq!(digest.cold_era_fingerprint(), Fingerprint::default());
         assert!(digest.warm_era_fingerprints().is_empty());
         assert!(digest.hot_era_fingerprints().is_empty());
+    }
+
+    // -- Digest::diff ----------------------------------------------------
+
+    #[test]
+    fn diff_identical_digests_is_none() {
+        let cfg = era_cfg();
+        let c = ts(at_secs(35), vec![0x01]);
+        let w = ts(at_secs(75), vec![0x01]);
+        let h = ts(at_secs(95), vec![0x01]);
+        let events = [("demo/a", &c), ("demo/b", &w), ("demo/c", &h)];
+
+        let a = build_digest(&cfg, events, IntervalIdx::from(10));
+        let b = build_digest(&cfg, events, IntervalIdx::from(10));
+        assert_eq!(a.diff(b), None);
+    }
+
+    #[test]
+    fn diff_incompatible_configuration_is_none() {
+        let cfg = era_cfg();
+        let other_cfg = ReplicationConfig::new("other/**", None, 10_000, 5, 2, 3, 250);
+        let h = ts(at_secs(95), vec![0x01]);
+
+        let local = build_digest(&cfg, [("demo/a", &h)], IntervalIdx::from(10));
+        // Different key_expr -> different config fingerprint -> never compares,
+        // even though the stored data plainly differs.
+        let remote = build_digest(&other_cfg, [], IntervalIdx::from(10));
+        assert_eq!(local.diff(remote), None);
+    }
+
+    #[test]
+    fn diff_detects_a_hot_sub_interval_only_in_other() {
+        let cfg = era_cfg();
+        let s2 = ts(at_secs(94), vec![0x01]); // interval 9, sub 2
+        let s4 = ts(at_secs(98), vec![0x01]); // interval 9, sub 4
+
+        let local = build_digest(&cfg, [("demo/a", &s2)], IntervalIdx::from(10));
+        let remote = build_digest(
+            &cfg,
+            [("demo/a", &s2), ("demo/b", &s4)],
+            IntervalIdx::from(10),
+        );
+
+        let diff = local.diff(remote).expect("remote has an extra hot sub");
+        assert!(!diff.cold_eras_differ());
+        assert!(diff.warm_eras_differences().is_empty());
+        let subs = diff
+            .hot_eras_differences()
+            .get(&IntervalIdx::from(9))
+            .expect("interval 9 diverges");
+        assert_eq!(subs.len(), 1);
+        assert!(subs.contains(&SubIntervalIdx::from(4)));
+    }
+
+    #[test]
+    fn diff_detects_a_differing_hot_sub_interval() {
+        let cfg = era_cfg();
+        // Same (interval 9, sub 2) bucket, different value -> different fp.
+        let here = ts(at_secs(94), vec![0x01]);
+        let local = build_digest(&cfg, [("demo/a", &here)], IntervalIdx::from(10));
+        let remote = build_digest(&cfg, [("demo/b", &here)], IntervalIdx::from(10));
+
+        let diff = local.diff(remote).expect("the shared bucket differs");
+        let subs = diff
+            .hot_eras_differences()
+            .get(&IntervalIdx::from(9))
+            .unwrap();
+        assert!(subs.contains(&SubIntervalIdx::from(2)));
+    }
+
+    #[test]
+    fn diff_detects_a_warm_interval_only_in_other() {
+        let cfg = era_cfg();
+        let i7 = ts(at_secs(75), vec![0x01]); // interval 7 (warm)
+        let i8 = ts(at_secs(85), vec![0x01]); // interval 8 (warm)
+
+        let local = build_digest(&cfg, [("demo/a", &i7)], IntervalIdx::from(10));
+        let remote = build_digest(
+            &cfg,
+            [("demo/a", &i7), ("demo/b", &i8)],
+            IntervalIdx::from(10),
+        );
+
+        let diff = local
+            .diff(remote)
+            .expect("remote has an extra warm interval");
+        assert!(diff.hot_eras_differences().is_empty());
+        assert_eq!(diff.warm_eras_differences().len(), 1);
+        assert!(diff.warm_eras_differences().contains(&IntervalIdx::from(8)));
+    }
+
+    #[test]
+    fn diff_cold_only_difference_sets_just_the_flag() {
+        let cfg = era_cfg();
+        // Two different cold events, no hot/warm at all.
+        let c3 = ts(at_secs(35), vec![0x01]); // interval 3 (cold)
+        let c4 = ts(at_secs(45), vec![0x01]); // interval 4 (cold)
+
+        let local = build_digest(&cfg, [("demo/a", &c3)], IntervalIdx::from(10));
+        let remote = build_digest(&cfg, [("demo/b", &c4)], IntervalIdx::from(10));
+
+        let diff = local.diff(remote).expect("the cold rollups differ");
+        assert!(diff.cold_eras_differ());
+        assert!(diff.warm_eras_differences().is_empty());
+        assert!(diff.hot_eras_differences().is_empty());
+    }
+
+    #[test]
+    fn diff_is_asymmetric_extra_on_self_is_not_reported() {
+        let cfg = era_cfg();
+        let s2 = ts(at_secs(94), vec![0x01]);
+        let s4 = ts(at_secs(98), vec![0x01]);
+
+        // `local` is a superset of `remote` (has the extra sub 4).
+        let local = build_digest(
+            &cfg,
+            [("demo/a", &s2), ("demo/b", &s4)],
+            IntervalIdx::from(10),
+        );
+        let remote = build_digest(&cfg, [("demo/a", &s2)], IntervalIdx::from(10));
+
+        // From local's perspective there is nothing to pull (it already has
+        // everything remote has).
+        assert_eq!(local.clone().diff(remote.clone()), None);
+        // From remote's perspective, local holds an extra sub 4 -> surfaced.
+        let diff = remote.diff(local).expect("local has the extra sub");
+        assert!(diff
+            .hot_eras_differences()
+            .get(&IntervalIdx::from(9))
+            .unwrap()
+            .contains(&SubIntervalIdx::from(4)));
+    }
+
+    #[test]
+    fn diff_folds_cold_difference_into_a_hot_diff() {
+        let cfg = era_cfg();
+        let s2 = ts(at_secs(94), vec![0x01]); // hot interval 9 sub 2
+        let s4 = ts(at_secs(98), vec![0x01]); // hot interval 9 sub 4
+        let cold = ts(at_secs(35), vec![0x01]); // cold interval 3
+
+        let local = build_digest(&cfg, [("demo/a", &s2)], IntervalIdx::from(10));
+        // remote diverges in the hot era AND has a cold event local lacks.
+        let remote = build_digest(
+            &cfg,
+            [("demo/a", &s2), ("demo/b", &s4), ("demo/c", &cold)],
+            IntervalIdx::from(10),
+        );
+
+        let diff = local.diff(remote).expect("hot + cold both differ");
+        assert!(
+            diff.cold_eras_differ(),
+            "the cold flag rides along the hot diff"
+        );
+        assert!(diff
+            .hot_eras_differences()
+            .get(&IntervalIdx::from(9))
+            .unwrap()
+            .contains(&SubIntervalIdx::from(4)));
     }
 }

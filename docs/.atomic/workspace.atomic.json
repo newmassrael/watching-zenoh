@@ -47045,6 +47045,44 @@
         "LOCAL: R311vi on ae1224f (origin/main=be8e731, +2 ahead vh+vi); host-gated kernel atoms, NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8."
       ]
     },
+    "Round 311vj": {
+      "decision_summary": "R311vj: storage-replication Digest::diff atom (replication 3/N) -- Digest::diff -> DigestDiff{cold_eras_differ, warm:Set<IntervalIdx>, hot:Map<IntervalIdx,Set<SubIntervalIdx>>}, the asymmetric local-vs-peer divergence work-list the aligner consumes; a faithful mirror of zenoh Digest::diff (config-fp short-circuit + hot/warm retain-differences drill-down + cold compare).",
+      "changes_bullets": [
+        "storage_replication.rs: Digest::diff(&self, mut other) -> Option<DigestDiff> (digest.rs:109-170): config-fp mismatch -> None; hot era retain other-subs NOT matching self then drop now-empty intervals; warm era retain other-intervals not matching self; if hot/warm leftover -> DigestDiff (cold flag folded in); else cold differ -> cold-only DigestDiff; else None.",
+        "DigestDiff{cold_eras_differ: bool, warm_eras_differences: BTreeSet<IntervalIdx>, hot_eras_differences: BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>} (digest.rs:93-98) + accessors. The typed work-list the aligner track consumes. BTreeSet/BTreeMap for no_std (zenoh HashSet/HashMap; wire-irrelevant since diff is local-only).",
+        "Asymmetric by design: local.diff(remote) surfaces only what remote has that local differs on or lacks; local's own extras are found when remote runs remote.diff(local). Each replica diffs the received digest, so every divergence is found once on the side that must pull."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-replication: storage_replication 25/25 (17 prior + 8 diff: identical->None; incompatible config->None; extra hot sub in other; differing hot sub; extra warm interval; cold-only sets just the flag; asymmetry (superset self -> None, subset self surfaces the extra); cold flag folded into a hot diff).",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. Default-feature code unchanged (storage-replication-gated additions only)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vj = storage-replication Digest::diff atom (replication 3/N, §5.11): Digest::diff -> DigestDiff (cold bool / warm Set<IntervalIdx> / hot Map<IntervalIdx,Set<SubIntervalIdx>>), the asymmetric local-vs-peer work-list. Faithful mirror of zenoh Digest::diff (digest.rs:109-170): config-fp short-circuit, hot/warm retain-differences drill-down, cold compare. DigestDiff is the typed handoff to the aligner track.",
+        "storage-replication track: R1 primitives (311vh=ae1224f), R2 Digest build (311vi=6f8040c), R3 diff DONE -> NEXT R4 bincode-compatible Digest wire codec (isolated SSOT module; byte-compatible with zenoh bincode::serialize(&Digest), core.rs:229-232; pin bincode version/config) -> R5 StorageState->Digest snapshot incl tombstones -> R6 driver publish loop (@-digest/<zid>/<config-fp>) -> R7 driver subscribe Remote-only + diff->observer (aligner handoff seam) -> R8 facade/inventory/run-ci/review -> R9 cross-impl interop.",
+        "LOCAL: R311vj on 6f8040c (origin/main=be8e731, +3 ahead vh+vi+vj); host-gated kernel atoms, NOT pushed. Kernel logic R1-R3 = Digest produce+compare complete; R4 makes it wire-shippable. Per-atom gates green; full run-ci is the pre-push gate at R8."
+      ],
+      "publishable_decision_summary": "R311vj: storage-replication Digest::diff atom (replication 3/N) -- Digest::diff -> DigestDiff{cold_eras_differ, warm:Set<IntervalIdx>, hot:Map<IntervalIdx,Set<SubIntervalIdx>>}, the asymmetric local-vs-peer divergence work-list the aligner consumes; a faithful mirror of zenoh Digest::diff (config-fp short-circuit + hot/warm retain-differences drill-down + cold compare).",
+      "publishable_changes_bullets": [
+        "storage_replication.rs: Digest::diff(&self, mut other) -> Option<DigestDiff> (digest.rs:109-170): config-fp mismatch -> None; hot era retain other-subs NOT matching self then drop now-empty intervals; warm era retain other-intervals not matching self; if hot/warm leftover -> DigestDiff (cold flag folded in); else cold differ -> cold-only DigestDiff; else None.",
+        "DigestDiff{cold_eras_differ: bool, warm_eras_differences: BTreeSet<IntervalIdx>, hot_eras_differences: BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>} (digest.rs:93-98) + accessors. The typed work-list the aligner track consumes. BTreeSet/BTreeMap for no_std (zenoh HashSet/HashMap; wire-irrelevant since diff is local-only).",
+        "Asymmetric by design: local.diff(remote) surfaces only what remote has that local differs on or lacks; local's own extras are found when remote runs remote.diff(local). Each replica diffs the received digest, so every divergence is found once on the side that must pull."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-replication: storage_replication 25/25 (17 prior + 8 diff: identical->None; incompatible config->None; extra hot sub in other; differing hot sub; extra warm interval; cold-only sets just the flag; asymmetry (superset self -> None, subset self surfaces the extra); cold flag folded into a hot diff).",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. Default-feature code unchanged (storage-replication-gated additions only)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vj = storage-replication Digest::diff atom (replication 3/N, §5.11): Digest::diff -> DigestDiff (cold bool / warm Set<IntervalIdx> / hot Map<IntervalIdx,Set<SubIntervalIdx>>), the asymmetric local-vs-peer work-list. Faithful mirror of zenoh Digest::diff (digest.rs:109-170): config-fp short-circuit, hot/warm retain-differences drill-down, cold compare. DigestDiff is the typed handoff to the aligner track.",
+        "storage-replication track: R1 primitives (311vh=ae1224f), R2 Digest build (311vi=6f8040c), R3 diff DONE -> NEXT R4 bincode-compatible Digest wire codec (isolated SSOT module; byte-compatible with zenoh bincode::serialize(&Digest), core.rs:229-232; pin bincode version/config) -> R5 StorageState->Digest snapshot incl tombstones -> R6 driver publish loop (@-digest/<zid>/<config-fp>) -> R7 driver subscribe Remote-only + diff->observer (aligner handoff seam) -> R8 facade/inventory/run-ci/review -> R9 cross-impl interop.",
+        "LOCAL: R311vj on 6f8040c (origin/main=be8e731, +3 ahead vh+vi+vj); host-gated kernel atoms, NOT pushed. Kernel logic R1-R3 = Digest produce+compare complete; R4 makes it wire-shippable. Per-atom gates green; full run-ci is the pre-push gate at R8."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
