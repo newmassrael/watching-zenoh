@@ -357,6 +357,29 @@ fn reply_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
     }))
 }
 
+/// R311va — SSOT for the reply-side `pubsub-timestamp` gate: convert a
+/// wz [`crate::sample::TimestampHint`] into the codec
+/// [`wz_codecs::timestamp::TimestampOwned`] iff `pubsub-timestamp` is on,
+/// else `None`. The reply-side twin of `push_build::gated_timestamp_field`
+/// (the `codec-push` / `codec-response` module gate-split forbids sharing
+/// one fn; the genuine conversion SSOT is `TimestampHint::to_codec` +
+/// `try_into_owned`, both reused here). Fallible (the bounded-zid owned
+/// conversion), so it runs in `build`'s `Result`, not the setter.
+#[cfg(feature = "codec-response")]
+fn gated_reply_timestamp(
+    timestamp: Option<&crate::sample::TimestampHint>,
+) -> Result<Option<wz_codecs::timestamp::TimestampOwned>, CodecError> {
+    #[cfg(feature = "pubsub-timestamp")]
+    {
+        timestamp.map(|t| t.to_codec().try_into_owned()).transpose()
+    }
+    #[cfg(not(feature = "pubsub-timestamp"))]
+    {
+        let _ = timestamp;
+        Ok(None)
+    }
+}
+
 /// The wz minimal `Err` BODY — MID `0x05` only, NO E (encoding) / Z (exts), with
 /// just the always-present payload (zenoh-pico `_z_err_encode`'s minimal shape).
 /// The SSOT the three `build_response_err_*` builders share, so the Err body is
@@ -404,6 +427,12 @@ pub struct ResponseReplyBuilder {
     body_kind_del: bool,
     // Reply-layer settings.
     consolidation: Option<ConsolidationMode>,
+    // R311va: optional inner-MsgPut (or MsgDel) value timestamp — the
+    // `_Z_FLAG_Z_*_T` (0x20) T-flag + timestamp field. Held as the wz-side
+    // `TimestampHint` and converted at build() (the conversion is fallible,
+    // so it lives in `build`'s `Result`, not the infallible setter). What a
+    // `History::All` storage stamps each version reply with.
+    timestamp: Option<crate::sample::TimestampHint>,
     // R121j-3c: Response-ENVELOPE-level responder ext (ext_id 0x03 ZBUF).
     // Tuple = (zid bytes 1..=16, eid). Distinct from R121j-4b Err.source_info
     // (Err-body-level): responder sits on the outer Response.extensions
@@ -433,8 +462,20 @@ impl ResponseReplyBuilder {
             payload: payload.to_vec(),
             body_kind_del: false,
             consolidation: None,
+            timestamp: None,
             responder: None,
         }
+    }
+
+    /// Set the inner-body value timestamp (the `MsgPut` / `MsgDel` T-flag).
+    /// Subsequent calls overwrite (last-wins). Emitted iff `pubsub-timestamp`
+    /// is on (the wz MsgPut-timestamp policy gate, mirrored from the Push
+    /// path's `gated_timestamp_field`); otherwise the T-flag stays clear and
+    /// no timestamp is serialised. What [`crate::query::QueryReply`] threads
+    /// a `History::All` storage's per-version timestamp through.
+    pub fn timestamp(mut self, timestamp: &crate::sample::TimestampHint) -> Self {
+        self.timestamp = Some(timestamp.clone());
+        self
     }
 
     /// Set the Reply-body consolidation mode. Subsequent calls
@@ -500,6 +541,10 @@ impl ResponseReplyBuilder {
     /// Reply-layer settings. Panics on `(mapping_id=0, suffix=None)`
     /// because the literal path requires an inline keyexpr suffix.
     pub fn build(self) -> Result<ResponseOwned, CodecError> {
+        // Convert the (optional) value timestamp up front — fallible, gated
+        // on pubsub-timestamp. Applied to whichever inner body arm
+        // (MsgPut default / MsgDel after reply_del) survives below.
+        let reply_timestamp = gated_reply_timestamp(self.timestamp.as_ref())?;
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -536,6 +581,23 @@ impl ResponseReplyBuilder {
             if let Some(mode) = self.consolidation {
                 reply.header |= 0x20; // _Z_FLAG_Z_R_C
                 reply.consolidation = Some(mode.wire_byte());
+            }
+            // Stamp the inner body's value timestamp + T-flag (0x20), on
+            // whichever arm survived the del-swap above. Mirrors the Push
+            // path's `build_msg_put_with_meta` header OR (bit 0x20 = MsgPut
+            // `set_t` / MsgDel D_T). `None` leaves the body un-timestamped.
+            if let Some(ts) = reply_timestamp {
+                match &mut reply.body {
+                    ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                        put.timestamp = Some(ts);
+                        put.header |= 0x20; // _Z_FLAG_Z_P_T
+                    }
+                    ReplyOwnedVariant::CodecZenohMsgDel(del) => {
+                        del.timestamp = Some(ts);
+                        del.header |= 0x20; // _Z_FLAG_Z_D_T
+                    }
+                    _ => {}
+                }
             }
         } else {
             unreachable!(
@@ -1719,5 +1781,54 @@ mod tests {
         );
         // MsgDel inner MID at offset 5.
         assert_eq!(wire[5], 0x02, "MsgDel inner MID follows consolidation byte");
+    }
+
+    /// R311va — ResponseReplyBuilder.timestamp() stamps the inner MsgPut's
+    /// timestamp field + the T-flag (0x20), the per-version reply shape a
+    /// History::All storage emits.
+    #[cfg(all(feature = "codec-response", feature = "pubsub-timestamp"))]
+    #[test]
+    fn response_reply_builder_timestamp_sets_msgput_t_flag_and_field() {
+        let ts = crate::sample::TimestampHint {
+            time: 0xDEAD_BEEF,
+            zid: vec![0xAA, 0xBB],
+        };
+        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .timestamp(&ts)
+            .build()
+            .unwrap();
+        match &response.body {
+            ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                    assert_eq!(put.header & 0x20, 0x20, "MsgPut T-flag (0x20) set");
+                    let got = put.timestamp.as_ref().expect("timestamp field present");
+                    assert_eq!(got.time, 0xDEAD_BEEF);
+                    assert_eq!(got.zid.as_slice(), &[0xAA, 0xBB]);
+                }
+                _ => panic!("expected CodecZenohMsgPut inner body"),
+            },
+            _ => panic!("expected CodecZenohReply body"),
+        }
+    }
+
+    /// R311va — without a `.timestamp()` call the inner MsgPut stays
+    /// un-timestamped (T-flag clear), so the additive option does not
+    /// perturb the existing minimal-reply shape.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn response_reply_builder_without_timestamp_leaves_t_flag_clear() {
+        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .build()
+            .unwrap();
+        if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
+            if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body {
+                assert_eq!(put.header & 0x20, 0x00, "T-flag clear without timestamp");
+                assert!(put.timestamp.is_none());
+            } else {
+                panic!("expected MsgPut");
+            }
+        } else {
+            panic!("expected Reply");
+        }
     }
 }

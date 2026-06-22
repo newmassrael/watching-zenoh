@@ -111,10 +111,11 @@ fn apply_sample<B: StorageBackend>(
 /// scheduled by the queryable dispatch path, not here. Free function for
 /// the same unit-testability reason as [`apply_sample`].
 ///
-/// Per-version reply TIMESTAMP is not yet carried (the `ReplyOut` surface
-/// has no timestamp slot): a `History::All` reply returns every version's
-/// payload, but the querier cannot yet order them by version — a
-/// timestamped-reply seam is the named follow-up.
+/// Each reply carries its version's TIMESTAMP via
+/// [`ReplyOut::reply_keyed_stamped`] (the inner MsgPut T-flag, emitted iff
+/// `pubsub-timestamp` is on), so a `History::All` querier can order the
+/// versions it receives — zenoh `q.reply(key, payload).timestamp(entry.timestamp)`
+/// (`storages_mgt/service.rs:584`).
 fn answer_query<B: StorageBackend>(
     state: &StorageState<B>,
     view: &dyn QueryView,
@@ -122,7 +123,7 @@ fn answer_query<B: StorageBackend>(
 ) {
     for (key, versions) in state.matching_versions(view.keyexpr()) {
         for data in versions {
-            out.reply_keyed(&key, &data.payload);
+            out.reply_keyed_stamped(&key, &data.timestamp, &data.payload);
         }
     }
 }
@@ -298,6 +299,9 @@ mod tests {
     #[derive(Default)]
     struct RecordingReplyOut {
         keyed: Vec<(String, Vec<u8>)>,
+        // (keyexpr, timestamp.time, payload) for each stamped reply — what
+        // the driver emits via reply_keyed_stamped for every version.
+        stamped: Vec<(String, u64, Vec<u8>)>,
     }
     impl ReplyOut for RecordingReplyOut {
         fn reply(&mut self, payload: &[u8]) {
@@ -305,6 +309,18 @@ mod tests {
         }
         fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
             self.keyed.push((keyexpr.to_string(), payload.to_vec()));
+        }
+        fn reply_keyed_stamped(
+            &mut self,
+            keyexpr: &str,
+            timestamp: &TimestampHint,
+            payload: &[u8],
+        ) {
+            // Keep `keyed` populated (per-key fan assertions) AND record the
+            // stamp separately (per-version timestamp assertions).
+            self.keyed.push((keyexpr.to_string(), payload.to_vec()));
+            self.stamped
+                .push((keyexpr.to_string(), timestamp.time, payload.to_vec()));
         }
         fn reply_del(&mut self) {}
         fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {
@@ -477,6 +493,34 @@ mod tests {
                     (String::from("demo/a"), vec![3]),
                 ],
                 "History::All replies every version, not just the latest"
+            );
+        }
+
+        #[test]
+        fn answer_query_stamps_each_version_with_its_value_timestamp() {
+            // The per-version reply timestamp: each version reply carries the
+            // timestamp that orders it, so a querier can sequence them.
+            let mut state = StorageState::new(HistoryStorage::new());
+            apply_sample(
+                &mut state,
+                &Sample::new_put("demo/a", vec![1]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            apply_sample(
+                &mut state,
+                &Sample::new_put("demo/a", vec![2]).with_timestamp(ts(20, 1)),
+                || unreachable!(),
+            );
+
+            let mut out = RecordingReplyOut::default();
+            answer_query(&state, &query("demo/a"), &mut out);
+            assert_eq!(
+                out.stamped,
+                vec![
+                    (String::from("demo/a"), 10, vec![1]),
+                    (String::from("demo/a"), 20, vec![2]),
+                ],
+                "each version reply carries its own value timestamp, in order"
             );
         }
     }

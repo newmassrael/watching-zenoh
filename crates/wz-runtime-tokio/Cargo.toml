@@ -221,6 +221,13 @@ storage-backend = [
     # The driver declares its subscriber + queryable on a Unicast session
     # (the `session` / `session_glue` modules are transport-unicast-gated).
     "transport-unicast",
+    # The storage versions by timestamp: the capture leg reads each Put's
+    # MsgPut timestamp (newer-wins / version ordering) and the answer leg
+    # emits each reply's value timestamp (the MsgPut T-flag). Both the wire
+    # decode and the reply T-flag emit are pubsub-timestamp-gated, so a
+    # storage genuinely needs it (without it every sample is fallback-stamped
+    # and replies carry no version timestamp).
+    "pubsub-timestamp",
 ]
 # R311uz — storage-history (§5.11 storage, atom 2/4): forwards the
 # History::All backend (wz-session-core/storage-history = HistoryStorage).

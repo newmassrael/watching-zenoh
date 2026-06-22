@@ -121,6 +121,29 @@ pub trait ReplyOut {
         let _ = keyexpr;
         self.reply(payload);
     }
+    /// Emit a Put-form reply stamped with both an explicit concrete
+    /// `keyexpr` AND a value `timestamp` (the inner `MsgPut` T-flag). The
+    /// full per-version reply shape a `History::All` storage needs: each
+    /// version replies under its own key carrying the timestamp that orders
+    /// it, so a querier can sequence the versions (zenoh
+    /// `q.reply(key, payload).timestamp(entry.timestamp)`).
+    ///
+    /// Default impl falls back to [`Self::reply_keyed`] (dropping the
+    /// timestamp), so impls that predate per-version timestamps stay valid
+    /// — a build without `pubsub-timestamp` (or a sink that does not carry
+    /// timestamps) simply omits the T-flag. `alloc`-gated: the
+    /// [`crate::sample::TimestampHint`] type lives in the `alloc`-gated
+    /// `sample` module (mirrors `QueryView::source_info`).
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_stamped(
+        &mut self,
+        keyexpr: &str,
+        timestamp: &crate::sample::TimestampHint,
+        payload: &[u8],
+    ) {
+        let _ = timestamp;
+        self.reply_keyed(keyexpr, payload);
+    }
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
     fn reply_del(&mut self);

@@ -324,6 +324,11 @@ impl From<QueryReply> for InboundReply {
                 rid,
                 keyexpr_literal,
                 body,
+                // R311va: the loopback receive path does not yet surface a
+                // reply timestamp (InboundReplyBody carries no timestamp
+                // slot) — the receive-side timestamp is the named follow-up
+                // twin of this emit-side atom. Dropped here intentionally.
+                timestamp: _,
                 responder: _,
             } => {
                 let body = match body {

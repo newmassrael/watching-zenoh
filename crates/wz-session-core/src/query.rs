@@ -172,6 +172,8 @@ use crate::query_sink::BoxedQuerySink;
 use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
+#[cfg(feature = "alloc")]
+use crate::sample::TimestampHint;
 
 /// R311v — extract the attachment payload view from an inbound
 /// [`Query`]'s extensions chain.
@@ -354,6 +356,14 @@ pub enum QueryReply {
         keyexpr_literal: String,
         /// Reply body arm (Put or Del).
         body: ReplyBody,
+        /// Optional value timestamp carried on the inner `MsgPut` (the
+        /// `_Z_FLAG_Z_P_T` T-flag). `None` emits no timestamp; `Some`
+        /// stamps the version the reply carries — what a `History::All`
+        /// storage uses so a querier can order the versions it replies
+        /// (zenoh `q.reply(..).timestamp(entry.timestamp)`,
+        /// `storages_mgt/service.rs:584`). Threaded into
+        /// [`crate::response_build::ResponseReplyBuilder::timestamp`].
+        timestamp: Option<TimestampHint>,
         /// Optional `(zid bytes, eid)` carried as the envelope-level
         /// responder ext on the emitted Response. `None` skips the ext;
         /// `Some` packs the bytes via
@@ -405,6 +415,7 @@ impl QueryReply {
                 rid,
                 keyexpr_literal,
                 body,
+                timestamp,
                 responder,
             } => {
                 let mut builder = match body {
@@ -420,6 +431,13 @@ impl QueryReply {
                         ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[]).reply_del()
                     }
                 };
+                // Thread the per-version value timestamp onto the inner
+                // MsgPut (T-flag) — emitted iff `pubsub-timestamp` is on
+                // (the builder gates the field). `None` leaves the MsgPut
+                // un-timestamped exactly as before.
+                if let Some(ts) = timestamp {
+                    builder = builder.timestamp(&ts);
+                }
                 if let Some((zid, eid)) = responder {
                     builder = builder.responder(&zid, eid);
                 }
@@ -497,6 +515,7 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: self.keyexpr_literal.clone(),
             body: ReplyBody::Put(payload.to_vec()),
+            timestamp: None,
             responder: self.responder.clone(),
         });
     }
@@ -517,6 +536,31 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
+            timestamp: None,
+            responder: self.responder.clone(),
+        });
+    }
+
+    /// Emit a Put-form reply stamped with both an explicit `keyexpr` AND a
+    /// value `timestamp` (the inner `MsgPut` T-flag). The full
+    /// per-version reply shape a `History::All` storage needs: each version
+    /// replies under its concrete key carrying the timestamp that orders it
+    /// (zenoh `q.reply(key, payload).timestamp(entry.timestamp)`,
+    /// `storages_mgt/service.rs:584`). The timestamp threads through
+    /// [`QueryReply::into_response`] into
+    /// [`crate::response_build::ResponseReplyBuilder::timestamp`] (emitted
+    /// iff `pubsub-timestamp` is on, the wz MsgPut-timestamp policy gate).
+    pub fn send_reply_keyed_stamped(
+        &mut self,
+        keyexpr: &str,
+        timestamp: &TimestampHint,
+        payload: &[u8],
+    ) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Put(payload.to_vec()),
+            timestamp: Some(timestamp.clone()),
             responder: self.responder.clone(),
         });
     }
@@ -530,6 +574,7 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: self.keyexpr_literal.clone(),
             body: ReplyBody::Del,
+            timestamp: None,
             responder: self.responder.clone(),
         });
     }
@@ -642,6 +687,9 @@ impl ReplyOut for QueryResponder<'_> {
     }
     fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
         self.send_reply_keyed(keyexpr, payload);
+    }
+    fn reply_keyed_stamped(&mut self, keyexpr: &str, timestamp: &TimestampHint, payload: &[u8]) {
+        self.send_reply_keyed_stamped(keyexpr, timestamp, payload);
     }
     fn reply_del(&mut self) {
         self.send_reply_del();
@@ -1786,6 +1834,46 @@ mod tests {
     }
 
     #[test]
+    fn responder_reply_keyed_stamped_carries_the_value_timestamp() {
+        // A History::All version reply: the per-key keyexpr AND the value
+        // timestamp ride the pushed QueryReply (timestamp Some).
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/**", |_q, responder| {
+            let ts = TimestampHint {
+                time: 0x1234,
+                zid: alloc::vec![0x07],
+            };
+            responder.reply_keyed_stamped("demo/a", &ts, b"v1");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("demo/**")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            QueryReply::Reply {
+                keyexpr_literal,
+                timestamp,
+                body: ReplyBody::Put(payload),
+                ..
+            } => {
+                assert_eq!(keyexpr_literal, "demo/a");
+                assert_eq!(payload, b"v1");
+                let ts = timestamp
+                    .as_ref()
+                    .expect("the reply carries the value timestamp");
+                assert_eq!(ts.time, 0x1234);
+                assert_eq!(ts.zid.as_slice(), &[0x07]);
+            }
+            other => panic!("expected stamped Put Reply, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn responder_send_reply_del_emits_del_arm() {
         let mut reg = QueryableRegistry::new();
         reg.register("clear/me", |_q, responder| {
@@ -2032,6 +2120,7 @@ mod tests {
             rid: 42,
             keyexpr_literal: "home/temp".to_string(),
             body: ReplyBody::Put(b"hello".to_vec()),
+            timestamp: None,
             responder: None,
         };
         let response = reply.into_response().unwrap();
@@ -2054,6 +2143,7 @@ mod tests {
             rid: 42,
             keyexpr_literal: "clear/me".to_string(),
             body: ReplyBody::Del,
+            timestamp: None,
             responder: None,
         };
         let response = reply.into_response().unwrap();
