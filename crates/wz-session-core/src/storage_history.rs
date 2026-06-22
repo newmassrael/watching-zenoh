@@ -21,7 +21,7 @@
 //! is the capability a persistent backend (influxdb / rocksdb) declares;
 //! `get` then returns `Vec<StoredData>` (`zenoh-backend-traits/src/lib.rs:250-254`)
 //! and the storage replies each version with its own timestamp
-//! (`storages_mgt/service.rs:584` — `q.reply(key, payload).timestamp(ts)`).
+//! (`storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)` — `q.reply(key, payload).timestamp(ts)`).
 //! [`HistoryStorage`] is the in-memory realisation of that `All` shape — a
 //! `BTreeMap<key, Vec<StoredData>>`, the versions kept sorted by timestamp.
 //!

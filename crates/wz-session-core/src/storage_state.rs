@@ -42,10 +42,12 @@
 //! ## Timestamp ordering
 //!
 //! [`timestamp_strictly_newer`] mirrors uhlc's `Timestamp` `Ord`
-//! (`uhlc-0.8.1/src/timestamp.rs:33-37`: derived `Ord` over
-//! `(time: NTP64, id: ID)` in that field order = lexicographic time-then-id).
-//! wz's [`TimestampHint`] carries the same `(time, zid)` shape, so the
-//! comparison is `time` first, `zid` bytes as the tiebreak.
+//! (`uhlc-0.8.1/src/timestamp.rs:33-38`: derived `Ord` over
+//! `(time: NTP64, id: ID)`) — `time` first, then the id. The id tiebreak
+//! is uhlc-faithful: [`timestamp_order_key`] zero-pads the trimmed `zid` to
+//! the full 16-byte LE array uhlc's `ID` (`[u8; 16]`) compares, NOT a raw
+//! trimmed-`Vec` lexicographic compare (which diverges for a
+//! non-canonically-encoded zid). See [`timestamp_order_key`] for the why.
 //!
 //! ## Deliberate divergences (each layer/profile-driven)
 //!
@@ -248,7 +250,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// `get_versions` default returns 0-or-1), so the result collapses to
     /// the `matching_entries` shape with one version per key. Mirrors
     /// zenoh's `reply_query` replying every `StoredData` `get` returns
-    /// (`storages_mgt/service.rs:584`).
+    /// (`storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`).
     pub fn matching_versions(&self, query_keyexpr: &str) -> Vec<(String, Vec<&StoredData>)> {
         let target_chunks: Vec<&str> = query_keyexpr.split('/').collect();
         let mut out = Vec::new();

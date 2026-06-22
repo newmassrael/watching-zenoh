@@ -361,7 +361,7 @@ pub enum QueryReply {
         /// stamps the version the reply carries — what a `History::All`
         /// storage uses so a querier can order the versions it replies
         /// (zenoh `q.reply(..).timestamp(entry.timestamp)`,
-        /// `storages_mgt/service.rs:584`). Threaded into
+        /// `storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`). Threaded into
         /// [`crate::response_build::ResponseReplyBuilder::timestamp`].
         timestamp: Option<TimestampHint>,
         /// Optional `(zid bytes, eid)` carried as the envelope-level
@@ -546,7 +546,7 @@ impl<'a> QueryResponder<'a> {
     /// per-version reply shape a `History::All` storage needs: each version
     /// replies under its concrete key carrying the timestamp that orders it
     /// (zenoh `q.reply(key, payload).timestamp(entry.timestamp)`,
-    /// `storages_mgt/service.rs:584`). The timestamp threads through
+    /// `storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`). The timestamp threads through
     /// [`QueryReply::into_response`] into
     /// [`crate::response_build::ResponseReplyBuilder::timestamp`] (emitted
     /// iff `pubsub-timestamp` is on, the wz MsgPut-timestamp policy gate).

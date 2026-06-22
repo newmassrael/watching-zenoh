@@ -53,6 +53,11 @@
 //!   several versions per key; the History::Latest in-memory backend holds
 //!   at most one, so wz returns `Option`. The `Vec` (version-history) form
 //!   arrives with the `storage-history` atom.
+//! - **`StoredData.encoding` is `Option<EncodingHint>`, not a concrete
+//!   `Encoding`**: zenoh's `StoredData.encoding` is a non-optional
+//!   `Encoding` (it defaults to `Encoding::default()`); wz models an absent
+//!   encoding as `None`, matching how a wz [`crate::sample::Sample`] carries
+//!   `Option<EncodingHint>` on the receive side.
 //!
 //! ## NON-goals (this atom)
 //!

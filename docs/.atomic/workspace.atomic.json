@@ -46767,6 +46767,48 @@
         "LOCAL: R311vb on top of va=44298b2 (origin/main=ef56758, +6 ahead); host-gated, NOT pushed."
       ]
     },
+    "Round 311vc": {
+      "decision_summary": "R311vc: session-review remediation 2/3 — fallback timestamp is now a wall-clock NTP64, closing the silent-data-loss mode the 4-agent review found (honesty Q3 + bug #6). The prior monotonic counter (1,2,3) was dominated by any real NTP64 (~10^18), so under newer-wins one real-timestamped Put made every later un-timestamped Put silently lose as Outdated. wall_clock_ntp64() mints the uhlc NTP64 layout (secs<<32 | frac), comparable to real publisher timestamps. Plus honesty docs: corrected the off-by service.rs:584 citation (an error-log line) to the real reply chain :575-577/:609-611, documented the StoredData.encoding Option divergence. The fallback stays injectable at the apply_sample FnOnce seam (§5.18 HLC drop-in).",
+      "changes_bullets": [
+        "storage_service.rs: wall_clock_ntp64() = (unix_secs<<32)|(subsec_nanos<<32/1e9) — the uhlc NTP64 layout. The driver's fallback for an un-timestamped sample now mints this instead of a monotonic counter (1,2,3); the counter was dominated by any real NTP64 (~10^18) so under newer-wins a real-ts Put silently dropped every later un-ts Put as Outdated (data loss). Wall-clock competes fairly by time.",
+        "Module doc rewritten: the data-loss mode is named explicitly + the residual limits (non-monotonic across NTP steps, sub-ns collisions) + §5.18 HLC as the proper source + the fallback is injectable at the apply_sample FnOnce seam (HLC drop-in).",
+        "Honesty docs: the service.rs:584 citation (an error-log line) corrected to :575-577 (wildcard) / :609-611 (non-wild) — the real q.reply(..).encoding(..).timestamp(..) chain — across storage_service/storage_history/query/storage_state. StoredData.encoding Option-vs-zenoh-non-optional divergence added to the storage_backend divergence list. storage_state Timestamp-ordering header note updated for the zero-pad fix."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features storage-history --lib storage_service 9/9; -p wz-session-core --features storage-history --lib storage 26/26.",
+        "clippy -D warnings clean (both crates --features storage-history --all-targets); fmt --check clean.",
+        "Direct-read arbitration confirmed the citation drift: service.rs:584 is 'self.name,' inside a tracing::warn!; the reply chain q.reply(key,payload).encoding(entry.encoding).timestamp(entry.timestamp) is at :575-577 (wildcard) and :609-611 (non-wild)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vc = session-review remediation 2/3. Fixes the honesty-Q3 + bug-#6 silent-data-loss: the fallback timestamp for un-timestamped samples is now a wall-clock NTP64 (comparable to real publisher NTP64) instead of a monotonic counter that was silently dominated under newer-wins. Plus honesty docs: corrected the off-by service.rs:584 citation to the real reply chain :575-577/:609-611, documented the StoredData.encoding Option divergence, named the data-loss mode + residual limits explicitly.",
+        "NEXT remediation: R311vd = (a) move apply_sample/answer_query into the kernel StorageState (architecture finding 1 — they are pure over kernel traits, currently block no_std reuse), (b) encoding-on-reply faithful pass-through (fidelity #8 + honesty Q4 — zenoh replies .encoding(entry.encoding); wz currently drops the stored encoding; make StoredData.encoding fully round-trip). After vd: the headline-overclaim (honesty Q1/Q2/Q8: 'end-to-end'/'active'/'closes-gap' without a live-session or cross-process e2e test) remains — a live-session loopback test (or honest MEMORY.md reframing) is the residual.",
+        "4-agent verdict recap: structure textbook-grade; headline SSOT (gated_reply_timestamp dup) CLEAN-forced; 6 real defects, vb closed #1+#5, vc closes #2 + part of #6.",
+        "LOCAL: R311vc on vb=d295e52 (origin/main=ef56758, +7 ahead); host-gated, NOT pushed."
+      ],
+      "publishable_decision_summary": "R311vc: session-review remediation 2/3 — fallback timestamp is now a wall-clock NTP64, closing the silent-data-loss mode the 4-agent review found (honesty Q3 + bug #6). The prior monotonic counter (1,2,3) was dominated by any real NTP64 (~10^18), so under newer-wins one real-timestamped Put made every later un-timestamped Put silently lose as Outdated. wall_clock_ntp64() mints the uhlc NTP64 layout (secs<<32 | frac), comparable to real publisher timestamps. Plus honesty docs: corrected the off-by service.rs:584 citation (an error-log line) to the real reply chain :575-577/:609-611, documented the StoredData.encoding Option divergence. The fallback stays injectable at the apply_sample FnOnce seam (§5.18 HLC drop-in).",
+      "publishable_changes_bullets": [
+        "storage_service.rs: wall_clock_ntp64() = (unix_secs<<32)|(subsec_nanos<<32/1e9) — the uhlc NTP64 layout. The driver's fallback for an un-timestamped sample now mints this instead of a monotonic counter (1,2,3); the counter was dominated by any real NTP64 (~10^18) so under newer-wins a real-ts Put silently dropped every later un-ts Put as Outdated (data loss). Wall-clock competes fairly by time.",
+        "Module doc rewritten: the data-loss mode is named explicitly + the residual limits (non-monotonic across NTP steps, sub-ns collisions) + §5.18 HLC as the proper source + the fallback is injectable at the apply_sample FnOnce seam (HLC drop-in).",
+        "Honesty docs: the service.rs:584 citation (an error-log line) corrected to :575-577 (wildcard) / :609-611 (non-wild) — the real q.reply(..).encoding(..).timestamp(..) chain — across storage_service/storage_history/query/storage_state. StoredData.encoding Option-vs-zenoh-non-optional divergence added to the storage_backend divergence list. storage_state Timestamp-ordering header note updated for the zero-pad fix."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features storage-history --lib storage_service 9/9; -p wz-session-core --features storage-history --lib storage 26/26.",
+        "clippy -D warnings clean (both crates --features storage-history --all-targets); fmt --check clean.",
+        "Direct-read arbitration confirmed the citation drift: service.rs:584 is 'self.name,' inside a tracing::warn!; the reply chain q.reply(key,payload).encoding(entry.encoding).timestamp(entry.timestamp) is at :575-577 (wildcard) and :609-611 (non-wild)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vc = session-review remediation 2/3. Fixes the honesty-Q3 + bug-#6 silent-data-loss: the fallback timestamp for un-timestamped samples is now a wall-clock NTP64 (comparable to real publisher NTP64) instead of a monotonic counter that was silently dominated under newer-wins. Plus honesty docs: corrected the off-by service.rs:584 citation to the real reply chain :575-577/:609-611, documented the StoredData.encoding Option divergence, named the data-loss mode + residual limits explicitly.",
+        "NEXT remediation: R311vd = (a) move apply_sample/answer_query into the kernel StorageState (architecture finding 1 — they are pure over kernel traits, currently block no_std reuse), (b) encoding-on-reply faithful pass-through (fidelity #8 + honesty Q4 — zenoh replies .encoding(entry.encoding); wz currently drops the stored encoding; make StoredData.encoding fully round-trip). After vd: the headline-overclaim (honesty Q1/Q2/Q8: 'end-to-end'/'active'/'closes-gap' without a live-session or cross-process e2e test) remains — a live-session loopback test (or honest MEMORY.md reframing) is the residual.",
+        "4-agent verdict recap: structure textbook-grade; headline SSOT (gated_reply_timestamp dup) CLEAN-forced; 6 real defects, vb closed #1+#5, vc closes #2 + part of #6.",
+        "LOCAL: R311vc on vb=d295e52 (origin/main=ef56758, +7 ahead); host-gated, NOT pushed."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [

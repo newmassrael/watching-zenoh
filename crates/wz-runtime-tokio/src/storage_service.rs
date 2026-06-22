@@ -34,14 +34,24 @@
 //! (`sample.timestamp().cloned().unwrap_or(session.new_timestamp())`,
 //! service.rs:182) so newer-wins always has a timestamp. wz's HLC / time
 //! sources are still reserved (§5.18), so this driver stamps an
-//! un-timestamped sample with a MONOTONIC arrival counter under a fixed
-//! `local_zid`. That gives a deterministic newer-wins order *among
-//! un-timestamped samples* (arrival order). The honest limit: a
-//! fallback-stamped sample's counter time is not comparable to a real
-//! NTP64 timestamp, so a storage facing a MIX of timestamped and
-//! un-timestamped publishers needs a real HLC to order them coherently —
-//! the §5.18 atom. A sample that DOES carry a timestamp always uses it, so
-//! a timestamped-publisher deployment is already fully coherent.
+//! un-timestamped sample with a **wall-clock NTP64** ([`wall_clock_ntp64`])
+//! under the storage's `local_zid` — the same NTP64 word shape a real
+//! publisher's timestamp carries, so a fallback stamp is directly
+//! comparable to a real one. This is the deliberate fix for the prior
+//! monotonic-counter design, which produced tiny counter values (1, 2, …)
+//! that any real NTP64 (~10^18) dominated: under newer-wins a single
+//! real-timestamped Put then made every subsequent un-timestamped Put lose
+//! as Outdated — silent data loss in a mixed-publisher deployment. A
+//! wall-clock stamp competes fairly by time instead.
+//!
+//! Residual limits (the real fix is the §5.18 HLC, the proper source):
+//! wall-clock is not guaranteed monotonic across NTP adjustments, and two
+//! un-timestamped Puts within one nanosecond collide (same `(time, zid)`,
+//! the later one Replaces). An HLC's logical counter removes both; a
+//! sample that DOES carry a timestamp always uses it, so a
+//! timestamped-publisher deployment is unaffected either way. The fallback
+//! is injectable at the [`apply_sample`] seam (it takes the stamp closure
+//! by `FnOnce`), so the §5.18 HLC is a drop-in when it lands.
 //!
 //! ## NON-goals (this atom)
 //!
@@ -54,6 +64,7 @@
 //! [`wz_session_core::storage_state`]).
 
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::TimestampHint;
@@ -70,6 +81,23 @@ use crate::session::{
     Subscriber, Unicast,
 };
 use crate::session_glue::SessionLinkActions;
+
+/// A wall-clock NTP64 timestamp word: `(unix_seconds << 32) | fraction`,
+/// the same NTP64 layout uhlc / a publisher's `Timestamp` carries
+/// (fraction = `subsec_nanos * 2^32 / 1e9`). The driver's fallback stamp
+/// for an un-timestamped sample (see the module-level fallback note) — a
+/// value of the same magnitude as a real publisher timestamp, so it
+/// competes fairly under newer-wins instead of being dominated by every
+/// real NTP64. NOT an HLC (no logical counter, not guaranteed monotonic
+/// across NTP steps); the §5.18 HLC is the proper source.
+fn wall_clock_ntp64() -> u64 {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    let frac = (u64::from(since_epoch.subsec_nanos()) << 32) / 1_000_000_000;
+    (secs << 32) | frac
+}
 
 /// Shared, lockable storage gate over a backend `B`. The subscriber
 /// callback locks it to write (capture Put / Delete) and the queryable
@@ -115,7 +143,7 @@ fn apply_sample<B: StorageBackend>(
 /// [`ReplyOut::reply_keyed_stamped`] (the inner MsgPut T-flag, emitted iff
 /// `pubsub-timestamp` is on), so a `History::All` querier can order the
 /// versions it receives — zenoh `q.reply(key, payload).timestamp(entry.timestamp)`
-/// (`storages_mgt/service.rs:584`).
+/// (`storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`).
 fn answer_query<B: StorageBackend>(
     state: &StorageState<B>,
     view: &dyn QueryView,
@@ -175,22 +203,19 @@ where
         let state: SharedState<B> = Arc::new(Mutex::new(StorageState::new(backend)));
 
         // Capture leg: each inbound sample locks the gate and applies it,
-        // stamping a fallback monotonic timestamp when the sample carries
-        // none (the §5.18 seam).
+        // stamping a fallback wall-clock NTP64 timestamp when the sample
+        // carries none (the §5.18 seam) — comparable to a real publisher
+        // timestamp, so newer-wins competes fairly (see the module note).
         let sub_state = Arc::clone(&state);
-        let mut fallback_counter: u64 = 0;
         let fallback_zid = local_zid;
         let subscriber = session.declare_subscriber(
             keyexpr.clone(),
             SubscribeOptions::default(),
             move |view: &dyn SampleView| {
                 let mut guard = sub_state.lock().expect("storage state mutex poisoned");
-                apply_sample(&mut guard, view, || {
-                    fallback_counter += 1;
-                    TimestampHint {
-                        time: fallback_counter,
-                        zid: fallback_zid.clone(),
-                    }
+                apply_sample(&mut guard, view, || TimestampHint {
+                    time: wall_clock_ntp64(),
+                    zid: fallback_zid.clone(),
                 });
             },
         )?;
