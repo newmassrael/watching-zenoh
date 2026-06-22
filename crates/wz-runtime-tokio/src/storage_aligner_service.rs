@@ -104,11 +104,14 @@ use wz_session_core::storage_aligner::{
     AlignmentFollowup, AlignmentQuery, AlignmentReply, RetrievedValue,
 };
 use wz_session_core::storage_backend::StorageBackend;
-use wz_session_core::storage_replication::{zid_to_zenoh_hex, ReplicationConfig};
+use wz_session_core::storage_replication::{zid_to_zenoh_hex, DigestDiff, ReplicationConfig};
 use wz_session_core::storage_state::StorageState;
 
-use crate::session::{QueryOptions, Queryable, QueryableError, QueryableOptions, Session, Unicast};
+use crate::session::{
+    QueryOptions, Queryable, QueryableError, QueryableOptions, Session, SubscribeError, Unicast,
+};
 use crate::session_glue::SessionLinkActions;
+use crate::storage_replication_service::DigestSubscriber;
 use crate::storage_service::wall_clock_ntp64;
 
 /// Per-query alignment timeout. The ASK pull loop awaits each query's terminal
@@ -141,11 +144,20 @@ type DecodedReply = (AlignmentReply, Option<RetrievedValue>);
 /// digest keyexpr + the aligner's `AlignmentReply::Discovery` zid encoding, so
 /// an asker querying `@zid/<our-zid>/<fp>/aligner` reaches this queryable.
 pub fn aligner_keyexpr(config: &ReplicationConfig, local_zid: &[u8]) -> String {
-    format!(
-        "@zid/{}/{}/aligner",
-        zid_to_zenoh_hex(local_zid),
-        config.fingerprint().value()
-    )
+    aligner_keyexpr_for_hex(config, &zid_to_zenoh_hex(local_zid))
+}
+
+/// The aligner keyexpr for a peer whose zid hex is ALREADY known —
+/// `@zid/<zid-hex>/<config-fp>/aligner`. The digest-driven path uses this: the
+/// digest subscriber parses a peer's zid hex out of its digest keyexpr
+/// ([`digest_keyexpr_zid_hex`](crate::storage_replication_service::digest_keyexpr_zid_hex))
+/// and this rebuilds the peer's aligner keyexpr from it — reaching exactly the
+/// keyexpr that peer's aligner queryable ([`AlignerService`]) is declared on,
+/// since both derive from the same [`zid_to_zenoh_hex`] rendering. The byte-form
+/// [`aligner_keyexpr`] delegates here after rendering the zid, so the keyexpr
+/// format string lives in ONE place.
+pub fn aligner_keyexpr_for_hex(config: &ReplicationConfig, zid_hex: &str) -> String {
+    format!("@zid/{}/{}/aligner", zid_hex, config.fingerprint().value())
 }
 
 /// Answer one inbound alignment query: decode the `AlignmentQuery` from the
@@ -478,6 +490,57 @@ where
     tokio::spawn(async move {
         run_alignment(&session, &state, &config, peer_aligner_ke, initial_query).await;
     })
+}
+
+/// Wire the digest-divergence handoff to the aligner: declare a
+/// [`DigestSubscriber`] whose `on_diff` spawns an alignment pull (`Diff`)
+/// against the diverging peer. This is the seam (A8c-2c) that makes a detected
+/// digest divergence automatically trigger a pull: the subscriber reports
+/// `(peer_zid_hex, DigestDiff)` (R311wj), this rebuilds the peer's aligner
+/// keyexpr ([`aligner_keyexpr_for_hex`]) and spawns [`query_replica_aligner`]
+/// with `AlignmentQuery::Diff(diff)`. `state` is shared with the
+/// [`StorageService`](crate::storage_service::StorageService) (pass its
+/// `shared_state()`), so the digest the subscriber diffs AND the entries the
+/// pull lands both reflect the one live store. Dropping the returned subscriber
+/// undeclares it (RAII), so no further auto-pulls are spawned (an in-flight pull
+/// runs to completion or its 10s timeout). zenoh `spawn_digest_subscriber` ->
+/// `spawn_query_replica_aligner` (core.rs:331-399 + 484-577).
+pub fn spawn_digest_aligner<R, T, B>(
+    session: &Session<R, T, Unicast>,
+    state: Arc<Mutex<StorageState<B>>>,
+    config: ReplicationConfig,
+) -> Result<DigestSubscriber<R>, SubscribeError>
+where
+    R: SessionRuntime + 'static,
+    T: TimeSource + Send + Sync + 'static,
+    B: StorageBackend + Send + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+    Session<R, T, Unicast>: Clone + Send + 'static,
+{
+    let session_for_pull = session.clone();
+    let state_for_declare = Arc::clone(&state);
+    let config_for_declare = config.clone();
+    DigestSubscriber::declare(
+        session,
+        state_for_declare,
+        config_for_declare,
+        move |peer_zid_hex: &str, diff: DigestDiff| {
+            // Build the peer's aligner keyexpr synchronously: `peer_zid_hex` is
+            // borrowed from the subscriber callback and is not valid past it, so
+            // it must be resolved before the detached pull is spawned.
+            let peer_aligner_ke = aligner_keyexpr_for_hex(&config, peer_zid_hex);
+            // The JoinHandle is dropped -> the pull runs detached; the digest
+            // subscriber's lifetime gates whether NEW pulls are spawned.
+            query_replica_aligner(
+                &session_for_pull,
+                Arc::clone(&state),
+                config.clone(),
+                peer_aligner_ke,
+                AlignmentQuery::Diff(diff),
+            );
+        },
+    )
 }
 
 #[cfg(test)]
@@ -909,6 +972,67 @@ mod tests {
             dest.replication_digest(&config, hot),
             source.lock().unwrap().replication_digest(&config, hot),
             "after pulling All, the destination converges to the source"
+        );
+    }
+
+    // ----- digest -> aligner wiring (A8c-2c) -----
+
+    #[test]
+    fn aligner_keyexpr_for_hex_matches_the_byte_form() {
+        let config = cfg();
+        // The hex form and the byte form (which renders the zid via
+        // zid_to_zenoh_hex) produce the identical keyexpr.
+        assert_eq!(
+            aligner_keyexpr_for_hex(&config, "ab01"),
+            aligner_keyexpr(&config, &[0x01, 0xab])
+        );
+        assert_eq!(
+            aligner_keyexpr_for_hex(&config, "ab01"),
+            format!("@zid/ab01/{}/aligner", config.fingerprint().value())
+        );
+    }
+
+    #[test]
+    fn digest_keyexpr_derives_the_peer_aligner_keyexpr() {
+        use crate::storage_replication_service::{digest_keyexpr, digest_keyexpr_zid_hex};
+        let config = cfg();
+        let peer_zid = vec![0x01, 0xab];
+
+        // The peer publishes its digest on its digest keyexpr and declares its
+        // aligner queryable on its aligner keyexpr.
+        let peer_digest_ke = digest_keyexpr(&config, &peer_zid);
+        let peer_aligner_ke = aligner_keyexpr(&config, &peer_zid);
+
+        // The asker, on receiving the peer's digest, parses the zid hex out of
+        // the digest keyexpr (R311wj) and rebuilds the aligner keyexpr -- which
+        // must reach exactly the peer's own aligner queryable.
+        let zid_hex = digest_keyexpr_zid_hex(&peer_digest_ke).expect("digest ke parses");
+        assert_eq!(
+            aligner_keyexpr_for_hex(&config, zid_hex),
+            peer_aligner_ke,
+            "the aligner ke derived from a peer's digest ke reaches the peer's own queryable"
+        );
+    }
+
+    #[test]
+    fn spawn_digest_aligner_declares_the_digest_subscriber() {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let config = cfg();
+        let state = Arc::new(Mutex::new(StorageState::new(MemoryStorage::new())));
+        // Wiring declares the digest subscriber; the on_diff -> pull spawn fires
+        // only on a received divergent digest (a two-replica e2e, A11).
+        let sub = spawn_digest_aligner(&session, state, config);
+        assert!(
+            sub.is_ok(),
+            "the digest -> aligner wiring declares its peer-digest subscriber"
         );
     }
 }
