@@ -45,11 +45,15 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
+use wz_session_core::locality::Locality;
+use wz_session_core::sink::SampleView;
 use wz_session_core::storage_backend::StorageBackend;
-use wz_session_core::storage_replication::{wire, ReplicationConfig};
+use wz_session_core::storage_replication::{wire, DigestDiff, ReplicationConfig};
 use wz_session_core::storage_state::StorageState;
 
-use crate::session::{PublishError, PublishOptions, Session, Unicast};
+use crate::session::{
+    PublishError, PublishOptions, Session, SubscribeError, SubscribeOptions, Subscriber, Unicast,
+};
 use crate::session_glue::SessionLinkActions;
 use crate::storage_service::wall_clock_ntp64;
 
@@ -161,6 +165,95 @@ impl DigestPublisher {
     }
 }
 
+/// The keyexpr a replica subscribes to for peer Digests:
+/// `@-digest/*/<config-fp>` — any source zid (`*`) but this replica's OWN
+/// configuration fingerprint, so only compatibly-configured replicas' digests
+/// are received. zenoh digest subscriber keyexpr (core.rs:294-298).
+pub fn digest_subscribe_keyexpr(config: &ReplicationConfig) -> String {
+    format!("@-digest/*/{}", config.fingerprint().value())
+}
+
+/// Process one received peer Digest: decode it, build the local digest at
+/// `now`, diff them, and hand any divergence to `on_diff`. zenoh's
+/// `spawn_digest_subscriber` per-sample body (core.rs:331-399) up to the point
+/// it would query the aligner — wz stops at producing the [`DigestDiff`] (the
+/// typed aligner handoff; the aligner is the next track). A payload that fails
+/// to decode, or a peer on an incompatible configuration
+/// ([`Digest::diff`](wz_session_core::storage_replication::Digest::diff) returns
+/// `None` on a config-fingerprint mismatch), is ignored — never fatal. Pure
+/// over the shared state: the deterministically tested core of the subscriber.
+fn handle_peer_digest<B: StorageBackend>(
+    state: &Arc<Mutex<StorageState<B>>>,
+    config: &ReplicationConfig,
+    peer_bytes: &[u8],
+    now: u64,
+    on_diff: &mut dyn FnMut(DigestDiff),
+) {
+    let peer = match wire::decode(peer_bytes) {
+        Ok(peer) => peer,
+        Err(_) => return,
+    };
+    let hot_upper = config.classify(now).0;
+    let local = {
+        let guard = state.lock().expect("storage state mutex poisoned");
+        guard.replication_digest(config, hot_upper)
+    };
+    if let Some(diff) = local.diff(peer) {
+        on_diff(diff);
+    }
+}
+
+/// A live peer-digest subscriber bound to a [`Session`]: receives peer Digests
+/// on `@-digest/*/<config-fp>` and, for each, hands a [`DigestDiff`] to the
+/// caller's `on_diff` callback whenever this replica diverges from the peer.
+/// The callback is the **aligner handoff seam**: this track produces the
+/// DigestDiff; the aligner track (next) consumes it to pull the diverging
+/// entries. Dropping it undeclares the subscriber (RAII).
+///
+/// The subscriber uses [`Locality::Remote`] so a replica does not process its
+/// OWN published digest (zenoh `allowed_origin(Locality::Remote)`,
+/// core.rs:310-317).
+pub struct DigestSubscriber<R: SessionRuntime> {
+    _subscriber: Subscriber<R>,
+}
+
+impl<R: SessionRuntime> DigestSubscriber<R> {
+    /// Declare the peer-digest subscriber. `state` is shared with the
+    /// [`StorageService`](crate::storage_service::StorageService) (pass its
+    /// `shared_state()`), so the local digest each diff compares against
+    /// reflects the live stored data. `on_diff` is invoked once per received
+    /// peer digest that diverges from this replica.
+    pub fn declare<T, B>(
+        session: &Session<R, T, Unicast>,
+        state: Arc<Mutex<StorageState<B>>>,
+        config: ReplicationConfig,
+        mut on_diff: impl FnMut(DigestDiff) + Send + 'static,
+    ) -> Result<Self, SubscribeError>
+    where
+        T: TimeSource + 'static,
+        B: StorageBackend + Send + 'static,
+        <R as SessionRuntime>::LinkSink: Send + Sync,
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        let subscriber = session.declare_subscriber(
+            digest_subscribe_keyexpr(&config),
+            SubscribeOptions::default().with_allowed_origin(Locality::Remote),
+            move |view: &dyn SampleView| {
+                handle_peer_digest(
+                    &state,
+                    &config,
+                    view.payload(),
+                    wall_clock_ntp64(),
+                    &mut on_diff,
+                );
+            },
+        )?;
+        Ok(Self {
+            _subscriber: subscriber,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +279,132 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(st))
+    }
+
+    fn state_with(keys: &[&str], now: u64) -> StorageState<MemoryStorage> {
+        use wz_session_core::sample::TimestampHint;
+        let mut st = StorageState::new(MemoryStorage::new());
+        for (i, key) in keys.iter().enumerate() {
+            st.process_put(
+                key,
+                vec![i as u8],
+                None,
+                TimestampHint {
+                    time: now,
+                    zid: vec![0x01],
+                },
+            );
+        }
+        st
+    }
+
+    #[test]
+    fn digest_subscribe_keyexpr_is_zenoh_formatted() {
+        let config = cfg();
+        assert_eq!(
+            digest_subscribe_keyexpr(&config),
+            format!("@-digest/*/{}", config.fingerprint().value())
+        );
+    }
+
+    #[test]
+    fn handle_peer_digest_reports_a_divergent_peer() {
+        let now = wall_clock_ntp64();
+        let config = cfg();
+        let hot_upper = config.classify(now).0;
+        let local = state_with(&["demo/a"], now);
+        // The peer holds an extra key -> the local replica diverges from it.
+        let peer = state_with(&["demo/a", "demo/b"], now);
+        let peer_bytes = wire::encode(&peer.replication_digest(&config, hot_upper));
+
+        let expected = local
+            .replication_digest(&config, hot_upper)
+            .diff(peer.replication_digest(&config, hot_upper));
+        assert!(expected.is_some(), "peer has an extra key -> a diff exists");
+
+        let arc = Arc::new(Mutex::new(local));
+        let mut got = None;
+        handle_peer_digest(&arc, &config, &peer_bytes, now, &mut |d| got = Some(d));
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn handle_peer_digest_ignores_an_identical_peer() {
+        let now = wall_clock_ntp64();
+        let config = cfg();
+        let hot_upper = config.classify(now).0;
+        let local = state_with(&["demo/a"], now);
+        let peer_bytes = wire::encode(&local.replication_digest(&config, hot_upper));
+
+        let arc = Arc::new(Mutex::new(local));
+        let mut called = false;
+        handle_peer_digest(&arc, &config, &peer_bytes, now, &mut |_| called = true);
+        assert!(!called, "an identical peer produces no diff");
+    }
+
+    #[test]
+    fn handle_peer_digest_ignores_a_corrupt_payload() {
+        let config = cfg();
+        let arc = Arc::new(Mutex::new(state_with(&["demo/a"], wall_clock_ntp64())));
+        let mut called = false;
+        handle_peer_digest(
+            &arc,
+            &config,
+            &[0xff, 0x00, 0x01],
+            wall_clock_ntp64(),
+            &mut |_| called = true,
+        );
+        assert!(!called, "a corrupt digest payload is ignored, not fatal");
+    }
+
+    #[test]
+    fn handle_peer_digest_ignores_an_incompatible_config_peer() {
+        let now = wall_clock_ntp64();
+        let local_config = cfg();
+        // A peer on a different key_expr -> a different config fingerprint, so
+        // Digest::diff short-circuits to None and the peer is ignored.
+        let peer_config = ReplicationConfig::new("other/**", None, 20, 5, 6, 30, 250);
+        let hot_upper = peer_config.classify(now).0;
+        let peer_bytes =
+            wire::encode(&state_with(&["x/y"], now).replication_digest(&peer_config, hot_upper));
+
+        let arc = Arc::new(Mutex::new(state_with(&["demo/a"], now)));
+        let mut called = false;
+        handle_peer_digest(&arc, &local_config, &peer_bytes, now, &mut |_| {
+            called = true
+        });
+        assert!(
+            !called,
+            "a peer on an incompatible configuration is ignored (config-fp mismatch)"
+        );
+    }
+
+    // A live-session test that the peer-digest subscriber declares against a
+    // real session on the @-digest/*/<fp> keyexpr (Remote-only). The
+    // cross-session firing (a remote peer's digest -> diff -> on_diff) is the
+    // R9 interop atom + a two-instance e2e; here the decode/diff/observer core
+    // is covered by the handle_peer_digest unit tests above.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn digest_subscriber_declares_on_the_subscribe_keyexpr() {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::TokioSession;
+        use crate::storage_service::StorageService;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let storage =
+            StorageService::declare(&session, "demo/**", vec![0x01]).expect("storage declares");
+        let config = cfg();
+        let sub = DigestSubscriber::declare(&session, storage.shared_state(), config, |_diff| {});
+        assert!(
+            sub.is_ok(),
+            "the peer-digest subscriber declares on @-digest/*/<fp>"
+        );
     }
 
     #[test]
@@ -233,9 +452,8 @@ mod tests {
     async fn spawned_publisher_emits_a_decodable_digest() {
         use crate::observer::ApplicationLayerObserver;
         use crate::runtime_impl::TokioTime;
-        use crate::session::{SubscribeOptions, TokioSession};
+        use crate::session::TokioSession;
         use std::time::Duration;
-        use wz_session_core::sink::SampleView;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));

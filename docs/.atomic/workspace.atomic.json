@@ -47195,6 +47195,44 @@
         "LOCAL: R311vm on e2a4796 (origin/main=be8e731, +6 ahead vh..vm); driver publisher live. NOT pushed; push awaits explicit consent; full run-ci is the pre-push gate at R8. zenoh divergences documented: no propagation-delay/jitter (needs a seeded RNG), recompute-not-incremental-log."
       ]
     },
+    "Round 311vn": {
+      "decision_summary": "R311vn: storage-replication digest subscriber driver atom (replication 7/N) -- DigestSubscriber receives peer digests on @-digest/*/<config-fp> (Remote-only), decodes + diffs against the live local digest, and hands each DigestDiff to an on_diff callback (the aligner handoff seam); the decode/diff/observer core is the deterministically tested handle_peer_digest.",
+      "changes_bullets": [
+        "storage_replication_service.rs: digest_subscribe_keyexpr(config) = @-digest/*/<config-fp> (zenoh core.rs:294-298); handle_peer_digest(state, config, peer_bytes, now, on_diff) = wire::decode -> local replication_digest(now) -> local.diff(peer) -> on_diff(DigestDiff) (pure; zenoh spawn_digest_subscriber body core.rs:331-399 up to the aligner handoff); a corrupt payload or an incompatible-config peer (diff None) is ignored, never fatal.",
+        "DigestSubscriber::declare(session, shared_state, config, on_diff) declares a Remote-only subscriber (with_allowed_origin(Locality::Remote), zenoh core.rs:310-317) whose callback runs handle_peer_digest; RAII undeclare on drop. The DigestDiff is the typed handoff the aligner track consumes.",
+        "Imports promoted to module level (SampleView, Locality, Subscriber/SubscribeError/SubscribeOptions, DigestDiff); the spawned_publisher test's now-redundant local uses removed."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio --features storage-replication,pubsub-allow-loop: storage_replication_service 9/9 (R6 3 + R7 6: digest_subscribe_keyexpr zenoh-formatted; handle_peer_digest reports a divergent peer (== local.diff(peer)), ignores an identical peer, ignores a corrupt payload without panic, ignores an incompatible-config peer via the config-fp mismatch -> None; LIVE DigestSubscriber declares on @-digest/*/<fp> Remote-only).",
+        "clippy -D clean (storage-replication,pubsub-allow-loop --all-targets); fmt clean. Regression: wz-runtime-tokio --lib 279/279 default."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vn = storage-replication digest subscriber driver (replication 7/N, §5.11): DigestSubscriber receives peer digests on @-digest/*/<config-fp> (Remote-only), wire::decode -> local digest -> local.diff(peer) -> on_diff(DigestDiff) (the aligner handoff seam; this track ENDS at producing DigestDiff). Core = pure handle_peer_digest (decode/diff/observer), deterministically tested incl corrupt + incompatible-config rejection. Live declare test; cross-session firing is R9 + a two-instance e2e (named residual).",
+        "storage-replication DIGEST track CODE COMPLETE (R1 prims vh, R2 build vi, R3 diff vj, R4 wire vk, R5 StorageState bridge vl, R6 publisher vm, R7 subscriber vn): produce + compare + wire + publish + subscribe + diff, byte-exact with zenoh's bincode digest. -> NEXT R8 facade forward (wz/Cargo.toml storage-replication -> wz-runtime-tokio?/storage-replication) + inventory storage-replication reserved->ACTIVE + Round entry + full run-ci (ALL host lanes) + 4-agent adversarial session review -> R9 cross-impl interop vs real zenohd storage-manager (digest mutual parse + config-fp match + diff detect; full convergence needs the aligner = storage-aligner track).",
+        "LOCAL: R311vn on 1ee2cad (origin/main=be8e731, +7 ahead vh..vn); NOT pushed; push awaits explicit consent. The aligner (storage-aligner) consumes DigestDiff to pull diverging entries = the next TRACK after this one closes at R8/R9."
+      ],
+      "publishable_decision_summary": "R311vn: storage-replication digest subscriber driver atom (replication 7/N) -- DigestSubscriber receives peer digests on @-digest/*/<config-fp> (Remote-only), decodes + diffs against the live local digest, and hands each DigestDiff to an on_diff callback (the aligner handoff seam); the decode/diff/observer core is the deterministically tested handle_peer_digest.",
+      "publishable_changes_bullets": [
+        "storage_replication_service.rs: digest_subscribe_keyexpr(config) = @-digest/*/<config-fp> (zenoh core.rs:294-298); handle_peer_digest(state, config, peer_bytes, now, on_diff) = wire::decode -> local replication_digest(now) -> local.diff(peer) -> on_diff(DigestDiff) (pure; zenoh spawn_digest_subscriber body core.rs:331-399 up to the aligner handoff); a corrupt payload or an incompatible-config peer (diff None) is ignored, never fatal.",
+        "DigestSubscriber::declare(session, shared_state, config, on_diff) declares a Remote-only subscriber (with_allowed_origin(Locality::Remote), zenoh core.rs:310-317) whose callback runs handle_peer_digest; RAII undeclare on drop. The DigestDiff is the typed handoff the aligner track consumes.",
+        "Imports promoted to module level (SampleView, Locality, Subscriber/SubscribeError/SubscribeOptions, DigestDiff); the spawned_publisher test's now-redundant local uses removed."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio --features storage-replication,pubsub-allow-loop: storage_replication_service 9/9 (R6 3 + R7 6: digest_subscribe_keyexpr zenoh-formatted; handle_peer_digest reports a divergent peer (== local.diff(peer)), ignores an identical peer, ignores a corrupt payload without panic, ignores an incompatible-config peer via the config-fp mismatch -> None; LIVE DigestSubscriber declares on @-digest/*/<fp> Remote-only).",
+        "clippy -D clean (storage-replication,pubsub-allow-loop --all-targets); fmt clean. Regression: wz-runtime-tokio --lib 279/279 default."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vn = storage-replication digest subscriber driver (replication 7/N, §5.11): DigestSubscriber receives peer digests on @-digest/*/<config-fp> (Remote-only), wire::decode -> local digest -> local.diff(peer) -> on_diff(DigestDiff) (the aligner handoff seam; this track ENDS at producing DigestDiff). Core = pure handle_peer_digest (decode/diff/observer), deterministically tested incl corrupt + incompatible-config rejection. Live declare test; cross-session firing is R9 + a two-instance e2e (named residual).",
+        "storage-replication DIGEST track CODE COMPLETE (R1 prims vh, R2 build vi, R3 diff vj, R4 wire vk, R5 StorageState bridge vl, R6 publisher vm, R7 subscriber vn): produce + compare + wire + publish + subscribe + diff, byte-exact with zenoh's bincode digest. -> NEXT R8 facade forward (wz/Cargo.toml storage-replication -> wz-runtime-tokio?/storage-replication) + inventory storage-replication reserved->ACTIVE + Round entry + full run-ci (ALL host lanes) + 4-agent adversarial session review -> R9 cross-impl interop vs real zenohd storage-manager (digest mutual parse + config-fp match + diff detect; full convergence needs the aligner = storage-aligner track).",
+        "LOCAL: R311vn on 1ee2cad (origin/main=be8e731, +7 ahead vh..vn); NOT pushed; push awaits explicit consent. The aligner (storage-aligner) consumes DigestDiff to pull diverging entries = the next TRACK after this one closes at R8/R9."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
