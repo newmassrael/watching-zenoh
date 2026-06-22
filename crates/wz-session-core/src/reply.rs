@@ -324,14 +324,16 @@ impl From<QueryReply> for InboundReply {
                 rid,
                 keyexpr_literal,
                 body,
-                // R311va/vd: the loopback receive path does not yet surface
-                // reply metadata (InboundReplyBody carries no encoding /
-                // timestamp slot) — the receive-side metadata is the named
-                // follow-up twin of these emit-side atoms. Dropped here
+                // R311va/vd/A8a: the loopback receive path does not yet
+                // surface reply metadata (InboundReplyBody carries no encoding
+                // / timestamp / attachment slot) — the receive-side metadata
+                // is the named follow-up twin of these emit-side atoms (A8b
+                // adds the attachment + encoding receive slots). Dropped here
                 // intentionally.
                 encoding: _,
                 timestamp: _,
                 responder: _,
+                attachment: _,
             } => {
                 let body = match body {
                     ReplyBody::Put(payload) => InboundReplyBody::Put { payload },

@@ -148,6 +148,35 @@ pub trait ReplyOut {
         let _ = (encoding, timestamp);
         self.reply_keyed(keyexpr, payload);
     }
+    /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
+    /// an optional value `encoding`) under an explicit concrete `keyexpr`.
+    /// The faithful shape a storage **aligner** answers a query with: the
+    /// serialized `AlignmentReply` rides the reply attachment (the inner
+    /// `MsgPut` body ext id 0x03 — the same Put-body attachment mechanism a
+    /// pubsub Put uses, since a Reply body IS a Put push-body) while the
+    /// stored value, if any, rides the `payload` (+ its `encoding`). A
+    /// metadata-only reply passes an empty `payload` (an empty-payload Put),
+    /// as the attachment is Put-only. zenoh
+    /// `q.reply(key, value).encoding(enc).attachment(bincode(reply))`
+    /// (`replication/core/aligner_query.rs:340-358`).
+    ///
+    /// Default impl falls back to [`Self::reply_keyed`] (dropping the
+    /// encoding + attachment), so impls that predate the attachment seam stay
+    /// valid — a build without `pubsub-attachment` (or a sink that does not
+    /// carry it) simply omits the body ext. `alloc`-gated (the
+    /// [`crate::sample::EncodingHint`] type lives in the `alloc`-gated
+    /// `sample` module), mirroring [`Self::reply_keyed_stamped`].
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_attached(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&crate::sample::EncodingHint>,
+        attachment: &[u8],
+    ) {
+        let _ = (encoding, attachment);
+        self.reply_keyed(keyexpr, payload);
+    }
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
     fn reply_del(&mut self);

@@ -376,6 +376,20 @@ pub enum QueryReply {
         /// `Some` packs the bytes via
         /// [`crate::session_glue::ResponseReplyBuilder::responder`].
         responder: Option<(Vec<u8>, u32)>,
+        /// Optional opaque attachment carried on the inner `MsgPut` body
+        /// extension chain (the push-body attachment ext, id 0x03 — the
+        /// SAME wire mechanism a pubsub Put attachment rides, because a
+        /// Reply's body IS a Put push-body; zenoh-pico `_z_push_body_encode`
+        /// emits it at `message.c:295-298`, reached from `_z_reply_encode`
+        /// at `message.c:517`). `None` emits no attachment ext; `Some` serves
+        /// a side-band the querier reads back — what the storage **aligner**
+        /// carries its serialized `AlignmentReply` on (zenoh
+        /// `q.reply(..).attachment(bincode(reply))`,
+        /// `replication/core/aligner_query.rs:340-358`). Put-only (zenoh-pico
+        /// gates `has_attachment` on `_is_put`), so it rides the Put arm even
+        /// for a value-less metadata reply (an empty-payload Put). Threaded
+        /// into [`crate::response_build::ResponseReplyBuilder::attachment`].
+        attachment: Option<Vec<u8>>,
     },
     /// Error reply — `MID = _Z_MID_Z_ERR(0x05)`. The `encoding` tuple
     /// (id, optional schema) maps onto
@@ -425,6 +439,7 @@ impl QueryReply {
                 encoding,
                 timestamp,
                 responder,
+                attachment,
             } => {
                 let mut builder = match body {
                     ReplyBody::Put(payload) => {
@@ -449,6 +464,12 @@ impl QueryReply {
                 }
                 if let Some(ts) = timestamp {
                     builder = builder.timestamp(&ts);
+                }
+                // Thread the inner-MsgPut body attachment ext (id 0x03),
+                // emitted iff `pubsub-attachment` is on (the builder gates
+                // it). `None` leaves the body ext chain empty / Z bit clear.
+                if let Some(att) = attachment {
+                    builder = builder.attachment(&att);
                 }
                 if let Some((zid, eid)) = responder {
                     builder = builder.responder(&zid, eid);
@@ -530,6 +551,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            attachment: None,
         });
     }
 
@@ -552,6 +574,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            attachment: None,
         });
     }
 
@@ -579,6 +602,40 @@ impl<'a> QueryResponder<'a> {
             encoding: encoding.cloned(),
             timestamp: Some(timestamp.clone()),
             responder: self.responder.clone(),
+            attachment: None,
+        });
+    }
+
+    /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
+    /// an optional value `encoding`) under an explicit `keyexpr` — the
+    /// faithful shape a storage **aligner** answers a query with: the
+    /// serialized `AlignmentReply` rides the reply attachment (the inner
+    /// `MsgPut` body ext id 0x03) while the stored value, if any, rides the
+    /// `payload` (+ its `encoding`). zenoh
+    /// `q.reply(key, value).encoding(enc).attachment(bincode(reply))`
+    /// (`replication/core/aligner_query.rs:340-358`). A metadata-only reply
+    /// passes an empty `payload` (an empty-payload Put), since the attachment
+    /// is Put-only (zenoh-pico gates `has_attachment` on `_is_put`). The
+    /// attachment threads through [`QueryReply::into_response`] into
+    /// [`crate::response_build::ResponseReplyBuilder::attachment`] (emitted
+    /// iff `pubsub-attachment` is on, the wz Put-body attachment policy gate).
+    /// No timestamp — the aligner orders by the `EventMetadata` it carries in
+    /// the attachment, not a reply T-flag.
+    pub fn send_reply_keyed_attached(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+        attachment: &[u8],
+    ) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Put(payload.to_vec()),
+            encoding: encoding.cloned(),
+            timestamp: None,
+            responder: self.responder.clone(),
+            attachment: Some(attachment.to_vec()),
         });
     }
 
@@ -594,6 +651,7 @@ impl<'a> QueryResponder<'a> {
             encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
+            attachment: None,
         });
     }
 
@@ -714,6 +772,15 @@ impl ReplyOut for QueryResponder<'_> {
         timestamp: &TimestampHint,
     ) {
         self.send_reply_keyed_stamped(keyexpr, payload, encoding, timestamp);
+    }
+    fn reply_keyed_attached(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+        attachment: &[u8],
+    ) {
+        self.send_reply_keyed_attached(keyexpr, payload, encoding, attachment);
     }
     fn reply_del(&mut self) {
         self.send_reply_del();
@@ -1906,6 +1973,81 @@ mod tests {
         }
     }
 
+    /// A8a — the aligner reply seam end-to-end: `reply_keyed_attached` stages
+    /// a QueryReply carrying the attachment (the serialized AlignmentReply)
+    /// alongside the value + encoding, and `into_response` threads it onto the
+    /// inner MsgPut's body attachment ext (id 0x03) on the wire. Proves the
+    /// whole chain (ReplyOut -> QueryResponder -> QueryReply -> wire), not just
+    /// the builder.
+    #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
+    #[test]
+    fn responder_reply_keyed_attached_threads_attachment_to_the_wire() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("@zid/aligner", |_q, responder| {
+            // A value-bearing Retrieval reply: payload + encoding ride the
+            // body, the serialized AlignmentReply rides the attachment.
+            let enc = EncodingHint {
+                packed_id: 13,
+                schema: None,
+            };
+            responder.reply_keyed_attached("demo/a", b"stored-value", Some(&enc), b"align-reply");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("@zid/aligner")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 1);
+        // Staging: the QueryReply carries the attachment + value + encoding.
+        match &replies[0] {
+            QueryReply::Reply {
+                keyexpr_literal,
+                body: ReplyBody::Put(payload),
+                encoding,
+                attachment,
+                timestamp,
+                ..
+            } => {
+                assert_eq!(keyexpr_literal, "demo/a");
+                assert_eq!(payload, b"stored-value");
+                assert_eq!(attachment.as_deref(), Some(&b"align-reply"[..]));
+                assert!(encoding.is_some(), "value encoding present");
+                assert!(timestamp.is_none(), "aligner replies carry no T-flag");
+            }
+            other => panic!("expected attached Put Reply, got {other:?}"),
+        }
+
+        // Wire: into_response emits the body attachment ext (id 0x03).
+        let response = replies
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_response()
+            .expect("the attached reply encodes");
+        match &response.body {
+            wz_codecs::response::ResponseOwnedVariant::CodecZenohReply(reply) => {
+                match &reply.body {
+                    wz_codecs::reply::ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                        assert_eq!(put.header & 0x80, 0x80, "MsgPut Z bit set");
+                        let exts = put.extensions.as_ref().expect("body ext chain");
+                        assert_eq!(
+                            crate::attachment::decode_attachment_ext(
+                                exts,
+                                crate::attachment::ATTACHMENT_EXT_ID_PUSH
+                            ),
+                            Some(&b"align-reply"[..]),
+                        );
+                    }
+                    _ => panic!("expected MsgPut inner body"),
+                }
+            }
+            _ => panic!("expected Reply body"),
+        }
+    }
+
     #[test]
     fn responder_send_reply_del_emits_del_arm() {
         let mut reg = QueryableRegistry::new();
@@ -2156,6 +2298,7 @@ mod tests {
             encoding: None,
             timestamp: None,
             responder: None,
+            attachment: None,
         };
         let response = reply.into_response().unwrap();
         // The Response should encode to the same bytes as the
@@ -2180,6 +2323,7 @@ mod tests {
             encoding: None,
             timestamp: None,
             responder: None,
+            attachment: None,
         };
         let response = reply.into_response().unwrap();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])

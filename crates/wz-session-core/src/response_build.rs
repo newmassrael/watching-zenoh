@@ -403,6 +403,39 @@ fn gated_reply_encoding(
     }
 }
 
+/// A8a — SSOT for the reply-side `pubsub-attachment` gate: build the single
+/// inner-`MsgPut` body attachment ext (push-body ext id `0x03`) iff
+/// `pubsub-attachment` is on, else `None`. The reply-side twin of the
+/// attachment branch of `push_build::build_body_extensions` (same
+/// `codec-push` / `codec-response` module gate-split rationale as
+/// [`gated_reply_timestamp`] forbids sharing one fn). The genuine wire SSOT —
+/// [`crate::attachment::encode_attachment_ext`] with
+/// [`crate::attachment::ATTACHMENT_EXT_ID_PUSH`] — is reused, so a reply's
+/// attachment ext is byte-identical to a pubsub Put's (a Reply body IS a Put
+/// push-body, zenoh-pico `_z_push_body_encode` message.c:295-298 reached from
+/// `_z_reply_encode` message.c:517). Fallible (the owned ext-zbuf copy; under
+/// `alloc` the carrier is unbounded, so an aligner-sized reply is not capped),
+/// so it runs in `build`'s `Result`.
+#[cfg(feature = "codec-response")]
+fn gated_reply_attachment(attachment: Option<&[u8]>) -> Result<Option<ExtEntryOwned>, CodecError> {
+    #[cfg(feature = "pubsub-attachment")]
+    {
+        attachment
+            .map(|a| {
+                crate::attachment::encode_attachment_ext(
+                    crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+                    a,
+                )
+            })
+            .transpose()
+    }
+    #[cfg(not(feature = "pubsub-attachment"))]
+    {
+        let _ = attachment;
+        Ok(None)
+    }
+}
+
 /// The wz minimal `Err` BODY — MID `0x05` only, NO E (encoding) / Z (exts), with
 /// just the always-present payload (zenoh-pico `_z_err_encode`'s minimal shape).
 /// The SSOT the three `build_response_err_*` builders share, so the Err body is
@@ -462,6 +495,13 @@ pub struct ResponseReplyBuilder {
     // so it lives in `build`'s `Result`, not the infallible setter). What a
     // `History::All` storage stamps each version reply with.
     timestamp: Option<crate::sample::TimestampHint>,
+    // A8a: optional inner-MsgPut body attachment — the push-body attachment
+    // ext (id 0x03) + the `_Z_FLAG_Z_Z` (0x80) body-ext-chain header bit.
+    // Held as the raw side-band bytes and built into the ext at build()
+    // (fallible owned copy). PUT-only (zenoh-pico gates `has_attachment` on
+    // `_is_put`), so it is dropped on a `.reply_del()` builder. What the
+    // storage aligner carries its serialized `AlignmentReply` on.
+    attachment: Option<Vec<u8>>,
     // R121j-3c: Response-ENVELOPE-level responder ext (ext_id 0x03 ZBUF).
     // Tuple = (zid bytes 1..=16, eid). Distinct from R121j-4b Err.source_info
     // (Err-body-level): responder sits on the outer Response.extensions
@@ -493,6 +533,7 @@ impl ResponseReplyBuilder {
             consolidation: None,
             encoding: None,
             timestamp: None,
+            attachment: None,
             responder: None,
         }
     }
@@ -518,6 +559,22 @@ impl ResponseReplyBuilder {
     /// a `History::All` storage's per-version timestamp through.
     pub fn timestamp(mut self, timestamp: &crate::sample::TimestampHint) -> Self {
         self.timestamp = Some(timestamp.clone());
+        self
+    }
+
+    /// Set the inner-`MsgPut` body attachment (the push-body attachment ext,
+    /// id 0x03). Subsequent calls overwrite (last-wins). Emitted iff
+    /// `pubsub-attachment` is on (the wz Put-body attachment policy gate,
+    /// shared with the Push path); otherwise the body ext chain stays empty
+    /// and the `_Z_FLAG_Z_Z` bit clear. Put-only — a Reply Del body carries
+    /// no attachment (zenoh-pico `has_attachment = _is_put && ..`), so an
+    /// `.attachment()` on a `.reply_del()` builder is ignored at build().
+    /// No length cap: under `alloc` the ext-zbuf carrier is unbounded, so an
+    /// aligner-sized `AlignmentReply` rides intact. What
+    /// [`crate::query::QueryReply`] threads a storage aligner's serialized
+    /// reply through.
+    pub fn attachment(mut self, attachment: &[u8]) -> Self {
+        self.attachment = Some(attachment.to_vec());
         self
     }
 
@@ -590,6 +647,7 @@ impl ResponseReplyBuilder {
         // Del body has no encoding slot).
         let reply_timestamp = gated_reply_timestamp(self.timestamp.as_ref())?;
         let reply_encoding = gated_reply_encoding(self.encoding.as_ref())?;
+        let reply_attachment = gated_reply_attachment(self.attachment.as_deref())?;
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -652,6 +710,22 @@ impl ResponseReplyBuilder {
                 if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &mut reply.body {
                     put.encoding = Some(enc);
                     put.header |= 0x40; // _Z_FLAG_Z_P_E
+                }
+            }
+            // Stamp the inner-MsgPut body attachment ext (id 0x03) + the Z
+            // (0x80) body-ext-chain header bit. Put-only — a Reply Del body
+            // has no attachment (zenoh-pico gates `has_attachment` on
+            // `_is_put`), so a `.attachment()` on a `.reply_del()` builder is
+            // dropped here. The single attachment ext is the sole body ext on
+            // a reply (a reply body carries no source_info — wire-absent), so
+            // it is the chain terminator (Z-continuation clear, set by
+            // `encode_attachment_ext`); the MsgPut header Z bit signals the
+            // chain's presence, exactly as the Push path's
+            // `build_msg_put_with_meta` does (push_build.rs:532-533).
+            if let Some(att_ext) = reply_attachment {
+                if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &mut reply.body {
+                    put.extensions = Some(vec![att_ext]);
+                    put.header |= 0x80; // _Z_FLAG_Z_Z
                 }
             }
         } else {
@@ -1909,6 +1983,178 @@ mod tests {
                 assert!(put.timestamp.is_none());
             } else {
                 panic!("expected MsgPut");
+            }
+        } else {
+            panic!("expected Reply");
+        }
+    }
+
+    // ---- A8a: reply-attachment emit seam ----
+
+    /// A8a — `.attachment()` stamps the inner MsgPut's body attachment ext
+    /// (push-body ext id 0x03) + the Z(0x80) body-ext-chain header bit, the
+    /// faithful side-band a storage aligner serves its serialized
+    /// `AlignmentReply` on (a Reply body IS a Put push-body, so the same 0x03
+    /// attachment ext a pubsub Put uses, zenoh-pico message.c:295-298).
+    #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
+    #[test]
+    fn response_reply_builder_attachment_sets_msgput_body_ext_and_z_flag() {
+        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .attachment(b"align-reply-bytes")
+            .build()
+            .unwrap();
+        match &response.body {
+            ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                    assert_eq!(put.header & 0x80, 0x80, "MsgPut Z-flag (0x80) set");
+                    let exts = put.extensions.as_ref().expect("body ext chain present");
+                    let got = crate::attachment::decode_attachment_ext(
+                        exts,
+                        crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+                    )
+                    .expect("attachment ext (id 0x03) present");
+                    assert_eq!(got, b"align-reply-bytes");
+                }
+                _ => panic!("expected CodecZenohMsgPut inner body"),
+            },
+            _ => panic!("expected CodecZenohReply body"),
+        }
+    }
+
+    /// A8a — on the wire the attachment rides the push-body ext: header byte
+    /// `ENC_ZBUF(0x40) | id(0x03) = 0x43` then a VLE length then the bytes,
+    /// inserted before the payload; the MsgPut header carries the Z bit. The
+    /// byte-level twin of the structural test above (zenoh-pico message.c:296
+    /// emits exactly `_Z_MSG_EXT_ENC_ZBUF | 0x03`).
+    #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
+    #[test]
+    fn response_reply_builder_attachment_emits_push_body_ext_on_wire() {
+        let att: &[u8] = b"abcde";
+        let baseline = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .build()
+            .unwrap()
+            .wire();
+        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .attachment(att)
+            .build()
+            .unwrap()
+            .wire();
+        // The ext adds exactly: 1 header + 1 VLE(len=5) + 5 value = 7 bytes.
+        assert_eq!(
+            wire.len(),
+            baseline.len() + 7,
+            "wire grows by the body attachment ext size (1 header + 1 len + 5 bytes)"
+        );
+        // The ext header (0x43) + VLE len (0x05) + value appear contiguously.
+        let mut window = vec![0x43u8, att.len() as u8];
+        window.extend_from_slice(att);
+        assert!(
+            wire.windows(window.len()).any(|w| w == window),
+            "wire carries [ENC_ZBUF|0x03, len, value] for the push-body attachment ext"
+        );
+    }
+
+    /// A8a — an aligner-sized (> the 32-byte `QUERY_EXT_ZBUF_MAX_LEN`)
+    /// attachment survives intact: under `alloc` the ext-zbuf owned carrier is
+    /// unbounded (`owned_bytes` -> `SceBytes<N>` wraps a `Vec<u8>`, N
+    /// advisory), so a real `AlignmentReply` is not capped. This is the proof
+    /// the attachment seam is usable for the aligner, not just tiny blobs.
+    #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
+    #[test]
+    fn response_reply_builder_attachment_carries_aligner_sized_payload() {
+        let big: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        assert!(big.len() > 32, "exceeds the 32-byte query-attachment cap");
+        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .attachment(&big)
+            .build()
+            .unwrap();
+        if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
+            if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body {
+                let exts = put.extensions.as_ref().expect("body ext chain present");
+                let got = crate::attachment::decode_attachment_ext(
+                    exts,
+                    crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+                )
+                .expect("attachment ext present");
+                assert_eq!(got, big.as_slice(), "the full 200-byte payload survived");
+            } else {
+                panic!("expected MsgPut");
+            }
+        } else {
+            panic!("expected Reply");
+        }
+    }
+
+    /// A8a — the attachment composes with encoding (E) + timestamp (T): all
+    /// three land on the inner MsgPut on distinct header bits (0x40 / 0x20 /
+    /// 0x80) and distinct slots (encoding / timestamp fields + the ext chain),
+    /// so a single value-bearing aligner Retrieval reply carries them together.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "pubsub-attachment",
+        feature = "pubsub-encoding",
+        feature = "pubsub-timestamp"
+    ))]
+    #[test]
+    fn response_reply_builder_attachment_composes_with_encoding_and_timestamp() {
+        let enc = crate::sample::EncodingHint {
+            packed_id: 13,
+            schema: None,
+        };
+        let ts = crate::sample::TimestampHint {
+            time: 0x0102_0304,
+            zid: vec![0x09],
+        };
+        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .encoding(&enc)
+            .timestamp(&ts)
+            .attachment(b"meta")
+            .build()
+            .unwrap();
+        if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
+            if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &reply.body {
+                assert_eq!(put.header & 0x40, 0x40, "E-flag set");
+                assert_eq!(put.header & 0x20, 0x20, "T-flag set");
+                assert_eq!(put.header & 0x80, 0x80, "Z-flag set (body ext chain)");
+                assert!(put.encoding.is_some());
+                assert!(put.timestamp.is_some());
+                let exts = put.extensions.as_ref().expect("ext chain present");
+                assert_eq!(
+                    crate::attachment::decode_attachment_ext(
+                        exts,
+                        crate::attachment::ATTACHMENT_EXT_ID_PUSH
+                    ),
+                    Some(&b"meta"[..])
+                );
+            } else {
+                panic!("expected MsgPut");
+            }
+        } else {
+            panic!("expected Reply");
+        }
+    }
+
+    /// A8a — attachment is PUT-only (zenoh-pico gates `has_attachment` on
+    /// `_is_put`): an `.attachment()` on a `.reply_del()` builder is dropped,
+    /// the Del body stays attachment-free, and nothing panics.
+    #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
+    #[test]
+    fn response_reply_builder_attachment_dropped_on_del_arm() {
+        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .reply_del()
+            .attachment(b"ignored")
+            .build()
+            .unwrap();
+        if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
+            match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgDel(del) => {
+                    assert!(
+                        del.extensions.is_none(),
+                        "a Del reply carries no attachment (Put-only)"
+                    );
+                    assert_eq!(del.header & 0x80, 0x00, "no Z bit on the Del body");
+                }
+                _ => panic!("expected MsgDel after reply_del()"),
             }
         } else {
             panic!("expected Reply");
