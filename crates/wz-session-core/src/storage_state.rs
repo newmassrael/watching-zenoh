@@ -83,7 +83,8 @@ use crate::sample_kind::SampleKind;
 use crate::sink::SampleView;
 #[cfg(feature = "storage-aligner")]
 use crate::storage_aligner::{
-    Action, AlignmentQuery, AlignmentReply, AlignmentResponse, EventBuckets, EventMetadata,
+    Action, AlignmentFollowup, AlignmentQuery, AlignmentReply, AlignmentResponse, EventBuckets,
+    EventMetadata,
 };
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 #[cfg(feature = "storage-replication")]
@@ -550,6 +551,154 @@ impl<B: StorageBackend> StorageState<B> {
                 // metadata was sent: skip, as zenoh does.
                 _ => None,
             },
+        }
+    }
+
+    /// Process one [`AlignmentReply`] from a peer this replica is aligning
+    /// *against* — the aligner's ASK half. Applies any entries this replica is
+    /// missing (via the newer-wins gate) and returns the
+    /// [`AlignmentFollowup`]: the next, finer query to send, or `Done`. zenoh
+    /// `Replication::process_alignment_reply` (aligner_reply.rs:99-229), minus
+    /// the wildcard arms wz storage has no events for.
+    ///
+    /// `value` is the reply body — present only for a Put
+    /// [`Retrieval`](AlignmentReply::Retrieval) (the payload + encoding); the
+    /// driver pulls it off the query-reply and passes it here. `now` fixes the
+    /// Hot-era upper bound the Cold/Warm fingerprint comparisons use.
+    ///
+    /// The exchange is stateless and drives itself: a driver loops
+    /// `query -> peer answers -> process each reply -> followup query` until
+    /// every branch returns `Done`.
+    #[cfg(feature = "storage-aligner")]
+    pub fn process_alignment_reply(
+        &mut self,
+        config: &ReplicationConfig,
+        reply: AlignmentReply,
+        value: Option<(Vec<u8>, Option<EncodingHint>)>,
+        now: u64,
+    ) -> AlignmentFollowup {
+        match reply {
+            // Initial alignment: the peer told us its zid; the driver pulls all
+            // of its content next.
+            AlignmentReply::Discovery(zid) => AlignmentFollowup::DiscoveredReplica(zid),
+
+            // Cold-era fingerprints: keep the intervals whose fingerprint we
+            // differ on (or lack) and ask for their sub-intervals
+            // (aligner_reply.rs:139-159).
+            AlignmentReply::Intervals(peer_fingerprints) => {
+                let buckets = EventBuckets::from_events(self.replication_events(), config);
+                let local = buckets.cold_era_fingerprints(config, config.classify(now).0);
+                let differing: alloc::collections::BTreeSet<_> = peer_fingerprints
+                    .into_iter()
+                    .filter(|(idx, peer_fp)| match local.get(idx) {
+                        Some(local_fp) => local_fp != peer_fp,
+                        None => true,
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect();
+                if differing.is_empty() {
+                    AlignmentFollowup::Done
+                } else {
+                    AlignmentFollowup::Query(AlignmentQuery::Intervals(differing))
+                }
+            }
+
+            // Sub-interval fingerprints: keep the sub-intervals we differ on
+            // (or lack) and ask for their events (aligner_reply.rs:160-200).
+            // Mirrors zenoh: an interval present locally is inserted even with
+            // an empty diff set; only a wholly-missing interval contributes all
+            // of the peer's sub-intervals.
+            AlignmentReply::SubIntervals(peer_sub_fingerprints) => {
+                let buckets = EventBuckets::from_events(self.replication_events(), config);
+                let interval_keys: alloc::collections::BTreeSet<_> =
+                    peer_sub_fingerprints.keys().copied().collect();
+                let local = buckets.sub_intervals_fingerprints(&interval_keys);
+                let mut diff: BTreeMap<_, alloc::collections::BTreeSet<_>> = BTreeMap::new();
+                for (interval_idx, peer_subs) in peer_sub_fingerprints {
+                    match local.get(&interval_idx) {
+                        None => {
+                            diff.insert(interval_idx, peer_subs.into_keys().collect());
+                        }
+                        Some(local_subs) => {
+                            let differing = peer_subs
+                                .into_iter()
+                                .filter(|(sub_idx, peer_fp)| match local_subs.get(sub_idx) {
+                                    Some(local_fp) => local_fp != peer_fp,
+                                    None => true,
+                                })
+                                .map(|(sub_idx, _)| sub_idx)
+                                .collect();
+                            diff.insert(interval_idx, differing);
+                        }
+                    }
+                }
+                if diff.is_empty() {
+                    AlignmentFollowup::Done
+                } else {
+                    AlignmentFollowup::Query(AlignmentQuery::SubIntervals(diff))
+                }
+            }
+
+            // Event metadata: a Delete we lack applies right away (no payload
+            // needed); a Put we lack is collected to fetch its payload
+            // (aligner_reply.rs:201-224 -> process_event_metadata :243-306).
+            AlignmentReply::EventsMetadata(events) => {
+                let mut missing_puts = Vec::new();
+                for meta in events {
+                    if !self.is_missing(&meta) {
+                        continue; // we already hold this event newer-or-equal
+                    }
+                    match meta.action() {
+                        Action::Put => missing_puts.push(meta),
+                        Action::Delete => {
+                            self.process_delete(meta.key(), meta.timestamp().clone());
+                        }
+                    }
+                }
+                if missing_puts.is_empty() {
+                    AlignmentFollowup::Done
+                } else {
+                    AlignmentFollowup::Query(AlignmentQuery::Events(missing_puts))
+                }
+            }
+
+            // A retrieved event + its payload: apply it through the newer-wins
+            // gate, unless we already hold it newer-or-equal
+            // (aligner_reply.rs:321-409, the wz-relevant Put / Delete arms).
+            AlignmentReply::Retrieval(meta) => {
+                if self.is_missing(&meta) {
+                    match meta.action() {
+                        Action::Put => {
+                            if let Some((payload, encoding)) = value {
+                                self.process_put(
+                                    meta.key(),
+                                    payload,
+                                    encoding,
+                                    meta.timestamp().clone(),
+                                );
+                            }
+                            // A Put with no value = the peer skipped it (its
+                            // data changed); nothing to apply.
+                        }
+                        Action::Delete => {
+                            self.process_delete(meta.key(), meta.timestamp().clone());
+                        }
+                    }
+                }
+                AlignmentFollowup::Done
+            }
+        }
+    }
+
+    /// Whether this replica is *missing* `meta` — i.e. it holds no
+    /// strictly-newer-or-equal timestamp for the key, so the event should be
+    /// pulled. zenoh's `latest_updates.get(key).timestamp >= replica_event` skip
+    /// check (aligner_reply.rs:244-252).
+    #[cfg(feature = "storage-aligner")]
+    fn is_missing(&self, meta: &EventMetadata) -> bool {
+        match self.latest.get(meta.key()) {
+            Some(recorded) => timestamp_strictly_newer(meta.timestamp(), recorded),
+            None => true,
         }
     }
 }
@@ -1101,6 +1250,173 @@ mod tests {
             assert!(
                 r.is_empty(),
                 "an empty SubIntervals query produces no response"
+            );
+        }
+
+        // ---- pull / convergence engine (process_alignment_reply) ----
+        use crate::storage_aligner::{AlignmentFollowup, EventBuckets};
+        use crate::storage_replication::Fingerprint;
+
+        #[test]
+        fn process_discovery_returns_the_discovered_replica() {
+            let mut s = StorageState::new(MemoryStorage::new());
+            let f = s.process_alignment_reply(
+                &cfg(),
+                AlignmentReply::Discovery(vec![0x09]),
+                None,
+                NOW10,
+            );
+            assert_eq!(f, AlignmentFollowup::DiscoveredReplica(vec![0x09]));
+        }
+
+        #[test]
+        fn process_intervals_asks_for_a_differing_interval() {
+            // Local is empty; the peer reports a cold interval -> local lacks
+            // it -> ask for its sub-intervals.
+            let mut s = StorageState::new(MemoryStorage::new());
+            let mut peer_cold: BTreeMap<IntervalIdx, Fingerprint> = BTreeMap::new();
+            peer_cold.insert(IntervalIdx::from(1), Fingerprint::from(0xABCD));
+            match s.process_alignment_reply(
+                &cfg(),
+                AlignmentReply::Intervals(peer_cold),
+                None,
+                NOW10,
+            ) {
+                AlignmentFollowup::Query(AlignmentQuery::Intervals(set)) => {
+                    assert!(set.contains(&IntervalIdx::from(1)));
+                }
+                other => panic!("expected an Intervals follow-up, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn process_intervals_aligned_is_done() {
+            // A peer fingerprint equal to ours -> nothing to ask.
+            let s = st_with(&[("demo/c", at(1, 0))]); // a cold-era key
+            let local = EventBuckets::from_events(s.replication_events(), &cfg())
+                .cold_era_fingerprints(&cfg(), cfg().classify(NOW10).0);
+            assert!(!local.is_empty(), "the snapshot has a cold interval");
+            let mut s = s;
+            assert_eq!(
+                s.process_alignment_reply(&cfg(), AlignmentReply::Intervals(local), None, NOW10),
+                AlignmentFollowup::Done
+            );
+        }
+
+        #[test]
+        fn process_events_metadata_applies_delete_and_collects_missing_put() {
+            let mut s = StorageState::new(MemoryStorage::new());
+            let reply = AlignmentReply::EventsMetadata(vec![
+                EventMetadata::put("demo/p", at(10, 0)),
+                EventMetadata::delete("demo/d", at(10, 1)),
+            ]);
+            match s.process_alignment_reply(&cfg(), reply, None, NOW10) {
+                AlignmentFollowup::Query(AlignmentQuery::Events(puts)) => {
+                    assert_eq!(puts.len(), 1, "only the Put needs a payload fetch");
+                    assert_eq!(puts[0].key(), "demo/p");
+                }
+                other => panic!("expected an Events follow-up, got {other:?}"),
+            }
+            // The Delete applied as a tombstone: an older Put can't resurrect it.
+            assert_eq!(
+                s.process_put("demo/d", vec![1], None, at(9, 0)),
+                StorageInsertionResult::Outdated
+            );
+        }
+
+        #[test]
+        fn process_retrieval_applies_a_put_then_skips_when_already_held() {
+            let mut s = StorageState::new(MemoryStorage::new());
+            let put = EventMetadata::put("demo/x", at(10, 0));
+            assert_eq!(
+                s.process_alignment_reply(
+                    &cfg(),
+                    AlignmentReply::Retrieval(put.clone()),
+                    Some((vec![0xAB], None)),
+                    NOW10,
+                ),
+                AlignmentFollowup::Done
+            );
+            assert_eq!(s.get("demo/x").map(|d| d.payload.clone()), Some(vec![0xAB]));
+            // Re-processing the same (already held) event does not re-apply.
+            s.process_alignment_reply(
+                &cfg(),
+                AlignmentReply::Retrieval(put),
+                Some((vec![0xFF], None)),
+                NOW10,
+            );
+            assert_eq!(
+                s.get("demo/x").unwrap().payload,
+                vec![0xAB],
+                "an already-held event is not overwritten"
+            );
+        }
+
+        // Drive a full alignment exchange between two in-memory replicas: the
+        // local replica detects divergence (digest diff), then loops
+        // query -> peer.answer -> local.process until every branch is Done.
+        fn drive_alignment(
+            local: &mut StorageState<MemoryStorage>,
+            peer: &StorageState<MemoryStorage>,
+            config: &ReplicationConfig,
+            now: u64,
+        ) {
+            let hu = config.classify(now).0;
+            let diff = match local
+                .replication_digest(config, hu)
+                .diff(peer.replication_digest(config, hu))
+            {
+                Some(d) => d,
+                None => return, // already aligned
+            };
+            let mut pending = vec![AlignmentQuery::Diff(diff)];
+            let mut guard = 0;
+            while let Some(query) = pending.pop() {
+                guard += 1;
+                assert!(guard < 100, "alignment must converge");
+                for resp in peer.answer_alignment_query(config, &query, &[0xFF], now) {
+                    match local.process_alignment_reply(config, resp.reply, resp.value, now) {
+                        AlignmentFollowup::Query(q) => pending.push(q),
+                        AlignmentFollowup::Done | AlignmentFollowup::DiscoveredReplica(_) => {}
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn two_replicas_converge_via_the_aligner() {
+            let config = cfg();
+            // hot_upper = 11: cold < 8, warm {8,9}, hot {10,11}.
+            let now = 11u64 << 32;
+            let mut peer = StorageState::new(MemoryStorage::new());
+            peer.process_put("demo/cold", vec![1], None, at(2, 0));
+            peer.process_put("demo/warm", vec![2], None, at(8, 1));
+            peer.process_put("demo/hot", vec![3], None, at(10, 0));
+            peer.process_delete("demo/gone", at(10, 1)); // a hot-era tombstone
+            let mut local = StorageState::new(MemoryStorage::new());
+            local.process_put("demo/cold", vec![1], None, at(2, 0)); // already shares cold
+
+            drive_alignment(&mut local, &peer, &config, now);
+
+            // Local pulled every entry it was missing, across all three eras.
+            assert_eq!(
+                local.get("demo/warm").map(|d| d.payload.clone()),
+                Some(vec![2])
+            );
+            assert_eq!(
+                local.get("demo/hot").map(|d| d.payload.clone()),
+                Some(vec![3])
+            );
+            assert!(
+                local.get("demo/gone").is_none(),
+                "the tombstone removed the key locally"
+            );
+            // Local was a subset of the peer, so the digests now match exactly.
+            let hu = config.classify(now).0;
+            assert_eq!(
+                local.replication_digest(&config, hu),
+                peer.replication_digest(&config, hu),
+                "the two replicas converged"
             );
         }
     }

@@ -395,6 +395,27 @@ pub struct AlignmentResponse {
     pub value: Option<(Vec<u8>, Option<EncodingHint>)>,
 }
 
+/// What the pull side does after processing one [`AlignmentReply`] — the
+/// outcome of [`StorageState::process_alignment_reply`](crate::storage_state::StorageState::process_alignment_reply).
+/// The aligner exchange is stateless: each reply either resolves or yields the
+/// next, finer request, so a driver simply loops on the followup until
+/// [`Done`](AlignmentFollowup::Done). zenoh threads this implicitly by spawning
+/// the next query inside `process_alignment_reply` (aligner_reply.rs:99-229);
+/// wz returns it so the engine stays pure (no Session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlignmentFollowup {
+    /// Nothing more to request — this branch of the alignment is converged
+    /// (any missing entries were applied in place).
+    Done,
+    /// Send this finer [`AlignmentQuery`] to the **same** peer (the current
+    /// aligner exchange) and process its replies in turn.
+    Query(AlignmentQuery),
+    /// Initial alignment: the peer answered a `Discovery` with its Zenoh ID.
+    /// The driver sends an [`AlignmentQuery::All`] to *this* zid's aligner
+    /// keyexpr to pull its entire contents (zenoh aligner_reply.rs:106-138).
+    DiscoveredReplica(Vec<u8>),
+}
+
 /// The storage-aligner wire codec — byte-exact encode/decode of the aligner
 /// types to the format a real zenoh `zenoh-plugin-storage-manager` replica
 /// publishes, the twin of [`crate::storage_replication::wire`].
