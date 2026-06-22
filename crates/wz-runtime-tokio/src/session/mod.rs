@@ -1439,8 +1439,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> crate::reply_sink::BoxedReplySink {
-        use crate::reply::InboundReplyBody;
-        use crate::reply_sink::{BoxedReplySink, ReplyKind};
+        use crate::reply_sink::BoxedReplySink;
         let cell: wz_session_core::deferred_fire::DeferredListenerCell<R, BoxedReplySink> =
             wz_session_core::deferred_fire::DeferredListenerCell::new(BoxedReplySink::new(
                 on_reply, on_final,
@@ -1448,23 +1447,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let queue = self.fires.clone();
         let cell_for_reply = cell.clone();
         let staged_reply = move |view: &dyn ReplyView| {
-            // Owned copy — a deferred fire outlives the dispatch borrow.
-            let owned = InboundReply {
-                rid: view.rid(),
-                keyexpr_literal: view.keyexpr().to_string(),
-                body: match view.kind() {
-                    ReplyKind::Put => InboundReplyBody::Put {
-                        payload: view.payload().to_vec(),
-                    },
-                    ReplyKind::Del => InboundReplyBody::Del,
-                    ReplyKind::Err => InboundReplyBody::Err {
-                        encoding: view
-                            .err_encoding()
-                            .map(|(id, schema)| (id, schema.map(str::to_string))),
-                        payload: view.payload().to_vec(),
-                    },
-                },
-            };
+            // Owned copy — a deferred fire outlives the dispatch borrow. The
+            // projection is the wz-session-core SSOT (InboundReply::from_view),
+            // so the attachment / encoding side-bands (A8b) thread through
+            // here without this duplicating the per-arm projection.
+            let owned = InboundReply::from_view(view);
             let cell = cell_for_reply.clone();
             queue.stage(Box::new(move || {
                 cell.invoke(move |sink| {

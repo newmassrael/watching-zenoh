@@ -84,6 +84,23 @@ pub trait ReplyView {
     /// Encoding hint carried by an Err reply (`packed_id` + optional
     /// `schema`), or `None` for Put / Del.
     fn err_encoding(&self) -> Option<(u32, Option<&str>)>;
+    /// A8b — opaque attachment carried by a Put reply on its inner
+    /// `MsgPut` body extension (push-body ext id 0x03 — the receive twin
+    /// of the A8a emit seam), or `None` for Del / Err or a Put with no
+    /// attachment. What a storage aligner reads its serialized
+    /// `AlignmentReply` off an inbound reply. Default `None` so impls
+    /// predating the attachment seam stay valid.
+    fn attachment(&self) -> Option<&[u8]> {
+        None
+    }
+    /// A8b — value encoding carried by a Put reply (`packed_id` + optional
+    /// `schema`), or `None` for Del / Err or a Put with no encoding. The
+    /// Put-arm twin of [`Self::err_encoding`]; what a querier reconstructs
+    /// a stored value's encoding from (the aligner's
+    /// `RetrievedValue.encoding`). Default `None`.
+    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+        None
+    }
 }
 
 /// A [`ReplyView`] over loose borrowed fields — the canonical impl for a

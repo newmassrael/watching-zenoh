@@ -183,11 +183,25 @@ use crate::reply_sink::{ReplySink, ReplyView};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundReplyBody {
     /// Successful data reply — `MsgPut` inner body. Payload bytes
-    /// flow through verbatim. Encoding / timestamp side-bands on the
-    /// MsgPut envelope are not surfaced in the AP MVP (callbacks that
-    /// need them peek into the wire-form codec directly; R121j-tstamp
-    /// + a future encoding setter expose them at this layer).
-    Put { payload: Vec<u8> },
+    /// flow through verbatim. The `attachment` + `encoding` side-bands on
+    /// the MsgPut envelope are surfaced (A8b — the receive twin of the A8a
+    /// emit seam); the timestamp side-band is still not surfaced here (the
+    /// aligner orders by the metadata in the attachment, not a reply ts).
+    Put {
+        /// The reply value bytes.
+        payload: Vec<u8>,
+        /// The inner-`MsgPut` body attachment (push-body ext id 0x03) the
+        /// reply carried, if any — the side-band a storage aligner reads
+        /// its `AlignmentReply` off. `None` when the reply had no
+        /// attachment or `pubsub-attachment` is off (the decode is gated,
+        /// mirroring the wire policy so a loopback reply matches a wire one).
+        attachment: Option<Vec<u8>>,
+        /// The inner-`MsgPut` value encoding (E-flag), mirroring the Err
+        /// encoding shape (`packed_id`, `schema`). `None` when the reply
+        /// carried no encoding or `pubsub-encoding` is off. What a querier
+        /// reconstructs the aligner's `RetrievedValue.encoding` from.
+        encoding: Option<(u32, Option<String>)>,
+    },
     /// Delete-keyexpr reply — `MsgDel` inner body. Carries no
     /// payload bytes (the wire-form `MsgDel` body has only a header
     /// + optional timestamp + ext chain).
@@ -250,7 +264,7 @@ impl ReplyView for InboundReply {
     }
     fn payload(&self) -> &[u8] {
         match &self.body {
-            InboundReplyBody::Put { payload } => payload,
+            InboundReplyBody::Put { payload, .. } => payload,
             InboundReplyBody::Del => &[],
             InboundReplyBody::Err { payload, .. } => payload,
         }
@@ -258,6 +272,20 @@ impl ReplyView for InboundReply {
     fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
         match &self.body {
             InboundReplyBody::Err { encoding, .. } => encoding
+                .as_ref()
+                .map(|(id, schema)| (*id, schema.as_deref())),
+            _ => None,
+        }
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        match &self.body {
+            InboundReplyBody::Put { attachment, .. } => attachment.as_deref(),
+            _ => None,
+        }
+    }
+    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+        match &self.body {
+            InboundReplyBody::Put { encoding, .. } => encoding
                 .as_ref()
                 .map(|(id, schema)| (*id, schema.as_deref())),
             _ => None,
@@ -278,6 +306,10 @@ impl InboundReply {
         let body = match view.kind() {
             ReplyKind::Put => InboundReplyBody::Put {
                 payload: view.payload().to_vec(),
+                attachment: view.attachment().map(<[u8]>::to_vec),
+                encoding: view
+                    .put_encoding()
+                    .map(|(id, schema)| (id, schema.map(String::from))),
             },
             ReplyKind::Del => InboundReplyBody::Del,
             ReplyKind::Err => InboundReplyBody::Err {
@@ -292,6 +324,95 @@ impl InboundReply {
             keyexpr_literal: view.keyexpr().to_string(),
             body,
         }
+    }
+}
+
+/// A8b — gate a loopback Put reply's staged attachment so a SessionLocal
+/// reply surfaces exactly what a wire (Remote) reply would: the wire decode
+/// is gated on `pubsub-attachment`, so with the gate off neither path carries
+/// an attachment.
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+fn loopback_put_attachment(attachment: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    #[cfg(feature = "pubsub-attachment")]
+    {
+        attachment
+    }
+    #[cfg(not(feature = "pubsub-attachment"))]
+    {
+        let _ = attachment;
+        None
+    }
+}
+
+/// A8b — gate + convert a loopback Put reply's staged encoding to the
+/// [`InboundReplyBody::Put`] shape (`packed_id`, `schema`), mirroring the wire
+/// path's `pubsub-encoding` gate.
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+fn loopback_put_encoding(
+    encoding: Option<crate::sample::EncodingHint>,
+) -> Option<(u32, Option<String>)> {
+    #[cfg(feature = "pubsub-encoding")]
+    {
+        encoding.map(|e| (e.packed_id, e.schema))
+    }
+    #[cfg(not(feature = "pubsub-encoding"))]
+    {
+        let _ = encoding;
+        None
+    }
+}
+
+/// A8b — extract an inbound Put reply's body attachment (push-body ext id
+/// 0x03) for the [`InboundReplyBody::Put`] slot, gated on `pubsub-attachment`
+/// (the wire policy: with the gate off the reply carries no attachment,
+/// mirroring the A8a emit side). Reuses the shared
+/// [`crate::attachment::decode_attachment_ext`] SSOT — the receive twin of
+/// the emit's `encode_attachment_ext`.
+#[cfg(all(
+    feature = "codec-response",
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "query-reply")
+))]
+fn put_reply_attachment(put: &wz_codecs::msg_put::MsgPutOwned) -> Option<Vec<u8>> {
+    #[cfg(feature = "pubsub-attachment")]
+    {
+        put.extensions.as_ref().and_then(|exts| {
+            crate::attachment::decode_attachment_ext(
+                exts,
+                crate::attachment::ATTACHMENT_EXT_ID_PUSH,
+            )
+            .map(<[u8]>::to_vec)
+        })
+    }
+    #[cfg(not(feature = "pubsub-attachment"))]
+    {
+        let _ = put;
+        None
+    }
+}
+
+/// A8b — extract an inbound Put reply's value encoding (E-flag) in the
+/// `(packed_id, schema)` shape the [`InboundReplyBody::Put`] slot mirrors
+/// from the Err arm, gated on `pubsub-encoding`.
+#[cfg(all(
+    feature = "codec-response",
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "query-reply")
+))]
+fn put_reply_encoding(put: &wz_codecs::msg_put::MsgPutOwned) -> Option<(u32, Option<String>)> {
+    #[cfg(feature = "pubsub-encoding")]
+    {
+        put.encoding.as_ref().map(|e| {
+            (
+                e.packed_id,
+                e.schema.as_ref().map(|s| String::from(s.as_str())),
+            )
+        })
+    }
+    #[cfg(not(feature = "pubsub-encoding"))]
+    {
+        let _ = put;
+        None
     }
 }
 
@@ -324,19 +445,25 @@ impl From<QueryReply> for InboundReply {
                 rid,
                 keyexpr_literal,
                 body,
-                // R311va/vd/A8a: the loopback receive path does not yet
-                // surface reply metadata (InboundReplyBody carries no encoding
-                // / timestamp / attachment slot) — the receive-side metadata
-                // is the named follow-up twin of these emit-side atoms (A8b
-                // adds the attachment + encoding receive slots). Dropped here
-                // intentionally.
-                encoding: _,
+                encoding,
+                // The timestamp side-band is still not surfaced on receive
+                // (out of scope — the aligner orders by the metadata in the
+                // attachment, not a reply T-flag); responder is envelope-level
+                // identity the AP consumer surface does not expose either way.
                 timestamp: _,
                 responder: _,
-                attachment: _,
+                attachment,
             } => {
                 let body = match body {
-                    ReplyBody::Put(payload) => InboundReplyBody::Put { payload },
+                    ReplyBody::Put(payload) => InboundReplyBody::Put {
+                        payload,
+                        // Gate the metadata so a loopback (SessionLocal) reply
+                        // surfaces exactly what a wire (Remote) reply would:
+                        // the wire decode is gated on the same features, so a
+                        // build with the gate off carries neither.
+                        attachment: loopback_put_attachment(attachment),
+                        encoding: loopback_put_encoding(encoding),
+                    },
                     ReplyBody::Del => InboundReplyBody::Del,
                 };
                 Self {
@@ -574,6 +701,8 @@ impl<C: ReplySink> ReplyRegistry<C> {
                 #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
                     payload: put.payload.as_slice().to_vec(),
+                    attachment: put_reply_attachment(put),
+                    encoding: put_reply_encoding(put),
                 },
                 #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => InboundReplyBody::Del,
@@ -1118,9 +1247,73 @@ mod tests {
         assert_eq!(reply.rid, 42);
         assert_eq!(reply.keyexpr_literal, "home/temp");
         match &reply.body {
-            InboundReplyBody::Put { payload } => assert_eq!(payload, b"21.0"),
+            InboundReplyBody::Put { payload, .. } => assert_eq!(payload, b"21.0"),
             other => panic!("expected Put, got {other:?}"),
         }
+    }
+
+    /// A8b — the EMIT->RECEIVE closure: a reply built with the A8a
+    /// `ResponseReplyBuilder.attachment()` / `.encoding()` decodes back
+    /// through `dispatch_response`, so the `InboundReply` surfaces the
+    /// attachment (the storage aligner's `AlignmentReply` carrier) AND the
+    /// value encoding. Proves emit and receive agree on the wire shape.
+    #[cfg(all(
+        feature = "codec-response",
+        feature = "pubsub-attachment",
+        feature = "pubsub-encoding",
+        feature = "query-reply"
+    ))]
+    #[test]
+    fn dispatch_response_surfaces_put_attachment_and_encoding() {
+        use crate::reply_sink::ReplyView;
+        use crate::response_build::ResponseReplyBuilder;
+        use crate::sample::EncodingHint;
+
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |reply| {
+                captured_cb
+                    .lock()
+                    .unwrap()
+                    .push(InboundReply::from_view(reply))
+            },
+            |_| {},
+        );
+
+        let enc = EncodingHint {
+            packed_id: 13,
+            schema: None,
+        };
+        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"stored-value")
+            .attachment(b"align-reply")
+            .encoding(&enc)
+            .build()
+            .unwrap();
+        reg.dispatch_response(&resp, &HashMap::new());
+
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        let reply = &snapshot[0];
+        match &reply.body {
+            InboundReplyBody::Put {
+                payload,
+                attachment,
+                encoding,
+            } => {
+                assert_eq!(payload, b"stored-value");
+                assert_eq!(attachment.as_deref(), Some(&b"align-reply"[..]));
+                assert_eq!(*encoding, Some((13, None)));
+            }
+            other => panic!("expected Put, got {other:?}"),
+        }
+        // The same metadata via the ReplyView seam accessors (A8b contract).
+        assert_eq!(reply.attachment(), Some(&b"align-reply"[..]));
+        assert_eq!(reply.put_encoding(), Some((13, None)));
     }
 
     #[test]
@@ -1455,6 +1648,8 @@ mod tests {
             keyexpr_literal: "home/temp".to_string(),
             body: InboundReplyBody::Put {
                 payload: b"21.0".to_vec(),
+                attachment: None,
+                encoding: None,
             },
         };
         reg.deliver_local_reply(&inbound);
@@ -1613,12 +1808,54 @@ mod tests {
             encoding: None,
             timestamp: None,
             responder: None,
+            attachment: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 11);
         assert_eq!(inbound.keyexpr_literal, "sensors/a");
         match inbound.body {
-            InboundReplyBody::Put { payload } => assert_eq!(payload, b"value"),
+            InboundReplyBody::Put { payload, .. } => assert_eq!(payload, b"value"),
+            other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
+    /// A8b — the loopback receive twin: a `QueryReply` staged with an
+    /// attachment + encoding (the A8a emit) projects through
+    /// `From<QueryReply>` so a SessionLocal reply surfaces the same metadata
+    /// a wire (Remote) reply would. Gated on the same features as the wire
+    /// decode, so loopback and wire carry identical information.
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "pubsub-attachment",
+        feature = "pubsub-encoding"
+    ))]
+    #[test]
+    fn from_query_reply_put_surfaces_attachment_and_encoding() {
+        use crate::query::{QueryReply, ReplyBody};
+        use crate::sample::EncodingHint;
+        let qr = QueryReply::Reply {
+            rid: 11,
+            keyexpr_literal: "sensors/a".to_string(),
+            body: ReplyBody::Put(b"value".to_vec()),
+            encoding: Some(EncodingHint {
+                packed_id: 7,
+                schema: None,
+            }),
+            timestamp: None,
+            responder: None,
+            attachment: Some(b"align".to_vec()),
+        };
+        let inbound: InboundReply = qr.into();
+        match inbound.body {
+            InboundReplyBody::Put {
+                payload,
+                attachment,
+                encoding,
+            } => {
+                assert_eq!(payload, b"value");
+                assert_eq!(attachment.as_deref(), Some(&b"align"[..]));
+                assert_eq!(encoding, Some((7, None)));
+            }
             other => panic!("expected Put, got {other:?}"),
         }
     }
@@ -1634,6 +1871,7 @@ mod tests {
             encoding: None,
             timestamp: None,
             responder: Some((vec![0xaa, 0xbb], 5)),
+            attachment: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 12);
