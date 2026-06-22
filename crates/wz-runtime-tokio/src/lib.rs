@@ -528,6 +528,22 @@ pub mod storage_service;
 #[cfg(feature = "storage-replication")]
 pub mod storage_replication_service;
 
+/// Round 311 A8c-2a — the storage-aligner DRIVER, ANSWER half (§5.11 storage,
+/// aligner): the tokio binding that declares a [`Queryable`](session::Queryable)
+/// on this replica's aligner keyexpr (`@zid/<zid>/<config-fp>/aligner`) and
+/// answers a peer's
+/// [`AlignmentQuery`](wz_session_core::storage_aligner::AlignmentQuery) with
+/// the entries it needs to converge. The decode / answer / emit core delegates
+/// to the no_std kernel
+/// ([`StorageState::answer_alignment_query`](wz_session_core::storage_state::StorageState::answer_alignment_query));
+/// this module reads the query attachment, locks the shared
+/// [`storage_service::StorageService`] state, and emits each response on the
+/// reply seam. The queryable is RAII-bound (dropping the
+/// [`storage_aligner_service::AlignerService`] undeclares it). Gated on
+/// `storage-aligner` (implies storage-replication).
+#[cfg(feature = "storage-aligner")]
+pub mod storage_aligner_service;
+
 /// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
 /// foundation. Binds once and holds N concurrent peer faces (bind -> accept
 /// loop -> per-face open + drive), the increment zenoh's role-agnostic

@@ -255,6 +255,26 @@ storage-replication = [
     "codec-push",
     "declare-subscriber",
 ]
+# Round 311 A8c-2a — storage-aligner (§5.11 storage, aligner driver). The
+# aligner ANSWER queryable DRIVER (`storage_aligner_service`). Forwards the
+# no_std aligner kernel (wz-session-core/storage-aligner = the AlignmentQuery /
+# AlignmentReply protocol + the answer / pull engines + the wire codec; implies
+# wz-session-core/storage-replication) and the driver's `storage-replication`
+# (for `StorageService::shared_state` — the answer reflects the SAME live
+# StorageState the StorageService captures into — plus the digest service the
+# on_diff ask-loop seam wires to in a later atom). Adds `query-attachment`: the
+# inbound AlignmentQuery rides the query attachment, read via
+# `QueryView::attachment` (without it the answer always sees `None` and replies
+# to nothing). Adds `pubsub-attachment`: the AlignmentReply rides the reply
+# attachment (the inner MsgPut body ext), emitted via
+# `ReplyOut::reply_keyed_attached` (without it the reply carries no
+# AlignmentReply and the asker cannot align). Implies storage-replication.
+storage-aligner = [
+    "wz-session-core/storage-aligner",
+    "storage-replication",
+    "query-attachment",
+    "pubsub-attachment",
+]
 codec-init-body = ["wz-codecs/codec-init-body", "wz-session-core/codec-init-body"]
 codec-open-body = ["wz-codecs/codec-open-body", "wz-session-core/codec-open-body"]
 # R311b — codec-keep-alive forwards the wz-codecs gate. Session lease
