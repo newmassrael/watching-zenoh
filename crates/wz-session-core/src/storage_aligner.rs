@@ -61,7 +61,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::sample::TimestampHint;
+use crate::sample::{EncodingHint, TimestampHint};
 use crate::storage_replication::{
     event_fingerprint, DigestDiff, Fingerprint, IntervalIdx, ReplicationConfig, SubIntervalIdx,
 };
@@ -373,6 +373,26 @@ pub enum AlignmentReply {
     /// One event's [`EventMetadata`], paired (on the query-reply value) with
     /// its payload (zenoh `reply_event_retrieval`).
     Retrieval(EventMetadata),
+}
+
+/// One reply the aligner emits for an [`AlignmentQuery`]: the typed
+/// [`AlignmentReply`] (which rides the query-reply attachment) plus, for a
+/// [`Retrieval`](AlignmentReply::Retrieval) of a Put, the stored value
+/// (payload + encoding) that rides the reply body. zenoh `reply_to_query`
+/// (aligner_query.rs:340-363) attaches the serialized AlignmentReply and, when
+/// present, the value.
+///
+/// A single [`AlignmentQuery`] can produce several responses (a `Diff` yields
+/// up to three — cold / warm / hot; an `All` or `Events` yields one per event),
+/// so the answer engine returns a `Vec<AlignmentResponse>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignmentResponse {
+    /// The typed reply (serialized onto the query-reply attachment).
+    pub reply: AlignmentReply,
+    /// The stored value (payload + encoding) for a Put `Retrieval`; `None` for
+    /// every other reply and for a Delete `Retrieval` (a delete carries no
+    /// payload).
+    pub value: Option<(Vec<u8>, Option<EncodingHint>)>,
 }
 
 /// The storage-aligner wire codec — byte-exact encode/decode of the aligner

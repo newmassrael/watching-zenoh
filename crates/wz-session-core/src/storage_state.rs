@@ -82,7 +82,9 @@ use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample_kind::SampleKind;
 use crate::sink::SampleView;
 #[cfg(feature = "storage-aligner")]
-use crate::storage_aligner::EventMetadata;
+use crate::storage_aligner::{
+    Action, AlignmentQuery, AlignmentReply, AlignmentResponse, EventBuckets, EventMetadata,
+};
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 #[cfg(feature = "storage-replication")]
 use crate::storage_replication::{build_digest, Digest, IntervalIdx, ReplicationConfig};
@@ -427,6 +429,128 @@ impl<B: StorageBackend> StorageState<B> {
                 }
             })
             .collect()
+    }
+
+    /// Answer one [`AlignmentQuery`] from a peer that is aligning against this
+    /// replica — the aligner's serve side. Returns the [`AlignmentResponse`]s
+    /// to send back (a single query can yield several: a `Diff` up to three,
+    /// an `All` / `Events` one per event). zenoh `Replication::aligner`
+    /// (aligner_query.rs:73-172).
+    ///
+    /// `local_zid` answers a `Discovery`; `now` (the wall-clock NTP64) fixes
+    /// the Hot-era upper bound (`config.classify(now).0`) the Cold-era reply
+    /// is computed against, exactly as zenoh recomputes `last_elapsed_interval`
+    /// at answer time (aligner_query.rs:190-199). Pure over the stored state +
+    /// config — no Session, no async — so any aligner driver reuses it.
+    ///
+    /// The drill-down levels map one-to-one to [`EventBuckets`] answers; a
+    /// `Retrieval` for a Put pairs its [`EventMetadata`] with the stored value
+    /// via [`retrieval_response`](Self::retrieval_response).
+    #[cfg(feature = "storage-aligner")]
+    pub fn answer_alignment_query(
+        &self,
+        config: &ReplicationConfig,
+        query: &AlignmentQuery,
+        local_zid: &[u8],
+        now: u64,
+    ) -> Vec<AlignmentResponse> {
+        match query {
+            AlignmentQuery::Discovery => alloc::vec![AlignmentResponse {
+                reply: AlignmentReply::Discovery(local_zid.to_vec()),
+                value: None,
+            }],
+            // All: transfer every event (the initial full alignment).
+            AlignmentQuery::All => self
+                .replication_events()
+                .into_iter()
+                .filter_map(|meta| self.retrieval_response(meta))
+                .collect(),
+            AlignmentQuery::Diff(diff) => {
+                let buckets = EventBuckets::from_events(self.replication_events(), config);
+                let hot_upper = config.classify(now).0;
+                let mut out = Vec::new();
+                if diff.cold_eras_differ() {
+                    out.push(AlignmentResponse {
+                        reply: AlignmentReply::Intervals(
+                            buckets.cold_era_fingerprints(config, hot_upper),
+                        ),
+                        value: None,
+                    });
+                }
+                if !diff.warm_eras_differences().is_empty() {
+                    out.push(AlignmentResponse {
+                        reply: AlignmentReply::SubIntervals(
+                            buckets.sub_intervals_fingerprints(diff.warm_eras_differences()),
+                        ),
+                        value: None,
+                    });
+                }
+                if !diff.hot_eras_differences().is_empty() {
+                    out.push(AlignmentResponse {
+                        reply: AlignmentReply::EventsMetadata(
+                            buckets.events_in(diff.hot_eras_differences()),
+                        ),
+                        value: None,
+                    });
+                }
+                out
+            }
+            AlignmentQuery::Intervals(intervals) => {
+                if intervals.is_empty() {
+                    return Vec::new();
+                }
+                let buckets = EventBuckets::from_events(self.replication_events(), config);
+                alloc::vec![AlignmentResponse {
+                    reply: AlignmentReply::SubIntervals(
+                        buckets.sub_intervals_fingerprints(intervals),
+                    ),
+                    value: None,
+                }]
+            }
+            AlignmentQuery::SubIntervals(sub_intervals) => {
+                if sub_intervals.is_empty() {
+                    return Vec::new();
+                }
+                let buckets = EventBuckets::from_events(self.replication_events(), config);
+                alloc::vec![AlignmentResponse {
+                    reply: AlignmentReply::EventsMetadata(buckets.events_in(sub_intervals)),
+                    value: None,
+                }]
+            }
+            AlignmentQuery::Events(events) => events
+                .iter()
+                .filter_map(|meta| self.retrieval_response(meta.clone()))
+                .collect(),
+        }
+    }
+
+    /// Build the `Retrieval` response for one event, or `None` to skip it.
+    /// zenoh `reply_event_retrieval` (aligner_query.rs:271-335):
+    ///
+    /// - a Delete carries no value — the response is sent with `value: None`
+    ///   (the peer applies the delete from the metadata alone);
+    /// - a Put pairs the metadata with the stored value, **but only if the
+    ///   stored value still has the requested timestamp**. If the key changed
+    ///   or was removed between the metadata being sent and this retrieval, the
+    ///   event is skipped (`None`) rather than replied with a stale/empty
+    ///   payload (aligner_query.rs:298-316).
+    #[cfg(feature = "storage-aligner")]
+    fn retrieval_response(&self, meta: EventMetadata) -> Option<AlignmentResponse> {
+        match meta.action() {
+            Action::Delete => Some(AlignmentResponse {
+                reply: AlignmentReply::Retrieval(meta),
+                value: None,
+            }),
+            Action::Put => match self.backend.get(meta.key()) {
+                Some(data) if &data.timestamp == meta.timestamp() => Some(AlignmentResponse {
+                    value: Some((data.payload.clone(), data.encoding.clone())),
+                    reply: AlignmentReply::Retrieval(meta),
+                }),
+                // The stored value moved on (newer ts) or is gone since the
+                // metadata was sent: skip, as zenoh does.
+                _ => None,
+            },
+        }
     }
 }
 
@@ -780,6 +904,203 @@ mod tests {
                 b.timestamp(),
                 &ts(20, 1),
                 "the tombstone carries the delete ts"
+            );
+        }
+
+        // ---- answer engine (answer_alignment_query) ----
+        use crate::storage_aligner::{AlignmentQuery, AlignmentReply, EventMetadata};
+        use crate::storage_replication::{
+            DigestDiff, IntervalIdx, ReplicationConfig, SubIntervalIdx,
+        };
+        use alloc::collections::BTreeSet;
+
+        // interval_ms=1000, sub_intervals=2 (sub_width 500ms), hot=2, warm=2:
+        // for hot_upper=10, warm_lower=7, hot_lower=9.
+        fn cfg() -> ReplicationConfig {
+            ReplicationConfig::new("demo/**", None, 1000, 2, 2, 2, 250)
+        }
+        // An event at exactly (interval, sub): sub 0 = on the second, sub 1 =
+        // +500ms (frac 2^31).
+        fn at(interval: u64, sub: u64) -> TimestampHint {
+            let frac = if sub == 0 { 0 } else { 1u64 << 31 };
+            TimestampHint {
+                time: (interval << 32) | frac,
+                zid: vec![0x01],
+            }
+        }
+        fn st_with(puts: &[(&str, TimestampHint)]) -> StorageState<MemoryStorage> {
+            let mut s = StorageState::new(MemoryStorage::new());
+            for (k, t) in puts {
+                s.process_put(k, vec![0xAB], None, t.clone());
+            }
+            s
+        }
+        const NOW10: u64 = 10u64 << 32; // classifies to interval 10 (hot_upper)
+
+        #[test]
+        fn answer_discovery_returns_local_zid() {
+            let s = StorageState::new(MemoryStorage::new());
+            let r = s.answer_alignment_query(&cfg(), &AlignmentQuery::Discovery, &[0x07, 0x08], 0);
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].reply, AlignmentReply::Discovery(vec![0x07, 0x08]));
+            assert!(r[0].value.is_none());
+        }
+
+        #[test]
+        fn answer_all_retrieves_puts_with_value_and_deletes_without() {
+            let mut s = st_with(&[("demo/a", at(9, 0))]);
+            s.process_delete("demo/b", at(9, 1)); // a tombstone
+            let r = s.answer_alignment_query(&cfg(), &AlignmentQuery::All, &[0x01], NOW10);
+            assert_eq!(r.len(), 2);
+            let put = r
+                .iter()
+                .find(|x| matches!(&x.reply, AlignmentReply::Retrieval(m) if m.key() == "demo/a"))
+                .unwrap();
+            assert!(put.value.is_some(), "a Put retrieval carries the payload");
+            let del = r
+                .iter()
+                .find(|x| matches!(&x.reply, AlignmentReply::Retrieval(m) if m.key() == "demo/b"))
+                .unwrap();
+            assert!(del.value.is_none(), "a Delete retrieval carries no payload");
+        }
+
+        #[test]
+        fn answer_events_retrieves_matching_put_and_skips_stale() {
+            let s = st_with(&[("demo/a", at(9, 0))]);
+            // Matching timestamp -> retrieved with its value.
+            let ok = s.answer_alignment_query(
+                &cfg(),
+                &AlignmentQuery::Events(vec![EventMetadata::put("demo/a", at(9, 0))]),
+                &[0x01],
+                NOW10,
+            );
+            assert_eq!(ok.len(), 1);
+            assert!(ok[0].value.is_some());
+            // A stale timestamp (the stored value moved on) -> skipped entirely.
+            let stale = s.answer_alignment_query(
+                &cfg(),
+                &AlignmentQuery::Events(vec![EventMetadata::put("demo/a", at(8, 0))]),
+                &[0x01],
+                NOW10,
+            );
+            assert!(
+                stale.is_empty(),
+                "a changed/gone Put is skipped, not replied empty"
+            );
+            // A delete event -> a value-less Retrieval.
+            let del = s.answer_alignment_query(
+                &cfg(),
+                &AlignmentQuery::Events(vec![EventMetadata::delete("demo/a", at(9, 0))]),
+                &[0x01],
+                NOW10,
+            );
+            assert_eq!(del.len(), 1);
+            assert!(del[0].value.is_none());
+        }
+
+        #[test]
+        fn answer_diff_dispatches_one_response_per_differing_era() {
+            let s = st_with(&[("demo/h", at(9, 0))]); // a hot-era event (interval 9)
+
+            let hot_diff = DigestDiff {
+                cold_eras_differ: false,
+                warm_eras_differences: BTreeSet::new(),
+                hot_eras_differences: [(
+                    IntervalIdx::from(9),
+                    [SubIntervalIdx::from(0)].into_iter().collect(),
+                )]
+                .into_iter()
+                .collect(),
+            };
+            let r =
+                s.answer_alignment_query(&cfg(), &AlignmentQuery::Diff(hot_diff), &[0x01], NOW10);
+            assert_eq!(r.len(), 1);
+            assert!(matches!(&r[0].reply, AlignmentReply::EventsMetadata(evs)
+                    if evs.len() == 1 && evs[0].key() == "demo/h"));
+
+            let cold_diff = DigestDiff {
+                cold_eras_differ: true,
+                warm_eras_differences: BTreeSet::new(),
+                hot_eras_differences: BTreeMap::new(),
+            };
+            let r =
+                s.answer_alignment_query(&cfg(), &AlignmentQuery::Diff(cold_diff), &[0x01], NOW10);
+            assert_eq!(r.len(), 1);
+            assert!(matches!(r[0].reply, AlignmentReply::Intervals(_)));
+
+            let warm_diff = DigestDiff {
+                cold_eras_differ: false,
+                warm_eras_differences: [IntervalIdx::from(7)].into_iter().collect(),
+                hot_eras_differences: BTreeMap::new(),
+            };
+            let r =
+                s.answer_alignment_query(&cfg(), &AlignmentQuery::Diff(warm_diff), &[0x01], NOW10);
+            assert_eq!(r.len(), 1);
+            assert!(matches!(r[0].reply, AlignmentReply::SubIntervals(_)));
+
+            let all_diff = DigestDiff {
+                cold_eras_differ: true,
+                warm_eras_differences: [IntervalIdx::from(7)].into_iter().collect(),
+                hot_eras_differences: [(
+                    IntervalIdx::from(9),
+                    [SubIntervalIdx::from(0)].into_iter().collect(),
+                )]
+                .into_iter()
+                .collect(),
+            };
+            let r =
+                s.answer_alignment_query(&cfg(), &AlignmentQuery::Diff(all_diff), &[0x01], NOW10);
+            assert_eq!(r.len(), 3, "cold + warm + hot -> three responses");
+        }
+
+        #[test]
+        fn answer_intervals_subintervals_dispatch_and_empty_is_silent() {
+            let s = st_with(&[("demo/h", at(9, 0))]);
+
+            let r = s.answer_alignment_query(
+                &cfg(),
+                &AlignmentQuery::Intervals([IntervalIdx::from(9)].into_iter().collect()),
+                &[0x01],
+                NOW10,
+            );
+            assert_eq!(r.len(), 1);
+            assert!(matches!(r[0].reply, AlignmentReply::SubIntervals(_)));
+
+            let r = s.answer_alignment_query(
+                &cfg(),
+                &AlignmentQuery::Intervals(BTreeSet::new()),
+                &[0x01],
+                NOW10,
+            );
+            assert!(
+                r.is_empty(),
+                "an empty Intervals query produces no response"
+            );
+
+            let mut map: BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>> = BTreeMap::new();
+            map.insert(
+                IntervalIdx::from(9),
+                [SubIntervalIdx::from(0)].into_iter().collect(),
+            );
+            let r = s.answer_alignment_query(
+                &cfg(),
+                &AlignmentQuery::SubIntervals(map),
+                &[0x01],
+                NOW10,
+            );
+            assert_eq!(r.len(), 1);
+            assert!(matches!(&r[0].reply, AlignmentReply::EventsMetadata(evs)
+                    if evs.iter().any(|e| e.key() == "demo/h")));
+
+            let r = s.answer_alignment_query(
+                &cfg(),
+                &AlignmentQuery::SubIntervals(BTreeMap::new()),
+                &[0x01],
+                NOW10,
+            );
+            assert!(
+                r.is_empty(),
+                "an empty SubIntervals query produces no response"
             );
         }
     }
