@@ -639,7 +639,8 @@
         "R311ci audit: 0 source cfg sites; storage backend is router-side feature beyond AP MVP scope.",
         "R311uw: storage-backend 1/4 landed - StorageBackend seam + MemoryStorage in session-core",
         "R311ux: storage 2/4 landed - StorageState newer-wins gate + tombstone + matching",
-        "R311uy: storage 3/4 driver landed - StorageService + reply_keyed; storage-backend ACTIVE"
+        "R311uy: storage 3/4 driver landed - StorageService + reply_keyed; storage-backend ACTIVE",
+        "R311uz: storage-history landed - HistoryStorage History::All; storage-history ACTIVE"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -46563,6 +46564,58 @@
         "LOCAL: R311uy on top of ux=64ad2f7 (origin/main=ef56758, +3 ahead uw+ux+uy); host-gated, NOT pushed (await user consent). Push needs full run-ci (this atom touches wz-runtime-tokio defaults' ReplyOut trait surface + a new feature combo). Untouched north-star: §5.11 history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
       ]
     },
+    "Round 311uz": {
+      "decision_summary": "R311uz: storage atom 2/4 (§5.11 storage-history) — the History::All version-keeping path, end-to-end. History enum {Latest/All} + StorageBackend::history()/get_versions() capability (storage-backend); HistoryStorage version-list backend (BTreeMap<key,Vec<StoredData>> sorted by (time,zid), storage-history feature); StorageState skips the newer-wins gate under All (zenoh service.rs:319 guard runs only for Latest) + matching_versions; the StorageService driver generalized over the backend (declare_with_backend + the MemoryStorage declare shorthand) with answer_query replying all versions per key. A wz Session can now declare a History::All storage that retains + replies every version. zenoh History (lib.rs:164-168) + get->Vec (lib.rs:250-254) + reply-per-version (service.rs:584) mirror. Per-version reply timestamp is the named follow-up (ReplyOut has no ts slot).",
+      "changes_bullets": [
+        "CAPABILITY (wz-session-core storage_backend.rs): History enum {Latest(default)/All} (zenoh History lib.rs:164-168) + StorageBackend::history() default Latest + get_versions() default (self.get(key).into_iter().collect() = 0-or-1, so Latest backends need no override). get_all_entries doc: multi-version backend lists each key once with its newest ts.",
+        "BACKEND (wz-session-core storage_history.rs, NEW, storage-history feat): HistoryStorage = BTreeMap<String,Vec<StoredData>>, versions kept sorted by (time,zid) via binary_search insert. put appends (exact-ts dup replaces), get returns newest, get_versions all, delete clears the key's list, history()=All. zenoh History::All shape (get->Vec<StoredData> lib.rs:250-254; bundled memory backend is Latest-only mod.rs:79).",
+        "GATE (wz-session-core storage_state.rs): latest_mode() helper; process_put/process_delete SKIP the newer-wins gate + latest-tracking under History::All (zenoh service.rs:319 guard runs only for Latest) — every version retained. matching_versions(query) = matching key -> ALL versions (via get_versions), the multi-version twin of matching_entries; Latest collapses to one version per key.",
+        "DRIVER (wz-runtime-tokio storage_service.rs): generalized StorageService<R,T,B=MemoryStorage> over the backend; declare_with_backend(.., backend) generic + declare (MemoryStorage shorthand). apply_sample/answer_query generic over B; answer_query now iterates matching_versions (Latest=one reply/key=unchanged; All=all versions/key, each reply_keyed under the concrete key). Per-version reply TIMESTAMP not carried (ReplyOut has no ts slot) -> named follow-up (querier cannot order versions yet).",
+        "FEATURES: wz-session-core storage-history=[\"storage-backend\"]; wz-runtime-tokio storage-history=[\"storage-backend\",\"wz-session-core/storage-history\"]; wz storage-history=[\"storage-backend\",\"wz-runtime-tokio?/storage-history\"] (AP-only)."
+      ],
+      "verification_bullets": [
+        "wz-session-core --features storage-history --lib: 25 storage tests (S1 6 + S2 10 + S4: HistoryStorage 6 + storage_state matching_versions/All 3). New: declares-All; put-retains-every-version-newest-last; out-of-order-put-sorted; exact-ts-dup-replaces; delete-clears-list; get_all_entries-newest-per-key; matching_versions-Latest-one-per-key; All-skips-gate-retains-both; matching_versions-wildcard-all-versions.",
+        "wz-runtime-tokio --features storage-history --lib storage_service: 8/8 (7 backend + answer_query_replies_every_version_of_a_history_all_key — 3 versions incl out-of-order, replied ordered each under the concrete key). storage-backend-only: 7/7 (unchanged; answer_query via matching_versions = same Latest behavior).",
+        "clippy -D warnings clean: session-core + runtime-tokio both --features storage-history --all-targets. fmt --check clean.",
+        "facade build: cargo build -p wz --features runtime-tokio,storage-history OK. composability: cargo build -p wz-session-core --no-default-features --features storage-history OK (literal-degrade, alloc-on).",
+        "REGRESSION 0: session-core --lib 155/155 default (storage modules gated off); runtime-tokio --lib 279/279 default (answer_query matching_versions change is Latest-equivalent; gated module off by default).",
+        "zenoh citations direct-read: History lib.rs:164-168, capability.history gate service.rs:319, reply per StoredData service.rs:584, get->Vec lib.rs:250-254, memory backend Latest-only mod.rs:79."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311uz = storage atom 2/4 (§5.11 storage-history): the History::All version-keeping path landed end-to-end. History enum + StorageBackend::history()/get_versions() capability (storage-backend); HistoryStorage version-list backend (storage-history); StorageState skips the newer-wins gate under All + matching_versions; the StorageService driver generalized over the backend (declare_with_backend) + answer_query replies all versions. A wz Session can now declare a History::All storage that retains + replies every version per key. Facade wired (wz/wz-runtime-tokio storage-history, AP-only).",
+        "STORAGE DOMAIN STATUS: storage-backend ACTIVE (R311uy), storage-history landed (this); REMAINING 2 reserved: storage-replication (digest publish/subscribe — zenoh replication/core.rs digest + LogLatest, an interval-bucketed fingerprint exchange) + storage-aligner (alignment query/reply — replication/core.rs:408-577, the Discovery/Diff query that reconciles missing events). Both are multi-replica convergence; storage-aligner builds on storage-replication's digest.",
+        "NAMED FOLLOW-UP (the History::All gap): per-version reply TIMESTAMP. answer_query replies every version's payload but ReplyOut/QueryResponder carry no timestamp slot, so a querier gets all historical values UNORDERED (cannot tell version order). zenoh's reply carries .timestamp(entry.timestamp) (service.rs:584). The fix = a timestamped-reply seam (QueryReply gains an optional timestamp -> ResponseReplyBuilder MsgPut T-flag; ReplyOut gains reply_keyed_stamped or reply gains a ts param) — same bottom-up shape as reply_keyed was for S3's wildcard fan. This is the next storage-history refinement (with: versioned-tombstone delete, tombstone GC, wildcard-override, strip_prefix).",
+        "LOCAL: R311uz on top of uy=d93d639 (origin/main=ef56758, +4 ahead uw+ux+uy+uz); host-gated, NOT pushed (await user consent). Push needs full run-ci (touches wz-runtime-tokio defaults via the answer_query matching_versions change + new feature combos). Untouched north-star: §5.11 replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
+      ],
+      "publishable_decision_summary": "R311uz: storage atom 2/4 (§5.11 storage-history) — the History::All version-keeping path, end-to-end. History enum {Latest/All} + StorageBackend::history()/get_versions() capability (storage-backend); HistoryStorage version-list backend (BTreeMap<key,Vec<StoredData>> sorted by (time,zid), storage-history feature); StorageState skips the newer-wins gate under All (zenoh service.rs:319 guard runs only for Latest) + matching_versions; the StorageService driver generalized over the backend (declare_with_backend + the MemoryStorage declare shorthand) with answer_query replying all versions per key. A wz Session can now declare a History::All storage that retains + replies every version. zenoh History (lib.rs:164-168) + get->Vec (lib.rs:250-254) + reply-per-version (service.rs:584) mirror. Per-version reply timestamp is the named follow-up (ReplyOut has no ts slot).",
+      "publishable_changes_bullets": [
+        "CAPABILITY (wz-session-core storage_backend.rs): History enum {Latest(default)/All} (zenoh History lib.rs:164-168) + StorageBackend::history() default Latest + get_versions() default (self.get(key).into_iter().collect() = 0-or-1, so Latest backends need no override). get_all_entries doc: multi-version backend lists each key once with its newest ts.",
+        "BACKEND (wz-session-core storage_history.rs, NEW, storage-history feat): HistoryStorage = BTreeMap<String,Vec<StoredData>>, versions kept sorted by (time,zid) via binary_search insert. put appends (exact-ts dup replaces), get returns newest, get_versions all, delete clears the key's list, history()=All. zenoh History::All shape (get->Vec<StoredData> lib.rs:250-254; bundled memory backend is Latest-only mod.rs:79).",
+        "GATE (wz-session-core storage_state.rs): latest_mode() helper; process_put/process_delete SKIP the newer-wins gate + latest-tracking under History::All (zenoh service.rs:319 guard runs only for Latest) — every version retained. matching_versions(query) = matching key -> ALL versions (via get_versions), the multi-version twin of matching_entries; Latest collapses to one version per key.",
+        "DRIVER (wz-runtime-tokio storage_service.rs): generalized StorageService<R,T,B=MemoryStorage> over the backend; declare_with_backend(.., backend) generic + declare (MemoryStorage shorthand). apply_sample/answer_query generic over B; answer_query now iterates matching_versions (Latest=one reply/key=unchanged; All=all versions/key, each reply_keyed under the concrete key). Per-version reply TIMESTAMP not carried (ReplyOut has no ts slot) -> named follow-up (querier cannot order versions yet).",
+        "FEATURES: wz-session-core storage-history=[\"storage-backend\"]; wz-runtime-tokio storage-history=[\"storage-backend\",\"wz-session-core/storage-history\"]; wz storage-history=[\"storage-backend\",\"wz-runtime-tokio?/storage-history\"] (AP-only)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core --features storage-history --lib: 25 storage tests (S1 6 + S2 10 + S4: HistoryStorage 6 + storage_state matching_versions/All 3). New: declares-All; put-retains-every-version-newest-last; out-of-order-put-sorted; exact-ts-dup-replaces; delete-clears-list; get_all_entries-newest-per-key; matching_versions-Latest-one-per-key; All-skips-gate-retains-both; matching_versions-wildcard-all-versions.",
+        "wz-runtime-tokio --features storage-history --lib storage_service: 8/8 (7 backend + answer_query_replies_every_version_of_a_history_all_key — 3 versions incl out-of-order, replied ordered each under the concrete key). storage-backend-only: 7/7 (unchanged; answer_query via matching_versions = same Latest behavior).",
+        "clippy -D warnings clean: session-core + runtime-tokio both --features storage-history --all-targets. fmt --check clean.",
+        "facade build: cargo build -p wz --features runtime-tokio,storage-history OK. composability: cargo build -p wz-session-core --no-default-features --features storage-history OK (literal-degrade, alloc-on).",
+        "REGRESSION 0: session-core --lib 155/155 default (storage modules gated off); runtime-tokio --lib 279/279 default (answer_query matching_versions change is Latest-equivalent; gated module off by default).",
+        "zenoh citations direct-read: History lib.rs:164-168, capability.history gate service.rs:319, reply per StoredData service.rs:584, get->Vec lib.rs:250-254, memory backend Latest-only mod.rs:79."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311uz = storage atom 2/4 (§5.11 storage-history): the History::All version-keeping path landed end-to-end. History enum + StorageBackend::history()/get_versions() capability (storage-backend); HistoryStorage version-list backend (storage-history); StorageState skips the newer-wins gate under All + matching_versions; the StorageService driver generalized over the backend (declare_with_backend) + answer_query replies all versions. A wz Session can now declare a History::All storage that retains + replies every version per key. Facade wired (wz/wz-runtime-tokio storage-history, AP-only).",
+        "STORAGE DOMAIN STATUS: storage-backend ACTIVE (R311uy), storage-history landed (this); REMAINING 2 reserved: storage-replication (digest publish/subscribe — zenoh replication/core.rs digest + LogLatest, an interval-bucketed fingerprint exchange) + storage-aligner (alignment query/reply — replication/core.rs:408-577, the Discovery/Diff query that reconciles missing events). Both are multi-replica convergence; storage-aligner builds on storage-replication's digest.",
+        "NAMED FOLLOW-UP (the History::All gap): per-version reply TIMESTAMP. answer_query replies every version's payload but ReplyOut/QueryResponder carry no timestamp slot, so a querier gets all historical values UNORDERED (cannot tell version order). zenoh's reply carries .timestamp(entry.timestamp) (service.rs:584). The fix = a timestamped-reply seam (QueryReply gains an optional timestamp -> ResponseReplyBuilder MsgPut T-flag; ReplyOut gains reply_keyed_stamped or reply gains a ts param) — same bottom-up shape as reply_keyed was for S3's wildcard fan. This is the next storage-history refinement (with: versioned-tombstone delete, tombstone GC, wildcard-override, strip_prefix).",
+        "LOCAL: R311uz on top of uy=d93d639 (origin/main=ef56758, +4 ahead uw+ux+uy+uz); host-gated, NOT pushed (await user consent). Push needs full run-ci (touches wz-runtime-tokio defaults via the answer_query matching_versions change + new feature combos). Untouched north-star: §5.11 replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
@@ -52328,10 +52381,10 @@
       "reason": "R311uy: StorageService driver landed (S1 backend + S2 gate + S3 driver); facade wz storage-backend forwards real code"
     },
     "storage-history": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh Z_EXT_HISTORY emit",
-      "reason": "F=history ext emit; P=zenoh; C=opt-in for storage backends"
+      "reason": "R311uz: History::All version-keeping landed end-to-end (HistoryStorage backend + StorageState gate-skip + driver matching_versions); facade storage-history forwards real code"
     },
     "storage-replication": {
       "status": "reserved",

@@ -495,6 +495,15 @@ deferred-fire = ["alloc"]
 # driver lands.
 storage-backend = ["alloc"]
 
+# R311uz — storage-history (§5.11 storage domain, atom 2/4). Gates the
+# `storage_history` module: an in-memory `History::All` backend
+# (`HistoryStorage`) that keeps every version per key, the multi-version
+# counterpart of `MemoryStorage`. Implies `storage-backend` (the backend
+# seam + the `History` capability + the `StorageState` history-aware gate
+# it builds on). The wz-runtime-tokio / wz facade forward this same-named
+# feature so a History::All storage is declarable end-to-end.
+storage-history = ["storage-backend"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

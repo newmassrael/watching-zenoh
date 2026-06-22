@@ -59,7 +59,7 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::SampleView;
-use wz_session_core::storage_backend::MemoryStorage;
+use wz_session_core::storage_backend::{MemoryStorage, StorageBackend};
 use wz_session_core::storage_state::StorageState;
 
 use wz_runtime_core::TimeSource;
@@ -71,21 +71,22 @@ use crate::session::{
 };
 use crate::session_glue::SessionLinkActions;
 
-/// Shared, lockable storage gate. The subscriber callback locks it to
-/// write (capture Put / Delete) and the queryable callback locks it to
-/// read (answer a query); `Arc` because the two callbacks each own a
-/// clone, `Mutex` because the session may fire them from different worker
-/// threads.
-type SharedState = Arc<Mutex<StorageState<MemoryStorage>>>;
+/// Shared, lockable storage gate over a backend `B`. The subscriber
+/// callback locks it to write (capture Put / Delete) and the queryable
+/// callback locks it to read (answer a query); `Arc` because the two
+/// callbacks each own a clone, `Mutex` because the session may fire them
+/// from different worker threads.
+type SharedState<B> = Arc<Mutex<StorageState<B>>>;
 
 /// Apply one inbound sample to the gate: a Put is stored / a Del removes,
-/// both through the newer-wins gate (an outdated mutation is dropped by
-/// the gate). An un-timestamped sample is stamped via `fallback` (called
-/// at most once, only when the sample carries no timestamp). Free function
-/// so the capture logic is unit-testable without a live session — the
+/// both through the [`StorageState`] gate (a `History::Latest` backend
+/// drops an outdated mutation; a `History::All` backend retains every
+/// version). An un-timestamped sample is stamped via `fallback` (called at
+/// most once, only when the sample carries no timestamp). Free function so
+/// the capture logic is unit-testable without a live session — the
 /// subscriber closure is a thin lock-then-call wrapper over this.
-fn apply_sample(
-    state: &mut StorageState<MemoryStorage>,
+fn apply_sample<B: StorageBackend>(
+    state: &mut StorageState<B>,
     view: &dyn SampleView,
     fallback: impl FnOnce() -> TimestampHint,
 ) {
@@ -101,57 +102,76 @@ fn apply_sample(
     }
 }
 
-/// Answer one inbound query from the stored set: reply every live entry
-/// whose key intersects the query keyexpr, each stamped with its OWN
-/// concrete keyexpr via [`ReplyOut::reply_keyed`] (so a wildcard get
-/// returns per-key replies, not the wildcard). The terminating
-/// ResponseFinal is scheduled by the queryable dispatch path, not here.
-/// Free function for the same unit-testability reason as [`apply_sample`].
-fn answer_query(state: &StorageState<MemoryStorage>, view: &dyn QueryView, out: &mut dyn ReplyOut) {
-    for (key, data) in state.matching_entries(view.keyexpr()) {
-        out.reply_keyed(&key, &data.payload);
+/// Answer one inbound query from the stored set: reply every matching key,
+/// each stamped with its OWN concrete keyexpr via [`ReplyOut::reply_keyed`]
+/// (so a wildcard get returns per-key replies, not the wildcard). A
+/// `History::All` backend replies ALL versions of each matching key (via
+/// [`StorageState::matching_versions`]); a `History::Latest` backend
+/// replies the single value per key. The terminating ResponseFinal is
+/// scheduled by the queryable dispatch path, not here. Free function for
+/// the same unit-testability reason as [`apply_sample`].
+///
+/// Per-version reply TIMESTAMP is not yet carried (the `ReplyOut` surface
+/// has no timestamp slot): a `History::All` reply returns every version's
+/// payload, but the querier cannot yet order them by version — a
+/// timestamped-reply seam is the named follow-up.
+fn answer_query<B: StorageBackend>(
+    state: &StorageState<B>,
+    view: &dyn QueryView,
+    out: &mut dyn ReplyOut,
+) {
+    for (key, versions) in state.matching_versions(view.keyexpr()) {
+        for data in versions {
+            out.reply_keyed(&key, &data.payload);
+        }
     }
 }
 
 /// A live storage service bound to a [`Session`]: owns the capture
 /// [`Subscriber`], the answering [`Queryable`], and the shared
-/// [`StorageState`]. Dropping it undeclares both (the handles' RAII
-/// `Drop`), tearing the storage down.
-pub struct StorageService<R: SessionRuntime, T: TimeSource> {
-    state: SharedState,
+/// [`StorageState`] over a backend `B` (defaulting to the in-memory
+/// `History::Latest` [`MemoryStorage`]). Dropping it undeclares both (the
+/// handles' RAII `Drop`), tearing the storage down.
+pub struct StorageService<R: SessionRuntime, T: TimeSource, B: StorageBackend = MemoryStorage> {
+    state: SharedState<B>,
     // Held for their RAII lifetime: dropping a handle undeclares the
     // subscriber / queryable. The service is the storage's lifetime owner.
     _subscriber: Subscriber<R>,
     _queryable: Queryable<R, T>,
 }
 
-impl<R, T> StorageService<R, T>
+impl<R, T, B> StorageService<R, T, B>
 where
     R: SessionRuntime,
     T: TimeSource + 'static,
+    B: StorageBackend + Send + 'static,
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    /// Declare a storage on `keyexpr` over `session`: a capture subscriber
-    /// plus a complete queryable backed by an in-memory store. `local_zid`
-    /// is the storage's identity for stamping un-timestamped samples (the
-    /// fallback `zid`; see the module-level fallback note) — must be
-    /// non-empty.
+    /// Declare a storage on `keyexpr` over `session` backed by an explicit
+    /// `backend`: a capture subscriber plus a complete queryable. The
+    /// generic form — pass [`MemoryStorage`] for `History::Latest` (or the
+    /// [`declare`](StorageService::declare) shorthand) or a
+    /// `History::All` backend (`storage-history`'s `HistoryStorage`) for a
+    /// version-keeping storage. `local_zid` is the storage's identity for
+    /// stamping un-timestamped samples (the fallback `zid`; see the
+    /// module-level fallback note) — must be non-empty.
     ///
     /// The queryable is declared COMPLETE
     /// ([`QueryableOptions::with_complete`]): a storage is an authoritative
     /// answerer for its keyexpr, the BestMatching producer signal a router
     /// routes a get to (the query-routing track).
-    pub fn declare(
+    pub fn declare_with_backend(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         local_zid: Vec<u8>,
+        backend: B,
     ) -> Result<Self, StorageServiceError> {
         if local_zid.is_empty() {
             return Err(StorageServiceError::InvalidZid);
         }
         let keyexpr: String = keyexpr.into();
-        let state: SharedState = Arc::new(Mutex::new(StorageState::new(MemoryStorage::new())));
+        let state: SharedState<B> = Arc::new(Mutex::new(StorageState::new(backend)));
 
         // Capture leg: each inbound sample locks the gate and applies it,
         // stamping a fallback monotonic timestamp when the sample carries
@@ -198,10 +218,30 @@ where
     /// without exposing the `Arc<Mutex<..>>` internals.
     pub fn with_state<F, O>(&self, f: F) -> O
     where
-        F: FnOnce(&StorageState<MemoryStorage>) -> O,
+        F: FnOnce(&StorageState<B>) -> O,
     {
         let guard = self.state.lock().expect("storage state mutex poisoned");
         f(&guard)
+    }
+}
+
+impl<R, T> StorageService<R, T, MemoryStorage>
+where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    /// Declare an in-memory `History::Latest` storage — the common shape
+    /// (newer-wins, one value per key). Shorthand for
+    /// [`declare_with_backend`](StorageService::declare_with_backend) with
+    /// a fresh [`MemoryStorage`].
+    pub fn declare(
+        session: &Session<R, T, Unicast>,
+        keyexpr: impl Into<String>,
+        local_zid: Vec<u8>,
+    ) -> Result<Self, StorageServiceError> {
+        Self::declare_with_backend(session, keyexpr, local_zid, MemoryStorage::new())
     }
 }
 
@@ -397,5 +437,47 @@ mod tests {
         let mut out = RecordingReplyOut::default();
         answer_query(&state, &query("demo/**"), &mut out);
         assert!(out.keyed.is_empty(), "a deleted key is not replied");
+    }
+
+    // The History::All driver path needs the storage-history backend.
+    #[cfg(feature = "storage-history")]
+    mod history {
+        use super::*;
+        use wz_session_core::storage_history::HistoryStorage;
+
+        #[test]
+        fn answer_query_replies_every_version_of_a_history_all_key() {
+            let mut state = StorageState::new(HistoryStorage::new());
+            // Three versions of one key (an older one arrives out of order).
+            apply_sample(
+                &mut state,
+                &Sample::new_put("demo/a", vec![3]).with_timestamp(ts(30, 1)),
+                || unreachable!(),
+            );
+            apply_sample(
+                &mut state,
+                &Sample::new_put("demo/a", vec![1]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            apply_sample(
+                &mut state,
+                &Sample::new_put("demo/a", vec![2]).with_timestamp(ts(20, 1)),
+                || unreachable!(),
+            );
+
+            let mut out = RecordingReplyOut::default();
+            answer_query(&state, &query("demo/a"), &mut out);
+            // All three versions replied, each under the concrete key,
+            // ordered by timestamp (the backend keeps them sorted).
+            assert_eq!(
+                out.keyed,
+                vec![
+                    (String::from("demo/a"), vec![1]),
+                    (String::from("demo/a"), vec![2]),
+                    (String::from("demo/a"), vec![3]),
+                ],
+                "History::All replies every version, not just the latest"
+            );
+        }
     }
 }

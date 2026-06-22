@@ -573,7 +573,10 @@ storage-aligner = []
 # server-side role beyond the MCU client profile. A `--no-default-features`
 # build without wz-runtime-tokio gates zero code (the `?` forward is inert).
 storage-backend = ["wz-runtime-tokio?/storage-backend"]
-storage-history = ["storage-backend"]
+# R311uz — storage-history forwards the AP History::All backend
+# (wz-runtime-tokio?/storage-history = HistoryStorage + the kernel). AP-only
+# (the MCU runtime has no storage driver); implies storage-backend.
+storage-history = ["storage-backend", "wz-runtime-tokio?/storage-history"]
 storage-replication = ["storage-backend"]
 
 # ----- domain: time (4 atomic, 0 active / 4 reserved) -----

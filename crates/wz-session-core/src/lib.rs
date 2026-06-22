@@ -703,6 +703,15 @@ pub mod storage_backend;
 #[cfg(feature = "storage-backend")]
 pub mod storage_state;
 
+/// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
+/// `History::All` backend ([`storage_history::HistoryStorage`]) that keeps
+/// every version per key, the multi-version counterpart of
+/// [`storage_backend::MemoryStorage`]. The newer-wins gate skips an `All`
+/// backend (every version retained); a query replies all versions. Gated
+/// on `storage-history` (which implies `storage-backend`).
+#[cfg(feature = "storage-history")]
+pub mod storage_history;
+
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
 /// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
 /// mirror of `query`, routing inbound `Response(Reply|Err)` +

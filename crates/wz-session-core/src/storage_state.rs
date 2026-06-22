@@ -76,7 +76,7 @@ use alloc::vec::Vec;
 
 use crate::keyexpr_match::keyexpr_intersects_target;
 use crate::sample::{EncodingHint, TimestampHint};
-use crate::storage_backend::{StorageBackend, StorageInsertionResult, StoredData};
+use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 
 /// Whether timestamp `a` is *strictly newer* than `b`. Lexicographic
 /// `(time, zid)` — the uhlc `Timestamp` `Ord` semantic
@@ -111,11 +111,20 @@ impl<B: StorageBackend> StorageState<B> {
         }
     }
 
+    /// Whether the backend keeps only the latest value per key
+    /// ([`History::Latest`]) — the mode in which the newer-wins gate runs.
+    /// A [`History::All`] backend retains every version, so the gate is
+    /// skipped (zenoh `storages_mgt/service.rs:319`).
+    fn latest_mode(&self) -> bool {
+        self.backend.history() == History::Latest
+    }
+
     /// The newer-wins gate (zenoh `guard_cache_if_latest`,
     /// service.rs:510-544): `true` iff the mutation should proceed — i.e.
     /// no *strictly newer* timestamp is already recorded for `key`. A tie
     /// (equal timestamp) proceeds, mirroring zenoh's "reject iff
-    /// `recorded > incoming`" (service.rs:536).
+    /// `recorded > incoming`" (service.rs:536). Consulted only in
+    /// [`History::Latest`] mode.
     fn accepts(&self, key: &str, incoming: &TimestampHint) -> bool {
         match self.latest.get(key) {
             Some(recorded) => !timestamp_strictly_newer(recorded, incoming),
@@ -123,12 +132,12 @@ impl<B: StorageBackend> StorageState<B> {
         }
     }
 
-    /// Process an inbound Put through the newer-wins gate. Returns
-    /// [`Outdated`](StorageInsertionResult::Outdated) (backend untouched)
-    /// when a strictly-newer value is already stored; otherwise stores the
-    /// value, records the timestamp, and returns the backend's
-    /// [`Inserted`](StorageInsertionResult::Inserted) /
-    /// [`Replaced`](StorageInsertionResult::Replaced).
+    /// Process an inbound Put. In [`History::Latest`] mode the newer-wins
+    /// gate runs: a strictly-older value returns
+    /// [`Outdated`](StorageInsertionResult::Outdated) (backend untouched),
+    /// otherwise the value is stored and its timestamp recorded. In
+    /// [`History::All`] mode the gate is SKIPPED (zenoh
+    /// service.rs:319) — every version is appended by the backend.
     pub fn process_put(
         &mut self,
         key: &str,
@@ -136,33 +145,41 @@ impl<B: StorageBackend> StorageState<B> {
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
     ) -> StorageInsertionResult {
-        if !self.accepts(key, &timestamp) {
+        let latest_mode = self.latest_mode();
+        if latest_mode && !self.accepts(key, &timestamp) {
             return StorageInsertionResult::Outdated;
         }
         let result = self.backend.put(key, payload, encoding, timestamp.clone());
-        self.latest.insert(key.to_string(), timestamp);
+        if latest_mode {
+            self.latest.insert(key.to_string(), timestamp);
+        }
         result
     }
 
-    /// Process an inbound Delete through the newer-wins gate. Returns
-    /// [`Outdated`](StorageInsertionResult::Outdated) (backend untouched)
-    /// when a strictly-newer event is already recorded; otherwise deletes
-    /// the value and records the delete timestamp as a **tombstone** (so a
-    /// subsequent older Put cannot resurrect the key).
+    /// Process an inbound Delete. In [`History::Latest`] mode the newer-wins
+    /// gate runs (a strictly-older delete returns
+    /// [`Outdated`](StorageInsertionResult::Outdated)) and the accepted
+    /// delete timestamp is retained as a **tombstone** (so a subsequent
+    /// older Put cannot resurrect the key). In [`History::All`] mode the
+    /// gate is skipped (the backend decides how a delete affects its
+    /// version list).
     pub fn process_delete(
         &mut self,
         key: &str,
         timestamp: TimestampHint,
     ) -> StorageInsertionResult {
-        if !self.accepts(key, &timestamp) {
+        let latest_mode = self.latest_mode();
+        if latest_mode && !self.accepts(key, &timestamp) {
             return StorageInsertionResult::Outdated;
         }
         let result = self.backend.delete(key, timestamp.clone());
-        // Retain the delete timestamp as a tombstone — the value is gone
-        // from the backend but the latest-accepted record survives, so the
-        // newer-wins gate still rejects an older Put. zenoh keeps the
-        // Delete event in `cache_latest.latest_updates` for the same reason.
-        self.latest.insert(key.to_string(), timestamp);
+        if latest_mode {
+            // Retain the delete timestamp as a tombstone — the value is gone
+            // from the backend but the latest-accepted record survives, so
+            // the newer-wins gate still rejects an older Put. zenoh keeps the
+            // Delete event in `cache_latest.latest_updates` for this reason.
+            self.latest.insert(key.to_string(), timestamp);
+        }
         result
     }
 
@@ -191,6 +208,28 @@ impl<B: StorageBackend> StorageState<B> {
             if keyexpr_intersects_target(&key, &target_chunks) {
                 if let Some(data) = self.backend.get(&key) {
                     out.push((key, data));
+                }
+            }
+        }
+        out
+    }
+
+    /// The multi-version counterpart of [`matching_entries`](Self::matching_entries):
+    /// every matching key paired with ALL its stored versions (newest
+    /// last), the query reply set for a [`History::All`] storage. For a
+    /// [`History::Latest`] backend each key yields its single value (the
+    /// `get_versions` default returns 0-or-1), so the result collapses to
+    /// the `matching_entries` shape with one version per key. Mirrors
+    /// zenoh's `reply_query` replying every `StoredData` `get` returns
+    /// (`storages_mgt/service.rs:584`).
+    pub fn matching_versions(&self, query_keyexpr: &str) -> Vec<(String, Vec<&StoredData>)> {
+        let target_chunks: Vec<&str> = query_keyexpr.split('/').collect();
+        let mut out = Vec::new();
+        for (key, _ts) in self.backend.get_all_entries() {
+            if keyexpr_intersects_target(&key, &target_chunks) {
+                let versions = self.backend.get_versions(&key);
+                if !versions.is_empty() {
+                    out.push((key, versions));
                 }
             }
         }
@@ -357,5 +396,67 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "demo/a");
         assert_eq!(hits[0].1.payload, vec![1]);
+    }
+
+    #[test]
+    fn matching_versions_on_latest_backend_yields_one_version_per_key() {
+        // A History::Latest backend keeps one value per key, so
+        // matching_versions collapses to the matching_entries shape.
+        let mut s = state();
+        s.process_put("demo/a", vec![1], None, ts(20, 1));
+        s.process_put("demo/a", vec![2], None, ts(30, 1)); // replaces
+        let hits = s.matching_versions("demo/a");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1.len(), 1, "Latest keeps one version");
+        assert_eq!(hits[0].1[0].payload, vec![2]);
+    }
+
+    // The History::All path needs the storage-history backend.
+    #[cfg(feature = "storage-history")]
+    mod history {
+        use super::*;
+        use crate::storage_history::HistoryStorage;
+
+        fn all_state() -> StorageState<HistoryStorage> {
+            StorageState::new(HistoryStorage::new())
+        }
+
+        #[test]
+        fn all_mode_skips_the_newer_wins_gate_and_retains_every_version() {
+            let mut s = all_state();
+            // Newest first, then an OLDER put: under Latest this would be
+            // Outdated and dropped; under All it is retained.
+            assert_eq!(
+                s.process_put("demo/a", vec![3], None, ts(30, 1)),
+                StorageInsertionResult::Inserted
+            );
+            let r = s.process_put("demo/a", vec![1], None, ts(10, 1));
+            assert_ne!(
+                r,
+                StorageInsertionResult::Outdated,
+                "History::All never drops an older value as Outdated"
+            );
+            let versions = s.matching_versions("demo/a");
+            assert_eq!(versions.len(), 1, "one matching key");
+            assert_eq!(versions[0].1.len(), 2, "both versions retained");
+            // Sorted ascending by timestamp regardless of arrival.
+            assert_eq!(versions[0].1[0].payload, vec![1]);
+            assert_eq!(versions[0].1[1].payload, vec![3]);
+        }
+
+        #[test]
+        fn matching_versions_wildcard_returns_all_versions_per_matching_key() {
+            let mut s = all_state();
+            s.process_put("demo/a", vec![1], None, ts(10, 1));
+            s.process_put("demo/a", vec![2], None, ts(20, 1));
+            s.process_put("demo/b", vec![9], None, ts(15, 1));
+            let mut hits = s.matching_versions("demo/*");
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(hits.len(), 2);
+            assert_eq!(hits[0].0, "demo/a");
+            assert_eq!(hits[0].1.len(), 2, "demo/a has two versions");
+            assert_eq!(hits[1].0, "demo/b");
+            assert_eq!(hits[1].1.len(), 1);
+        }
     }
 }

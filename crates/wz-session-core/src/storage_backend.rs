@@ -91,6 +91,27 @@ pub enum StorageInsertionResult {
     Deleted,
 }
 
+/// How many values a backend keeps per key. zenoh `History`
+/// (`zenoh-backend-traits/src/lib.rs:164-168`).
+///
+/// The mode drives the service gate above the backend: under
+/// [`Latest`](History::Latest) the newer-wins gate keeps only the newest
+/// value (an outdated mutation is dropped), under [`All`](History::All)
+/// the gate is skipped and every version is retained (zenoh
+/// `storages_mgt/service.rs:319` — `guard_cache_if_latest` runs only for
+/// `History::Latest`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum History {
+    /// Keep only the newest value per key (the default; the in-memory
+    /// [`MemoryStorage`] mode). zenoh `History::Latest`.
+    #[default]
+    Latest,
+    /// Keep every value per key, including historical / out-of-order ones
+    /// (the `storage-history` [`crate::storage_history::HistoryStorage`]
+    /// mode). zenoh `History::All`.
+    All,
+}
+
 /// A single versioned value held by a backend. zenoh `StoredData`
 /// (`zenoh-backend-traits/src/lib.rs:177-182`:
 /// `{ payload: ZBytes, encoding: Encoding, timestamp: Timestamp }`). wz
@@ -154,8 +175,30 @@ pub trait StorageBackend {
 
     /// List every stored `(key, timestamp)` pair — the input the query
     /// path resolves a wildcard query against. zenoh `get_all_entries`
-    /// (`zenoh-backend-traits/src/lib.rs:256-259`).
+    /// (`zenoh-backend-traits/src/lib.rs:256-259`). For a multi-version
+    /// (`History::All`) backend this lists each key once with its NEWEST
+    /// timestamp (the wildcard-match scan only needs the key set).
     fn get_all_entries(&self) -> Vec<(String, TimestampHint)>;
+
+    /// This backend's history capability — how many values it keeps per
+    /// key. zenoh `Capability::history` (`zenoh-backend-traits/src/lib.rs:145`).
+    /// Defaults to [`History::Latest`]; a multi-version backend overrides
+    /// it to [`History::All`], which tells the service gate above to retain
+    /// every version instead of dropping outdated ones.
+    fn history(&self) -> History {
+        History::Latest
+    }
+
+    /// All stored versions for an exact `key`, newest last — the
+    /// multi-version form of [`get`](StorageBackend::get). zenoh `get`
+    /// returns `Vec<StoredData>` for exactly this reason
+    /// (`zenoh-backend-traits/src/lib.rs:250-254`). The default returns the
+    /// single latest value (0 or 1), so a [`History::Latest`] backend needs
+    /// no override; a [`History::All`] backend returns its full version
+    /// list.
+    fn get_versions(&self, key: &str) -> Vec<&StoredData> {
+        self.get(key).into_iter().collect()
+    }
 }
 
 /// In-memory [`StorageBackend`]: a keyexpr -> [`StoredData`] map. zenoh
