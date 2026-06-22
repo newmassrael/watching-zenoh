@@ -483,6 +483,18 @@ session-matching = ["alloc"]
 # registries inline.
 deferred-fire = ["alloc"]
 
+# R311uw — storage-backend (§5.11 storage domain, atom 1/4). Gates the
+# `storage_backend` kernel module: the pluggable `StorageBackend` seam +
+# an in-memory backend, a faithful mirror of zenoh's `zenoh-backend-traits`
+# `Storage` trait + the bundled `memory_backend`. Pulls `alloc` for the
+# BTreeMap / String / Vec backing and the `crate::sample` TimestampHint /
+# EncodingHint the `StoredData` embeds. Runtime-agnostic backend layer; the
+# newer-wins service decision and the wz-runtime-tokio StorageService driver
+# (Subscriber + complete Queryable + select loop) are follow-up atoms.
+# wz-runtime-tokio / the wz facade forward this same-named feature once the
+# driver lands.
+storage-backend = ["alloc"]
+
 [build-dependencies]
 # R311in — shared sce-codegen invocation + emit post-processing (one
 # source across the three codegen build scripts).

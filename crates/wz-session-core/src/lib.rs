@@ -676,6 +676,18 @@ pub mod request_routing_context;
 /// `codec-response-final`. Runtime-agnostic (`FnMut + Send`, no async).
 pub mod query;
 
+/// R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
+/// [`storage_backend::StorageBackend`] seam + an in-memory backend
+/// ([`storage_backend::MemoryStorage`]). A faithful mirror of zenoh's
+/// `zenoh-backend-traits` `Storage` trait + the bundled `memory_backend`.
+/// Gated on `storage-backend` (which implies `alloc`: the BTreeMap /
+/// String / Vec backing + the `crate::sample` TimestampHint / EncodingHint
+/// the `StoredData` embeds). Runtime-agnostic backend layer; the newer-wins
+/// service decision + the wz-runtime-tokio StorageService driver are the
+/// follow-up atoms.
+#[cfg(feature = "storage-backend")]
+pub mod storage_backend;
+
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
 /// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
 /// mirror of `query`, routing inbound `Response(Reply|Err)` +

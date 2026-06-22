@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R311uw — the `storage-backend` atom (§5.11 storage domain, 1/4): the
+//! pluggable storage-backend seam + an in-memory backend.
+//!
+//! A zenoh storage is a server-side service that captures every Put/Delete
+//! on a key_expr (a Subscriber) and serves the stored data back on a query
+//! (a complete Queryable). Underneath that service sits a *backend*: the
+//! technology that actually holds the bytes (memory / rocksdb / filesystem
+//! / influxdb). This module lands the **backend layer** — the trait every
+//! backend implements and the in-memory implementation — runtime-agnostic
+//! and `no_std`, so the same kernel composes on AP and (heap-permitting)
+//! MCU profiles, mirroring the [`crate::routing`] data-plane kernel split.
+//!
+//! ## zenoh anchor
+//!
+//! Mirrors zenoh 1.5.0 `zenoh-backend-traits`
+//! (`plugins/zenoh-backend-traits/src/lib.rs`) and the bundled in-memory
+//! backend (`plugins/zenoh-plugin-storage-manager/src/memory_backend/mod.rs`):
+//!
+//! - [`StorageInsertionResult`] = `StorageInsertionResult` (lib.rs:170-175):
+//!   the four-way outcome of a mutation.
+//! - [`StoredData`] = `StoredData` (lib.rs:177-182): a versioned value
+//!   (`{ payload, encoding, timestamp }`).
+//! - [`StorageBackend`] = the `Storage` trait (lib.rs:219-260): `put` /
+//!   `delete` / `get` / `get_all_entries`.
+//! - [`MemoryStorage`] = `MemoryStorage` (memory_backend/mod.rs:78-158): a
+//!   keyexpr -> [`StoredData`] map.
+//!
+//! ## Deliberate divergences from zenoh (each a layer/profile decision)
+//!
+//! - **sync, not `async`**: zenoh's trait methods are `async` because a
+//!   real backend (rocksdb, network) blocks. The no_std kernel seam stays
+//!   sync — the in-memory backend never awaits, and an `async` backend is
+//!   an AP-side wrapper over a sync core. The seam mirrored here is the
+//!   data shape, not the await coloring.
+//! - **`&str` key, never `Option`**: zenoh keys are `Option<OwnedKeyExpr>`
+//!   (`None` == the configured `strip_prefix` matched the storage key_expr
+//!   exactly, lib.rs:225). wz's minimal storage carries no `strip_prefix`,
+//!   so the key is always the full keyexpr string. `strip_prefix` is a
+//!   later storage-config atom.
+//! - **no `ZResult` wrapper**: the in-memory mutations are infallible, so
+//!   the result is the bare [`StorageInsertionResult`] (zenoh wraps it in
+//!   `ZResult` for the fallible-backend case).
+//! - **`BTreeMap`, not `HashMap`**: zenoh's memory backend is a `HashMap`
+//!   (memory_backend/mod.rs:79); the no_std kernel has no std hasher, and
+//!   the exact-key lookup is semantically identical (a key->value store
+//!   does not depend on iteration order — [`MemoryStorage::get_all_entries`]
+//!   simply yields keys sorted).
+//! - **`get` returns `Option`, not `Vec`**: zenoh's `get` returns
+//!   `Vec<StoredData>` because History::All (lib.rs:164-168) may hold
+//!   several versions per key; the History::Latest in-memory backend holds
+//!   at most one, so wz returns `Option`. The `Vec` (version-history) form
+//!   arrives with the `storage-history` atom.
+//!
+//! ## NON-goals (this atom)
+//!
+//! The **newer-wins** decision (zenoh keeps it in the storage *service*,
+//! `guard_cache_if_latest`, `storages_mgt/service.rs:510-544`, NOT in the
+//! backend — the bare backend overwrites verbatim), the query-side keyexpr
+//! matching (resolving a wildcard query against the stored set), and the
+//! `StorageService` driver (the Subscriber + complete Queryable + select
+//! loop, an AP wz-runtime-tokio binding) are the follow-up atoms. This
+//! atom is the runtime-agnostic backend foundation they sit on.
+
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use crate::sample::{EncodingHint, TimestampHint};
+
+/// The four-way outcome of a storage mutation. zenoh
+/// `StorageInsertionResult` (`zenoh-backend-traits/src/lib.rs:170-175`).
+///
+/// [`Outdated`](StorageInsertionResult::Outdated) is part of the contract
+/// but a *bare* [`MemoryStorage`] never returns it — it overwrites
+/// verbatim. Outdated is produced by the newer-wins service gate that sits
+/// above a backend (zenoh `guard_cache_if_latest`, the follow-up atom).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageInsertionResult {
+    /// The mutation was older than the stored value and was rejected
+    /// (produced by the newer-wins gate above the backend, never by the
+    /// bare backend itself).
+    Outdated,
+    /// A new key was created.
+    Inserted,
+    /// An existing key's value was overwritten.
+    Replaced,
+    /// A key's entry was removed.
+    Deleted,
+}
+
+/// A single versioned value held by a backend. zenoh `StoredData`
+/// (`zenoh-backend-traits/src/lib.rs:177-182`:
+/// `{ payload: ZBytes, encoding: Encoding, timestamp: Timestamp }`). wz
+/// projects the codec types through the application-owned [`crate::sample`]
+/// mirrors ([`EncodingHint`] / [`TimestampHint`]) so a stored value carries
+/// the same `Clone` / `PartialEq` surface a [`crate::sample::Sample`] does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredData {
+    /// The stored payload bytes.
+    pub payload: Vec<u8>,
+    /// The encoding the value was published with, if any. A storage must
+    /// preserve it to serve the value back faithfully.
+    pub encoding: Option<EncodingHint>,
+    /// The timestamp that versioned this value — the key the newer-wins
+    /// gate (follow-up atom) compares against.
+    pub timestamp: TimestampHint,
+}
+
+/// The pluggable storage-backend seam: the contract every concrete backend
+/// (memory / rocksdb / filesystem / influxdb) implements so a storage
+/// service drives any of them through one interface. zenoh `Storage`
+/// (`zenoh-backend-traits/src/lib.rs:219-260`).
+///
+/// A backend is a dumb store: it does NOT compare timestamps. Newer-wins
+/// versioning is the service's job (zenoh `guard_cache_if_latest`,
+/// `storages_mgt/service.rs:510-544`), so a `put` of an older value still
+/// [`Replaced`](StorageInsertionResult::Replaced)s the stored one here —
+/// the gate above the backend is what rejects it as
+/// [`Outdated`](StorageInsertionResult::Outdated). Keeping the backend
+/// comparison-free is what lets the newer-wins gate be the single,
+/// testable place that decision lives.
+pub trait StorageBackend {
+    /// Store `payload` / `encoding` under `key`, versioned by `timestamp`.
+    /// Returns [`Inserted`](StorageInsertionResult::Inserted) for a new
+    /// key, [`Replaced`](StorageInsertionResult::Replaced) for an existing
+    /// one. Does NOT compare timestamps (zenoh memory_backend `put`,
+    /// `memory_backend/mod.rs:97-122`: Occupied -> Replaced, Vacant ->
+    /// Inserted).
+    fn put(
+        &mut self,
+        key: &str,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+        timestamp: TimestampHint,
+    ) -> StorageInsertionResult;
+
+    /// Remove `key`. Returns [`Deleted`](StorageInsertionResult::Deleted)
+    /// unconditionally — even for an absent key (zenoh memory_backend
+    /// `delete`, `memory_backend/mod.rs:126-133`: `remove_entry` then
+    /// `Deleted`). `timestamp` is accepted for contract parity (a
+    /// history / replication backend records the delete version); the bare
+    /// in-memory backend drops the entry.
+    fn delete(&mut self, key: &str, timestamp: TimestampHint) -> StorageInsertionResult;
+
+    /// Retrieve the value stored under an exact `key`, if any. zenoh `get`
+    /// (`zenoh-backend-traits/src/lib.rs:250-254`) returns
+    /// `Vec<StoredData>` for History::All; the History::Latest in-memory
+    /// backend holds at most one value per key, so wz returns `Option`
+    /// (the `Vec` form arrives with `storage-history`).
+    fn get(&self, key: &str) -> Option<&StoredData>;
+
+    /// List every stored `(key, timestamp)` pair — the input the query
+    /// path resolves a wildcard query against. zenoh `get_all_entries`
+    /// (`zenoh-backend-traits/src/lib.rs:256-259`).
+    fn get_all_entries(&self) -> Vec<(String, TimestampHint)>;
+}
+
+/// In-memory [`StorageBackend`]: a keyexpr -> [`StoredData`] map. zenoh
+/// `MemoryStorage` (`memory_backend/mod.rs:78-158`). Backed by an `alloc`
+/// [`BTreeMap`] (see the module-level divergence note).
+#[derive(Debug, Default)]
+pub struct MemoryStorage {
+    map: BTreeMap<String, StoredData>,
+}
+
+impl MemoryStorage {
+    /// A fresh, empty in-memory storage.
+    pub fn new() -> Self {
+        Self {
+            map: BTreeMap::new(),
+        }
+    }
+
+    /// The number of distinct keys currently stored.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Whether the storage holds no keys.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+impl StorageBackend for MemoryStorage {
+    fn put(
+        &mut self,
+        key: &str,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+        timestamp: TimestampHint,
+    ) -> StorageInsertionResult {
+        let data = StoredData {
+            payload,
+            encoding,
+            timestamp,
+        };
+        // `BTreeMap::insert` returns the displaced value (Some) or None for
+        // a fresh key — the exact Occupied/Vacant split zenoh's memory
+        // backend keys Replaced/Inserted off of (memory_backend/mod.rs:108
+        // / :121).
+        match self.map.insert(String::from(key), data) {
+            Some(_) => StorageInsertionResult::Replaced,
+            None => StorageInsertionResult::Inserted,
+        }
+    }
+
+    fn delete(&mut self, key: &str, _timestamp: TimestampHint) -> StorageInsertionResult {
+        // zenoh `remove_entry` then `Deleted` unconditionally
+        // (memory_backend/mod.rs:132-133): absent-key delete is still
+        // Deleted (the storage-history / tombstone semantics live above
+        // the bare backend).
+        self.map.remove(key);
+        StorageInsertionResult::Deleted
+    }
+
+    fn get(&self, key: &str) -> Option<&StoredData> {
+        self.map.get(key)
+    }
+
+    fn get_all_entries(&self) -> Vec<(String, TimestampHint)> {
+        self.map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.timestamp.clone()))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn ts(time: u64) -> TimestampHint {
+        TimestampHint {
+            time,
+            zid: vec![0x01],
+        }
+    }
+
+    fn enc() -> Option<EncodingHint> {
+        None
+    }
+
+    #[test]
+    fn put_new_key_is_inserted_and_readable() {
+        let mut s = MemoryStorage::new();
+        let r = s.put("demo/a", vec![1, 2, 3], enc(), ts(10));
+        assert_eq!(r, StorageInsertionResult::Inserted);
+        assert_eq!(s.len(), 1);
+        let stored = s.get("demo/a").expect("key present after put");
+        assert_eq!(stored.payload, vec![1, 2, 3]);
+        assert_eq!(stored.timestamp, ts(10));
+    }
+
+    #[test]
+    fn put_existing_key_is_replaced() {
+        let mut s = MemoryStorage::new();
+        assert_eq!(
+            s.put("demo/a", vec![1], enc(), ts(10)),
+            StorageInsertionResult::Inserted
+        );
+        let r = s.put("demo/a", vec![2], enc(), ts(20));
+        assert_eq!(r, StorageInsertionResult::Replaced);
+        assert_eq!(s.len(), 1, "replace does not grow the key set");
+        assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+    }
+
+    #[test]
+    fn delete_removes_entry_and_returns_deleted() {
+        let mut s = MemoryStorage::new();
+        s.put("demo/a", vec![1], enc(), ts(10));
+        let r = s.delete("demo/a", ts(20));
+        assert_eq!(r, StorageInsertionResult::Deleted);
+        assert!(s.get("demo/a").is_none(), "key gone after delete");
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn delete_absent_key_still_returns_deleted() {
+        // Faithful to zenoh memory_backend: `remove_entry` is unconditional
+        // and the result is Deleted even when the key was never present
+        // (memory_backend/mod.rs:132-133).
+        let mut s = MemoryStorage::new();
+        assert_eq!(
+            s.delete("demo/missing", ts(1)),
+            StorageInsertionResult::Deleted
+        );
+    }
+
+    #[test]
+    fn get_all_entries_lists_every_key_with_its_timestamp() {
+        let mut s = MemoryStorage::new();
+        s.put("demo/a", vec![1], enc(), ts(10));
+        s.put("demo/b", vec![2], enc(), ts(20));
+        let mut entries = s.get_all_entries();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            entries,
+            vec![
+                (String::from("demo/a"), ts(10)),
+                (String::from("demo/b"), ts(20)),
+            ]
+        );
+    }
+
+    #[test]
+    fn backend_does_not_compare_timestamps_an_older_put_still_replaces() {
+        // The seam contract: a bare backend is comparison-free. A put with
+        // an OLDER timestamp still Replaces (the newer-wins gate above the
+        // backend is what would reject it as Outdated). This is the
+        // invariant the follow-up newer-wins atom relies on.
+        let mut s = MemoryStorage::new();
+        s.put("demo/a", vec![9], enc(), ts(100));
+        let r = s.put("demo/a", vec![1], enc(), ts(1));
+        assert_eq!(r, StorageInsertionResult::Replaced);
+        assert_eq!(
+            s.get("demo/a").unwrap().payload,
+            vec![1],
+            "bare backend overwrites verbatim, ignoring the older timestamp"
+        );
+    }
+}

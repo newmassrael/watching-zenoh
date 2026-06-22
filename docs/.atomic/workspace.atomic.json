@@ -636,7 +636,8 @@
       "decision_status": "active",
       "intent": "Storage domain catalog: 4 atomic features all reserved (storage backend / history / replication / aligner — server-side persistence not yet implemented).",
       "caveats_bullets": [
-        "R311ci audit: 0 source cfg sites; storage backend is router-side feature beyond AP MVP scope."
+        "R311ci audit: 0 source cfg sites; storage backend is router-side feature beyond AP MVP scope.",
+        "R311uw: storage-backend 1/4 landed - StorageBackend seam + MemoryStorage in session-core"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -46406,6 +46407,54 @@
         "R311uv = query-routing fidelity: forward_request EMPTY route now sends a prompt ResponseFinal to the querier (zenoh route_query dispatcher/queries.rs:518-530), closing the uu session-review's one tracked fidelity gap. The querier's get() terminates promptly instead of waiting out its own timeout. Just the final (no Err), querier rid, egress-ACL via send_to_face, no pending entry. The QueryTarget BestMatching track (um..uu) + this fidelity close = the relay query plane is now zenoh-faithful for BOTH the populated and the empty route.",
         "TRACKED debt (remaining): --no-default-features routing-peer 18 fails (flood/sent==0 root-cause), N-final fan-out (per-outface vs zenoh Arc-aggregated; Session-API scope).",
         "LOCAL: R311uv on top of uu=fbcb898 (origin/main=f2a64cd, +10 ahead um..uv); host-gated. PUSH this session = full run-ci then push (user asked to close + push). North-star beyond 5.16: untouched Storage(5.11) / SHM."
+      ]
+    },
+    "Round 311uw": {
+      "decision_summary": "R311uw: storage-backend atom 1/4 (§5.11 storage) — the backend layer. Lands the pluggable StorageBackend seam + an in-memory MemoryStorage in wz-session-core (no_std+alloc, storage-backend feature, default-off), a faithful mirror of zenoh zenoh-backend-traits Storage trait (lib.rs:219-260) + the bundled memory_backend (mod.rs:78-158). The backend is comparison-free by contract (an older put still Replaces; newer-wins is the service gate above it, the follow-up atom). Divergences each layer/profile-driven + doc-cited: sync not async, &str not Option<OwnedKeyExpr> (no strip_prefix), bare result not ZResult, BTreeMap not HashMap (no_std), get->Option not Vec (History::Latest).",
+      "changes_bullets": [
+        "storage_backend.rs (NEW, wz-session-core): StorageBackend trait (put/delete/get/get_all_entries) + MemoryStorage (BTreeMap) + StorageInsertionResult + StoredData. Faithful mirror of zenoh zenoh-backend-traits Storage trait (lib.rs:219-260) + bundled memory_backend (mod.rs:78-158).",
+        "lib.rs: storage_backend module gated #[cfg(feature = \"storage-backend\")]. Cargo.toml: storage-backend = [\"alloc\"] (BTreeMap/String/Vec + crate::sample TimestampHint/EncodingHint backing the StoredData).",
+        "Deliberate divergences (each layer/profile-driven, all doc-cited): sync not async (no_std seam over a sync core); &str key not Option<OwnedKeyExpr> (no strip_prefix yet); bare StorageInsertionResult not ZResult (in-mem infallible); BTreeMap not HashMap (no_std, no std hasher); get -> Option not Vec (History::Latest holds <=1; the Vec form is the storage-history atom).",
+        "Backend is comparison-free by contract: an older put still Replaces; newer-wins lives in the service gate above the backend (zenoh guard_cache_if_latest service.rs:510-544), the follow-up atom."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features storage-backend: 6/6 storage_backend tests pass (Inserted/Replaced; Deleted incl absent-key; get_all_entries; backend-no-compare older-put-still-replaces).",
+        "clippy -D warnings clean on --features storage-backend --all-targets AND default --all-targets; cargo fmt --check clean.",
+        "no-regression: --no-default-features (no-alloc MCU lane) builds clean (storage_backend is default-off and never pulls alloc unbidden).",
+        "zenoh citations direct-read verified (not memory): StorageInsertionResult lib.rs:170-174, StoredData :177-182, Storage trait :219-260, History :164-168, memory_backend HashMap mod.rs:79 + put :108/:121 + delete :132-133."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311uw = storage-backend atom 1/4 (§5.11 storage): the backend layer landed. StorageBackend pluggable seam + in-memory MemoryStorage in wz-session-core (no_std+alloc, storage-backend feature, default-off). Faithful zenoh zenoh-backend-traits Storage + memory_backend mirror; comparison-free backend by contract.",
+        "NEXT (storage-backend completion): (2) newer-wins service decision — a StorageState over a backend with cache_latest (zenoh guard_cache_if_latest service.rs:510-544): Outdated gate + tombstone-timestamp retention + matching_entries (keyexpr_intersects_target reuse) for wildcard query reply; pure no_std, unit-tested. (3) wz-runtime-tokio StorageService driver: owns Subscriber + complete Queryable + select loop, fallback-stamps un-timestamped samples (zenoh sample.timestamp().unwrap_or(session.new_timestamp()) service.rs:178), e2e put->get; wire the wz / wz-runtime-tokio facade storage-backend forward here.",
+        "THEN domain atoms: storage-history (History::All = Vec<StoredData> per key), storage-replication (digest publish/subscribe), storage-aligner (alignment query/reply). zenoh anchors mapped (replication/core.rs digest+aligner, log.rs Event/Fingerprint).",
+        "HONEST: catalog §5.11 storage-backend is kernel-landed but NOT facade-wired (the wz feature gates zero code until S3 forwards). The §5.11 \"0 source cfg sites\" (R311ci) is now stale -> a new R311uw caveat records the backend landing (frozen-ledger spirit; the R311ci caveat is unchanged).",
+        "LOCAL: R311uw on top of uv=ef75658 (origin/main=ef75658, +1 ahead); host-gated, NOT pushed (await user consent). Other untouched north-star: §5.11 history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
+      ],
+      "publishable_decision_summary": "R311uw: storage-backend atom 1/4 (§5.11 storage) — the backend layer. Lands the pluggable StorageBackend seam + an in-memory MemoryStorage in wz-session-core (no_std+alloc, storage-backend feature, default-off), a faithful mirror of zenoh zenoh-backend-traits Storage trait (lib.rs:219-260) + the bundled memory_backend (mod.rs:78-158). The backend is comparison-free by contract (an older put still Replaces; newer-wins is the service gate above it, the follow-up atom). Divergences each layer/profile-driven + doc-cited: sync not async, &str not Option<OwnedKeyExpr> (no strip_prefix), bare result not ZResult, BTreeMap not HashMap (no_std), get->Option not Vec (History::Latest).",
+      "publishable_changes_bullets": [
+        "storage_backend.rs (NEW, wz-session-core): StorageBackend trait (put/delete/get/get_all_entries) + MemoryStorage (BTreeMap) + StorageInsertionResult + StoredData. Faithful mirror of zenoh zenoh-backend-traits Storage trait (lib.rs:219-260) + bundled memory_backend (mod.rs:78-158).",
+        "lib.rs: storage_backend module gated #[cfg(feature = \"storage-backend\")]. Cargo.toml: storage-backend = [\"alloc\"] (BTreeMap/String/Vec + crate::sample TimestampHint/EncodingHint backing the StoredData).",
+        "Deliberate divergences (each layer/profile-driven, all doc-cited): sync not async (no_std seam over a sync core); &str key not Option<OwnedKeyExpr> (no strip_prefix yet); bare StorageInsertionResult not ZResult (in-mem infallible); BTreeMap not HashMap (no_std, no std hasher); get -> Option not Vec (History::Latest holds <=1; the Vec form is the storage-history atom).",
+        "Backend is comparison-free by contract: an older put still Replaces; newer-wins lives in the service gate above the backend (zenoh guard_cache_if_latest service.rs:510-544), the follow-up atom."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features storage-backend: 6/6 storage_backend tests pass (Inserted/Replaced; Deleted incl absent-key; get_all_entries; backend-no-compare older-put-still-replaces).",
+        "clippy -D warnings clean on --features storage-backend --all-targets AND default --all-targets; cargo fmt --check clean.",
+        "no-regression: --no-default-features (no-alloc MCU lane) builds clean (storage_backend is default-off and never pulls alloc unbidden).",
+        "zenoh citations direct-read verified (not memory): StorageInsertionResult lib.rs:170-174, StoredData :177-182, Storage trait :219-260, History :164-168, memory_backend HashMap mod.rs:79 + put :108/:121 + delete :132-133."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311uw = storage-backend atom 1/4 (§5.11 storage): the backend layer landed. StorageBackend pluggable seam + in-memory MemoryStorage in wz-session-core (no_std+alloc, storage-backend feature, default-off). Faithful zenoh zenoh-backend-traits Storage + memory_backend mirror; comparison-free backend by contract.",
+        "NEXT (storage-backend completion): (2) newer-wins service decision — a StorageState over a backend with cache_latest (zenoh guard_cache_if_latest service.rs:510-544): Outdated gate + tombstone-timestamp retention + matching_entries (keyexpr_intersects_target reuse) for wildcard query reply; pure no_std, unit-tested. (3) wz-runtime-tokio StorageService driver: owns Subscriber + complete Queryable + select loop, fallback-stamps un-timestamped samples (zenoh sample.timestamp().unwrap_or(session.new_timestamp()) service.rs:178), e2e put->get; wire the wz / wz-runtime-tokio facade storage-backend forward here.",
+        "THEN domain atoms: storage-history (History::All = Vec<StoredData> per key), storage-replication (digest publish/subscribe), storage-aligner (alignment query/reply). zenoh anchors mapped (replication/core.rs digest+aligner, log.rs Event/Fingerprint).",
+        "HONEST: catalog §5.11 storage-backend is kernel-landed but NOT facade-wired (the wz feature gates zero code until S3 forwards). The §5.11 \"0 source cfg sites\" (R311ci) is now stale -> a new R311uw caveat records the backend landing (frozen-ledger spirit; the R311ci caveat is unchanged).",
+        "LOCAL: R311uw on top of uv=ef75658 (origin/main=ef75658, +1 ahead); host-gated, NOT pushed (await user consent). Other untouched north-star: §5.11 history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
       ]
     },
     "Round 311v": {
