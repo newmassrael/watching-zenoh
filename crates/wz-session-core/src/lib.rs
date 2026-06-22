@@ -688,6 +688,21 @@ pub mod query;
 #[cfg(feature = "storage-backend")]
 pub mod storage_backend;
 
+/// R311ux — the storage *service gate* (§5.11 storage, atom 2/4): the
+/// newer-wins versioning decision + the query-match set
+/// ([`storage_state::StorageState`]). The runtime-agnostic half of a
+/// storage service — pure no_std, no Subscriber / Queryable / async — that
+/// turns the dumb [`storage_backend::StorageBackend`] into a storage by
+/// applying zenoh's `guard_cache_if_latest` newer-wins gate (older
+/// Put/Delete -> Outdated; Delete leaves a tombstone timestamp) and
+/// resolving a (wildcard) query into the matching stored entries via the
+/// shared [`keyexpr_match::keyexpr_intersects_target`] scan. Same
+/// `storage-backend` gate; the wz-runtime-tokio StorageService driver
+/// (Subscriber + complete Queryable + select loop) wraps a `StorageState`
+/// (atom 3).
+#[cfg(feature = "storage-backend")]
+pub mod storage_state;
+
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
 /// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
 /// mirror of `query`, routing inbound `Response(Reply|Err)` +

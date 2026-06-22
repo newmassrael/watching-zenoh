@@ -637,7 +637,8 @@
       "intent": "Storage domain catalog: 4 atomic features all reserved (storage backend / history / replication / aligner — server-side persistence not yet implemented).",
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; storage backend is router-side feature beyond AP MVP scope.",
-        "R311uw: storage-backend 1/4 landed - StorageBackend seam + MemoryStorage in session-core"
+        "R311uw: storage-backend 1/4 landed - StorageBackend seam + MemoryStorage in session-core",
+        "R311ux: storage 2/4 landed - StorageState newer-wins gate + tombstone + matching"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -46455,6 +46456,58 @@
         "THEN domain atoms: storage-history (History::All = Vec<StoredData> per key), storage-replication (digest publish/subscribe), storage-aligner (alignment query/reply). zenoh anchors mapped (replication/core.rs digest+aligner, log.rs Event/Fingerprint).",
         "HONEST: catalog §5.11 storage-backend is kernel-landed but NOT facade-wired (the wz feature gates zero code until S3 forwards). The §5.11 \"0 source cfg sites\" (R311ci) is now stale -> a new R311uw caveat records the backend landing (frozen-ledger spirit; the R311ci caveat is unchanged).",
         "LOCAL: R311uw on top of uv=ef75658 (origin/main=ef75658, +1 ahead); host-gated, NOT pushed (await user consent). Other untouched north-star: §5.11 history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
+      ]
+    },
+    "Round 311ux": {
+      "decision_summary": "R311ux: storage atom 2/4 (§5.11) — the newer-wins service gate. StorageState<B> in wz-session-core (pure no_std, storage-backend feature) wraps a StorageBackend with newer-wins versioning (older Put/Delete -> Outdated, zenoh guard_cache_if_latest service.rs:510-544: accept iff incoming >= recorded), Delete tombstone retention (an older Put after a Delete cannot resurrect the key), and matching_entries for the (wildcard) query reply set via the shared keyexpr_intersects_target (zenoh get_matching_keys service.rs:628-658). timestamp_strictly_newer mirrors uhlc Timestamp Ord (timestamp.rs:33-37, time then zid). S1 backend + S2 gate = the runtime-agnostic storage kernel; the wz-runtime-tokio driver is atom 3.",
+      "changes_bullets": [
+        "storage_state.rs (NEW, wz-session-core): StorageState<B: StorageBackend> = the newer-wins service gate over a backend. process_put / process_delete / get / matching_entries. Pure no_std (no Subscriber/Queryable/async); the runtime-agnostic half of a storage service.",
+        "newer-wins gate (zenoh guard_cache_if_latest service.rs:510-544): accept iff incoming >= recorded (reject iff a STRICTLY newer ts recorded, service.rs:536); older Put/Delete -> Outdated, backend untouched. timestamp_strictly_newer mirrors uhlc Timestamp Ord (timestamp.rs:33-37: time then zid lexicographic).",
+        "tombstone: an accepted Delete records its ts in `latest` (cache_latest mirror) even though the value leaves the backend, so an older Put after a Delete rejects Outdated instead of resurrecting the key.",
+        "matching_entries (zenoh get_matching_keys service.rs:628-658): scan get_all_entries, keep keys that keyexpr_intersects_target the query, pair with value via get. Reuses the shared pub/sub matcher (storage reply set == subscriber set). Wildcard via keyexpr-wildcard-* features; literal-degrades without them.",
+        "lib.rs: storage_state module gated #[cfg(feature = \"storage-backend\")] (same gate as storage_backend).",
+        "Divergences doc-cited: single authoritative latest map (no cache-vs-storage split; storage-fallback branch never runs); tombstones retained unbounded (GC = follow-up, zenoh GarbageCollectionEvent service.rs:661-713); no wildcard-update overriding (zenoh overriding_wild_update service.rs:415-494 = dedicated follow-up)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features storage-backend: 16/16 (6 storage_backend + 10 storage_state). storage_state covers: newer-put-replaces; older-put-Outdated-value-unchanged; equal-ts-accepted (zenoh >= gate); zid-tiebreak (same time, higher zid newer); delete-then-older-put-Outdated (tombstone holds); delete-then-newer-put-resurrects; older-delete-Outdated; matching wildcard/exact/excludes-deleted.",
+        "clippy -D warnings clean: --features storage-backend --all-targets AND default --all-targets; cargo fmt --check clean.",
+        "no-regression: --no-default-features --features storage-backend builds clean (matcher literal-degrades without keyexpr-wildcard-* features; storage-backend forces no wildcard implication, composability preserved).",
+        "zenoh citations direct-read verified: guard_cache_if_latest service.rs:510-544 (:516 cache accept new>cached, :536 storage reject data>new), get_matching_keys :628-658 (:646 intersects), GarbageCollectionEvent :661-713, overriding_wild_update :415-494; uhlc Timestamp Ord timestamp.rs:33-37 (time then id)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311ux = storage atom 2/4 (§5.11): the newer-wins service gate landed. StorageState<B> in wz-session-core (pure no_std, storage-backend feature) wraps a StorageBackend with: newer-wins versioning (Outdated gate, zenoh guard_cache_if_latest), Delete tombstone retention, and matching_entries (wildcard query reply via the shared keyexpr_intersects_target). S1 backend + S2 gate = the full runtime-agnostic storage kernel.",
+        "NEXT (S3, atom 3/4): wz-runtime-tokio StorageService DRIVER. Owns Subscriber(storage keyexpr) + complete Queryable(storage keyexpr) + select loop (zenoh storages_mgt/service.rs:170-208): sample -> StorageState.process_put/process_delete (fallback-stamp un-timestamped samples, zenoh sample.timestamp().unwrap_or(session.new_timestamp()) service.rs:182); query -> StorageState.matching_entries -> reply each + ResponseFinal. e2e put->get across a real session. WIRE the wz / wz-runtime-tokio facade storage-backend feature forward here (-> §5.11 inventory reserved->active). Precedent: wz-e2e-queryable/src/main.rs (declare_queryable + hold handle); declare_subscriber wz-runtime-tokio/src/session/mod.rs:954; declare_queryable .complete :2254.",
+        "THEN domain atoms 4/4-adjacent: storage-history (History::All = Vec<StoredData> per key, get returns Vec), storage-replication (digest publish/sub, replication/core.rs), storage-aligner (alignment query/reply, replication/core.rs:408-577). Plus deferred: tombstone GC (zenoh GarbageCollectionEvent service.rs:661-713), wildcard-update overriding (overriding_wild_update :415-494), strip_prefix config.",
+        "HONEST: §5.11 storage-backend inventory still RESERVED (kernel S1+S2 landed but facade not wired until S3 forwards the feature). The matching_entries timestamp in the (key, ts) pair from get_all_entries is unused in the reply (the value carries its own ts); kept for the get_all_entries trait shape.",
+        "LOCAL: R311ux on top of uw=37068e8 (origin/main=ef56758, +2 ahead uw+ux); host-gated, NOT pushed (await user consent). Untouched north-star: §5.11 S3+history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
+      ],
+      "publishable_decision_summary": "R311ux: storage atom 2/4 (§5.11) — the newer-wins service gate. StorageState<B> in wz-session-core (pure no_std, storage-backend feature) wraps a StorageBackend with newer-wins versioning (older Put/Delete -> Outdated, zenoh guard_cache_if_latest service.rs:510-544: accept iff incoming >= recorded), Delete tombstone retention (an older Put after a Delete cannot resurrect the key), and matching_entries for the (wildcard) query reply set via the shared keyexpr_intersects_target (zenoh get_matching_keys service.rs:628-658). timestamp_strictly_newer mirrors uhlc Timestamp Ord (timestamp.rs:33-37, time then zid). S1 backend + S2 gate = the runtime-agnostic storage kernel; the wz-runtime-tokio driver is atom 3.",
+      "publishable_changes_bullets": [
+        "storage_state.rs (NEW, wz-session-core): StorageState<B: StorageBackend> = the newer-wins service gate over a backend. process_put / process_delete / get / matching_entries. Pure no_std (no Subscriber/Queryable/async); the runtime-agnostic half of a storage service.",
+        "newer-wins gate (zenoh guard_cache_if_latest service.rs:510-544): accept iff incoming >= recorded (reject iff a STRICTLY newer ts recorded, service.rs:536); older Put/Delete -> Outdated, backend untouched. timestamp_strictly_newer mirrors uhlc Timestamp Ord (timestamp.rs:33-37: time then zid lexicographic).",
+        "tombstone: an accepted Delete records its ts in `latest` (cache_latest mirror) even though the value leaves the backend, so an older Put after a Delete rejects Outdated instead of resurrecting the key.",
+        "matching_entries (zenoh get_matching_keys service.rs:628-658): scan get_all_entries, keep keys that keyexpr_intersects_target the query, pair with value via get. Reuses the shared pub/sub matcher (storage reply set == subscriber set). Wildcard via keyexpr-wildcard-* features; literal-degrades without them.",
+        "lib.rs: storage_state module gated #[cfg(feature = \"storage-backend\")] (same gate as storage_backend).",
+        "Divergences doc-cited: single authoritative latest map (no cache-vs-storage split; storage-fallback branch never runs); tombstones retained unbounded (GC = follow-up, zenoh GarbageCollectionEvent service.rs:661-713); no wildcard-update overriding (zenoh overriding_wild_update service.rs:415-494 = dedicated follow-up)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features storage-backend: 16/16 (6 storage_backend + 10 storage_state). storage_state covers: newer-put-replaces; older-put-Outdated-value-unchanged; equal-ts-accepted (zenoh >= gate); zid-tiebreak (same time, higher zid newer); delete-then-older-put-Outdated (tombstone holds); delete-then-newer-put-resurrects; older-delete-Outdated; matching wildcard/exact/excludes-deleted.",
+        "clippy -D warnings clean: --features storage-backend --all-targets AND default --all-targets; cargo fmt --check clean.",
+        "no-regression: --no-default-features --features storage-backend builds clean (matcher literal-degrades without keyexpr-wildcard-* features; storage-backend forces no wildcard implication, composability preserved).",
+        "zenoh citations direct-read verified: guard_cache_if_latest service.rs:510-544 (:516 cache accept new>cached, :536 storage reject data>new), get_matching_keys :628-658 (:646 intersects), GarbageCollectionEvent :661-713, overriding_wild_update :415-494; uhlc Timestamp Ord timestamp.rs:33-37 (time then id)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ux = storage atom 2/4 (§5.11): the newer-wins service gate landed. StorageState<B> in wz-session-core (pure no_std, storage-backend feature) wraps a StorageBackend with: newer-wins versioning (Outdated gate, zenoh guard_cache_if_latest), Delete tombstone retention, and matching_entries (wildcard query reply via the shared keyexpr_intersects_target). S1 backend + S2 gate = the full runtime-agnostic storage kernel.",
+        "NEXT (S3, atom 3/4): wz-runtime-tokio StorageService DRIVER. Owns Subscriber(storage keyexpr) + complete Queryable(storage keyexpr) + select loop (zenoh storages_mgt/service.rs:170-208): sample -> StorageState.process_put/process_delete (fallback-stamp un-timestamped samples, zenoh sample.timestamp().unwrap_or(session.new_timestamp()) service.rs:182); query -> StorageState.matching_entries -> reply each + ResponseFinal. e2e put->get across a real session. WIRE the wz / wz-runtime-tokio facade storage-backend feature forward here (-> §5.11 inventory reserved->active). Precedent: wz-e2e-queryable/src/main.rs (declare_queryable + hold handle); declare_subscriber wz-runtime-tokio/src/session/mod.rs:954; declare_queryable .complete :2254.",
+        "THEN domain atoms 4/4-adjacent: storage-history (History::All = Vec<StoredData> per key, get returns Vec), storage-replication (digest publish/sub, replication/core.rs), storage-aligner (alignment query/reply, replication/core.rs:408-577). Plus deferred: tombstone GC (zenoh GarbageCollectionEvent service.rs:661-713), wildcard-update overriding (overriding_wild_update :415-494), strip_prefix config.",
+        "HONEST: §5.11 storage-backend inventory still RESERVED (kernel S1+S2 landed but facade not wired until S3 forwards the feature). The matching_entries timestamp in the (key, ts) pair from get_all_entries is unused in the reply (the value carries its own ts); kept for the get_all_entries trait shape.",
+        "LOCAL: R311ux on top of uw=37068e8 (origin/main=ef56758, +2 ahead uw+ux); host-gated, NOT pushed (await user consent). Untouched north-star: §5.11 S3+history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
       ]
     },
     "Round 311v": {
