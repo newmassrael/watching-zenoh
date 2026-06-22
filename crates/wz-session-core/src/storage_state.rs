@@ -82,6 +82,8 @@ use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample_kind::SampleKind;
 use crate::sink::SampleView;
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
+#[cfg(feature = "storage-replication")]
+use crate::storage_replication::{build_digest, Digest, IntervalIdx, ReplicationConfig};
 
 /// The uhlc-faithful ordering key for a timestamp: `(time, zid-as-16-byte
 /// little-endian array)`. The SSOT both the newer-wins gate
@@ -336,6 +338,34 @@ impl<B: StorageBackend> StorageState<B> {
     pub fn backend(&self) -> &B {
         &self.backend
     }
+
+    /// Builds this storage's replication [`Digest`] for the given Hot-era
+    /// upper bound (the driver passes the current interval,
+    /// `config.classify(now).0`). zenoh `Replication` builds the digest off
+    /// its `LogLatest` (core.rs:217-227 -> log.rs:544); wz builds it off the
+    /// authoritative storage state here.
+    ///
+    /// The digest is built from [`latest`](StorageState) — the latest
+    /// accepted timestamp per key — which **includes tombstones** (an
+    /// accepted Delete leaves its timestamp here even though the value is
+    /// gone from the backend). Tombstones MUST be in the digest so a delete
+    /// converges with a replica that still holds the key; this is why the
+    /// digest is built from `latest` and not from
+    /// [`StorageBackend::get_all_entries`], which drops deleted keys. zenoh
+    /// records Delete events in its replication log for the same reason
+    /// (log.rs:44-49 — `Action::Delete` is a first-class logged event).
+    #[cfg(feature = "storage-replication")]
+    pub fn replication_digest(
+        &self,
+        config: &ReplicationConfig,
+        hot_era_upper_bound: IntervalIdx,
+    ) -> Digest {
+        build_digest(
+            config,
+            self.latest.iter().map(|(key, ts)| (key.as_str(), ts)),
+            hot_era_upper_bound,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -584,6 +614,76 @@ mod tests {
             assert_eq!(hits[0].1.len(), 2, "demo/a has two versions");
             assert_eq!(hits[1].0, "demo/b");
             assert_eq!(hits[1].1.len(), 1);
+        }
+    }
+
+    // The replication digest needs the storage-replication kernel.
+    #[cfg(feature = "storage-replication")]
+    mod replication {
+        use super::*;
+        use crate::storage_replication::{build_digest, IntervalIdx, ReplicationConfig};
+
+        fn state() -> StorageState<MemoryStorage> {
+            StorageState::new(MemoryStorage::new())
+        }
+
+        #[test]
+        fn replication_digest_covers_all_stored_keys() {
+            let cfg = ReplicationConfig::defaults("demo/**");
+            let hot_upper = IntervalIdx::from(10);
+            let mut s = state();
+            s.process_put("demo/a", vec![1], None, ts(10, 1));
+            s.process_put("demo/b", vec![2], None, ts(15, 2));
+
+            let a = ts(10, 1);
+            let b = ts(15, 2);
+            assert_eq!(
+                s.replication_digest(&cfg, hot_upper),
+                build_digest(&cfg, [("demo/a", &a), ("demo/b", &b)], hot_upper)
+            );
+        }
+
+        #[test]
+        fn replication_digest_includes_tombstones() {
+            let cfg = ReplicationConfig::defaults("demo/**");
+            let hot_upper = IntervalIdx::from(10);
+            let mut s = state();
+            s.process_put("demo/a", vec![1], None, ts(10, 1));
+            s.process_delete("demo/a", ts(20, 1)); // tombstone at ts 20
+
+            // The backend dropped the deleted key, but the digest must still
+            // cover it (at the delete timestamp) so the delete propagates to a
+            // replica that still holds the key.
+            assert!(
+                s.backend().get_all_entries().is_empty(),
+                "backend drops the deleted key"
+            );
+            let tombstone = ts(20, 1);
+            assert_eq!(
+                s.replication_digest(&cfg, hot_upper),
+                build_digest(&cfg, [("demo/a", &tombstone)], hot_upper)
+            );
+            // ...and it is NOT the empty digest a get_all_entries build gives.
+            assert_ne!(
+                s.replication_digest(&cfg, hot_upper),
+                build_digest(&cfg, [], hot_upper)
+            );
+        }
+
+        #[test]
+        fn replication_digest_reflects_newer_wins() {
+            let cfg = ReplicationConfig::defaults("demo/**");
+            let hot_upper = IntervalIdx::from(10);
+            let mut s = state();
+            s.process_put("demo/a", vec![1], None, ts(20, 1));
+            // Older put is rejected (Outdated) -> latest stays at ts 20.
+            s.process_put("demo/a", vec![2], None, ts(10, 1));
+
+            let newer = ts(20, 1);
+            assert_eq!(
+                s.replication_digest(&cfg, hot_upper),
+                build_digest(&cfg, [("demo/a", &newer)], hot_upper)
+            );
         }
     }
 }

@@ -47121,6 +47121,42 @@
         "Kernel digest stack R1-R4 = produce + compare + wire complete. R5 binds it to the live storage; R6/R7 are the tokio driver. LOCAL: R311vk on ea5e5a7 (origin/main=be8e731, +4 ahead vh..vk); NOT pushed. Per-atom gates green; full run-ci is the pre-push gate at R8. User authorized auto-progress to R9; push awaits explicit consent."
       ]
     },
+    "Round 311vl": {
+      "decision_summary": "R311vl: storage-replication StorageState->Digest bridge atom (replication 5/N) -- StorageState::replication_digest builds the Digest from the latest-per-key snapshot INCLUDING tombstones (not get_all_entries), so deletes propagate; the kernel digest stack is now bound to a live storage.",
+      "changes_bullets": [
+        "storage_state.rs: StorageState::replication_digest(config, hot_upper) -> Digest (storage-replication-gated) = build_digest over self.latest (the latest accepted ts per key). Built from `latest`, NOT backend.get_all_entries(): `latest` includes tombstones (accepted Delete ts), and a delete must be in the digest to converge with a replica still holding the key (zenoh logs Delete events, log.rs:44-49). Driver passes hot_upper = config.classify(now).0.",
+        "cfg-gated use crate::storage_replication::{build_digest, Digest, IntervalIdx, ReplicationConfig} (compiled out unless storage-replication is enabled)."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-replication: storage_state 15/15 incl 3 new replication tests (covers all stored keys == build_digest; includes tombstones - backend empty after delete yet the digest is non-empty at the delete ts; reflects newer-wins - an older put is Outdated so the digest keeps the newer ts). storage_replication 31/31 unchanged.",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. Regression: session-core --lib 155/155 default (the additions are storage-replication-gated; the default path is unaffected)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vl = storage-replication StorageState->Digest bridge (replication 5/N, §5.11): StorageState::replication_digest builds the Digest from self.latest (latest-per-key INCLUDING tombstones) via build_digest, NOT get_all_entries (which drops deleted keys) - so deletes converge. The kernel digest stack is now bound to a live storage. hot_upper = config.classify(now).0 (the driver supplies now).",
+        "storage-replication track: R1 prims (vh=ae1224f), R2 build (vi=6f8040c), R3 diff (vj=ea5e5a7), R4 wire (vk=fdb799f), R5 StorageState bridge DONE -> NEXT R6 driver: ReplicationService in wz-runtime-tokio (spawn periodic task: clock.sleep(interval) -> lock state -> replication_digest -> wire::encode -> session.publish(@-digest/<zid>/<config-fp>)); RAII handle; mirror accept_loop.rs:558 interval + storage_service.rs RAII; keyexpr per core.rs:45-48 -> R7 driver subscribe Remote-only + wire::decode + diff->observer (aligner handoff) -> R8 facade/inventory reserved->ACTIVE/run-ci/review -> R9 cross-impl interop.",
+        "LOCAL: R311vl on fdb799f (origin/main=be8e731, +5 ahead vh..vl); kernel atoms R1-R5 = produce + compare + wire + bind, all no_std. NEXT atoms are the tokio driver. NOT pushed; push awaits explicit consent; full run-ci is the pre-push gate at R8."
+      ],
+      "publishable_decision_summary": "R311vl: storage-replication StorageState->Digest bridge atom (replication 5/N) -- StorageState::replication_digest builds the Digest from the latest-per-key snapshot INCLUDING tombstones (not get_all_entries), so deletes propagate; the kernel digest stack is now bound to a live storage.",
+      "publishable_changes_bullets": [
+        "storage_state.rs: StorageState::replication_digest(config, hot_upper) -> Digest (storage-replication-gated) = build_digest over self.latest (the latest accepted ts per key). Built from `latest`, NOT backend.get_all_entries(): `latest` includes tombstones (accepted Delete ts), and a delete must be in the digest to converge with a replica still holding the key (zenoh logs Delete events, log.rs:44-49). Driver passes hot_upper = config.classify(now).0.",
+        "cfg-gated use crate::storage_replication::{build_digest, Digest, IntervalIdx, ReplicationConfig} (compiled out unless storage-replication is enabled)."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-replication: storage_state 15/15 incl 3 new replication tests (covers all stored keys == build_digest; includes tombstones - backend empty after delete yet the digest is non-empty at the delete ts; reflects newer-wins - an older put is Outdated so the digest keeps the newer ts). storage_replication 31/31 unchanged.",
+        "clippy -D clean (storage-replication --all-targets); fmt clean. Regression: session-core --lib 155/155 default (the additions are storage-replication-gated; the default path is unaffected)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vl = storage-replication StorageState->Digest bridge (replication 5/N, §5.11): StorageState::replication_digest builds the Digest from self.latest (latest-per-key INCLUDING tombstones) via build_digest, NOT get_all_entries (which drops deleted keys) - so deletes converge. The kernel digest stack is now bound to a live storage. hot_upper = config.classify(now).0 (the driver supplies now).",
+        "storage-replication track: R1 prims (vh=ae1224f), R2 build (vi=6f8040c), R3 diff (vj=ea5e5a7), R4 wire (vk=fdb799f), R5 StorageState bridge DONE -> NEXT R6 driver: ReplicationService in wz-runtime-tokio (spawn periodic task: clock.sleep(interval) -> lock state -> replication_digest -> wire::encode -> session.publish(@-digest/<zid>/<config-fp>)); RAII handle; mirror accept_loop.rs:558 interval + storage_service.rs RAII; keyexpr per core.rs:45-48 -> R7 driver subscribe Remote-only + wire::decode + diff->observer (aligner handoff) -> R8 facade/inventory reserved->ACTIVE/run-ci/review -> R9 cross-impl interop.",
+        "LOCAL: R311vl on fdb799f (origin/main=be8e731, +5 ahead vh..vl); kernel atoms R1-R5 = produce + compare + wire + bind, all no_std. NEXT atoms are the tokio driver. NOT pushed; push awaits explicit consent; full run-ci is the pre-push gate at R8."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
