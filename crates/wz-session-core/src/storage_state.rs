@@ -84,7 +84,7 @@ use crate::sink::SampleView;
 #[cfg(feature = "storage-aligner")]
 use crate::storage_aligner::{
     Action, AlignmentFollowup, AlignmentQuery, AlignmentReply, AlignmentResponse, EventBuckets,
-    EventMetadata,
+    EventMetadata, RetrievedValue,
 };
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 #[cfg(feature = "storage-replication")]
@@ -544,7 +544,10 @@ impl<B: StorageBackend> StorageState<B> {
             }),
             Action::Put => match self.backend.get(meta.key()) {
                 Some(data) if &data.timestamp == meta.timestamp() => Some(AlignmentResponse {
-                    value: Some((data.payload.clone(), data.encoding.clone())),
+                    value: Some(RetrievedValue {
+                        payload: data.payload.clone(),
+                        encoding: data.encoding.clone(),
+                    }),
                     reply: AlignmentReply::Retrieval(meta),
                 }),
                 // The stored value moved on (newer ts) or is gone since the
@@ -562,20 +565,21 @@ impl<B: StorageBackend> StorageState<B> {
     /// the wildcard arms wz storage has no events for.
     ///
     /// `value` is the reply body — present only for a Put
-    /// [`Retrieval`](AlignmentReply::Retrieval) (the payload + encoding); the
-    /// driver pulls it off the query-reply and passes it here. `now` fixes the
-    /// Hot-era upper bound the Cold/Warm fingerprint comparisons use.
+    /// [`Retrieval`](AlignmentReply::Retrieval) (the [`RetrievedValue`]); the
+    /// driver pulls it off the query-reply and passes it here.
     ///
     /// The exchange is stateless and drives itself: a driver loops
     /// `query -> peer answers -> process each reply -> followup query` until
-    /// every branch returns `Done`.
+    /// every branch returns `Done`. No current-time is needed — the fingerprint
+    /// comparisons are era-independent (a peer's Cold-era interval is compared
+    /// against the local interval's fingerprint regardless of how this replica
+    /// would classify it, mirroring zenoh, core/aligner_query.rs:179-186).
     #[cfg(feature = "storage-aligner")]
     pub fn process_alignment_reply(
         &mut self,
         config: &ReplicationConfig,
         reply: AlignmentReply,
-        value: Option<(Vec<u8>, Option<EncodingHint>)>,
-        now: u64,
+        value: Option<RetrievedValue>,
     ) -> AlignmentFollowup {
         match reply {
             // Initial alignment: the peer told us its zid; the driver pulls all
@@ -583,17 +587,17 @@ impl<B: StorageBackend> StorageState<B> {
             AlignmentReply::Discovery(zid) => AlignmentFollowup::DiscoveredReplica(zid),
 
             // Cold-era fingerprints: keep the intervals whose fingerprint we
-            // differ on (or lack) and ask for their sub-intervals
-            // (aligner_reply.rs:139-159).
+            // differ on (or lack) and ask for their sub-intervals. The local
+            // comparison is the era-INDEPENDENT interval fingerprint (zenoh
+            // `intervals.get(idx).fingerprint()`, core/aligner_reply.rs:145),
+            // NOT the cold-era-filtered map — so an interval the peer reports
+            // cold but this replica would classify warm/hot under clock skew is
+            // still compared on its real fingerprint, not spuriously re-requested.
             AlignmentReply::Intervals(peer_fingerprints) => {
                 let buckets = EventBuckets::from_events(self.replication_events(), config);
-                let local = buckets.cold_era_fingerprints(config, config.classify(now).0);
                 let differing: alloc::collections::BTreeSet<_> = peer_fingerprints
                     .into_iter()
-                    .filter(|(idx, peer_fp)| match local.get(idx) {
-                        Some(local_fp) => local_fp != peer_fp,
-                        None => true,
-                    })
+                    .filter(|(idx, peer_fp)| buckets.interval_fingerprint_of(idx) != Some(*peer_fp))
                     .map(|(idx, _)| idx)
                     .collect();
                 if differing.is_empty() {
@@ -669,7 +673,7 @@ impl<B: StorageBackend> StorageState<B> {
                 if self.is_missing(&meta) {
                     match meta.action() {
                         Action::Put => {
-                            if let Some((payload, encoding)) = value {
+                            if let Some(RetrievedValue { payload, encoding }) = value {
                                 self.process_put(
                                     meta.key(),
                                     payload,
@@ -1260,12 +1264,7 @@ mod tests {
         #[test]
         fn process_discovery_returns_the_discovered_replica() {
             let mut s = StorageState::new(MemoryStorage::new());
-            let f = s.process_alignment_reply(
-                &cfg(),
-                AlignmentReply::Discovery(vec![0x09]),
-                None,
-                NOW10,
-            );
+            let f = s.process_alignment_reply(&cfg(), AlignmentReply::Discovery(vec![0x09]), None);
             assert_eq!(f, AlignmentFollowup::DiscoveredReplica(vec![0x09]));
         }
 
@@ -1276,12 +1275,7 @@ mod tests {
             let mut s = StorageState::new(MemoryStorage::new());
             let mut peer_cold: BTreeMap<IntervalIdx, Fingerprint> = BTreeMap::new();
             peer_cold.insert(IntervalIdx::from(1), Fingerprint::from(0xABCD));
-            match s.process_alignment_reply(
-                &cfg(),
-                AlignmentReply::Intervals(peer_cold),
-                None,
-                NOW10,
-            ) {
+            match s.process_alignment_reply(&cfg(), AlignmentReply::Intervals(peer_cold), None) {
                 AlignmentFollowup::Query(AlignmentQuery::Intervals(set)) => {
                     assert!(set.contains(&IntervalIdx::from(1)));
                 }
@@ -1291,14 +1285,17 @@ mod tests {
 
         #[test]
         fn process_intervals_aligned_is_done() {
-            // A peer fingerprint equal to ours -> nothing to ask.
+            // Feed back our own per-interval fingerprints as the peer's reply
+            // -> every interval matches -> nothing to ask. (cold_era_fingerprints
+            // gives the same per-interval value the era-independent comparison
+            // uses, for a cold interval.)
             let s = st_with(&[("demo/c", at(1, 0))]); // a cold-era key
             let local = EventBuckets::from_events(s.replication_events(), &cfg())
                 .cold_era_fingerprints(&cfg(), cfg().classify(NOW10).0);
             assert!(!local.is_empty(), "the snapshot has a cold interval");
             let mut s = s;
             assert_eq!(
-                s.process_alignment_reply(&cfg(), AlignmentReply::Intervals(local), None, NOW10),
+                s.process_alignment_reply(&cfg(), AlignmentReply::Intervals(local), None),
                 AlignmentFollowup::Done
             );
         }
@@ -1310,7 +1307,7 @@ mod tests {
                 EventMetadata::put("demo/p", at(10, 0)),
                 EventMetadata::delete("demo/d", at(10, 1)),
             ]);
-            match s.process_alignment_reply(&cfg(), reply, None, NOW10) {
+            match s.process_alignment_reply(&cfg(), reply, None) {
                 AlignmentFollowup::Query(AlignmentQuery::Events(puts)) => {
                     assert_eq!(puts.len(), 1, "only the Put needs a payload fetch");
                     assert_eq!(puts[0].key(), "demo/p");
@@ -1332,8 +1329,10 @@ mod tests {
                 s.process_alignment_reply(
                     &cfg(),
                     AlignmentReply::Retrieval(put.clone()),
-                    Some((vec![0xAB], None)),
-                    NOW10,
+                    Some(RetrievedValue {
+                        payload: vec![0xAB],
+                        encoding: None
+                    }),
                 ),
                 AlignmentFollowup::Done
             );
@@ -1342,8 +1341,10 @@ mod tests {
             s.process_alignment_reply(
                 &cfg(),
                 AlignmentReply::Retrieval(put),
-                Some((vec![0xFF], None)),
-                NOW10,
+                Some(RetrievedValue {
+                    payload: vec![0xFF],
+                    encoding: None,
+                }),
             );
             assert_eq!(
                 s.get("demo/x").unwrap().payload,
@@ -1375,7 +1376,7 @@ mod tests {
                 guard += 1;
                 assert!(guard < 100, "alignment must converge");
                 for resp in peer.answer_alignment_query(config, &query, &[0xFF], now) {
-                    match local.process_alignment_reply(config, resp.reply, resp.value, now) {
+                    match local.process_alignment_reply(config, resp.reply, resp.value) {
                         AlignmentFollowup::Query(q) => pending.push(q),
                         AlignmentFollowup::Done | AlignmentFollowup::DiscoveredReplica(_) => {}
                     }
@@ -1418,6 +1419,74 @@ mod tests {
                 peer.replication_digest(&config, hu),
                 "the two replicas converged"
             );
+        }
+
+        #[test]
+        fn two_replicas_converge_bidirectionally() {
+            // Each replica holds entries the other lacks (across eras), so a
+            // single one-directional pull is NOT enough — both sides must run
+            // the aligner. After both pulls, each holds the union.
+            let config = cfg();
+            let now = 11u64 << 32;
+            let mut a = StorageState::new(MemoryStorage::new());
+            a.process_put("k/shared", vec![0], None, at(2, 0));
+            a.process_put("k/only_a_warm", vec![0xA1], None, at(8, 0));
+            a.process_put("k/only_a_hot", vec![0xA2], None, at(10, 0));
+            let mut b = StorageState::new(MemoryStorage::new());
+            b.process_put("k/shared", vec![0], None, at(2, 0));
+            b.process_put("k/only_b_warm", vec![0xB1], None, at(9, 0));
+            b.process_put("k/only_b_hot", vec![0xB2], None, at(11, 0));
+
+            // a pulls from b, then b pulls from a (now the union).
+            drive_alignment(&mut a, &b, &config, now);
+            drive_alignment(&mut b, &a, &config, now);
+
+            for (key, val) in [
+                ("k/only_a_warm", vec![0xA1]),
+                ("k/only_a_hot", vec![0xA2]),
+                ("k/only_b_warm", vec![0xB1]),
+                ("k/only_b_hot", vec![0xB2]),
+            ] {
+                assert_eq!(a.get(key).map(|d| d.payload.clone()), Some(val.clone()));
+                assert_eq!(b.get(key).map(|d| d.payload.clone()), Some(val));
+            }
+            let hu = config.classify(now).0;
+            assert_eq!(
+                a.replication_digest(&config, hu),
+                b.replication_digest(&config, hu),
+                "both replicas converged to the union"
+            );
+        }
+
+        #[test]
+        fn convergence_resolves_an_equal_timestamp_conflict_by_zid() {
+            // Same key + same NTP64 time but different zid on each replica:
+            // newer-wins breaks the tie by the uhlc zid order, so the
+            // higher-zid value wins on both sides.
+            let config = cfg();
+            let now = 11u64 << 32;
+            let t = at(10, 0).time;
+            let lo = TimestampHint {
+                time: t,
+                zid: vec![0x01],
+            };
+            let hi = TimestampHint {
+                time: t,
+                zid: vec![0x02],
+            };
+            let mut local = StorageState::new(MemoryStorage::new());
+            local.process_put("k/x", vec![0xAA], None, lo);
+            let mut peer = StorageState::new(MemoryStorage::new());
+            peer.process_put("k/x", vec![0xBB], None, hi.clone());
+
+            // The peer holds the higher-zid version -> local must adopt it.
+            drive_alignment(&mut local, &peer, &config, now);
+            assert_eq!(
+                local.get("k/x").map(|d| d.payload.clone()),
+                Some(vec![0xBB]),
+                "the higher-zid value wins the equal-time conflict"
+            );
+            assert_eq!(local.get("k/x").map(|d| d.timestamp.clone()), Some(hi));
         }
     }
 }

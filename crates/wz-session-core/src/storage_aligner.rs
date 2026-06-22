@@ -204,9 +204,9 @@ impl EventBuckets {
 
     /// The [`Fingerprint`] of one sub-interval = the XOR of its events'
     /// fingerprints. zenoh `SubInterval.fingerprint`, maintained as
-    /// `self.fingerprint ^= event.fingerprint()` on insert (classification.rs:183,
-    /// :353). XOR is order-independent, so the recomputed value matches zenoh's
-    /// incrementally-maintained one.
+    /// `self.fingerprint ^= event.fingerprint()` on insert (classification.rs:378
+    /// SubInterval insert; :183 the Interval-level XOR). XOR is order-independent,
+    /// so the recomputed value matches zenoh's incrementally-maintained one.
     fn sub_fingerprint(events: &[EventMetadata]) -> Fingerprint {
         events
             .iter()
@@ -234,13 +234,30 @@ impl EventBuckets {
         self.intervals
             .iter()
             .filter(|(&idx, _)| idx < warm_lower)
-            .map(|(idx, subs)| {
-                let interval_fp = subs.values().fold(Fingerprint::default(), |acc, evs| {
-                    acc ^ Self::sub_fingerprint(evs)
-                });
-                (*idx, interval_fp)
-            })
+            .map(|(idx, subs)| (*idx, Self::interval_fingerprint(subs)))
             .collect()
+    }
+
+    /// The [`Fingerprint`] of one interval = the XOR of all its events'
+    /// fingerprints (equivalently the XOR of its sub-interval fingerprints).
+    /// zenoh `Interval.fingerprint`, classification.rs:104-108.
+    fn interval_fingerprint(subs: &BTreeMap<SubIntervalIdx, Vec<EventMetadata>>) -> Fingerprint {
+        subs.values().fold(Fingerprint::default(), |acc, evs| {
+            acc ^ Self::sub_fingerprint(evs)
+        })
+    }
+
+    /// The **era-independent** [`Fingerprint`] of an interval, or `None` if this
+    /// replica holds no events in it. This is what the pull side compares a
+    /// peer's Cold-era reply against — zenoh looks the interval up in its log
+    /// regardless of era (`intervals.get(idx).fingerprint()`,
+    /// core/aligner_reply.rs:145), explicitly NOT re-classifying it by era,
+    /// because the two replicas may bucket the same interval into different eras
+    /// under clock skew yet the comparison is still valid (core/aligner_query.rs:179-186).
+    pub fn interval_fingerprint_of(&self, interval_idx: &IntervalIdx) -> Option<Fingerprint> {
+        self.intervals
+            .get(interval_idx)
+            .map(Self::interval_fingerprint)
     }
 
     /// Per-sub-interval [`Fingerprint`]s of the requested `intervals` — the
@@ -375,12 +392,24 @@ pub enum AlignmentReply {
     Retrieval(EventMetadata),
 }
 
+/// A stored value carried back on a Put [`Retrieval`](AlignmentReply::Retrieval):
+/// the payload and its optional encoding (the query-reply body in zenoh's
+/// wire). Named rather than a bare `(Vec<u8>, Option<EncodingHint>)` because it
+/// is a public field of [`AlignmentResponse`] and a parameter of the pull
+/// engine — the pairing deserves a name, not positional `.0` / `.1`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievedValue {
+    /// The stored payload bytes.
+    pub payload: Vec<u8>,
+    /// The encoding the value was published with, if any.
+    pub encoding: Option<EncodingHint>,
+}
+
 /// One reply the aligner emits for an [`AlignmentQuery`]: the typed
 /// [`AlignmentReply`] (which rides the query-reply attachment) plus, for a
-/// [`Retrieval`](AlignmentReply::Retrieval) of a Put, the stored value
-/// (payload + encoding) that rides the reply body. zenoh `reply_to_query`
-/// (aligner_query.rs:340-363) attaches the serialized AlignmentReply and, when
-/// present, the value.
+/// [`Retrieval`](AlignmentReply::Retrieval) of a Put, the [`RetrievedValue`]
+/// that rides the reply body. zenoh `reply_to_query` (aligner_query.rs:340-363)
+/// attaches the serialized AlignmentReply and, when present, the value.
 ///
 /// A single [`AlignmentQuery`] can produce several responses (a `Diff` yields
 /// up to three — cold / warm / hot; an `All` or `Events` yields one per event),
@@ -389,10 +418,9 @@ pub enum AlignmentReply {
 pub struct AlignmentResponse {
     /// The typed reply (serialized onto the query-reply attachment).
     pub reply: AlignmentReply,
-    /// The stored value (payload + encoding) for a Put `Retrieval`; `None` for
-    /// every other reply and for a Delete `Retrieval` (a delete carries no
-    /// payload).
-    pub value: Option<(Vec<u8>, Option<EncodingHint>)>,
+    /// The stored value for a Put `Retrieval`; `None` for every other reply and
+    /// for a Delete `Retrieval` (a delete carries no payload).
+    pub value: Option<RetrievedValue>,
 }
 
 /// What the pull side does after processing one [`AlignmentReply`] — the
