@@ -81,6 +81,8 @@ use crate::query_sink::{QueryView, ReplyOut};
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample_kind::SampleKind;
 use crate::sink::SampleView;
+#[cfg(feature = "storage-aligner")]
+use crate::storage_aligner::EventMetadata;
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 #[cfg(feature = "storage-replication")]
 use crate::storage_replication::{build_digest, Digest, IntervalIdx, ReplicationConfig};
@@ -384,6 +386,47 @@ impl<B: StorageBackend> StorageState<B> {
             self.latest.iter().map(|(key, ts)| (key.as_str(), ts)),
             hot_era_upper_bound,
         )
+    }
+
+    /// This storage's events as [`EventMetadata`], the snapshot the aligner
+    /// answers ([`EventBuckets`](crate::storage_aligner::EventBuckets)) are
+    /// computed from. One entry per key in [`latest`](StorageState),
+    /// **including tombstones**: a key present in `latest` but absent from the
+    /// backend was deleted, so it is a `Delete` event; a key still in the
+    /// backend is a `Put`. zenoh's aligner reads the same Put/Delete events
+    /// off its replication log — the `Action::Delete` tombstone is a
+    /// first-class logged event there too (log.rs:44-49).
+    ///
+    /// Tombstones MUST be carried so a delete converges with a replica that
+    /// still holds the key (the same reason
+    /// [`replication_digest`](Self::replication_digest) is built from `latest`,
+    /// not [`StorageBackend::get_all_entries`] which drops deleted keys).
+    ///
+    /// # History::Latest only
+    ///
+    /// Like [`replication_digest`](Self::replication_digest), the aligner
+    /// assumes a `History::Latest` backend: `latest` is populated only by the
+    /// newer-wins gate ([`latest_mode`](StorageState::latest_mode)), so a
+    /// `History::All` backend yields no events. The `debug_assert` catches the
+    /// misconfiguration loudly in debug builds.
+    #[cfg(feature = "storage-aligner")]
+    pub fn replication_events(&self) -> Vec<EventMetadata> {
+        debug_assert!(
+            self.latest_mode(),
+            "replication_events assumes a History::Latest backend; a \
+             History::All backend leaves `latest` empty (the aligner, like the \
+             digest, assumes Latest)"
+        );
+        self.latest
+            .iter()
+            .map(|(key, ts)| {
+                if self.backend.get(key).is_some() {
+                    EventMetadata::put(key.clone(), ts.clone())
+                } else {
+                    EventMetadata::delete(key.clone(), ts.clone())
+                }
+            })
+            .collect()
     }
 }
 
@@ -702,6 +745,41 @@ mod tests {
             assert_eq!(
                 s.replication_digest(&cfg, hot_upper),
                 build_digest(&cfg, [("demo/a", &newer)], hot_upper)
+            );
+        }
+    }
+
+    // The aligner event snapshot needs the storage-aligner kernel.
+    #[cfg(feature = "storage-aligner")]
+    mod aligner {
+        use super::*;
+        use crate::storage_aligner::Action;
+
+        #[test]
+        fn replication_events_distinguishes_put_from_delete_tombstone() {
+            let mut s = StorageState::new(MemoryStorage::new());
+            s.process_put("demo/a", vec![1], None, ts(10, 1));
+            s.process_put("demo/b", vec![2], None, ts(11, 1));
+            s.process_delete("demo/b", ts(20, 1)); // tombstone
+
+            let events = s.replication_events();
+            // One entry per key in `latest`, including the tombstone.
+            assert_eq!(events.len(), 2);
+
+            let a = events.iter().find(|e| e.key() == "demo/a").unwrap();
+            assert_eq!(a.action(), Action::Put, "a live key is a Put event");
+            assert_eq!(a.timestamp(), &ts(10, 1));
+
+            let b = events.iter().find(|e| e.key() == "demo/b").unwrap();
+            assert_eq!(
+                b.action(),
+                Action::Delete,
+                "a deleted key (gone from the backend) is a Delete tombstone event"
+            );
+            assert_eq!(
+                b.timestamp(),
+                &ts(20, 1),
+                "the tombstone carries the delete ts"
             );
         }
     }
