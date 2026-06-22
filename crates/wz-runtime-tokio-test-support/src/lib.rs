@@ -58,22 +58,27 @@ pub fn fixture_session_init_params() -> SessionInitParams {
     }
 }
 
-/// Session-open params for dialing a REAL zenoh 1.5.0 router (zenohd or any
-/// foreign zenoh peer) — the INTEROP shape `wz-ap-demo`'s initiator path uses:
-/// `version: 0x09`, a real `batch_size`, and `seq_num_res`/`req_id_res = 2`.
-/// This differs from [`fixture_session_init_params`], whose `version: 0x05` /
-/// `batch_size: 0` are wz<->wz internal-test values a STRICT zenohd rejects at
-/// InitSyn. Shared from the test-support SSOT so the in-process zenohd
-/// storage-replication interop e2e (and any future cross-impl test that opens a
-/// `Session` in-process against a foreign peer) sources ONE copy of these
-/// params rather than re-declaring the shape inline. (`wz-ap-demo`'s
+/// The zenoh-1.5.0 INTEROP wire-negotiation profile, parameterized on the two
+/// fields that legitimately vary per caller: `whatami` (the role the opener
+/// presents) and `zid` (its identity). The remaining eight fields are the
+/// negotiation shape a STRICT zenoh peer accepts at InitSyn — `version: 0x09`,
+/// a real `batch_size: 65535`, and `seq_num_res`/`req_id_res = 2` — the shape
+/// `wz-ap-demo`'s initiator path uses. This differs from
+/// [`fixture_session_init_params`], whose `version: 0x05` / `batch_size: 0` are
+/// wz<->wz internal-test values a strict zenohd rejects at InitSyn.
+///
+/// This is the SSOT for that profile: the in-process zenohd storage-replication
+/// interop e2e (a `Client` dialing a router — [`zenohd_interop_session_init_params`])
+/// and the `wz-e2e-*` acceptor scaffolding (a `Peer` accepting one peer) both
+/// derive their `SessionInitParams` from this ONE builder rather than each
+/// re-declaring the eight shared negotiation fields inline. (`wz-ap-demo`'s
 /// `demo_session_init_params` is `pub(crate)` to that binary, so it cannot be
-/// the shared source for an in-process test.)
-pub fn zenohd_interop_session_init_params() -> SessionInitParams {
+/// the shared source for an in-process or cross-crate test.)
+pub fn zenoh_interop_session_init_params(whatami: WhatAmI, zid: Vec<u8>) -> SessionInitParams {
     SessionInitParams {
         version: 0x09,
-        whatami: WhatAmI::Client,
-        zid: vec![0x0c, 0x0a, 0x10, 0x00],
+        whatami,
+        zid,
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: 65535,
@@ -84,6 +89,15 @@ pub fn zenohd_interop_session_init_params() -> SessionInitParams {
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }
+}
+
+/// Session-open params for dialing a REAL zenoh 1.5.0 router (zenohd or any
+/// foreign zenoh peer) in-process — the `Client`-role projection of
+/// [`zenoh_interop_session_init_params`]. Used by the in-process zenohd
+/// storage-replication interop e2e (and any future cross-impl test that opens a
+/// `Session` in-process against a foreign peer).
+pub fn zenohd_interop_session_init_params() -> SessionInitParams {
+    zenoh_interop_session_init_params(WhatAmI::Client, vec![0x0c, 0x0a, 0x10, 0x00])
 }
 
 // The frame-recording `RecordingLinkDriver` + `recording_actions`

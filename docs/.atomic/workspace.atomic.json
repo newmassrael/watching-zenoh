@@ -48523,6 +48523,52 @@
         "LOCAL: R311wq atop wn/wo/wp; NOT committed (await explicit consent). origin/main=a8fa235 (wm). Working tree now also adds wz-runtime-tokio-test-support/src/lib.rs + the wn/wo test+Cargo.toml edits above. Recommend a full run-ci before any push."
       ]
     },
+    "Round 311wr": {
+      "decision_summary": "R311wr: adopt the zenoh-1.5.0 interop session-init SSOT in wz-e2e-harness -- the DRY follow-up wq disclosed but deferred. Extract a parameterized zenoh_interop_session_init_params(whatami, zid) in wz-runtime-tokio-test-support; both the A10 storage interop e2e (Client) and the wz-e2e-* acceptor scaffolding (Peer) derive from it, eliminating the duplicated 8-field negotiation profile. Zero behavior change (each caller byte-identical); no binary subset widened.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: NEW pub fn zenoh_interop_session_init_params(whatami, zid) -- the SSOT for the zenoh-1.5.0 negotiation profile (version 0x09 / batch_size 65535 / seq_num_res+req_id_res 2 / 10s lease / fixed 0xAB key). zenohd_interop_session_init_params() is now a thin Client wrapper (zid 0c0a1000) over it.",
+        "crates/wz-e2e-harness/src/lib.rs: session_init_params() delegates to the shared builder with (WhatAmI::Peer, zid 01020304) instead of re-declaring the 10-field struct inline; the now-unused SigningKey import is dropped.",
+        "crates/wz-e2e-harness/Cargo.toml: add the wz-runtime-tokio-test-support path dep (non-dev) with a justifying comment -- wz-e2e-* are CI-only test infra (Layer E2), and the dep's wz-runtime-tokio features are all already pinned by every binary so it widens no subset."
+      ],
+      "verification_bullets": [
+        "Zero behavior change: only whatami + zid vary per caller; the 8 shared negotiation fields move verbatim into the SSOT builder, so each caller produces a byte-identical SessionInitParams.",
+        "All 7 wz-e2e-* binaries (harness / pubsub / queryable / zget / liveliness / liveliness-token / declare-observer) build under their pinned facade subsets; cargo build green with no feature widening (test-support pins only wz-runtime-tokio features every binary already selects).",
+        "wz-integration-tests compiles (cargo test --no-run) including the A10 wz_zenohd_storage_replication.rs caller, which uses the kept zenohd_interop_session_init_params() wrapper unchanged.",
+        "cargo fmt --check + clippy -p wz-runtime-tokio-test-support -p wz-e2e-harness --all-targets -D warnings both clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311wr = closes the wq-disclosed DRY follow-up: wz-e2e-harness now sources the zenoh-1.5.0 interop negotiation profile from the test-support SSOT (zenoh_interop_session_init_params) instead of a parallel inline copy.",
+        "The harness copy was NOT byte-identical to the A10 copy (whatami Peer vs Client, distinct zid), so the textbook adoption parameterized the genuinely-shared profile rather than replacing the call -- a naive swap would have flipped the acceptor's role.",
+        "wz-e2e-harness now carries a non-dev dep on the test-support crate; acceptable because the wz-e2e-* binaries are CI-only e2e infra (no shipped artifact pulls test-support) and the dep widens no binary's pinned subset.",
+        "Remaining (none requested): wz-ap-demo's demo_session_init_params (pub(crate), version 0x09) is a third parallel copy that could adopt the same SSOT, but it is a separate binary crate and was out of scope here.",
+        "LOCAL: R311wr committed with the code change (this entry + the 3 files). origin/main=2adaea1 (wq). A full run-ci is the recommended pre-push gate (touches wz-e2e-* + Layer E2/C4b subsets)."
+      ],
+      "publishable_decision_summary": "R311wr: adopt the zenoh-1.5.0 interop session-init SSOT in wz-e2e-harness -- the DRY follow-up wq disclosed but deferred. Extract a parameterized zenoh_interop_session_init_params(whatami, zid) in wz-runtime-tokio-test-support; both the A10 storage interop e2e (Client) and the wz-e2e-* acceptor scaffolding (Peer) derive from it, eliminating the duplicated 8-field negotiation profile. Zero behavior change (each caller byte-identical); no binary subset widened.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: NEW pub fn zenoh_interop_session_init_params(whatami, zid) -- the SSOT for the zenoh-1.5.0 negotiation profile (version 0x09 / batch_size 65535 / seq_num_res+req_id_res 2 / 10s lease / fixed 0xAB key). zenohd_interop_session_init_params() is now a thin Client wrapper (zid 0c0a1000) over it.",
+        "crates/wz-e2e-harness/src/lib.rs: session_init_params() delegates to the shared builder with (WhatAmI::Peer, zid 01020304) instead of re-declaring the 10-field struct inline; the now-unused SigningKey import is dropped.",
+        "crates/wz-e2e-harness/Cargo.toml: add the wz-runtime-tokio-test-support path dep (non-dev) with a justifying comment -- wz-e2e-* are CI-only test infra (Layer E2), and the dep's wz-runtime-tokio features are all already pinned by every binary so it widens no subset."
+      ],
+      "publishable_verification_bullets": [
+        "Zero behavior change: only whatami + zid vary per caller; the 8 shared negotiation fields move verbatim into the SSOT builder, so each caller produces a byte-identical SessionInitParams.",
+        "All 7 wz-e2e-* binaries (harness / pubsub / queryable / zget / liveliness / liveliness-token / declare-observer) build under their pinned facade subsets; cargo build green with no feature widening (test-support pins only wz-runtime-tokio features every binary already selects).",
+        "wz-integration-tests compiles (cargo test --no-run) including the A10 wz_zenohd_storage_replication.rs caller, which uses the kept zenohd_interop_session_init_params() wrapper unchanged.",
+        "cargo fmt --check + clippy -p wz-runtime-tokio-test-support -p wz-e2e-harness --all-targets -D warnings both clean."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311wr = closes the wq-disclosed DRY follow-up: wz-e2e-harness now sources the zenoh-1.5.0 interop negotiation profile from the test-support SSOT (zenoh_interop_session_init_params) instead of a parallel inline copy.",
+        "The harness copy was NOT byte-identical to the A10 copy (whatami Peer vs Client, distinct zid), so the textbook adoption parameterized the genuinely-shared profile rather than replacing the call -- a naive swap would have flipped the acceptor's role.",
+        "wz-e2e-harness now carries a non-dev dep on the test-support crate; acceptable because the wz-e2e-* binaries are CI-only e2e infra (no shipped artifact pulls test-support) and the dep widens no binary's pinned subset.",
+        "Remaining (none requested): wz-ap-demo's demo_session_init_params (pub(crate), version 0x09) is a third parallel copy that could adopt the same SSOT, but it is a separate binary crate and was out of scope here.",
+        "LOCAL: R311wr committed with the code change (this entry + the 3 files). origin/main=2adaea1 (wq). A full run-ci is the recommended pre-push gate (touches wz-e2e-* + Layer E2/C4b subsets)."
+      ]
+    },
     "Round 311x": {
       "decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
       "changes_bullets": [

@@ -61,6 +61,17 @@ wz = { path = "../wz", default-features = false, features = [
     "keyexpr-literal",
     "keyexpr-canon",
 ] }
+# The acceptor session-open params share the zenoh-1.5.0 interop
+# wire-negotiation profile with the in-process zenohd interop e2e; that
+# profile's SSOT is `zenoh_interop_session_init_params` in the test-support
+# crate. Acceptable as a non-dev dep here because every wz-e2e-* binary is
+# CI-only test infrastructure (driven by Layer E2), never a shipped artifact,
+# so the "no fixtures in production builds" contract is preserved. Crucially it
+# widens no binary's subset: test-support pins wz-runtime-tokio with only
+# {transport-unicast, transport-link-tcp, session-unicast-{open,accept},
+# codec-{frame,keep-alive,init-body,open-body,close}, keyexpr-canon}, all of
+# which every wz-e2e-* binary already pins, so feature unification adds nothing.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 log = "0.4"
 env_logger = "0.11"

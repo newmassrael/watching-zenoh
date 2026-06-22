@@ -2013,6 +2013,7 @@ dependencies = [
  "log",
  "tokio",
  "wz",
+ "wz-runtime-tokio-test-support",
 ]
 
 [[package]]

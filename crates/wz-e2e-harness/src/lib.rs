@@ -27,8 +27,7 @@ use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::TokioSession;
 use wz::runtime_tokio::session_glue::{
-    drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, SigningKey,
-    WhatAmI,
+    drive_session_until_terminal, IterationEvent, SessionInitParams, SessionTimeouts, WhatAmI,
 };
 use wz::runtime_tokio::session_open::{
     accept_and_open_session, DialedLink, OpenedSession, DEFAULT_OPEN_TICK_MS,
@@ -212,23 +211,19 @@ pub async fn run_acceptor_e2e<H>(
     Ok(())
 }
 
-/// Acceptor-side session parameters shared by every `wz-e2e-*` binary.
-/// Peer-role defaults; the demo signing key is a fixed 0xAB pattern (a
-/// real deployment supplies per-process entropy).
+/// Acceptor-side session parameters shared by every `wz-e2e-*` binary: the
+/// `Peer`-role projection of the zenoh-1.5.0 interop wire-negotiation profile
+/// (its SSOT is `zenoh_interop_session_init_params` in the test-support crate),
+/// with this acceptor's own zid. Only the role (`Peer` here vs the
+/// storage-interop e2e's `Client`) and the zid vary; the eight negotiation
+/// fields (version 0x09, batch_size 65535, resolutions, the fixed 0xAB demo
+/// signing key) come from the shared profile. A real deployment supplies
+/// per-process entropy for the signing key.
 fn session_init_params() -> SessionInitParams {
-    SessionInitParams {
-        version: 0x09,
-        whatami: WhatAmI::Peer,
-        zid: vec![0x01, 0x02, 0x03, 0x04],
-        seq_num_res: 2,
-        req_id_res: 2,
-        batch_size: 65535,
-        lease_ms: 10_000,
-        initial_sn: 0,
-        cookie: Vec::new(),
-        cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte demo key satisfies >= 32 invariant"),
-    }
+    wz_runtime_tokio_test_support::zenoh_interop_session_init_params(
+        WhatAmI::Peer,
+        vec![0x01, 0x02, 0x03, 0x04],
+    )
 }
 
 /// Resolve on the first SIGTERM / SIGINT (unix) or Ctrl-C (other). The
