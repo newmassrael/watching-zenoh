@@ -638,7 +638,8 @@
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; storage backend is router-side feature beyond AP MVP scope.",
         "R311uw: storage-backend 1/4 landed - StorageBackend seam + MemoryStorage in session-core",
-        "R311ux: storage 2/4 landed - StorageState newer-wins gate + tombstone + matching"
+        "R311ux: storage 2/4 landed - StorageState newer-wins gate + tombstone + matching",
+        "R311uy: storage 3/4 driver landed - StorageService + reply_keyed; storage-backend ACTIVE"
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -46510,6 +46511,58 @@
         "LOCAL: R311ux on top of uw=37068e8 (origin/main=ef56758, +2 ahead uw+ux); host-gated, NOT pushed (await user consent). Untouched north-star: §5.11 S3+history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
       ]
     },
+    "Round 311uy": {
+      "decision_summary": "R311uy: storage atom 3/4 (§5.11) — the StorageService DRIVER + the ReplyOut::reply_keyed seam it needs. A wz Session now runs a live in-memory storage: storage_service.rs (wz-runtime-tokio) declares a capture Subscriber (Put/Delete -> the S2 newer-wins gate, un-timestamped samples fallback-stamped with a monotonic counter since HLC/§5.18 is reserved) + a COMPLETE Queryable (wildcard get -> per-key replies). The reply_keyed seam (wz-session-core ReplyOut + QueryResponder, defaulted/signature-stable) lets a queryable stamp each reply with its OWN concrete keyexpr (zenoh get_matching_keys parity) — storage is its first consumer. Facade wired (wz -> wz-runtime-tokio storage-backend = query-queryable + codec-response-final + transport-unicast): §5.11 storage-backend reserved -> ACTIVE. zenoh StorageService mirror (service.rs declare_subscriber:142 / declare_queryable.complete:151 / select arms:170-208 / fallback:182).",
+      "changes_bullets": [
+        "SEAM (wz-session-core): ReplyOut::reply_keyed(keyexpr, payload) added — a defaulted trait method (falls back to reply() at the bound keyexpr, signature-stable for existing impls). QueryResponder gains send_reply_keyed (pushes a QueryReply::Reply with the override keyexpr_literal) + overrides reply_keyed. into_response already threads a per-record keyexpr (ResponseReplyBuilder::new(rid,0,Some(keyexpr),payload)), so no wire-builder change. This is the queryable-surface capability a faithful wildcard-get reply needs (per-key concrete keyexpr, not the wildcard); storage is the first consumer.",
+        "DRIVER (wz-runtime-tokio): storage_service.rs (NEW) — StorageService<R,T>. declare(session, keyexpr, local_zid) declares a capture Subscriber + a COMPLETE Queryable on the keyexpr, holding both handles + Arc<Mutex<StorageState<MemoryStorage>>>. Two testable free fns: apply_sample (SampleView -> process_put/process_delete via the S2 gate, fallback-stamp un-timestamped samples) + answer_query (matching_entries -> reply_keyed per key). zenoh StorageService mirror (service.rs declare_subscriber:142 / declare_queryable.complete:151 / select arms:170-208); wz's callback observer replaces the explicit tokio::select!.",
+        "FALLBACK (§5.18 seam): un-timestamped samples stamped with a monotonic arrival counter under local_zid (zenoh uses session HLC unwrap_or service.rs:182; wz HLC reserved). Carried timestamps always honored; mixed stamped/un-stamped coherence needs the §5.18 HLC atom (documented).",
+        "FACADE: wz-runtime-tokio storage-backend = [wz-session-core/storage-backend, query-queryable, codec-response-final, transport-unicast]; wz storage-backend = [wz-runtime-tokio?/storage-backend] (AP-only; MCU has no storage driver). §5.11 inventory storage-backend reserved -> active (facade now wires real code).",
+        "FIDELITY note: codec-response-final added to the forward because a storage queryable's reply lifecycle ends in a terminating ResponseFinal (query-queryable alone left ResponseSink::send_response_final use dead in the minimal combo — a pre-existing latent query-queryable gating gap surfaced by the new combo, recorded as tracked debt)."
+      ],
+      "verification_bullets": [
+        "SEAM tests: wz-session-core query::responder_reply_keyed_stamps_per_key_keyexpr_over_the_query_keyexpr (wildcard query -> two replies each with its own concrete keyexpr via the real QueryableRegistry dispatch + QueryResponder) + query_sink::default_reply_keyed_falls_back_to_reply (an impl that does not override reply_keyed routes to reply()).",
+        "DRIVER tests: wz-runtime-tokio --features storage-backend --lib storage_service 7/7 — apply_sample uses carried-ts not fallback; uses fallback when un-timestamped; del removes; outdated put dropped through gate; answer_query wildcard per-key fan; exact-key single reply; deleted key not replied.",
+        "clippy -D warnings clean: wz-runtime-tokio --features storage-backend --all-targets; wz-session-core default + --features storage-backend --all-targets. fmt --check clean both crates.",
+        "facade build: cargo build -p wz --features runtime-tokio,storage-backend OK (forward chain wz -> wz-runtime-tokio/storage-backend -> session-core/storage-backend + query-queryable + codec-response-final + transport-unicast).",
+        "REGRESSION 0: wz-session-core --lib 155/155 (was 155 baseline + the new seam tests run under the gated test module); wz-runtime-tokio --lib 279/279 default (ReplyOut defaulted method is non-breaking — every existing ReplyOut consumer unaffected). wz-runtime-tokio default lib builds+links clean (storage_service is storage-backend-gated, off by default).",
+        "zenoh citations direct-read: StorageService declare_subscriber service.rs:142-148, declare_queryable.complete:151-162, select arms:170-208, fallback-stamp:182."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311uy = storage atom 3/4 (§5.11): the StorageService DRIVER landed + the ReplyOut::reply_keyed seam it needs. A wz Session can now run a live in-memory storage: capture Subscriber (Put/Delete -> S2 newer-wins gate, fallback-stamp) + COMPLETE Queryable (wildcard get -> per-key replies via reply_keyed). Facade wired: §5.11 storage-backend inventory reserved -> ACTIVE (S1 backend + S2 gate + S3 driver = the full in-memory storage, end-to-end observable). reply_keyed is a general queryable capability (per-key concrete reply keyexpr, zenoh get_matching_keys parity); storage is its first consumer.",
+        "NEXT (storage domain, the remaining 3 reserved atoms): storage-history (History::All — Vec<StoredData> per key; backend get returns Vec; the StorageState keeps version history not just latest), storage-replication (digest publish/subscribe, zenoh replication/core.rs digest + LogLatest), storage-aligner (alignment query/reply, replication/core.rs:408-577). Plus the deferred kernel follow-ups: tombstone GC (zenoh GarbageCollectionEvent service.rs:661-713), wildcard-update overriding (overriding_wild_update :415-494), strip_prefix config, reply-side value timestamp (querier reads stored version).",
+        "TRACKED DEBT (found this atom, NOT storage's to fix): query-queryable does not imply codec-response-final, so a query-queryable build without it leaves ResponseSink::send_response_final use dead at session/mod.rs:1163 (a latent feature-gating gap; storage-backend forwards codec-response-final to stay coherent). A cross-process e2e against a foreign z_get (wz-e2e-storage binary over the shared harness, the wz-e2e-queryable pattern) is the empirical north-star proof beyond the in-process free-fn tests.",
+        "LOCAL: R311uy on top of ux=64ad2f7 (origin/main=ef56758, +3 ahead uw+ux+uy); host-gated, NOT pushed (await user consent). Push needs full run-ci (this atom touches wz-runtime-tokio defaults' ReplyOut trait surface + a new feature combo). Untouched north-star: §5.11 history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
+      ],
+      "publishable_decision_summary": "R311uy: storage atom 3/4 (§5.11) — the StorageService DRIVER + the ReplyOut::reply_keyed seam it needs. A wz Session now runs a live in-memory storage: storage_service.rs (wz-runtime-tokio) declares a capture Subscriber (Put/Delete -> the S2 newer-wins gate, un-timestamped samples fallback-stamped with a monotonic counter since HLC/§5.18 is reserved) + a COMPLETE Queryable (wildcard get -> per-key replies). The reply_keyed seam (wz-session-core ReplyOut + QueryResponder, defaulted/signature-stable) lets a queryable stamp each reply with its OWN concrete keyexpr (zenoh get_matching_keys parity) — storage is its first consumer. Facade wired (wz -> wz-runtime-tokio storage-backend = query-queryable + codec-response-final + transport-unicast): §5.11 storage-backend reserved -> ACTIVE. zenoh StorageService mirror (service.rs declare_subscriber:142 / declare_queryable.complete:151 / select arms:170-208 / fallback:182).",
+      "publishable_changes_bullets": [
+        "SEAM (wz-session-core): ReplyOut::reply_keyed(keyexpr, payload) added — a defaulted trait method (falls back to reply() at the bound keyexpr, signature-stable for existing impls). QueryResponder gains send_reply_keyed (pushes a QueryReply::Reply with the override keyexpr_literal) + overrides reply_keyed. into_response already threads a per-record keyexpr (ResponseReplyBuilder::new(rid,0,Some(keyexpr),payload)), so no wire-builder change. This is the queryable-surface capability a faithful wildcard-get reply needs (per-key concrete keyexpr, not the wildcard); storage is the first consumer.",
+        "DRIVER (wz-runtime-tokio): storage_service.rs (NEW) — StorageService<R,T>. declare(session, keyexpr, local_zid) declares a capture Subscriber + a COMPLETE Queryable on the keyexpr, holding both handles + Arc<Mutex<StorageState<MemoryStorage>>>. Two testable free fns: apply_sample (SampleView -> process_put/process_delete via the S2 gate, fallback-stamp un-timestamped samples) + answer_query (matching_entries -> reply_keyed per key). zenoh StorageService mirror (service.rs declare_subscriber:142 / declare_queryable.complete:151 / select arms:170-208); wz's callback observer replaces the explicit tokio::select!.",
+        "FALLBACK (§5.18 seam): un-timestamped samples stamped with a monotonic arrival counter under local_zid (zenoh uses session HLC unwrap_or service.rs:182; wz HLC reserved). Carried timestamps always honored; mixed stamped/un-stamped coherence needs the §5.18 HLC atom (documented).",
+        "FACADE: wz-runtime-tokio storage-backend = [wz-session-core/storage-backend, query-queryable, codec-response-final, transport-unicast]; wz storage-backend = [wz-runtime-tokio?/storage-backend] (AP-only; MCU has no storage driver). §5.11 inventory storage-backend reserved -> active (facade now wires real code).",
+        "FIDELITY note: codec-response-final added to the forward because a storage queryable's reply lifecycle ends in a terminating ResponseFinal (query-queryable alone left ResponseSink::send_response_final use dead in the minimal combo — a pre-existing latent query-queryable gating gap surfaced by the new combo, recorded as tracked debt)."
+      ],
+      "publishable_verification_bullets": [
+        "SEAM tests: wz-session-core query::responder_reply_keyed_stamps_per_key_keyexpr_over_the_query_keyexpr (wildcard query -> two replies each with its own concrete keyexpr via the real QueryableRegistry dispatch + QueryResponder) + query_sink::default_reply_keyed_falls_back_to_reply (an impl that does not override reply_keyed routes to reply()).",
+        "DRIVER tests: wz-runtime-tokio --features storage-backend --lib storage_service 7/7 — apply_sample uses carried-ts not fallback; uses fallback when un-timestamped; del removes; outdated put dropped through gate; answer_query wildcard per-key fan; exact-key single reply; deleted key not replied.",
+        "clippy -D warnings clean: wz-runtime-tokio --features storage-backend --all-targets; wz-session-core default + --features storage-backend --all-targets. fmt --check clean both crates.",
+        "facade build: cargo build -p wz --features runtime-tokio,storage-backend OK (forward chain wz -> wz-runtime-tokio/storage-backend -> session-core/storage-backend + query-queryable + codec-response-final + transport-unicast).",
+        "REGRESSION 0: wz-session-core --lib 155/155 (was 155 baseline + the new seam tests run under the gated test module); wz-runtime-tokio --lib 279/279 default (ReplyOut defaulted method is non-breaking — every existing ReplyOut consumer unaffected). wz-runtime-tokio default lib builds+links clean (storage_service is storage-backend-gated, off by default).",
+        "zenoh citations direct-read: StorageService declare_subscriber service.rs:142-148, declare_queryable.complete:151-162, select arms:170-208, fallback-stamp:182."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311uy = storage atom 3/4 (§5.11): the StorageService DRIVER landed + the ReplyOut::reply_keyed seam it needs. A wz Session can now run a live in-memory storage: capture Subscriber (Put/Delete -> S2 newer-wins gate, fallback-stamp) + COMPLETE Queryable (wildcard get -> per-key replies via reply_keyed). Facade wired: §5.11 storage-backend inventory reserved -> ACTIVE (S1 backend + S2 gate + S3 driver = the full in-memory storage, end-to-end observable). reply_keyed is a general queryable capability (per-key concrete reply keyexpr, zenoh get_matching_keys parity); storage is its first consumer.",
+        "NEXT (storage domain, the remaining 3 reserved atoms): storage-history (History::All — Vec<StoredData> per key; backend get returns Vec; the StorageState keeps version history not just latest), storage-replication (digest publish/subscribe, zenoh replication/core.rs digest + LogLatest), storage-aligner (alignment query/reply, replication/core.rs:408-577). Plus the deferred kernel follow-ups: tombstone GC (zenoh GarbageCollectionEvent service.rs:661-713), wildcard-update overriding (overriding_wild_update :415-494), strip_prefix config, reply-side value timestamp (querier reads stored version).",
+        "TRACKED DEBT (found this atom, NOT storage's to fix): query-queryable does not imply codec-response-final, so a query-queryable build without it leaves ResponseSink::send_response_final use dead at session/mod.rs:1163 (a latent feature-gating gap; storage-backend forwards codec-response-final to stay coherent). A cross-process e2e against a foreign z_get (wz-e2e-storage binary over the shared harness, the wz-e2e-queryable pattern) is the empirical north-star proof beyond the in-process free-fn tests.",
+        "LOCAL: R311uy on top of ux=64ad2f7 (origin/main=ef56758, +3 ahead uw+ux+uy); host-gated, NOT pushed (await user consent). Push needs full run-ci (this atom touches wz-runtime-tokio defaults' ReplyOut trait surface + a new feature combo). Untouched north-star: §5.11 history/replication/aligner, SHM, --no-default-features routing-peer 18-fail debt."
+      ]
+    },
     "Round 311v": {
       "decision_summary": "R311v QueryEvent.attachment extraction. Inbound Query extension chain (ext_id 0x05, ExtZbuf) decoded to Option<&[u8]> view threaded through fire_matching_queryables; R311r carry closed.",
       "changes_bullets": [
@@ -52269,10 +52322,10 @@
       "reason": "F=aligner protocol; P=zenoh; C=opt-in storage convergence"
     },
     "storage-backend": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh-backend-traits crate",
-      "reason": "F=plugin trait; P=zenoh-backend-traits; C=opt-in plugin surface"
+      "reason": "R311uy: StorageService driver landed (S1 backend + S2 gate + S3 driver); facade wz storage-backend forwards real code"
     },
     "storage-history": {
       "status": "reserved",

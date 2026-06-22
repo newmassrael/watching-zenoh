@@ -199,6 +199,29 @@ query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]
 query-consolidation = ["query-get"]
+# R311uy — storage-backend (§5.11 storage, atom 3/4): the StorageService
+# DRIVER (`storage_service` module). Forwards the runtime-agnostic kernel
+# (wz-session-core/storage-backend = the StorageBackend seam + the
+# StorageState newer-wins gate) AND `query-queryable` — the driver's
+# answering leg declares a COMPLETE queryable, so without it
+# `declare_queryable` returns FeatureDisabled and the storage cannot serve
+# gets. The capture subscriber + wire-RX (codec-push / pubsub-*) are the
+# data-plane the storage composes with (on by default); a storage facing
+# only loopback publishes works without them.
+storage-backend = [
+    "wz-session-core/storage-backend",
+    "query-queryable",
+    # The queryable's reply lifecycle ends in a terminating ResponseFinal
+    # (the dispatch path stages `send_response_final` after the storage's
+    # replies), so a storage genuinely needs the ResponseFinal wire frame.
+    # query-queryable alone (codec-request + codec-response) does not pull
+    # it; without it the `ResponseSink::send_response_final` use in the
+    # dispatch loop is dead. A storage MUST terminate its query answers.
+    "codec-response-final",
+    # The driver declares its subscriber + queryable on a Unicast session
+    # (the `session` / `session_glue` modules are transport-unicast-gated).
+    "transport-unicast",
+]
 codec-init-body = ["wz-codecs/codec-init-body", "wz-session-core/codec-init-body"]
 codec-open-body = ["wz-codecs/codec-open-body", "wz-session-core/codec-open-body"]
 # R311b — codec-keep-alive forwards the wz-codecs gate. Session lease

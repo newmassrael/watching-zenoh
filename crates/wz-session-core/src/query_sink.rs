@@ -105,6 +105,22 @@ pub trait QueryView {
 pub trait ReplyOut {
     /// Emit a Put-form data reply with the given payload bytes.
     fn reply(&mut self, payload: &[u8]);
+    /// Emit a Put-form data reply stamped with an explicit, concrete reply
+    /// keyexpr instead of the query keyexpr the responder is bound to. The
+    /// faithful shape for a queryable that answers a WILDCARD query with
+    /// several concrete stored keys (a storage's wildcard get): each reply
+    /// must carry its OWN key, not the wildcard the querier asked under.
+    /// The caller must pass a keyexpr the querier's query covers (the
+    /// `reply ⊆ query` zenoh contract); the seam does not re-check it.
+    ///
+    /// Default impl falls back to [`Self::reply`] (the responder's bound
+    /// keyexpr), so impls that predate per-key replies stay valid and a
+    /// single-key (exact) reply is unaffected — the override matters only
+    /// when the reply keyexpr differs from the query keyexpr.
+    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+        let _ = keyexpr;
+        self.reply(payload);
+    }
     /// Emit a Del-form reply (the queryable signals deletion at the
     /// keyexpr).
     fn reply_del(&mut self);
@@ -308,6 +324,17 @@ mod tests {
         assert_eq!(sink.last_param_len, Some(3));
         assert_eq!(out.replies, 1);
         assert_eq!(out.last_len, 2);
+    }
+
+    #[test]
+    fn default_reply_keyed_falls_back_to_reply() {
+        // CountingReplyOut does NOT override reply_keyed, so the trait
+        // default must route it to reply() (the responder's bound keyexpr).
+        // An impl that predates per-key replies keeps working unchanged.
+        let mut out = CountingReplyOut::default();
+        out.reply_keyed("demo/a", b"value");
+        assert_eq!(out.replies, 1, "default reply_keyed routes to reply()");
+        assert_eq!(out.last_len, 5);
     }
 
     #[test]

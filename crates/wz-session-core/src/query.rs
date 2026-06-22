@@ -501,6 +501,26 @@ impl<'a> QueryResponder<'a> {
         });
     }
 
+    /// Emit a Put-form reply stamped with an explicit, concrete
+    /// `keyexpr` instead of the bound query keyexpr. The per-key reply
+    /// shape a queryable answering a WILDCARD query needs: each stored
+    /// key replies under its own keyexpr, not the wildcard the querier
+    /// asked under (zenoh's storage `get_matching_keys` reply per key).
+    /// The wire echo already threads a per-record keyexpr through
+    /// [`QueryReply::into_response`]
+    /// (`ResponseReplyBuilder::new(rid, 0, Some(keyexpr), payload)`), so
+    /// this just stages the override literal rather than the bound one.
+    /// The caller must pass a keyexpr the inbound query covers
+    /// (`reply ⊆ query`); not re-checked here.
+    pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Put(payload.to_vec()),
+            responder: self.responder.clone(),
+        });
+    }
+
     /// Emit a Del-form reply — the queryable signals that the value
     /// at this keyexpr is being deleted / cleared. No payload bytes
     /// (the inner `MsgDel` body carries only a header + optional
@@ -619,6 +639,9 @@ impl<'a> QueryResponder<'a> {
 impl ReplyOut for QueryResponder<'_> {
     fn reply(&mut self, payload: &[u8]) {
         self.send_reply(payload);
+    }
+    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+        self.send_reply_keyed(keyexpr, payload);
     }
     fn reply_del(&mut self) {
         self.send_reply_del();
@@ -1721,6 +1744,44 @@ mod tests {
             invocations.load(Ordering::SeqCst),
             0,
             "Locality::SessionLocal suppresses inbound (remote) Query pre-loopback"
+        );
+    }
+
+    #[test]
+    fn responder_reply_keyed_stamps_per_key_keyexpr_over_the_query_keyexpr() {
+        // A wildcard query answered with two concrete stored keys: each
+        // reply must carry its OWN keyexpr (demo/a, demo/b), NOT the query
+        // wildcard the responder is bound to (demo/**). This is the storage
+        // wildcard-get reply shape.
+        let mut reg = QueryableRegistry::new();
+        reg.register("demo/**", |_q, responder| {
+            responder.reply_keyed("demo/a", b"v1");
+            responder.reply_keyed("demo/b", b"v2");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("demo/**")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 2);
+        let keys: Vec<&str> = replies
+            .iter()
+            .map(|r| match r {
+                QueryReply::Reply {
+                    keyexpr_literal,
+                    body: ReplyBody::Put(_),
+                    ..
+                } => keyexpr_literal.as_str(),
+                other => panic!("expected Put Reply, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["demo/a", "demo/b"],
+            "each reply carries its own concrete keyexpr, not the query wildcard"
         );
     }
 

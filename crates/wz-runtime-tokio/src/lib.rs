@@ -505,6 +505,17 @@ pub mod ws_pipeline;
 #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
 pub mod session_open;
 
+/// R311uy — the storage service DRIVER (§5.11 storage, atom 3/4): the AP
+/// tokio binding for the runtime-agnostic storage kernel. A
+/// [`storage_service::StorageService`] declares a capture [`Subscriber`]
+/// + a complete [`Queryable`] on a storage keyexpr and drives the
+/// [`wz_session_core::storage_state::StorageState`] gate (Put / Delete
+/// capture -> newer-wins; query -> per-key reply). Gated on
+/// `storage-backend` (which forwards the kernel + `query-queryable`), so a
+/// profile without storage never compiles the driver.
+#[cfg(feature = "storage-backend")]
+pub mod storage_service;
+
 /// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
 /// foundation. Binds once and holds N concurrent peer faces (bind -> accept
 /// loop -> per-face open + drive), the increment zenoh's role-agnostic
