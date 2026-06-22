@@ -425,20 +425,34 @@ impl RequestQueryBuilder {
         self
     }
 
-    /// Set the Query-level attachment extension payload. Panics on
-    /// empty and on `len > QUERY_EXT_ZBUF_MAX_LEN`. Gated on
-    /// `query-attachment` (wire-data helper) so a `codec-request` subset
-    /// that does not compose query attachments carries no attachment
-    /// encode path.
+    /// Set the Query-level attachment extension payload. Panics on empty
+    /// (zenoh-pico's `_z_bytes_check` predicate clears the ext for an empty
+    /// slice, so an empty attachment is a caller error). Gated on
+    /// `query-attachment` (wire-data helper) so a `codec-request` subset that
+    /// does not compose query attachments carries no attachment encode path.
+    ///
+    /// **Size (A8c-1):** under `no_std` the shared ExtZbuf `value` carrier is
+    /// `heapless::Vec<u8, 32>` (`ext_zbuf.scxml` `sce:max-size="32"`), so an
+    /// over-32 attachment is structurally unrepresentable; the
+    /// `not(alloc)`-gated assert fails fast at the call site rather than deep
+    /// in the codec. Under `alloc` the carrier is an unbounded `Vec` (the `N`
+    /// is advisory — every `sce:max-size` field degrades to unbounded under
+    /// `alloc`, proven by the 200-byte reply attachment, A8a), matching
+    /// zenoh's unbounded query `ZBytes`, so a larger attachment — e.g. a
+    /// storage `AlignmentQuery::Diff` / `Intervals` / `Events`, which exceeds
+    /// 32 bytes — rides intact and no cap applies. A wz `no_std` peer (which
+    /// never runs the alloc-only storage / aligner) would reject an over-32
+    /// attachment on decode; zenoh and alloc-wz peers accept it.
     #[cfg(feature = "query-attachment")]
     pub fn query_attachment(mut self, attachment: &[u8]) -> Self {
         assert!(
             !attachment.is_empty(),
             "RequestQueryBuilder::query_attachment requires a non-empty attachment slice",
         );
+        #[cfg(not(feature = "alloc"))]
         assert!(
             attachment.len() <= QUERY_EXT_ZBUF_MAX_LEN,
-            "attachment slice length {} exceeds wz ExtZbuf codec's max-size ({})",
+            "attachment slice length {} exceeds the no_std ExtZbuf bound ({})",
             attachment.len(),
             QUERY_EXT_ZBUF_MAX_LEN,
         );
@@ -732,18 +746,22 @@ pub fn build_request_query_with_parameters(
         .build()
 }
 
-/// R121j-1c — `attachment` slice max-size enforced by the wz ExtZbuf
-/// codec (sources/codecs/ext_zbuf.scxml's `sce:max-size="32"` on
-/// the `value` field). zenoh-pico's `_z_msg_ext_t.body._zbuf._val`
-/// is variable-length upstream (no codec-level bound); wz's
-/// stripped-down scope caps the ZBuf body at 32 bytes across all
+/// The `no_std` ExtZbuf `value` carrier bound (sources/codecs/ext_zbuf.scxml's
+/// `sce:max-size="32"`), the heapless `Vec<u8, 32>` capacity shared across all
 /// ExtZbuf-encoded extensions (attachment, value-as-payload,
-/// source_info-as-payload). A future round that needs larger
-/// attachments either lifts the wz codec bound or adds a separate
-/// `ExtZbufLarge` arm; until then the helper rejects oversize at
-/// the call site so wz-to-wz interop does not silently fail at the
-/// peer decoder. zenoh-pico peers accept arbitrarily large ZBuf
-/// payloads, so wz-emit -> zenoh-pico-receive is unaffected.
+/// source_info-as-payload). zenoh-pico's `_z_msg_ext_t.body._zbuf._val` is
+/// variable-length upstream (no codec-level bound).
+///
+/// R121j-1c originally asserted this bound on EVERY `query_attachment` call.
+/// **A8c-1 (storage-aligner) relaxed it to `no_std`-only**: under `alloc` the
+/// `value` carrier is an unbounded `Vec` (the `N` is advisory — every
+/// `sce:max-size` field degrades to unbounded under `alloc`), matching zenoh's
+/// unbounded query `ZBytes`, so a larger attachment (e.g. an `AlignmentQuery`)
+/// rides intact. The constant remains the documented `no_std` bound and the
+/// `not(alloc)` assert in `query_attachment` / `build_request_query_with_attachment`
+/// still fails fast there. A wz `no_std` peer would reject an over-32
+/// attachment on decode; zenoh and alloc-wz peers accept arbitrarily large
+/// ZBuf payloads, so wz-emit -> {zenoh, alloc-wz}-receive is unaffected.
 pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 
 /// R121j-1c — build a `Request(Query)` with a single attachment
@@ -789,8 +807,10 @@ pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 /// ext from the wire and emit only the bare Query header (the
 /// caller's intent is then plain `build_request_query`).
 ///
-/// `attachment.len() > QUERY_EXT_ZBUF_MAX_LEN` is rejected to match
-/// the wz codec's ExtZbuf bound; see the constant's doc-comment.
+/// `attachment.len() > QUERY_EXT_ZBUF_MAX_LEN` is rejected only under
+/// `no_std` (the heapless ExtZbuf bound); under `alloc` the carrier is
+/// unbounded and a larger attachment (e.g. an `AlignmentQuery`) rides intact
+/// (A8c-1). See the constant's doc-comment.
 ///
 /// Source-info and body(Value) extensions are NOT covered by this
 /// helper — separate concerns with their own sub-codec wiring
@@ -1325,12 +1345,40 @@ mod tests {
         let _ = build_request_query_with_attachment(42, 7, None, b"");
     }
 
-    #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
+    /// A8c-1 — under `alloc` a query attachment LARGER than the 32-byte
+    /// no_std ExtZbuf bound (`QUERY_EXT_ZBUF_MAX_LEN`) builds intact: the
+    /// carrier is an unbounded `Vec` (matching zenoh's query `ZBytes`), so a
+    /// storage `AlignmentQuery` — which exceeds 32 bytes for a Diff /
+    /// Intervals / Events — rides whole. The R121j-1c hard cap was relaxed to
+    /// `no_std`-only; this replaces its `should_panic` test (under `alloc` the
+    /// assert is gone, so the build succeeds and carries the full payload).
+    #[cfg(all(
+        feature = "codec-request",
+        feature = "query-attachment",
+        feature = "alloc"
+    ))]
     #[test]
-    #[should_panic(expected = "exceeds wz ExtZbuf codec's max-size (32)")]
-    fn build_request_query_with_attachment_rejects_over_max_size() {
-        let over: Vec<u8> = vec![0u8; QUERY_EXT_ZBUF_MAX_LEN + 1];
-        let _ = build_request_query_with_attachment(42, 7, None, &over);
+    fn build_request_query_with_attachment_carries_over_32_under_alloc() {
+        let big: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        assert!(
+            big.len() > QUERY_EXT_ZBUF_MAX_LEN,
+            "exceeds the no_std ExtZbuf bound"
+        );
+        let req = build_request_query_with_attachment(42, 7, None, &big)
+            .expect("an over-32 attachment builds under alloc (unbounded carrier)");
+        match &req.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header & 0x80, 0x80, "Q_Z set (ext chain present)");
+                let exts = q.extensions.as_ref().expect("ext chain present");
+                let att = crate::attachment::decode_attachment_ext(
+                    exts,
+                    crate::attachment::ATTACHMENT_EXT_ID_QUERY,
+                )
+                .expect("query attachment ext (id 0x05) present");
+                assert_eq!(att, big.as_slice(), "the full 200-byte attachment survived");
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
     }
 
     /// R121j-1d — Wire-byte regression gate for
