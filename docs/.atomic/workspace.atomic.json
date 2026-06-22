@@ -47233,6 +47233,44 @@
         "LOCAL: R311vn on 1ee2cad (origin/main=be8e731, +7 ahead vh..vn); NOT pushed; push awaits explicit consent. The aligner (storage-aligner) consumes DigestDiff to pull diverging entries = the next TRACK after this one closes at R8/R9."
       ]
     },
+    "Round 311vo": {
+      "decision_summary": "R311vo: storage-replication track finalize atom (replication 8/N) -- the wz facade forwards the AP digest pub/sub driver and the storage-replication inventory flips reserved->active; full run-ci GREEN across all host lanes (incl MCU Q + zenohd Z 9/9).",
+      "changes_bullets": [
+        "wz/Cargo.toml: storage-replication = [storage-backend, wz-runtime-tokio?/storage-replication] (was a [storage-backend]-only placeholder) - AP-only ? forward; does NOT imply storage-history (replication runs on History::Latest, zenoh's digest assumes Latest). Header count corrected to 3 active (backend+history+replication) / 1 reserved (aligner).",
+        "Inventory: storage-replication reserved -> active (the digest pub/sub is usable end-to-end: kernel R1-R5 + driver R6-R7 + facade forward).",
+        "No code change; the digest stack (R311vh..vn) is wired into the facade so `wz --features storage-replication` builds the publisher + subscriber driver end-to-end."
+      ],
+      "verification_bullets": [
+        "full run-ci (scripts/run-ci.sh) GREEN: RUNCI_EXIT=0, zero FAIL lanes. Layers A..Q + Z all pass incl C1 (cargo test --workspace), C2 (clippy --workspace -D warnings), C4* (facade + runtime arbitrary-subset matrices - the new feature composes), G (MCU cross-compile catalog), Q (QEMU mps2/microbit e2e + footprint; multicast-e2e text +12 OK tol=±256), Z (zenohd v1.5.0 interop 9/9). The new AP-only feature breaks no subset or MCU lane.",
+        "facade build: wz --features storage-replication compiles (the ? forward pulls the driver). validate_workspace: T1 orphan new=+0; inventory storage-replication=active; ledger entries +1."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vo = storage-replication track finalize (replication 8/N, §5.11): the wz facade forwards wz-runtime-tokio?/storage-replication; inventory storage-replication reserved -> ACTIVE. full run-ci GREEN across all host lanes (RUNCI_EXIT=0, incl MCU Q + zenohd Z 9/9). The digest pub/sub track (R1-R7) is end-to-end usable via `wz --features storage-replication`.",
+        "storage-replication DIGEST track COMPLETE + run-ci green (R1 prims vh, R2 build vi, R3 diff vj, R4 wire vk, R5 bridge vl, R6 publisher vm, R7 subscriber vn, R8 facade+inventory+run-ci vo). NEXT R9 = cross-impl byte interop test (wz <-> real bincode 1.3 bidirectional parse) + honest residual doc, then a 4-agent adversarial session review; push awaits explicit user consent.",
+        "LOCAL: R311vo on a7f06b0 (origin/main=be8e731, +8 ahead vh..vo); NOT pushed. Named residuals: (1) live zenohd-storage-manager-replication digest interop needs the storage-manager plugin provisioned AND the ALIGNER for full convergence (zenohd diffs wz's digest then sends an aligner query back, which wz answers only once storage-aligner lands); (2) propagation-delay/jitter publisher tuning (needs a seeded RNG). storage-aligner is the next TRACK (consumes DigestDiff)."
+      ],
+      "publishable_decision_summary": "R311vo: storage-replication track finalize atom (replication 8/N) -- the wz facade forwards the AP digest pub/sub driver and the storage-replication inventory flips reserved->active; full run-ci GREEN across all host lanes (incl MCU Q + zenohd Z 9/9).",
+      "publishable_changes_bullets": [
+        "wz/Cargo.toml: storage-replication = [storage-backend, wz-runtime-tokio?/storage-replication] (was a [storage-backend]-only placeholder) - AP-only ? forward; does NOT imply storage-history (replication runs on History::Latest, zenoh's digest assumes Latest). Header count corrected to 3 active (backend+history+replication) / 1 reserved (aligner).",
+        "Inventory: storage-replication reserved -> active (the digest pub/sub is usable end-to-end: kernel R1-R5 + driver R6-R7 + facade forward).",
+        "No code change; the digest stack (R311vh..vn) is wired into the facade so `wz --features storage-replication` builds the publisher + subscriber driver end-to-end."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci (scripts/run-ci.sh) GREEN: RUNCI_EXIT=0, zero FAIL lanes. Layers A..Q + Z all pass incl C1 (cargo test --workspace), C2 (clippy --workspace -D warnings), C4* (facade + runtime arbitrary-subset matrices - the new feature composes), G (MCU cross-compile catalog), Q (QEMU mps2/microbit e2e + footprint; multicast-e2e text +12 OK tol=±256), Z (zenohd v1.5.0 interop 9/9). The new AP-only feature breaks no subset or MCU lane.",
+        "facade build: wz --features storage-replication compiles (the ? forward pulls the driver). validate_workspace: T1 orphan new=+0; inventory storage-replication=active; ledger entries +1."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vo = storage-replication track finalize (replication 8/N, §5.11): the wz facade forwards wz-runtime-tokio?/storage-replication; inventory storage-replication reserved -> ACTIVE. full run-ci GREEN across all host lanes (RUNCI_EXIT=0, incl MCU Q + zenohd Z 9/9). The digest pub/sub track (R1-R7) is end-to-end usable via `wz --features storage-replication`.",
+        "storage-replication DIGEST track COMPLETE + run-ci green (R1 prims vh, R2 build vi, R3 diff vj, R4 wire vk, R5 bridge vl, R6 publisher vm, R7 subscriber vn, R8 facade+inventory+run-ci vo). NEXT R9 = cross-impl byte interop test (wz <-> real bincode 1.3 bidirectional parse) + honest residual doc, then a 4-agent adversarial session review; push awaits explicit user consent.",
+        "LOCAL: R311vo on a7f06b0 (origin/main=be8e731, +8 ahead vh..vo); NOT pushed. Named residuals: (1) live zenohd-storage-manager-replication digest interop needs the storage-manager plugin provisioned AND the ALIGNER for full convergence (zenohd diffs wz's digest then sends an aligner query back, which wz answers only once storage-aligner lands); (2) propagation-delay/jitter publisher tuning (needs a seeded RNG). storage-aligner is the next TRACK (consumes DigestDiff)."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
@@ -52948,10 +52986,10 @@
       "reason": "R311uz: History::All version-keeping landed end-to-end (HistoryStorage backend + StorageState gate-skip + driver matching_versions); facade storage-history forwards real code"
     },
     "storage-replication": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh storage replication protocol",
-      "reason": "F=replication FSM; P=zenoh storage-replication; C=opt-in on top of storage-backend"
+      "reason": "R311vo: digest pub/sub driver landed end-to-end (kernel R1-R5 + driver R6-R7); facade forwards wz-runtime-tokio?/storage-replication"
     },
     "switchboard": {
       "status": "active",

@@ -564,7 +564,8 @@ session-unicast-open = [
     "wz-runtime-lwip?/session-unicast-open",
 ]
 
-# ----- domain: storage (1 atomic active: storage-backend; 3 reserved) -----
+# ----- domain: storage (3 active: storage-backend + storage-history +
+# storage-replication; 1 reserved: storage-aligner) -----
 storage-aligner = []
 # R311uy — storage-backend now forwards the AP StorageService driver
 # (wz-runtime-tokio?/storage-backend = the `storage_service` module + the
@@ -577,7 +578,13 @@ storage-backend = ["wz-runtime-tokio?/storage-backend"]
 # (wz-runtime-tokio?/storage-history = HistoryStorage + the kernel). AP-only
 # (the MCU runtime has no storage driver); implies storage-backend.
 storage-history = ["storage-backend", "wz-runtime-tokio?/storage-history"]
-storage-replication = ["storage-backend"]
+# Round 311vo — storage-replication forwards the AP digest publisher/subscriber
+# driver (wz-runtime-tokio?/storage-replication = the
+# `storage_replication_service` module + the kernel digest stack: Fingerprint /
+# Digest / diff / wire codec). AP-only (the MCU runtime has no storage driver);
+# implies storage-backend. Replication runs on a History::Latest storage
+# (zenoh's digest assumes Latest), so it does NOT imply storage-history.
+storage-replication = ["storage-backend", "wz-runtime-tokio?/storage-replication"]
 
 # ----- domain: time (4 atomic, 0 active / 4 reserved) -----
 # R311ci — audit-only ratify. Sample.timestamp (NTP64 wire word) is
