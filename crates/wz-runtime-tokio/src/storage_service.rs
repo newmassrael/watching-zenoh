@@ -432,6 +432,48 @@ mod tests {
         assert!(out.keyed.is_empty(), "a deleted key is not replied");
     }
 
+    // A REAL live-session test of the driver wiring (not just the kernel
+    // methods): build a session, declare an actual StorageService (the
+    // routed declare_subscriber + complete queryable), then a loopback
+    // publish must reach the capture subscriber and land in the store,
+    // observed through `with_state`. Exercises StorageService::declare, the
+    // Arc<Mutex> shared state, the capture closure, and with_state — the
+    // session-wiring the free-function tests above cannot cover. Mirrors
+    // `session::tests::declared_subscriber_fires_on_loopback_publish`.
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
+    #[test]
+    fn declared_storage_captures_a_loopback_publish_observed_via_with_state() {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::{PublishOptions, TokioSession};
+        use wz_session_core::locality::Locality;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let storage = StorageService::declare(&session, "demo/**", vec![0x01])
+            .expect("storage declare succeeds against the test link");
+
+        let fired = session
+            .publish(
+                "demo/a",
+                b"v1",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(fired, 1, "the storage's capture subscriber fired once");
+
+        storage.with_state(|st| {
+            assert_eq!(
+                st.get("demo/a").map(|d| d.payload.clone()),
+                Some(b"v1".to_vec()),
+                "the declared storage captured the loopback publish into the store"
+            );
+        });
+    }
+
     // The History::All driver path needs the storage-history backend.
     #[cfg(feature = "storage-history")]
     mod history {

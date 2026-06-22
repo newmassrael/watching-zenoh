@@ -46895,6 +46895,44 @@
         "LOCAL: R311ve on vd=60a8d00 (origin/main=ef56758, +9 ahead uw..ve); host-gated, NOT pushed."
       ]
     },
+    "Round 311vf": {
+      "decision_summary": "R311vf: session-review remediation 5 (honesty Q7) — a real live-session driver test. StorageService::declare and with_state had zero test coverage (the prior driver tests only exercised the kernel methods on a hand-built StorageState), so the storage-backend/history inventory active flip rode on compile-success not a working wired feature. declared_storage_captures_a_loopback_publish_observed_via_with_state builds a TokioSession (recording_actions + observer + TokioTime), declares an actual StorageService (routed declare_subscriber + complete queryable), does a SessionLocal loopback publish, and asserts with_state observes the captured value — the declare wiring + Arc<Mutex> + capture closure now exercised in-process. Closes the 4-agent review remediation (vb..vf).",
+      "changes_bullets": [
+        "storage_service.rs test: declared_storage_captures_a_loopback_publish_observed_via_with_state — builds a real TokioSession (crate::test_fixtures::recording_actions + ApplicationLayerObserver + TokioTime), calls StorageService::declare (the routed declare_subscriber + complete declare_queryable, both must succeed -> .expect), does a SessionLocal loopback publish on demo/a, asserts fired==1 AND with_state observes demo/a=v1 in the store.",
+        "Closes honesty-Q7's main gap: StorageService::declare / with_state / the Arc<Mutex> shared state / the capture closure were previously unexercised (the other 'driver tests' construct StorageState + call its methods directly). Mirrors session::tests::declared_subscriber_fires_on_loopback_publish. Gated declare-subscriber + pubsub-allow-loop (default-on)."
+      ],
+      "verification_bullets": [
+        "runtime-tokio --features storage-history --lib storage_service 10/10 (was 9 + the live-session loopback test).",
+        "clippy -D clean (runtime-tokio storage-history --all-targets); fmt clean.",
+        "The query-reply loopback (get -> queryable -> reply -> querier) is still not loopback-tested, but declare_queryable's wiring is proven (declare succeeds) and answer_into is unit-tested; capture+declare+with_state are now real-session-covered."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vf = session-review remediation 5 (honesty Q7): a real live-session driver test. Previously StorageService::declare / with_state had ZERO coverage (the 'driver tests' only called the kernel methods on a hand-built StorageState), so the inventory active flip + 'end-to-end' framing rode on compile-success. Now a build_session-style TokioSession declares an actual StorageService and a loopback publish is observed captured via with_state — the routed declare_subscriber + complete queryable + Arc<Mutex> + capture closure are exercised end-to-end in-process.",
+        "SESSION-REVIEW REMEDIATION COMPLETE (4-agent adversarial review of R311uw..va): vb #1 zid uhlc-faithful + #5 comparator SSOT; vc #2 fallback wall-clock NTP64 (data-loss) + #6 citations; vd #3 encoding round-trip + dead-field honesty; ve #4 kernel placement (no_std reuse); vf Q7 live-session test. Residual (named, low): cross-process e2e against a foreign z_get (a wz-e2e-storage binary), the query-reply loopback test, kernel-crate (vs driver-crate) location of the apply_sample/answer_into tests.",
+        "LOCAL: R311vf on ve=3d9a459 (origin/main=ef56758, +10 ahead uw..vf); host-gated, NOT pushed. North-star storage domain remaining: storage-replication + storage-aligner (multi-replica)."
+      ],
+      "publishable_decision_summary": "R311vf: session-review remediation 5 (honesty Q7) — a real live-session driver test. StorageService::declare and with_state had zero test coverage (the prior driver tests only exercised the kernel methods on a hand-built StorageState), so the storage-backend/history inventory active flip rode on compile-success not a working wired feature. declared_storage_captures_a_loopback_publish_observed_via_with_state builds a TokioSession (recording_actions + observer + TokioTime), declares an actual StorageService (routed declare_subscriber + complete queryable), does a SessionLocal loopback publish, and asserts with_state observes the captured value — the declare wiring + Arc<Mutex> + capture closure now exercised in-process. Closes the 4-agent review remediation (vb..vf).",
+      "publishable_changes_bullets": [
+        "storage_service.rs test: declared_storage_captures_a_loopback_publish_observed_via_with_state — builds a real TokioSession (crate::test_fixtures::recording_actions + ApplicationLayerObserver + TokioTime), calls StorageService::declare (the routed declare_subscriber + complete declare_queryable, both must succeed -> .expect), does a SessionLocal loopback publish on demo/a, asserts fired==1 AND with_state observes demo/a=v1 in the store.",
+        "Closes honesty-Q7's main gap: StorageService::declare / with_state / the Arc<Mutex> shared state / the capture closure were previously unexercised (the other 'driver tests' construct StorageState + call its methods directly). Mirrors session::tests::declared_subscriber_fires_on_loopback_publish. Gated declare-subscriber + pubsub-allow-loop (default-on)."
+      ],
+      "publishable_verification_bullets": [
+        "runtime-tokio --features storage-history --lib storage_service 10/10 (was 9 + the live-session loopback test).",
+        "clippy -D clean (runtime-tokio storage-history --all-targets); fmt clean.",
+        "The query-reply loopback (get -> queryable -> reply -> querier) is still not loopback-tested, but declare_queryable's wiring is proven (declare succeeds) and answer_into is unit-tested; capture+declare+with_state are now real-session-covered."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vf = session-review remediation 5 (honesty Q7): a real live-session driver test. Previously StorageService::declare / with_state had ZERO coverage (the 'driver tests' only called the kernel methods on a hand-built StorageState), so the inventory active flip + 'end-to-end' framing rode on compile-success. Now a build_session-style TokioSession declares an actual StorageService and a loopback publish is observed captured via with_state — the routed declare_subscriber + complete queryable + Arc<Mutex> + capture closure are exercised end-to-end in-process.",
+        "SESSION-REVIEW REMEDIATION COMPLETE (4-agent adversarial review of R311uw..va): vb #1 zid uhlc-faithful + #5 comparator SSOT; vc #2 fallback wall-clock NTP64 (data-loss) + #6 citations; vd #3 encoding round-trip + dead-field honesty; ve #4 kernel placement (no_std reuse); vf Q7 live-session test. Residual (named, low): cross-process e2e against a foreign z_get (a wz-e2e-storage binary), the query-reply loopback test, kernel-crate (vs driver-crate) location of the apply_sample/answer_into tests.",
+        "LOCAL: R311vf on ve=3d9a459 (origin/main=ef56758, +10 ahead uw..vf); host-gated, NOT pushed. North-star storage domain remaining: storage-replication + storage-aligner (multi-replica)."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [
