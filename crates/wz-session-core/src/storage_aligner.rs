@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 
 use crate::sample::TimestampHint;
 use crate::storage_replication::{
-    event_fingerprint, Fingerprint, IntervalIdx, ReplicationConfig, SubIntervalIdx,
+    event_fingerprint, DigestDiff, Fingerprint, IntervalIdx, ReplicationConfig, SubIntervalIdx,
 };
 
 /// The kind of a logged replication event. zenoh `log::Action` (log.rs:43-49),
@@ -306,6 +306,75 @@ impl EventBuckets {
     }
 }
 
+/// The information a Replica requests from a peer's Aligner to converge its
+/// storage. zenoh `core::aligner_query::AlignmentQuery` (aligner_query.rs:51-65).
+///
+/// Requests drill from coarse to fine in the order
+/// `Diff -> Intervals -> SubIntervals -> Events`; not all steps run — where the
+/// drill starts depends on the era a divergence was detected in (a Hot-era
+/// divergence skips straight to the sub-interval level). `Discovery` + `All`
+/// are the initial-alignment path a fresh (empty) replica uses *instead* of a
+/// Digest exchange: discover a peer, then pull everything.
+///
+/// wz uses `BTreeSet` / `BTreeMap` where zenoh uses `HashSet` / `HashMap` (the
+/// no_std kernel has no std hasher) — wire-compatible because the codec
+/// length-prefixes each collection, so the byte layout is element-order
+/// independent (the same property the digest codec relies on).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlignmentQuery {
+    /// Ask peers for their Zenoh ID, to pick one for an initial full transfer.
+    Discovery,
+    /// Retrieve a peer's entire contents (the initial alignment).
+    All,
+    /// The first alignment request after a Digest comparison localised a
+    /// divergence — carries the [`DigestDiff`] that named the differing eras.
+    Diff(DigestDiff),
+    /// Request the per-sub-interval fingerprints of these intervals — the
+    /// Cold-era follow-up, once the Replica has found which cold intervals
+    /// differ.
+    Intervals(BTreeSet<IntervalIdx>),
+    /// Request the [`EventMetadata`] in these sub-intervals — the Warm/Hot
+    /// follow-up, once the Replica has found which sub-intervals differ.
+    SubIntervals(BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>>),
+    /// Request the payloads for these events — the final step, once the
+    /// Replica has found which exact events it is missing.
+    Events(Vec<EventMetadata>),
+}
+
+/// The information a peer's Aligner sends back in response to an
+/// [`AlignmentQuery`]. zenoh `core::aligner_reply::AlignmentReply`
+/// (aligner_reply.rs:51-58).
+///
+/// Replies proceed `Intervals -> SubIntervals -> EventsMetadata -> Retrieval`,
+/// each one letting the asking Replica compare against its own state and then
+/// request the next, finer level. `Discovery` is the initial-alignment reply
+/// (the peer's Zenoh ID). One [`Retrieval`](AlignmentReply::Retrieval) is sent
+/// *per event*, and it additionally carries the event's payload on the
+/// query-reply's value (this enum itself rides the reply attachment, the
+/// payload rides the reply body — zenoh `reply_to_query`, aligner_query.rs:340-363).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlignmentReply {
+    /// The responder's Zenoh ID bytes — the same zid the digest keyexpr is
+    /// formatted from — in answer to a `Discovery`. zenoh
+    /// `AlignmentReply::Discovery(ZenohId)`; wz carries the raw zid bytes
+    /// (the length-trimmed LE prefix [`TimestampHint::zid`] uses).
+    Discovery(Vec<u8>),
+    /// The per-interval fingerprints of the Cold era, in answer to a `Diff`
+    /// with a Cold divergence (zenoh `reply_cold_era`). The Replica diffs
+    /// these against its own to find which intervals to drill into.
+    Intervals(BTreeMap<IntervalIdx, Fingerprint>),
+    /// The per-sub-interval fingerprints of the requested intervals (zenoh
+    /// `reply_sub_intervals`).
+    SubIntervals(BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>>),
+    /// The [`EventMetadata`] in the requested sub-intervals (zenoh
+    /// `reply_events_metadata`). The Replica keeps those it lacks a newer copy
+    /// of and requests their payloads.
+    EventsMetadata(Vec<EventMetadata>),
+    /// One event's [`EventMetadata`], paired (on the query-reply value) with
+    /// its payload (zenoh `reply_event_retrieval`).
+    Retrieval(EventMetadata),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +585,67 @@ mod tests {
                 .fold(Fingerprint::default(), |acc, fp| acc ^ *fp);
             assert_eq!(interval_fp, *warm_fp);
         }
+    }
+
+    // --- AlignmentQuery / AlignmentReply (the protocol vocabulary) ---
+
+    fn a_digest_diff() -> DigestDiff {
+        let cfg = cfg2();
+        let hot_upper = IntervalIdx::from(10);
+        let local = build_digest(&cfg, [("k/a", &at(9, 0))], hot_upper);
+        let peer = build_digest(&cfg, [("k/a", &at(9, 0)), ("k/b", &at(9, 1))], hot_upper);
+        local
+            .diff(peer)
+            .expect("the peer holds an extra key -> a diff exists")
+    }
+
+    #[test]
+    fn alignment_query_variants_are_distinct_and_self_equal() {
+        let diff = a_digest_diff();
+        let q_diff = AlignmentQuery::Diff(diff.clone());
+        let q_intervals = AlignmentQuery::Intervals([IntervalIdx::from(9)].into_iter().collect());
+        let mut sub_map: BTreeMap<IntervalIdx, BTreeSet<SubIntervalIdx>> = BTreeMap::new();
+        sub_map.insert(
+            IntervalIdx::from(9),
+            [SubIntervalIdx::from(0)].into_iter().collect(),
+        );
+        let q_subs = AlignmentQuery::SubIntervals(sub_map);
+        let q_events = AlignmentQuery::Events(vec![EventMetadata::put("k/a", at(9, 0))]);
+
+        // self-equal (incl. through Clone)
+        assert_eq!(AlignmentQuery::Discovery, AlignmentQuery::Discovery);
+        assert_eq!(AlignmentQuery::All, AlignmentQuery::All);
+        assert_eq!(q_diff, AlignmentQuery::Diff(diff));
+        assert_eq!(q_intervals.clone(), q_intervals);
+
+        // distinct variants
+        assert_ne!(AlignmentQuery::Discovery, AlignmentQuery::All);
+        assert_ne!(q_intervals, q_subs);
+        assert_ne!(q_subs, q_events);
+    }
+
+    #[test]
+    fn alignment_reply_variants_are_distinct_and_self_equal() {
+        let r_disc = AlignmentReply::Discovery(vec![0x01, 0xab]);
+        let mut ivl = BTreeMap::new();
+        ivl.insert(IntervalIdx::from(2), Fingerprint::from(7u64));
+        let r_ivl = AlignmentReply::Intervals(ivl.clone());
+        let mut subs: BTreeMap<IntervalIdx, BTreeMap<SubIntervalIdx, Fingerprint>> =
+            BTreeMap::new();
+        let mut inner = BTreeMap::new();
+        inner.insert(SubIntervalIdx::from(0), Fingerprint::from(9u64));
+        subs.insert(IntervalIdx::from(9), inner);
+        let r_subs = AlignmentReply::SubIntervals(subs);
+        let r_meta = AlignmentReply::EventsMetadata(vec![EventMetadata::delete("k/x", at(9, 0))]);
+        let r_ret = AlignmentReply::Retrieval(EventMetadata::put("k/y", at(9, 1)));
+
+        // self-equal
+        assert_eq!(r_disc, AlignmentReply::Discovery(vec![0x01, 0xab]));
+        assert_eq!(r_ivl, AlignmentReply::Intervals(ivl));
+
+        // distinct
+        assert_ne!(r_disc, AlignmentReply::Discovery(vec![0x02]));
+        assert_ne!(r_subs, r_meta);
+        assert_ne!(r_meta, r_ret);
     }
 }
