@@ -380,6 +380,29 @@ fn gated_reply_timestamp(
     }
 }
 
+/// R311vd — SSOT for the reply-side `pubsub-encoding` gate: convert a wz
+/// [`crate::sample::EncodingHint`] into the codec
+/// [`wz_codecs::encoding::EncodingOwned`] iff `pubsub-encoding` is on, else
+/// `None`. The reply-side twin of `push_build::gated_encoding_field` (same
+/// `codec-push`/`codec-response` gate-split rationale as
+/// [`gated_reply_timestamp`]; the conversion SSOT — `EncodingHint::to_codec`
+/// then `try_into_owned` — is reused). Fallible, so it runs in `build`'s
+/// `Result`.
+#[cfg(feature = "codec-response")]
+fn gated_reply_encoding(
+    encoding: Option<&crate::sample::EncodingHint>,
+) -> Result<Option<wz_codecs::encoding::EncodingOwned>, CodecError> {
+    #[cfg(feature = "pubsub-encoding")]
+    {
+        encoding.map(|e| e.to_codec().try_into_owned()).transpose()
+    }
+    #[cfg(not(feature = "pubsub-encoding"))]
+    {
+        let _ = encoding;
+        Ok(None)
+    }
+}
+
 /// The wz minimal `Err` BODY — MID `0x05` only, NO E (encoding) / Z (exts), with
 /// just the always-present payload (zenoh-pico `_z_err_encode`'s minimal shape).
 /// The SSOT the three `build_response_err_*` builders share, so the Err body is
@@ -427,6 +450,12 @@ pub struct ResponseReplyBuilder {
     body_kind_del: bool,
     // Reply-layer settings.
     consolidation: Option<ConsolidationMode>,
+    // R311vd: optional inner-MsgPut value encoding — the `_Z_FLAG_Z_P_E`
+    // (0x40) E-flag + encoding field. Put-only (a Reply Del body has no
+    // encoding slot per zenoh-pico). Held as the wz-side `EncodingHint`,
+    // converted at build() (fallible). What a storage serves a stored
+    // value's encoding back with so a querier renders it faithfully.
+    encoding: Option<crate::sample::EncodingHint>,
     // R311va: optional inner-MsgPut (or MsgDel) value timestamp — the
     // `_Z_FLAG_Z_*_T` (0x20) T-flag + timestamp field. Held as the wz-side
     // `TimestampHint` and converted at build() (the conversion is fallible,
@@ -462,9 +491,23 @@ impl ResponseReplyBuilder {
             payload: payload.to_vec(),
             body_kind_del: false,
             consolidation: None,
+            encoding: None,
             timestamp: None,
             responder: None,
         }
+    }
+
+    /// Set the inner-MsgPut value encoding (the `_Z_FLAG_Z_P_E` E-flag).
+    /// Subsequent calls overwrite (last-wins). Emitted iff `pubsub-encoding`
+    /// is on (the wz MsgPut-encoding policy gate, mirrored from the Push
+    /// path's `gated_encoding_field`); otherwise the E-flag stays clear.
+    /// Put-only — a Reply Del body has no encoding slot, so a `.encoding()`
+    /// on a `.reply_del()` builder is ignored at build(). What
+    /// [`crate::query::QueryReply`] threads a storage's stored-value
+    /// encoding through.
+    pub fn encoding(mut self, encoding: &crate::sample::EncodingHint) -> Self {
+        self.encoding = Some(encoding.clone());
+        self
     }
 
     /// Set the inner-body value timestamp (the `MsgPut` / `MsgDel` T-flag).
@@ -541,10 +584,12 @@ impl ResponseReplyBuilder {
     /// Reply-layer settings. Panics on `(mapping_id=0, suffix=None)`
     /// because the literal path requires an inline keyexpr suffix.
     pub fn build(self) -> Result<ResponseOwned, CodecError> {
-        // Convert the (optional) value timestamp up front — fallible, gated
-        // on pubsub-timestamp. Applied to whichever inner body arm
-        // (MsgPut default / MsgDel after reply_del) survives below.
+        // Convert the (optional) value metadata up front — fallible, each
+        // gated on its policy feature. Timestamp applies to whichever inner
+        // arm (MsgPut / MsgDel) survives; encoding is MsgPut-only (a Reply
+        // Del body has no encoding slot).
         let reply_timestamp = gated_reply_timestamp(self.timestamp.as_ref())?;
+        let reply_encoding = gated_reply_encoding(self.encoding.as_ref())?;
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -597,6 +642,16 @@ impl ResponseReplyBuilder {
                         del.header |= 0x20; // _Z_FLAG_Z_D_T
                     }
                     _ => {}
+                }
+            }
+            // Stamp the inner-MsgPut value encoding + E-flag (0x40). Put-only
+            // — a Reply Del body carries no encoding (zenoh-pico), so a
+            // `.encoding()` on a `.reply_del()` builder is dropped here.
+            // Mirrors the Push path's `build_msg_put_with_meta` E-flag OR.
+            if let Some(enc) = reply_encoding {
+                if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &mut reply.body {
+                    put.encoding = Some(enc);
+                    put.header |= 0x40; // _Z_FLAG_Z_P_E
                 }
             }
         } else {
@@ -1804,6 +1859,34 @@ mod tests {
                     let got = put.timestamp.as_ref().expect("timestamp field present");
                     assert_eq!(got.time, 0xDEAD_BEEF);
                     assert_eq!(got.zid.as_slice(), &[0xAA, 0xBB]);
+                }
+                _ => panic!("expected CodecZenohMsgPut inner body"),
+            },
+            _ => panic!("expected CodecZenohReply body"),
+        }
+    }
+
+    /// R311vd — ResponseReplyBuilder.encoding() stamps the inner MsgPut's
+    /// encoding field + the E-flag (0x40), the faithful value-encoding a
+    /// storage serves back on a reply.
+    #[cfg(all(feature = "codec-response", feature = "pubsub-encoding"))]
+    #[test]
+    fn response_reply_builder_encoding_sets_msgput_e_flag_and_field() {
+        let enc = crate::sample::EncodingHint {
+            packed_id: 13,
+            schema: Some("application/json".into()),
+        };
+        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+            .encoding(&enc)
+            .build()
+            .unwrap();
+        match &response.body {
+            ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
+                ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                    assert_eq!(put.header & 0x40, 0x40, "MsgPut E-flag (0x40) set");
+                    let got = put.encoding.as_ref().expect("encoding field present");
+                    assert_eq!(got.packed_id, 13);
+                    assert_eq!(got.schema.as_deref(), Some("application/json"));
                 }
                 _ => panic!("expected CodecZenohMsgPut inner body"),
             },

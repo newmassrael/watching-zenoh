@@ -324,10 +324,12 @@ impl From<QueryReply> for InboundReply {
                 rid,
                 keyexpr_literal,
                 body,
-                // R311va: the loopback receive path does not yet surface a
-                // reply timestamp (InboundReplyBody carries no timestamp
-                // slot) — the receive-side timestamp is the named follow-up
-                // twin of this emit-side atom. Dropped here intentionally.
+                // R311va/vd: the loopback receive path does not yet surface
+                // reply metadata (InboundReplyBody carries no encoding /
+                // timestamp slot) — the receive-side metadata is the named
+                // follow-up twin of these emit-side atoms. Dropped here
+                // intentionally.
+                encoding: _,
                 timestamp: _,
                 responder: _,
             } => {

@@ -46809,6 +46809,52 @@
         "LOCAL: R311vc on vb=d295e52 (origin/main=ef56758, +7 ahead); host-gated, NOT pushed."
       ]
     },
+    "Round 311vd": {
+      "decision_summary": "R311vd: session-review remediation 3/3 — encoding-on-reply faithful pass-through. zenoh's storage reply is q.reply(key,payload).encoding(entry.encoding).timestamp(entry.timestamp) (service.rs:575-577); wz served only payload+timestamp, dropping the stored encoding — StoredData.encoding was a write-only dead field whose docstring falsely claimed it served the value back faithfully. Now the full reply metadata round-trips: ReplyOut::reply_keyed_stamped gains an encoding arg, QueryReply::Reply gains an encoding field, into_response threads it into the new ResponseReplyBuilder::encoding (MsgPut E-flag 0x40, gated_reply_encoding/pubsub-encoding), the driver serves data.encoding, storage-backend forwards pubsub-encoding.",
+      "changes_bullets": [
+        "query_sink.rs ReplyOut::reply_keyed_stamped now carries encoding: (keyexpr, payload, Option<&EncodingHint>, &TimestampHint) — defaulted -> reply_keyed (drops both). The faithful full-metadata reply seam.",
+        "query.rs QueryReply::Reply gains encoding: Option<EncodingHint>; send_reply_keyed_stamped + the QueryResponder ReplyOut impl carry it; into_response threads it into ResponseReplyBuilder.encoding (all producers + the loopback From<QueryReply> + 2 test literals updated).",
+        "response_build.rs ResponseReplyBuilder.encoding(&EncodingHint) (Put-body only; a Reply Del has no encoding) + gated_reply_encoding (pubsub-encoding gate, twin of push_build::gated_encoding_field); build() sets the inner MsgPut encoding + E-flag 0x40.",
+        "storage_service.rs answer_query now reply_keyed_stamped(&key, &payload, data.encoding.as_ref(), &data.timestamp). wz-runtime-tokio storage-backend forwards pubsub-encoding (capture reads + reply serves).",
+        "storage_backend.rs StoredData.encoding doc corrected: was a false 'must preserve to serve back faithfully' on a write-only dead field; encoding now round-trips."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-history,query-*,pubsub-encoding,pubsub-timestamp 296/296; runtime-tokio --features storage-history --lib storage_service 9/9 (encoding+ts round-trip).",
+        "clippy -D clean (session-core default + storage-history; runtime-tokio storage-history, all --all-targets); fmt clean. facade wz --features runtime-tokio,storage-history builds. Regression: session-core --lib 155/155, runtime-tokio --lib 279/279.",
+        "Direct-read: zenoh reply chain .encoding(entry.encoding).timestamp(entry.timestamp) at service.rs:575-577/:609-611 — wz now matches both legs."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311vd = session-review remediation 3/3 — encoding-on-reply faithful pass-through, closing fidelity-#8 + honesty-Q4 (StoredData.encoding was a write-only dead field with a false docstring). Full reply metadata (key+payload+encoding+timestamp) now round-trips; captured on Put, served on get.",
+        "4-agent review (R311uw..va) functional+correctness defects remediated: vb=#1 zid-tiebreak uhlc-faithful + #5 comparator SSOT; vc=#2 fallback wall-clock NTP64 + #6 citations; vd=#3 encoding round-trip + honesty.",
+        "REMAINING (named, lower severity): arch #4 move apply_sample/answer_query free fns into kernel StorageState (no_std reuse; works as-is); honesty Q1/Q2/Q7/Q8 headline 'end-to-end'/'active' lacks a live-session/cross-process e2e test (StorageService::declare/with_state untested) — a build_session loopback test or MEMORY.md reframing is the residual.",
+        "LOCAL: R311vd on vc=71b540f (origin/main=ef56758, +8 ahead uw..vd); host-gated, NOT pushed; push needs full run-ci."
+      ],
+      "publishable_decision_summary": "R311vd: session-review remediation 3/3 — encoding-on-reply faithful pass-through. zenoh's storage reply is q.reply(key,payload).encoding(entry.encoding).timestamp(entry.timestamp) (service.rs:575-577); wz served only payload+timestamp, dropping the stored encoding — StoredData.encoding was a write-only dead field whose docstring falsely claimed it served the value back faithfully. Now the full reply metadata round-trips: ReplyOut::reply_keyed_stamped gains an encoding arg, QueryReply::Reply gains an encoding field, into_response threads it into the new ResponseReplyBuilder::encoding (MsgPut E-flag 0x40, gated_reply_encoding/pubsub-encoding), the driver serves data.encoding, storage-backend forwards pubsub-encoding.",
+      "publishable_changes_bullets": [
+        "query_sink.rs ReplyOut::reply_keyed_stamped now carries encoding: (keyexpr, payload, Option<&EncodingHint>, &TimestampHint) — defaulted -> reply_keyed (drops both). The faithful full-metadata reply seam.",
+        "query.rs QueryReply::Reply gains encoding: Option<EncodingHint>; send_reply_keyed_stamped + the QueryResponder ReplyOut impl carry it; into_response threads it into ResponseReplyBuilder.encoding (all producers + the loopback From<QueryReply> + 2 test literals updated).",
+        "response_build.rs ResponseReplyBuilder.encoding(&EncodingHint) (Put-body only; a Reply Del has no encoding) + gated_reply_encoding (pubsub-encoding gate, twin of push_build::gated_encoding_field); build() sets the inner MsgPut encoding + E-flag 0x40.",
+        "storage_service.rs answer_query now reply_keyed_stamped(&key, &payload, data.encoding.as_ref(), &data.timestamp). wz-runtime-tokio storage-backend forwards pubsub-encoding (capture reads + reply serves).",
+        "storage_backend.rs StoredData.encoding doc corrected: was a false 'must preserve to serve back faithfully' on a write-only dead field; encoding now round-trips."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-history,query-*,pubsub-encoding,pubsub-timestamp 296/296; runtime-tokio --features storage-history --lib storage_service 9/9 (encoding+ts round-trip).",
+        "clippy -D clean (session-core default + storage-history; runtime-tokio storage-history, all --all-targets); fmt clean. facade wz --features runtime-tokio,storage-history builds. Regression: session-core --lib 155/155, runtime-tokio --lib 279/279.",
+        "Direct-read: zenoh reply chain .encoding(entry.encoding).timestamp(entry.timestamp) at service.rs:575-577/:609-611 — wz now matches both legs."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311vd = session-review remediation 3/3 — encoding-on-reply faithful pass-through, closing fidelity-#8 + honesty-Q4 (StoredData.encoding was a write-only dead field with a false docstring). Full reply metadata (key+payload+encoding+timestamp) now round-trips; captured on Put, served on get.",
+        "4-agent review (R311uw..va) functional+correctness defects remediated: vb=#1 zid-tiebreak uhlc-faithful + #5 comparator SSOT; vc=#2 fallback wall-clock NTP64 + #6 citations; vd=#3 encoding round-trip + honesty.",
+        "REMAINING (named, lower severity): arch #4 move apply_sample/answer_query free fns into kernel StorageState (no_std reuse; works as-is); honesty Q1/Q2/Q7/Q8 headline 'end-to-end'/'active' lacks a live-session/cross-process e2e test (StorageService::declare/with_state untested) — a build_session loopback test or MEMORY.md reframing is the residual.",
+        "LOCAL: R311vd on vc=71b540f (origin/main=ef56758, +8 ahead uw..vd); host-gated, NOT pushed; push needs full run-ci."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [

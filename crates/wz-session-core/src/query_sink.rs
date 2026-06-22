@@ -121,27 +121,31 @@ pub trait ReplyOut {
         let _ = keyexpr;
         self.reply(payload);
     }
-    /// Emit a Put-form reply stamped with both an explicit concrete
-    /// `keyexpr` AND a value `timestamp` (the inner `MsgPut` T-flag). The
-    /// full per-version reply shape a `History::All` storage needs: each
-    /// version replies under its own key carrying the timestamp that orders
-    /// it, so a querier can sequence the versions (zenoh
-    /// `q.reply(key, payload).timestamp(entry.timestamp)`).
+    /// Emit a Put-form reply carrying the FULL stored-value metadata: an
+    /// explicit concrete `keyexpr`, the value `payload`, its `encoding` (the
+    /// inner `MsgPut` E-flag), and its `timestamp` (the T-flag). The
+    /// faithful per-version reply shape a storage needs — zenoh's
+    /// `q.reply(key, payload).encoding(entry.encoding).timestamp(entry.timestamp)`
+    /// (`storages_mgt/service.rs:575-577`): each version replies under its
+    /// own key carrying the encoding to render it AND the timestamp to order
+    /// it, so a querier gets back the value exactly as stored.
     ///
     /// Default impl falls back to [`Self::reply_keyed`] (dropping the
-    /// timestamp), so impls that predate per-version timestamps stay valid
-    /// — a build without `pubsub-timestamp` (or a sink that does not carry
-    /// timestamps) simply omits the T-flag. `alloc`-gated: the
-    /// [`crate::sample::TimestampHint`] type lives in the `alloc`-gated
+    /// encoding + timestamp), so impls that predate per-version metadata
+    /// stay valid — a build without `pubsub-encoding` / `pubsub-timestamp`
+    /// (or a sink that does not carry them) simply omits those flags.
+    /// `alloc`-gated: the [`crate::sample::EncodingHint`] /
+    /// [`crate::sample::TimestampHint`] types live in the `alloc`-gated
     /// `sample` module (mirrors `QueryView::source_info`).
     #[cfg(feature = "alloc")]
     fn reply_keyed_stamped(
         &mut self,
         keyexpr: &str,
-        timestamp: &crate::sample::TimestampHint,
         payload: &[u8],
+        encoding: Option<&crate::sample::EncodingHint>,
+        timestamp: &crate::sample::TimestampHint,
     ) {
-        let _ = timestamp;
+        let _ = (encoding, timestamp);
         self.reply_keyed(keyexpr, payload);
     }
     /// Emit a Del-form reply (the queryable signals deletion at the

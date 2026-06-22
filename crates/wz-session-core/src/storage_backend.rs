@@ -57,7 +57,10 @@
 //!   `Encoding`**: zenoh's `StoredData.encoding` is a non-optional
 //!   `Encoding` (it defaults to `Encoding::default()`); wz models an absent
 //!   encoding as `None`, matching how a wz [`crate::sample::Sample`] carries
-//!   `Option<EncodingHint>` on the receive side.
+//!   `Option<EncodingHint>` on the receive side. The stored encoding IS
+//!   served back on the query reply (the `reply_keyed_stamped` encoding
+//!   leg, mirroring zenoh's `q.reply(..).encoding(entry.encoding)`), so the
+//!   field round-trips — captured on Put, returned on get.
 //!
 //! ## NON-goals (this atom)
 //!
@@ -127,8 +130,10 @@ pub enum History {
 pub struct StoredData {
     /// The stored payload bytes.
     pub payload: Vec<u8>,
-    /// The encoding the value was published with, if any. A storage must
-    /// preserve it to serve the value back faithfully.
+    /// The encoding the value was published with, if any. Captured on Put
+    /// and served back on the query reply (the `reply_keyed_stamped`
+    /// encoding leg), so the value renders on the querier exactly as
+    /// published.
     pub encoding: Option<EncodingHint>,
     /// The timestamp that versioned this value — the key the newer-wins
     /// gate (follow-up atom) compares against.

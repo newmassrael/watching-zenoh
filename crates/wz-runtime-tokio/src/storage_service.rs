@@ -151,7 +151,7 @@ fn answer_query<B: StorageBackend>(
 ) {
     for (key, versions) in state.matching_versions(view.keyexpr()) {
         for data in versions {
-            out.reply_keyed_stamped(&key, &data.timestamp, &data.payload);
+            out.reply_keyed_stamped(&key, &data.payload, data.encoding.as_ref(), &data.timestamp);
         }
     }
 }
@@ -324,9 +324,9 @@ mod tests {
     #[derive(Default)]
     struct RecordingReplyOut {
         keyed: Vec<(String, Vec<u8>)>,
-        // (keyexpr, timestamp.time, payload) for each stamped reply — what
-        // the driver emits via reply_keyed_stamped for every version.
-        stamped: Vec<(String, u64, Vec<u8>)>,
+        // (keyexpr, encoding.packed_id, timestamp.time, payload) for each
+        // stamped reply — the full metadata the driver emits per version.
+        stamped: Vec<(String, Option<u32>, u64, Vec<u8>)>,
     }
     impl ReplyOut for RecordingReplyOut {
         fn reply(&mut self, payload: &[u8]) {
@@ -338,14 +338,19 @@ mod tests {
         fn reply_keyed_stamped(
             &mut self,
             keyexpr: &str,
-            timestamp: &TimestampHint,
             payload: &[u8],
+            encoding: Option<&wz_session_core::sample::EncodingHint>,
+            timestamp: &TimestampHint,
         ) {
             // Keep `keyed` populated (per-key fan assertions) AND record the
-            // stamp separately (per-version timestamp assertions).
+            // full metadata separately (per-version encoding + timestamp).
             self.keyed.push((keyexpr.to_string(), payload.to_vec()));
-            self.stamped
-                .push((keyexpr.to_string(), timestamp.time, payload.to_vec()));
+            self.stamped.push((
+                keyexpr.to_string(),
+                encoding.map(|e| e.packed_id),
+                timestamp.time,
+                payload.to_vec(),
+            ));
         }
         fn reply_del(&mut self) {}
         fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {
@@ -522,13 +527,20 @@ mod tests {
         }
 
         #[test]
-        fn answer_query_stamps_each_version_with_its_value_timestamp() {
-            // The per-version reply timestamp: each version reply carries the
-            // timestamp that orders it, so a querier can sequence them.
+        fn answer_query_stamps_each_version_with_its_value_encoding_and_timestamp() {
+            use wz_session_core::sample::EncodingHint;
+            // Each version reply carries the timestamp that orders it AND the
+            // stored value's encoding, so a querier gets the value back
+            // exactly as published (zenoh .encoding(..).timestamp(..)).
             let mut state = StorageState::new(HistoryStorage::new());
             apply_sample(
                 &mut state,
-                &Sample::new_put("demo/a", vec![1]).with_timestamp(ts(10, 1)),
+                &Sample::new_put("demo/a", vec![1])
+                    .with_timestamp(ts(10, 1))
+                    .with_encoding(EncodingHint {
+                        packed_id: 4,
+                        schema: None,
+                    }),
                 || unreachable!(),
             );
             apply_sample(
@@ -542,10 +554,11 @@ mod tests {
             assert_eq!(
                 out.stamped,
                 vec![
-                    (String::from("demo/a"), 10, vec![1]),
-                    (String::from("demo/a"), 20, vec![2]),
+                    // v1 carried encoding 4 + ts 10; v2 no encoding + ts 20.
+                    (String::from("demo/a"), Some(4), 10, vec![1]),
+                    (String::from("demo/a"), None, 20, vec![2]),
                 ],
-                "each version reply carries its own value timestamp, in order"
+                "each version reply carries its own encoding + timestamp, in order"
             );
         }
     }

@@ -173,7 +173,7 @@ use crate::query_sink::{QuerySink, QueryView, ReplyOut};
 #[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
 #[cfg(feature = "alloc")]
-use crate::sample::TimestampHint;
+use crate::sample::{EncodingHint, TimestampHint};
 
 /// R311v — extract the attachment payload view from an inbound
 /// [`Query`]'s extensions chain.
@@ -356,6 +356,13 @@ pub enum QueryReply {
         keyexpr_literal: String,
         /// Reply body arm (Put or Del).
         body: ReplyBody,
+        /// Optional value encoding carried on the inner `MsgPut` (the
+        /// `_Z_FLAG_Z_P_E` E-flag). `None` emits no encoding; `Some` serves
+        /// the stored value's encoding back so a querier renders it exactly
+        /// as published — zenoh `q.reply(..).encoding(entry.encoding)`
+        /// (`storages_mgt/service.rs:575-577`). Threaded into
+        /// [`crate::response_build::ResponseReplyBuilder::encoding`].
+        encoding: Option<EncodingHint>,
         /// Optional value timestamp carried on the inner `MsgPut` (the
         /// `_Z_FLAG_Z_P_T` T-flag). `None` emits no timestamp; `Some`
         /// stamps the version the reply carries — what a `History::All`
@@ -415,6 +422,7 @@ impl QueryReply {
                 rid,
                 keyexpr_literal,
                 body,
+                encoding,
                 timestamp,
                 responder,
             } => {
@@ -431,10 +439,14 @@ impl QueryReply {
                         ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[]).reply_del()
                     }
                 };
-                // Thread the per-version value timestamp onto the inner
-                // MsgPut (T-flag) — emitted iff `pubsub-timestamp` is on
-                // (the builder gates the field). `None` leaves the MsgPut
-                // un-timestamped exactly as before.
+                // Thread the per-version value encoding (E-flag) + timestamp
+                // (T-flag) onto the inner MsgPut — each emitted iff its
+                // policy gate (`pubsub-encoding` / `pubsub-timestamp`) is on
+                // (the builder gates the fields). `None` leaves that flag
+                // clear, exactly as before.
+                if let Some(enc) = encoding {
+                    builder = builder.encoding(&enc);
+                }
                 if let Some(ts) = timestamp {
                     builder = builder.timestamp(&ts);
                 }
@@ -515,6 +527,7 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: self.keyexpr_literal.clone(),
             body: ReplyBody::Put(payload.to_vec()),
+            encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
         });
@@ -536,30 +549,34 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
+            encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
         });
     }
 
-    /// Emit a Put-form reply stamped with both an explicit `keyexpr` AND a
-    /// value `timestamp` (the inner `MsgPut` T-flag). The full
-    /// per-version reply shape a `History::All` storage needs: each version
-    /// replies under its concrete key carrying the timestamp that orders it
-    /// (zenoh `q.reply(key, payload).timestamp(entry.timestamp)`,
-    /// `storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`). The timestamp threads through
-    /// [`QueryReply::into_response`] into
-    /// [`crate::response_build::ResponseReplyBuilder::timestamp`] (emitted
-    /// iff `pubsub-timestamp` is on, the wz MsgPut-timestamp policy gate).
+    /// Emit a Put-form reply carrying the full stored-value metadata: an
+    /// explicit `keyexpr`, the value `encoding` (the `MsgPut` E-flag), and
+    /// the value `timestamp` (the T-flag). The faithful per-version reply a
+    /// storage emits — zenoh
+    /// `q.reply(key, payload).encoding(entry.encoding).timestamp(entry.timestamp)`
+    /// (`storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`).
+    /// Both metadata fields thread through [`QueryReply::into_response`] into
+    /// [`crate::response_build::ResponseReplyBuilder`] (the encoding emitted
+    /// iff `pubsub-encoding` is on, the timestamp iff `pubsub-timestamp` is
+    /// on — the wz MsgPut metadata policy gates).
     pub fn send_reply_keyed_stamped(
         &mut self,
         keyexpr: &str,
-        timestamp: &TimestampHint,
         payload: &[u8],
+        encoding: Option<&EncodingHint>,
+        timestamp: &TimestampHint,
     ) {
         self.replies.push(QueryReply::Reply {
             rid: self.rid,
             keyexpr_literal: keyexpr.to_string(),
             body: ReplyBody::Put(payload.to_vec()),
+            encoding: encoding.cloned(),
             timestamp: Some(timestamp.clone()),
             responder: self.responder.clone(),
         });
@@ -574,6 +591,7 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: self.keyexpr_literal.clone(),
             body: ReplyBody::Del,
+            encoding: None,
             timestamp: None,
             responder: self.responder.clone(),
         });
@@ -688,8 +706,14 @@ impl ReplyOut for QueryResponder<'_> {
     fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
         self.send_reply_keyed(keyexpr, payload);
     }
-    fn reply_keyed_stamped(&mut self, keyexpr: &str, timestamp: &TimestampHint, payload: &[u8]) {
-        self.send_reply_keyed_stamped(keyexpr, timestamp, payload);
+    fn reply_keyed_stamped(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+        timestamp: &TimestampHint,
+    ) {
+        self.send_reply_keyed_stamped(keyexpr, payload, encoding, timestamp);
     }
     fn reply_del(&mut self) {
         self.send_reply_del();
@@ -1843,7 +1867,11 @@ mod tests {
                 time: 0x1234,
                 zid: alloc::vec![0x07],
             };
-            responder.reply_keyed_stamped("demo/a", &ts, b"v1");
+            let enc = EncodingHint {
+                packed_id: 13,
+                schema: None,
+            };
+            responder.reply_keyed_stamped("demo/a", b"v1", Some(&enc), &ts);
         });
 
         let mut replies = Vec::new();
@@ -1857,6 +1885,7 @@ mod tests {
         match &replies[0] {
             QueryReply::Reply {
                 keyexpr_literal,
+                encoding,
                 timestamp,
                 body: ReplyBody::Put(payload),
                 ..
@@ -1868,6 +1897,10 @@ mod tests {
                     .expect("the reply carries the value timestamp");
                 assert_eq!(ts.time, 0x1234);
                 assert_eq!(ts.zid.as_slice(), &[0x07]);
+                let enc = encoding
+                    .as_ref()
+                    .expect("the reply carries the value encoding");
+                assert_eq!(enc.packed_id, 13);
             }
             other => panic!("expected stamped Put Reply, got {other:?}"),
         }
@@ -2120,6 +2153,7 @@ mod tests {
             rid: 42,
             keyexpr_literal: "home/temp".to_string(),
             body: ReplyBody::Put(b"hello".to_vec()),
+            encoding: None,
             timestamp: None,
             responder: None,
         };
@@ -2143,6 +2177,7 @@ mod tests {
             rid: 42,
             keyexpr_literal: "clear/me".to_string(),
             body: ReplyBody::Del,
+            encoding: None,
             timestamp: None,
             responder: None,
         };
