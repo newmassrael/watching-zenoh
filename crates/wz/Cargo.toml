@@ -564,9 +564,15 @@ session-unicast-open = [
     "wz-runtime-lwip?/session-unicast-open",
 ]
 
-# ----- domain: storage (3 active: storage-backend + storage-history +
-# storage-replication; 1 reserved: storage-aligner) -----
-storage-aligner = []
+# ----- domain: storage (4 active: storage-backend + storage-history +
+# storage-replication + storage-aligner) -----
+# R311wl — storage-aligner forwards the AP aligner driver
+# (wz-runtime-tokio?/storage-aligner = the `storage_aligner_service` module:
+# the answer queryable + the ASK pull loop + the digest->aligner on_diff
+# wiring). AP-only (the MCU runtime has no storage driver); implies
+# storage-replication (the aligner consumes a DigestDiff and reuses the digest
+# keyexpr / zid rendering).
+storage-aligner = ["storage-replication", "wz-runtime-tokio?/storage-aligner"]
 # R311uy — storage-backend now forwards the AP StorageService driver
 # (wz-runtime-tokio?/storage-backend = the `storage_service` module + the
 # kernel: StorageBackend seam + StorageState newer-wins gate). AP-only:

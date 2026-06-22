@@ -937,6 +937,37 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings)
 }
 
+# ─── Layer C1z — storage driver: backend/history/replication/aligner ─
+#
+# R311wl: the storage DRIVER stack — the StorageService capture+answer
+# queryable, the History::All backend, the digest publisher/subscriber, and the
+# aligner answer queryable + ASK pull loop + on_diff->pull wiring — is gated on
+# the off-default storage-* features, so the default Layer C1
+# (`cargo test --workspace`) does NOT compile it: storage was UNCOVERED in CI
+# before this lane. storage-aligner is the maximal replication-side feature (it
+# implies storage-replication -> storage-backend), so two configs exercise every
+# storage driver module:
+#   1. runs the storage_* lib tests (storage_service / storage_replication_service
+#      / storage_aligner_service) under `--features storage-aligner`, and the
+#      History::All tests under `--features storage-history`;
+#   2. clippy-gates both cfgs (`--all-targets`);
+#   3. clippy-gates the LIB under `--no-default-features --features storage-aligner`
+#      to prove the storage driver composes standalone (storage-aligner pulls its
+#      full set: storage-replication + query-{queryable,consolidation,timeout,
+#      attachment} + pubsub-{attachment,encoding,timestamp} + transport-unicast);
+#   4. builds the wz facade under `--features storage-aligner` so the
+#      `wz-runtime-tokio?/storage-aligner` forward (R311wl) stays wired.
+# The live two-replica digest->aligner convergence e2e is the A11 follow-up.
+layer_c1z_cargo_test_storage_driver() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet \
+        && cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-aligner --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-history --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features storage-aligner --quiet -- -D warnings \
+        && cargo build -p wz --features storage-aligner --quiet)
+}
+
 # ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
 #
 # R311du: same shape as C1c. The pubsub SubscriberRegistry test module
@@ -3162,6 +3193,7 @@ run_layer C1v layer_c1v_cargo_test_ws || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1
+run_layer C1z layer_c1z_cargo_test_storage_driver || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
