@@ -46855,6 +46855,46 @@
         "LOCAL: R311vd on vc=71b540f (origin/main=ef56758, +8 ahead uw..vd); host-gated, NOT pushed; push needs full run-ci."
       ]
     },
+    "Round 311ve": {
+      "decision_summary": "R311ve: session-review remediation 4 (architecture finding #4) — apply_sample/answer_query moved from the wz-runtime-tokio driver into the kernel StorageState as the apply_sample / answer_into methods. They were pure over the kernel seams (SampleView/QueryView/ReplyOut) yet lived in the tokio crate, blocking no_std reuse; a future MCU storage driver now reuses the exact capture+serve mapping, and the tokio module is purely the lock-and-delegate binding. Driver closures + the 9 driver tests now call the methods; SampleKind import dropped; module docs updated.",
+      "changes_bullets": [
+        "storage_state.rs: apply_sample(&mut self, view: &dyn SampleView, fallback) + answer_into(&self, view: &dyn QueryView, out: &mut dyn ReplyOut) added as StorageState methods (the capture-side + serve-side mappings). Pure over the kernel seams (SampleView/QueryView/ReplyOut), no async/no Session.",
+        "storage_service.rs: the free fns apply_sample/answer_query REMOVED; the subscriber/queryable closures + all driver tests now call guard.apply_sample / guard.answer_into. The driver is the thin tokio binding (lock + delegate). Module doc + imports updated (SampleKind import dropped).",
+        "Architecture review finding #4 fixed: the capture/answer mapping was in wz-runtime-tokio (pure over kernel traits) which blocked no_std reuse; a future MCU storage driver now reuses the exact mapping from the kernel."
+      ],
+      "verification_bullets": [
+        "session-core --features storage-history,... storage 26/26; runtime-tokio --features storage-history --lib storage_service 9/9 (the 9 driver tests now exercise the kernel methods via state.apply_sample/answer_into).",
+        "clippy -D clean (session-core storage-history + runtime-tokio storage-history, --all-targets; no unused-import after dropping SampleKind); fmt clean. Regression: session-core --lib 155/155, runtime-tokio --lib 279/279 default."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "carry_forward_bullets": [
+        "R311ve = session-review remediation 4 (architecture finding #4): apply_sample/answer_query moved from the wz-runtime-tokio driver into the kernel StorageState as methods (apply_sample / answer_into). They are pure over the kernel seams, so a future no_std/MCU storage driver reuses the capture+serve mapping; the tokio module is now purely the lock+delegate binding.",
+        "4-agent session review (R311uw..va) remediation status: vb=#1 zid uhlc-faithful + #5 comparator SSOT; vc=#2 fallback wall-clock NTP64 + #6 citations; vd=#3 encoding round-trip + dead-field honesty; ve=#4 kernel placement. All functional/correctness/structure defects addressed.",
+        "REMAINING (honesty Q1/Q2/Q7/Q8, lowest severity, named): StorageService::declare / with_state have NO live-session test (the 'driver tests' construct StorageState + call its methods directly; the session wiring + RAII teardown are untested), so 'end-to-end'/'active' in the earlier ledger headlines remains coverage-light. Residual = a build_session in-process loopback test (publish->capture->stored, get->answer->reply) OR an honest MEMORY.md/headline reframing. Also: kernel-crate test coverage of apply_sample/answer_into (currently exercised only from the driver crate's tests).",
+        "LOCAL: R311ve on vd=60a8d00 (origin/main=ef56758, +9 ahead uw..ve); host-gated, NOT pushed."
+      ],
+      "publishable_decision_summary": "R311ve: session-review remediation 4 (architecture finding #4) — apply_sample/answer_query moved from the wz-runtime-tokio driver into the kernel StorageState as the apply_sample / answer_into methods. They were pure over the kernel seams (SampleView/QueryView/ReplyOut) yet lived in the tokio crate, blocking no_std reuse; a future MCU storage driver now reuses the exact capture+serve mapping, and the tokio module is purely the lock-and-delegate binding. Driver closures + the 9 driver tests now call the methods; SampleKind import dropped; module docs updated.",
+      "publishable_changes_bullets": [
+        "storage_state.rs: apply_sample(&mut self, view: &dyn SampleView, fallback) + answer_into(&self, view: &dyn QueryView, out: &mut dyn ReplyOut) added as StorageState methods (the capture-side + serve-side mappings). Pure over the kernel seams (SampleView/QueryView/ReplyOut), no async/no Session.",
+        "storage_service.rs: the free fns apply_sample/answer_query REMOVED; the subscriber/queryable closures + all driver tests now call guard.apply_sample / guard.answer_into. The driver is the thin tokio binding (lock + delegate). Module doc + imports updated (SampleKind import dropped).",
+        "Architecture review finding #4 fixed: the capture/answer mapping was in wz-runtime-tokio (pure over kernel traits) which blocked no_std reuse; a future MCU storage driver now reuses the exact mapping from the kernel."
+      ],
+      "publishable_verification_bullets": [
+        "session-core --features storage-history,... storage 26/26; runtime-tokio --features storage-history --lib storage_service 9/9 (the 9 driver tests now exercise the kernel methods via state.apply_sample/answer_into).",
+        "clippy -D clean (session-core storage-history + runtime-tokio storage-history, --all-targets; no unused-import after dropping SampleKind); fmt clean. Regression: session-core --lib 155/155, runtime-tokio --lib 279/279 default."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ve = session-review remediation 4 (architecture finding #4): apply_sample/answer_query moved from the wz-runtime-tokio driver into the kernel StorageState as methods (apply_sample / answer_into). They are pure over the kernel seams, so a future no_std/MCU storage driver reuses the capture+serve mapping; the tokio module is now purely the lock+delegate binding.",
+        "4-agent session review (R311uw..va) remediation status: vb=#1 zid uhlc-faithful + #5 comparator SSOT; vc=#2 fallback wall-clock NTP64 + #6 citations; vd=#3 encoding round-trip + dead-field honesty; ve=#4 kernel placement. All functional/correctness/structure defects addressed.",
+        "REMAINING (honesty Q1/Q2/Q7/Q8, lowest severity, named): StorageService::declare / with_state have NO live-session test (the 'driver tests' construct StorageState + call its methods directly; the session wiring + RAII teardown are untested), so 'end-to-end'/'active' in the earlier ledger headlines remains coverage-light. Residual = a build_session in-process loopback test (publish->capture->stored, get->answer->reply) OR an honest MEMORY.md/headline reframing. Also: kernel-crate test coverage of apply_sample/answer_into (currently exercised only from the driver crate's tests).",
+        "LOCAL: R311ve on vd=60a8d00 (origin/main=ef56758, +9 ahead uw..ve); host-gated, NOT pushed."
+      ]
+    },
     "Round 311w": {
       "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
       "changes_bullets": [

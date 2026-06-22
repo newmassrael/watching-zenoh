@@ -21,12 +21,14 @@
 //! `declare_subscriber` (service.rs:142-148) + `declare_queryable`
 //! `.complete(..)` (service.rs:151-162), and the select loop's two arms
 //! (service.rs:170-208): a received sample routes to `process_sample`
-//! (here [`apply_sample`] -> the gate's `process_put` / `process_delete`)
-//! and a received query routes to `reply_query` (here [`answer_query`] ->
-//! the gate's `matching_entries`, replied per key). wz's callback-driven
-//! observer replaces zenoh's explicit `tokio::select!` — the subscriber /
-//! queryable registries fire the two closures, so the "loop" is the
-//! session's own drive loop, not a private one.
+//! (here the gate's [`StorageState::apply_sample`]) and a received query
+//! routes to `reply_query` (here the gate's [`StorageState::answer_into`]).
+//! Both are runtime-agnostic kernel methods (no async / no Session), so a
+//! future MCU storage driver reuses the same capture/answer mapping; this
+//! module is the thin tokio binding that locks the shared state and
+//! delegates. wz's callback-driven observer replaces zenoh's explicit
+//! `tokio::select!` — the subscriber / queryable registries fire the two
+//! closures, so the "loop" is the session's own drive loop.
 //!
 //! ## Fallback timestamp (the §5.18 seam)
 //!
@@ -50,8 +52,8 @@
 //! the later one Replaces). An HLC's logical counter removes both; a
 //! sample that DOES carry a timestamp always uses it, so a
 //! timestamped-publisher deployment is unaffected either way. The fallback
-//! is injectable at the [`apply_sample`] seam (it takes the stamp closure
-//! by `FnOnce`), so the §5.18 HLC is a drop-in when it lands.
+//! is injectable at the [`StorageState::apply_sample`] seam (it takes the
+//! stamp closure by `FnOnce`), so the §5.18 HLC is a drop-in when it lands.
 //!
 //! ## NON-goals (this atom)
 //!
@@ -68,7 +70,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::TimestampHint;
-use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::SampleView;
 use wz_session_core::storage_backend::{MemoryStorage, StorageBackend};
 use wz_session_core::storage_state::StorageState;
@@ -105,56 +106,6 @@ fn wall_clock_ntp64() -> u64 {
 /// callbacks each own a clone, `Mutex` because the session may fire them
 /// from different worker threads.
 type SharedState<B> = Arc<Mutex<StorageState<B>>>;
-
-/// Apply one inbound sample to the gate: a Put is stored / a Del removes,
-/// both through the [`StorageState`] gate (a `History::Latest` backend
-/// drops an outdated mutation; a `History::All` backend retains every
-/// version). An un-timestamped sample is stamped via `fallback` (called at
-/// most once, only when the sample carries no timestamp). Free function so
-/// the capture logic is unit-testable without a live session — the
-/// subscriber closure is a thin lock-then-call wrapper over this.
-fn apply_sample<B: StorageBackend>(
-    state: &mut StorageState<B>,
-    view: &dyn SampleView,
-    fallback: impl FnOnce() -> TimestampHint,
-) {
-    let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
-    match view.kind() {
-        SampleKind::Put => {
-            let encoding = view.encoding().cloned();
-            state.process_put(view.keyexpr(), view.payload().to_vec(), encoding, timestamp);
-        }
-        SampleKind::Del => {
-            state.process_delete(view.keyexpr(), timestamp);
-        }
-    }
-}
-
-/// Answer one inbound query from the stored set: reply every matching key,
-/// each stamped with its OWN concrete keyexpr via [`ReplyOut::reply_keyed`]
-/// (so a wildcard get returns per-key replies, not the wildcard). A
-/// `History::All` backend replies ALL versions of each matching key (via
-/// [`StorageState::matching_versions`]); a `History::Latest` backend
-/// replies the single value per key. The terminating ResponseFinal is
-/// scheduled by the queryable dispatch path, not here. Free function for
-/// the same unit-testability reason as [`apply_sample`].
-///
-/// Each reply carries its version's TIMESTAMP via
-/// [`ReplyOut::reply_keyed_stamped`] (the inner MsgPut T-flag, emitted iff
-/// `pubsub-timestamp` is on), so a `History::All` querier can order the
-/// versions it receives — zenoh `q.reply(key, payload).timestamp(entry.timestamp)`
-/// (`storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)`).
-fn answer_query<B: StorageBackend>(
-    state: &StorageState<B>,
-    view: &dyn QueryView,
-    out: &mut dyn ReplyOut,
-) {
-    for (key, versions) in state.matching_versions(view.keyexpr()) {
-        for data in versions {
-            out.reply_keyed_stamped(&key, &data.payload, data.encoding.as_ref(), &data.timestamp);
-        }
-    }
-}
 
 /// A live storage service bound to a [`Session`]: owns the capture
 /// [`Subscriber`], the answering [`Queryable`], and the shared
@@ -213,7 +164,7 @@ where
             SubscribeOptions::default(),
             move |view: &dyn SampleView| {
                 let mut guard = sub_state.lock().expect("storage state mutex poisoned");
-                apply_sample(&mut guard, view, || TimestampHint {
+                guard.apply_sample(view, || TimestampHint {
                     time: wall_clock_ntp64(),
                     zid: fallback_zid.clone(),
                 });
@@ -228,7 +179,7 @@ where
             QueryableOptions::default().with_complete(true),
             move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
                 let guard = query_state.lock().expect("storage state mutex poisoned");
-                answer_query(&guard, view, out);
+                guard.answer_into(view, out);
             },
         )?;
 
@@ -377,7 +328,7 @@ mod tests {
     fn apply_sample_put_uses_the_carried_timestamp_not_the_fallback() {
         let mut state = fresh();
         let sample = Sample::new_put("demo/a", vec![1, 2, 3]).with_timestamp(ts(10, 1));
-        apply_sample(&mut state, &sample, || {
+        state.apply_sample(&sample, || {
             panic!("fallback must not run for a stamped sample")
         });
         let stored = state.get("demo/a").expect("stored after put");
@@ -389,7 +340,7 @@ mod tests {
     fn apply_sample_put_without_timestamp_uses_the_fallback() {
         let mut state = fresh();
         let sample = Sample::new_put("demo/a", vec![9]);
-        apply_sample(&mut state, &sample, || ts(7, 9));
+        state.apply_sample(&sample, || ts(7, 9));
         let stored = state.get("demo/a").expect("stored after put");
         assert_eq!(
             stored.timestamp,
@@ -401,13 +352,11 @@ mod tests {
     #[test]
     fn apply_sample_del_removes_through_the_gate() {
         let mut state = fresh();
-        apply_sample(
-            &mut state,
+        state.apply_sample(
             &Sample::new_put("demo/a", vec![1]).with_timestamp(ts(10, 1)),
             || unreachable!(),
         );
-        apply_sample(
-            &mut state,
+        state.apply_sample(
             &Sample::new_del("demo/a").with_timestamp(ts(20, 1)),
             || unreachable!(),
         );
@@ -419,13 +368,11 @@ mod tests {
         // A second put with an older timestamp is dropped by the gate; the
         // driver does not bypass newer-wins.
         let mut state = fresh();
-        apply_sample(
-            &mut state,
+        state.apply_sample(
             &Sample::new_put("demo/a", vec![9]).with_timestamp(ts(100, 1)),
             || unreachable!(),
         );
-        apply_sample(
-            &mut state,
+        state.apply_sample(
             &Sample::new_put("demo/a", vec![1]).with_timestamp(ts(1, 1)),
             || unreachable!(),
         );
@@ -452,7 +399,7 @@ mod tests {
         state.process_put("other/c", vec![3], None, ts(10, 1));
 
         let mut out = RecordingReplyOut::default();
-        answer_query(&state, &query("demo/*"), &mut out);
+        state.answer_into(&query("demo/*"), &mut out);
 
         let mut got = out.keyed;
         got.sort_by(|a, b| a.0.cmp(&b.0));
@@ -471,7 +418,7 @@ mod tests {
         let mut state = fresh();
         state.process_put("demo/a", vec![42], None, ts(10, 1));
         let mut out = RecordingReplyOut::default();
-        answer_query(&state, &query("demo/a"), &mut out);
+        state.answer_into(&query("demo/a"), &mut out);
         assert_eq!(out.keyed, vec![(String::from("demo/a"), vec![42])]);
     }
 
@@ -481,7 +428,7 @@ mod tests {
         state.process_put("demo/a", vec![1], None, ts(10, 1));
         state.process_delete("demo/a", ts(20, 1));
         let mut out = RecordingReplyOut::default();
-        answer_query(&state, &query("demo/**"), &mut out);
+        state.answer_into(&query("demo/**"), &mut out);
         assert!(out.keyed.is_empty(), "a deleted key is not replied");
     }
 
@@ -495,24 +442,21 @@ mod tests {
         fn answer_query_replies_every_version_of_a_history_all_key() {
             let mut state = StorageState::new(HistoryStorage::new());
             // Three versions of one key (an older one arrives out of order).
-            apply_sample(
-                &mut state,
+            state.apply_sample(
                 &Sample::new_put("demo/a", vec![3]).with_timestamp(ts(30, 1)),
                 || unreachable!(),
             );
-            apply_sample(
-                &mut state,
+            state.apply_sample(
                 &Sample::new_put("demo/a", vec![1]).with_timestamp(ts(10, 1)),
                 || unreachable!(),
             );
-            apply_sample(
-                &mut state,
+            state.apply_sample(
                 &Sample::new_put("demo/a", vec![2]).with_timestamp(ts(20, 1)),
                 || unreachable!(),
             );
 
             let mut out = RecordingReplyOut::default();
-            answer_query(&state, &query("demo/a"), &mut out);
+            state.answer_into(&query("demo/a"), &mut out);
             // All three versions replied, each under the concrete key,
             // ordered by timestamp (the backend keeps them sorted).
             assert_eq!(
@@ -533,8 +477,7 @@ mod tests {
             // stored value's encoding, so a querier gets the value back
             // exactly as published (zenoh .encoding(..).timestamp(..)).
             let mut state = StorageState::new(HistoryStorage::new());
-            apply_sample(
-                &mut state,
+            state.apply_sample(
                 &Sample::new_put("demo/a", vec![1])
                     .with_timestamp(ts(10, 1))
                     .with_encoding(EncodingHint {
@@ -543,14 +486,13 @@ mod tests {
                     }),
                 || unreachable!(),
             );
-            apply_sample(
-                &mut state,
+            state.apply_sample(
                 &Sample::new_put("demo/a", vec![2]).with_timestamp(ts(20, 1)),
                 || unreachable!(),
             );
 
             let mut out = RecordingReplyOut::default();
-            answer_query(&state, &query("demo/a"), &mut out);
+            state.answer_into(&query("demo/a"), &mut out);
             assert_eq!(
                 out.stamped,
                 vec![

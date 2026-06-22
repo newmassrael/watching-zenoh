@@ -77,7 +77,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::keyexpr_match::keyexpr_intersects_target;
+use crate::query_sink::{QueryView, ReplyOut};
 use crate::sample::{EncodingHint, TimestampHint};
+use crate::sample_kind::SampleKind;
+use crate::sink::SampleView;
 use crate::storage_backend::{History, StorageBackend, StorageInsertionResult, StoredData};
 
 /// The uhlc-faithful ordering key for a timestamp: `(time, zid-as-16-byte
@@ -263,6 +266,55 @@ impl<B: StorageBackend> StorageState<B> {
             }
         }
         out
+    }
+
+    /// Apply one inbound sample (the capture side of a storage): a Put is
+    /// stored / a Del removes, both through the newer-wins gate
+    /// ([`process_put`](Self::process_put) / [`process_delete`](Self::process_delete)).
+    /// An un-timestamped sample is stamped via `fallback` (called at most
+    /// once, only when the sample carries no timestamp — the §5.18 seam; a
+    /// runtime driver passes a wall-clock / HLC closure). Runtime-agnostic:
+    /// reads the sample through the [`SampleView`] seam, no async / no
+    /// Session, so any storage driver (tokio, a future MCU one) reuses this
+    /// exact capture mapping. zenoh `process_sample`
+    /// (`storages_mgt/service.rs:213-369`, the `select!` sample arm).
+    pub fn apply_sample(
+        &mut self,
+        view: &dyn SampleView,
+        fallback: impl FnOnce() -> TimestampHint,
+    ) {
+        let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
+        match view.kind() {
+            SampleKind::Put => {
+                let encoding = view.encoding().cloned();
+                self.process_put(view.keyexpr(), view.payload().to_vec(), encoding, timestamp);
+            }
+            SampleKind::Del => {
+                self.process_delete(view.keyexpr(), timestamp);
+            }
+        }
+    }
+
+    /// Answer one inbound query from the stored set (the serve side of a
+    /// storage): reply every matching key — under `History::All` every
+    /// version of it — each stamped with its OWN concrete keyexpr + value
+    /// encoding + timestamp via [`ReplyOut::reply_keyed_stamped`], so a
+    /// querier gets the value back exactly as stored and can order the
+    /// versions. The terminating `ResponseFinal` is the queryable dispatch
+    /// path's job, not this. Runtime-agnostic (reads the query through
+    /// [`QueryView`], emits through the [`ReplyOut`] seam). zenoh
+    /// `reply_query` (`storages_mgt/service.rs:546-622`).
+    pub fn answer_into(&self, view: &dyn QueryView, out: &mut dyn ReplyOut) {
+        for (key, versions) in self.matching_versions(view.keyexpr()) {
+            for data in versions {
+                out.reply_keyed_stamped(
+                    &key,
+                    &data.payload,
+                    data.encoding.as_ref(),
+                    &data.timestamp,
+                );
+            }
+        }
     }
 
     /// Borrow the underlying backend (read-only inspection / handoff).
