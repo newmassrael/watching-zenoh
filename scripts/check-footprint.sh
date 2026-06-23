@@ -121,8 +121,13 @@ declare -A BASELINE_MC_TEXT=(
     # (R311mp~ns: publish/subscribe SSOT, Session typestate, seam refactors,
     # declare routing). text-only growth (data/bss flat), verified feature-driven
     # by symbol breakdown + 23-commit closure log; not a leak. Old: 50680/50484.
-    ["thumbv7m-none-eabi"]=51260
-    ["thumbv7em-none-eabihf"]=51320
+    # R311wz — SHRANK after the SCE pin bump to ba65f7a1b: the VLE 9-byte-cap fix
+    # moved each codec's inline LEB128 emit to one shared runtime write_vle_uN
+    # call, so the codec-heavy multicast binary lost duplicated VLE loops.
+    # text-only reduction (data/bss flat); a code-size improvement, not a leak.
+    # Old: 51260/51320 (R311pr).
+    ["thumbv7m-none-eabi"]=50292
+    ["thumbv7em-none-eabihf"]=50328
 )
 declare -A BASELINE_MC_DATA=(
     ["thumbv7m-none-eabi"]=4

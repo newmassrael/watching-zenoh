@@ -1901,7 +1901,9 @@
         "(g) reproducible: bash scripts/run-ci.sh --layer Q then arm-none-eabi-size the built ELF",
         "(h) figures are R311mi measurements; this section is their living home (was R311mi ledger-only)",
         "(i) R311pr re-measure thumbv7m text=51260 (+580 vs a); multicast accretion, text-only no leak",
-        "(j) R311pr re-measure thumbv7em text=51320 (+836 vs b); same cause; BASELINE_MC rebased"
+        "(j) R311pr re-measure thumbv7em text=51320 (+836 vs b); same cause; BASELINE_MC rebased",
+        "(l) R311wz thumbv7em text=50328 (-992 vs j); same SCE-VLE-codegen cause; BASELINE_MC rebased",
+        "(k) R311wz thumbv7m text=50292 (-968 vs i); SCE ba65f7a1b VLE 9-cap codegen shrink, text-only"
       ],
       "impact_scope": [
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
@@ -48949,6 +48951,52 @@
         "R3b live handshake wiring (usrpwd e2e) is where the dummy-HMAC timing-oracle hardening + the fresh-per-handshake RNG nonce contract MUST land; the golden-byte fixture is the unit down-payment, a wz<->zenohd usrpwd interop e2e the full cross-impl proof (like storage A10/A12).",
         "access domain still 4/6 active (acl/downsampling/quota/usrpwd); pubkey (R4, RSA dep) + jwt (phantom, reclassify) remain.",
         "LOCAL: R311wy atop bf654bb (origin/main after the R311wu-wx push). Recommend full run-ci before any push (the ext_nodeid re-export + vle move touch the codec hot path; new C1y lane). NOT pushed without explicit consent."
+      ]
+    },
+    "Round 311wz": {
+      "decision_summary": "R311wz: bump the SCE vendor submodule pin 3078f8bf7 -> ba65f7a1b to pull the VLE 9-byte-cap fix the R311wy review surfaced + reported upstream (SCE 812ff17cd caps a u64 ZInt at 9 bytes per canonical zenoh; ba65f7a1b moves the encode into the runtime write_vle_uN). sce-codegen rebuilt + wz codecs regenerated (ExtZint::encode now delegates to the 9-byte-cap runtime sink, matching zenoh + zenoh-pico). wz's hand-rolled vle is retired -- read/encode now delegate to the sce_forge_runtime VLE SSOT. Resolves the R311wy VLE-outstanding item; pin-bump only, no SCE source edited from this session.",
+      "changes_bullets": [
+        "vendor/sce: submodule pin bump 3078f8bf7 -> ba65f7a1b (SCE origin/main). The two relevant SCE commits: 812ff17cd \"Cap VLE u64 codec at 9 bytes to match canonical Zenoh ZInt\" (final byte = 8 data bits; RFC App.B + encode SSOT + all 6 runtime decode paths + golden vectors) and ba65f7a1b \"Move VLE encode into runtime write_vle_uN, symmetric to read\" (write_vle_uN on all 6 runtime sinks; generator emits a one-line write_vle call).",
+        "sce-codegen rebuilt from the new pin (scripts/build-sce.sh) + wz codecs regenerated: ExtZint::encode is now `w.write_vle_u64(self.value)` (delegating to the runtime 9-byte-cap sink) instead of the old inline LEB128 loop. Every SCE-generated VLE codec now caps a u64 at 9 bytes = zenoh + zenoh-pico parity.",
+        "crates/wz-session-core/src/vle.rs: retire the wz-local hand-rolled LEB128 -- read_vle_u64 now delegates to SceCursor::read_vle_u64, encode_vle_u64_into to VecSink::write_vle_u64 (the sce_forge_runtime VLE SSOT). One VLE codec in the tree. Module doc rewritten (the >=2^63 divergence is retired); tests updated -- the round-trip now covers u64::MAX (9-byte cap), and the obsolete LEB128 \"overlong -> None\" test is replaced by a canonical 9-byte-cap read test (u64::MAX = 0xFF x9, exactly 9 consumed, trailing byte left)."
+      ],
+      "verification_bullets": [
+        "SCE fix verified by DIRECT READ before bumping (no blind bump): write_vle_inner cont_max=(64-1).div_ceil(7)-1=8 -> at most 8 continuation bytes + 1 full-8-bit final byte = 9 for u64; read_vle_inner vle_len=9, final_shift=56 reads the 9th byte as full 8 bits. Symmetric, matches zenoh VLE_LEN_MAX=vle_len(u64::MAX)=9 and zenoh-pico #define VLE_LEN 9 (_z_zint64_encode_buf final byte = lv & 0xff). ba65f7a1b confirmed on SCE github origin/main (reproducible submodule pin; a fresh clone resolves it).",
+        "Regen confirmed: the freshly generated ExtZint::encode is `w.write_vle_u64(self.value)?` (was the inline `while _vle >= 0x80 { write_u8 }` LEB128). wz vle delegates to the runtime; vle tests 6 pass incl the u64::MAX 9-byte round-trip + the 9-byte-cap read; default `cargo clippy -p wz-session-core --all-targets -D warnings` green after the regen + delegation.",
+        "The bump is a WIRE change for u64 VLE values >= 2^63 (10 -> 9 bytes), making wz byte-identical to zenoh/pico there (the R311wy fidelity HIGH, now resolved). For < 2^63 values nothing changes. Full run-ci is the gate (Layer Z zenohd interop + the codec/wire golden tests revalidate the regenerated codec layer).",
+        "No SCE source edited from this wz session (pin-bump only, per the read-only-SCE rule); the fix was authored + pushed in the SCE repo after the R311wy report."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "R311wz = SCE vendor pin bump 3078f8bf7 -> ba65f7a1b: pulls the VLE 9-byte-cap fix (the R311wy fidelity HIGH that was reported upstream). ExtZint + every SCE-generated VLE codec now cap a u64 at 9 bytes (zenoh + zenoh-pico parity); the wz hand-rolled vle is retired -- read_vle_u64 / encode_vle_u64_into delegate to the sce_forge_runtime SSOT (SceCursor / VecSink). The R311wy \"VLE OUTSTANDING (SCE issue)\" item is RESOLVED.",
+        "SCE pin record: update [[sce-vendor-pin-state]] memory 3078f8bf7 -> ba65f7a1b.",
+        "NEXT: R3b live handshake wiring + wz<->zenohd usrpwd interop e2e -- now the auth nonce (a full-range u64 carried as ExtZint) is wire-correct, so the e2e can validate the real handshake against zenohd without the latent VLE divergence. Then R4 pubkey (RSA dep); jwt phantom reclassify.",
+        "LOCAL: R311wz atop 1078bf0 (origin/main after the R311wy push). Recommend full run-ci before any push -- the codec regen is a wire-layer change; the pre-push gate (full run-ci incl Layer Z) is the authoritative check. NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311wz: bump the SCE vendor submodule pin 3078f8bf7 -> ba65f7a1b to pull the VLE 9-byte-cap fix the R311wy review surfaced + reported upstream (SCE 812ff17cd caps a u64 ZInt at 9 bytes per canonical zenoh; ba65f7a1b moves the encode into the runtime write_vle_uN). sce-codegen rebuilt + wz codecs regenerated (ExtZint::encode now delegates to the 9-byte-cap runtime sink, matching zenoh + zenoh-pico). wz's hand-rolled vle is retired -- read/encode now delegate to the sce_forge_runtime VLE SSOT. Resolves the R311wy VLE-outstanding item; pin-bump only, no SCE source edited from this session.",
+      "publishable_changes_bullets": [
+        "vendor/sce: submodule pin bump 3078f8bf7 -> ba65f7a1b (SCE origin/main). The two relevant SCE commits: 812ff17cd \"Cap VLE u64 codec at 9 bytes to match canonical Zenoh ZInt\" (final byte = 8 data bits; RFC App.B + encode SSOT + all 6 runtime decode paths + golden vectors) and ba65f7a1b \"Move VLE encode into runtime write_vle_uN, symmetric to read\" (write_vle_uN on all 6 runtime sinks; generator emits a one-line write_vle call).",
+        "sce-codegen rebuilt from the new pin (scripts/build-sce.sh) + wz codecs regenerated: ExtZint::encode is now `w.write_vle_u64(self.value)` (delegating to the runtime 9-byte-cap sink) instead of the old inline LEB128 loop. Every SCE-generated VLE codec now caps a u64 at 9 bytes = zenoh + zenoh-pico parity.",
+        "crates/wz-session-core/src/vle.rs: retire the wz-local hand-rolled LEB128 -- read_vle_u64 now delegates to SceCursor::read_vle_u64, encode_vle_u64_into to VecSink::write_vle_u64 (the sce_forge_runtime VLE SSOT). One VLE codec in the tree. Module doc rewritten (the >=2^63 divergence is retired); tests updated -- the round-trip now covers u64::MAX (9-byte cap), and the obsolete LEB128 \"overlong -> None\" test is replaced by a canonical 9-byte-cap read test (u64::MAX = 0xFF x9, exactly 9 consumed, trailing byte left)."
+      ],
+      "publishable_verification_bullets": [
+        "SCE fix verified by DIRECT READ before bumping (no blind bump): write_vle_inner cont_max=(64-1).div_ceil(7)-1=8 -> at most 8 continuation bytes + 1 full-8-bit final byte = 9 for u64; read_vle_inner vle_len=9, final_shift=56 reads the 9th byte as full 8 bits. Symmetric, matches zenoh VLE_LEN_MAX=vle_len(u64::MAX)=9 and zenoh-pico #define VLE_LEN 9 (_z_zint64_encode_buf final byte = lv & 0xff). ba65f7a1b confirmed on SCE github origin/main (reproducible submodule pin; a fresh clone resolves it).",
+        "Regen confirmed: the freshly generated ExtZint::encode is `w.write_vle_u64(self.value)?` (was the inline `while _vle >= 0x80 { write_u8 }` LEB128). wz vle delegates to the runtime; vle tests 6 pass incl the u64::MAX 9-byte round-trip + the 9-byte-cap read; default `cargo clippy -p wz-session-core --all-targets -D warnings` green after the regen + delegation.",
+        "The bump is a WIRE change for u64 VLE values >= 2^63 (10 -> 9 bytes), making wz byte-identical to zenoh/pico there (the R311wy fidelity HIGH, now resolved). For < 2^63 values nothing changes. Full run-ci is the gate (Layer Z zenohd interop + the codec/wire golden tests revalidate the regenerated codec layer).",
+        "No SCE source edited from this wz session (pin-bump only, per the read-only-SCE rule); the fix was authored + pushed in the SCE repo after the R311wy report."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311wz = SCE vendor pin bump 3078f8bf7 -> ba65f7a1b: pulls the VLE 9-byte-cap fix (the R311wy fidelity HIGH that was reported upstream). ExtZint + every SCE-generated VLE codec now cap a u64 at 9 bytes (zenoh + zenoh-pico parity); the wz hand-rolled vle is retired -- read_vle_u64 / encode_vle_u64_into delegate to the sce_forge_runtime SSOT (SceCursor / VecSink). The R311wy \"VLE OUTSTANDING (SCE issue)\" item is RESOLVED.",
+        "SCE pin record: update [[sce-vendor-pin-state]] memory 3078f8bf7 -> ba65f7a1b.",
+        "NEXT: R3b live handshake wiring + wz<->zenohd usrpwd interop e2e -- now the auth nonce (a full-range u64 carried as ExtZint) is wire-correct, so the e2e can validate the real handshake against zenohd without the latent VLE divergence. Then R4 pubkey (RSA dep); jwt phantom reclassify.",
+        "LOCAL: R311wz atop 1078bf0 (origin/main after the R311wy push). Recommend full run-ci before any push -- the codec regen is a wire-layer change; the pre-push gate (full run-ci incl Layer Z) is the authoritative check. NOT pushed without explicit consent."
       ]
     },
     "Round 311x": {
