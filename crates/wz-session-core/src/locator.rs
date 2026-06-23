@@ -95,6 +95,18 @@ pub enum Proto {
     /// `ws/...` locator dials directly through `dial_locator` (like `udp`),
     /// via `wz-runtime-tokio::ws_pipeline`.
     Ws,
+    /// `quic/...` — QUIC stream transport: the same numeric `host:port` grammar
+    /// as `tcp`/`tls` (zenoh-link-quic resolves the host to a `SocketAddr` and
+    /// uses the host as the TLS SNI). zenoh carries a batch over ONE
+    /// bidirectional QUIC stream with the SAME StreamEnvelope length-prefix as
+    /// TCP/TLS (`is_streamed = true`, `QUIC_DEFAULT_MTU = 65535`). Parses
+    /// unconditionally like every proto; the BACKEND dial is gated
+    /// (`transport-link-quic`) and — LIKE `tls` (and unlike `ws`) — needs cert
+    /// config (TLS 1.3, ALPN `hq-29`) the locator alone does not carry, so a
+    /// `quic/...` locator dials only when the threaded
+    /// `wz-runtime-tokio::session_open::DialConfig.quic` supplies it; otherwise
+    /// `dial_locator` returns a typed `Unsupported`.
+    Quic,
 }
 
 /// A locator parsed into its transport protocol and numeric endpoint.
@@ -133,6 +145,7 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         "udp" => Proto::Udp,
         "tls" => Proto::Tls,
         "ws" => Proto::Ws,
+        "quic" => Proto::Quic,
         other => return Err(LocatorParseError::UnknownProto(other.to_string())),
     };
     let addr = SocketAddr::from_str(addr_str)
@@ -611,6 +624,7 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16)> {
         "udp" => Proto::Udp,
         "tls" => Proto::Tls,
         "ws" => Proto::Ws,
+        "quic" => Proto::Quic,
         _ => return None,
     };
     // A bracketed address is an IPv6 literal; if it did not parse as a
@@ -703,11 +717,47 @@ mod tests {
 
     #[test]
     fn rejects_unknown_proto() {
-        // `quic` is a not-yet-wired transport — `ws` is now a known proto
-        // (R311ob), so the unknown-proto example moved to one still absent.
+        // `quic` is now a known proto (R311xk), so the unknown-proto example
+        // moved to `bt` — a transport the module doc still lists as not-yet-wired.
         assert_eq!(
-            parse_locator("quic/127.0.0.1:7447"),
-            Err(LocatorParseError::UnknownProto("quic".to_string()))
+            parse_locator("bt/00:11:22:33:44:55"),
+            Err(LocatorParseError::UnknownProto("bt".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_quic_ipv4() {
+        // `quic` shares the `tcp` numeric grammar (zenoh resolves host:port to a
+        // SocketAddr); parsing is unconditional, only the dial backend is gated.
+        let p = parse_locator("quic/192.168.1.10:7447").expect("valid quic locator");
+        assert_eq!(p.proto, Proto::Quic);
+        assert_eq!(p.addr, "192.168.1.10:7447".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn parse_any_routes_quic_to_the_ip_leaf() {
+        // A `quic/...` locator parses through the IP leaf (numeric host:port),
+        // landing as `AnyLocator::Ip(Proto::Quic)` whether or not the QUIC
+        // backend is compiled — the dial step decides reachability.
+        let any = parse_any_locator("quic/127.0.0.1:7447").expect("quic locator");
+        assert_eq!(
+            any,
+            AnyLocator::Ip(parse_locator("quic/127.0.0.1:7447").unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_any_classifies_quic_dns_name_as_named() {
+        // DNS-vs-numeric is an address-token property orthogonal to scheme:
+        // a `quic/HOST:PORT` with a DNS host classifies to Named (the QUIC dial
+        // needs the hostname as SNI anyway).
+        assert_eq!(
+            parse_any_locator("quic/example.org:7447"),
+            Ok(AnyLocator::Named {
+                proto: Proto::Quic,
+                host: "example.org".to_string(),
+                port: 7447,
+            })
         );
     }
 

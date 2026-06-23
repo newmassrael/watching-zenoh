@@ -503,6 +503,20 @@ transport-link-unixsock = ["transport-link-tcp"]
 # arm is `#[cfg(all(transport-link-vsock, target_os="linux"))]`. NOT default —
 # pico has no vsock transport (host VM-IPC link).
 transport-link-vsock = ["transport-link-tcp", "dep:tokio-vsock"]
+# R311xk — host QUIC link backend. Like tls (and UNLIKE ws), forwards
+# `transport-link-tcp`: QUIC frames a zenoh batch over ONE bidirectional stream
+# with the SAME StreamEnvelope length-prefix as TCP, reusing the entire
+# `stream_link` pipeline over a `quinn::{SendStream,RecvStream}` pair (already
+# split — no `into_split`/`tokio::io::split`). Pulls `quinn` + the SAME rustls
+# cert stack as tls (`tokio-rustls`/`rustls-pemfile`/`base64`) because QUIC's
+# cert config IS a rustls ClientConfig/ServerConfig (TLS 1.3-only + ALPN
+# `hq-29`), built by `quic_config` reusing the `tls_config` PEM loaders. The
+# locator PARSE (`Proto::Quic`) is unconditional in wz-session-core (IP-family
+# numeric host:port, like tls/ws — NOT a new AnyLocator variant); only the
+# dial/accept BACKEND is gated here. Cert material the locator cannot carry is
+# threaded via `DialConfig.quic` (the tls pattern), so the generic
+# `dial_locator` returns Unsupported for `quic/...` without it. NOT default.
+transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64"]
 # R311qa — multi-peer accept-and-hold capability (the `routing-router` /
 # future `routing-peer` foundation). Gates `pub mod accept_loop` (lib.rs) and
 # pulls its prerequisites: the TCP listen path (`transport-link-tcp`), the
@@ -908,6 +922,21 @@ rustls-pemfile = { version = "2", optional = true }
 # `base64_decode` in `zenoh-link-tls/src/utils.rs`. Optional + tls-gated like
 # the other TLS deps.
 base64 = { version = "0.22", optional = true }
+# R311xk — host QUIC link backend, behind the optional `transport-link-quic`
+# feature. quinn is the async QUIC implementation zenoh-link-vsock... no:
+# zenoh-link-quic uses quinn 0.11.5 (workspace pin). wz pins the same 0.11.
+# QUIC frames a zenoh batch over ONE bidirectional stream (uni rejected,
+# bidi=1) with the SAME StreamEnvelope length-prefix as TCP/TLS, so the
+# `quinn::SendStream` (AsyncWrite) + `quinn::RecvStream` (AsyncRead) reuse the
+# shared `stream_link` read/write drivers UNCHANGED — they are already a split
+# pair (no `into_split` / `tokio::io::split` needed). quinn rides the SAME
+# rustls 0.23 + `ring` stack as the TLS link (via `quinn::crypto::rustls::
+# {QuicClientConfig,QuicServerConfig}`), so `transport-link-quic` reuses the
+# `tokio-rustls` / `rustls-pemfile` / `base64` cert deps + the `tls_config` PEM
+# loaders. `default-features = false` + `ring` + `rustls`: avoid quinn's default
+# `aws-lc-rs` provider so it shares wz's single `ring` provider (the tls_config
+# reasoning). `runtime-tokio` binds quinn's reactor to tokio. NOT default.
+quinn = { version = "0.11", default-features = false, features = ["ring", "rustls", "runtime-tokio"], optional = true }
 # R311ob — host WebSocket link backend, behind the optional `transport-link-ws`
 # feature. tokio-tungstenite is the async RFC6455 protocol layer: `client_async`
 # / `accept_async` run the HTTP-Upgrade handshake over a `TcpStream`, then the

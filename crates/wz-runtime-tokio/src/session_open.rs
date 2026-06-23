@@ -77,10 +77,23 @@ use tokio_serial::SerialStream;
 use crate::tls_pipeline::{dial_tls, wire_tls_stream, TlsReadDriver};
 #[cfg(feature = "transport-link-tls")]
 use tokio_rustls::rustls::pki_types::ServerName;
-#[cfg(feature = "transport-link-tls")]
+// R311xk — the rustls `ClientConfig` is shared by `TlsDialConfig` and
+// `QuicDialConfig`, so it is imported for EITHER backend (one import, no
+// duplicate when both are on).
+#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 use tokio_rustls::rustls::ClientConfig;
 #[cfg(feature = "transport-link-tls")]
 use tokio_rustls::TlsStream;
+
+// R311xk — the QUIC arm, like tls, rides this tcp+unicast-gated module as an
+// additive STREAM transport (transport-link-quic forwards transport-link-tcp).
+// zenoh frames a batch over ONE bidirectional QUIC stream with the SAME
+// StreamEnvelope length-prefix as TCP/TLS, so `wire_quic_stream` reuses the
+// `stream_link` drivers over a `quinn::{SendStream,RecvStream}` pair. LIKE tls
+// (and unlike ws), a `quic/...` dial needs cert config the locator cannot carry,
+// threaded via `DialConfig.quic`.
+#[cfg(feature = "transport-link-quic")]
+use crate::quic_pipeline::{dial_quic, wire_quic_stream, QuicLink, QuicReadDriver};
 
 // R311ob — the WS arm, like udp, rides this tcp+unicast-gated module as an
 // additive DATAGRAM transport. The stream type is the RFC6455
@@ -154,6 +167,12 @@ pub struct DialConfig {
     /// verify the peer with), so a TLS dial is opt-in by supplying this.
     #[cfg(feature = "transport-link-tls")]
     pub tls: Option<TlsDialConfig>,
+    /// QUIC client material for a `quic/...` dial (R311xk). `None` (the default)
+    /// => a `quic/...` locator dials to a typed `Unsupported` (no certs to
+    /// verify the peer with), so a QUIC dial is opt-in by supplying this — the
+    /// same shape as `tls`.
+    #[cfg(feature = "transport-link-quic")]
+    pub quic: Option<QuicDialConfig>,
 }
 
 /// The TLS material a `tls/...` dial needs beyond the locator's addr: the
@@ -165,6 +184,18 @@ pub struct DialConfig {
 pub struct TlsDialConfig {
     pub client_config: Arc<ClientConfig>,
     pub server_name: ServerName<'static>,
+}
+
+/// The QUIC material a `quic/...` dial needs beyond the locator's addr (R311xk):
+/// the rustls [`ClientConfig`] (TLS-1.3 + ALPN `hq-29`, from
+/// [`crate::quic_config`]) and the SNI / cert server name. Mirrors
+/// [`TlsDialConfig`] — the same cert-threading shape — diverging only in the
+/// `server_name` TYPE: a `String`, because quinn's `Endpoint::connect` takes a
+/// `&str` SNI (where tokio-rustls's connector takes a typed `ServerName`).
+#[cfg(feature = "transport-link-quic")]
+pub struct QuicDialConfig {
+    pub client_config: Arc<ClientConfig>,
+    pub server_name: String,
 }
 
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
@@ -235,6 +266,17 @@ pub enum DialedLink {
     /// gated with the backend.
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockStream),
+    /// A connected + QUIC-handshaked link, split downstream via
+    /// [`wire_quic_stream`] (R311xk). Like serial/tls, the handshake (here the
+    /// QUIC + TLS-1.3 handshake) has ALREADY run by the time this is built —
+    /// [`crate::quic_pipeline::dial_quic`] (client) / `accept_quic_on` (server)
+    /// drive it and open the single bidirectional stream before returning, so
+    /// the steady-state split stays uniform with TCP. `Box`ed: a [`QuicLink`]
+    /// carries the endpoint + connection keep-alive handles + both stream halves
+    /// (clippy `large_enum_variant`). Produced by [`dial_locator`] when its
+    /// [`DialConfig`] carries `quic` (the TLS-style cert threading).
+    #[cfg(feature = "transport-link-quic")]
+    Quic(Box<QuicLink>),
 }
 
 impl DialedLink {
@@ -262,6 +304,8 @@ impl DialedLink {
             DialedLink::Unixsock(_) => "unixsock",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             DialedLink::Vsock(_) => "vsock",
+            #[cfg(feature = "transport-link-quic")]
+            DialedLink::Quic(_) => "quic",
         }
     }
 }
@@ -287,15 +331,17 @@ impl DialedLink {
 /// feature is on; otherwise it never parses to [`AnyLocator::Serial`].
 ///
 /// `cfg` (R311oc) supplies out-of-band dial material a locator string cannot
-/// carry — today the TLS client config a `tls/...` dial needs. Cert-free
-/// transports (tcp/udp/ws/serial) ignore it; `tls` reads `cfg.tls` (absent =>
-/// typed `Unsupported`). This is what lets the dial seam handle EVERY transport
-/// uniformly — pico threads the same material via `session_cfg`.
+/// carry — the TLS client config a `tls/...` dial needs, or the QUIC client
+/// config a `quic/...` dial needs (R311xk). Cert-free transports
+/// (tcp/udp/ws/serial/unixsock/vsock) ignore it; `tls` reads `cfg.tls` and
+/// `quic` reads `cfg.quic` (absent => typed `Unsupported`). This is what lets
+/// the dial seam handle EVERY transport uniformly — pico threads the same
+/// material via `session_cfg`.
 pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<DialedLink> {
-    // `cfg` is consumed only by the tls arm; discard it loudly in builds
-    // without that backend so the always-present seam signature carries no
+    // `cfg` is consumed only by the tls / quic arms; discard it loudly in builds
+    // without either backend so the always-present seam signature carries no
     // dead-param warning.
-    #[cfg(not(feature = "transport-link-tls"))]
+    #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
     let _ = cfg;
     match locator {
         AnyLocator::Ip(ip) => match ip.proto {
@@ -345,6 +391,32 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Ws => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "ws session-open requires the transport-link-ws feature",
+            )),
+            // R311xk — `quic/...` dials from the locator when `cfg.quic` supplies
+            // the TLS-1.3 + ALPN rustls client config + SNI name (the tls model;
+            // QUIC mandates a cert). Absent config => typed `Unsupported`, so a
+            // QUIC dial is opt-in. `dial_quic` (build a client endpoint, connect,
+            // open the one bidi stream) is the primitive; this arm orchestrates
+            // it. Numeric only here (the `Named` arm below keeps the deferred
+            // name dial); the SNI comes from `cfg.quic` (like `tls`), not the
+            // numeric locator.
+            #[cfg(feature = "transport-link-quic")]
+            Proto::Quic => match &cfg.quic {
+                // Clone the client config lazily — only on an actual QUIC dial.
+                Some(q) => Ok(DialedLink::Quic(Box::new(
+                    dial_quic(ip.addr, q.client_config.clone(), &q.server_name).await?,
+                ))),
+                None => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "quic dial requires DialConfig.quic (rustls client config + SNI name)",
+                )),
+            },
+            // With the backend off, the same `Unsupported` shape as the tls/udp
+            // arms — `quic/...` still parses, only its dial is absent.
+            #[cfg(not(feature = "transport-link-quic"))]
+            Proto::Quic => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "quic session-open requires the transport-link-quic feature",
             )),
         },
         // R311ps — a DNS-named IP-family endpoint (`tcp/example.org:7447`). The
@@ -664,6 +736,8 @@ pub enum InboundLink {
     Unixsock(UnixsockReadDriver),
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockReadDriver),
+    #[cfg(feature = "transport-link-quic")]
+    Quic(QuicReadDriver),
 }
 
 impl LinkDriver for InboundLink {
@@ -682,6 +756,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.open().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.open().await,
+            #[cfg(feature = "transport-link-quic")]
+            InboundLink::Quic(d) => d.open().await,
         }
     }
 
@@ -700,6 +776,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.send(frame, reliability).await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.send(frame, reliability).await,
+            #[cfg(feature = "transport-link-quic")]
+            InboundLink::Quic(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -718,6 +796,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.close().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.close().await,
+            #[cfg(feature = "transport-link-quic")]
+            InboundLink::Quic(d) => d.close().await,
         }
     }
 
@@ -736,6 +816,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.poll_event().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.poll_event().await,
+            #[cfg(feature = "transport-link-quic")]
+            InboundLink::Quic(d) => d.poll_event().await,
         }
     }
 }
@@ -787,6 +869,11 @@ pub fn wire_dialed_link(
         DialedLink::Vsock(stream) => {
             let (inbound, outbound, handle) = wire_vsock_stream(stream);
             (InboundLink::Vsock(inbound), outbound, handle)
+        }
+        #[cfg(feature = "transport-link-quic")]
+        DialedLink::Quic(link) => {
+            let (inbound, outbound, handle) = wire_quic_stream(*link);
+            (InboundLink::Quic(inbound), outbound, handle)
         }
     }
 }
@@ -1501,8 +1588,11 @@ mod tests {
 
     #[test]
     fn unknown_scheme_is_an_error() {
+        // R311xk — `quic` is now a known proto, so the unknown-scheme example
+        // moved to `bt` (still not-yet-wired), mirroring the locator.rs
+        // `rejects_unknown_proto` fix.
         assert!(matches!(
-            plan_endpoint("quic/1.2.3.4:7447"),
+            plan_endpoint("bt/00:11:22:33:44:55"),
             Err(AnyLocatorError::Ip(LocatorParseError::UnknownProto(_)))
         ));
     }

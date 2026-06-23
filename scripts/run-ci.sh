@@ -927,6 +927,37 @@ layer_c1ab_cargo_test_vsock() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-vsock --quiet -- -D warnings)
 }
 
+# ─── Layer C1ac — QUIC link: locator parse + wz-runtime-tokio backend ─
+#
+# R311xk: same shape as C1aa (unixsock) / C1ab (vsock), but the e2e RUNS (no
+# #[ignore]) — QUIC loopback needs no special kernel support (ordinary UDP on
+# 127.0.0.1 + an in-process self-signed cert), so this is the fully-verified
+# link round. The QUIC backend (`quic_pipeline`: dial_quic/bind_quic/
+# accept_quic_on + the VsockReadDriver... no: the QuicReadDriver reusing the TCP
+# StreamEnvelope framing over a quinn SendStream/RecvStream pair) gates on
+# `transport-link-quic`, OFF in the default set. This lane:
+#   1. runs the locator tests (the `quic/<host>:<port>` parse is `Proto::Quic`,
+#      the IP-family numeric grammar — ungated parse, like tls/ws);
+#   2. runs the `quic_e2e` integration test (gated `all(transport-link-quic,
+#      transport-unicast)`): two nodes complete the QUIC + TLS-1.3 handshake
+#      over loopback — the initiator via a `quic/...` LOCATOR + DialConfig.quic
+#      (the cert-threaded seam) — reach Established, and a Put is delivered
+#      byte-exact over the StreamEnvelope-framed QUIC bidi stream;
+#   3. clippy-gates the `transport-link-quic` cfg (`--all-targets`);
+#   4. clippy-gates the LIB under `--no-default-features --features
+#      transport-link-quic` to prove `quic_pipeline` + `quic_config` compose
+#      standalone (they pull only `transport-link-tcp`'s shared `stream_link` +
+#      quinn + the tls rustls cert stack, no `transport-unicast` session-open
+#      integration). NO reconnect e2e yet (a QUIC reconnect would re-dial the
+#      `quic/...` locator like tls/ws — a clean follow-up; deferred here).
+layer_c1ac_cargo_test_quic() {
+    (cd crates \
+        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic --test quic_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3340,6 +3371,7 @@ run_layer C1u layer_c1u_cargo_test_tls || overall=1
 run_layer C1v layer_c1v_cargo_test_ws || overall=1
 run_layer C1aa layer_c1aa_cargo_test_unixsock || overall=1
 run_layer C1ab layer_c1ab_cargo_test_vsock || overall=1
+run_layer C1ac layer_c1ac_cargo_test_quic || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

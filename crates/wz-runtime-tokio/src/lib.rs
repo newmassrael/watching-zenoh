@@ -494,8 +494,11 @@ pub mod tls_pipeline;
 /// SAN to match the dialed name, or accept any CA-chained name). Mirrors
 /// zenoh-rust `zenoh-link-tls/src/utils.rs` and pico's TLS `session_cfg` cert
 /// keys (`ROOT_CA_CERTIFICATE` / `CONNECT_CERTIFICATE` / `LISTEN_CERTIFICATE` /
-/// `ENABLE_MTLS` / `VERIFY_NAME_ON_CONNECT`). Gated `transport-link-tls`.
-#[cfg(feature = "transport-link-tls")]
+/// `ENABLE_MTLS` / `VERIFY_NAME_ON_CONNECT`). Gated `transport-link-tls` OR
+/// `transport-link-quic` (R311xk — the QUIC link reuses the SAME PEM loaders +
+/// rustls 0.23 stack; [`quic_config`] builds its TLS-1.3 + ALPN config on top
+/// of these loaders).
+#[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 pub mod tls_config;
 
 /// R311ob — WebSocket-over-TCP backend for the WS link. The DATAGRAM-flow
@@ -544,6 +547,30 @@ pub mod unixsock_pipeline;
 /// `transport-link-tcp`-gated session-open module additively, like tls/unixsock.
 #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
 pub mod vsock_pipeline;
+
+/// R311xk — TLS-1.3 + ALPN-`hq-29` rustls config builders for the QUIC link.
+/// QUIC mandates TLS 1.3, so its rustls config differs from the TLS link's two
+/// ways (TLS-1.3-only, ALPN `hq-29`); everything else (PEM loaders, `ring`
+/// provider, rustls 0.23 stack) is shared with [`tls_config`]. Gated
+/// `transport-link-quic`.
+#[cfg(feature = "transport-link-quic")]
+pub mod quic_config;
+
+/// R311xk — host QUIC backend. The STREAM sibling of [`tls_pipeline`]: zenoh
+/// carries a batch over ONE bidirectional QUIC stream (uni rejected, bidi=1)
+/// with the SAME StreamEnvelope length-prefix as TCP/TLS (`is_streamed = true`,
+/// MTU `BatchSize::MAX`), so it REUSES `stream_link`'s drivers UNCHANGED — a
+/// `quinn::RecvStream` is `AsyncRead`, a `SendStream` is `AsyncWrite`, and they
+/// are ALREADY a split pair (no `into_split`/`tokio::io::split`). The endpoint +
+/// connection ride into the read driver as a keep-alive (QUIC's stream
+/// references its connection references the endpoint driver). Gated
+/// `transport-link-quic` (forwards `transport-link-tcp` for the shared
+/// `stream_link` SSOT, pulls `quinn` + the tls rustls cert stack). Cert config
+/// is threaded via `DialConfig.quic` (the tls pattern); the `session_open`
+/// DialedLink::Quic arm rides the `transport-link-tcp`-gated session-open module
+/// additively, like tls.
+#[cfg(feature = "transport-link-quic")]
+pub mod quic_pipeline;
 
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
