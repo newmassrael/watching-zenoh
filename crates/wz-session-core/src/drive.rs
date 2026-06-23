@@ -118,6 +118,52 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                     if !admit {
                         return DriverLoopOutcome::SideEffectOnly;
                     }
+                    // R3b — feed the admitted handshake frame's ext chain into
+                    // the matching Z_EXT_AUTH demux stage BEFORE advancing the
+                    // FSM, so a usrpwd reject tears the session down instead of
+                    // emitting the next handshake message. zenoh runs auth recv
+                    // inside the establishment FSM transition; this is the
+                    // engine-free analogue, placed right where the per-event
+                    // admission already gates (an unadmitted frame returned
+                    // above and is never auth-checked). An empty dispatch admits
+                    // every stage (zenoh `Auth::default()`). The InitSyn/OpenSyn
+                    // (accept) and InitAck/OpenAck (initiator) demux stages each
+                    // pair an event with its frame variant.
+                    #[cfg(feature = "session-extauth")]
+                    {
+                        let auth: Option<Result<(), crate::auth_dispatch::AuthError>> = match &frame
+                        {
+                            #[cfg(feature = "codec-init-body")]
+                            InboundFrame::Init {
+                                is_ack: false,
+                                extensions,
+                                ..
+                            } => Some(actions.with_auth(|d| d.accept_recv_init_syn(extensions))),
+                            #[cfg(feature = "codec-init-body")]
+                            InboundFrame::Init {
+                                is_ack: true,
+                                extensions,
+                                ..
+                            } => Some(actions.with_auth(|d| d.open_recv_init_ack(extensions))),
+                            #[cfg(feature = "codec-open-body")]
+                            InboundFrame::Open {
+                                is_ack: false,
+                                extensions,
+                                ..
+                            } => Some(actions.with_auth(|d| d.accept_recv_open_syn(extensions))),
+                            #[cfg(feature = "codec-open-body")]
+                            InboundFrame::Open {
+                                is_ack: true,
+                                extensions,
+                                ..
+                            } => Some(actions.with_auth(|d| d.open_recv_open_ack(extensions))),
+                            _ => None,
+                        };
+                        if let Some(Err(e)) = auth {
+                            engine.process_event(E::FramingError);
+                            return DriverLoopOutcome::AuthRejected(e);
+                        }
+                    }
                     engine.process_event(event);
                     DriverLoopOutcome::AdvancedFsm
                 }

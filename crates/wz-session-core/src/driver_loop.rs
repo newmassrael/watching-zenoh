@@ -102,6 +102,18 @@ pub enum DriverLoopOutcome {
     /// a typed open error instead of folding it into `Terminal`.
     #[cfg(feature = "codec-init-body")]
     InitAckCapsRejected,
+    /// R3b — a Z_EXT_AUTH method rejected the peer on a handshake recv stage
+    /// (a bad usrpwd credential / unknown user / missing required sub-ext, or a
+    /// malformed auth ext). The dispatcher has already injected `FramingError`
+    /// so the FSM tears the session down with `CloseReason::Invalid` (wire
+    /// Close(INVALID)) — the wz mirror of zenoh's establishment FSM
+    /// `?`-propagating the usrpwd verify error into a transport close
+    /// (`auth/usrpwd.rs:418/424`). Surfaced as its own variant so the open loop
+    /// maps it to a typed open-loop auth-reject error (the
+    /// `InitAckCapsRejected` pattern). The carried `AuthError` identifies the
+    /// method failure for logging.
+    #[cfg(feature = "session-extauth")]
+    AuthRejected(crate::auth_dispatch::AuthError),
     /// R311im — the inbound frame parsed to a transport `Fragment`
     /// (`T_MID_FRAGMENT`, MID `0x06`). Reassembly is stateful — the slot
     /// pool ([`crate::reassembly_dispatch::ReassemblyDispatcher`]) lives in

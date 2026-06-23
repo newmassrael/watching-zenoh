@@ -725,8 +725,11 @@ session-unicast-accept = ["wz-session-core/session-unicast-accept"]
 # follow-on atoms.
 session-extauth = ["wz-session-core/session-extauth"]
 # R3 usrpwd — forward the §5.16 usrpwd auth method (UsrPwdMethod + HMAC-SHA3-256)
-# into the AP runtime; implies session-extauth (the dispatch kernel).
-access-extauth-usrpwd = ["wz-session-core/access-extauth-usrpwd"]
+# into the AP runtime; implies session-extauth (the dispatch kernel). R3b — the
+# LOCAL session-extauth must be on too, so the AP-layer wiring gated on it
+# (nonce_from_os_entropy, OpenError::AuthRejected, the drive-loop reject arm)
+# compiles; forwarding only to wz-session-core left those configured out.
+access-extauth-usrpwd = ["session-extauth", "wz-session-core/access-extauth-usrpwd"]
 # R311cf/R311fd — keyexpr domain. The other 7 keyexpr-* features are
 # cluster-wide behaviors with no single anchor cfg site (follow-up
 # cascade per-site wire-up).

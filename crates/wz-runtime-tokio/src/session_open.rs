@@ -752,6 +752,15 @@ pub enum OpenError {
     /// wire Close(INVALID)) and the open loop surfaces the typed reason
     /// here instead of folding it into [`Self::Terminal`].
     InitAckCapsRejected,
+    /// R3b — a Z_EXT_AUTH method rejected the peer during the handshake (a bad
+    /// usrpwd credential, unknown user, missing required sub-ext, or a malformed
+    /// auth ext). The dispatcher took the `framing.error` arm (Closing with
+    /// `CloseReason::Invalid`, wire Close(INVALID)); the open loop surfaces the
+    /// carried [`AuthError`](wz_session_core::auth_dispatch::AuthError) here
+    /// instead of folding it into [`Self::Terminal`]. The wz mirror of zenoh's
+    /// establishment FSM `?`-propagating the usrpwd verify error into a close.
+    #[cfg(feature = "session-extauth")]
+    AuthRejected(wz_session_core::auth_dispatch::AuthError),
     /// The bounded iteration budget elapsed before Established (test guard;
     /// production passes `None`).
     IterationLimit,
@@ -903,6 +912,14 @@ pub(crate) async fn drive_open_loop(
                     #[cfg(feature = "codec-init-body")]
                     DriverLoopOutcome::InitAckCapsRejected => {
                         return Err(OpenError::InitAckCapsRejected);
+                    }
+                    // R3b — a usrpwd method rejected the peer; the FSM is already
+                    // Closing(Invalid). Surface the typed reason (mirrors the
+                    // InitAckCapsRejected path) for both the initiator and the
+                    // acceptor (both drive through this shared loop).
+                    #[cfg(feature = "session-extauth")]
+                    DriverLoopOutcome::AuthRejected(e) => {
+                        return Err(OpenError::AuthRejected(e));
                     }
                     _ => {}
                 }

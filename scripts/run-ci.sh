@@ -939,6 +939,14 @@ layer_c1x_cargo_test_routing_routes() {
 #      clippy-gated both there and codec-only (`--no-default-features --features
 #      session-extauth`). Without this the auth unit tests ran in NO lane
 #      (preset-ap-full carries the features but is build-only).
+#   7. §5.16 usrpwd LIVE wiring (R3b): the wz<->wz usrpwd handshake e2e
+#      (`usrpwd_handshake_e2e`) drives a real initiator<->responder handshake
+#      over the encode/parse/dispatch path (matching creds -> Established;
+#      bad password -> AuthRejected/Closing), and the wz-runtime-tokio
+#      all-targets clippy gate covers the now-active AP-layer wiring
+#      (nonce_from_os_entropy + OpenError::AuthRejected + the drive-loop reject
+#      arm) that the R3b feature-graph fix made compile (access-extauth-usrpwd
+#      now implies the LOCAL session-extauth).
 # The demo-binary mesh e2e is Layer E6 (separate, --features routing-peer).
 layer_c1y_cargo_test_routing_peer() {
     local access="routing-peer,access-acl,access-downsampling,access-quota"
@@ -959,7 +967,9 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet \
         && cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet \
         && cargo clippy -p wz-session-core --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features session-extauth --all-targets --quiet -- -D warnings)
+        && cargo clippy -p wz-session-core --no-default-features --features session-extauth --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features access-extauth-usrpwd --test usrpwd_handshake_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-usrpwd --quiet -- -D warnings)
 }
 
 # ─── Layer C1z — storage driver: backend/history/replication/aligner ─

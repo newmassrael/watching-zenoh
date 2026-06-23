@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! R3b — wz<->wz usrpwd handshake e2e (the live-wiring proof).
+//!
+//! Drives a REAL initiator<->responder unicast handshake over the actual
+//! `encode_init`/`encode_open` + `parse_inbound` + `dispatch_link_event` path,
+//! pumping each side's emitted wire bytes into the other through
+//! `poll_and_dispatch_one`. Unlike the `extauth_usrpwd` / `auth_dispatch` kernel
+//! unit tests (which exercise the four-stage exchange through the dispatch in
+//! isolation), this test proves the LIVE WIRING the R3b round added:
+//!
+//!   - SEND: the four handshake send actions stage their usrpwd sub-ext into the
+//!     role ext chain, so `encode_init`/`encode_open` actually carry the auth
+//!     ext on the wire (asserted directly by re-parsing the InitSyn).
+//!   - RECV: `dispatch_link_event` feeds each admitted handshake frame's ext
+//!     chain into the matching demux stage, and a usrpwd reject drives
+//!     `framing.error` (Accepting -> Closing, `CloseReason::Invalid`) surfaced as
+//!     `DriverLoopOutcome::AuthRejected`.
+//!
+//! The responder challenge nonce is drawn fresh from OS entropy via
+//! `nonce_from_os_entropy` (the AP-layer injection the no_std core cannot do),
+//! exercising the real per-handshake nonce path. This is the wz<->wz down
+//! payment on the wz<->zenohd cross-impl interop e2e (the next atom), mirroring
+//! storage A11 (wz<->wz) before A10/A12 (cross-impl).
+
+#![cfg(feature = "access-extauth-usrpwd")]
+
+use std::sync::Arc;
+
+use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session_fsm_unicast::{
+    SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
+};
+use wz_runtime_tokio::session_glue::{
+    new_session_actions, new_session_engine, nonce_from_os_entropy, parse_inbound,
+    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, InboundFrame, SessionLinkActions,
+};
+use wz_runtime_tokio::{LinkEvent, RxFrame};
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
+};
+use wz_session_core::auth_dispatch::AuthDispatch;
+use wz_session_core::extauth::decode_auth_ext;
+use wz_session_core::extauth_usrpwd::UsrPwdMethod;
+
+const USER: &[u8] = b"alice";
+const PASSWORD: &[u8] = b"s3cret";
+
+/// Build one session side: actions over a recording outbound driver with the
+/// usrpwd `dispatch` installed, plus its initialized engine.
+fn side(driver: &Arc<LifecycleRecordingDriver>, dispatch: AuthDispatch) -> Arc<SessionLinkActions> {
+    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
+    let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+    actions.install_auth_dispatch(dispatch);
+    actions
+}
+
+/// The most recent outbound frame the recording driver captured.
+fn last_send(driver: &LifecycleRecordingDriver) -> Vec<u8> {
+    driver
+        .snapshot()
+        .sends
+        .last()
+        .expect("a send was recorded")
+        .0
+        .clone()
+}
+
+/// Outcome of one full wz<->wz usrpwd handshake driven over the real wire path.
+struct HandshakeOutcome {
+    initiator_state: S,
+    responder_state: S,
+    /// The responder's verdict on the OpenSyn (where a bad credential surfaces).
+    responder_open_syn_outcome: DriverLoopOutcome,
+    initiator_actions: Arc<SessionLinkActions>,
+    responder_actions: Arc<SessionLinkActions>,
+    init_syn_wire: Vec<u8>,
+}
+
+/// Drive a complete initiator<->responder usrpwd handshake. The initiator
+/// authenticates with `(USER, initiator_password)`; the responder's lookup holds
+/// `(USER, PASSWORD)` and a fresh OS-entropy challenge nonce.
+async fn drive_handshake(initiator_password: &[u8]) -> HandshakeOutcome {
+    // Fresh per-handshake challenge nonce from OS entropy (the AP-layer
+    // injection — the no_std core draws none).
+    let nonce = nonce_from_os_entropy().expect("OS entropy for the usrpwd challenge nonce");
+
+    let init_driver = Arc::new(LifecycleRecordingDriver::default());
+    let resp_driver = Arc::new(LifecycleRecordingDriver::default());
+
+    let initiator_dispatch = AuthDispatch::new(vec![Box::new(UsrPwdMethod::initiator(
+        USER.to_vec(),
+        initiator_password.to_vec(),
+    )) as _]);
+    let responder_dispatch = AuthDispatch::new(vec![Box::new(UsrPwdMethod::responder(
+        vec![(USER.to_vec(), PASSWORD.to_vec())],
+        nonce,
+    )) as _]);
+
+    let init_actions = side(&init_driver, initiator_dispatch);
+    let resp_actions = side(&resp_driver, responder_dispatch);
+
+    let mut init_engine = new_session_engine(&init_actions);
+    init_engine.initialize();
+    let mut resp_engine = new_session_engine(&resp_actions);
+    resp_engine.initialize();
+
+    // Responder: Init -> AwaitingInitSyn (listener role activation).
+    resp_engine.process_event(E::InboundStart);
+
+    // Initiator: Init -> SentInitSyn; send_init_syn emits the InitSyn carrying
+    // the usrpwd Unit offer.
+    init_engine.process_event(E::OutboundStart);
+    init_engine.process_event(E::LinkOpened);
+    let init_syn_wire = last_send(&init_driver);
+
+    // Responder Rx InitSyn -> SentInitAck; send_init_ack_with_cookie emits the
+    // InitAck carrying the Z64 challenge nonce (+ the R86 HMAC-bound cookie).
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn_wire.clone()))]);
+    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
+    let init_ack_wire = last_send(&resp_driver);
+
+    // Initiator Rx InitAck -> GotInitAck; open_recv_init_ack captures the nonce,
+    // send_open_syn emits the OpenSyn carrying the Zbuf {user, HMAC} (+ cookie
+    // echo).
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_ack_wire))]);
+    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
+    let open_syn_wire = last_send(&init_driver);
+
+    // Responder Rx OpenSyn -> accept_recv_open_syn verifies the HMAC. A match
+    // advances SentInitAck -> Established (emitting OpenAck); a bad credential
+    // drives framing.error -> Closing and returns AuthRejected.
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_syn_wire))]);
+    let responder_open_syn_outcome =
+        poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
+
+    // On acceptance, feed the OpenAck back so the initiator reaches Established.
+    if resp_engine.get_current_state() == S::Established {
+        let open_ack_wire = last_send(&resp_driver);
+        let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_ack_wire))]);
+        poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
+    }
+
+    HandshakeOutcome {
+        initiator_state: init_engine.get_current_state(),
+        responder_state: resp_engine.get_current_state(),
+        responder_open_syn_outcome,
+        initiator_actions: init_actions,
+        responder_actions: resp_actions,
+        init_syn_wire,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usrpwd_matching_credentials_reach_established_on_both_sides() {
+    let h = drive_handshake(PASSWORD).await;
+
+    // The behavioral proof: both sides reached Established over the real wire
+    // path, which is only possible if the usrpwd HMAC verified AND the cookie
+    // echo matched.
+    assert_eq!(
+        h.initiator_state,
+        S::Established,
+        "initiator must reach Established"
+    );
+    assert_eq!(
+        h.responder_state,
+        S::Established,
+        "responder must reach Established after verifying the usrpwd HMAC"
+    );
+    assert!(
+        matches!(h.responder_open_syn_outcome, DriverLoopOutcome::AdvancedFsm),
+        "the OpenSyn verify must AdvanceFsm; got {:?}",
+        h.responder_open_syn_outcome
+    );
+    let resp_trace = h.responder_actions.trace_snapshot();
+    assert_eq!(
+        resp_trace.send_open_ack, 1,
+        "the responder must emit OpenAck only after the HMAC verified"
+    );
+    assert_eq!(
+        resp_trace.set_close_reason_count, 0,
+        "a matching credential must not run any close-reason action"
+    );
+    let init_trace = h.initiator_actions.trace_snapshot();
+    assert_eq!(init_trace.send_open_syn, 1, "the initiator emitted OpenSyn");
+
+    // The wire-level proof of the SEND wiring: re-parse the InitSyn and confirm
+    // the usrpwd auth ext (id 0x3) is actually on the wire (not silently empty).
+    let frame = parse_inbound(&h.init_syn_wire).expect("InitSyn re-parses");
+    let extensions = match frame {
+        InboundFrame::Init { extensions, .. } => extensions,
+        other => panic!("expected Init, got {}", std::any::type_name_of_val(&other)),
+    };
+    assert!(
+        decode_auth_ext(&extensions).is_some(),
+        "the InitSyn must carry the Z_EXT_AUTH ext (the staged usrpwd offer)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usrpwd_bad_password_rejects_and_tears_down_the_responder() {
+    let h = drive_handshake(b"wrong-password").await;
+
+    // The reject must surface as the typed AuthRejected outcome (the wz mirror
+    // of zenoh's establishment FSM propagating the usrpwd verify error).
+    assert!(
+        matches!(
+            h.responder_open_syn_outcome,
+            DriverLoopOutcome::AuthRejected(_)
+        ),
+        "a bad password must surface DriverLoopOutcome::AuthRejected; got {:?}",
+        h.responder_open_syn_outcome
+    );
+    // framing.error tears the Accepting session down to Closing(Invalid).
+    assert_eq!(
+        h.responder_state,
+        S::Closing,
+        "a bad credential must drive the responder Accepting -> Closing"
+    );
+    assert_ne!(
+        h.initiator_state,
+        S::Established,
+        "the initiator never gets an OpenAck, so it must not reach Established"
+    );
+    let resp_trace = h.responder_actions.trace_snapshot();
+    assert_eq!(
+        resp_trace.send_open_ack, 0,
+        "send_open_ack must NOT fire when the usrpwd HMAC verify fails"
+    );
+    assert!(
+        resp_trace.set_close_reason_count >= 1,
+        "the reject must run set_close_reason_invalid (wire Close(INVALID))"
+    );
+}

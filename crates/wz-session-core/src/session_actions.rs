@@ -121,6 +121,10 @@ use crate::handshake_encode::encode_init;
 #[cfg(feature = "codec-open-body")]
 use crate::handshake_encode::encode_open;
 
+// R3b — the Z_EXT_AUTH dispatch wired into the four handshake send/recv stages.
+#[cfg(feature = "session-extauth")]
+use crate::auth_dispatch::AuthDispatch;
+
 // single-source borrowed reply builders (liveliness-token ResponseSink leg)
 #[cfg(feature = "liveliness-token")]
 use crate::declare::local_token::{build_final_reply, build_token_reply};
@@ -341,6 +345,16 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     init_ack_ext: R::Mutex<Vec<ExtEntryOwned>>,
     open_syn_ext: R::Mutex<Vec<ExtEntryOwned>>,
     open_ack_ext: R::Mutex<Vec<ExtEntryOwned>>,
+    /// R3b — the Z_EXT_AUTH dispatch (`session-extauth`). Holds the negotiated
+    /// auth methods (usrpwd, ...) and mux/demuxes their per-stage sub-exts into
+    /// the four handshake ext chains above. Default empty (no auth ext, admits
+    /// every stage = zenoh `Auth::default()`); the AP layer installs a
+    /// configured dispatch via [`Self::install_auth_dispatch`]. Behind its own
+    /// mutex so a send stage advances a method's state without blocking the role
+    /// ext slots (the "mid-handshake auth-step rotation" the slot comment above
+    /// anticipated).
+    #[cfg(feature = "session-extauth")]
+    pub auth: R::Mutex<AuthDispatch>,
     /// R121d — sizing parameters parsed from the peer's inbound
     /// `InitSyn`. The Accepting side caps its outbound InitAck
     /// `seq_num_res / req_id_res / batch_size` to `min(own,
@@ -706,6 +720,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             init_ack_ext: R::new_mutex(vec![default_init_patch_ext_entry()]),
             open_syn_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
             open_ack_ext: R::new_mutex(Vec::<ExtEntryOwned>::new()),
+            // R3b — empty dispatch (no auth ext, admits all = zenoh
+            // `Auth::default()`); the AP layer installs the configured one.
+            #[cfg(feature = "session-extauth")]
+            auth: R::new_mutex(AuthDispatch::default()),
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             rx_sn: R::new_mutex(crate::sn::RxSn::default()),
@@ -975,6 +993,69 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             ExtChainRole::OpenSyn => &self.open_syn_ext,
             ExtChainRole::OpenAck => &self.open_ack_ext,
         }
+    }
+
+    /// R3b — install the configured Z_EXT_AUTH dispatch. The AP layer builds it
+    /// with the usrpwd method(s) + a fresh OS-entropy challenge nonce and calls
+    /// this once at session bring-up, replacing the empty default (which emits
+    /// no auth ext and admits every stage).
+    #[cfg(feature = "session-extauth")]
+    pub fn install_auth_dispatch(&self, dispatch: AuthDispatch) {
+        R::with_mutex_mut(&self.auth, |slot| *slot = dispatch);
+    }
+
+    /// R3b — refresh the responder challenge nonce: a FRESH cryptographically
+    /// random `nonce` per accepted handshake (the [`crate::extauth_usrpwd`]
+    /// replay-defense contract). The no_std core draws no entropy, so the AP
+    /// accept path supplies it before the InitAck stage — and again on a
+    /// re-handshake, since the ext slots (and thus a stale auth ext) survive
+    /// [`Self::reset_for_reopen`].
+    #[cfg(feature = "session-extauth")]
+    pub fn refresh_auth_challenge_nonce(&self, nonce: u64) {
+        R::with_mutex_mut(&self.auth, |d| d.set_challenge_nonce(nonce));
+    }
+
+    /// R3b — run `f` against the auth dispatch under its mutex. The recv-stage
+    /// driver ([`crate::drive::dispatch_link_event`]) calls this to feed a
+    /// parsed handshake frame's ext chain into the matching demux stage; the
+    /// mutex detail stays here while the per-event stage routing stays at the
+    /// drive seam (beside the existing per-event admission match).
+    #[cfg(feature = "session-extauth")]
+    pub fn with_auth<U>(&self, f: impl FnOnce(&mut AuthDispatch) -> U) -> U {
+        R::with_mutex_mut(&self.auth, f)
+    }
+
+    /// R3b — run the auth dispatch's send stage for `role` and install the
+    /// resulting auth ext (id [`AUTH_EXT_ID`](crate::extauth::AUTH_EXT_ID)) into
+    /// that role's ext chain, IDEMPOTENTLY: any prior auth ext is dropped first
+    /// so a re-handshake's re-send never duplicates it (the slots persist across
+    /// `reset_for_reopen`). `None` (no method contributes) just clears any stale
+    /// auth ext. The shipped methods' send stages are infallible; a fallible
+    /// future method's failure would surface on the peer's recv-stage reject,
+    /// not here, so a send-stage error is swallowed (no auth ext emitted).
+    ///
+    /// Gated on the UNION of its four send-action callers (each pairs a body
+    /// codec with a role), so a `session-extauth`-only subset that compiles no
+    /// send action does not carry it as dead code under `-D warnings`.
+    #[cfg(all(
+        feature = "session-extauth",
+        any(feature = "codec-init-body", feature = "codec-open-body"),
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn stage_auth_send(
+        &self,
+        role: ExtChainRole,
+        produce: impl FnOnce(
+            &mut AuthDispatch,
+        ) -> Result<Option<ExtEntryOwned>, crate::auth_dispatch::AuthError>,
+    ) {
+        let ext = R::with_mutex_mut(&self.auth, produce).ok().flatten();
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            chain.retain(|e| e.ext_id() != crate::extauth::AUTH_EXT_ID);
+            if let Some(ext) = ext {
+                chain.push(ext);
+            }
+        });
     }
 
     pub fn trace_snapshot(&self) -> ActionTrace {
@@ -3728,6 +3809,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_init_syn += 1);
+            // R3b — initiator usrpwd offer (Unit) staged into the InitSyn chain.
+            #[cfg(feature = "session-extauth")]
+            a.stage_auth_send(ExtChainRole::InitSyn, |d| d.open_init_syn());
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -3744,6 +3828,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_open_syn += 1);
+            // R3b — initiator usrpwd response (Zbuf {user, hmac}) staged into
+            // the OpenSyn chain; HMACs over the nonce captured from InitAck.
+            #[cfg(feature = "session-extauth")]
+            a.stage_auth_send(ExtChainRole::OpenSyn, |d| d.open_open_syn());
             // RFC §5.M echo contract: prefer the cookie captured from a
             // peer InitAck via handle_inbound; fall back to params.cookie
             // for tests that drive OpenSyn without an inbound parse cycle.
@@ -3770,6 +3858,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_init_ack_with_cookie += 1);
+            // R3b — responder usrpwd challenge (Z64 nonce) staged into the
+            // InitAck chain. The AP accept path refreshes the nonce per
+            // handshake before this fires (replay defense).
+            #[cfg(feature = "session-extauth")]
+            a.stage_auth_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),
@@ -3803,6 +3896,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         {
             let a = &self.inner;
             R::with_mutex_mut(&a.trace, |t| t.send_open_ack += 1);
+            // R3b — responder usrpwd accept (Unit) staged into the OpenAck
+            // chain (reached only after accept_recv_open_syn verified the HMAC).
+            #[cfg(feature = "session-extauth")]
+            a.stage_auth_send(ExtChainRole::OpenAck, |d| d.accept_open_ack());
             // Accepting side OpenAck: cookie is consumed by the time we
             // get here (it travelled inbound on OpenSyn and was already
             // MAC-verified); the OpenAck shape omits it (parent.A=1

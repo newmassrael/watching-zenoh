@@ -120,7 +120,15 @@ pub enum AuthError {
 /// by [`id`](Self::id). A stage a method does not participate in keeps the
 /// default (contribute nothing / admit) — usrpwd, e.g., offers a `Unit` on
 /// InitSyn, a `Z64` nonce on InitAck, a `Zbuf` HMAC on OpenSyn.
-pub trait AuthMethod {
+///
+/// `Send` supertrait: an [`AuthDispatch`] lives in the session's
+/// [`SessionLinkActions`](crate::session_actions::SessionLinkActions) auth slot,
+/// behind the per-runtime `Mutex` whose `with_mutex_mut` requires `T: Send` for
+/// every runtime (the AP tokio profile shares it across tasks). The shipped
+/// methods (usrpwd) are naturally `Send` (owned `Vec<u8>` credentials); the
+/// bound makes that an explicit, compiler-checked contract rather than an
+/// accidental property.
+pub trait AuthMethod: Send {
     /// The method id used to route this method's sub-ext within the auth ext
     /// (zenoh `id::PUBKEY = 0x1` / `id::USRPWD = 0x2`). Must be `<= 0x0F` (the
     /// 4-bit ext id field).
@@ -161,6 +169,16 @@ pub trait AuthMethod {
     fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
         Ok(None)
     }
+
+    /// Refresh this method's per-handshake challenge nonce (responder side).
+    /// The no_std core draws no entropy (`getrandom` has no bare-metal
+    /// backend), so the AP layer supplies a FRESH cryptographically-random
+    /// `nonce` per accepted handshake — the wz mirror of zenoh drawing
+    /// `prng.gen()` in `StateAccept::new` (usrpwd.rs:169-174). Default no-op
+    /// (a method without a challenge — e.g. an initiator-only or
+    /// nonce-free method — ignores it). See the [`UsrPwdMethod::responder`]
+    /// security contract: a fixed / reused nonce is a replay hole.
+    fn set_challenge_nonce(&mut self, _nonce: u64) {}
 }
 
 /// The composable auth dispatch — holds the negotiated methods and mux/demuxes
@@ -180,6 +198,18 @@ impl AuthDispatch {
     /// Whether no method is configured — the fast path (no auth ext emitted).
     pub fn is_empty(&self) -> bool {
         self.methods.is_empty()
+    }
+
+    /// Refresh every method's per-handshake challenge nonce (responder side).
+    /// The AP layer draws a FRESH cryptographically-random `nonce` per accepted
+    /// handshake (OS entropy — the no_std core cannot) and fans it out here, so
+    /// the responder's InitAck challenge is never reused across handshakes (the
+    /// [`UsrPwdMethod::responder`] replay-defense contract). A method without a
+    /// challenge ignores it (the trait default no-op).
+    pub fn set_challenge_nonce(&mut self, nonce: u64) {
+        for m in self.methods.iter_mut() {
+            m.set_challenge_nonce(nonce);
+        }
     }
 
     /// Multiplex per-method `(id, sub-ext)` contributions into the outer auth
@@ -278,6 +308,16 @@ impl AuthDispatch {
     }
 }
 
+impl Default for AuthDispatch {
+    /// An empty dispatch — no method configured, so it emits no auth ext and
+    /// admits every stage (the wz mirror of zenoh `Auth::default()`). This is
+    /// the [`SessionLinkActions`](crate::session_actions::SessionLinkActions)
+    /// auth-slot default until the AP layer installs a configured dispatch.
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
 /// Find the sub-ext whose id matches `id` in a demuxed inner chain (the
 /// `ztake!` analogue), projected to an [`AuthSubExt`]. `None` when the peer sent
 /// no sub-ext for that id (or one in an encoding this kernel does not carry).
@@ -291,8 +331,8 @@ fn find_method_sub_ext(entries: &[ExtEntryOwned], id: u8) -> Option<AuthSubExt> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::rc::Rc;
-    use core::cell::Cell;
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     /// A test-double method exercising the four-stage mux/demux + id routing +
     /// ALL THREE sub-ext encodings: the open side offers `Unit` on InitSyn; the
@@ -304,18 +344,18 @@ mod tests {
         id: u8,
         nonce: u64,
         open_recv_nonce: Option<u64>,
-        accept_offered: Rc<Cell<bool>>,
-        accept_verified: Rc<Cell<bool>>,
-        open_confirmed: Rc<Cell<bool>>,
+        accept_offered: Arc<AtomicBool>,
+        accept_verified: Arc<AtomicBool>,
+        open_confirmed: Arc<AtomicBool>,
     }
 
     impl EchoMethod {
         fn new(
             id: u8,
             nonce: u64,
-            accept_offered: Rc<Cell<bool>>,
-            accept_verified: Rc<Cell<bool>>,
-            open_confirmed: Rc<Cell<bool>>,
+            accept_offered: Arc<AtomicBool>,
+            accept_verified: Arc<AtomicBool>,
+            open_confirmed: Arc<AtomicBool>,
         ) -> Self {
             Self {
                 id,
@@ -330,9 +370,9 @@ mod tests {
             Box::new(Self::new(
                 id,
                 nonce,
-                Rc::new(Cell::new(false)),
-                Rc::new(Cell::new(false)),
-                Rc::new(Cell::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
             ))
         }
     }
@@ -361,13 +401,15 @@ mod tests {
                 .map(|n| AuthSubExt::Zbuf(n.to_le_bytes().to_vec())))
         }
         fn open_recv_open_ack(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
-            self.open_confirmed.set(sub == Some(AuthSubExt::Unit));
+            self.open_confirmed
+                .store(sub == Some(AuthSubExt::Unit), Ordering::SeqCst);
             Ok(())
         }
         // Accept side: note the Unit offer, issue the Z64 nonce, verify the Zbuf
         // echo, confirm with Unit.
         fn accept_recv_init_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
-            self.accept_offered.set(sub == Some(AuthSubExt::Unit));
+            self.accept_offered
+                .store(sub == Some(AuthSubExt::Unit), Ordering::SeqCst);
             Ok(())
         }
         fn accept_init_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
@@ -375,7 +417,7 @@ mod tests {
         }
         fn accept_recv_open_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
             let ok = sub == Some(AuthSubExt::Zbuf(self.nonce.to_le_bytes().to_vec()));
-            self.accept_verified.set(ok);
+            self.accept_verified.store(ok, Ordering::SeqCst);
             if !ok {
                 return Err(AuthError::Rejected("nonce mismatch"));
             }
@@ -392,21 +434,21 @@ mod tests {
 
     #[test]
     fn four_stage_open_accept_round_trip_authenticates_all_encodings() {
-        let accept_offered = Rc::new(Cell::new(false));
-        let accept_verified = Rc::new(Cell::new(false));
-        let open_confirmed = Rc::new(Cell::new(false));
+        let accept_offered = Arc::new(AtomicBool::new(false));
+        let accept_verified = Arc::new(AtomicBool::new(false));
+        let open_confirmed = Arc::new(AtomicBool::new(false));
         let mut accept = AuthDispatch::new(alloc::vec![Box::new(EchoMethod::new(
             0x2,
             0x4243_4445,
             accept_offered.clone(),
             accept_verified.clone(),
-            Rc::new(Cell::new(false)),
+            Arc::new(AtomicBool::new(false)),
         )) as _]);
         let mut open = AuthDispatch::new(alloc::vec![Box::new(EchoMethod::new(
             0x2,
             0x4243_4445,
-            Rc::new(Cell::new(false)),
-            Rc::new(Cell::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             open_confirmed.clone(),
         )) as _]);
 
@@ -414,7 +456,10 @@ mod tests {
         let init_syn = open.open_init_syn().unwrap();
         assert!(init_syn.is_some(), "InitSyn carries the Unit offer");
         accept.accept_recv_init_syn(&exts(init_syn)).unwrap();
-        assert!(accept_offered.get(), "accept saw the Unit offer");
+        assert!(
+            accept_offered.load(Ordering::SeqCst),
+            "accept saw the Unit offer"
+        );
 
         // InitAck (Z64): the accept side issues the nonce; the open side stores it.
         let init_ack = accept.accept_init_ack().unwrap();
@@ -428,8 +473,14 @@ mod tests {
         let open_ack = accept.accept_open_ack().unwrap();
         open.open_recv_open_ack(&exts(open_ack)).unwrap();
 
-        assert!(accept_verified.get(), "accept verified the echoed nonce");
-        assert!(open_confirmed.get(), "open confirmed the Unit OK");
+        assert!(
+            accept_verified.load(Ordering::SeqCst),
+            "accept verified the echoed nonce"
+        );
+        assert!(
+            open_confirmed.load(Ordering::SeqCst),
+            "open confirmed the Unit OK"
+        );
     }
 
     #[test]

@@ -39,6 +39,12 @@ use crate::vle::encode_vle_u64_into;
 /// usrpwd method id within the auth ext (zenoh `id::USRPWD`).
 const USRPWD_ID: u8 = 0x2;
 
+/// A fixed dummy password the unknown-user reject path HMACs over so its cost
+/// matches a known user's verify (the timing-oracle close in
+/// [`UsrPwdMethod::accept_recv_open_syn`]). The value is irrelevant — only the
+/// constant HMAC work matters; the verdict is always reject.
+const UNKNOWN_USER_DUMMY_PWD: &[u8] = b"wz-usrpwd-unknown-user-dummy";
+
 /// HMAC-SHA3-256 sign — zenoh `zenoh_crypto::hmac::sign` (`Hmac::<Sha3_256>`);
 /// key = the InitAck nonce's little-endian bytes, msg = the password.
 fn hmac_sha3_256(key: &[u8], msg: &[u8]) -> Vec<u8> {
@@ -210,13 +216,29 @@ impl AuthMethod for UsrPwdMethod {
             return Err(AuthError::Rejected("usrpwd: missing OpenSyn"));
         };
         let (user, hmac) = decode_open_syn(&body)?;
-        let password = self
-            .password_for(&user)
-            .ok_or(AuthError::Rejected("usrpwd: unknown user"))?;
-        if !hmac_sha3_256_verify(&self.nonce.to_le_bytes(), password, &hmac) {
-            return Err(AuthError::Rejected("usrpwd: bad password"));
+        let key = self.nonce.to_le_bytes();
+        // R3b timing-oracle close (the hardening the R311wy security contract
+        // deferred to this live atom): on an UNKNOWN user, run a dummy HMAC
+        // over a fixed secret before rejecting, so the reject path costs the
+        // same whether or not the username exists. zenoh usrpwd.rs:418
+        // early-returns on the lookup miss (a username-enumeration timing
+        // oracle); wz hardens beyond it with IDENTICAL wire (both reject the
+        // handshake — the difference is only timing, observable solely over a
+        // real network, which usrpwd already assumes is TLS/QUIC-encrypted).
+        match self.password_for(&user) {
+            Some(password) => {
+                if !hmac_sha3_256_verify(&key, password, &hmac) {
+                    return Err(AuthError::Rejected("usrpwd: bad password"));
+                }
+                Ok(())
+            }
+            None => {
+                // Discarded — the verdict is fixed (reject); only the work
+                // matters, equalising the unknown-user branch's HMAC cost.
+                let _ = hmac_sha3_256_verify(&key, UNKNOWN_USER_DUMMY_PWD, &hmac);
+                Err(AuthError::Rejected("usrpwd: unknown user"))
+            }
         }
-        Ok(())
     }
 
     fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
@@ -224,6 +246,15 @@ impl AuthMethod for UsrPwdMethod {
             return Ok(None);
         }
         Ok(Some(AuthSubExt::Unit))
+    }
+
+    fn set_challenge_nonce(&mut self, nonce: u64) {
+        // Responder side: this is the InitAck challenge + the OpenSyn-verify
+        // key. The live handshake wiring calls this with a FRESH OS-entropy
+        // nonce per accepted handshake (the replay-defense contract on
+        // [`Self::responder`]). Harmless on an initiator-only method — the
+        // initiator reads `recv_nonce`, never this slot.
+        self.nonce = nonce;
     }
 }
 
@@ -290,6 +321,29 @@ mod tests {
             ),
         );
         assert_eq!(r, Err(AuthError::Rejected("usrpwd: unknown user")));
+    }
+
+    #[test]
+    fn set_challenge_nonce_refreshes_the_initack_challenge() {
+        // The InitAck Z64 must reflect the LATEST injected nonce — the live
+        // wiring refreshes it per accepted handshake (replay defense). Tested
+        // at the method (not the value-blind handshake: an initiator HMACs
+        // against whatever InitAck nonce it receives, so a full round-trip
+        // authenticates for ANY nonce and cannot witness the refresh).
+        let mut r = UsrPwdMethod::responder(
+            alloc::vec![(b"alice".to_vec(), b"pw".to_vec())],
+            0x1111_1111,
+        );
+        assert_eq!(
+            r.accept_init_ack().unwrap(),
+            Some(AuthSubExt::Z64(0x1111_1111))
+        );
+        r.set_challenge_nonce(0x2222_2222);
+        assert_eq!(
+            r.accept_init_ack().unwrap(),
+            Some(AuthSubExt::Z64(0x2222_2222)),
+            "InitAck must carry the refreshed nonce, not the construction one"
+        );
     }
 
     #[test]

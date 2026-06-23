@@ -144,6 +144,26 @@ pub fn signing_key_from_os_entropy() -> Result<SigningKey, getrandom::Error> {
         .expect("32-byte entropy buffer always satisfies the >= 32 length contract"))
 }
 
+/// R3b — draw a fresh usrpwd challenge nonce from OS-backed cryptographic
+/// entropy. The wz mirror of zenoh drawing `prng.gen::<u64>()` per accepted
+/// handshake in usrpwd `StateAccept::new` (its `PseudoRng` is OS-entropy seeded
+/// at transport-manager build). Pulls 8 bytes from `getrandom` (the same source
+/// as `signing_key_from_os_entropy`) and little-endian-decodes them to a `u64`.
+///
+/// The no_std session core cannot draw entropy (`getrandom` has no bare-metal
+/// backend), so the AP accept path draws the nonce here and supplies it to the
+/// responder method via `SessionLinkActions::refresh_auth_challenge_nonce`. A
+/// FRESH nonce per accepted handshake is the usrpwd replay defense — a reused
+/// nonce lets a captured OpenSyn `{user, hmac}` replay against the responder.
+/// The fallible surface returns `getrandom::Error` for the same
+/// sandbox-without-entropy reason as the signing-key draw.
+#[cfg(feature = "session-extauth")]
+pub fn nonce_from_os_entropy() -> Result<u64, getrandom::Error> {
+    let mut buf = [0u8; 8];
+    getrandom::getrandom(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
+
 // R311dl — the wire_const re-import moved into the test module: after the
 // outbound builders (push/declare/interest/handshake) hoisted to
 // wz-session-core, the only remaining session_glue references to
