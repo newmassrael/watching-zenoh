@@ -31,6 +31,14 @@
 //! needs no key of zenohd's. If a future zenoh implements `known_keys_file`, this
 //! test should be promoted to assert Established (the wire already interoperates).
 //!
+//! ## Untested direction (disclosed gap)
+//!
+//! pubkey is MUTUAL, but only the wz-initiator -> zenohd-responder direction is
+//! exercised here. The reverse (zenohd-initiator -> wz-responder) is NOT
+//! cross-impl-proven — it would need zenohd to DIAL wz with pubkey configured,
+//! which the in-process harness does not set up. The wz responder logic is
+//! proven wz<->wz (`pubkey_handshake_e2e`); its cross-impl half is a known gap.
+//!
 //! `#[ignore]` (binary-dep e2e): needs `target/zenohd/zenohd` (set
 //! `WZ_ZENOHD_BIN` or run `scripts/build-zenohd.sh`) + `openssl` on PATH. Run via
 //! Layer Z / `--ignored`.

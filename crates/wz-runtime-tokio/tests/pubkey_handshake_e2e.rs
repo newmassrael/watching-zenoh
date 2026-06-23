@@ -50,9 +50,10 @@ async fn pubkey_production_open_seams_authenticate_over_real_tcp() {
         let (stream, _peer) = listener.accept().await.expect("accept");
         let mut params = fixture_session_init_params();
         params.zid = vec![0x02; 4];
+        // Some(vec![init_pub]) = admit exactly this initiator key (membership).
         let responder = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
             generate_keypair(KEY_BITS).expect("responder keypair"),
-            vec![init_pub],
+            Some(vec![init_pub]),
         )) as _]);
         accept_and_open_session_with_auth(
             DialedLink::Tcp(stream),

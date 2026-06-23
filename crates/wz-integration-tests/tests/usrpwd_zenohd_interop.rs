@@ -174,12 +174,20 @@ async fn wz_rejected_by_usrpwd_zenohd_with_wrong_credentials() {
 
     // The SAME proven-ready zenohd must REJECT a wrong password. The only
     // difference from the control is the password, so a failure here is the
-    // usrpwd HMAC mismatch surfacing as zenohd's establishment close.
+    // usrpwd HMAC mismatch surfacing as zenohd's establishment Close. Assert the
+    // failure is a PEER-CLOSE shape (zenohd closed at the auth stage), not a
+    // pre-auth failure (Dial / IterationLimit) that would also be `is_err()` but
+    // would NOT prove the reject reached auth -- so a wz regression that never
+    // gets to the auth stage cannot pass as a "reject".
     let wrong = dial_with_creds(port, USER, "definitely-the-wrong-password").await;
-    assert!(
-        wrong.is_err(),
-        "usrpwd zenohd must reject a wrong password, but wz reached Established"
-    );
+    match wrong {
+        Err(OpenError::Terminal | OpenError::HandshakeTimeout | OpenError::LinkLost(_)) => {}
+        Ok(_) => panic!("usrpwd zenohd must reject a wrong password, but wz reached Established"),
+        Err(other) => panic!(
+            "wrong-password dial failed with {other:?}, not a peer-close reject \
+             (Terminal/HandshakeTimeout/LinkLost) -- wz may not have reached the auth stage"
+        ),
+    }
 
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
