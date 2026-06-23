@@ -287,6 +287,16 @@ session-unicast = ["dep:sce-rust-runtime"]
 session-unicast-open = []
 session-unicast-accept = []
 
+# session-extauth — the Z_EXT_AUTH establishment extension (catalog
+# §5.4 session, zenoh init.rs:156 / open.rs:121 `zextzbuf!(0x3, false)`).
+# Gates the `extauth` codec module (the wire-ext envelope on Init / Open).
+# AP-only (zenoh-pico has no auth), so it implies `alloc` (auth payloads —
+# an RSA signature for the pubkey method — exceed the no_std heapless bound)
+# and is forwarded only through the AP runtime (wz-runtime-tokio), never the
+# MCU profile. R1 lands the codec; the method-agnostic dispatch (OpenFsm /
+# AcceptFsm mirror) + the usrpwd / pubkey methods are follow-on atoms.
+session-extauth = ["alloc"]
+
 # Round A — multicast session FSM (docs/session-fsm.md §3.1 session-level
 # lifecycle + §3.2 per-peer membership). Gates the two SCE-generated
 # engine-free statechart modules (build.rs codegens

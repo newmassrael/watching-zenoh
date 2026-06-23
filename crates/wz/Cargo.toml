@@ -535,8 +535,11 @@ scouting-static = [
     "wz-runtime-lwip?/scouting-static",
 ]
 
-# ----- domain: session (10 atomic, 4 active / 6 reserved) -----
-session-extauth = []
+# ----- domain: session (10 atomic) -----
+# session-extauth forwards the §5.4 Z_EXT_AUTH establishment-ext codec into
+# the AP runtime (R1 = codec layer; dispatch + usrpwd/pubkey methods follow).
+# AP-only: no wz-runtime-lwip forward (zenoh-pico has no auth).
+session-extauth = ["wz-runtime-tokio?/session-extauth"]
 session-extcompression = ["transport-compression"]
 session-extqos = []
 session-extshm = ["transport-shm"]

@@ -4047,10 +4047,10 @@
       ]
     },
     "session-fsm--prose-level-sketch/8-2-new-open-questions": {
-      "intent": "Four new open questions (OQ-W9..W12) added from this document; OQ-W9 closed via zenoh-pico parity verification.",
+      "intent": "Four new open questions (OQ-W9..W12) added from this document; OQ-W9 + OQ-W10 closed (W10 via the R311wv extauth-codec round, which also unblocks OQ-W2).",
       "inputs_bullets": [
         "OQ-W9 closed: client multicast session unsupported (zenoh-pico parity, hard-error diag)",
-        "OQ-W10: ext::Auth multi-step shape (USRPWD intra-Opening sub-states); blocks OQ-W2",
+        "OQ-W10 closed: ext::Auth = ext side-state on existing 4 handshake msgs, no new FSM state (R311wv)",
         "OQ-W11: multi-link TX dispatch policy (round-robin vs priority); feeds 5.N, blocks Phase C10",
         "OQ-W12: closing timeout default for slow links (Serial 115200); deploy.yaml default"
       ],
@@ -48721,6 +48721,68 @@
         "LOCAL: R311wu committed with the code (this entry + 7 files + the inventory status flip). origin/main=b1afe84. Recommend a FULL run-ci before any push (the routing-peer interceptor surface moved from always-on to cfg-gated, plus Layer C1y + ap-demo + the facade/preset feature graph changed). NOT pushed without explicit consent."
       ]
     },
+    "Round 311wv": {
+      "decision_summary": "R311wv: session-extauth track R1 -- ratify OQ-W10/W2 (ext::Auth rides the existing 4 handshake messages as ext side-state, no new SCXML sub-state) + land the Z_EXT_AUTH establishment-ext codec (the (0x3, ENC_ZBUF, ExtZbuf) wire envelope on Init/Open), gated on the new AP-only session-extauth feature, inventory reserved->active (codec layer; the method-agnostic dispatch + usrpwd/pubkey methods follow). jwt deferred as a zenoh phantom -- no transport-establishment JWT method exists in zenoh.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/extauth.rs: NEW Z_EXT_AUTH codec SSOT -- AUTH_EXT_ID=0x03 + encode_auth_ext/decode_auth_ext, the (0x3, ENC_ZBUF, ExtZbuf) wire envelope on the Init/Open carrier (zenoh init.rs:156 / open.rs:121 zextzbuf!(0x3,false)); mirrors the attachment.rs ext-codec shape but is its own SSOT (distinct carrier + ext id space). 3 round-trip/empty/miss unit tests.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature=\"session-extauth\")] pub mod extauth (sibling of attachment).",
+        "crates/wz-session-core/Cargo.toml: session-extauth = [\"alloc\"] (AP-only; implies alloc -- the pubkey method's RSA signature exceeds the no_std heapless bound).",
+        "crates/wz-runtime-tokio/Cargo.toml: session-extauth = [\"wz-session-core/session-extauth\"] (AP forward; no wz-runtime-lwip forward -- zenoh-pico has no auth).",
+        "crates/wz/Cargo.toml: session-extauth = [\"wz-runtime-tokio?/session-extauth\"] (was an empty stub).",
+        "inventory: session-extauth reserved->active, honest partial-scope reason (R1 codec layer; dispatch + usrpwd/pubkey methods follow).",
+        "session-fsm--prose-level-sketch/8-2-new-open-questions: OQ-W10 marked closed (mirroring the OQ-W9 closure), intent updated to note W10 closed + OQ-W2 unblocked."
+      ],
+      "verification_bullets": [
+        "A3 read-FIRST (the load-bearing classification, direct source): wz auth impl = 0 (genuinely inert, not foundational/partial). OQ-W10/W2 resolved by zenoh source -- auth/mod.rs:289-634 OpenFsm/AcceptFsm hook ONLY the existing 4 establishment messages (send_init_syn/recv_init_ack/send_open_syn/recv_open_ack); usrpwd.rs:148-173 StateOpen/StateAccept = a nonce side-state, NOT a new FSM state. So ext::Auth rides the existing 4-message exchange with no intra-Opening sub-region -> SCXML-pure.",
+        "The ext chain is HAND-WRITTEN in wz-session-core (encode_ext_chain + per-id helpers; attachment.rs / declare_ext_keyexpr.rs the templates), NOT SCE-forge -- so the codec adds no sce:* and no codegen schema change.",
+        "jwt is a zenoh PHANTOM: ZERO JWT auth in zenoh transport establishment (grep io/commons = 0) -- access-extauth-jwt has no port source; deferred for reclassification (port-don't-invent), NOT built.",
+        "zenoh-pico has no auth (0 hits) -> extauth is AP-only, no parity expectation.",
+        "Build/test green: 3 extauth unit tests pass; --no-default-features --features session-extauth compiles standalone; clippy -D warnings --all-targets clean; default build (codec elided) clean; facade wz --features runtime-tokio,session-extauth and --features runtime-tokio,access-extauth-jwt both compose.",
+        "audit-catalog-status.sh: correctly FAILED (reserved-but-gated drift) before the flip, OK after session-extauth reserved->active (active<=>gated restored)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "session-fsm--prose-level-sketch/8-2-new-open-questions"
+      ],
+      "carry_forward_bullets": [
+        "R311wv = session-extauth track R1: OQ-W10/W2 ratified resolved (ext::Auth = ext side-state on the existing 4 handshake msgs, no new SCXML state) + the Z_EXT_AUTH establishment-ext CODEC landed (wire envelope only). session-extauth flipped active (codec layer); this is the wire foundation the remaining atoms consume.",
+        "NEXT R2 = the method-agnostic auth DISPATCH seam: the wz mirror of zenoh establishment/ext/auth/mod.rs OpenFsm/AcceptFsm -- read inbound auth ext -> produce outbound auth ext across recv_init_syn/send_init_ack/send_open_syn/recv_open_ack, in the handshake glue (handshake_encode + session_glue), NO new SCXML state (per OQ-W10). Wires the R1 codec into the actual Init/Open encode/decode.",
+        "NEXT R3 = usrpwd method (zenoh usrpwd.rs: nonce challenge in InitAck, HMAC(password, nonce) in OpenSyn) -> access-extauth-usrpwd reserved->active.",
+        "NEXT R4 = pubkey method (zenoh pubkey.rs: RSA challenge-response) -> access-extauth-pubkey active; needs an RSA crypto dep DECISION first (which crate; AP-only).",
+        "access-extauth-jwt = zenoh PHANTOM (no transport-establishment JWT method exists in zenoh). After R4, RECLASSIFY the catalog atom (correct its source / remove), do NOT build (port-don't-invent). So the access domain realistically closes to 5/6 textbook (acl/downsampling/quota done R311wu + usrpwd/pubkey), with jwt reclassified.",
+        "LOCAL: R311wv to be committed atop R311wu (b4d36ea, unpushed); origin/main=b1afe84. Recommend a full run-ci before any push (touches the facade/preset feature graph + wz-session-core + a new AP-only feature). NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311wv: session-extauth track R1 -- ratify OQ-W10/W2 (ext::Auth rides the existing 4 handshake messages as ext side-state, no new SCXML sub-state) + land the Z_EXT_AUTH establishment-ext codec (the (0x3, ENC_ZBUF, ExtZbuf) wire envelope on Init/Open), gated on the new AP-only session-extauth feature, inventory reserved->active (codec layer; the method-agnostic dispatch + usrpwd/pubkey methods follow). jwt deferred as a zenoh phantom -- no transport-establishment JWT method exists in zenoh.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/extauth.rs: NEW Z_EXT_AUTH codec SSOT -- AUTH_EXT_ID=0x03 + encode_auth_ext/decode_auth_ext, the (0x3, ENC_ZBUF, ExtZbuf) wire envelope on the Init/Open carrier (zenoh init.rs:156 / open.rs:121 zextzbuf!(0x3,false)); mirrors the attachment.rs ext-codec shape but is its own SSOT (distinct carrier + ext id space). 3 round-trip/empty/miss unit tests.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature=\"session-extauth\")] pub mod extauth (sibling of attachment).",
+        "crates/wz-session-core/Cargo.toml: session-extauth = [\"alloc\"] (AP-only; implies alloc -- the pubkey method's RSA signature exceeds the no_std heapless bound).",
+        "crates/wz-runtime-tokio/Cargo.toml: session-extauth = [\"wz-session-core/session-extauth\"] (AP forward; no wz-runtime-lwip forward -- zenoh-pico has no auth).",
+        "crates/wz/Cargo.toml: session-extauth = [\"wz-runtime-tokio?/session-extauth\"] (was an empty stub).",
+        "inventory: session-extauth reserved->active, honest partial-scope reason (R1 codec layer; dispatch + usrpwd/pubkey methods follow).",
+        "session-fsm--prose-level-sketch/8-2-new-open-questions: OQ-W10 marked closed (mirroring the OQ-W9 closure), intent updated to note W10 closed + OQ-W2 unblocked."
+      ],
+      "publishable_verification_bullets": [
+        "A3 read-FIRST (the load-bearing classification, direct source): wz auth impl = 0 (genuinely inert, not foundational/partial). OQ-W10/W2 resolved by zenoh source -- auth/mod.rs:289-634 OpenFsm/AcceptFsm hook ONLY the existing 4 establishment messages (send_init_syn/recv_init_ack/send_open_syn/recv_open_ack); usrpwd.rs:148-173 StateOpen/StateAccept = a nonce side-state, NOT a new FSM state. So ext::Auth rides the existing 4-message exchange with no intra-Opening sub-region -> SCXML-pure.",
+        "The ext chain is HAND-WRITTEN in wz-session-core (encode_ext_chain + per-id helpers; attachment.rs / declare_ext_keyexpr.rs the templates), NOT SCE-forge -- so the codec adds no sce:* and no codegen schema change.",
+        "jwt is a zenoh PHANTOM: ZERO JWT auth in zenoh transport establishment (grep io/commons = 0) -- access-extauth-jwt has no port source; deferred for reclassification (port-don't-invent), NOT built.",
+        "zenoh-pico has no auth (0 hits) -> extauth is AP-only, no parity expectation.",
+        "Build/test green: 3 extauth unit tests pass; --no-default-features --features session-extauth compiles standalone; clippy -D warnings --all-targets clean; default build (codec elided) clean; facade wz --features runtime-tokio,session-extauth and --features runtime-tokio,access-extauth-jwt both compose.",
+        "audit-catalog-status.sh: correctly FAILED (reserved-but-gated drift) before the flip, OK after session-extauth reserved->active (active<=>gated restored)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "session-fsm--prose-level-sketch/8-2-new-open-questions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311wv = session-extauth track R1: OQ-W10/W2 ratified resolved (ext::Auth = ext side-state on the existing 4 handshake msgs, no new SCXML state) + the Z_EXT_AUTH establishment-ext CODEC landed (wire envelope only). session-extauth flipped active (codec layer); this is the wire foundation the remaining atoms consume.",
+        "NEXT R2 = the method-agnostic auth DISPATCH seam: the wz mirror of zenoh establishment/ext/auth/mod.rs OpenFsm/AcceptFsm -- read inbound auth ext -> produce outbound auth ext across recv_init_syn/send_init_ack/send_open_syn/recv_open_ack, in the handshake glue (handshake_encode + session_glue), NO new SCXML state (per OQ-W10). Wires the R1 codec into the actual Init/Open encode/decode.",
+        "NEXT R3 = usrpwd method (zenoh usrpwd.rs: nonce challenge in InitAck, HMAC(password, nonce) in OpenSyn) -> access-extauth-usrpwd reserved->active.",
+        "NEXT R4 = pubkey method (zenoh pubkey.rs: RSA challenge-response) -> access-extauth-pubkey active; needs an RSA crypto dep DECISION first (which crate; AP-only).",
+        "access-extauth-jwt = zenoh PHANTOM (no transport-establishment JWT method exists in zenoh). After R4, RECLASSIFY the catalog atom (correct its source / remove), do NOT build (port-don't-invent). So the access domain realistically closes to 5/6 textbook (acl/downsampling/quota done R311wu + usrpwd/pubkey), with jwt reclassified.",
+        "LOCAL: R311wv to be committed atop R311wu (b4d36ea, unpushed); origin/main=b1afe84. Recommend a full run-ci before any push (touches the facade/preset feature graph + wz-session-core + a new AP-only feature). NOT pushed without explicit consent."
+      ]
+    },
     "Round 311x": {
       "decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
       "changes_bullets": [
@@ -54316,10 +54378,10 @@
       "reason": "F=config-file static peer (scout_static bounded-seam synth, no-alloc-capable); P=zenoh static endpoints; C=alternative to dynamic discovery; R311if gated, R311ih composes on AP+MCU via facade->runtime->core"
     },
     "session-extauth": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh Z_EXT_AUTH",
-      "reason": "F=auth extension dispatch; P=zenoh; C=opt-in handshake extension, OQ-W2 carry"
+      "reason": "F=Z_EXT_AUTH establishment ext (wire codec); P=zenoh init.rs:156/open.rs:121 zextzbuf!(0x3,false); C=cfg knob session-extauth, R1 codec layer only (method-agnostic dispatch + usrpwd/pubkey methods are follow-on atoms); OQ-W10/W2 resolved (ext side-state on existing 4 handshake msgs, no new SCXML state)"
     },
     "session-extcompression": {
       "status": "reserved",

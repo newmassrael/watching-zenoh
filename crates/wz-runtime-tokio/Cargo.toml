@@ -719,6 +719,11 @@ switchboard = ["codec-push", "wz-session-core/switchboard"]
 # resumable, stateless-accept) stay declaration-only at wz facade.
 session-unicast-open = ["wz-session-core/session-unicast-open"]
 session-unicast-accept = ["wz-session-core/session-unicast-accept"]
+# R1 extauth — forward the §5.4 Z_EXT_AUTH establishment ext codec into the
+# AP runtime (the codec lives in wz-session-core; only the AP profile carries
+# auth — the MCU/lwip path never forwards it). The dispatch + methods are
+# follow-on atoms.
+session-extauth = ["wz-session-core/session-extauth"]
 # R311cf/R311fd — keyexpr domain. The other 7 keyexpr-* features are
 # cluster-wide behaviors with no single anchor cfg site (follow-up
 # cascade per-site wire-up).

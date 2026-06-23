@@ -621,6 +621,15 @@ pub mod source_info_ext;
 #[cfg(all(feature = "alloc", feature = "attachment-bytes"))]
 pub mod attachment;
 
+/// SSOT for the Z_EXT_AUTH establishment extension wire shape. Gated on the
+/// `session-extauth` catalog primitive (AP-only — zenoh-pico has no auth);
+/// owns the one encode / decode pair for the `(0x3, ENC_ZBUF, ExtZbuf body)`
+/// auth ext on the Init / Open carrier. Sibling of `attachment` (same ExtZbuf
+/// shape, distinct carrier + ext id space). The method-agnostic dispatch and
+/// the concrete methods (usrpwd / pubkey) are follow-on atoms consuming it.
+#[cfg(feature = "session-extauth")]
+pub mod extauth;
+
 /// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
 /// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value
 /// construction of a `Response(Reply|Err)` wire record from a
