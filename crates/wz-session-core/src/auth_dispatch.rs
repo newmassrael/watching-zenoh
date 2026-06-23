@@ -46,23 +46,8 @@ use wz_codecs::ext_zint::ExtZint;
 
 use crate::codec_owned::owned_bytes;
 use crate::ext_chain::{decode_ext_chain, encode_ext_chain};
+use crate::ext_header::{EXT_ENC_Z64, EXT_ENC_ZBUF};
 use crate::extauth::{decode_auth_ext, encode_auth_ext};
-
-/// ENC_Z64 marker for an inner per-method sub-ext header (the 2-bit encoding
-/// field `0b01` at bits 5..6). Mirrors `ext_nodeid::EXT_ENC_Z64`, redefined here
-/// because `ext_nodeid` is codec-plane-gated (`codec-push` / `-declare` /
-/// `-request`) and so absent on a session-extauth-only build.
-const ENC_Z64: u8 = 0x20;
-
-/// ENC_ZBUF marker for an inner per-method sub-ext header (`0b10` at bits 5..6).
-/// Mirrors `ext_nodeid::EXT_ENC_ZBUF`; see [`ENC_Z64`] for why it is redefined.
-const ENC_ZBUF: u8 = 0x40;
-
-/// Extract the 4-bit ext id from a header (mirrors `ext_nodeid::ext_id`; see
-/// [`ENC_Z64`] for why it is not imported).
-fn ext_id(header: u8) -> u8 {
-    header & 0x0F
-}
 
 /// A method's per-stage auth sub-extension — the encoding + value zenoh's
 /// `ZExt{Unit,Z64,ZBuf}` carries inside the auth ext, abstracted so a method
@@ -90,11 +75,11 @@ impl AuthSubExt {
                 body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
             },
             AuthSubExt::Z64(value) => ExtEntryOwned {
-                header: id | ENC_Z64,
+                header: id | EXT_ENC_Z64,
                 body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
             },
             AuthSubExt::Zbuf(bytes) => ExtEntryOwned {
-                header: id | ENC_ZBUF,
+                header: id | EXT_ENC_ZBUF,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: bytes.len() as u64,
                     value: owned_bytes(&bytes)
@@ -299,7 +284,7 @@ impl AuthDispatch {
 fn find_method_sub_ext(entries: &[ExtEntryOwned], id: u8) -> Option<AuthSubExt> {
     entries
         .iter()
-        .find(|e| ext_id(e.header) == id)
+        .find(|e| e.ext_id() == id)
         .and_then(|e| AuthSubExt::from_body(&e.body))
 }
 

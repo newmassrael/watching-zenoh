@@ -34,6 +34,7 @@ use sce_forge_runtime::codec::SceCursor;
 use sha3::Sha3_256;
 
 use crate::auth_dispatch::{AuthError, AuthMethod, AuthSubExt};
+use crate::vle::encode_vle_u64_into;
 
 /// usrpwd method id within the auth ext (zenoh `id::USRPWD`).
 const USRPWD_ID: u8 = 0x2;
@@ -47,28 +48,18 @@ fn hmac_sha3_256(key: &[u8], msg: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Constant-time HMAC-SHA3-256 verify (`Mac::verify_slice`) — the accept side's
-/// password check. Hardened over zenoh's plain `!=` comparison: the wire is
-/// identical, only the tag comparison is made timing-safe.
+/// Constant-time HMAC-SHA3-256 TAG verify (`Mac::verify_slice`). Hardened over
+/// zenoh's plain `!=` (identical wire; the tag comparison is timing-safe). NOTE:
+/// this hardens ONLY the tag compare — the surrounding user lookup still returns
+/// early on an unknown user (a username-enumeration timing oracle, the same as
+/// zenoh `usrpwd.rs:418`). Closing that needs a dummy-HMAC on the miss path; it
+/// is deferred to the live-handshake atom (it matters only over a real network,
+/// which usrpwd assumes is already TLS/QUIC-encrypted underneath).
 fn hmac_sha3_256_verify(key: &[u8], msg: &[u8], tag: &[u8]) -> bool {
     let mut mac =
         <Hmac<Sha3_256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(msg);
     mac.verify_slice(tag).is_ok()
-}
-
-/// Append `v` as a base-128 VLE (zenoh ZInt: 7 data bits per byte, LSB-first,
-/// bit-7 continuation) — the write twin of [`SceCursor::read_vle_u64`].
-fn push_vle(out: &mut Vec<u8>, mut v: u64) {
-    loop {
-        let byte = (v & 0x7f) as u8;
-        v >>= 7;
-        if v == 0 {
-            out.push(byte);
-            break;
-        }
-        out.push(byte | 0x80);
-    }
 }
 
 /// Read a VLE length then that many bytes (one zenoh `ZBuf`).
@@ -85,9 +76,9 @@ fn read_vle_bytes(cursor: &mut SceCursor<'_>) -> Result<Vec<u8>, AuthError> {
 /// Encode the OpenSyn body `{user, hmac}` (zenoh writes each as a `ZBuf`).
 fn encode_open_syn(user: &[u8], hmac: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(user.len() + hmac.len() + 4);
-    push_vle(&mut out, user.len() as u64);
+    encode_vle_u64_into(&mut out, user.len() as u64);
     out.extend_from_slice(user);
-    push_vle(&mut out, hmac.len() as u64);
+    encode_vle_u64_into(&mut out, hmac.len() as u64);
     out.extend_from_slice(hmac);
     out
 }
@@ -130,8 +121,17 @@ impl UsrPwdMethod {
     }
 
     /// A RESPONDER-side method with a `(user, password)` `lookup` table and the
-    /// challenge `nonce` (INJECTED — the live handshake supplies a per-handshake
-    /// random value; the kernel keeps it deterministic + testable).
+    /// challenge `nonce` (INJECTED — the kernel keeps it deterministic +
+    /// testable).
+    ///
+    /// SECURITY CONTRACT (the live-handshake atom MUST honor this): the `nonce`
+    /// is the ONLY replay defense — a captured OpenSyn `{user, hmac}` replays
+    /// against any responder reusing the same nonce. The live wiring MUST draw a
+    /// FRESH cryptographically-random `nonce` PER accepted handshake (the AP
+    /// `signing_key_from_os_entropy` / `getrandom` source), never a constant or a
+    /// per-process value. A fixed / zero nonce here is a replay hole. usrpwd also
+    /// assumes the transport beneath is already encrypted (TLS / QUIC), as zenoh
+    /// does — it is not confidential on its own.
     pub fn responder(lookup: Vec<(Vec<u8>, Vec<u8>)>, nonce: u64) -> Self {
         Self {
             credentials: None,
@@ -301,12 +301,19 @@ mod tests {
     }
 
     #[test]
-    fn push_vle_matches_the_cursor_reader() {
-        // A multi-byte VLE (300 = 0xAC 0x02) round-trips through the SceCursor
-        // reader, locking the write twin against the canonical decoder.
-        let mut out = Vec::new();
-        push_vle(&mut out, 300);
-        let mut cursor = SceCursor::new(&out);
-        assert_eq!(cursor.read_vle_u64().unwrap(), 300);
+    fn open_syn_body_is_canonical_zenoh_two_zbuf_bytes() {
+        // GOLDEN vector: zenoh `Zenoh080` writes {user, hmac} as VLE-len + bytes,
+        // twice (usrpwd.rs:241-245). user="alice" (len 5), hmac=0xAB×32 (len 32)
+        // — both lengths < 0x80, so single-byte VLE. This pins the exact wire,
+        // the unit-level down payment on the wz<->zenohd interop e2e. (Values
+        // are < 2^63, so the LEB128-vs-9-byte-cap divergence — tracked in
+        // crate::vle — does not arise here.)
+        let body = encode_open_syn(b"alice", &[0xAB; 32]);
+        let mut expected = alloc::vec![0x05, b'a', b'l', b'i', b'c', b'e', 0x20];
+        expected.extend_from_slice(&[0xAB; 32]);
+        assert_eq!(
+            body, expected,
+            "OpenSyn body must be the canonical zenoh two-ZBuf byte sequence"
+        );
     }
 }

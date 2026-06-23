@@ -25,6 +25,7 @@
 //! Init / Open, not the data-plane Push / Query), with its own ext id space.
 
 use crate::codec_owned::owned_bytes;
+use crate::ext_header::EXT_ENC_ZBUF;
 use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
@@ -36,21 +37,17 @@ use wz_codecs::ext_zbuf::ExtZbufOwned;
 /// 0x3 Auth, 0x4 MultiLink, 0x5 LowLatency, 0x6 Compression, 0x7 Patch).
 pub const AUTH_EXT_ID: u8 = 0x03;
 
-/// ENC_ZBUF marker packed into the ext header high bits: the 2-bit encoding
-/// field (`0b10`) shifted into bits 5..6 (`0b10 << 5 = 0x40`). The auth ext is
-/// non-mandatory, so the `0x10` mandatory bit is never set.
-const AUTH_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
-
 /// Build the Z_EXT_AUTH `ExtEntry` carrying `payload` (the negotiated method's
-/// challenge / response bytes). The surrounding codec applies the
-/// chain-continuation `Z` bit; this helper emits the entry with `Z` clear
-/// (terminator), so a caller appending it as the sole / last establishment ext
-/// needs no fix-up. Fallible only on the `no_std` profile, where the owned
-/// mirror is a bounded `heapless::Vec` (auth payloads — an 8-byte nonce, an
-/// HMAC, an RSA signature — ride the AP `alloc` profile, where any length fits).
+/// challenge / response bytes). The header is the auth id with the ENC_ZBUF
+/// marker ([`EXT_ENC_ZBUF`](crate::ext_header::EXT_ENC_ZBUF), the iext SSOT) and
+/// no mandatory bit. The surrounding codec applies the chain-continuation `Z`
+/// bit; this helper emits the entry with `Z` clear (terminator), so a caller
+/// appending it as the sole / last establishment ext needs no fix-up. Fallible
+/// only on the `no_std` profile, where the owned mirror is a bounded
+/// `heapless::Vec` (auth payloads ride the AP `alloc` profile, any length fits).
 pub fn encode_auth_ext(payload: &[u8]) -> Result<ExtEntryOwned, CodecError> {
     Ok(ExtEntryOwned {
-        header: AUTH_EXT_HEADER_ENC_ZBUF | AUTH_EXT_ID,
+        header: EXT_ENC_ZBUF | AUTH_EXT_ID,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: payload.len() as u64,
             value: owned_bytes(payload)?,
@@ -106,7 +103,7 @@ mod tests {
         // A foreign establishment ext (e.g. a 0x07 Patch-shaped entry) is not
         // mistaken for the auth ext.
         let foreign = ExtEntryOwned {
-            header: AUTH_EXT_HEADER_ENC_ZBUF | 0x07,
+            header: EXT_ENC_ZBUF | 0x07,
             body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                 value_len: 1,
                 value: owned_bytes(&[0xAB]).unwrap(),

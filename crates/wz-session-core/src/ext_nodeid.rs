@@ -29,19 +29,12 @@ use wz_codecs::ext_zint::ExtZint;
 /// The `ext_nodeid` extension id — zenoh Push/Declare `NodeId`,
 /// `zextz64!(0x3, true)` (the id is identical for both messages).
 pub const NODEID_EXT_ID: u8 = 0x03;
-/// Mandatory flag, zenoh `iext::FLAG_M` (bit 4).
-pub const EXT_FLAG_M: u8 = 0x10;
-/// `Z64` encoding, zenoh `iext::ENC_Z64` (bits 5-6) — the `node_id` rides a
-/// zint body.
-pub const EXT_ENC_Z64: u8 = 0x20;
-/// `ZBuf` encoding, zenoh `iext::ENC_ZBUF` (bits 5-6) — a length-prefixed byte
-/// body. Not used by the `node_id` ext (which is `Z64`); lives here as the shared
-/// iext encoding vocabulary the sibling [`declare_ext_keyexpr`](crate::declare_ext_keyexpr)
-/// ext rides.
-pub const EXT_ENC_ZBUF: u8 = 0x40;
-/// Chain-continuation flag, zenoh `iext::FLAG_Z` (bit 7): another extension
-/// follows THIS ext entry. Per-entry, layered by [`apply_chain_z_bits`].
-pub const EXT_FLAG_Z: u8 = 0x80;
+// The iext encoding-marker vocabulary (FLAG_M / ENC_Z64 / ENC_ZBUF / FLAG_Z)
+// is the spec-frozen SSOT in `crate::ext_header` (unconditional). Re-exported
+// here so the existing `ext_nodeid::{EXT_FLAG_M, EXT_ENC_Z64, ..}` callers'
+// paths are unchanged, while the codec-gated-out consumers (session-extauth)
+// reach the same constants directly from `ext_header`.
+pub use crate::ext_header::{EXT_ENC_Z64, EXT_ENC_ZBUF, EXT_FLAG_M, EXT_FLAG_Z};
 
 /// The MESSAGE-level header `Z` bit, zenoh `<msg>::flag::Z (1 << 7)`: the
 /// message (Push / Declare / Request, envelope OR body) carries an extension
@@ -54,12 +47,9 @@ pub const MESSAGE_FLAG_Z: u8 = 0x80;
 /// Z64` = `0x33`.
 pub const NODEID_EXT_HEADER: u8 = NODEID_EXT_ID | EXT_FLAG_M | EXT_ENC_Z64;
 
-/// The extension id field (bits 0-3) of a header byte — zenoh `iext::mid`,
-/// dropping the mandatory / encoding / chain flags. The shared iext id mask,
-/// reused by [`declare_ext_keyexpr`](crate::declare_ext_keyexpr).
-pub fn ext_id(header: u8) -> u8 {
-    header & 0x0F
-}
+// `ext_id` (the iext id-field accessor) is the SSOT in `crate::ext_header`;
+// re-exported for the existing `ext_nodeid::ext_id` callers' paths.
+pub use crate::ext_header::ext_id;
 
 /// Sync a message header's `Z` bit to whether its extension chain is now
 /// present — the SSOT for the per-message source setters

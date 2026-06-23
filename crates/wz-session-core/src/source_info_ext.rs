@@ -16,12 +16,13 @@
 //! codec-feature gate — lets every codec path that emits a `source_info`
 //! ext reach the one encoder.
 //!
-//! [`encode_vle_u64_into`] is the base-128 VLE u64 primitive both this
-//! encoder and the sibling `encode_responder_ext_body` (kept in
-//! `response_build`) share; it is `pub(crate)` so the response path can
-//! continue to borrow it without duplicating the loop.
+//! The base-128 VLE u64 primitive this encoder + the sibling
+//! `encode_responder_ext_body` (in `response_build`) share is
+//! [`crate::vle::encode_vle_u64_into`] — the VLE codec SSOT (read + write).
 
 use alloc::vec::Vec;
+
+use crate::vle::encode_vle_u64_into;
 
 /// R121j-4b — encode the value bytes of a `source_info` extension per
 /// zenoh-pico's `_z_source_info_encode`.
@@ -51,20 +52,9 @@ pub fn encode_source_info_ext_body(zid: &[u8], eid: u32, sn: u32) -> Vec<u8> {
     out
 }
 
-/// R121j-4b — base-128 VLE u64 emit into a `Vec<u8>`. Mirrors the
-/// inline loop in `encode_frame_envelope` and zenoh-pico's
-/// `_z_zsize_encode` at
-/// `vendor/zenoh-pico/src/protocol/codec/core.c`. Free-function shape
-/// because ext-body construction happens before any `SceSink` is in
-/// scope — the ext body lives inside `ExtZbuf.value` and the
-/// surrounding codec sink only sees the already-built `Vec`.
-pub(crate) fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v as u8 & 0x7F) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
+// `encode_vle_u64_into` moved to the `crate::vle` SSOT (imported above) so the
+// VLE-u64 writer has one home alongside its reader; this module and
+// `response_build` + `extauth_usrpwd` all share it.
 
 // R311fs — encode_source_info_ext_body wire-layout test, relocated
 // from wz-runtime-tokio::session_glue to its SSOT home (R311ek moved

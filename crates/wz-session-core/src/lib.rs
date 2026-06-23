@@ -330,6 +330,15 @@ pub mod link;
 /// no_std clean (core::fmt + core::error::Error); unconditional.
 pub mod parse_error;
 
+/// SSOT for the zenoh `iext` extension-header vocabulary (the spec-frozen
+/// encoding-marker bits + the id-field accessor). Unconditional — these are
+/// protocol constants shared by every ext codec; `ext_nodeid` (codec-gated)
+/// re-exports from here so a gated-out consumer (the session-extauth auth
+/// dispatch / codec) reaches them without re-deriving the bits. `pub` like the
+/// sibling `wz_codecs::wire_const` wire vocabulary, so the spec constants are
+/// not dead-code-flagged in feature configs that use only a subset.
+pub mod ext_header;
+
 /// SSOT for the transport-message extension CHAIN codec (the Z-flag-gated
 /// `ExtEntry` list). Shared by `handshake_encode` (outbound), `inbound`
 /// (inbound), and `auth_dispatch` (the Z_EXT_AUTH inner method chain). Gated on

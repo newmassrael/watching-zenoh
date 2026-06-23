@@ -41,7 +41,8 @@ use sce_forge_runtime::codec::CodecError;
 // to the codec-feature-agnostic `source_info_ext` module so the
 // `codec-push` body-extension path can reach the encoder too; the
 // responder encoder below keeps borrowing the VLE helper from there.
-use crate::source_info_ext::{encode_source_info_ext_body, encode_vle_u64_into};
+use crate::source_info_ext::encode_source_info_ext_body;
+use crate::vle::encode_vle_u64_into;
 
 /// R121j-3 — build a `Response(Reply(MsgPut))` network-message in
 /// the minimal AP MVP shape (no Response-level exts, no Reply-level

@@ -933,6 +933,12 @@ layer_c1x_cargo_test_routing_routes() {
 #      compile, lint, and RUN; and each knob is clippy-gated standalone
 #      (--no-default-features --features access-X, each implies routing-peer) to
 #      prove independent composition.
+#   6. §5.16 extauth (R311wy): the wz-session-core auth atoms — the Z_EXT_AUTH
+#      codec (extauth), the dispatch kernel (auth_dispatch), and the usrpwd
+#      method (extauth_usrpwd) — are TESTED under `access-extauth-usrpwd` and
+#      clippy-gated both there and codec-only (`--no-default-features --features
+#      session-extauth`). Without this the auth unit tests ran in NO lane
+#      (preset-ap-full carries the features but is build-only).
 # The demo-binary mesh e2e is Layer E6 (separate, --features routing-peer).
 layer_c1y_cargo_test_routing_peer() {
     local access="routing-peer,access-acl,access-downsampling,access-quota"
@@ -949,7 +955,11 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features "$access" --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features access-downsampling --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features access-quota --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features access-quota --quiet -- -D warnings \
+        && cargo test -p wz-session-core --features access-extauth-usrpwd --lib extauth --quiet \
+        && cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet \
+        && cargo clippy -p wz-session-core --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features session-extauth --all-targets --quiet -- -D warnings)
 }
 
 # ─── Layer C1z — storage driver: backend/history/replication/aligner ─

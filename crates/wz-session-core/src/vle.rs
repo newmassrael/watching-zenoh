@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Shared slice-based VLE (base-128 varint) decoder — the borrowed-slice SSOT.
+//! Shared slice-based VLE (base-128 varint) codec — the borrowed-slice SSOT for
+//! both read and write.
 //!
 //! `sce_forge_runtime::codec::SceCursor::read_vle_u64` is the canonical
 //! cursor-driven decoder used wherever a wire message is parsed off a cursor.
 //! This module is its borrowed-`&[u8]` twin, for the cases where a VLE field is
 //! embedded in an already-buffered `ExtZbuf` body (`source_info_ext`,
-//! `declare_ext_keyexpr`) rather than read from the live cursor. Factored out so
-//! those callers share ONE slice decoder instead of each hand-rolling the
-//! continuation/over-shift logic (the bug-prone part of a varint reader).
+//! `declare_ext_keyexpr`, the `extauth_usrpwd` OpenSyn body) rather than read
+//! from the live cursor. Factored out so those callers share ONE varint codec
+//! instead of each hand-rolling the continuation/over-shift logic (the bug-prone
+//! part).
+//!
+//! WIRE NOTE: [`encode_vle_u64_into`] emits standard LEB128, matching the
+//! SCE-generated `ExtZint`/`ExtZbuf` codecs so wz is internally consistent. This
+//! DIVERGES from zenoh + zenoh-pico for values `>= 2^63`, which cap the `u64`
+//! ZInt at 9 bytes (the 9th byte carries a full 8 data bits) where LEB128 uses
+//! 10. The fix belongs in the SCE VLE codegen + `SceCursor` reader (reported
+//! upstream); this writer is kept LEB128 to match the SCE-generated path until
+//! that lands. Reachable only by full-range `u64` fields (auth nonces, post-2038
+//! NTP64); the auth OpenSyn lengths this writer encodes are always `< 2^63`.
 
 /// Read a base-128 VLE-encoded `u64` from the front of `bytes`. Returns
 /// `(value, bytes_consumed)` on success; `None` on truncation (the
@@ -35,6 +46,19 @@ pub(crate) fn read_vle_u64(bytes: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+/// Append `v` to `out` as a base-128 LEB128 VLE — the write twin of
+/// [`read_vle_u64`] / `SceCursor::read_vle_u64`. The single VLE-u64 writer SSOT
+/// (consumed by `source_info_ext`, `response_build`, and the `extauth_usrpwd`
+/// OpenSyn body). See the module WIRE NOTE for the `>= 2^63` LEB128-vs-zenoh
+/// 9-byte-cap divergence (SCE-codegen-tracked).
+pub(crate) fn encode_vle_u64_into(out: &mut alloc::vec::Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push((v as u8 & 0x7F) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43,6 +67,25 @@ mod tests {
     fn read_vle_u64_handles_single_byte_payloads() {
         assert_eq!(read_vle_u64(&[0x00]), Some((0, 1)));
         assert_eq!(read_vle_u64(&[0x7F]), Some((127, 1)));
+    }
+
+    #[test]
+    fn encode_vle_u64_into_round_trips_through_the_reader() {
+        // The writer SSOT (consolidated from source_info_ext + extauth_usrpwd's
+        // former push_vle) round-trips against read_vle_u64 across the byte-width
+        // boundaries. Pins exact bytes for the small values (1-byte: 5; 2-byte:
+        // 300 = 0xAC 0x02).
+        for v in [0u64, 5, 127, 128, 300, 16_384, u32::MAX as u64, 1 << 62] {
+            let mut out = alloc::vec::Vec::new();
+            encode_vle_u64_into(&mut out, v);
+            assert_eq!(read_vle_u64(&out), Some((v, out.len())), "round-trip {v}");
+        }
+        let mut five = alloc::vec::Vec::new();
+        encode_vle_u64_into(&mut five, 5);
+        assert_eq!(five, [0x05]);
+        let mut three_hundred = alloc::vec::Vec::new();
+        encode_vle_u64_into(&mut three_hundred, 300);
+        assert_eq!(three_hundred, [0xAC, 0x02]);
     }
 
     #[test]
