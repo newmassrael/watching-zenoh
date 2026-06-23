@@ -683,7 +683,10 @@ transport-link-vsock = ["transport-link-tcp", "wz-runtime-tokio?/transport-link-
 # forward: WS is a DATAGRAM-flow link (own WebSocket message framing, not the
 # TCP StreamEnvelope), so it composes like udp, not tls. `locator-ws` selects this.
 transport-link-ws = ["wz-runtime-tokio?/transport-link-ws"]
-transport-lowlatency = []
+# transport-lowlatency — runtime-negotiated lean transport (zenoh
+# zextunit!(0x5,false)); weak-forwards the runtime-tokio lowlatency gate. AP-only
+# (no lwip forward). The functional alternative to transport-fragmentation.
+transport-lowlatency = ["wz-runtime-tokio?/transport-lowlatency"]
 # R311mc — transport-multicast additionally weak-forwards to wz-session-lwip:
 # the MCU multicast drive loop (run_multicast_session) + its observer-staging
 # sinks (MulticastReplyQueue) live in wz-session-lwip's OWN transport-multicast

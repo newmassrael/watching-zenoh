@@ -659,6 +659,15 @@ pub mod attachment;
 #[cfg(feature = "session-extauth")]
 pub mod extauth;
 
+/// SSOT for the Z_EXT_LOWLATENCY establishment ext (`transport-lowlatency`) —
+/// the wz mirror of zenoh `init::ext::LowLatency` / `open::ext::LowLatency`
+/// (`zextunit!(0x5,false)`). The codec layer (the `0x5` unit ext + the peer-offer
+/// projector); the per-session `is_lowlatency` runtime state, the offer/`&=`
+/// negotiation, and the lean no-Frame tx / rx data path live in `session_actions`
+/// / `drive`.
+#[cfg(feature = "transport-lowlatency")]
+pub mod extlowlatency;
+
 /// The method-agnostic Z_EXT_AUTH dispatch kernel — the wz mirror of zenoh
 /// `establishment/ext/auth/mod.rs` (`AuthFsm`'s OpenFsm + AcceptFsm). Mux/demux
 /// of per-method sub-exts (keyed by method id) into / out of the auth ext

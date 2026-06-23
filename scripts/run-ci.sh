@@ -958,6 +958,38 @@ layer_c1ac_cargo_test_quic() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic --quiet -- -D warnings)
 }
 
+# ─── Layer C1ad — lowlatency transport: ext codec + lean tx/rx + e2e ─
+#
+# R311xl: transport-lowlatency is a transport MODE (not a link kind), the wz
+# mirror of zenoh's runtime-negotiated lowlatency unicast transport
+# (init.rs:162 zextunit!(0x5,false)) — the functional alternative to
+# transport-fragmentation. Both peers OFFER the Z_EXT_LOWLATENCY unit ext on
+# Init; the `&=` merge agrees; the established session drops the Frame(sn)
+# wrapper + fragmentation, serializing the bare NetworkMessage directly. NO new
+# dependency. This lane:
+#   1. runs the extlowlatency ext-codec unit tests (the 0x5 unit ext + the
+#      peer-offer projector);
+#   2. runs the lowlatency_e2e integration tests (gated all(transport-lowlatency,
+#      transport-unicast, transport-link-tcp)): wz<->wz negotiate over real TCP
+#      loopback + deliver a Put byte-exact over the lean wire, AND a deterministic
+#      wire-form proof that the lowlatency Put rides a bare N_MID_PUSH (no Frame)
+#      while the no-offer control rides a T_MID_FRAME, plus the one-sided-offer
+#      `&=` leaving both sides universal;
+#   3. clippy-gates the cfg under --all-targets (the lean tx/rx branches +
+#      the negotiation wiring);
+#   4. clippy-gates the LIB under --no-default-features --features
+#      transport-lowlatency to prove the rx-capable lowlatency primitive (the
+#      ext codec + lean rx + per-session state) composes standalone WITHOUT the
+#      handshake codecs (the Init offer/merge is additively gated on
+#      codec-init-body, so a bare build carries no dead send_wire seam).
+layer_c1ad_cargo_test_lowlatency() {
+    (cd crates \
+        && cargo test -p wz-session-core --features transport-lowlatency --lib extlowlatency --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-lowlatency,transport-unicast,transport-link-tcp --test lowlatency_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,transport-unicast,transport-link-tcp --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features transport-lowlatency --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3372,6 +3404,7 @@ run_layer C1v layer_c1v_cargo_test_ws || overall=1
 run_layer C1aa layer_c1aa_cargo_test_unixsock || overall=1
 run_layer C1ab layer_c1ab_cargo_test_vsock || overall=1
 run_layer C1ac layer_c1ac_cargo_test_quic || overall=1
+run_layer C1ad layer_c1ad_cargo_test_lowlatency || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

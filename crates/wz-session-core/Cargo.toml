@@ -106,6 +106,23 @@ reassembly = ["dep:sce-rust-runtime", "codec-frame"]
 # fragmentation is a follow-up.
 transport-fragmentation = ["reassembly", "codec-fragment", "alloc"]
 
+# transport-lowlatency — runtime-negotiated lean transport, the wz mirror of
+# zenoh's lowlatency unicast transport (`init.rs:162` zextunit!(0x5,false)).
+# Gates the `extlowlatency` ext codec, the per-session `is_lowlatency` slot,
+# the offer/`&=` negotiation, and the lean tx / rx data path that drops the
+# Frame(sn) wrapper + fragmentation (zenoh `TransportUnicastLowlatency`). Needs
+# `codec-frame` for `parse_frame_payload` (the lean rx re-uses the in-batch
+# NetworkMessage decoder), `session-unicast` for the establishment FSM, and
+# `alloc` for the ext chain + the lean wire Vec. NO new external dependency
+# (zenoh's lowlatency needs none either). The Init offer / `&=` merge is
+# ADDITIVELY gated on `codec-init-body` at its use sites (drive.rs / the
+# send_init_* stagers), so this feature does NOT force the handshake codecs:
+# a bare `transport-lowlatency` build is the rx-capable lowlatency primitive
+# (ext codec + lean rx + the per-session state), and the negotiation + lean tx
+# light up once a real unicast session (`transport-unicast`) composes it in.
+# The functional alternative to `transport-fragmentation`.
+transport-lowlatency = ["alloc", "codec-frame", "session-unicast"]
+
 # MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
 # build (heapless, no http-send / scripting — those are std-coupled and
 # mutually exclusive with no_std, enforced by a compile_error! in

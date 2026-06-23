@@ -355,6 +355,17 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// anticipated).
     #[cfg(feature = "session-extauth")]
     pub auth: R::Mutex<AuthDispatch>,
+    /// transport-lowlatency — the negotiated lowlatency capability for THIS
+    /// session (zenoh `TransportConfigUnicast::is_lowlatency`). Seeded with the
+    /// local offer ([`Self::set_lowlatency_offer`]) at bring-up, then ANDed
+    /// against the peer's InitSyn / InitAck offer
+    /// ([`Self::negotiate_lowlatency_against_peer`], zenoh
+    /// `is_lowlatency &= other_ext.is_some()`). When true post-establishment,
+    /// the lean tx / rx data path drops the Frame(sn) wrapper + fragmentation
+    /// (the wz mirror of zenoh `TransportUnicastLowlatency`). Behind its own
+    /// mutex so the merge advances without blocking the role ext slots.
+    #[cfg(feature = "transport-lowlatency")]
+    pub is_lowlatency: R::Mutex<bool>,
     /// R121d — sizing parameters parsed from the peer's inbound
     /// `InitSyn`. The Accepting side caps its outbound InitAck
     /// `seq_num_res / req_id_res / batch_size` to `min(own,
@@ -724,6 +735,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // `Auth::default()`); the AP layer installs the configured one.
             #[cfg(feature = "session-extauth")]
             auth: R::new_mutex(AuthDispatch::default()),
+            // transport-lowlatency — false until the AP layer offers it
+            // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
+            #[cfg(feature = "transport-lowlatency")]
+            is_lowlatency: R::new_mutex(false),
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             rx_sn: R::new_mutex(crate::sn::RxSn::default()),
@@ -1058,6 +1073,67 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
+    /// transport-lowlatency — the AP layer's "this deploy offers lowlatency
+    /// toward this peer" config, set once at session bring-up BEFORE the
+    /// handshake drives (the wz analogue of zenoh
+    /// `TransportManager::config.unicast.is_lowlatency` seeding the per-link
+    /// establishment state). Seeds [`Self::is_lowlatency`]; the peer's offer is
+    /// ANDed in by [`Self::negotiate_lowlatency_against_peer`].
+    #[cfg(feature = "transport-lowlatency")]
+    pub fn set_lowlatency_offer(&self, offer: bool) {
+        R::with_mutex_mut(&self.is_lowlatency, |s| *s = offer);
+    }
+
+    /// transport-lowlatency — AND the peer's InitSyn / InitAck lowlatency offer
+    /// into the local capability: zenoh
+    /// `state.is_lowlatency &= other_ext.is_some()`
+    /// (`establishment/ext/lowlatency.rs:78`). Called from the establishment
+    /// demux ([`crate::drive::dispatch_link_event`]) on every inbound Init
+    /// frame, so the result is `local_offer && peer_offer`. The acceptor's merge
+    /// lands on InitSyn arrival BEFORE it emits its InitAck (so the reflect is
+    /// "still true after the AND"); the initiator's lands on InitAck arrival,
+    /// finalizing the capability (zenoh finalizes lowlatency at the Init
+    /// exchange — OpenSyn / OpenAck carry nothing).
+    #[cfg(feature = "transport-lowlatency")]
+    pub fn negotiate_lowlatency_against_peer(&self, peer_offered: bool) {
+        R::with_mutex_mut(&self.is_lowlatency, |s| *s &= peer_offered);
+    }
+
+    /// transport-lowlatency — the negotiated lowlatency capability for this
+    /// session. Read by the lean tx seam ([`Self::dispatch_network_message`])
+    /// and the lean rx seam ([`crate::drive::dispatch_link_event`]); true only
+    /// when BOTH peers offered the ext.
+    #[cfg(feature = "transport-lowlatency")]
+    pub fn is_lowlatency(&self) -> bool {
+        R::with_mutex_mut(&self.is_lowlatency, |s| *s)
+    }
+
+    /// transport-lowlatency — stage (or clear) the Z_EXT_LOWLATENCY offer in
+    /// `role`'s ext chain, IDEMPOTENTLY (mirrors [`Self::stage_auth_send`]): any
+    /// prior lowlatency ext is dropped first so a re-handshake never duplicates
+    /// it (the slots persist across `reset_for_reopen`), then the unit ext is
+    /// pushed iff this session is still offering lowlatency. The offer read is
+    /// taken and released before the ext-chain mutex is acquired (non-reentrant
+    /// per-profile mutex; 2b-(1) reentrancy discipline).
+    ///
+    /// Gated on the UNION of its two send-action callers (`send_init_syn` /
+    /// `send_init_ack_with_cookie`), so a subset build that compiles neither
+    /// does not carry it as dead code under `-D warnings`.
+    #[cfg(all(
+        feature = "transport-lowlatency",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn stage_lowlatency_send(&self, role: ExtChainRole) {
+        let offer = self.is_lowlatency();
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            chain.retain(|e| e.ext_id() != crate::extlowlatency::LOWLATENCY_EXT_ID);
+            if offer {
+                chain.push(crate::extlowlatency::encode_lowlatency_ext());
+            }
+        });
+    }
+
     pub fn trace_snapshot(&self) -> ActionTrace {
         R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
     }
@@ -1356,6 +1432,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // network-message send routes through this chokepoint.
         if !R::with_mutex_mut(&self.transport_available, |g| *g) {
             return Err(SendWireError::TransportUnavailable);
+        }
+        // transport-lowlatency — the lean send path (zenoh
+        // `TransportBodyLowLatencyRef::Network(b) => write the bare
+        // NetworkMessage`, codec/transport/mod.rs:47): when this session
+        // negotiated lowlatency, emit the network message's OWN bytes with NO
+        // Frame(sn) wrapper, NO fragmentation, and NO batching — `encode_body`
+        // is already the bare NetworkMessage encoder (the same closure the Frame
+        // path wraps). This precedes the MTU / SN / batch-lock machinery below,
+        // which lowlatency deletes by design (zenoh's lowlatency transport tracks
+        // no SN and never fragments — defrag and the half-window gate do not
+        // exist on this path). Data sends only fire post-Established, by when the
+        // capability is finalized (negotiated at the Init exchange), so reading
+        // `is_lowlatency()` here needs no establishment guard.
+        #[cfg(feature = "transport-lowlatency")]
+        if self.is_lowlatency() {
+            let mut wire = Vec::with_capacity(worst_case_payload);
+            {
+                let mut sink = sce_forge_runtime::codec::VecSink::new(&mut wire);
+                encode_body(&mut sink).expect("VecSink is infallible");
+            }
+            self.send_wire(
+                &wire,
+                if reliable {
+                    Reliability::Reliable
+                } else {
+                    Reliability::BestEffort
+                },
+            );
+            return Ok(());
         }
         // Outbound MTU = the negotiated-min batch budget
         // ([`Self::negotiated_batch_mtu`]: min(own, peer) with `0` as the
@@ -3812,6 +3917,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // R3b — initiator usrpwd offer (Unit) staged into the InitSyn chain.
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitSyn, |d| d.open_init_syn());
+            // transport-lowlatency — initiator offers the lowlatency capability
+            // (the unit ext) in InitSyn iff this deploy enabled it; the helper
+            // self-clears a stale ext when the offer is off (zenoh
+            // `send_init_syn` emits `LowLatency::new()` only when is_lowlatency).
+            #[cfg(feature = "transport-lowlatency")]
+            a.stage_lowlatency_send(ExtChainRole::InitSyn);
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -3863,6 +3974,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // handshake before this fires (replay defense).
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
+            // transport-lowlatency — acceptor REFLECTS the lowlatency capability
+            // in InitAck iff it is STILL offering after the InitSyn `&=` merge
+            // (which ran at InitSyn arrival, before this send): the helper reads
+            // the merged `is_lowlatency()`, so it pushes the ext only when both
+            // sides agreed (zenoh `recv_init_syn` ANDs, then `send_init_ack`
+            // emits the ext only if is_lowlatency still holds).
+            #[cfg(feature = "transport-lowlatency")]
+            a.stage_lowlatency_send(ExtChainRole::InitAck);
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),

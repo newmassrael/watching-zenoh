@@ -348,6 +348,13 @@ reassembly = ["wz-session-core/reassembly", "codec-frame"]
 # fragmentation gate + the runtime `reassembly` RX wiring so the AP
 # profile fragments + reassembles full-duplex.
 transport-fragmentation = ["wz-session-core/transport-fragmentation", "reassembly"]
+
+# transport-lowlatency — forwards the session-core lowlatency gate (the
+# `extlowlatency` ext codec + the per-session `is_lowlatency` slot + the lean
+# tx / rx data path). AP/unicast lean transport (the wz mirror of zenoh's
+# lowlatency unicast transport); no MCU forward (lwip has no lowlatency, as
+# session-extauth is AP-only). No new dependency.
+transport-lowlatency = ["wz-session-core/transport-lowlatency"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +

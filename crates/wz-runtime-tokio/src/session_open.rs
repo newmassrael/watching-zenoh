@@ -1239,6 +1239,27 @@ pub async fn connect_and_open_session_with_auth(
         .await
 }
 
+/// transport-lowlatency — [`connect_and_open_session`] that OFFERS the
+/// lowlatency capability: dials the locator then opens with the lean-transport
+/// offer staged on the session actions before the handshake drives. The InitSyn
+/// carries the Z_EXT_LOWLATENCY unit ext, and if the peer reflects it the
+/// established session uses the lean no-Frame data path. The additive
+/// lowlatency-on sibling of the bare connect (signature-stable: existing callers
+/// keep the bare open).
+#[cfg(feature = "transport-lowlatency")]
+pub async fn connect_and_open_session_with_lowlatency(
+    locator: AnyLocator,
+    params: SessionInitParams,
+    cfg: &DialConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
+    initiate_and_open_session_with_lowlatency(dialed, params, clock, max_iters, tick_interval_ms)
+        .await
+}
+
 /// Bring up a session in the Initiator role from an already-connected
 /// transport — the dialed-link half of [`connect_and_open_session`], split out
 /// so a caller that already holds a connected stream (e.g. wz-ap-demo's
@@ -1294,6 +1315,33 @@ pub async fn initiate_and_open_session_with_auth(
     let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let actions = new_session_actions(outbound, params, clock);
     actions.install_auth_dispatch(auth);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// transport-lowlatency — [`initiate_and_open_session`] with the lowlatency
+/// capability offered on the session actions before the handshake drives, so the
+/// InitSyn carries the Z_EXT_LOWLATENCY unit ext. The initiator side; the
+/// acceptor reflects via [`accept_and_open_session_with_lowlatency`]. The
+/// additive lowlatency-on sibling of the bare open.
+#[cfg(feature = "transport-lowlatency")]
+pub async fn initiate_and_open_session_with_lowlatency(
+    connected: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let actions = new_session_actions(outbound, params, clock);
+    actions.set_lowlatency_offer(true);
     initiator_open(
         inbound,
         actions,
@@ -1421,6 +1469,37 @@ pub async fn accept_and_open_session_with_auth(
     // from AP OS entropy here because the no_std session core cannot.
     let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
     actions.refresh_auth_challenge_nonce(nonce);
+
+    engine.process_event(E::InboundStart);
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// transport-lowlatency — [`accept_and_open_session`] that OFFERS the lowlatency
+/// capability on the accept side: the acceptor reflects the Z_EXT_LOWLATENCY ext
+/// in its InitAck iff the peer's InitSyn offered it (the `&=` merge runs on the
+/// inbound InitSyn before the InitAck is emitted), so the established session
+/// uses the lean no-Frame data path. The accept-side counterpart of
+/// [`connect_and_open_session_with_lowlatency`].
+#[cfg(feature = "transport-lowlatency")]
+pub async fn accept_and_open_session_with_lowlatency(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    actions.set_lowlatency_offer(true);
 
     engine.process_event(E::InboundStart);
     drive_open_loop(
