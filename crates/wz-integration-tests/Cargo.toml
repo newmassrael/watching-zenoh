@@ -112,6 +112,11 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # the auth lib tests also run there); the isolated `cargo test -p
     # wz-runtime-tokio` build stays at its default (auth-off) feature set.
     "access-extauth-usrpwd",
+    # R4c — the wz<->zenohd PUBKEY interop e2e (tests/pubkey_zenohd_interop.rs)
+    # dials a pubkey-guarded zenohd IN-PROCESS with a PubKeyMethod::initiator
+    # dispatch, so this dev-dep build needs the pubkey method (rsa) + the auth-on
+    # open seam. Same additive-unification note as access-extauth-usrpwd above.
+    "access-extauth-pubkey",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the

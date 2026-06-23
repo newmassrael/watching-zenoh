@@ -3156,6 +3156,13 @@ layer_z_zenohd_interop() {
     # as the router leg.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test usrpwd_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # R4c — wz<->zenohd PUBKEY WIRE interop (needs zenohd + openssl, no plugin).
+    # Stock zenohd cannot admit a pubkey client (known_keys_file is an
+    # unimplemented upstream TODO -> Some(empty) lookup rejects all), so this
+    # proves the achievable interop: zenohd DECODES wz's pubkey InitSyn and
+    # rejects only at the lookup (wz's wire is canonical-router decodable).
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pubkey_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
     # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a
     # checkout); SKIP if absent (a crates.io-only zenohd has no plugin .so).
