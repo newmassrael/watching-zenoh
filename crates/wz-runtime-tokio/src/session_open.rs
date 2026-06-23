@@ -102,6 +102,17 @@ use crate::unixsock_pipeline::{dial_unixsock, wire_unixsock_stream, UnixsockRead
 #[cfg(feature = "transport-link-unixsock")]
 use tokio::net::UnixStream;
 
+// R311xj — the vsock arm, like tls/unixsock, rides this tcp+unicast-gated
+// module as an additive STREAM transport, but Linux-only (AF_VSOCK), so gated
+// all(transport-link-vsock, target_os=linux). A connected `VsockStream` reuses
+// the `stream_link` split via `tokio::io::split` (the TLS pattern);
+// `dial_locator` builds it from a `vsock/<CID>:<PORT>` locator (no cert config,
+// like ws/udp/unixsock).
+#[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+use crate::vsock_pipeline::{dial_vsock, wire_vsock_stream, VsockReadDriver};
+#[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+use tokio_vsock::VsockStream;
+
 /// Default cadence at which [`connect_and_open_session`] sweeps the host
 /// handshake deadline (R311il — the engine-free FSM arms no `<send delay>`,
 /// so there is no SCE scheduler to pump) while waiting on the handshake. It
@@ -216,6 +227,14 @@ pub enum DialedLink {
     /// the acceptor wraps directly (no dial-time handshake, unlike serial/tls).
     #[cfg(feature = "transport-link-unixsock")]
     Unixsock(UnixStream),
+    /// A connected AF_VSOCK stream, split downstream via [`wire_vsock_stream`]
+    /// (R311xj). A reliable byte STREAM like TCP/unixsock, so the steady-state
+    /// split is uniform with [`Self::Tcp`]. NOT `Box`ed (a `VsockStream` is a
+    /// thin fd wrapper). Produced by [`dial_locator`] for a `vsock/<CID>:<PORT>`
+    /// locator (no cert config, like ws/udp/unixsock). Linux-only (AF_VSOCK),
+    /// gated with the backend.
+    #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+    Vsock(VsockStream),
 }
 
 impl DialedLink {
@@ -241,6 +260,8 @@ impl DialedLink {
             DialedLink::Ws(_) => "ws",
             #[cfg(feature = "transport-link-unixsock")]
             DialedLink::Unixsock(_) => "unixsock",
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            DialedLink::Vsock(_) => "vsock",
         }
     }
 }
@@ -390,6 +411,25 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             io::ErrorKind::Unsupported,
             "unixsock session-open requires the transport-link-unixsock feature",
         )),
+        // R311xj — a `vsock/<CID>:<PORT>` endpoint dials through the AF_VSOCK
+        // backend: `dial_vsock` connects the `VsockStream` (no dial-time
+        // handshake — ready for the uniform split, like tcp/unixsock). The
+        // Initiator side; the Responder comes up via an accepted `VsockStream`
+        // (the acceptor owns the `VsockListener`). No cert config, so it dials
+        // directly here (like ws/udp/unixsock).
+        #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+        AnyLocator::Vsock(ep) => Ok(DialedLink::Vsock(dial_vsock(ep.cid, ep.port).await?)),
+        // R311xj — `AnyLocator::Vsock` is an ALWAYS-present, PLATFORM-INDEPENDENT
+        // variant (the vsock locator leaf is ungated in wz-session-core), so
+        // this arm must exist on every target / feature combo. Without the
+        // backend (feature off, or a non-Linux target) it dials to a typed
+        // `Unsupported`, exactly as serial/udp do — keeping the match exhaustive
+        // and avoiding cross-crate/cross-target skew.
+        #[cfg(not(all(feature = "transport-link-vsock", target_os = "linux")))]
+        AnyLocator::Vsock(_ep) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vsock session-open requires the transport-link-vsock feature on a Linux target",
+        )),
     }
 }
 
@@ -536,6 +576,16 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
             "unixsock accept is a UnixListener bind (bind_unixsock + accept_unixsock_on), \
              not a TcpListener; the listen side is owned by the acceptor, unwired here",
         )),
+        // R311xj — a vsock acceptor is a `VsockListener` bind + accept
+        // (`vsock_pipeline::bind_vsock` / `accept_vsock_on`), NOT the
+        // `TcpListener` this seam returns, so it cannot fit here — the listen
+        // side is owned by the acceptor / e2e harness (the same not-yet-wired
+        // acceptor extension point ws/tls/udp/unixsock document). The DIAL side
+        // IS wired (`dial_locator` above); only the listen seam is unwired here.
+        AnyLocator::Vsock(_) => Err(unsupported(
+            "vsock accept is a VsockListener bind (bind_vsock + accept_vsock_on), not a \
+             TcpListener; the listen side is owned by the acceptor, unwired here",
+        )),
     }
 }
 
@@ -612,6 +662,8 @@ pub enum InboundLink {
     Ws(WsReadDriver),
     #[cfg(feature = "transport-link-unixsock")]
     Unixsock(UnixsockReadDriver),
+    #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+    Vsock(VsockReadDriver),
 }
 
 impl LinkDriver for InboundLink {
@@ -628,6 +680,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Ws(d) => d.open().await,
             #[cfg(feature = "transport-link-unixsock")]
             InboundLink::Unixsock(d) => d.open().await,
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            InboundLink::Vsock(d) => d.open().await,
         }
     }
 
@@ -644,6 +698,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Ws(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-unixsock")]
             InboundLink::Unixsock(d) => d.send(frame, reliability).await,
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            InboundLink::Vsock(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -660,6 +716,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Ws(d) => d.close().await,
             #[cfg(feature = "transport-link-unixsock")]
             InboundLink::Unixsock(d) => d.close().await,
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            InboundLink::Vsock(d) => d.close().await,
         }
     }
 
@@ -676,6 +734,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Ws(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-unixsock")]
             InboundLink::Unixsock(d) => d.poll_event().await,
+            #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+            InboundLink::Vsock(d) => d.poll_event().await,
         }
     }
 }
@@ -722,6 +782,11 @@ pub fn wire_dialed_link(
         DialedLink::Unixsock(stream) => {
             let (inbound, outbound, handle) = wire_unixsock_stream(stream);
             (InboundLink::Unixsock(inbound), outbound, handle)
+        }
+        #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+        DialedLink::Vsock(stream) => {
+            let (inbound, outbound, handle) = wire_vsock_stream(stream);
+            (InboundLink::Vsock(inbound), outbound, handle)
         }
     }
 }

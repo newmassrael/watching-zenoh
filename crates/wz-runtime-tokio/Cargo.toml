@@ -490,6 +490,19 @@ transport-link-ws = ["dep:tokio-tungstenite", "dep:futures-util"]
 # the `transport-link-tcp`-gated session-open module additively, like the tls
 # arm. NOT default — pico has no unixsock transport at all (host-only link).
 transport-link-unixsock = ["transport-link-tcp"]
+# R311xj — host AF_VSOCK link backend (VM<->host / VM<->VM). Like tls/unixsock
+# (and UNLIKE ws), forwards `transport-link-tcp`: vsock is a reliable byte
+# STREAM (zenoh's vsock link: is_streamed/is_reliable=true, MTU=BatchSize::MAX)
+# that reuses the ENTIRE TCP `stream_link` pipeline over a `tokio_vsock::VsockStream`
+# (split via `tokio::io::split`, the TLS pattern, since VsockStream has no
+# owned-half split), so no new codec. Pulls the optional, Linux-only
+# `tokio-vsock` dep (see [target.'cfg(target_os="linux")'] below). The locator
+# PARSE (`AnyLocator::Vsock`) is unconditional + platform-independent in
+# wz-session-core (no feature forward, like serial/unixsock); only the
+# dial/accept BACKEND is gated here, and the `session_open` DialedLink::Vsock
+# arm is `#[cfg(all(transport-link-vsock, target_os="linux"))]`. NOT default —
+# pico has no vsock transport (host VM-IPC link).
+transport-link-vsock = ["transport-link-tcp", "dep:tokio-vsock"]
 # R311qa — multi-peer accept-and-hold capability (the `routing-router` /
 # future `routing-peer` foundation). Gates `pub mod accept_loop` (lib.rs) and
 # pulls its prerequisites: the TCP listen path (`transport-link-tcp`), the
@@ -1030,6 +1043,16 @@ portable-atomic = "1"
 # socket2's `all`). Distinct from the dev-dependencies socket2 below,
 # which serves a bind-without-listen test shim; Cargo unifies the two.
 socket2 = { version = "0.6", features = ["all"], optional = true }
+
+# R311xj — AF_VSOCK link backend dep. Linux-only (the same platform gate
+# zenoh-link-vsock uses, `[target.'cfg(target_os="linux")']`): `tokio-vsock`
+# wraps the Linux-only AF_VSOCK socket family, so it is target-gated AND
+# optional, pulled only by `transport-link-vsock`. `vsock_pipeline` (and its
+# session_open wiring) is `#[cfg(all(feature="transport-link-vsock",
+# target_os="linux"))]`, so a non-Linux build never references this dep. Pinned
+# to 0.5 to match zenoh-link-vsock 1.5.0.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = { version = "0.5", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

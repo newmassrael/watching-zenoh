@@ -663,7 +663,15 @@ transport-link-udp = ["wz-runtime-tokio?/transport-link-udp"]
 # (dial_unixsock/bind_unixsock/accept_unixsock_on + UnixsockReadDriver).
 # `locator-unixsock` (above) selects this.
 transport-link-unixsock = ["transport-link-tcp", "wz-runtime-tokio?/transport-link-unixsock"]
-transport-link-vsock = []
+# R311xj — now forwards the host AF_VSOCK backend to wz-runtime-tokio (was a
+# declaration-only placeholder while no vsock backend existed). Keeps
+# transport-link-tcp (vsock is a byte STREAM reusing the TCP `stream_link`
+# pipeline, like tls/unixsock) and adds the runtime forward so the facade
+# catalog feature turns on `vsock_pipeline`. The backend is Linux-only (the
+# wz-runtime-tokio module is `#[cfg(all(.., target_os="linux"))]` over the
+# Linux-only `tokio-vsock` dep); on a non-Linux target this forward is inert
+# (the module + dep compile out). `locator-vsock` (above) selects this.
+transport-link-vsock = ["transport-link-tcp", "wz-runtime-tokio?/transport-link-vsock"]
 # R311ob — forwards the host WebSocket backend to wz-runtime-tokio (was a
 # declaration-only placeholder while no WS backend existed). No transport-link-tcp
 # forward: WS is a DATAGRAM-flow link (own WebSocket message framing, not the

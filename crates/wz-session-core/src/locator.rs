@@ -26,7 +26,7 @@
 //!
 //! ## Scope
 //!
-//! Three leaves, dispatched by scheme through [`parse_any_locator`] into the
+//! Four leaves, dispatched by scheme through [`parse_any_locator`] into the
 //! [`AnyLocator`] sum type:
 //! - the IP leaf [`parse_locator`] — `tcp` / `udp` / `tls` / `ws` over a
 //!   numeric [`SocketAddr`] (IPv4 `1.2.3.4:7447` or IPv6 `[::1]:7447`); `tls`
@@ -42,7 +42,14 @@
 //!   endpoint shape (a socket path, not a [`SocketAddr`]) parsed
 //!   unconditionally so the [`AnyLocator::Unixsock`] variant is always
 //!   present; only the dial BACKEND (`transport-link-unixsock` in
-//!   `wz-runtime-tokio`) is gated.
+//!   `wz-runtime-tokio`) is gated;
+//! - the vsock leaf [`parse_vsock_locator`] — `vsock/<CID>:<PORT>` AF_VSOCK
+//!   endpoints (R311xj). A non-IP `(cid, port)` u32 pair (with the libc
+//!   `VMADDR_CID_*` / `VMADDR_PORT_ANY` sentinel strings), so — like serial /
+//!   unixsock — it is a distinct [`AnyLocator::Vsock`] variant parsed
+//!   PLATFORM-INDEPENDENTLY and unconditionally (the parse is pure string
+//!   work); only the dial BACKEND (`transport-link-vsock` in `wz-runtime-tokio`,
+//!   itself Linux-only via `tokio-vsock`) is gated.
 //!
 //! DNS hostnames (`tcp/example.org:7447`) are CLASSIFIED, not rejected
 //! (R311ps): the IP leaf [`parse_locator`] is numeric-only and returns
@@ -326,7 +333,125 @@ pub fn parse_unixsock_locator(locator: &str) -> Result<UnixsockEndpoint, Unixsoc
     })
 }
 
-// ─── unified locator (IP | Serial | Unixsock) ───
+// ─── vsock locator leaf ───
+//
+// R311xj — the `vsock/<CID>:<PORT>` locator GRAMMAR is universal and pure
+// string work (a CID + port, both u32), so — like the serial and unixsock
+// leaves above — it lives HERE, PLATFORM-INDEPENDENT and ungated. The vsock
+// BACKEND (`wz-runtime-tokio::vsock_pipeline` over `tokio-vsock`) is
+// Linux-only and feature-gated; the PARSE is not, so [`AnyLocator::Vsock`] is
+// an always-present variant on every target (a `vsock/...` string parses on
+// macOS too; dialing it there fails at the backend as Unsupported, the same
+// model serial/udp use for a missing backend). This keeps consumers' `match`
+// exhaustive in every feature/target combination.
+
+/// vsock context-id sentinels — the Linux AF_VSOCK ABI values, mirroring
+/// libc's `VMADDR_CID_*` (kept as plain `u32` consts here so this no_std/alloc
+/// parser needs no `libc` dep; the `wz-runtime-tokio` backend builds a
+/// `tokio_vsock::VsockAddr` from the parsed pair). `ANY` is the `0xFFFF_FFFF`
+/// wildcard (the unsigned image of `-1i32`).
+pub const VMADDR_CID_HYPERVISOR: u32 = 0;
+/// The current VM context — vsock's loopback equivalent (`VMADDR_CID_LOCAL`).
+pub const VMADDR_CID_LOCAL: u32 = 1;
+/// The host kernel context (`VMADDR_CID_HOST`).
+pub const VMADDR_CID_HOST: u32 = 2;
+/// The wildcard CID (`VMADDR_CID_ANY` = `0xFFFF_FFFF`, the `-1i32` image).
+pub const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
+/// The wildcard port (`VMADDR_PORT_ANY` = `0xFFFF_FFFF`); on bind the kernel
+/// assigns an ephemeral port.
+pub const VMADDR_PORT_ANY: u32 = 0xFFFF_FFFF;
+
+/// A parsed `vsock/<CID>:<PORT>` locator: an AF_VSOCK `(cid, port)` u32 pair.
+/// zenoh's vsock link (`io/zenoh-links/zenoh-link-vsock`, `VSOCK_LOCATOR_PREFIX`)
+/// addresses a peer by context-id + port (NOT an IP `SocketAddr`), so — like
+/// serial / unixsock — this is a distinct non-IP endpoint shape rather than a
+/// [`Proto`] variant. Building the live `tokio_vsock::VsockAddr` is the
+/// backend's concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VsockEndpoint {
+    /// The context-id (a literal `u32`, or one of the `VMADDR_CID_*` sentinels).
+    pub cid: u32,
+    /// The port (a literal `u32`, or `VMADDR_PORT_ANY`).
+    pub port: u32,
+}
+
+/// Why a `vsock/<CID>:<PORT>` locator string did not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VsockLocatorError {
+    /// The locator does not begin with the `vsock/` scheme.
+    NotVsockScheme,
+    /// The address is not exactly `<CID>:<PORT>` (missing or extra `:`) —
+    /// zenoh requires the `split(':')` to yield exactly two parts.
+    BadAddress(String),
+    /// The CID token is neither a `VMADDR_CID_*` sentinel, `-1`, nor a `u32`.
+    BadCid(String),
+    /// The PORT token is neither `VMADDR_PORT_ANY`, `-1`, nor a `u32`.
+    BadPort(String),
+}
+
+const VSOCK_SCHEME: &str = "vsock";
+
+/// Parse a zenoh `vsock/<CID>:<PORT>` locator into a [`VsockEndpoint`].
+///
+/// Mirror of zenoh's `get_vsock_addr` (`zenoh-link-vsock/src/unicast.rs`): the
+/// address after the `vsock/` scheme splits on `:` into exactly two parts
+/// (more or fewer is [`VsockLocatorError::BadAddress`]); each part accepts a
+/// case-insensitive sentinel string (`VMADDR_CID_HYPERVISOR` / `_LOCAL` /
+/// `_HOST` / `_ANY` for the CID, `VMADDR_PORT_ANY` for the port), the `-1`
+/// alias for the `ANY` wildcard, or a literal `u32`.
+///
+/// The vsock counterpart of [`parse_locator`] (IP), [`parse_serial_locator`]
+/// (serial) and [`parse_unixsock_locator`] (unixsock); [`parse_any_locator`]
+/// is the scheme-dispatcher delegating to the four leaves.
+pub fn parse_vsock_locator(locator: &str) -> Result<VsockEndpoint, VsockLocatorError> {
+    let (scheme, addr) = locator
+        .split_once('/')
+        .ok_or(VsockLocatorError::NotVsockScheme)?;
+    if scheme != VSOCK_SCHEME {
+        return Err(VsockLocatorError::NotVsockScheme);
+    }
+    // Exactly `<CID>:<PORT>` — zenoh's `split(':')` requires len == 2, so a
+    // missing or extra `:` is rejected (an empty CID/PORT then fails its own
+    // numeric parse below).
+    let (cid_str, port_str) = addr
+        .split_once(':')
+        .ok_or_else(|| VsockLocatorError::BadAddress(addr.to_string()))?;
+    if port_str.contains(':') {
+        return Err(VsockLocatorError::BadAddress(addr.to_string()));
+    }
+    Ok(VsockEndpoint {
+        cid: parse_vsock_cid(cid_str)?,
+        port: parse_vsock_port(port_str)?,
+    })
+}
+
+/// Parse a vsock CID token: a case-insensitive `VMADDR_CID_*` sentinel, the
+/// `-1` alias for `VMADDR_CID_ANY`, or a literal `u32` (zenoh's
+/// `get_vsock_addr` CID arm).
+fn parse_vsock_cid(s: &str) -> Result<u32, VsockLocatorError> {
+    match s.to_uppercase().as_str() {
+        "VMADDR_CID_HYPERVISOR" => Ok(VMADDR_CID_HYPERVISOR),
+        "VMADDR_CID_HOST" => Ok(VMADDR_CID_HOST),
+        "VMADDR_CID_LOCAL" => Ok(VMADDR_CID_LOCAL),
+        "VMADDR_CID_ANY" | "-1" => Ok(VMADDR_CID_ANY),
+        _ => s
+            .parse::<u32>()
+            .map_err(|_| VsockLocatorError::BadCid(s.to_string())),
+    }
+}
+
+/// Parse a vsock PORT token: a case-insensitive `VMADDR_PORT_ANY`, the `-1`
+/// alias, or a literal `u32` (zenoh's `get_vsock_addr` port arm).
+fn parse_vsock_port(s: &str) -> Result<u32, VsockLocatorError> {
+    match s.to_uppercase().as_str() {
+        "VMADDR_PORT_ANY" | "-1" => Ok(VMADDR_PORT_ANY),
+        _ => s
+            .parse::<u32>()
+            .map_err(|_| VsockLocatorError::BadPort(s.to_string())),
+    }
+}
+
+// ─── unified locator (IP | Serial | Unixsock | Vsock) ───
 //
 // R311nv — the SERIAL link backend (`wz-runtime-tokio::serial_pipeline`)
 // needs a `serial/...` locator to reach a dial seam alongside the IP
@@ -386,6 +511,15 @@ pub enum AnyLocator {
     /// `transport-link-serial`. A non-IP endpoint (a socket path, not a
     /// [`SocketAddr`]), so — like serial — it cannot be a [`Proto`] variant.
     Unixsock(UnixsockEndpoint),
+    /// An AF_VSOCK endpoint (`vsock/<CID>:<PORT>`) — see [`VsockEndpoint`].
+    /// ALWAYS present and PLATFORM-INDEPENDENT (R311xj: the vsock locator leaf
+    /// is ungated and pure string work, so a `vsock/...` string parses to this
+    /// on every target, not only Linux). Whether it can be DIALED is the
+    /// runtime backend's concern (`transport-link-vsock`, Linux-only via
+    /// `tokio-vsock`), surfaced at dial time as `Unsupported` off-Linux or
+    /// feature-off — as serial/udp surface a missing backend. A non-IP
+    /// `(cid, port)` pair, so — like serial / unixsock — not a [`Proto`].
+    Vsock(VsockEndpoint),
 }
 
 /// Why a locator string did not parse into an [`AnyLocator`] — the
@@ -402,6 +536,9 @@ pub enum AnyLocatorError {
     /// The unixsock leaf ([`parse_unixsock_locator`]) rejected a
     /// `unixsock-stream/...` string (R311xi).
     Unixsock(UnixsockLocatorError),
+    /// The vsock leaf ([`parse_vsock_locator`]) rejected a `vsock/...`
+    /// string (R311xj).
+    Vsock(VsockLocatorError),
 }
 
 /// Parse any zenoh locator string into an [`AnyLocator`], dispatching on
@@ -432,6 +569,17 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
         return parse_unixsock_locator(locator)
             .map(AnyLocator::Unixsock)
             .map_err(AnyLocatorError::Unixsock);
+    }
+    // R311xj — `vsock/...` routes to the vsock leaf, like serial/unixsock.
+    // Checked before the IP leaf (which would reject `vsock` as UnknownProto);
+    // the leaf is unconditional + platform-independent, so the string always
+    // parses to [`AnyLocator::Vsock`] whether or not a vsock BACKEND is
+    // compiled (or the target is Linux) — dialing without one fails at dial
+    // time (the serial/udp model).
+    if matches!(locator.split_once('/'), Some(("vsock", _))) {
+        return parse_vsock_locator(locator)
+            .map(AnyLocator::Vsock)
+            .map_err(AnyLocatorError::Vsock);
     }
     match parse_locator(locator) {
         Ok(ip) => Ok(AnyLocator::Ip(ip)),
@@ -755,6 +903,97 @@ mod tests {
         assert_eq!(
             parse_unixsock_locator("unixsock-stream"),
             Err(UnixsockLocatorError::NotUnixsockScheme)
+        );
+    }
+
+    #[test]
+    fn parse_any_routes_vsock_to_the_vsock_leaf() {
+        // R311xj — unconditional + platform-independent: a `vsock/...` string
+        // always routes to the vsock leaf (like serial/unixsock), whether or
+        // not a vsock backend exists or the target is Linux.
+        let any = parse_any_locator("vsock/VMADDR_CID_LOCAL:17000").expect("vsock locator");
+        assert_eq!(
+            any,
+            AnyLocator::Vsock(parse_vsock_locator("vsock/VMADDR_CID_LOCAL:17000").unwrap())
+        );
+        // And the vsock leaf error composes through too.
+        assert!(matches!(
+            parse_any_locator("vsock/not-a-cid:17000"),
+            Err(AnyLocatorError::Vsock(VsockLocatorError::BadCid(_)))
+        ));
+    }
+
+    // ─── vsock locator leaf (R311xj) ───
+
+    #[test]
+    fn parses_vsock_cid_sentinels_case_insensitive() {
+        // The four VMADDR_CID_* sentinels, matched case-insensitively (zenoh
+        // uppercases before matching) — literal locator strings to keep the
+        // no_std/alloc test off the `format!` macro.
+        for (locator, cid) in [
+            ("vsock/VMADDR_CID_HYPERVISOR:17000", VMADDR_CID_HYPERVISOR),
+            ("vsock/vmaddr_cid_local:17000", VMADDR_CID_LOCAL),
+            ("vsock/VMADDR_CID_HOST:17000", VMADDR_CID_HOST),
+            ("vsock/Vmaddr_Cid_Any:17000", VMADDR_CID_ANY),
+        ] {
+            let ep = parse_vsock_locator(locator).expect("cid sentinel");
+            assert_eq!(ep.cid, cid, "{locator} -> cid");
+            assert_eq!(ep.port, 17000);
+        }
+    }
+
+    #[test]
+    fn parses_vsock_minus_one_and_port_any_as_wildcards() {
+        // `-1` is the ANY alias for both CID and PORT; VMADDR_PORT_ANY for port.
+        let ep = parse_vsock_locator("vsock/-1:-1").expect("wildcards");
+        assert_eq!(ep.cid, VMADDR_CID_ANY);
+        assert_eq!(ep.port, VMADDR_PORT_ANY);
+        let ep2 = parse_vsock_locator("vsock/3:VMADDR_PORT_ANY").expect("literal cid + port any");
+        assert_eq!(ep2.cid, 3);
+        assert_eq!(ep2.port, VMADDR_PORT_ANY);
+    }
+
+    #[test]
+    fn parses_vsock_u32_literals() {
+        let ep = parse_vsock_locator("vsock/3:1024").expect("u32 literals");
+        assert_eq!(ep.cid, 3);
+        assert_eq!(ep.port, 1024);
+    }
+
+    #[test]
+    fn rejects_vsock_bad_address_shape() {
+        // Missing `:` and extra `:` both fail (zenoh requires exactly 2 parts).
+        assert!(matches!(
+            parse_vsock_locator("vsock/17000"),
+            Err(VsockLocatorError::BadAddress(_))
+        ));
+        assert!(matches!(
+            parse_vsock_locator("vsock/1:2:3"),
+            Err(VsockLocatorError::BadAddress(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_vsock_bad_cid_and_port() {
+        assert!(matches!(
+            parse_vsock_locator("vsock/nope:17000"),
+            Err(VsockLocatorError::BadCid(_))
+        ));
+        assert!(matches!(
+            parse_vsock_locator("vsock/3:nope"),
+            Err(VsockLocatorError::BadPort(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_vsock_scheme() {
+        assert_eq!(
+            parse_vsock_locator("tcp/127.0.0.1:7447"),
+            Err(VsockLocatorError::NotVsockScheme)
+        );
+        assert_eq!(
+            parse_vsock_locator("vsock"),
+            Err(VsockLocatorError::NotVsockScheme)
         );
     }
 

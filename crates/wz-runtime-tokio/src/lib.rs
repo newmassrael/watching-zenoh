@@ -528,6 +528,23 @@ pub mod ws_pipeline;
 #[cfg(feature = "transport-link-unixsock")]
 pub mod unixsock_pipeline;
 
+/// R311xj — AF_VSOCK backend for the vsock link (VM<->host / VM<->VM). The
+/// STREAM sibling of [`link_pipeline`] (TCP) / [`unixsock_pipeline`]: vsock is a
+/// reliable byte stream (zenoh's vsock link, `is_streamed = true`, MTU
+/// `BatchSize::MAX`), so it REUSES `stream_link`'s StreamEnvelope framing
+/// UNCHANGED — `dial_vsock`/`bind_vsock`/`accept_vsock_on` over a
+/// `tokio_vsock::VsockStream`/`VsockListener`, `wire_vsock_stream` splitting via
+/// `tokio::io::split` (the TLS pattern — VsockStream has no owned-half split).
+/// No new codec. Gated `transport-link-vsock` (forwards `transport-link-tcp` for
+/// the shared `stream_link` SSOT) AND `target_os = "linux"` (AF_VSOCK is
+/// Linux-only, via the optional `tokio-vsock` dep — the same platform gate
+/// zenoh-link-vsock carries). The `vsock/<CID>:<PORT>` locator PARSE is
+/// platform-independent + ungated in `wz-session-core`; only this dial/accept
+/// backend is gated. The `session_open` DialedLink::Vsock integration rides the
+/// `transport-link-tcp`-gated session-open module additively, like tls/unixsock.
+#[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
+pub mod vsock_pipeline;
+
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
 /// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`

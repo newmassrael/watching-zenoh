@@ -893,6 +893,40 @@ layer_c1aa_cargo_test_unixsock() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixsock --quiet -- -D warnings)
 }
 
+# ─── Layer C1ab — VSOCK link: locator parse + wz-runtime-tokio backend ─
+#
+# R311xj: same shape as C1aa (unixsock). The vsock backend (`vsock_pipeline`:
+# dial_vsock/bind_vsock/accept_vsock_on + the VsockReadDriver reusing the TCP
+# StreamEnvelope framing, split via tokio::io::split) gates on BOTH
+# `transport-link-vsock` AND `target_os = "linux"` (AF_VSOCK is Linux-only, via
+# the optional `tokio-vsock` dep), OFF in the default set. This lane:
+#   1. runs the locator tests (the `vsock/<CID>:<PORT>` parse is ungated +
+#      platform-independent — the CID/port grammar, the genuinely-new logic);
+#   2. runs `--lib vsock_pipeline` + `--test vsock_e2e`: these COMPILE the
+#      backend + the wz<->wz e2e and report them IGNORED. The live tests are
+#      `#[ignore]` because AF_VSOCK loopback (`VMADDR_CID_LOCAL`) needs the
+#      `vsock_loopback` kernel module, ABSENT in this sandbox (bind = EPERM, no
+#      /dev/vsock). They run on a vsock-capable host via
+#      `cargo test --features transport-link-vsock -- --ignored` (the Layer Z
+#      environment-gated pattern); the data path they would exercise is already
+#      proven by the TCP/TLS/unixsock lanes. The lane does NOT pass `--ignored`
+#      (it would EPERM-fail here) — it proves compile + correct-ignore;
+#   3. clippy-gates the `transport-link-vsock` cfg (`--all-targets`, compiling
+#      the #[ignore] targets);
+#   4. clippy-gates the LIB under `--no-default-features --features
+#      transport-link-vsock` to prove `vsock_pipeline` composes standalone (it
+#      pulls only `transport-link-tcp`'s shared `stream_link` + tokio-vsock, no
+#      `transport-unicast` session-open integration). NO reconnect e2e: vsock is
+#      `NotReconnectable` (non-IP), like unixsock.
+layer_c1ab_cargo_test_vsock() {
+    (cd crates \
+        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-vsock --lib vsock_pipeline --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-vsock --test vsock_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-vsock --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-vsock --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3305,6 +3339,7 @@ run_layer C1t layer_c1t_cargo_test_serial || overall=1
 run_layer C1u layer_c1u_cargo_test_tls || overall=1
 run_layer C1v layer_c1v_cargo_test_ws || overall=1
 run_layer C1aa layer_c1aa_cargo_test_unixsock || overall=1
+run_layer C1ab layer_c1ab_cargo_test_vsock || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

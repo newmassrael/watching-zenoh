@@ -97,6 +97,13 @@ pub enum NotReconnectable {
     /// supervisor's retained-locator type stays IP-family by construction; the
     /// path arm is a clean extension point if local-IPC reconnect is wanted.
     Unixsock,
+    /// A `vsock/...` endpoint (R311xj): an AF_VSOCK `(cid, port)` link is
+    /// connection-oriented but non-IP, so — like unixsock — it is outside the
+    /// IP-family reconnect set this supervisor models (pico's
+    /// `Z_FEATURE_AUTO_RECONNECT` is tcp/udp/tls/ws; pico has no vsock). A
+    /// cid-bearing [`ReconnectLocator`] arm is a clean extension point if
+    /// VM-host reconnect is ever wanted.
+    Vsock,
 }
 
 impl From<ReconnectLocator> for AnyLocator {
@@ -129,6 +136,9 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
             // (see [`NotReconnectable::Unixsock`]). Rejected at the boundary
             // like serial.
             AnyLocator::Unixsock(_) => Err(NotReconnectable::Unixsock),
+            // R311xj — vsock: non-IP (cid:port), not in the reconnect set
+            // (see [`NotReconnectable::Vsock`]). Rejected like unixsock/serial.
+            AnyLocator::Vsock(_) => Err(NotReconnectable::Vsock),
         }
     }
 }
@@ -376,7 +386,7 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
 #[cfg(test)]
 mod reconnect_locator_tests {
     use super::*;
-    use crate::locator::{SerialEndpoint, SerialTarget, UnixsockEndpoint};
+    use crate::locator::{SerialEndpoint, SerialTarget, UnixsockEndpoint, VsockEndpoint};
     use core::net::SocketAddr;
 
     fn numeric() -> ParsedLocator {
@@ -446,6 +456,21 @@ mod reconnect_locator_tests {
         assert_eq!(
             ReconnectLocator::try_from(any),
             Err(NotReconnectable::Unixsock)
+        );
+    }
+
+    #[test]
+    fn vsock_is_not_reconnectable() {
+        // R311xj — an AF_VSOCK link is non-IP, outside the IP-family reconnect
+        // set, so it is rejected at the same narrowing boundary as
+        // unixsock/serial.
+        let any = AnyLocator::Vsock(VsockEndpoint {
+            cid: 1,
+            port: 17000,
+        });
+        assert_eq!(
+            ReconnectLocator::try_from(any),
+            Err(NotReconnectable::Vsock)
         );
     }
 }
