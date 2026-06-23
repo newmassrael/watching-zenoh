@@ -3140,6 +3140,13 @@ layer_z_zenohd_interop() {
     # e2e tests, so serial execution costs only wall-clock, not coverage.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_to_zenohd_router -- --ignored --quiet --test-threads=1) || return 1
+    # R3b-2 — wz<->zenohd usrpwd AUTH interop. Needs ONLY zenohd (no
+    # storage-manager plugin, no pico CLI): wz authenticates to a
+    # mandatory-usrpwd zenohd (correct creds -> Established) and is rejected
+    # with a wrong password. --test-threads=1 for the same per-zenohd isolation
+    # as the router leg.
+    (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test usrpwd_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
     # R311wo (A10) — wz<->zenohd storage-manager REPLICATION interop. Needs the
     # storage-manager plugin cdylib (built + installed by build-zenohd.sh from a
     # checkout); SKIP if absent (a crates.io-only zenohd has no plugin .so).

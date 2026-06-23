@@ -103,6 +103,15 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
     # there. That is purely additive coverage (the default isolated build is
     # untouched), but the unification claim is not made anymore.
     "storage-aligner",
+    # R3b — the wz<->zenohd usrpwd interop e2e
+    # (tests/usrpwd_zenohd_interop.rs) dials a usrpwd-guarded zenohd IN-PROCESS
+    # with connect_and_open_session_with_auth + a UsrPwdMethod::initiator
+    # dispatch, so this dev-dep build needs the auth method + the auth-on open
+    # seam. Like the storage-aligner pin above, this unifies onto the shared
+    # wz-runtime-tokio build under `cargo test --workspace` (additive coverage:
+    # the auth lib tests also run there); the isolated `cargo test -p
+    # wz-runtime-tokio` build stays at its default (auth-off) feature set.
+    "access-extauth-usrpwd",
 ] }
 # R71 — `fixture_session_init_params` / `install_session_actions_for_test`
 # / `dispatch_script` live in this sibling crate. Replaces the

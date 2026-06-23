@@ -36,6 +36,9 @@ use wz_session_core::locator::{
 };
 #[cfg(feature = "scouting-static")]
 use wz_session_core::scout_static::synth_static_locators;
+// R3b — the Z_EXT_AUTH dispatch installed by the auth-on open variants.
+#[cfg(feature = "session-extauth")]
+use wz_session_core::auth_dispatch::AuthDispatch;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 use crate::link_pipeline::{
@@ -987,6 +990,26 @@ pub async fn connect_and_open_session(
     initiate_and_open_session(dialed, params, clock, max_iters, tick_interval_ms).await
 }
 
+/// R3b — [`connect_and_open_session`] with a Z_EXT_AUTH dispatch installed: it
+/// dials the locator then opens with auth, the additive auth-on sibling of the
+/// bare connect. Used by the wz<->zenohd usrpwd interop e2e: wz dials a
+/// usrpwd-guarded zenohd as a client and authenticates with a
+/// `UsrPwdMethod::initiator` dispatch.
+#[cfg(feature = "session-extauth")]
+pub async fn connect_and_open_session_with_auth(
+    locator: AnyLocator,
+    params: SessionInitParams,
+    auth: AuthDispatch,
+    cfg: &DialConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
+    initiate_and_open_session_with_auth(dialed, params, auth, clock, max_iters, tick_interval_ms)
+        .await
+}
+
 /// Bring up a session in the Initiator role from an already-connected
 /// transport — the dialed-link half of [`connect_and_open_session`], split out
 /// so a caller that already holds a connected stream (e.g. wz-ap-demo's
@@ -1011,6 +1034,37 @@ pub async fn initiate_and_open_session(
 ) -> Result<OpenedSession, OpenError> {
     let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let actions = new_session_actions(outbound, params, clock);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R3b — [`initiate_and_open_session`] with a Z_EXT_AUTH dispatch installed on
+/// the session actions before the handshake drives, so the four establishment
+/// messages carry the negotiated auth sub-exts (a usrpwd initiator's offer +
+/// HMAC). The additive auth-on sibling of the bare open: the many existing
+/// callers keep the unauthenticated signature, while an auth deploy (or the
+/// wz<->zenohd usrpwd interop e2e) calls this. Initiator side only — the
+/// responder challenge nonce arrives on the peer InitAck, so there is no nonce
+/// draw here (that is the accept path's `refresh_auth_challenge_nonce`).
+#[cfg(feature = "session-extauth")]
+pub async fn initiate_and_open_session_with_auth(
+    connected: DialedLink,
+    params: SessionInitParams,
+    auth: AuthDispatch,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let actions = new_session_actions(outbound, params, clock);
+    actions.install_auth_dispatch(auth);
     initiator_open(
         inbound,
         actions,
