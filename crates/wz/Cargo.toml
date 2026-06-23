@@ -112,16 +112,16 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true
 default = []
 
 # ----- domain: access (6 atomic) -----
-# acl / downsampling / quota forward to the wz-runtime-tokio interceptor
-# knobs (active); each runtime feature implies routing-peer (the chain seam
-# lives there). The `?` forward is a no-op until a runtime is selected, like
-# every other facade forward. extauth-* stay reserved (require session-extauth,
-# itself not yet implemented).
+# acl / downsampling / quota forward to the wz-runtime-tokio interceptor knobs.
+# extauth-usrpwd forwards the §5.16 usrpwd auth method (HMAC-SHA3-256). The `?`
+# forward is a no-op until a runtime is selected, like every other facade
+# forward. extauth-jwt = a zenoh PHANTOM (no transport JWT method exists) and
+# extauth-pubkey (RSA) stay reserved until built.
 access-acl = ["wz-runtime-tokio?/access-acl"]
 access-downsampling = ["wz-runtime-tokio?/access-downsampling"]
 access-extauth-jwt = ["session-extauth"]
 access-extauth-pubkey = ["session-extauth"]
-access-extauth-usrpwd = ["session-extauth"]
+access-extauth-usrpwd = ["session-extauth", "wz-runtime-tokio?/access-extauth-usrpwd"]
 access-quota = ["wz-runtime-tokio?/access-quota"]
 
 # ----- domain: attachment (2 atomic) -----

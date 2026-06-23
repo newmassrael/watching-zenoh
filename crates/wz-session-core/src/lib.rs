@@ -657,6 +657,13 @@ pub mod extauth;
 #[cfg(feature = "session-extauth")]
 pub mod auth_dispatch;
 
+/// The usrpwd auth method — the wz mirror of zenoh `establishment/ext/auth/
+/// usrpwd.rs`. A username/password challenge-response [`auth_dispatch::AuthMethod`]
+/// (HMAC-SHA3-256 over an InitAck nonce). Gated on `access-extauth-usrpwd` (the
+/// first concrete §5.16 auth method; pulls `sha3`).
+#[cfg(feature = "access-extauth-usrpwd")]
+pub mod extauth_usrpwd;
+
 /// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
 /// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value
 /// construction of a `Response(Reply|Err)` wire record from a

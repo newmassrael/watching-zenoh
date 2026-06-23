@@ -48839,6 +48839,62 @@
         "LOCAL: R311ww to be committed atop R311wv (607288c); chain b1afe84(origin) <- wu <- wv <- ww. Recommend full run-ci before any push -- the ext_chain extraction relocates the inbound decode + handshake encode hot paths (byte-identical, but the whole codec subset matrix + e2e must revalidate). NOT pushed without explicit consent."
       ]
     },
+    "Round 311wx": {
+      "decision_summary": "R311wx: session-extauth track R3 -- the usrpwd auth METHOD kernel (the wz mirror of zenoh usrpwd.rs): HMAC-SHA3-256 (sign + constant-time verify) over an InitAck nonce challenge, OpenSyn {user,hmac} Zenoh080 codec, open credentials + accept lookup dict + an injected nonce (no RNG in the no_std core). Adds the sha3 dep (zenoh usrpwd uses Hmac::<Sha3_256>, not the cookie path's sha2). Also REVISES the R311ww dispatch kernel: AuthMethod stages exchange AuthSubExt{Unit,Z64,Zbuf} not Vec<u8>, so a method owns its per-stage wire encoding (the fidelity gap the first real method surfaced). access-extauth-usrpwd reserved->active. Method kernel only -- the live Init/Open handshake wiring + a wz<->zenohd interop e2e are follow-on atoms.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/extauth_usrpwd.rs: NEW usrpwd auth method (id 0x2) -- the wz mirror of zenoh usrpwd.rs. HMAC-SHA3-256 sign + constant-time verify_slice (hardened over zenoh's plain !=, same wire); OpenSyn {user,hmac} body = zenoh Zenoh080 two-ZBuf (VLE-len+bytes, hand-rolled push_vle + SceCursor read); open `credentials: (user,pwd)` + accept `lookup` dict + INJECTED nonce (no RNG in the no_std core). 5 tests: authenticate / wrong-pwd reject / unknown-user reject / OpenSyn round-trip / VLE round-trip.",
+        "crates/wz-session-core/src/auth_dispatch.rs: REVISED the R311ww kernel for per-stage encoding fidelity -- AuthMethod send/recv stages now exchange AuthSubExt{Unit, Z64(u64), Zbuf(Vec<u8>)} instead of Vec<u8> (usrpwd uses Unit on InitSyn, Z64 nonce on InitAck, Zbuf on OpenSyn, Unit on OpenAck); mux/demux map AuthSubExt <-> the ExtEntry body variant (ExtUnit/ExtZint/ExtZbuf); EchoMethod + the 4 tests now exercise all three encodings.",
+        "crates/wz-session-core/Cargo.toml: sha3 0.10 optional (default-features=false, no_std) -- zenoh usrpwd uses HMAC-SHA3-256 (zenoh_crypto Hmac::<Sha3_256>), distinct from the cookie path's sha2; + feature access-extauth-usrpwd = [session-extauth, dep:sha3].",
+        "crates/wz-runtime-tokio/Cargo.toml + crates/wz/Cargo.toml: access-extauth-usrpwd forwards (AP-only).",
+        "crates/wz-session-core/src/lib.rs: pub mod extauth_usrpwd (gate access-extauth-usrpwd).",
+        "inventory: access-extauth-usrpwd reserved->active (method kernel; live handshake wiring is a follow-on atom)."
+      ],
+      "verification_bullets": [
+        "zenoh-faithful (cross-impl with zenohd by construction): usrpwd wire mirrors usrpwd.rs ext defs -- InitSyn zextunit / InitAck zextz64(nonce) / OpenSyn zextzbuf{user,hmac} / OpenAck zextunit, all id USRPWD=0x2; HMAC-SHA3-256 matches zenoh_crypto::hmac::sign (Hmac::<Sha3_256>, hmac.rs:19) keyed by nonce.to_le_bytes() over the password; OpenSyn body is Zenoh080's two-ZBuf (VLE length + bytes), the push_vle write twin locked against SceCursor::read_vle_u64 by a unit test (300 = 0xAC 0x02 round-trip).",
+        "SECURITY: the accept-side password check uses Mac::verify_slice (constant-time) rather than zenoh's `!=` -- identical wire, timing-safe comparison.",
+        "Tests: extauth_usrpwd 5 (authenticate, wrong-pwd Rejected, unknown-user Rejected, OpenSyn body round-trip, VLE round-trip); auth_dispatch 4 (revised kernel now exercises Unit/Z64/Zbuf); wz-session-core --lib with usrpwd = 167 pass (155 base + 3 codec + 4 dispatch + 5 usrpwd), no regression from the kernel revision.",
+        "clippy -D warnings green: default --all-targets (sha3 + usrpwd + extauth all elided); access-extauth-usrpwd --all-targets; session-extauth-only compiles (usrpwd + sha3 absent -- usrpwd gated on access-extauth-usrpwd, not session-extauth). Facade wz --features runtime-tokio,access-extauth-usrpwd composes.",
+        "audit-catalog-status.sh: correctly FAILED (reserved-but-gated) before the flip, OK after access-extauth-usrpwd reserved->active (active<=>gated, active 80->81). validate_workspace baseline preserved (T1 orphan=13 new=+0, T3/T4 unchanged)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "R311wx = session-extauth R3: the usrpwd auth METHOD kernel (HMAC-SHA3-256 + OpenSyn codec, open creds + accept dict + injected nonce) + the new sha3 dep + a revision of the R311ww dispatch kernel (AuthMethod stages exchange AuthSubExt{Unit,Z64,Zbuf} not Vec<u8>, so a method owns its per-stage wire encoding -- the fidelity gap the first real method surfaced; a shape correction on the unpushed kernel, not a behavior break). access-extauth-usrpwd reserved->active.",
+        "NEXT R3b = LIVE handshake wiring: wire AuthDispatch into the real Init/Open encode/decode -- handshake_encode emits open_init_syn/open_open_syn (initiator) + accept_init_ack/accept_open_ack (responder); the inbound parse feeds open_recv_init_ack / accept_recv_init_syn / etc.; inject a real per-handshake nonce from the AP RNG (signing_key_from_os_entropy pattern). NO new SCXML state (auth ext = side-state on the establishment ctx). Then a wz<->zenohd usrpwd interop e2e (the cross-impl proof, like storage A10/A12) -- the method's wire is zenoh-faithful by construction but only an e2e proves it on the wire.",
+        "NEXT R4 = pubkey method (zenoh pubkey.rs RSA challenge-response); needs an RSA crypto-dep DECISION (which crate, AP-only) -> access-extauth-pubkey active.",
+        "access-extauth-jwt = zenoh PHANTOM (0 JWT in zenoh transport) -> reclassify after R4, do NOT build. Access domain now 4/6 (acl/downsampling/quota + usrpwd active); pubkey + jwt-reclassify remain -> closes to 5/6 textbook.",
+        "LOCAL: R311wx atop R311ww (b35b7ff); chain b1afe84(origin) <- wu <- wv <- ww <- wx (4 ahead). Recommend full run-ci before any push (new sha3 dep + the kernel API revision + the facade/preset feature graph). NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311wx: session-extauth track R3 -- the usrpwd auth METHOD kernel (the wz mirror of zenoh usrpwd.rs): HMAC-SHA3-256 (sign + constant-time verify) over an InitAck nonce challenge, OpenSyn {user,hmac} Zenoh080 codec, open credentials + accept lookup dict + an injected nonce (no RNG in the no_std core). Adds the sha3 dep (zenoh usrpwd uses Hmac::<Sha3_256>, not the cookie path's sha2). Also REVISES the R311ww dispatch kernel: AuthMethod stages exchange AuthSubExt{Unit,Z64,Zbuf} not Vec<u8>, so a method owns its per-stage wire encoding (the fidelity gap the first real method surfaced). access-extauth-usrpwd reserved->active. Method kernel only -- the live Init/Open handshake wiring + a wz<->zenohd interop e2e are follow-on atoms.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/extauth_usrpwd.rs: NEW usrpwd auth method (id 0x2) -- the wz mirror of zenoh usrpwd.rs. HMAC-SHA3-256 sign + constant-time verify_slice (hardened over zenoh's plain !=, same wire); OpenSyn {user,hmac} body = zenoh Zenoh080 two-ZBuf (VLE-len+bytes, hand-rolled push_vle + SceCursor read); open `credentials: (user,pwd)` + accept `lookup` dict + INJECTED nonce (no RNG in the no_std core). 5 tests: authenticate / wrong-pwd reject / unknown-user reject / OpenSyn round-trip / VLE round-trip.",
+        "crates/wz-session-core/src/auth_dispatch.rs: REVISED the R311ww kernel for per-stage encoding fidelity -- AuthMethod send/recv stages now exchange AuthSubExt{Unit, Z64(u64), Zbuf(Vec<u8>)} instead of Vec<u8> (usrpwd uses Unit on InitSyn, Z64 nonce on InitAck, Zbuf on OpenSyn, Unit on OpenAck); mux/demux map AuthSubExt <-> the ExtEntry body variant (ExtUnit/ExtZint/ExtZbuf); EchoMethod + the 4 tests now exercise all three encodings.",
+        "crates/wz-session-core/Cargo.toml: sha3 0.10 optional (default-features=false, no_std) -- zenoh usrpwd uses HMAC-SHA3-256 (zenoh_crypto Hmac::<Sha3_256>), distinct from the cookie path's sha2; + feature access-extauth-usrpwd = [session-extauth, dep:sha3].",
+        "crates/wz-runtime-tokio/Cargo.toml + crates/wz/Cargo.toml: access-extauth-usrpwd forwards (AP-only).",
+        "crates/wz-session-core/src/lib.rs: pub mod extauth_usrpwd (gate access-extauth-usrpwd).",
+        "inventory: access-extauth-usrpwd reserved->active (method kernel; live handshake wiring is a follow-on atom)."
+      ],
+      "publishable_verification_bullets": [
+        "zenoh-faithful (cross-impl with zenohd by construction): usrpwd wire mirrors usrpwd.rs ext defs -- InitSyn zextunit / InitAck zextz64(nonce) / OpenSyn zextzbuf{user,hmac} / OpenAck zextunit, all id USRPWD=0x2; HMAC-SHA3-256 matches zenoh_crypto::hmac::sign (Hmac::<Sha3_256>, hmac.rs:19) keyed by nonce.to_le_bytes() over the password; OpenSyn body is Zenoh080's two-ZBuf (VLE length + bytes), the push_vle write twin locked against SceCursor::read_vle_u64 by a unit test (300 = 0xAC 0x02 round-trip).",
+        "SECURITY: the accept-side password check uses Mac::verify_slice (constant-time) rather than zenoh's `!=` -- identical wire, timing-safe comparison.",
+        "Tests: extauth_usrpwd 5 (authenticate, wrong-pwd Rejected, unknown-user Rejected, OpenSyn body round-trip, VLE round-trip); auth_dispatch 4 (revised kernel now exercises Unit/Z64/Zbuf); wz-session-core --lib with usrpwd = 167 pass (155 base + 3 codec + 4 dispatch + 5 usrpwd), no regression from the kernel revision.",
+        "clippy -D warnings green: default --all-targets (sha3 + usrpwd + extauth all elided); access-extauth-usrpwd --all-targets; session-extauth-only compiles (usrpwd + sha3 absent -- usrpwd gated on access-extauth-usrpwd, not session-extauth). Facade wz --features runtime-tokio,access-extauth-usrpwd composes.",
+        "audit-catalog-status.sh: correctly FAILED (reserved-but-gated) before the flip, OK after access-extauth-usrpwd reserved->active (active<=>gated, active 80->81). validate_workspace baseline preserved (T1 orphan=13 new=+0, T3/T4 unchanged)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311wx = session-extauth R3: the usrpwd auth METHOD kernel (HMAC-SHA3-256 + OpenSyn codec, open creds + accept dict + injected nonce) + the new sha3 dep + a revision of the R311ww dispatch kernel (AuthMethod stages exchange AuthSubExt{Unit,Z64,Zbuf} not Vec<u8>, so a method owns its per-stage wire encoding -- the fidelity gap the first real method surfaced; a shape correction on the unpushed kernel, not a behavior break). access-extauth-usrpwd reserved->active.",
+        "NEXT R3b = LIVE handshake wiring: wire AuthDispatch into the real Init/Open encode/decode -- handshake_encode emits open_init_syn/open_open_syn (initiator) + accept_init_ack/accept_open_ack (responder); the inbound parse feeds open_recv_init_ack / accept_recv_init_syn / etc.; inject a real per-handshake nonce from the AP RNG (signing_key_from_os_entropy pattern). NO new SCXML state (auth ext = side-state on the establishment ctx). Then a wz<->zenohd usrpwd interop e2e (the cross-impl proof, like storage A10/A12) -- the method's wire is zenoh-faithful by construction but only an e2e proves it on the wire.",
+        "NEXT R4 = pubkey method (zenoh pubkey.rs RSA challenge-response); needs an RSA crypto-dep DECISION (which crate, AP-only) -> access-extauth-pubkey active.",
+        "access-extauth-jwt = zenoh PHANTOM (0 JWT in zenoh transport) -> reclassify after R4, do NOT build. Access domain now 4/6 (acl/downsampling/quota + usrpwd active); pubkey + jwt-reclassify remain -> closes to 5/6 textbook.",
+        "LOCAL: R311wx atop R311ww (b35b7ff); chain b1afe84(origin) <- wu <- wv <- ww <- wx (4 ahead). Recommend full run-ci before any push (new sha3 dep + the kernel API revision + the facade/preset feature graph). NOT pushed without explicit consent."
+      ]
+    },
     "Round 311x": {
       "decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
       "changes_bullets": [
@@ -53774,10 +53830,10 @@
       "reason": "F=RSA verify; P=zenoh; C=requires session-extauth, alternative method"
     },
     "access-extauth-usrpwd": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh usrpwd auth method",
-      "reason": "F=usrpwd verify; P=zenoh; C=requires session-extauth, alternative method"
+      "reason": "F=usrpwd verify (HMAC-SHA3-256 over an InitAck nonce); P=zenoh usrpwd auth method; C=cfg knob access-extauth-usrpwd (implies session-extauth), method kernel — the live Init/Open handshake wiring + wz<->zenohd interop e2e are follow-on atoms"
     },
     "access-quota": {
       "status": "active",

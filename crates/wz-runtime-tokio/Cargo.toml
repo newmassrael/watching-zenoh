@@ -724,6 +724,9 @@ session-unicast-accept = ["wz-session-core/session-unicast-accept"]
 # auth — the MCU/lwip path never forwards it). The dispatch + methods are
 # follow-on atoms.
 session-extauth = ["wz-session-core/session-extauth"]
+# R3 usrpwd — forward the §5.16 usrpwd auth method (UsrPwdMethod + HMAC-SHA3-256)
+# into the AP runtime; implies session-extauth (the dispatch kernel).
+access-extauth-usrpwd = ["wz-session-core/access-extauth-usrpwd"]
 # R311cf/R311fd — keyexpr domain. The other 7 keyexpr-* features are
 # cluster-wide behaviors with no single anchor cfg site (follow-up
 # cascade per-site wire-up).

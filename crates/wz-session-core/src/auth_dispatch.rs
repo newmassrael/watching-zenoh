@@ -11,43 +11,111 @@
 //! into ONE auth ext: each method contributes a `ZExtUnknown` sub-extension
 //! keyed by its method id, the sub-exts are encoded as a chain into the auth
 //! ext's ZBuf payload, and the peer demultiplexes by id (`ztake!`). wz mirrors
-//! this exactly: an [`AuthMethod`] contributes / consumes a per-method payload
-//! at each of the four handshake stages, and [`AuthDispatch`] mux/demuxes them
-//! through the [`crate::ext_chain`] inner chain wrapped by the
+//! this exactly: an [`AuthMethod`] contributes / consumes a per-method
+//! [`AuthSubExt`] at each of the four handshake stages, and [`AuthDispatch`]
+//! mux/demuxes them through the [`crate::ext_chain`] inner chain wrapped by the
 //! [`crate::extauth`] outer auth ext (id `0x3`). The multi-step state lives
 //! INSIDE each method (`&mut self`), riding the existing four establishment
 //! messages — no new session FSM state (the OQ-W10/W2 resolution).
 //!
+//! # Per-stage encoding
+//!
+//! A method's sub-ext encoding varies per stage (zenoh usrpwd: InitSyn `Unit`,
+//! InitAck `Z64` nonce, OpenSyn `ZBuf` {user,hmac}, OpenAck `Unit`), so a method
+//! returns / receives an [`AuthSubExt`] that names BOTH the encoding and the
+//! value; the kernel maps it to / from the matching wire `ExtEntry` body
+//! (`ExtUnit` / `ExtZint` / `ExtZbuf`). A method never touches the wire types.
+//!
 //! # Scope
 //!
 //! This kernel is method-agnostic + transport-agnostic: it does NOT itself
-//! authenticate (that is the concrete methods — usrpwd / pubkey, follow-on
-//! atoms) and does NOT wire into the live Init/Open handshake (the
-//! `handshake_encode` / `session_glue` integration is a follow-on atom). It is
-//! unit-tested here against a test-double method exercising the full four-stage
-//! open<->accept exchange + method-id routing.
+//! authenticate (that is the concrete methods — usrpwd / pubkey) and does NOT
+//! wire into the live Init/Open handshake (the `handshake_encode` /
+//! `session_glue` integration is a follow-on atom). It is unit-tested here
+//! against a test-double method exercising the full four-stage open<->accept
+//! exchange + method-id routing + all three sub-ext encodings.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use sce_forge_runtime::codec::SceCursor;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbufOwned;
+use wz_codecs::ext_zint::ExtZint;
 
 use crate::codec_owned::owned_bytes;
 use crate::ext_chain::{decode_ext_chain, encode_ext_chain};
 use crate::extauth::{decode_auth_ext, encode_auth_ext};
 
-/// ENC_ZBUF marker for an inner per-method sub-ext header (the 2-bit encoding
-/// field `0b10` at bits 5..6). Mirrors `ext_nodeid::EXT_ENC_ZBUF`, redefined
-/// here because `ext_nodeid` is codec-plane-gated (`codec-push` / `-declare` /
+/// ENC_Z64 marker for an inner per-method sub-ext header (the 2-bit encoding
+/// field `0b01` at bits 5..6). Mirrors `ext_nodeid::EXT_ENC_Z64`, redefined here
+/// because `ext_nodeid` is codec-plane-gated (`codec-push` / `-declare` /
 /// `-request`) and so absent on a session-extauth-only build.
+const ENC_Z64: u8 = 0x20;
+
+/// ENC_ZBUF marker for an inner per-method sub-ext header (`0b10` at bits 5..6).
+/// Mirrors `ext_nodeid::EXT_ENC_ZBUF`; see [`ENC_Z64`] for why it is redefined.
 const ENC_ZBUF: u8 = 0x40;
 
 /// Extract the 4-bit ext id from a header (mirrors `ext_nodeid::ext_id`; see
-/// [`ENC_ZBUF`] for why it is not imported).
+/// [`ENC_Z64`] for why it is not imported).
 fn ext_id(header: u8) -> u8 {
     header & 0x0F
+}
+
+/// A method's per-stage auth sub-extension — the encoding + value zenoh's
+/// `ZExt{Unit,Z64,ZBuf}` carries inside the auth ext, abstracted so a method
+/// never touches the wire `ExtEntry` types. A `Unit` is a present-but-empty
+/// marker (e.g. usrpwd InitSyn "I offer usrpwd" / OpenAck "OK"), `Z64` a small
+/// integer (usrpwd InitAck nonce), `Zbuf` an opaque byte blob (usrpwd OpenSyn
+/// {user, hmac}).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthSubExt {
+    /// A present, empty marker (`ZExtUnit`).
+    Unit,
+    /// A small unsigned integer (`ZExtZ64`).
+    Z64(u64),
+    /// An opaque byte payload (`ZExtZBuf`).
+    Zbuf(Vec<u8>),
+}
+
+impl AuthSubExt {
+    /// Build the wire `ExtEntry` for this sub-ext under method `id` (the kernel's
+    /// mux step). The header carries `id` plus the encoding marker.
+    fn into_ext_entry(self, id: u8) -> Result<ExtEntryOwned, AuthError> {
+        Ok(match self {
+            AuthSubExt::Unit => ExtEntryOwned {
+                header: id,
+                body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+            },
+            AuthSubExt::Z64(value) => ExtEntryOwned {
+                header: id | ENC_Z64,
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
+            },
+            AuthSubExt::Zbuf(bytes) => ExtEntryOwned {
+                header: id | ENC_ZBUF,
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                    value_len: bytes.len() as u64,
+                    value: owned_bytes(&bytes)
+                        .map_err(|_| AuthError::Rejected("payload too large"))?,
+                }),
+            },
+        })
+    }
+
+    /// Project a demuxed wire `ExtEntry` body back into an `AuthSubExt` (the
+    /// kernel's demux step). `None` for an encoding this kernel does not carry.
+    fn from_body(body: &ExtEntryOwnedVariant) -> Option<AuthSubExt> {
+        match body {
+            ExtEntryOwnedVariant::CodecZenohExtUnit(_) => Some(AuthSubExt::Unit),
+            ExtEntryOwnedVariant::CodecZenohExtZint(z) => Some(AuthSubExt::Z64(z.value)),
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => {
+                Some(AuthSubExt::Zbuf(z.value.as_slice().to_vec()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// An auth dispatch error. The handshake aborts on either: a malformed auth ext
@@ -63,10 +131,10 @@ pub enum AuthError {
 
 /// One auth method — the wz mirror of a zenoh per-method FSM (`AuthUsrPwdFsm` /
 /// `AuthPubKeyFsm`). It owns its multi-step state (`&mut self`) and contributes
-/// / consumes a per-method payload at each of the four establishment stages,
-/// keyed by [`id`](Self::id). A stage a method does not participate in keeps the
-/// default (contribute nothing / admit) — usrpwd, e.g., sends nothing on
-/// InitSyn, a nonce on InitAck, an HMAC on OpenSyn.
+/// / consumes an [`AuthSubExt`] at each of the four establishment stages, keyed
+/// by [`id`](Self::id). A stage a method does not participate in keeps the
+/// default (contribute nothing / admit) — usrpwd, e.g., offers a `Unit` on
+/// InitSyn, a `Z64` nonce on InitAck, a `Zbuf` HMAC on OpenSyn.
 pub trait AuthMethod {
     /// The method id used to route this method's sub-ext within the auth ext
     /// (zenoh `id::PUBKEY = 0x1` / `id::USRPWD = 0x2`). Must be `<= 0x0F` (the
@@ -74,44 +142,44 @@ pub trait AuthMethod {
     fn id(&self) -> u8;
 
     // ── Open (initiator) side ────────────────────────────────────────────
-    /// Produce this method's InitSyn payload (or `None` to contribute nothing).
-    fn open_init_syn(&mut self) -> Result<Option<Vec<u8>>, AuthError> {
+    /// Produce this method's InitSyn sub-ext (or `None` to contribute nothing).
+    fn open_init_syn(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
         Ok(None)
     }
-    /// Consume the peer's InitAck payload for this method (`None` if absent).
-    fn open_recv_init_ack(&mut self, _payload: Option<&[u8]>) -> Result<(), AuthError> {
+    /// Consume the peer's InitAck sub-ext for this method (`None` if absent).
+    fn open_recv_init_ack(&mut self, _sub: Option<AuthSubExt>) -> Result<(), AuthError> {
         Ok(())
     }
-    /// Produce this method's OpenSyn payload (or `None`).
-    fn open_open_syn(&mut self) -> Result<Option<Vec<u8>>, AuthError> {
+    /// Produce this method's OpenSyn sub-ext (or `None`).
+    fn open_open_syn(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
         Ok(None)
     }
-    /// Consume the peer's OpenAck payload for this method (`None` if absent).
-    fn open_recv_open_ack(&mut self, _payload: Option<&[u8]>) -> Result<(), AuthError> {
+    /// Consume the peer's OpenAck sub-ext for this method (`None` if absent).
+    fn open_recv_open_ack(&mut self, _sub: Option<AuthSubExt>) -> Result<(), AuthError> {
         Ok(())
     }
 
     // ── Accept (responder) side ──────────────────────────────────────────
-    /// Consume the peer's InitSyn payload for this method (`None` if absent).
-    fn accept_recv_init_syn(&mut self, _payload: Option<&[u8]>) -> Result<(), AuthError> {
+    /// Consume the peer's InitSyn sub-ext for this method (`None` if absent).
+    fn accept_recv_init_syn(&mut self, _sub: Option<AuthSubExt>) -> Result<(), AuthError> {
         Ok(())
     }
-    /// Produce this method's InitAck payload (or `None`).
-    fn accept_init_ack(&mut self) -> Result<Option<Vec<u8>>, AuthError> {
+    /// Produce this method's InitAck sub-ext (or `None`).
+    fn accept_init_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
         Ok(None)
     }
-    /// Consume the peer's OpenSyn payload for this method (`None` if absent).
-    fn accept_recv_open_syn(&mut self, _payload: Option<&[u8]>) -> Result<(), AuthError> {
+    /// Consume the peer's OpenSyn sub-ext for this method (`None` if absent).
+    fn accept_recv_open_syn(&mut self, _sub: Option<AuthSubExt>) -> Result<(), AuthError> {
         Ok(())
     }
-    /// Produce this method's OpenAck payload (or `None`).
-    fn accept_open_ack(&mut self) -> Result<Option<Vec<u8>>, AuthError> {
+    /// Produce this method's OpenAck sub-ext (or `None`).
+    fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
         Ok(None)
     }
 }
 
 /// The composable auth dispatch — holds the negotiated methods and mux/demuxes
-/// their per-stage payloads into / out of the Z_EXT_AUTH ext. An EMPTY dispatch
+/// their per-stage sub-exts into / out of the Z_EXT_AUTH ext. An EMPTY dispatch
 /// produces no auth ext (auth disabled) and admits every stage, mirroring zenoh
 /// `Auth::default()`.
 pub struct AuthDispatch {
@@ -129,23 +197,17 @@ impl AuthDispatch {
         self.methods.is_empty()
     }
 
-    /// Multiplex per-method `(id, payload)` contributions into the outer auth
-    /// ext: each becomes an `id | ENC_ZBUF` sub-ext in an inner chain, encoded
-    /// and wrapped by the R1 codec. No contributions -> no auth ext.
-    fn mux(contributions: &[(u8, Vec<u8>)]) -> Result<Option<ExtEntryOwned>, AuthError> {
+    /// Multiplex per-method `(id, sub-ext)` contributions into the outer auth
+    /// ext: each becomes an `id`-keyed sub-ext (encoding per the [`AuthSubExt`])
+    /// in an inner chain, encoded and wrapped by the R1 codec. No contributions
+    /// -> no auth ext.
+    fn mux(contributions: Vec<(u8, AuthSubExt)>) -> Result<Option<ExtEntryOwned>, AuthError> {
         if contributions.is_empty() {
             return Ok(None);
         }
         let mut inner = Vec::with_capacity(contributions.len());
-        for (id, payload) in contributions {
-            inner.push(ExtEntryOwned {
-                header: id | ENC_ZBUF,
-                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                    value_len: payload.len() as u64,
-                    value: owned_bytes(payload)
-                        .map_err(|_| AuthError::Rejected("payload too large"))?,
-                }),
-            });
+        for (id, sub) in contributions {
+            inner.push(sub.into_ext_entry(id)?);
         }
         let inner_bytes = encode_ext_chain(&inner);
         let outer =
@@ -166,33 +228,32 @@ impl AuthDispatch {
     }
 
     /// The single send-stage driver: run `f` over every method, collect the
-    /// non-`None` contributions keyed by id, mux into the outer auth ext.
+    /// non-`None` sub-exts keyed by id, mux into the outer auth ext.
     fn send_stage(
         &mut self,
-        f: impl Fn(&mut dyn AuthMethod) -> Result<Option<Vec<u8>>, AuthError>,
+        f: impl Fn(&mut dyn AuthMethod) -> Result<Option<AuthSubExt>, AuthError>,
     ) -> Result<Option<ExtEntryOwned>, AuthError> {
         let mut contributions = Vec::new();
         for m in self.methods.iter_mut() {
             let id = m.id();
-            if let Some(payload) = f(m.as_mut())? {
-                contributions.push((id, payload));
+            if let Some(sub) = f(m.as_mut())? {
+                contributions.push((id, sub));
             }
         }
-        Self::mux(&contributions)
+        Self::mux(contributions)
     }
 
-    /// The single recv-stage driver: demux the peer's auth ext, then run `f`
-    /// over every method with ITS sub-ext payload (`None` if the peer sent none
-    /// for that method id).
+    /// The single recv-stage driver: demux the peer's auth ext, then run `f` over
+    /// every method with ITS sub-ext (`None` if the peer sent none for that id).
     fn recv_stage(
         &mut self,
         peer_exts: &[ExtEntryOwned],
-        f: impl Fn(&mut dyn AuthMethod, Option<&[u8]>) -> Result<(), AuthError>,
+        f: impl Fn(&mut dyn AuthMethod, Option<AuthSubExt>) -> Result<(), AuthError>,
     ) -> Result<(), AuthError> {
         let inner = Self::demux(peer_exts)?;
         for m in self.methods.iter_mut() {
-            let payload = find_method_payload(&inner, m.id());
-            f(m.as_mut(), payload)?;
+            let sub = find_method_sub_ext(&inner, m.id());
+            f(m.as_mut(), sub)?;
         }
         Ok(())
     }
@@ -203,7 +264,7 @@ impl AuthDispatch {
     }
     /// Open side: consume the peer InitAck's auth ext.
     pub fn open_recv_init_ack(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, p| m.open_recv_init_ack(p))
+        self.recv_stage(peer_exts, |m, s| m.open_recv_init_ack(s))
     }
     /// Open side: produce the OpenSyn auth ext.
     pub fn open_open_syn(&mut self) -> Result<Option<ExtEntryOwned>, AuthError> {
@@ -211,12 +272,12 @@ impl AuthDispatch {
     }
     /// Open side: consume the peer OpenAck's auth ext.
     pub fn open_recv_open_ack(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, p| m.open_recv_open_ack(p))
+        self.recv_stage(peer_exts, |m, s| m.open_recv_open_ack(s))
     }
 
     /// Accept side: consume the peer InitSyn's auth ext.
     pub fn accept_recv_init_syn(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, p| m.accept_recv_init_syn(p))
+        self.recv_stage(peer_exts, |m, s| m.accept_recv_init_syn(s))
     }
     /// Accept side: produce the InitAck auth ext.
     pub fn accept_init_ack(&mut self) -> Result<Option<ExtEntryOwned>, AuthError> {
@@ -224,7 +285,7 @@ impl AuthDispatch {
     }
     /// Accept side: consume the peer OpenSyn's auth ext.
     pub fn accept_recv_open_syn(&mut self, peer_exts: &[ExtEntryOwned]) -> Result<(), AuthError> {
-        self.recv_stage(peer_exts, |m, p| m.accept_recv_open_syn(p))
+        self.recv_stage(peer_exts, |m, s| m.accept_recv_open_syn(s))
     }
     /// Accept side: produce the OpenAck auth ext.
     pub fn accept_open_ack(&mut self) -> Result<Option<ExtEntryOwned>, AuthError> {
@@ -232,17 +293,14 @@ impl AuthDispatch {
     }
 }
 
-/// Find the payload of the sub-ext whose id matches `id` in a demuxed inner
-/// chain (the `ztake!` analogue). `None` when the peer sent no sub-ext for it.
-fn find_method_payload(entries: &[ExtEntryOwned], id: u8) -> Option<&[u8]> {
-    for e in entries {
-        if ext_id(e.header) == id {
-            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &e.body {
-                return Some(z.value.as_slice());
-            }
-        }
-    }
-    None
+/// Find the sub-ext whose id matches `id` in a demuxed inner chain (the
+/// `ztake!` analogue), projected to an [`AuthSubExt`]. `None` when the peer sent
+/// no sub-ext for that id (or one in an encoding this kernel does not carry).
+fn find_method_sub_ext(entries: &[ExtEntryOwned], id: u8) -> Option<AuthSubExt> {
+    entries
+        .iter()
+        .find(|e| ext_id(e.header) == id)
+        .and_then(|e| AuthSubExt::from_body(&e.body))
 }
 
 #[cfg(test)]
@@ -251,16 +309,17 @@ mod tests {
     use alloc::rc::Rc;
     use core::cell::Cell;
 
-    /// A test-double method: a challenge-response that proves the four-stage
-    /// mux/demux + id routing. The accept side issues a nonce on InitAck; the
-    /// open side echoes it on OpenSyn; the accept side verifies the echo and
-    /// confirms (0x01) on OpenAck; the open side checks the confirmation. The
-    /// two terminal flags are shared `Rc<Cell>` the test inspects after the
-    /// methods are boxed into the dispatch.
+    /// A test-double method exercising the four-stage mux/demux + id routing +
+    /// ALL THREE sub-ext encodings: the open side offers `Unit` on InitSyn; the
+    /// accept side issues a `Z64` nonce on InitAck; the open side echoes it as a
+    /// `Zbuf` on OpenSyn; the accept side verifies and confirms with `Unit` on
+    /// OpenAck; the open side checks the confirmation. The two terminal flags are
+    /// shared `Rc<Cell>` the test inspects after the methods are boxed.
     struct EchoMethod {
         id: u8,
-        nonce: u8,
-        open_recv_nonce: Option<u8>,
+        nonce: u64,
+        open_recv_nonce: Option<u64>,
+        accept_offered: Rc<Cell<bool>>,
         accept_verified: Rc<Cell<bool>>,
         open_confirmed: Rc<Cell<bool>>,
     }
@@ -268,7 +327,8 @@ mod tests {
     impl EchoMethod {
         fn new(
             id: u8,
-            nonce: u8,
+            nonce: u64,
+            accept_offered: Rc<Cell<bool>>,
             accept_verified: Rc<Cell<bool>>,
             open_confirmed: Rc<Cell<bool>>,
         ) -> Self {
@@ -276,14 +336,16 @@ mod tests {
                 id,
                 nonce,
                 open_recv_nonce: None,
+                accept_offered,
                 accept_verified,
                 open_confirmed,
             }
         }
-        fn boxed(id: u8, nonce: u8) -> Box<dyn AuthMethod> {
+        fn boxed(id: u8, nonce: u64) -> Box<dyn AuthMethod> {
             Box::new(Self::new(
                 id,
                 nonce,
+                Rc::new(Cell::new(false)),
                 Rc::new(Cell::new(false)),
                 Rc::new(Cell::new(false)),
             ))
@@ -294,37 +356,48 @@ mod tests {
         fn id(&self) -> u8 {
             self.id
         }
-        // Open side: silent on InitSyn, store the nonce from InitAck, echo it on
-        // OpenSyn, check the OK byte on OpenAck.
-        fn open_recv_init_ack(&mut self, payload: Option<&[u8]>) -> Result<(), AuthError> {
-            let nonce = *payload
-                .and_then(|p| p.first())
-                .ok_or(AuthError::Rejected("no nonce"))?;
-            self.open_recv_nonce = Some(nonce);
+        // Open side: offer Unit on InitSyn, store the Z64 nonce from InitAck,
+        // echo it as a Zbuf on OpenSyn, check the Unit OK on OpenAck.
+        fn open_init_syn(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
+            Ok(Some(AuthSubExt::Unit))
+        }
+        fn open_recv_init_ack(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+            match sub {
+                Some(AuthSubExt::Z64(n)) => {
+                    self.open_recv_nonce = Some(n);
+                    Ok(())
+                }
+                _ => Err(AuthError::Rejected("expected Z64 nonce")),
+            }
+        }
+        fn open_open_syn(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
+            Ok(self
+                .open_recv_nonce
+                .map(|n| AuthSubExt::Zbuf(n.to_le_bytes().to_vec())))
+        }
+        fn open_recv_open_ack(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+            self.open_confirmed.set(sub == Some(AuthSubExt::Unit));
             Ok(())
         }
-        fn open_open_syn(&mut self) -> Result<Option<Vec<u8>>, AuthError> {
-            Ok(self.open_recv_nonce.map(|n| alloc::vec![n]))
-        }
-        fn open_recv_open_ack(&mut self, payload: Option<&[u8]>) -> Result<(), AuthError> {
-            self.open_confirmed.set(payload == Some(&[0x01]));
+        // Accept side: note the Unit offer, issue the Z64 nonce, verify the Zbuf
+        // echo, confirm with Unit.
+        fn accept_recv_init_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+            self.accept_offered.set(sub == Some(AuthSubExt::Unit));
             Ok(())
         }
-        // Accept side: issue the nonce on InitAck, verify the echo on OpenSyn,
-        // confirm with 0x01 on OpenAck.
-        fn accept_init_ack(&mut self) -> Result<Option<Vec<u8>>, AuthError> {
-            Ok(Some(alloc::vec![self.nonce]))
+        fn accept_init_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
+            Ok(Some(AuthSubExt::Z64(self.nonce)))
         }
-        fn accept_recv_open_syn(&mut self, payload: Option<&[u8]>) -> Result<(), AuthError> {
-            let ok = payload == Some(&[self.nonce]);
+        fn accept_recv_open_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+            let ok = sub == Some(AuthSubExt::Zbuf(self.nonce.to_le_bytes().to_vec()));
             self.accept_verified.set(ok);
             if !ok {
                 return Err(AuthError::Rejected("nonce mismatch"));
             }
             Ok(())
         }
-        fn accept_open_ack(&mut self) -> Result<Option<Vec<u8>>, AuthError> {
-            Ok(Some(alloc::vec![0x01]))
+        fn accept_open_ack(&mut self) -> Result<Option<AuthSubExt>, AuthError> {
+            Ok(Some(AuthSubExt::Unit))
         }
     }
 
@@ -333,53 +406,53 @@ mod tests {
     }
 
     #[test]
-    fn four_stage_open_accept_round_trip_authenticates() {
+    fn four_stage_open_accept_round_trip_authenticates_all_encodings() {
+        let accept_offered = Rc::new(Cell::new(false));
         let accept_verified = Rc::new(Cell::new(false));
         let open_confirmed = Rc::new(Cell::new(false));
         let mut accept = AuthDispatch::new(alloc::vec![Box::new(EchoMethod::new(
             0x2,
-            0x42,
+            0x4243_4445,
+            accept_offered.clone(),
             accept_verified.clone(),
             Rc::new(Cell::new(false)),
         )) as _]);
         let mut open = AuthDispatch::new(alloc::vec![Box::new(EchoMethod::new(
             0x2,
-            0x42,
+            0x4243_4445,
+            Rc::new(Cell::new(false)),
             Rc::new(Cell::new(false)),
             open_confirmed.clone(),
         )) as _]);
 
-        // InitSyn: the echo method is silent, so no auth ext rides the InitSyn.
+        // InitSyn (Unit): the open side offers usrpwd; the accept side notes it.
         let init_syn = open.open_init_syn().unwrap();
-        assert!(init_syn.is_none(), "echo method is silent on InitSyn");
+        assert!(init_syn.is_some(), "InitSyn carries the Unit offer");
         accept.accept_recv_init_syn(&exts(init_syn)).unwrap();
+        assert!(accept_offered.get(), "accept saw the Unit offer");
 
-        // InitAck: the accept side issues the nonce; the open side stores it.
+        // InitAck (Z64): the accept side issues the nonce; the open side stores it.
         let init_ack = accept.accept_init_ack().unwrap();
-        assert!(init_ack.is_some(), "InitAck carries the nonce auth ext");
         open.open_recv_init_ack(&exts(init_ack)).unwrap();
 
-        // OpenSyn: the open side echoes the nonce; the accept side verifies.
+        // OpenSyn (Zbuf): the open side echoes the nonce; the accept side verifies.
         let open_syn = open.open_open_syn().unwrap();
-        assert!(open_syn.is_some(), "OpenSyn carries the echoed nonce");
         accept.accept_recv_open_syn(&exts(open_syn)).unwrap();
 
-        // OpenAck: the accept side confirms; the open side checks.
+        // OpenAck (Unit): the accept side confirms; the open side checks.
         let open_ack = accept.accept_open_ack().unwrap();
         open.open_recv_open_ack(&exts(open_ack)).unwrap();
 
-        assert!(
-            accept_verified.get(),
-            "accept side verified the echoed nonce"
-        );
-        assert!(open_confirmed.get(), "open side confirmed the OK byte");
+        assert!(accept_verified.get(), "accept verified the echoed nonce");
+        assert!(open_confirmed.get(), "open confirmed the Unit OK");
     }
 
     #[test]
     fn a_tampered_open_syn_is_rejected_by_the_accept_side() {
         let mut accept = AuthDispatch::new(alloc::vec![EchoMethod::boxed(0x2, 0x42)]);
         // Forge an OpenSyn auth ext carrying the WRONG nonce for method 0x2.
-        let forged = AuthDispatch::mux(&[(0x2, alloc::vec![0x00])]).unwrap();
+        let forged =
+            AuthDispatch::mux(alloc::vec![(0x2, AuthSubExt::Zbuf(alloc::vec![0x00]))]).unwrap();
         let err = accept.accept_recv_open_syn(&exts(forged)).unwrap_err();
         assert_eq!(err, AuthError::Rejected("nonce mismatch"));
     }
@@ -390,12 +463,12 @@ mod tests {
         // the open side must route each sub-ext to the matching method by id,
         // then echo the right nonce so the accept side verifies BOTH.
         let mut accept = AuthDispatch::new(alloc::vec![
-            EchoMethod::boxed(0x1, 0xAA),
-            EchoMethod::boxed(0x2, 0xBB)
+            EchoMethod::boxed(0x1, 0xAAAA),
+            EchoMethod::boxed(0x2, 0xBBBB)
         ]);
         let mut open = AuthDispatch::new(alloc::vec![
-            EchoMethod::boxed(0x1, 0xAA),
-            EchoMethod::boxed(0x2, 0xBB)
+            EchoMethod::boxed(0x1, 0xAAAA),
+            EchoMethod::boxed(0x2, 0xBBBB)
         ]);
         let init_ack = accept.accept_init_ack().unwrap();
         open.open_recv_init_ack(&exts(init_ack)).unwrap();

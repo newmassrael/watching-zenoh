@@ -296,6 +296,10 @@ session-unicast-accept = []
 # MCU profile. R1 lands the codec; the method-agnostic dispatch (OpenFsm /
 # AcceptFsm mirror) + the usrpwd / pubkey methods are follow-on atoms.
 session-extauth = ["alloc"]
+# access-extauth-usrpwd — the §5.16 usrpwd auth method (R311wx). Gates the
+# `extauth_usrpwd` module (the UsrPwdMethod + HMAC-SHA3-256 + OpenSyn codec);
+# implies session-extauth (the dispatch kernel it plugs into) and pulls `sha3`.
+access-extauth-usrpwd = ["session-extauth", "dep:sha3"]
 
 # Round A — multicast session FSM (docs/session-fsm.md §3.1 session-level
 # lifecycle + §3.2 per-peer membership). Gates the two SCE-generated
@@ -608,6 +612,12 @@ log = "0.4"
 # `alloc` feature supplies the `Zeroizing<Vec<u8>>` key wrapper.
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+# R3 (R311wx) — SHA3-256 for the §5.16 usrpwd auth method ONLY. zenoh's
+# `zenoh_crypto::hmac::sign` is `Hmac::<Sha3_256>` (commons/zenoh-crypto/src/
+# hmac.rs:19), so usrpwd interop with zenohd requires SHA3 (the cookie path's
+# sha2 is a different hash). Optional + AP-only (pulled by access-extauth-usrpwd,
+# itself implying session-extauth); default-features = false keeps it no_std.
+sha3 = { version = "0.10", default-features = false, optional = true }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # no-alloc backing store for the application-layer registries. When the
 # `alloc` feature is off (MCU no-heap profile, §2.3) `BoundedVec<T, N>`
