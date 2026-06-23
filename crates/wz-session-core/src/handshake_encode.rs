@@ -41,6 +41,8 @@ use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+use crate::ext_chain::encode_ext_chain;
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 use crate::session_init_params::SessionInitParams;
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 use sce_forge_runtime::codec::CodecError;
@@ -193,39 +195,9 @@ pub fn encode_open(
     Ok(wire)
 }
 
-/// Serialize a transport-message ext chain — concatenated
-/// `ExtEntry::encode()` outputs with the per-entry `Z` bit
-/// (`0x80`) flipped to mark chain continuation. Last entry gets
-/// Z=0 (chain terminator); preceding entries get Z=1. Empty input
-/// returns an empty `Vec` so call sites can unconditionally
-/// `extend_from_slice` the result.
-///
-/// The encoder owns Z so authors never have to remember to flip
-/// the bit between "this is a single-entry chain" (Z=0) and
-/// "this is the last entry of an N-entry chain" (also Z=0). The
-/// non-Z bits (`ext_id`, `M`, `enc`) stay author-set; the helper
-/// preserves them via a byte-level patch on the first byte.
-#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
-    if entries.is_empty() {
-        return Vec::new();
-    }
-    let mut buf = Vec::with_capacity(entries.len() * 4);
-    let last = entries.len() - 1;
-    for (i, entry) in entries.iter().enumerate() {
-        let mut bytes = entry.as_borrowed().encode_to_vec();
-        // ExtEntry::encode pushes the header byte first (see
-        // ext_entry codegen line 145); flip the Z bit per chain
-        // position before emitting.
-        if i == last {
-            bytes[0] &= !0x80;
-        } else {
-            bytes[0] |= 0x80;
-        }
-        buf.extend_from_slice(&bytes);
-    }
-    buf
-}
+// R2 (R311ww) — the ext-chain serializer moved to the shared `crate::ext_chain`
+// SSOT (consumed by inbound decode + the extauth dispatch's inner method chain
+// too); imported above. Was an inline `fn` here.
 
 /// Build the wire bytes for a Close frame. Body is the wz `Close`
 /// (single reason byte), verified byte-identical to zenoh-pico's

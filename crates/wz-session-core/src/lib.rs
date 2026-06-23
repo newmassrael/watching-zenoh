@@ -330,6 +330,23 @@ pub mod link;
 /// no_std clean (core::fmt + core::error::Error); unconditional.
 pub mod parse_error;
 
+/// SSOT for the transport-message extension CHAIN codec (the Z-flag-gated
+/// `ExtEntry` list). Shared by `handshake_encode` (outbound), `inbound`
+/// (inbound), and `auth_dispatch` (the Z_EXT_AUTH inner method chain). Gated on
+/// the union of those consumers' features.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame",
+        feature = "session-extauth"
+    )
+))]
+mod ext_chain;
+
 /// Lease-deadline check outcome (R77 helper surface). no_std +
 /// no_alloc clean (pure enum); unconditional.
 pub mod lease;
@@ -629,6 +646,16 @@ pub mod attachment;
 /// the concrete methods (usrpwd / pubkey) are follow-on atoms consuming it.
 #[cfg(feature = "session-extauth")]
 pub mod extauth;
+
+/// The method-agnostic Z_EXT_AUTH dispatch kernel — the wz mirror of zenoh
+/// `establishment/ext/auth/mod.rs` (`AuthFsm`'s OpenFsm + AcceptFsm). Mux/demux
+/// of per-method sub-exts (keyed by method id) into / out of the auth ext
+/// across the four establishment stages, consuming the `extauth` outer codec +
+/// the `ext_chain` inner chain. Method state rides `&mut self` on the existing
+/// messages (no new FSM state, OQ-W10/W2). Concrete methods (usrpwd / pubkey) +
+/// the live handshake wiring are follow-on atoms.
+#[cfg(feature = "session-extauth")]
+pub mod auth_dispatch;
 
 /// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
 /// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value

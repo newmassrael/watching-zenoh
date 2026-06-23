@@ -43,7 +43,7 @@ use crate::parse_error::InboundParseError;
     feature = "codec-keep-alive",
     feature = "codec-frame"
 ))]
-use crate::parse_error::MAX_EXT_CHAIN_DEPTH;
+use crate::ext_chain::decode_ext_chain;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -59,7 +59,7 @@ use sce_forge_runtime::codec::SceCursor;
     feature = "codec-keep-alive",
     feature = "codec-frame"
 ))]
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryOwned};
+use wz_codecs::ext_entry::ExtEntryOwned;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -412,28 +412,6 @@ pub fn inbound_to_fsm_event(
     }
 }
 
-/// R68c — decode the trailing Z-flag-gated transport ext chain into the
-/// lifetime-free owned mirror. Bounded by [`MAX_EXT_CHAIN_DEPTH`] so a
-/// malformed peer cannot pin the decoder into an unbounded loop.
-#[cfg(any(
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive",
-    feature = "codec-frame"
-))]
-fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
-    let mut entries = Vec::new();
-    for _ in 0..MAX_EXT_CHAIN_DEPTH {
-        let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
-        let z = entry.z();
-        // Deep-copy the borrowed decode view into the lifetime-free
-        // owned mirror so the parsed chain can outlive the input
-        // buffer in `InboundFrame::*.extensions`.
-        entries.push(entry.try_into_owned().map_err(InboundParseError::Codec)?);
-        if !z {
-            return Ok(entries);
-        }
-    }
-    Err(InboundParseError::ExtChainOverflow)
-}
+// R2 (R311ww) — `decode_ext_chain` moved to the shared `crate::ext_chain` SSOT
+// (encode counterpart + the extauth dispatch's inner method chain consume it
+// too); imported above. Was an inline `fn` here.
