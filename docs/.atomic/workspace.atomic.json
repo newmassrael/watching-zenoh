@@ -49317,6 +49317,42 @@
         "LOCAL: R4c (Round 311xe) atop deb905a (R4b, Round 311xd). 5 commits ahead of origin/main (R3b-1 00f0537, R3b-2 a046480, R4a 14d5c96, R4b deb905a, R4c). NOT pushed without explicit consent."
       ]
     },
+    "Round 311xf": {
+      "decision_summary": "jwt reclassify: access-extauth-jwt reserved -> deprecated, a confirmed zenoh PHANTOM. Direct-read shows zenoh has NO jwt transport auth method (establishment/ext/auth = mod+pubkey+usrpwd only; the sole zenoh JWT is a media-type label in api/encoding.rs), so there is nothing to mirror and it is not a buildable catalog atom. This closes the SS5.16 access-control auth family at 5/6 textbook (acl/downsampling/quota/usrpwd/pubkey active); 6/6 is unreachable by construction. The access track is DONE.",
+      "changes_bullets": [
+        "inventory: access-extauth-jwt reserved -> deprecated. The catalog falsely listed it as a \"zenoh JWT auth method\"; direct-read shows no such method exists, so it is reclassified as a phantom (deprecated = not a buildable atom). access-control auth family now 5/6 (acl/downsampling/quota/usrpwd/pubkey active; jwt deprecated)."
+      ],
+      "verification_bullets": [
+        "direct-read (the arbiter): zenoh io/zenoh-transport/src/unicast/establishment/ext/auth/ contains ONLY mod.rs + pubkey.rs + usrpwd.rs -- no jwt.rs; `rg -i jwt io/zenoh-transport/` returns ZERO hits. The sole \"jwt\" in all of zenoh is a media-type label in zenoh/src/api/encoding.rs (the encoding registry), NOT a Z_EXT_AUTH transport auth method. So there is no zenoh transport jwt method to mirror -- a genuine PHANTOM (unlike usrpwd/pubkey, which are real establishment/ext/auth methods).",
+        "catalog-status audit OK (atoms=145, active=82 unchanged -- deprecated is neither active nor gated, so it satisfies the active<=>gated + reserved=>not-gated invariants vacuously). validate_workspace baseline preserved (T1 orphan new=+0)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "jwt reclassified deprecated (zenoh PHANTOM, direct-read confirmed) -> the §5.16 access-control auth family is COMPLETE: 5/6 textbook (acl/downsampling/quota/usrpwd/pubkey active; jwt deprecated-phantom). 6/6 is unreachable BY CONSTRUCTION -- jwt is not a zenoh transport auth method. THE ACCESS TRACK IS DONE.",
+        "access auth cross-impl status: usrpwd full Established cross-impl (R3b-2); pubkey wire-decode interop (R4c, Established blocked upstream by zenoh's un-populatable known_keys lookup).",
+        "NEXT: pivot to a fresh heavy track from the AP-full remaining roadmap -- encoding (7 atoms) / transport-advanced+SHM (6) / HLC SS5.18 (3). See project_north_star_remaining_roadmap.md.",
+        "LOCAL: jwt-reclassify (Round 311xf) atop ea24313 (R4c). 6 commits ahead of origin/main (R3b-1/R3b-2/R4a/R4b/R4c/jwt). NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "jwt reclassify: access-extauth-jwt reserved -> deprecated, a confirmed zenoh PHANTOM. Direct-read shows zenoh has NO jwt transport auth method (establishment/ext/auth = mod+pubkey+usrpwd only; the sole zenoh JWT is a media-type label in api/encoding.rs), so there is nothing to mirror and it is not a buildable catalog atom. This closes the SS5.16 access-control auth family at 5/6 textbook (acl/downsampling/quota/usrpwd/pubkey active); 6/6 is unreachable by construction. The access track is DONE.",
+      "publishable_changes_bullets": [
+        "inventory: access-extauth-jwt reserved -> deprecated. The catalog falsely listed it as a \"zenoh JWT auth method\"; direct-read shows no such method exists, so it is reclassified as a phantom (deprecated = not a buildable atom). access-control auth family now 5/6 (acl/downsampling/quota/usrpwd/pubkey active; jwt deprecated)."
+      ],
+      "publishable_verification_bullets": [
+        "direct-read (the arbiter): zenoh io/zenoh-transport/src/unicast/establishment/ext/auth/ contains ONLY mod.rs + pubkey.rs + usrpwd.rs -- no jwt.rs; `rg -i jwt io/zenoh-transport/` returns ZERO hits. The sole \"jwt\" in all of zenoh is a media-type label in zenoh/src/api/encoding.rs (the encoding registry), NOT a Z_EXT_AUTH transport auth method. So there is no zenoh transport jwt method to mirror -- a genuine PHANTOM (unlike usrpwd/pubkey, which are real establishment/ext/auth methods).",
+        "catalog-status audit OK (atoms=145, active=82 unchanged -- deprecated is neither active nor gated, so it satisfies the active<=>gated + reserved=>not-gated invariants vacuously). validate_workspace baseline preserved (T1 orphan new=+0)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "jwt reclassified deprecated (zenoh PHANTOM, direct-read confirmed) -> the §5.16 access-control auth family is COMPLETE: 5/6 textbook (acl/downsampling/quota/usrpwd/pubkey active; jwt deprecated-phantom). 6/6 is unreachable BY CONSTRUCTION -- jwt is not a zenoh transport auth method. THE ACCESS TRACK IS DONE.",
+        "access auth cross-impl status: usrpwd full Established cross-impl (R3b-2); pubkey wire-decode interop (R4c, Established blocked upstream by zenoh's un-populatable known_keys lookup).",
+        "NEXT: pivot to a fresh heavy track from the AP-full remaining roadmap -- encoding (7 atoms) / transport-advanced+SHM (6) / HLC SS5.18 (3). See project_north_star_remaining_roadmap.md.",
+        "LOCAL: jwt-reclassify (Round 311xf) atop ea24313 (R4c). 6 commits ahead of origin/main (R3b-1/R3b-2/R4a/R4b/R4c/jwt). NOT pushed without explicit consent."
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [
@@ -54204,10 +54240,10 @@
       "reason": "F=rate-limit filter; P=zenoh downsampling; C=cfg knob access-downsampling (routing-peer interceptor)"
     },
     "access-extauth-jwt": {
-      "status": "reserved",
+      "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh JWT auth method",
-      "reason": "F=JWT verify; P=zenoh; C=requires session-extauth, alternative method"
+      "reason": "zenoh PHANTOM (direct-read): NO jwt in zenoh transport auth -- establishment/ext/auth has only pubkey+usrpwd; the sole zenoh JWT is a media-type label in api/encoding.rs, not a Z_EXT_AUTH method. Nothing to mirror -> do NOT build. access closes to 5/6 textbook (6/6 unreachable by construction)."
     },
     "access-extauth-pubkey": {
       "status": "active",
