@@ -165,8 +165,15 @@ routing-routes = ["routing-router", "wz/routing-routes"]
 # inbound, holding both — `peer_loop`, hold-only). Forwards the facade
 # `routing-peer`, which gates the demo's `run_peer` path — the cfg site that
 # makes the catalog claim truthful (a binary now exercises mesh topology). NOT in
-# `default`; only `--features routing-peer` compiles the peer mode.
-routing-peer = ["wz/routing-peer"]
+# `default`; only `--features routing-peer` compiles the peer mode. Also pulls
+# the three §5.16 access knobs so `run_peer` can fill all of InterceptorConfig
+# (--acl-deny / --downsample / --max-payload); each implies routing-peer.
+routing-peer = [
+    "wz/routing-peer",
+    "wz/access-acl",
+    "wz/access-downsampling",
+    "wz/access-quota",
+]
 
 [lints]
 workspace = true

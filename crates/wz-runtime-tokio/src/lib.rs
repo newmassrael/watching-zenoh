@@ -576,14 +576,17 @@ pub mod routing_forward;
 pub mod linkstate_forward;
 
 /// R311tt — the §5.16 access-control interceptor SEAM: the composable
-/// message-admission chain ([`interceptor::InterceptorChain`]) the ACL enforcer
-/// (and future downsampling / quota / qos enforcers) plug into, plus the ACL
-/// enforcer adapter ([`interceptor::access_control::AclInterceptor`]). The wz
-/// mirror of zenoh `net/routing/interceptor/{mod.rs,access_control.rs}`. The
-/// seam + adapter reference the codec `NetworkMessage` types, so they live in
-/// this runtime crate and consume the pure [`wz_access_control`] policy engine
-/// (zenoh's `authorization.rs`), kept message-type-free in its own crate.
-/// Gated on `routing-peer` (the forwarder it gates is).
+/// message-admission chain ([`interceptor::InterceptorChain`]) the ACL,
+/// downsampling, and low-pass enforcers plug into, plus the ACL enforcer
+/// adapter (`interceptor::access_control::AclInterceptor`). The wz mirror of
+/// zenoh `net/routing/interceptor/{mod.rs,access_control.rs}`. The seam +
+/// adapter reference the codec `NetworkMessage` types, so they live in this
+/// runtime crate and consume the pure `wz_access_control` policy engine (zenoh's
+/// `authorization.rs`), kept message-type-free in its own crate. The SEAM is
+/// gated on `routing-peer` (the forwarder it gates is); each concrete enforcer
+/// is an independent §5.16 knob (`access-acl` / `access-downsampling` /
+/// `access-quota`) so a routing peer composes exactly the admission filters it
+/// needs — none of them is access control disabled.
 #[cfg(feature = "routing-peer")]
 pub mod interceptor;
 

@@ -119,7 +119,7 @@ use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
 
 use crate::accept_loop::{DialIntent, DialIntentReceiver, DialIntentSender, FaceForwarder, FaceId};
-use crate::interceptor::{InterceptorChain, InterceptorContext};
+use crate::interceptor::{InterceptorChain, InterceptorContext, InterceptorFlow};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::PendingQueries;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
@@ -135,14 +135,18 @@ pub use wz_routing_graph::{AutoConnect, AutoConnectStrategy, WhatAmI, Zid};
 // beside `set_interceptors`, so a deploy builds an `AclPolicy` from one facade
 // path (`wz::runtime_tokio::linkstate_forward::{AclPolicy, ..}`) — the same
 // convenience the AutoConnect re-export above gives the autoconnect opt-in.
+// Gated on `access-acl` (the enforcer + its engine compile only with it).
+#[cfg(feature = "access-acl")]
 pub use wz_access_control::{
     AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
 };
 // R311tw — the downsampling rule type, re-exported beside the other rule types
 // so a deploy builds it from the same facade path as the ACL types above.
+#[cfg(feature = "access-downsampling")]
 pub use crate::interceptor::downsampling::DownsamplingRule;
 // R311tx — the low-pass (per-key payload-size limit) rule type, re-exported
 // beside the other rule types (the §5.16 access-quota realization).
+#[cfg(feature = "access-quota")]
 pub use crate::interceptor::low_pass::LowPassRule;
 // R311ty — the combined interceptor configuration, the single funnel a deploy
 // fills and installs via `set_interceptors` (the wz mirror of zenoh's
@@ -522,8 +526,8 @@ impl LinkstateForwarder {
     /// is dropped and witnessed by
     /// [`interceptor_dropped`](Self::interceptor_dropped).
     pub fn set_interceptors(&self, config: InterceptorConfig) {
-        *self.ingress_interceptors.borrow_mut() = config.build_chain(AclFlow::Ingress);
-        *self.egress_interceptors.borrow_mut() = config.build_chain(AclFlow::Egress);
+        *self.ingress_interceptors.borrow_mut() = config.build_chain(InterceptorFlow::Ingress);
+        *self.egress_interceptors.borrow_mut() = config.build_chain(InterceptorFlow::Egress);
     }
 
     /// The number of messages ANY interceptor has dropped so far (ACL denial,
@@ -2474,6 +2478,7 @@ mod tests {
     use crate::runtime_impl::TokioRuntime;
     use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
     use sce_forge_runtime::codec::{SceBytes, SceString};
+    #[cfg(feature = "access-acl")]
     use wz_access_control::{AclConfig, AclMessage, AclRule, Permission, SubjectSelector};
     use wz_codecs::linkstate::LinkstateOwned;
     use wz_codecs::linkstate_link::LinkstateLink;
@@ -3815,6 +3820,7 @@ mod tests {
 
     /// Build an allow-default policy with one ingress-Put deny rule on
     /// `deny_keyexpr`, applied to every peer — the smallest real ACL.
+    #[cfg(feature = "access-acl")]
     fn deny_put_policy(deny_keyexpr: &str) -> AclPolicy {
         AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
@@ -3828,6 +3834,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "access-acl")]
     #[test]
     fn an_acl_deny_drops_an_inbound_put_before_relay() {
         // Line A - S(self) - B; B subscribes demo/data. With S configured to DENY
@@ -3872,6 +3879,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "access-acl")]
     #[test]
     fn an_acl_allow_lets_an_inbound_put_relay() {
         // The same topology, but the deny rule targets a DIFFERENT subtree
@@ -3914,6 +3922,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "access-acl")]
     #[test]
     fn an_acl_deny_drops_an_inbound_declare_subscriber() {
         // Control-plane enforcement: S denies DeclareSubscriber on `admin/**`. A
@@ -3980,6 +3989,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "access-acl")]
     #[test]
     fn an_acl_deny_drops_an_inbound_declare_queryable() {
         // §5.16 query ACL (R311ud) — the query-plane twin of
@@ -4047,6 +4057,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "access-acl")]
     #[test]
     fn an_acl_deny_drops_an_inbound_query_before_routing() {
         // §5.16 query ACL (R311ud) — the routed-Query gate. C holds queryables for
@@ -4128,6 +4139,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "access-acl")]
     #[test]
     fn an_egress_acl_deny_blocks_a_relayed_reply() {
         // §5.16 query ACL EGRESS (R311ud) — the reply-relay gate (the Reply twin
@@ -4192,6 +4204,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "access-acl")]
     #[test]
     fn an_egress_acl_deny_blocks_a_relay_but_not_reception() {
         // Egress enforcement — the gap ingress cannot close. S ALLOWS ingress but
@@ -4241,6 +4254,7 @@ mod tests {
         assert_eq!(fwd.interceptor_dropped(), 1, "the egress drop is witnessed");
     }
 
+    #[cfg(all(feature = "access-acl", feature = "access-downsampling"))]
     #[test]
     fn downsampling_composes_with_acl_on_the_interceptor_chain() {
         // The chain runs BOTH a (permissive) ACL enforcer and a downsampler —
@@ -4298,6 +4312,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "access-acl", feature = "access-downsampling"))]
     #[test]
     fn downsampling_precedes_the_acl_and_accounts_a_denied_message() {
         // Locks the FIXED zenoh factory order (downsampling BEFORE access-control,
@@ -4385,6 +4400,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "access-quota")]
     #[test]
     fn low_pass_drops_an_oversized_put_on_a_governed_keyexpr() {
         // The §5.16 access-quota realization (a per-key payload-size cap). S caps

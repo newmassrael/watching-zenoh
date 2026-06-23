@@ -111,13 +111,18 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true
 [features]
 default = []
 
-# ----- domain: access (6 atomic, all reserved) -----
-access-acl = []
-access-downsampling = []
+# ----- domain: access (6 atomic) -----
+# acl / downsampling / quota forward to the wz-runtime-tokio interceptor
+# knobs (active); each runtime feature implies routing-peer (the chain seam
+# lives there). The `?` forward is a no-op until a runtime is selected, like
+# every other facade forward. extauth-* stay reserved (require session-extauth,
+# itself not yet implemented).
+access-acl = ["wz-runtime-tokio?/access-acl"]
+access-downsampling = ["wz-runtime-tokio?/access-downsampling"]
 access-extauth-jwt = ["session-extauth"]
 access-extauth-pubkey = ["session-extauth"]
 access-extauth-usrpwd = ["session-extauth"]
-access-quota = []
+access-quota = ["wz-runtime-tokio?/access-quota"]
 
 # ----- domain: attachment (2 atomic) -----
 # attachment-bytes: the attachment-ext codec primitive (wz-session-core

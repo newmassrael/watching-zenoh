@@ -40,16 +40,28 @@
 //! checks the `Put` action by the auth-free zid subject — the smallest real
 //! rule, on the structure that the rest of §5.16 extends rather than replaces.
 
+// Each concrete interceptor is an independent §5.16 composition knob: the
+// module, its config field, and its build_chain push gate on the matching
+// `access-*` feature. The SEAM below (the trait + chain + flow descriptor)
+// stays under `routing-peer` so the chain builds for any subset — including
+// none, which is access control disabled.
+#[cfg(feature = "access-acl")]
 pub mod access_control;
+#[cfg(feature = "access-downsampling")]
 pub mod downsampling;
+#[cfg(feature = "access-quota")]
 pub mod low_pass;
 
+#[cfg(feature = "access-acl")]
 use wz_access_control::{AclFlow, AclPolicy};
 use wz_routing_graph::Zid;
 use wz_session_core::network_message::NetworkMessage;
 
+#[cfg(feature = "access-acl")]
 use self::access_control::AclInterceptor;
+#[cfg(feature = "access-downsampling")]
 use self::downsampling::{DownsamplingInterceptor, DownsamplingRule};
+#[cfg(feature = "access-quota")]
 use self::low_pass::{LowPassInterceptor, LowPassRule};
 
 /// The per-message context an [`Interceptor`] reads — the wz mirror of zenoh
@@ -115,6 +127,29 @@ impl InterceptorChain {
     }
 }
 
+/// Which message flow a chain enforces — ingress (the inbound relay-admission
+/// point) or egress (the outbound fan-out point). The SEAM-LOCAL flow
+/// descriptor, kept free of the access-acl engine's [`AclFlow`] so a chain
+/// builds for the downsampling / low-pass interceptors alone (access-acl
+/// elided); it maps to `AclFlow` only where the ACL enforcer is constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterceptorFlow {
+    /// Inbound messages arriving on a face (the relay-admission point).
+    Ingress,
+    /// Outbound messages leaving toward a face (the fan-out point).
+    Egress,
+}
+
+#[cfg(feature = "access-acl")]
+impl From<InterceptorFlow> for AclFlow {
+    fn from(flow: InterceptorFlow) -> Self {
+        match flow {
+            InterceptorFlow::Ingress => AclFlow::Ingress,
+            InterceptorFlow::Egress => AclFlow::Egress,
+        }
+    }
+}
+
 /// The full §5.16 interceptor configuration — the SINGLE funnel a deploy fills,
 /// the wz mirror of the config slices zenoh's `interceptor_factories` reads
 /// (`config.downsampling()` / `config.access_control()` /
@@ -123,17 +158,22 @@ impl InterceptorChain {
 /// [`build_chain`](Self::build_chain), so a deploy configures the whole pipeline
 /// once rather than through three independent, order-dependent, append-only
 /// setters (the footgun the R311tx review flagged: re-calling a setter
-/// duplicated an interceptor, and the cross-setter order was unspecified).
+/// duplicated an interceptor, and the cross-setter order was unspecified). Each
+/// field is present only when its `access-*` feature is enabled; an all-elided
+/// config is the empty struct (access control disabled).
 #[derive(Default)]
 pub struct InterceptorConfig {
     /// The access-control policy, or `None` for no ACL enforcer (zenoh
-    /// `AclConfig.enabled = false`).
+    /// `AclConfig.enabled = false`). Present only under `access-acl`.
+    #[cfg(feature = "access-acl")]
     pub acl: Option<AclPolicy>,
     /// The downsampling (rate-limit) rules; empty installs no downsampling
-    /// interceptor.
+    /// interceptor. Present only under `access-downsampling`.
+    #[cfg(feature = "access-downsampling")]
     pub downsampling: Vec<DownsamplingRule>,
     /// The low-pass (per-key payload-size cap) rules; empty installs no low-pass
-    /// interceptor.
+    /// interceptor. Present only under `access-quota`.
+    #[cfg(feature = "access-quota")]
     pub low_pass: Vec<LowPassRule>,
 }
 
@@ -145,18 +185,29 @@ impl InterceptorConfig {
     /// deploy enables — unlike per-setter append order, which depended on call
     /// order. Each flow gets its OWN interceptor instances (a per-flow
     /// downsampling timer, a per-flow ACL enforcer bound to `flow`), as zenoh
-    /// keeps separate per-flow enforcers. An empty config yields an empty chain
-    /// (access control disabled — every message admitted).
-    pub fn build_chain(&self, flow: AclFlow) -> InterceptorChain {
+    /// keeps separate per-flow enforcers. An empty config — or one whose
+    /// interceptors are all feature-elided — yields an empty chain (access
+    /// control disabled, every message admitted).
+    pub fn build_chain(&self, flow: InterceptorFlow) -> InterceptorChain {
+        // `flow` is consumed only by the access-acl ACL push (mapped to
+        // `AclFlow`); with access-acl elided the chain is flow-agnostic.
+        #[cfg(not(feature = "access-acl"))]
+        let _ = flow;
+        // `mut` is exercised by whichever interceptor pushes compile in; a
+        // routing-peer build with no access knob leaves the chain empty.
+        #[allow(unused_mut)]
         let mut chain = InterceptorChain::new();
+        #[cfg(feature = "access-downsampling")]
         if !self.downsampling.is_empty() {
             chain.push(Box::new(DownsamplingInterceptor::new(
                 self.downsampling.clone(),
             )));
         }
+        #[cfg(feature = "access-acl")]
         if let Some(policy) = &self.acl {
-            chain.push(Box::new(AclInterceptor::new(policy.clone(), flow)));
+            chain.push(Box::new(AclInterceptor::new(policy.clone(), flow.into())));
         }
+        #[cfg(feature = "access-quota")]
         if !self.low_pass.is_empty() {
             chain.push(Box::new(LowPassInterceptor::new(self.low_pass.clone())));
         }

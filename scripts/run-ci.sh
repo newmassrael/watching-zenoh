@@ -925,8 +925,17 @@ layer_c1x_cargo_test_routing_routes() {
 #      to prove `peer_loop` composes standalone (routing-peer pulls only
 #      routing-accept);
 #   4. clippy-gates the demo `run_peer` cfg site (`--features routing-peer`).
+#   5. §5.16 access knobs: routing-peer ALONE (steps 1-4) proves the interceptor
+#      chain ELIDES to nothing (access control disabled) — the seam compiles and
+#      the access tests vanish. The combo run then enables all three
+#      (access-acl / access-downsampling / access-quota) so the enforcers + their
+#      unit tests (interceptor::*) and the linkstate access tests actually
+#      compile, lint, and RUN; and each knob is clippy-gated standalone
+#      (--no-default-features --features access-X, each implies routing-peer) to
+#      prove independent composition.
 # The demo-binary mesh e2e is Layer E6 (separate, --features routing-peer).
 layer_c1y_cargo_test_routing_peer() {
+    local access="routing-peer,access-acl,access-downsampling,access-quota"
     (cd crates \
         && cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet \
         && cargo test -p wz-routing-graph --quiet \
@@ -934,7 +943,13 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-routing-graph --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-peer --quiet -- -D warnings \
-        && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings)
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet \
+        && cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features "$access" --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features access-acl --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features access-downsampling --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features access-quota --quiet -- -D warnings)
 }
 
 # ─── Layer C1z — storage driver: backend/history/replication/aligner ─

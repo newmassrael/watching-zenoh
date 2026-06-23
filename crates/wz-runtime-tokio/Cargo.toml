@@ -520,11 +520,6 @@ routing-routes = [
 routing-peer = [
     "routing-accept",
     "dep:wz-routing-graph",
-    # R311tt — the §5.16 access-control ACL policy kernel. The interceptor seam
-    # + enforcer adapter (which match on NetworkMessage) live in this crate
-    # under `routing-peer` and consume this pure engine, mirroring zenoh's
-    # access_control.rs(adapter)/authorization.rs(engine) split.
-    "dep:wz-access-control",
     "wz-codecs/codec-linkstate",
     "wz-session-core/codec-linkstate",
     # R311rd — a routing peer is a full mesh node: it carries the data plane
@@ -554,6 +549,20 @@ routing-peer = [
     # so without this the flood is silently dropped at the stream guard.
     "transport-fragmentation",
 ]
+# ── §5.16 access-control composition knobs ───────────────────────────
+# Each independently elides ONE interceptor on the routing-peer admission
+# chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain
+# SEAM (InterceptorChain / InterceptorContext / InterceptorFlow / the
+# per-face admit in linkstate_forward) stays under `routing-peer`, so all
+# three imply it; an empty config — or a routing-peer build that selects
+# none of these — is access control disabled (every message admitted).
+# `access-acl` additionally pulls the pure policy ENGINE crate
+# (wz-access-control); the enforcer adapter consumes it. Promoted from
+# always-on-under-routing-peer to real cfg knobs so a routing peer composes
+# exactly the admission filters it needs (Layer F footprint).
+access-acl = ["routing-peer", "dep:wz-access-control"]
+access-downsampling = ["routing-peer"]
+access-quota = ["routing-peer"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the

@@ -48661,6 +48661,66 @@
         "LOCAL: R311wt committed atop R311ws (1559d6c) + R311wr (672721b); origin/main=2adaea1 (3 commits ahead after this). Recommend full run-ci before any push -- the R311ws Queryable::matches change is un-gated control-plane (touches the whole query matrix) and Layer Z runs A10/A12."
       ]
     },
+    "Round 311wu": {
+      "decision_summary": "R311wu: promote the §5.16 access-control acl / downsampling / quota atoms from reserved-implemented-but-ungated (always-on under routing-peer, runtime-configured) to REAL cfg knobs (access-acl / access-downsampling / access-quota), each independently eliding one interceptor on the routing-peer admission chain; flip their inventory status reserved->active. This resolves the load-trigger caveat (all 6 access atoms read reserved despite the ACL chain landing R311tt..ty): the 3 were genuinely implemented but had ZERO cfg(feature=...) site (audit invariant #2 held), while access-extauth-* stay genuinely inert (reserved; require the unimplemented session-extauth).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/interceptor/mod.rs: gate `pub mod {access_control,downsampling,low_pass}` + their imports on access-acl / access-downsampling / access-quota; introduce a SEAM-LOCAL `InterceptorFlow {Ingress,Egress}` so the chain seam no longer depends on the access-acl `AclFlow` (mapped via `From<InterceptorFlow> for AclFlow`, gated on access-acl); gate each `InterceptorConfig` field + its `build_chain` push on the matching feature -- an all-elided config builds an empty chain (access control disabled).",
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs: `set_interceptors` builds via `InterceptorFlow::{Ingress,Egress}` not `AclFlow`; gate the `wz_access_control` / `DownsamplingRule` / `LowPassRule` re-exports, the test-mod `wz_access_control` import, and the 11 access tests (8 acl -> access-acl, 2 downsampling -> all(access-acl,access-downsampling), 1 low_pass -> access-quota).",
+        "crates/wz-runtime-tokio/src/lib.rs: the `pub mod interceptor` doc demotes two now-conditionally-broken intra-doc links (`AclInterceptor`, `wz_access_control`) to code spans and documents the per-knob gating.",
+        "crates/wz-runtime-tokio/Cargo.toml: move `dep:wz-access-control` off `routing-peer` onto the new `access-acl`; add access-acl=[routing-peer,dep:wz-access-control], access-downsampling=[routing-peer], access-quota=[routing-peer].",
+        "crates/wz/Cargo.toml: facade access-acl/-downsampling/-quota now forward to wz-runtime-tokio?/access-* (were empty stubs); extauth-* unchanged (reserved, require session-extauth).",
+        "crates/wz-ap-demo/Cargo.toml: `routing-peer` additionally pulls wz/access-acl + -downsampling + -quota so `run_peer` fills all of InterceptorConfig (--acl-deny / --downsample / --max-payload).",
+        "scripts/run-ci.sh: Layer C1y gains the access-on combo (test interceptor + linkstate with the 3 knobs, clippy --all-targets) + per-knob standalone elision clippy; routing-peer-alone now also proves full access elision.",
+        "docs/.atomic: set_inventory_status access-acl/-downsampling/-quota reserved->active with corrected reasons (quota = low_pass per-key payload-size cap, not cumulative accounting)."
+      ],
+      "verification_bullets": [
+        "Caveat resolved by DIRECT READ, not self-assessment: the 3 atoms had real code (wz-access-control engine + interceptor/{access_control,downsampling,low_pass}.rs, landed R311tt..ty) compiled always-on under routing-peer with ZERO cfg(feature=\"access-*\") site, so audit invariant #2 (reserved=>not-gated) held and the catalog read them as inert-remaining; extauth-* have NO impl (doc refs only) and depend on the unimplemented session-extauth stub, so they stay genuinely reserved-inert.",
+        "cargo check green across the matrix: routing-peer alone; routing-peer + all-3-access; and each access-* standalone (each implies routing-peer).",
+        "clippy -D warnings green: routing-peer-alone --all-targets (access code + its tests fully elided), routing-peer + all-access --all-targets, ap-demo --features routing-peer --all-targets (now pulls the 3 knobs), and each access-* standalone --no-default-features.",
+        "cargo test green: 430 lib tests with routing-peer + all-access (the interceptor::* unit tests + the linkstate access tests RUN); 411 with routing-peer alone (the 19 access tests cfg-eliminated, ZERO failures -- elision is non-regressive). A --no-default-features run dropped 19 flooding tests on missing default declare/query features (expected, not a regression; CI keeps defaults).",
+        "audit-catalog-status.sh OK: active<=>cfg-gated now holds for all 3 (atoms=145 active=79). validate_workspace baseline preserved: T1 orphan=13 (new=+0), T3 warn=4 / T4 info=4, ledger entries=966 / sections=259 unchanged by the status flip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "R311wu = the §5.16 access caveat (MEMORY/roadmap: \"all 6 access reserved despite ACL landing R311tt..ty -- verify promotion-gap vs partial\") RESOLVED. Finding: 3 of 6 (acl/downsampling/quota) were IMPLEMENTED-but-ungated (runtime-configured, FOUNDATIONAL-style, no per-atom cfg knob) -> promoted to real cfg knobs + status active; 3 of 6 (extauth jwt/pubkey/usrpwd) genuinely INERT -> stay reserved.",
+        "Roadmap math correction: access \"6 genuine remaining\" -> 3 genuine remaining (extauth only); genuine ap-full remaining ~48 -> ~45. extauth-* are blocked on session-extauth (itself an empty stub, unimplemented).",
+        "DESIGN: the interceptor chain SEAM (InterceptorChain / InterceptorContext / InterceptorFlow / the per-face admit) stays under routing-peer; each enforcer is now an independent Layer-F footprint knob. The seam was decoupled from the access-acl AclFlow via the seam-local InterceptorFlow -- a SOLID improvement (the seam no longer depends on the engine's concretion), not merely gating.",
+        "NOT a status-only flip (which would FAIL audit invariant #3 active<=>gated): the promotion added genuine cfg gates so each interceptor independently elides; the empty stub features (access-acl=[] etc.) became real forwards.",
+        "NEXT (none requested): access-extauth needs session-extauth first; or pick another heavy track (encoding 7 / session-ext 6 / transport-advanced+SHM 6 / HLC 5.18 3). The R311wt latent matcher sweep (subscriber/liveliness literal->intersection vs pico) remains open.",
+        "LOCAL: R311wu committed with the code (this entry + 7 files + the inventory status flip). origin/main=b1afe84. Recommend a FULL run-ci before any push (the routing-peer interceptor surface moved from always-on to cfg-gated, plus Layer C1y + ap-demo + the facade/preset feature graph changed). NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311wu: promote the §5.16 access-control acl / downsampling / quota atoms from reserved-implemented-but-ungated (always-on under routing-peer, runtime-configured) to REAL cfg knobs (access-acl / access-downsampling / access-quota), each independently eliding one interceptor on the routing-peer admission chain; flip their inventory status reserved->active. This resolves the load-trigger caveat (all 6 access atoms read reserved despite the ACL chain landing R311tt..ty): the 3 were genuinely implemented but had ZERO cfg(feature=...) site (audit invariant #2 held), while access-extauth-* stay genuinely inert (reserved; require the unimplemented session-extauth).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/interceptor/mod.rs: gate `pub mod {access_control,downsampling,low_pass}` + their imports on access-acl / access-downsampling / access-quota; introduce a SEAM-LOCAL `InterceptorFlow {Ingress,Egress}` so the chain seam no longer depends on the access-acl `AclFlow` (mapped via `From<InterceptorFlow> for AclFlow`, gated on access-acl); gate each `InterceptorConfig` field + its `build_chain` push on the matching feature -- an all-elided config builds an empty chain (access control disabled).",
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs: `set_interceptors` builds via `InterceptorFlow::{Ingress,Egress}` not `AclFlow`; gate the `wz_access_control` / `DownsamplingRule` / `LowPassRule` re-exports, the test-mod `wz_access_control` import, and the 11 access tests (8 acl -> access-acl, 2 downsampling -> all(access-acl,access-downsampling), 1 low_pass -> access-quota).",
+        "crates/wz-runtime-tokio/src/lib.rs: the `pub mod interceptor` doc demotes two now-conditionally-broken intra-doc links (`AclInterceptor`, `wz_access_control`) to code spans and documents the per-knob gating.",
+        "crates/wz-runtime-tokio/Cargo.toml: move `dep:wz-access-control` off `routing-peer` onto the new `access-acl`; add access-acl=[routing-peer,dep:wz-access-control], access-downsampling=[routing-peer], access-quota=[routing-peer].",
+        "crates/wz/Cargo.toml: facade access-acl/-downsampling/-quota now forward to wz-runtime-tokio?/access-* (were empty stubs); extauth-* unchanged (reserved, require session-extauth).",
+        "crates/wz-ap-demo/Cargo.toml: `routing-peer` additionally pulls wz/access-acl + -downsampling + -quota so `run_peer` fills all of InterceptorConfig (--acl-deny / --downsample / --max-payload).",
+        "scripts/run-ci.sh: Layer C1y gains the access-on combo (test interceptor + linkstate with the 3 knobs, clippy --all-targets) + per-knob standalone elision clippy; routing-peer-alone now also proves full access elision.",
+        "docs/.atomic: set_inventory_status access-acl/-downsampling/-quota reserved->active with corrected reasons (quota = low_pass per-key payload-size cap, not cumulative accounting)."
+      ],
+      "publishable_verification_bullets": [
+        "Caveat resolved by DIRECT READ, not self-assessment: the 3 atoms had real code (wz-access-control engine + interceptor/{access_control,downsampling,low_pass}.rs, landed R311tt..ty) compiled always-on under routing-peer with ZERO cfg(feature=\"access-*\") site, so audit invariant #2 (reserved=>not-gated) held and the catalog read them as inert-remaining; extauth-* have NO impl (doc refs only) and depend on the unimplemented session-extauth stub, so they stay genuinely reserved-inert.",
+        "cargo check green across the matrix: routing-peer alone; routing-peer + all-3-access; and each access-* standalone (each implies routing-peer).",
+        "clippy -D warnings green: routing-peer-alone --all-targets (access code + its tests fully elided), routing-peer + all-access --all-targets, ap-demo --features routing-peer --all-targets (now pulls the 3 knobs), and each access-* standalone --no-default-features.",
+        "cargo test green: 430 lib tests with routing-peer + all-access (the interceptor::* unit tests + the linkstate access tests RUN); 411 with routing-peer alone (the 19 access tests cfg-eliminated, ZERO failures -- elision is non-regressive). A --no-default-features run dropped 19 flooding tests on missing default declare/query features (expected, not a regression; CI keeps defaults).",
+        "audit-catalog-status.sh OK: active<=>cfg-gated now holds for all 3 (atoms=145 active=79). validate_workspace baseline preserved: T1 orphan=13 (new=+0), T3 warn=4 / T4 info=4, ledger entries=966 / sections=259 unchanged by the status flip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311wu = the §5.16 access caveat (MEMORY/roadmap: \"all 6 access reserved despite ACL landing R311tt..ty -- verify promotion-gap vs partial\") RESOLVED. Finding: 3 of 6 (acl/downsampling/quota) were IMPLEMENTED-but-ungated (runtime-configured, FOUNDATIONAL-style, no per-atom cfg knob) -> promoted to real cfg knobs + status active; 3 of 6 (extauth jwt/pubkey/usrpwd) genuinely INERT -> stay reserved.",
+        "Roadmap math correction: access \"6 genuine remaining\" -> 3 genuine remaining (extauth only); genuine ap-full remaining ~48 -> ~45. extauth-* are blocked on session-extauth (itself an empty stub, unimplemented).",
+        "DESIGN: the interceptor chain SEAM (InterceptorChain / InterceptorContext / InterceptorFlow / the per-face admit) stays under routing-peer; each enforcer is now an independent Layer-F footprint knob. The seam was decoupled from the access-acl AclFlow via the seam-local InterceptorFlow -- a SOLID improvement (the seam no longer depends on the engine's concretion), not merely gating.",
+        "NOT a status-only flip (which would FAIL audit invariant #3 active<=>gated): the promotion added genuine cfg gates so each interceptor independently elides; the empty stub features (access-acl=[] etc.) became real forwards.",
+        "NEXT (none requested): access-extauth needs session-extauth first; or pick another heavy track (encoding 7 / session-ext 6 / transport-advanced+SHM 6 / HLC 5.18 3). The R311wt latent matcher sweep (subscriber/liveliness literal->intersection vs pico) remains open.",
+        "LOCAL: R311wu committed with the code (this entry + 7 files + the inventory status flip). origin/main=b1afe84. Recommend a FULL run-ci before any push (the routing-peer interceptor surface moved from always-on to cfg-gated, plus Layer C1y + ap-demo + the facade/preset feature graph changed). NOT pushed without explicit consent."
+      ]
+    },
     "Round 311x": {
       "decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
       "changes_bullets": [
@@ -53572,16 +53632,16 @@
   },
   "inventory_entries": {
     "access-acl": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh-acl plugin",
-      "reason": "F=ACL filter pipeline; P=zenoh-acl; C=opt-in policy plugin"
+      "reason": "F=ACL filter pipeline; P=zenoh-acl; C=cfg knob access-acl (routing-peer interceptor enforcer + wz-access-control engine)"
     },
     "access-downsampling": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh downsampling plugin",
-      "reason": "F=rate-limit filter; P=zenoh downsampling; C=opt-in QoS policy"
+      "reason": "F=rate-limit filter; P=zenoh downsampling; C=cfg knob access-downsampling (routing-peer interceptor)"
     },
     "access-extauth-jwt": {
       "status": "reserved",
@@ -53602,10 +53662,10 @@
       "reason": "F=usrpwd verify; P=zenoh; C=requires session-extauth, alternative method"
     },
     "access-quota": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh per-key quota",
-      "reason": "F=quota accounting; P=zenoh; C=opt-in policy"
+      "reason": "F=per-key payload-size cap (zenoh low_pass realization, not cumulative accounting); P=zenoh low_pass; C=cfg knob access-quota (routing-peer interceptor)"
     },
     "attachment-bytes": {
       "status": "active",
