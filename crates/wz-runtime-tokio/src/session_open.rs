@@ -1260,6 +1260,25 @@ pub async fn connect_and_open_session_with_lowlatency(
         .await
 }
 
+/// session-extcompression — [`connect_and_open_session`] that OFFERS compression:
+/// dials the locator then opens with the lz4-compression offer staged on the
+/// session actions before the handshake drives. The InitSyn carries the
+/// Z_EXT_COMPRESSION unit ext, and if the peer reflects it every post-establishment
+/// batch is lz4-wrapped. Signature-stable additive sibling of the bare connect.
+#[cfg(feature = "session-extcompression")]
+pub async fn connect_and_open_session_with_compression(
+    locator: AnyLocator,
+    params: SessionInitParams,
+    cfg: &DialConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
+    initiate_and_open_session_with_compression(dialed, params, clock, max_iters, tick_interval_ms)
+        .await
+}
+
 /// Bring up a session in the Initiator role from an already-connected
 /// transport — the dialed-link half of [`connect_and_open_session`], split out
 /// so a caller that already holds a connected stream (e.g. wz-ap-demo's
@@ -1342,6 +1361,32 @@ pub async fn initiate_and_open_session_with_lowlatency(
     let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let actions = new_session_actions(outbound, params, clock);
     actions.set_lowlatency_offer(true);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// session-extcompression — [`initiate_and_open_session`] with the compression
+/// capability offered before the handshake drives (the InitSyn carries the
+/// Z_EXT_COMPRESSION unit ext). Initiator side; the acceptor reflects via
+/// [`accept_and_open_session_with_compression`].
+#[cfg(feature = "session-extcompression")]
+pub async fn initiate_and_open_session_with_compression(
+    connected: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let actions = new_session_actions(outbound, params, clock);
+    actions.set_compression_offer(true);
     initiator_open(
         inbound,
         actions,
@@ -1500,6 +1545,36 @@ pub async fn accept_and_open_session_with_lowlatency(
     let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_lowlatency_offer(true);
+
+    engine.process_event(E::InboundStart);
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// session-extcompression — [`accept_and_open_session`] that OFFERS compression
+/// on the accept side: the acceptor reflects the Z_EXT_COMPRESSION ext in its
+/// InitAck iff the peer's InitSyn offered it (the `&=` merge), so the established
+/// session lz4-wraps every batch. The accept-side counterpart of
+/// [`connect_and_open_session_with_compression`].
+#[cfg(feature = "session-extcompression")]
+pub async fn accept_and_open_session_with_compression(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    actions.set_compression_offer(true);
 
     engine.process_event(E::InboundStart);
     drive_open_loop(

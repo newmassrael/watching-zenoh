@@ -668,6 +668,21 @@ pub mod extauth;
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;
 
+/// SSOT for the transport-level batch COMPRESSION wrap (`transport-compression`)
+/// — the wz mirror of zenoh's per-batch lz4 codec (batch.rs). `compress_batch` /
+/// `decompress_batch` wrap the `[BatchHeader][payload]` the link layer length-
+/// frames, applied at the `send_wire` / `dispatch_link_event` seams.
+#[cfg(feature = "transport-compression")]
+pub mod compression;
+
+/// SSOT for the Z_EXT_COMPRESSION establishment ext (`session-extcompression`) —
+/// the wz mirror of zenoh `init::ext::Compression` (`zextunit!(0x6,false)`). The
+/// codec layer (the 0x6 unit ext + the peer-offer projector); the per-session
+/// `is_compression` state, the `&=` negotiation, and the lz4 data path live in
+/// `session_actions` / `drive` / `compression`.
+#[cfg(feature = "session-extcompression")]
+pub mod extcompression;
+
 /// The method-agnostic Z_EXT_AUTH dispatch kernel — the wz mirror of zenoh
 /// `establishment/ext/auth/mod.rs` (`AuthFsm`'s OpenFsm + AcceptFsm). Mux/demux
 /// of per-method sub-exts (keyed by method id) into / out of the auth ext

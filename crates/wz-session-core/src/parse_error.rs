@@ -32,6 +32,12 @@ pub enum InboundParseError {
     /// `ext_envelope.scxml::on-overflow="reject"` so a malformed
     /// peer cannot pin the decoder into an unbounded loop.
     ExtChainOverflow,
+    /// transport-compression — a compression-negotiated batch could not be
+    /// lz4-decompressed (empty wire, a corrupt lz4 block, or a blob that would
+    /// expand past the negotiated mtu bound — the decompression-bomb guard).
+    /// The session tears down (framing error) rather than trusting the peer.
+    #[cfg(feature = "transport-compression")]
+    CompressionFailed,
 }
 
 impl fmt::Display for InboundParseError {
@@ -44,6 +50,10 @@ impl fmt::Display for InboundParseError {
                 "inbound ext chain exceeded MAX_EXT_CHAIN_DEPTH={} without terminator",
                 MAX_EXT_CHAIN_DEPTH
             ),
+            #[cfg(feature = "transport-compression")]
+            Self::CompressionFailed => {
+                write!(f, "inbound compressed batch failed lz4 decompression")
+            }
         }
     }
 }

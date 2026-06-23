@@ -540,7 +540,7 @@ scouting-static = [
 # the AP runtime (R1 = codec layer; dispatch + usrpwd/pubkey methods follow).
 # AP-only: no wz-runtime-lwip forward (zenoh-pico has no auth).
 session-extauth = ["wz-runtime-tokio?/session-extauth"]
-session-extcompression = ["transport-compression"]
+session-extcompression = ["transport-compression", "wz-runtime-tokio?/session-extcompression"]
 session-extqos = []
 session-extshm = ["transport-shm"]
 session-multicast = []
@@ -625,7 +625,9 @@ time-timestamp-source = []
 # multicast loop now splits oversize TX via the shared multicast_tx_emit
 # SSOT once the feature is on) are wired such cascades.
 transport-batching = ["wz-runtime-tokio?/transport-batching", "wz-runtime-lwip?/transport-batching"]
-transport-compression = []
+# transport-compression — lz4 per-batch wrap (zenoh batch.rs); weak-forwards
+# the runtime-tokio gate. AP-only. session-extcompression adds the 0x6 handshake.
+transport-compression = ["wz-runtime-tokio?/transport-compression"]
 # R311mg — transport-fragmentation additionally weak-forwards to
 # wz-session-lwip: R311mf landed the MCU multicast Fragment RX/TX in the
 # wz-session-lwip crate's OWN transport-fragmentation feature, so without

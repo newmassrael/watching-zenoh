@@ -990,6 +990,36 @@ layer_c1ad_cargo_test_lowlatency() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-lowlatency --quiet -- -D warnings)
 }
 
+# ─── Layer C1ae — compression transport: lz4 wrap + ext 0x6 + e2e ─
+#
+# R311xm: transport-compression (the lz4 per-batch wrap) + session-extcompression
+# (the Z_EXT_COMPRESSION 0x6 handshake), the wz mirror of zenoh's per-batch
+# compression (batch.rs), using the SAME lz4_flex crate for wz<->zenohd byte
+# compatibility. Both peers OFFER the 0x6 unit ext on Init; the `&=` merge agrees;
+# every post-establishment batch is lz4-wrapped [BatchHeader][payload] (kept only
+# when smaller). Handshake/OpenAck stay uncompressed (the is_established gate).
+# This lane:
+#   1. runs the compression + extcompression unit tests (the lz4 round-trip incl
+#      the incompressible-stays-raw + decompression-bomb-bound cases, and the 0x6
+#      unit ext codec);
+#   2. runs the compression_e2e integration tests (gated all(session-extcompression,
+#      transport-unicast, transport-link-tcp)): wz<->wz negotiate over real TCP +
+#      deliver a compressible Put byte-exact through the lz4 wrap, AND a
+#      deterministic wire-form proof that the Put batch leads with the COMPRESSION
+#      BatchHeader (vs a bare T_MID_FRAME control), plus the one-sided-offer `&=`;
+#   3. clippy-gates the cfg under --all-targets (the lz4 tx/rx wrap + negotiation);
+#   4. clippy-gates the LIB under --no-default-features --features
+#      transport-compression to prove the bare lz4 wrap primitive (no handshake
+#      codecs) composes standalone (is_compression never flips, so the wrap is
+#      inert-but-present, dead-code-free).
+layer_c1ae_cargo_test_compression() {
+    (cd crates \
+        && cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
+        && cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp --test compression_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features session-extcompression,transport-unicast,transport-link-tcp --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features transport-compression --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3405,6 +3435,7 @@ run_layer C1aa layer_c1aa_cargo_test_unixsock || overall=1
 run_layer C1ab layer_c1ab_cargo_test_vsock || overall=1
 run_layer C1ac layer_c1ac_cargo_test_quic || overall=1
 run_layer C1ad layer_c1ad_cargo_test_lowlatency || overall=1
+run_layer C1ae layer_c1ae_cargo_test_compression || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

@@ -355,6 +355,13 @@ transport-fragmentation = ["wz-session-core/transport-fragmentation", "reassembl
 # lowlatency unicast transport); no MCU forward (lwip has no lowlatency, as
 # session-extauth is AP-only). No new dependency.
 transport-lowlatency = ["wz-session-core/transport-lowlatency"]
+
+# transport-compression / session-extcompression — forward the session-core
+# lz4 batch wrap + the Z_EXT_COMPRESSION (0x6) handshake. AP/unicast (no MCU
+# forward, as session-extauth / transport-lowlatency are AP-only). NO new dep
+# at the runtime layer (lz4_flex rides session-core).
+transport-compression = ["wz-session-core/transport-compression"]
+session-extcompression = ["wz-session-core/session-extcompression"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +

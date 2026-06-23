@@ -123,6 +123,27 @@ transport-fragmentation = ["reassembly", "codec-fragment", "alloc"]
 # The functional alternative to `transport-fragmentation`.
 transport-lowlatency = ["alloc", "codec-frame", "session-unicast"]
 
+# transport-compression — the lz4 per-batch wrap (the wz mirror of zenoh's
+# batch.rs compress/decompress), the functional data path. Gates the
+# `compression` module (compress_batch/decompress_batch), the per-session
+# is_compression slot + getter, and the lz4 tx/rx wrap at the send_wire /
+# dispatch_link_event seams. Pulls `alloc` (the wrap Vec) + the lz4_flex codec.
+# The wrap engages only when is_compression() && is_established(); without the
+# negotiation (session-extcompression) is_compression stays false, so a bare
+# transport-compression build is the inert-but-present wrap primitive (cf. the
+# bare transport-lowlatency rx primitive). NO handshake codecs forced.
+transport-compression = ["alloc", "dep:lz4_flex"]
+
+# session-extcompression — the Z_EXT_COMPRESSION (0x6) establishment handshake
+# (the wz mirror of zenoh's compression ext). Gates the `extcompression` ext
+# codec + the offer/`&=` negotiation that SETS is_compression, and FORWARDS
+# transport-compression (the negotiation enables the wrap). Pulls `codec-frame`
+# (the rx wrap re-uses parse_frame_payload's batch) + `session-unicast` (the
+# establishment FSM it rides). The Init offer/merge is additively gated on
+# codec-init-body at its use sites (so a bare build carries no dead send_wire
+# seam, exactly the transport-lowlatency discipline).
+session-extcompression = ["transport-compression", "codec-frame", "session-unicast"]
+
 # MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
 # build (heapless, no http-send / scripting — those are std-coupled and
 # mutually exclusive with no_std, enforced by a compile_error! in
@@ -635,6 +656,12 @@ sha2 = { version = "0.10", default-features = false }
 # sha2 is a different hash). Optional + AP-only (pulled by access-extauth-usrpwd,
 # itself implying session-extauth); default-features = false keeps it no_std.
 sha3 = { version = "0.10", default-features = false, optional = true }
+# transport-compression — the per-batch lz4 codec, the SAME crate zenoh uses
+# (io/zenoh-transport lz4_flex 0.11), so a compression-negotiated wz<->zenohd
+# session is byte-compatible. no_std + alloc via the safe-* pure-Rust block impls
+# (no std, no nightly, no unsafe); the `frame` format is std-coupled + unused
+# (we use the block API), so default-features are off.
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"], optional = true }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # no-alloc backing store for the application-layer registries. When the
 # `alloc` feature is off (MCU no-heap profile, §2.3) `BoundedVec<T, N>`

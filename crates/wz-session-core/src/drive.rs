@@ -40,8 +40,9 @@ use crate::inbound::InboundFrame;
 #[cfg(feature = "codec-frame")]
 use crate::network_message::parse_frame_payload;
 // transport-lowlatency — the lean rx branch reads the leading message id
-// (wire_const) and synthesizes an empty ext list (Vec).
-#[cfg(feature = "transport-lowlatency")]
+// (wire_const) and synthesizes an empty ext list (Vec); transport-compression's
+// rx un-wrap holds the decompressed batch in a Vec too.
+#[cfg(any(feature = "transport-lowlatency", feature = "transport-compression"))]
 use alloc::vec::Vec;
 #[cfg(feature = "transport-lowlatency")]
 use wz_codecs::wire_const;
@@ -67,6 +68,38 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             DriverLoopOutcome::LinkLost(cause)
         }
         LinkEvent::Rx(rx) => {
+            // transport-compression — un-wrap the OUTERMOST wire layer FIRST
+            // (zenoh decompresses the batch before any transport-message
+            // dispatch). Once compression is negotiated AND established, the
+            // datagram is [BatchHeader][payload]; decompress it into `bytes`
+            // (which the lowlatency / universal dispatch below then reads). A
+            // malformed blob — or one that would expand past the negotiated mtu
+            // bound (the decompression-bomb guard) — is a framing error.
+            // Pre-establishment handshake frames are never compressed (the
+            // is_established gate), so they pass through verbatim.
+            #[cfg(feature = "transport-compression")]
+            let decompressed: Option<Vec<u8>> =
+                if actions.is_compression() && actions.is_established() {
+                    match crate::compression::decompress_batch(
+                        &rx.bytes,
+                        actions.negotiated_batch_mtu(),
+                    ) {
+                        Some(b) => Some(b),
+                        None => {
+                            engine.process_event(E::FramingError);
+                            return DriverLoopOutcome::ParseError(
+                                crate::parse_error::InboundParseError::CompressionFailed,
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+            #[cfg(feature = "transport-compression")]
+            let bytes: &[u8] = decompressed.as_deref().unwrap_or(&rx.bytes);
+            #[cfg(not(feature = "transport-compression"))]
+            let bytes: &[u8] = &rx.bytes;
+
             // transport-lowlatency — lean rx: once this session negotiated
             // lowlatency AND is established, a datagram whose leading message id
             // is neither Close nor KeepAlive is a BARE NetworkMessage with NO
@@ -95,7 +128,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                 // keeps the test feature-robust: `T_MID_KEEP_ALIVE` is ungated,
                 // and the `T_MID_CLOSE` arm rides `codec-close` exactly like the
                 // `handle_inbound` decode arm it defers to.
-                let lean_network = match rx.bytes.first().map(|h| h & 0x1F) {
+                let lean_network = match bytes.first().map(|h| h & 0x1F) {
                     None => false,
                     Some(wire_const::T_MID_KEEP_ALIVE) => false,
                     #[cfg(feature = "codec-close")]
@@ -103,7 +136,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                     Some(_) => true,
                 };
                 if lean_network {
-                    return match parse_frame_payload(&rx.bytes) {
+                    return match parse_frame_payload(bytes) {
                         Ok(messages) => DriverLoopOutcome::FramePayload {
                             reliable: true,
                             sn: 0,
@@ -118,7 +151,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                     };
                 }
             }
-            match actions.handle_inbound(&rx.bytes) {
+            match actions.handle_inbound(bytes) {
                 Ok(frame) => match inbound_to_fsm_event(&frame) {
                     Some(event) => {
                         // R311kc — initiator InitAck params validation (zenoh-pico
@@ -190,6 +223,20 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                         if let InboundFrame::Init { extensions, .. } = &frame {
                             actions.negotiate_lowlatency_against_peer(
                                 crate::extlowlatency::peer_offered_lowlatency(extensions),
+                            );
+                        }
+                        // session-extcompression — the same `&=` merge for the
+                        // Z_EXT_COMPRESSION offer on every admitted Init frame
+                        // (zenoh `is_compression &= other_ext.is_some()`, both
+                        // recv_init_syn and recv_init_ack), BEFORE the InitAck
+                        // send reflects it.
+                        #[cfg(all(
+                            feature = "session-extcompression",
+                            feature = "codec-init-body"
+                        ))]
+                        if let InboundFrame::Init { extensions, .. } = &frame {
+                            actions.negotiate_compression_against_peer(
+                                crate::extcompression::peer_offered_compression(extensions),
                             );
                         }
                         // R3b — feed the admitted handshake frame's ext chain into

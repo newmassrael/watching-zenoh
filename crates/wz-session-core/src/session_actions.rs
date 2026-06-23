@@ -366,6 +366,17 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// mutex so the merge advances without blocking the role ext slots.
     #[cfg(feature = "transport-lowlatency")]
     pub is_lowlatency: R::Mutex<bool>,
+    /// transport-compression — the negotiated compression capability for THIS
+    /// session (zenoh `TransportConfigUnicast::is_compression`). Seeded with the
+    /// local offer ([`Self::set_compression_offer`]) at bring-up, then ANDed
+    /// against the peer's InitSyn / InitAck offer
+    /// ([`Self::negotiate_compression_against_peer`], zenoh
+    /// `is_compression &= other_ext.is_some()`). When true post-establishment,
+    /// every outbound batch is lz4-wrapped at [`Self::send_wire`] and every
+    /// inbound batch is un-wrapped at [`crate::drive::dispatch_link_event`]
+    /// (the wz mirror of zenoh's per-batch compression). Behind its own mutex.
+    #[cfg(feature = "transport-compression")]
+    pub is_compression: R::Mutex<bool>,
     /// R121d — sizing parameters parsed from the peer's inbound
     /// `InitSyn`. The Accepting side caps its outbound InitAck
     /// `seq_num_res / req_id_res / batch_size` to `min(own,
@@ -739,6 +750,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // (`set_lowlatency_offer`) and the peer's offer is ANDed in.
             #[cfg(feature = "transport-lowlatency")]
             is_lowlatency: R::new_mutex(false),
+            #[cfg(feature = "transport-compression")]
+            is_compression: R::new_mutex(false),
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             rx_sn: R::new_mutex(crate::sn::RxSn::default()),
@@ -806,6 +819,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn send_wire(&self, bytes: &[u8], reliability: Reliability) {
         let now = self.clock.now_monotonic_ms();
         R::with_mutex_mut(&self.last_outbound_at, |slot| *slot = Some(now));
+        // transport-compression — once compression is negotiated, every
+        // post-establishment batch is lz4-wrapped here (the wz analogue of
+        // zenoh's finalize-then-write-to-link). The is_established() gate keeps
+        // the handshake messages uncompressed: zenoh sets the link's
+        // is_compression only after the handshake AND explicitly ships OpenAck
+        // raw (link.rs:285) -- both fall out for free, since the acceptor is not
+        // yet established when it emits OpenAck. This wraps OUTSIDE the lowlatency
+        // lean encode (compression is the outermost wire layer); the link layer
+        // then length-frames the [BatchHeader][payload] (zenoh's
+        // [length][header][payload]).
+        #[cfg(feature = "transport-compression")]
+        if self.is_compression() && self.is_established() {
+            let wrapped = crate::compression::compress_batch(bytes);
+            self.link_driver().send_blocking(&wrapped, reliability);
+            return;
+        }
         self.link_driver().send_blocking(bytes, reliability);
     }
 
@@ -1130,6 +1159,58 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             chain.retain(|e| e.ext_id() != crate::extlowlatency::LOWLATENCY_EXT_ID);
             if offer {
                 chain.push(crate::extlowlatency::encode_lowlatency_ext());
+            }
+        });
+    }
+
+    /// transport-compression — the negotiated compression capability for this
+    /// session. Read by the lz4 tx wrap ([`Self::send_wire`]) and the rx un-wrap
+    /// ([`crate::drive::dispatch_link_event`]); true only when BOTH peers offered
+    /// the ext. The getter lives under `transport-compression` (the wrap reads
+    /// it) while the setters live under `session-extcompression` (the handshake
+    /// sets it) -- a bare `transport-compression` build has the inert wrap but no
+    /// way to flip the flag, so it never engages.
+    #[cfg(feature = "transport-compression")]
+    pub fn is_compression(&self) -> bool {
+        R::with_mutex_mut(&self.is_compression, |s| *s)
+    }
+
+    /// session-extcompression — the AP layer's "this deploy offers compression
+    /// toward this peer" config, set once at bring-up BEFORE the handshake drives
+    /// (the wz analogue of zenoh `config.unicast.is_compression`). Seeds
+    /// [`Self::is_compression`]; the peer's offer is ANDed in by
+    /// [`Self::negotiate_compression_against_peer`].
+    #[cfg(feature = "session-extcompression")]
+    pub fn set_compression_offer(&self, offer: bool) {
+        R::with_mutex_mut(&self.is_compression, |s| *s = offer);
+    }
+
+    /// session-extcompression — AND the peer's InitSyn / InitAck compression offer
+    /// into the local capability: zenoh `is_compression &= other_ext.is_some()`
+    /// (`establishment/ext/compression.rs:79/165`). Called from the establishment
+    /// demux ([`crate::drive::dispatch_link_event`]) on every inbound Init frame,
+    /// so the result is `local_offer && peer_offer`, finalized at the Init
+    /// exchange (zenoh's Open stages are NOP).
+    #[cfg(feature = "session-extcompression")]
+    pub fn negotiate_compression_against_peer(&self, peer_offered: bool) {
+        R::with_mutex_mut(&self.is_compression, |s| *s &= peer_offered);
+    }
+
+    /// session-extcompression — stage (or clear) the Z_EXT_COMPRESSION offer in
+    /// `role`'s ext chain, IDEMPOTENTLY (mirrors [`Self::stage_lowlatency_send`]).
+    /// Gated on the UNION of its two send-action callers so a subset build that
+    /// compiles neither does not carry it as dead code under `-D warnings`.
+    #[cfg(all(
+        feature = "session-extcompression",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn stage_compression_send(&self, role: ExtChainRole) {
+        let offer = self.is_compression();
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            chain.retain(|e| e.ext_id() != crate::extcompression::COMPRESSION_EXT_ID);
+            if offer {
+                chain.push(crate::extcompression::encode_compression_ext());
             }
         });
     }
@@ -3923,6 +4004,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // `send_init_syn` emits `LowLatency::new()` only when is_lowlatency).
             #[cfg(feature = "transport-lowlatency")]
             a.stage_lowlatency_send(ExtChainRole::InitSyn);
+            // session-extcompression — initiator offers compression (the 0x6 unit
+            // ext) in InitSyn iff this deploy enabled it (zenoh send_init_syn).
+            #[cfg(feature = "session-extcompression")]
+            a.stage_compression_send(ExtChainRole::InitSyn);
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -3982,6 +4067,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // emits the ext only if is_lowlatency still holds).
             #[cfg(feature = "transport-lowlatency")]
             a.stage_lowlatency_send(ExtChainRole::InitAck);
+            // session-extcompression — acceptor REFLECTS compression in InitAck
+            // iff it is STILL offering after the InitSyn `&=` merge (zenoh
+            // recv_init_syn ANDs, then send_init_ack emits the ext only if still
+            // compression-capable).
+            #[cfg(feature = "session-extcompression")]
+            a.stage_compression_send(ExtChainRole::InitAck);
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),
