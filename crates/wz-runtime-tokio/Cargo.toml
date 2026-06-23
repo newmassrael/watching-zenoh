@@ -730,6 +730,12 @@ session-extauth = ["wz-session-core/session-extauth"]
 # (nonce_from_os_entropy, OpenError::AuthRejected, the drive-loop reject arm)
 # compiles; forwarding only to wz-session-core left those configured out.
 access-extauth-usrpwd = ["session-extauth", "wz-session-core/access-extauth-usrpwd"]
+# R4b pubkey — the §5.16 RSA challenge-response auth method (PubKeyMethod). Unlike
+# usrpwd (which lives in the no_std session kernel), pubkey lives HERE because
+# `rsa` needs std; it gates the local `extauth_pubkey` module + pulls `rsa` /
+# `rand`. Implies session-extauth (the dispatch kernel + the AuthMethod trait +
+# the vle::read_zbuf SSOT it consumes from wz-session-core).
+access-extauth-pubkey = ["session-extauth", "dep:rsa", "dep:rand"]
 # R311cf/R311fd — keyexpr domain. The other 7 keyexpr-* features are
 # cluster-wide behaviors with no single anchor cfg site (follow-up
 # cascade per-site wire-up).
@@ -962,6 +968,19 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # tier registry (intrinsics §2.5). Keeping the dep AP-only preserves
 # the no_std contract on the MCU build.
 getrandom = "0.2"
+# R4b — RSA for the §5.16 pubkey auth method (PubKeyMethod, the wz mirror of
+# zenoh pubkey.rs). zenoh uses the RustCrypto `rsa` crate (Cargo.toml `rsa =
+# "0.9"`) with PKCS#1 v1.5 encryption + `decrypt_blinded` (the Marvin
+# RUSTSEC-2023-0071 mitigation; accepted per the RSA-dep decision -- AP-only,
+# usrpwd-grade encrypted-transport threat model). `rsa` REQUIRES std, so this
+# method is AP-only (wz-runtime-tokio) and CANNOT live in the no_std session
+# kernel where usrpwd does -- the AuthMethod trait stays in the kernel, the impl
+# lives where its crypto dep mandates (the clean trait/impl split). Optional:
+# pulled only by `access-extauth-pubkey`. `rand` supplies the `OsRng` CryptoRng
+# the RSA padding/blinding + the challenge draw need (rand_core 0.6, matching
+# rsa 0.9).
+rsa = { version = "0.9", optional = true }
+rand = { version = "0.8", optional = true }
 # R311di-pre-a — no_std-compatible HashMap. `hashbrown` is the upstream
 # implementation of std::collections::HashMap (std re-exports it via
 # alloc + hashbrown). Pulling the crate directly here makes the

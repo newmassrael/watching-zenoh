@@ -49209,6 +49209,64 @@
         "LOCAL: R4a (Round 311xc) atop a046480 (R3b-2, Round 311xb). NOT pushed without explicit consent."
       ]
     },
+    "Round 311xd": {
+      "decision_summary": "R4b: the pubkey auth method (PubKeyMethod, mutual RSA challenge-response, the wz mirror of zenoh pubkey.rs) on the R4a-hardened base. AP-only + std (the rsa crate needs std), so it lives in wz-runtime-tokio while the AuthMethod trait stays in the no_std kernel -- the clean trait/impl split. 4 stages (InitSyn pubkey / InitAck pubkey+enc-challenge / OpenSyn reenc-challenge / OpenAck Unit) over PKCS#1 v1.5 + decrypt_blinded (the Marvin RUSTSEC-2023-0071 mitigation, accepted per the explicit RSA-dep decision); the initiator relays the decrypted challenge as opaque bytes (cross-impl robust), the responder challenge = the injected nonce.to_le_bytes() (zenoh-exact). It reuses the method-agnostic dispatch + the now-symmetric open seams + the accept-seam nonce injection + the R4a id:: / read_zbuf/write_zbuf SSOTs -- nothing of the wiring re-derived. 5 kernel tests + a real-TCP both-seams e2e (zero-flake); access-extauth-pubkey reserved->active (access 5/6).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: rsa 0.9 + rand 0.8 optional AP-only deps; access-extauth-pubkey = [session-extauth, dep:rsa, dep:rand]. crates/wz/Cargo.toml: the facade forwards access-extauth-pubkey to wz-runtime-tokio.",
+        "crates/wz-runtime-tokio/src/extauth_pubkey.rs: NEW PubKeyMethod (id::PUBKEY) -- mutual RSA challenge-response, the wz mirror of zenoh pubkey.rs, AP-only because rsa needs std (the AuthMethod trait stays in the no_std kernel; the clean trait/impl split). 4 stages: InitSyn{my pubkey n,e LE} / InitAck{my pubkey + challenge enc with peer key} / OpenSyn{challenge reenc with peer key} / OpenAck Unit. PKCS#1 v1.5 encrypt + decrypt_blinded (Marvin mitigation). The INITIATOR relays the decrypted challenge as OPAQUE bytes (re-encrypt verbatim -- cross-impl robust); the RESPONDER challenge = the injected nonce's to_le_bytes() (zenoh-exact). Consumes the R4a id:: + vle::read_zbuf/write_zbuf SSOTs. + generate_keypair helper + a documented RUSTSEC-2023-0071 / threat-model caveat.",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod extauth_pubkey (gated access-extauth-pubkey) + pub use rsa (re-export the RsaPrivateKey/RsaPublicKey types a consumer must name).",
+        "crates/wz-runtime-tokio/tests/pubkey_handshake_e2e.rs: NEW real-TCP both-seams e2e -- connect_and_open_session_with_auth <-> accept_and_open_session_with_auth with a PubKeyMethod dispatch; the R4a accept seam injects pubkey's challenge nonce (set_challenge_nonce). Both sides reach Established over a socket.",
+        "scripts/run-ci.sh: Layer C1y runs the pubkey kernel tests + the real-TCP e2e + the all-targets clippy gate under access-extauth-pubkey.",
+        "inventory: access-extauth-pubkey reserved->active."
+      ],
+      "verification_bullets": [
+        "zenoh-faithful (Explore-dissected pubkey.rs + direct-read of the challenge encoding): the 4-stage wire (ZPublicKey = two ZBufs n.to_bytes_le + e.to_bytes_le; ciphertext = one ZBuf), PKCS#1 v1.5 + decrypt_blinded; the responder encrypts challenge.to_le_bytes() and compares the recovered bytes to it (pubkey.rs:577 / 638); the initiator decrypts then RE-encrypts the decrypted bytes VERBATIM under the responder key (pubkey.rs:423/433 -- the opaque relay that makes wz-as-initiator wire-format-agnostic + cross-impl robust).",
+        "5 kernel unit tests through AuthDispatch (so the real mux/demux + ext-chain codec are exercised): mutual round-trip authenticates / empty-lookup admits any key / unauthorized key rejected / mismatched challenge response rejected / ZPublicKey codec round-trips. + 1 real-TCP both-seams e2e: pubkey authenticates over a socket via the production open seams, with the R4a accept seam injecting pubkey's challenge nonce. The wire is non-deterministic (PKCS#1 v1.5 blinding) so the tests are behavioral, not byte-pinned. zero-flake 3/3.",
+        "clippy -D warnings green: wz-runtime-tokio --all-targets (access-extauth-pubkey) + --lib default (auth-off -- pubkey gated out, signature stability); facade wz --features runtime-tokio,access-extauth-pubkey builds; the Layer C1y pubkey lanes (kernel + e2e + all-targets clippy) exit 0; run-ci.sh bash -n OK.",
+        "catalog-status audit OK (active<=>gated truthfulness; active 81->82). validate_workspace baseline preserved (T1 orphan new=+0, T3/T4 unchanged).",
+        "The R4a base paid off: pubkey reuses the method-agnostic dispatch + the now-symmetric open seams + the accept-seam nonce injection + the id:: / read_zbuf/write_zbuf SSOTs -- extauth_pubkey.rs is the RSA crypto + the 8 trait-stages + the codec, nothing of the wiring re-derived."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "R4b = the pubkey auth method (mutual RSA challenge-response, the wz mirror of zenoh pubkey.rs) on the R4a-hardened base. access-extauth-pubkey reserved->active. access domain now 5/6 active (acl / downsampling / quota + usrpwd + pubkey). The method plugs into the SAME method-agnostic dispatch + the now-symmetric open seams as usrpwd; the accept seam injects pubkey's per-handshake RSA challenge nonce (the R4a payoff).",
+        "The rsa 0.9 dep (RUSTSEC-2023-0071, no fixed version) is accepted per the explicit user decision: decrypt_blinded mitigation + AP-only + the encrypted-transport threat model (zenoh's own choice mirrored faithfully). No cargo-deny / audit advisory gate exists in the project to block it.",
+        "NEXT R4c (nearly free given the seams) = wz<->zenohd pubkey CROSS-IMPL interop: spawn zenohd with transport/auth/pubkey + a private_key_pem (--cfg), wz dials with a PubKeyMethod::initiator(generate_keypair). zenoh known_keys_file is TODO/unimplemented upstream -> a pubkey-configured zenohd with an empty lookup ACCEPTS ALL initiator keys, so the e2e proves the wire without a whitelist (wz's ephemeral key is admitted; wz-as-initiator relays the challenge opaque, so it needs no lookup of zenohd's key either). The storage-A10/A12 discipline applied to pubkey.",
+        "jwt = the LAST access atom: zenoh PHANTOM (0 JWT in zenoh transport) -> reclassify (do NOT build). After the reclassify, access is 5/6 textbook (the achievable max -- jwt is not a real zenoh transport method, so 6/6 is unreachable by construction).",
+        "DEFERRED (config surface, none requested): production PEM key-loading for pubkey (vs the generate_keypair ephemeral path) -- the rsa `pem` feature + a from_pkcs1_pem helper; usrpwd / pubkey responder config plumbing (a DialConfig / listener auth field). The in-process + interop proofs cover the wire; the wider config surface is YAGNI until a deploy needs it.",
+        "LOCAL: R4b (Round 311xd) atop 14d5c96 (R4a, Round 311xc). NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R4b: the pubkey auth method (PubKeyMethod, mutual RSA challenge-response, the wz mirror of zenoh pubkey.rs) on the R4a-hardened base. AP-only + std (the rsa crate needs std), so it lives in wz-runtime-tokio while the AuthMethod trait stays in the no_std kernel -- the clean trait/impl split. 4 stages (InitSyn pubkey / InitAck pubkey+enc-challenge / OpenSyn reenc-challenge / OpenAck Unit) over PKCS#1 v1.5 + decrypt_blinded (the Marvin RUSTSEC-2023-0071 mitigation, accepted per the explicit RSA-dep decision); the initiator relays the decrypted challenge as opaque bytes (cross-impl robust), the responder challenge = the injected nonce.to_le_bytes() (zenoh-exact). It reuses the method-agnostic dispatch + the now-symmetric open seams + the accept-seam nonce injection + the R4a id:: / read_zbuf/write_zbuf SSOTs -- nothing of the wiring re-derived. 5 kernel tests + a real-TCP both-seams e2e (zero-flake); access-extauth-pubkey reserved->active (access 5/6).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: rsa 0.9 + rand 0.8 optional AP-only deps; access-extauth-pubkey = [session-extauth, dep:rsa, dep:rand]. crates/wz/Cargo.toml: the facade forwards access-extauth-pubkey to wz-runtime-tokio.",
+        "crates/wz-runtime-tokio/src/extauth_pubkey.rs: NEW PubKeyMethod (id::PUBKEY) -- mutual RSA challenge-response, the wz mirror of zenoh pubkey.rs, AP-only because rsa needs std (the AuthMethod trait stays in the no_std kernel; the clean trait/impl split). 4 stages: InitSyn{my pubkey n,e LE} / InitAck{my pubkey + challenge enc with peer key} / OpenSyn{challenge reenc with peer key} / OpenAck Unit. PKCS#1 v1.5 encrypt + decrypt_blinded (Marvin mitigation). The INITIATOR relays the decrypted challenge as OPAQUE bytes (re-encrypt verbatim -- cross-impl robust); the RESPONDER challenge = the injected nonce's to_le_bytes() (zenoh-exact). Consumes the R4a id:: + vle::read_zbuf/write_zbuf SSOTs. + generate_keypair helper + a documented RUSTSEC-2023-0071 / threat-model caveat.",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod extauth_pubkey (gated access-extauth-pubkey) + pub use rsa (re-export the RsaPrivateKey/RsaPublicKey types a consumer must name).",
+        "crates/wz-runtime-tokio/tests/pubkey_handshake_e2e.rs: NEW real-TCP both-seams e2e -- connect_and_open_session_with_auth <-> accept_and_open_session_with_auth with a PubKeyMethod dispatch; the R4a accept seam injects pubkey's challenge nonce (set_challenge_nonce). Both sides reach Established over a socket.",
+        "scripts/run-ci.sh: Layer C1y runs the pubkey kernel tests + the real-TCP e2e + the all-targets clippy gate under access-extauth-pubkey.",
+        "inventory: access-extauth-pubkey reserved->active."
+      ],
+      "publishable_verification_bullets": [
+        "zenoh-faithful (Explore-dissected pubkey.rs + direct-read of the challenge encoding): the 4-stage wire (ZPublicKey = two ZBufs n.to_bytes_le + e.to_bytes_le; ciphertext = one ZBuf), PKCS#1 v1.5 + decrypt_blinded; the responder encrypts challenge.to_le_bytes() and compares the recovered bytes to it (pubkey.rs:577 / 638); the initiator decrypts then RE-encrypts the decrypted bytes VERBATIM under the responder key (pubkey.rs:423/433 -- the opaque relay that makes wz-as-initiator wire-format-agnostic + cross-impl robust).",
+        "5 kernel unit tests through AuthDispatch (so the real mux/demux + ext-chain codec are exercised): mutual round-trip authenticates / empty-lookup admits any key / unauthorized key rejected / mismatched challenge response rejected / ZPublicKey codec round-trips. + 1 real-TCP both-seams e2e: pubkey authenticates over a socket via the production open seams, with the R4a accept seam injecting pubkey's challenge nonce. The wire is non-deterministic (PKCS#1 v1.5 blinding) so the tests are behavioral, not byte-pinned. zero-flake 3/3.",
+        "clippy -D warnings green: wz-runtime-tokio --all-targets (access-extauth-pubkey) + --lib default (auth-off -- pubkey gated out, signature stability); facade wz --features runtime-tokio,access-extauth-pubkey builds; the Layer C1y pubkey lanes (kernel + e2e + all-targets clippy) exit 0; run-ci.sh bash -n OK.",
+        "catalog-status audit OK (active<=>gated truthfulness; active 81->82). validate_workspace baseline preserved (T1 orphan new=+0, T3/T4 unchanged).",
+        "The R4a base paid off: pubkey reuses the method-agnostic dispatch + the now-symmetric open seams + the accept-seam nonce injection + the id:: / read_zbuf/write_zbuf SSOTs -- extauth_pubkey.rs is the RSA crypto + the 8 trait-stages + the codec, nothing of the wiring re-derived."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R4b = the pubkey auth method (mutual RSA challenge-response, the wz mirror of zenoh pubkey.rs) on the R4a-hardened base. access-extauth-pubkey reserved->active. access domain now 5/6 active (acl / downsampling / quota + usrpwd + pubkey). The method plugs into the SAME method-agnostic dispatch + the now-symmetric open seams as usrpwd; the accept seam injects pubkey's per-handshake RSA challenge nonce (the R4a payoff).",
+        "The rsa 0.9 dep (RUSTSEC-2023-0071, no fixed version) is accepted per the explicit user decision: decrypt_blinded mitigation + AP-only + the encrypted-transport threat model (zenoh's own choice mirrored faithfully). No cargo-deny / audit advisory gate exists in the project to block it.",
+        "NEXT R4c (nearly free given the seams) = wz<->zenohd pubkey CROSS-IMPL interop: spawn zenohd with transport/auth/pubkey + a private_key_pem (--cfg), wz dials with a PubKeyMethod::initiator(generate_keypair). zenoh known_keys_file is TODO/unimplemented upstream -> a pubkey-configured zenohd with an empty lookup ACCEPTS ALL initiator keys, so the e2e proves the wire without a whitelist (wz's ephemeral key is admitted; wz-as-initiator relays the challenge opaque, so it needs no lookup of zenohd's key either). The storage-A10/A12 discipline applied to pubkey.",
+        "jwt = the LAST access atom: zenoh PHANTOM (0 JWT in zenoh transport) -> reclassify (do NOT build). After the reclassify, access is 5/6 textbook (the achievable max -- jwt is not a real zenoh transport method, so 6/6 is unreachable by construction).",
+        "DEFERRED (config surface, none requested): production PEM key-loading for pubkey (vs the generate_keypair ephemeral path) -- the rsa `pem` feature + a from_pkcs1_pem helper; usrpwd / pubkey responder config plumbing (a DialConfig / listener auth field). The in-process + interop proofs cover the wire; the wider config surface is YAGNI until a deploy needs it.",
+        "LOCAL: R4b (Round 311xd) atop 14d5c96 (R4a, Round 311xc). NOT pushed without explicit consent."
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [
@@ -54102,10 +54160,10 @@
       "reason": "F=JWT verify; P=zenoh; C=requires session-extauth, alternative method"
     },
     "access-extauth-pubkey": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh pubkey auth method",
-      "reason": "F=RSA verify; P=zenoh; C=requires session-extauth, alternative method"
+      "reason": "R4b: PubKeyMethod (mutual RSA challenge-response, the wz mirror of zenoh pubkey.rs) now gates the wz-runtime-tokio extauth_pubkey module + the rsa dep (AP-only, std); plugs into the method-agnostic Z_EXT_AUTH dispatch + the open seams. wz<->wz kernel (5) + real-TCP both-seams e2e green."
     },
     "access-extauth-usrpwd": {
       "status": "active",

@@ -947,6 +947,12 @@ layer_c1x_cargo_test_routing_routes() {
 #      (nonce_from_os_entropy + OpenError::AuthRejected + the drive-loop reject
 #      arm) that the R3b feature-graph fix made compile (access-extauth-usrpwd
 #      now implies the LOCAL session-extauth).
+#   8. §5.16 pubkey (R4b): the PubKeyMethod (mutual RSA challenge-response, the
+#      wz mirror of zenoh pubkey.rs; AP-only since `rsa` needs std) -- the
+#      extauth_pubkey kernel tests + the wz<->wz real-TCP both-seams e2e
+#      (pubkey_handshake_e2e) + the all-targets clippy gate under
+#      access-extauth-pubkey. Plugs into the SAME dispatch + open seams as
+#      usrpwd; the accept seam injects pubkey's challenge nonce.
 # The demo-binary mesh e2e is Layer E6 (separate, --features routing-peer).
 layer_c1y_cargo_test_routing_peer() {
     local access="routing-peer,access-acl,access-downsampling,access-quota"
@@ -969,7 +975,10 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-session-core --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extauth --all-targets --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features access-extauth-usrpwd --test usrpwd_handshake_e2e --quiet \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-usrpwd --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-usrpwd --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey --quiet \
+        && cargo test -p wz-runtime-tokio --features access-extauth-pubkey --test pubkey_handshake_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features access-extauth-pubkey --quiet -- -D warnings)
 }
 
 # ─── Layer C1z — storage driver: backend/history/replication/aligner ─

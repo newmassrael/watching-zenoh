@@ -308,6 +308,22 @@ pub mod observer;
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod session;
 
+/// R4b — the §5.16 pubkey transport-auth method (`PubKeyMethod`, mutual RSA
+/// challenge-response, the wz mirror of zenoh `auth/pubkey.rs`). AP-only +
+/// std-gated because the `rsa` crate requires std — unlike usrpwd, which lives
+/// in the no_std session kernel. The `AuthMethod` trait + dispatch + ZBuf codec
+/// stay in `wz-session-core`; this is the concrete impl where its crypto dep
+/// mandates. Gated on `access-extauth-pubkey`.
+#[cfg(feature = "access-extauth-pubkey")]
+pub mod extauth_pubkey;
+
+/// R4b — re-export the `rsa` crate the pubkey method is built against: a
+/// `PubKeyMethod`'s constructors take `RsaPrivateKey` / `RsaPublicKey`, so a
+/// consumer must name those types, and re-exporting the exact version avoids a
+/// version-skew between the caller's `rsa` and the method's.
+#[cfg(feature = "access-extauth-pubkey")]
+pub use rsa;
+
 /// R311y — per-runtime synchronization primitive aliases (`Mutex<T>`,
 /// `RwLock<T>`) implementing the R311w option (a) decision lock on
 /// §5.P Mutex/RwLock shape. The tokio profile binds the aliases to
