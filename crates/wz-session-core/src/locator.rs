@@ -26,7 +26,7 @@
 //!
 //! ## Scope
 //!
-//! Two leaves, dispatched by scheme through [`parse_any_locator`] into the
+//! Three leaves, dispatched by scheme through [`parse_any_locator`] into the
 //! [`AnyLocator`] sum type:
 //! - the IP leaf [`parse_locator`] — `tcp` / `udp` / `tls` / `ws` over a
 //!   numeric [`SocketAddr`] (IPv4 `1.2.3.4:7447` or IPv6 `[::1]:7447`); `tls`
@@ -36,7 +36,13 @@
 //! - the serial leaf [`parse_serial_locator`] — `serial/...` device or
 //!   pin endpoints (relocated here from `serial_link` in R311ny so the
 //!   [`AnyLocator::Serial`] variant is unconditional; see that leaf's
-//!   note).
+//!   note);
+//! - the unixsock leaf [`parse_unixsock_locator`] — `unixsock-stream/...`
+//!   filesystem-path endpoints (R311xi). Like serial, it is a non-IP
+//!   endpoint shape (a socket path, not a [`SocketAddr`]) parsed
+//!   unconditionally so the [`AnyLocator::Unixsock`] variant is always
+//!   present; only the dial BACKEND (`transport-link-unixsock` in
+//!   `wz-runtime-tokio`) is gated.
 //!
 //! DNS hostnames (`tcp/example.org:7447`) are CLASSIFIED, not rejected
 //! (R311ps): the IP leaf [`parse_locator`] is numeric-only and returns
@@ -49,7 +55,7 @@
 //! - IP locator metadata suffixes (`udp/1.2.3.4:7447#iface=eth0`) — the
 //!   `#`-delimited config tail is not split by the IP leaf (the serial
 //!   leaf DOES read its `#baudrate=` tail);
-//! - other transports not yet wired (`unixsock-stream/...`, `bt/...`).
+//! - other transports not yet wired (`bt/...`).
 
 use alloc::string::{String, ToString};
 use core::net::SocketAddr;
@@ -251,7 +257,76 @@ fn parse_u32(s: &str) -> Result<u32, SerialLocatorError> {
     }
 }
 
-// ─── unified locator (IP | Serial) ───
+// ─── unixsock-stream locator leaf ───
+//
+// R311xi — the `unixsock-stream/...` locator GRAMMAR is universal, exactly
+// like the serial leaf above: parsing a unix-domain socket path is always
+// possible and costs only alloc string work, so it lives HERE alongside the
+// IP and serial leaves, NOT behind `transport-link-unixsock`. Only the
+// unixsock BACKEND (the tokio `UnixStream` dial/accept in
+// `wz-runtime-tokio::unixsock_pipeline`) is feature-gated. This mirrors the
+// serial leaf — `serial/...` always PARSES and only the tty backend is gated
+// — and lets [`AnyLocator::Unixsock`] be an ALWAYS-present variant, so a
+// consumer's `match` can never skew non-exhaustive across feature combos
+// (the R311ny / R311nx skew-liquidation lesson, applied to the new leaf).
+
+/// A parsed `unixsock-stream/...` locator: the filesystem path of the unix
+/// domain socket. zenoh's `unixsock-stream` link
+/// (`io/zenoh-links/zenoh-link-unixsock_stream`, `UNIXSOCKSTREAM_LOCATOR_PREFIX`)
+/// carries the socket path as the locator address with no further structure —
+/// the path is taken verbatim (`get_unix_path_as_string` = `address.to_string()`),
+/// so this leaf carries just the path. Validating the path (existence,
+/// permissions) is the dial/bind backend's concern, exactly as the serial
+/// leaf defers baud-rate validation to the tty open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnixsockEndpoint {
+    /// The unix-domain socket path, taken verbatim from the locator address
+    /// (everything after the `unixsock-stream/` scheme). An absolute path
+    /// (`/tmp/zenoh.sock`) yields the double-slash locator
+    /// `unixsock-stream//tmp/zenoh.sock`, the same scheme+abs-path shape the
+    /// serial leaf parses (`serial//dev/ttyUSB0`).
+    pub path: String,
+}
+
+/// Why a `unixsock-stream/...` locator string did not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnixsockLocatorError {
+    /// The locator does not begin with the `unixsock-stream/` scheme.
+    NotUnixsockScheme,
+    /// The path (after the scheme) is empty (`unixsock-stream/`).
+    EmptyPath,
+}
+
+const UNIXSOCK_SCHEME: &str = "unixsock-stream";
+
+/// Parse a zenoh `unixsock-stream/...` locator into a [`UnixsockEndpoint`].
+///
+/// The scheme is the substring before the first `/`; everything after it is
+/// the socket path, taken verbatim (zenoh's `get_unix_path_as_string` is a
+/// bare `address.to_string()`, so an absolute path keeps its leading `/`:
+/// `unixsock-stream//tmp/zenoh.sock` -> path `/tmp/zenoh.sock`). An empty path
+/// is rejected ([`UnixsockLocatorError::EmptyPath`]) — the unixsock counterpart
+/// of the serial leaf's [`SerialLocatorError::EmptyAddress`].
+///
+/// The unixsock counterpart of [`parse_locator`] (IP) and
+/// [`parse_serial_locator`] (serial); [`parse_any_locator`] is the
+/// scheme-dispatcher delegating to the three leaves.
+pub fn parse_unixsock_locator(locator: &str) -> Result<UnixsockEndpoint, UnixsockLocatorError> {
+    let (scheme, path) = locator
+        .split_once('/')
+        .ok_or(UnixsockLocatorError::NotUnixsockScheme)?;
+    if scheme != UNIXSOCK_SCHEME {
+        return Err(UnixsockLocatorError::NotUnixsockScheme);
+    }
+    if path.is_empty() {
+        return Err(UnixsockLocatorError::EmptyPath);
+    }
+    Ok(UnixsockEndpoint {
+        path: path.to_string(),
+    })
+}
+
+// ─── unified locator (IP | Serial | Unixsock) ───
 //
 // R311nv — the SERIAL link backend (`wz-runtime-tokio::serial_pipeline`)
 // needs a `serial/...` locator to reach a dial seam alongside the IP
@@ -302,6 +377,15 @@ pub enum AnyLocator {
     /// Keeping the variant unconditional means a consumer's `match` is
     /// exhaustive in every feature combination (no cross-crate skew).
     Serial(SerialEndpoint),
+    /// A unix-domain-socket endpoint (`unixsock-stream/...`) — see
+    /// [`UnixsockEndpoint`]. ALWAYS present (R311xi: the unixsock locator
+    /// leaf is ungated, like serial), so a `unixsock-stream/...` string
+    /// parses to this on any alloc build. Whether it can be DIALED is the
+    /// runtime backend's concern (`transport-link-unixsock`), surfaced at
+    /// dial time — exactly as `serial` always parses but dials only with
+    /// `transport-link-serial`. A non-IP endpoint (a socket path, not a
+    /// [`SocketAddr`]), so — like serial — it cannot be a [`Proto`] variant.
+    Unixsock(UnixsockEndpoint),
 }
 
 /// Why a locator string did not parse into an [`AnyLocator`] — the
@@ -315,6 +399,9 @@ pub enum AnyLocatorError {
     /// The serial leaf ([`parse_serial_locator`]) rejected a `serial/...`
     /// string.
     Serial(SerialLocatorError),
+    /// The unixsock leaf ([`parse_unixsock_locator`]) rejected a
+    /// `unixsock-stream/...` string (R311xi).
+    Unixsock(UnixsockLocatorError),
 }
 
 /// Parse any zenoh locator string into an [`AnyLocator`], dispatching on
@@ -334,6 +421,17 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
         return parse_serial_locator(locator)
             .map(AnyLocator::Serial)
             .map_err(AnyLocatorError::Serial);
+    }
+    // R311xi — `unixsock-stream/...` routes to the unixsock leaf, like the
+    // serial scheme above. Checked before the IP leaf (which would reject
+    // `unixsock-stream` as an UnknownProto); the leaf is unconditional, so
+    // the string always parses to [`AnyLocator::Unixsock`] whether or not a
+    // unixsock BACKEND is compiled (dialing without one fails at dial time —
+    // the serial/udp model).
+    if matches!(locator.split_once('/'), Some(("unixsock-stream", _))) {
+        return parse_unixsock_locator(locator)
+            .map(AnyLocator::Unixsock)
+            .map_err(AnyLocatorError::Unixsock);
     }
     match parse_locator(locator) {
         Ok(ip) => Ok(AnyLocator::Ip(ip)),
@@ -596,6 +694,67 @@ mod tests {
         assert_eq!(
             parse_any_locator("serial//dev/ttyUSB0"),
             Err(AnyLocatorError::Serial(SerialLocatorError::MissingBaudrate))
+        );
+    }
+
+    #[test]
+    fn parse_any_routes_unixsock_to_the_unixsock_leaf() {
+        // R311xi — unconditional (no `transport-link-unixsock` cfg): the
+        // unixsock leaf is always compiled, so a `unixsock-stream/...` string
+        // always routes here whether or not a unixsock backend exists, exactly
+        // like the serial scheme.
+        let any = parse_any_locator("unixsock-stream//tmp/zenoh.sock").expect("unixsock locator");
+        assert_eq!(
+            any,
+            AnyLocator::Unixsock(
+                parse_unixsock_locator("unixsock-stream//tmp/zenoh.sock").unwrap()
+            )
+        );
+        // And the unixsock leaf error composes through too.
+        assert_eq!(
+            parse_any_locator("unixsock-stream/"),
+            Err(AnyLocatorError::Unixsock(UnixsockLocatorError::EmptyPath))
+        );
+    }
+
+    // ─── unixsock-stream locator leaf (R311xi) ───
+
+    #[test]
+    fn parses_unixsock_absolute_path() {
+        // The double-slash shape: scheme `/` + absolute path. zenoh takes the
+        // path verbatim (`get_unix_path_as_string`), so the leading `/` of an
+        // absolute path is preserved.
+        let ep = parse_unixsock_locator("unixsock-stream//tmp/zenoh.sock").expect("abs path");
+        assert_eq!(ep.path, "/tmp/zenoh.sock");
+    }
+
+    #[test]
+    fn parses_unixsock_relative_path() {
+        // A relative path (no leading `/`) is also a valid socket path —
+        // taken verbatim like zenoh.
+        let ep = parse_unixsock_locator("unixsock-stream/zenoh.sock").expect("rel path");
+        assert_eq!(ep.path, "zenoh.sock");
+    }
+
+    #[test]
+    fn rejects_empty_unixsock_path() {
+        // `unixsock-stream/` has an empty path — the unixsock counterpart of
+        // the serial leaf's EmptyAddress.
+        assert_eq!(
+            parse_unixsock_locator("unixsock-stream/"),
+            Err(UnixsockLocatorError::EmptyPath)
+        );
+    }
+
+    #[test]
+    fn rejects_non_unixsock_scheme() {
+        assert_eq!(
+            parse_unixsock_locator("tcp/127.0.0.1:7447"),
+            Err(UnixsockLocatorError::NotUnixsockScheme)
+        );
+        assert_eq!(
+            parse_unixsock_locator("unixsock-stream"),
+            Err(UnixsockLocatorError::NotUnixsockScheme)
         );
     }
 

@@ -476,6 +476,20 @@ transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemf
 # Ws arm rides the tcp+unicast-gated `session_open` like the udp arm). NOT
 # default — pico ships WS as an optional link (Z_FEATURE_LINK_WS).
 transport-link-ws = ["dep:tokio-tungstenite", "dep:futures-util"]
+# R311xi — host Unix-domain-stream link backend. Like TLS (and UNLIKE WS), it
+# forwards `transport-link-tcp` because a unix socket is a reliable byte STREAM
+# (zenoh's `unixsock_stream` link: `is_streamed() = true`, MTU 65535) that
+# reuses the ENTIRE TCP `stream_link` pipeline — the StreamEnvelope
+# length-prefix framing, the shared `poll_framed` reader, the writer task —
+# over a `tokio::net::UnixStream` instead of a `TcpStream`, so no new codec.
+# Pulls NO new dep: tokio's `net` feature already carries `UnixStream` /
+# `UnixListener` on Unix (vs TLS's `tokio-rustls` / WS's `tokio-tungstenite`).
+# The locator PARSE (`AnyLocator::Unixsock`) is unconditional in
+# wz-session-core (no feature forward, like serial); only the dial/accept
+# BACKEND is gated here, and the `session_open` DialedLink::Unixsock arm rides
+# the `transport-link-tcp`-gated session-open module additively, like the tls
+# arm. NOT default — pico has no unixsock transport at all (host-only link).
+transport-link-unixsock = ["transport-link-tcp"]
 # R311qa — multi-peer accept-and-hold capability (the `routing-router` /
 # future `routing-peer` foundation). Gates `pub mod accept_loop` (lib.rs) and
 # pulls its prerequisites: the TCP listen path (`transport-link-tcp`), the

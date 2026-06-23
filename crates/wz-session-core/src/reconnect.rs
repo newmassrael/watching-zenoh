@@ -87,6 +87,16 @@ pub enum NotReconnectable {
     /// A `serial/...` endpoint: a point-to-point tty with no reopen-task
     /// model (pico parity — `Z_FEATURE_AUTO_RECONNECT` is IP-family only).
     Serial,
+    /// A `unixsock-stream/...` endpoint (R311xi): a unix-domain socket is
+    /// connection-oriented (re-dialable in principle), but it is NOT in the
+    /// IP-family reconnect set this supervisor models — pico's
+    /// `Z_FEATURE_AUTO_RECONNECT` reopen-task covers tcp/udp/tls/ws (pico has
+    /// no unixsock transport at all), and a local-IPC reconnect needs a
+    /// path-bearing [`ReconnectLocator`] arm + supervisor re-dial wiring that
+    /// no caller needs yet. Rejected here at the boundary like serial, so the
+    /// supervisor's retained-locator type stays IP-family by construction; the
+    /// path arm is a clean extension point if local-IPC reconnect is wanted.
+    Unixsock,
 }
 
 impl From<ReconnectLocator> for AnyLocator {
@@ -115,6 +125,10 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
                 Ok(ReconnectLocator::Named { proto, host, port })
             }
             AnyLocator::Serial(_) => Err(NotReconnectable::Serial),
+            // R311xi — unix-domain socket: non-IP, not in the reconnect set
+            // (see [`NotReconnectable::Unixsock`]). Rejected at the boundary
+            // like serial.
+            AnyLocator::Unixsock(_) => Err(NotReconnectable::Unixsock),
         }
     }
 }
@@ -362,7 +376,7 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
 #[cfg(test)]
 mod reconnect_locator_tests {
     use super::*;
-    use crate::locator::{SerialEndpoint, SerialTarget};
+    use crate::locator::{SerialEndpoint, SerialTarget, UnixsockEndpoint};
     use core::net::SocketAddr;
 
     fn numeric() -> ParsedLocator {
@@ -417,6 +431,21 @@ mod reconnect_locator_tests {
         assert_eq!(
             ReconnectLocator::try_from(any),
             Err(NotReconnectable::Serial)
+        );
+    }
+
+    #[test]
+    fn unixsock_is_not_reconnectable() {
+        // R311xi — a unix-domain socket is non-IP, outside the IP-family
+        // reconnect set, so it is rejected at the same narrowing boundary as
+        // serial (the supervisor's retained-locator type stays IP-family by
+        // construction; a path arm is a clean extension point).
+        let any = AnyLocator::Unixsock(UnixsockEndpoint {
+            path: "/tmp/zenoh.sock".into(),
+        });
+        assert_eq!(
+            ReconnectLocator::try_from(any),
+            Err(NotReconnectable::Unixsock)
         );
     }
 }

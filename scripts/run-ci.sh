@@ -858,6 +858,41 @@ layer_c1v_cargo_test_ws() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-ws --quiet -- -D warnings)
 }
 
+# ─── Layer C1aa — UNIXSOCK link: locator parse + wz-runtime-tokio backend ─
+#
+# R311xi: same shape as C1u (tls) / C1v (ws). The unixsock backend
+# (`unixsock_pipeline`: dial_unixsock/bind_unixsock/accept_unixsock_on + the
+# UnixsockReadDriver reusing the TCP StreamEnvelope framing) gates on
+# `transport-link-unixsock`, OFF in the default set, so Layer C1's
+# `cargo test --workspace` never reaches it. (The single-letter C1[u-z] suffix
+# run is exhausted; this is the next transport-link lane, grouped with C1u/C1v
+# in the run loop.) This lane:
+#   1. runs the locator tests (the `unixsock-stream` parse is ungated
+#      parse-always, like serial — the `AnyLocator::Unixsock` leaf);
+#   2. runs the `unixsock_pipeline` unit tests (dial-error, bind/accept
+#      round-trip, stale-socket-file replace);
+#   3. runs the `unixsock_e2e` integration test (gated
+#      `all(transport-link-unixsock, transport-unicast)`: two nodes bring a
+#      session up over a loopback unix socket — the initiator via a
+#      `unixsock-stream/...` LOCATOR, dialed straight through dial_locator like
+#      ws/udp — reach Established, and a Put is delivered byte-exact over the
+#      StreamEnvelope-framed unix stream);
+#   4. clippy-gates the `transport-link-unixsock` cfg (`--all-targets`);
+#   5. clippy-gates the LIB under `--no-default-features --features
+#      transport-link-unixsock` to prove `unixsock_pipeline` composes standalone
+#      (it pulls only `transport-link-tcp`'s shared `stream_link`, no
+#      `transport-unicast` session-open integration). NO reconnect e2e: a unix
+#      socket is `NotReconnectable` (non-IP, outside the reconnect set), so —
+#      unlike C1u/C1v — there is no reconnect module to exercise.
+layer_c1aa_cargo_test_unixsock() {
+    (cd crates \
+        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --lib unixsock_pipeline --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixsock --test unixsock_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixsock --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixsock --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3269,6 +3304,7 @@ run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1t layer_c1t_cargo_test_serial || overall=1
 run_layer C1u layer_c1u_cargo_test_tls || overall=1
 run_layer C1v layer_c1v_cargo_test_ws || overall=1
+run_layer C1aa layer_c1aa_cargo_test_unixsock || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

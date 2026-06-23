@@ -512,6 +512,22 @@ pub mod tls_config;
 #[cfg(feature = "transport-link-ws")]
 pub mod ws_pipeline;
 
+/// R311xi — Unix-domain-stream backend for the unixsock link. The local-IPC
+/// STREAM sibling of [`link_pipeline`] (TCP), NOT a datagram transport: a unix
+/// socket is a reliable byte stream (zenoh's `unixsock_stream` link,
+/// `is_streamed = true`, MTU 65535), so it REUSES `stream_link`'s StreamEnvelope
+/// framing UNCHANGED — `dial_unixsock`/`bind_unixsock`/`accept_unixsock_on` over
+/// `tokio::net::UnixStream`/`UnixListener`, `wire_unixsock_stream` splitting the
+/// owned halves (`into_split`, like TCP). No new codec, no new dep (tokio's
+/// `net` feature carries the unix types on Unix). Gated `transport-link-unixsock`
+/// (which forwards `transport-link-tcp` for the shared `stream_link` SSOT); the
+/// `session_open` DialedLink::Unixsock integration rides the
+/// `transport-link-tcp`-gated session-open module as an additive arm, like
+/// serial/tls. A `unixsock-stream/...` locator dials from the locator like
+/// every other transport (no cert config needed).
+#[cfg(feature = "transport-link-unixsock")]
+pub mod unixsock_pipeline;
+
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
 /// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`
