@@ -41,10 +41,13 @@
 //!   subscriber + `process_alignment_reply`).
 //! - [`zenohd_converges_to_wz_replica`] — the ANSWER direction (the mirror): an
 //!   empty zenohd replica PULLS from a wz replica that holds an entry,
-//!   exercising wz's [`AlignerService`] answer queryable + `DigestPublisher`
-//!   against the REAL zenoh aligner ASK. This closes the gap the ASK test alone
-//!   left — wz's ANSWER side was previously validated only wz<->wz (the A11
-//!   convergence e2e), never cross-impl.
+//!   exercising wz's [`AlignerService`] answer queryable against the REAL zenoh
+//!   aligner ASK. (wz's `DigestPublisher` is spawned as the faithful
+//!   complete-replica setup + the steady-state fallback, but convergence here is
+//!   via initial-alignment Discovery, so the digest-diff round-trip is not the
+//!   load-bearing path — see that test's docstring.) This closes the gap the ASK
+//!   test alone left — wz's ANSWER side was previously validated only wz<->wz
+//!   (the A11 convergence e2e), never cross-impl.
 //!
 //! ## Divergence setup (wz's replica state starts empty)
 //!
@@ -387,22 +390,29 @@ fn zget_once(key: &str, port: u16) -> String {
 ///
 /// ## Convergence path (initial alignment)
 ///
-/// An empty zenohd replica bootstraps via INITIAL ALIGNMENT (storages_mgt
-/// service.rs:13-26 awaits `initial_alignment()` when its log is empty, BEFORE
-/// the steady-state digest pub/sub starts). zenohd GETs `@zid/*/<fp>/aligner`
-/// (a WILDCARD selector) with `AlignmentQuery::Discovery` (core.rs:73-107); wz's
-/// aligner queryable, declared on the concrete `@zid/<wz-zid>/<fp>/aligner`,
-/// answers `Discovery(wz-zid)`; zenohd then GETs wz's concrete aligner with
-/// `AlignmentQuery::All` and lands every streamed `Retrieval`. The steady-state
-/// digest path (wz's `DigestPublisher` → zenohd's `@-digest/*` subscriber →
-/// concrete `Diff` query) is the fallback once initial alignment's one-shot GET
-/// times out; the generous `z_get` poll budget covers both.
+/// An empty zenohd replica bootstraps via INITIAL ALIGNMENT
+/// (`replication/service.rs:71-80` awaits `initial_alignment()` when its log is
+/// empty, BEFORE the steady-state digest pub/sub starts). zenohd GETs
+/// `@zid/*/<fp>/aligner` (a WILDCARD selector) with `AlignmentQuery::Discovery`
+/// (core.rs:73-112); wz's aligner queryable, declared on the concrete
+/// `@zid/<wz-zid>/<fp>/aligner`, answers `Discovery(wz-zid)`; zenohd then GETs
+/// wz's concrete aligner with `AlignmentQuery::All` and lands every streamed
+/// `Retrieval`. The steady-state digest path (wz's `DigestPublisher` → zenohd's
+/// `@-digest/*` subscriber → a CONCRETE `Diff` query) is the fallback once
+/// initial alignment's one-shot GET times out; the `z_get` poll budget covers
+/// both, which is why this e2e stays robust if the Discovery race is ever lost.
 ///
-/// This is the test that drove the wz fidelity fix in `Queryable::matches`: the
+/// This e2e SURFACED the wz fidelity fix in `Queryable::matches`: the
 /// initial-alignment Discovery is a WILDCARD query selector, and wz previously
 /// matched the inbound query as a concrete literal (so `@zid/*/..` never reached
-/// the concrete `@zid/<wz-zid>/..` queryable). Query routing is keyexpr
-/// INTERSECTION; the fix makes wz answer it.
+/// the concrete `@zid/<wz-zid>/..` queryable; query routing is keyexpr
+/// INTERSECTION). The fix makes wz answer it on the FAST path. This e2e is NOT
+/// the fix's strict regression guard, though: zenohd's concrete-`Diff` fallback
+/// issues a CONCRETE aligner query that reaches wz's queryable WITHOUT the fix,
+/// so it would also converge here — the strict guard is the kernel unit test
+/// `concrete_queryable_answers_wildcard_query_selector` (which fails pre-fix).
+/// This test's value is the cross-impl integration: a REAL zenohd aligning FROM
+/// wz's `AlignerService`.
 ///
 /// No wz-side seeding race: wz holds the entry in its own `StorageState` for the
 /// whole test (not a one-shot Put) and the aligner queryable stays declared for
