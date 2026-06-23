@@ -274,16 +274,13 @@ impl AuthMethod for PubKeyMethod {
 
     // ── Accept (responder) side ──────────────────────────────────────────
     fn accept_recv_init_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+        // A pubkey RESPONDER REQUIRES the initiator to present its public key on
+        // InitSyn (zenoh pubkey.rs:558 bails "Missing PubKey extension"). The
+        // accept_* stages run ONLY on the accept side, so a method reaching here
+        // is acting as a responder — a missing or malformed offer is a reject,
+        // not a silent bypass of pubkey auth.
         let Some(AuthSubExt::Zbuf(body)) = sub else {
-            // No pubkey offer from the peer: this method does not challenge.
-            // KNOWN GAP (method-agnostic dispatch): a configured pubkey responder
-            // does NOT currently REQUIRE the initiator to present pubkey — it
-            // degrades to "no pubkey auth" rather than rejecting (zenoh, by
-            // contrast, bails when a configured method's ext is absent).
-            // Enforcing mandatory-method presence is a dispatch-level feature (a
-            // "required methods" set checked in the recv-InitSyn demux), and
-            // applies equally to usrpwd — deferred to a follow-up.
-            return Ok(());
+            return Err(AuthError::Rejected("pubkey: missing InitSyn offer"));
         };
         let mut cursor = SceCursor::new(&body);
         let peer = read_pubkey(&mut cursor)?;
@@ -463,5 +460,16 @@ mod tests {
         let decoded = read_pubkey(&mut cursor).expect("ZPublicKey round-trips");
         assert_eq!(decoded, key, "n + e survive the two-ZBuf LE encoding");
         assert_eq!(cursor.remaining(), 0, "both ZBufs consumed exactly");
+    }
+
+    #[test]
+    fn a_responder_rejects_an_initsyn_without_the_pubkey_offer() {
+        // The accept side REQUIRES the initiator to present its key — a missing
+        // offer is a reject, not a silent bypass (zenoh pubkey.rs:558).
+        let mut responder = PubKeyMethod::responder(keypair(), None);
+        assert_eq!(
+            responder.accept_recv_init_syn(None),
+            Err(AuthError::Rejected("pubkey: missing InitSyn offer"))
+        );
     }
 }

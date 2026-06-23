@@ -49399,6 +49399,46 @@
         "LOCAL: R311xg atop 5819736 (jwt). 7 commits ahead of origin/main. NOT pushed without explicit consent."
       ]
     },
+    "Round 311xh": {
+      "decision_summary": "R311xh: close the R311xg disclosed gap #1 -- mandatory-method-presence. A configured auth RESPONDER now REQUIRES the peer to present the method's sub-ext on InitSyn (accept_recv_init_syn Errs on a None offer) instead of silently degrading to no-auth, matching zenoh (usrpwd.rs:372 / pubkey.rs:558 bail on a missing ext). Enforcement is method-level (configured = mandatory, AND across methods) and the accept_* stages run only on the accept side, so the offer is required there; usrpwd gates on a non-empty lookup (responder), pubkey unconditionally. Happy paths are unaffected (the initiator offers); + 2 new require-offer reject tests. No inventory change.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/extauth_usrpwd.rs: accept_recv_init_syn now REQUIRES the InitSyn usrpwd offer for a configured RESPONDER (non-empty lookup) -- Err(\"usrpwd: missing InitSyn offer\") on a None sub-ext (zenoh usrpwd.rs:372 bails \"Expected extension\"). An empty-lookup initiator-role method does not enforce. + a test (responder rejects a no-offer InitSyn; initiator does not).",
+        "crates/wz-runtime-tokio/src/extauth_pubkey.rs: accept_recv_init_syn now REQUIRES the InitSyn pubkey offer -- a missing/malformed offer is Err(\"pubkey: missing InitSyn offer\"), not a silent degrade (zenoh pubkey.rs:558 bails \"Missing PubKey extension\"). The accept_* stages run only on the accept side, so a method reaching here is a responder. + a test."
+      ],
+      "verification_bullets": [
+        "Closes the R311xg disclosed gap #1 (mandatory-method-presence). zenoh-faithful: enforcement is METHOD-LEVEL (each configured method's recv_init_syn bails on its absent ext; configured = mandatory, AND-semantics across methods), mirroring zenoh mod.rs where every Some-state method's recv is driven and bails. usrpwd requires iff !lookup.is_empty() (a responder); pubkey requires unconditionally (accept side = responder, no empty-distinguisher).",
+        "Happy paths UNAFFECTED (the initiator offers via open_init_syn so the responder's require is satisfied): wz<->wz usrpwd e2e 3, pubkey real-TCP e2e 1, all kernel tests pass; + 2 NEW require-offer reject tests. wz-session-core --lib 171, pubkey kernel 7. clippy -D warnings green both lanes (access-extauth-usrpwd + access-extauth-pubkey all-targets). The wz<->zenohd interop is unaffected (wz dials as the initiator; the require is on the accept side). No inventory change. validate_workspace baseline preserved (T1 orphan new=+0)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "R311xh closes the R311xg disclosed gap #1 (mandatory-method-presence): a configured responder now REQUIRES the peer to OFFER the method on InitSyn (Err on absence), matching zenoh, instead of silently degrading to no-auth. The remaining disclosed gap #2 (zenohd-initiator -> wz-responder pubkey cross-impl direction untested) stays open -- it needs zenohd to DIAL wz with pubkey; the wz responder is wz<->wz-proven only.",
+        "access track stays DONE at 5/6 textbook (hardened by R311xg + R311xh).",
+        "NEXT: pivot to a fresh heavy track from the AP-full remaining roadmap -- encoding (7) / transport-advanced+SHM (6) / HLC SS5.18 (3).",
+        "PUSH: after this round the user authorized a push. The 8-commit chain (R311xa..R311xh) is to be pushed after a full run-ci (RUNCI_EXIT=0) gate."
+      ],
+      "publishable_decision_summary": "R311xh: close the R311xg disclosed gap #1 -- mandatory-method-presence. A configured auth RESPONDER now REQUIRES the peer to present the method's sub-ext on InitSyn (accept_recv_init_syn Errs on a None offer) instead of silently degrading to no-auth, matching zenoh (usrpwd.rs:372 / pubkey.rs:558 bail on a missing ext). Enforcement is method-level (configured = mandatory, AND across methods) and the accept_* stages run only on the accept side, so the offer is required there; usrpwd gates on a non-empty lookup (responder), pubkey unconditionally. Happy paths are unaffected (the initiator offers); + 2 new require-offer reject tests. No inventory change.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/extauth_usrpwd.rs: accept_recv_init_syn now REQUIRES the InitSyn usrpwd offer for a configured RESPONDER (non-empty lookup) -- Err(\"usrpwd: missing InitSyn offer\") on a None sub-ext (zenoh usrpwd.rs:372 bails \"Expected extension\"). An empty-lookup initiator-role method does not enforce. + a test (responder rejects a no-offer InitSyn; initiator does not).",
+        "crates/wz-runtime-tokio/src/extauth_pubkey.rs: accept_recv_init_syn now REQUIRES the InitSyn pubkey offer -- a missing/malformed offer is Err(\"pubkey: missing InitSyn offer\"), not a silent degrade (zenoh pubkey.rs:558 bails \"Missing PubKey extension\"). The accept_* stages run only on the accept side, so a method reaching here is a responder. + a test."
+      ],
+      "publishable_verification_bullets": [
+        "Closes the R311xg disclosed gap #1 (mandatory-method-presence). zenoh-faithful: enforcement is METHOD-LEVEL (each configured method's recv_init_syn bails on its absent ext; configured = mandatory, AND-semantics across methods), mirroring zenoh mod.rs where every Some-state method's recv is driven and bails. usrpwd requires iff !lookup.is_empty() (a responder); pubkey requires unconditionally (accept side = responder, no empty-distinguisher).",
+        "Happy paths UNAFFECTED (the initiator offers via open_init_syn so the responder's require is satisfied): wz<->wz usrpwd e2e 3, pubkey real-TCP e2e 1, all kernel tests pass; + 2 NEW require-offer reject tests. wz-session-core --lib 171, pubkey kernel 7. clippy -D warnings green both lanes (access-extauth-usrpwd + access-extauth-pubkey all-targets). The wz<->zenohd interop is unaffected (wz dials as the initiator; the require is on the accept side). No inventory change. validate_workspace baseline preserved (T1 orphan new=+0)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311xh closes the R311xg disclosed gap #1 (mandatory-method-presence): a configured responder now REQUIRES the peer to OFFER the method on InitSyn (Err on absence), matching zenoh, instead of silently degrading to no-auth. The remaining disclosed gap #2 (zenohd-initiator -> wz-responder pubkey cross-impl direction untested) stays open -- it needs zenohd to DIAL wz with pubkey; the wz responder is wz<->wz-proven only.",
+        "access track stays DONE at 5/6 textbook (hardened by R311xg + R311xh).",
+        "NEXT: pivot to a fresh heavy track from the AP-full remaining roadmap -- encoding (7) / transport-advanced+SHM (6) / HLC SS5.18 (3).",
+        "PUSH: after this round the user authorized a push. The 8-commit chain (R311xa..R311xh) is to be pushed after a full run-ci (RUNCI_EXIT=0) gate."
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [

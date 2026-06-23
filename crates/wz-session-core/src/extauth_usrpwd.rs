@@ -180,9 +180,15 @@ impl AuthMethod for UsrPwdMethod {
         Ok(())
     }
 
-    fn accept_recv_init_syn(&mut self, _sub: Option<AuthSubExt>) -> Result<(), AuthError> {
-        // The InitSyn is the open side's usrpwd offer; the challenge nonce is
-        // issued on InitAck whenever this node responds (has a lookup table).
+    fn accept_recv_init_syn(&mut self, sub: Option<AuthSubExt>) -> Result<(), AuthError> {
+        // A configured usrpwd RESPONDER (a non-empty lookup) REQUIRES the
+        // initiator to OFFER usrpwd on InitSyn (the Unit marker) — zenoh
+        // usrpwd.rs:372 bails "Expected extension" when configured and the offer
+        // is absent. Without this, a peer presenting no usrpwd ext would silently
+        // bypass usrpwd auth. The challenge itself is issued on InitAck.
+        if !self.lookup.is_empty() && sub.is_none() {
+            return Err(AuthError::Rejected("usrpwd: missing InitSyn offer"));
+        }
         Ok(())
     }
 
@@ -306,6 +312,21 @@ mod tests {
             ),
         );
         assert_eq!(r, Err(AuthError::Rejected("usrpwd: unknown user")));
+    }
+
+    #[test]
+    fn a_responder_requires_the_initsyn_offer() {
+        // A configured responder (non-empty lookup) rejects an InitSyn that
+        // carries no usrpwd offer — it must not silently bypass auth.
+        let mut resp =
+            UsrPwdMethod::responder(alloc::vec![(b"alice".to_vec(), b"pw".to_vec())], 0x42);
+        assert_eq!(
+            resp.accept_recv_init_syn(None),
+            Err(AuthError::Rejected("usrpwd: missing InitSyn offer"))
+        );
+        // An initiator-role method (empty lookup) does not require the offer.
+        let mut init = UsrPwdMethod::initiator(b"bob".to_vec(), b"pw".to_vec());
+        assert_eq!(init.accept_recv_init_syn(None), Ok(()));
     }
 
     #[test]
