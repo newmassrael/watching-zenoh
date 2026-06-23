@@ -33,11 +33,8 @@ use hmac::{Hmac, Mac};
 use sce_forge_runtime::codec::SceCursor;
 use sha3::Sha3_256;
 
-use crate::auth_dispatch::{AuthError, AuthMethod, AuthSubExt};
-use crate::vle::encode_vle_u64_into;
-
-/// usrpwd method id within the auth ext (zenoh `id::USRPWD`).
-const USRPWD_ID: u8 = 0x2;
+use crate::auth_dispatch::{id, AuthError, AuthMethod, AuthSubExt};
+use crate::vle::{read_zbuf, write_zbuf};
 
 /// A fixed dummy password the unknown-user reject path HMACs over so its cost
 /// matches a known user's verify (the timing-oracle close in
@@ -68,32 +65,20 @@ fn hmac_sha3_256_verify(key: &[u8], msg: &[u8], tag: &[u8]) -> bool {
     mac.verify_slice(tag).is_ok()
 }
 
-/// Read a VLE length then that many bytes (one zenoh `ZBuf`).
-fn read_vle_bytes(cursor: &mut SceCursor<'_>) -> Result<Vec<u8>, AuthError> {
-    let len = cursor.read_vle_u64().map_err(|_| AuthError::Decode)? as usize;
-    let slice = cursor
-        .peek_slice(len)
-        .map_err(|_| AuthError::Decode)?
-        .to_vec();
-    cursor.advance(len).map_err(|_| AuthError::Decode)?;
-    Ok(slice)
-}
-
-/// Encode the OpenSyn body `{user, hmac}` (zenoh writes each as a `ZBuf`).
+/// Encode the OpenSyn body `{user, hmac}` — two zenoh `ZBuf`s, via the
+/// [`crate::vle`] `write_zbuf` SSOT (shared with the pubkey method's body codec).
 fn encode_open_syn(user: &[u8], hmac: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(user.len() + hmac.len() + 4);
-    encode_vle_u64_into(&mut out, user.len() as u64);
-    out.extend_from_slice(user);
-    encode_vle_u64_into(&mut out, hmac.len() as u64);
-    out.extend_from_slice(hmac);
+    write_zbuf(&mut out, user);
+    write_zbuf(&mut out, hmac);
     out
 }
 
-/// Decode the OpenSyn body into `(user, hmac)`.
+/// Decode the OpenSyn body into `(user, hmac)` via the `read_zbuf` SSOT.
 fn decode_open_syn(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AuthError> {
     let mut cursor = SceCursor::new(bytes);
-    let user = read_vle_bytes(&mut cursor)?;
-    let hmac = read_vle_bytes(&mut cursor)?;
+    let user = read_zbuf(&mut cursor).ok_or(AuthError::Decode)?;
+    let hmac = read_zbuf(&mut cursor).ok_or(AuthError::Decode)?;
     Ok((user, hmac))
 }
 
@@ -157,7 +142,7 @@ impl UsrPwdMethod {
 
 impl AuthMethod for UsrPwdMethod {
     fn id(&self) -> u8 {
-        USRPWD_ID
+        id::USRPWD
     }
 
     fn open_init_syn(&mut self) -> Result<Option<AuthSubExt>, AuthError> {

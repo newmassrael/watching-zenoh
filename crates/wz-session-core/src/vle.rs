@@ -37,6 +37,30 @@ pub(crate) fn encode_vle_u64_into(out: &mut alloc::vec::Vec<u8>, v: u64) {
         .expect("VecSink is growable, so write_vle_u64 never overflows");
 }
 
+/// Write one zenoh `ZBuf` — a VLE length then that many bytes — to `out` (the
+/// `Zenoh080` length-prefixed-bytes framing). The SSOT for the "one ZBuf"
+/// primitive every Z_EXT_AUTH method body is built from: usrpwd's
+/// `{user, hmac}` is two of these, pubkey's RSA-key `{n, e}` + ciphertext are
+/// three. `pub` so the AP-only pubkey method (in `wz-runtime-tokio`) consumes
+/// the same definition as no_std usrpwd — one framing, two crates, zero drift.
+pub fn write_zbuf(out: &mut alloc::vec::Vec<u8>, bytes: &[u8]) {
+    encode_vle_u64_into(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+/// Read one zenoh `ZBuf` (VLE length + that many bytes) from `cursor`, the read
+/// twin of [`write_zbuf`]. `None` on truncation / malformed VLE / a length that
+/// overruns the buffer. The cursor advances past the bytes so successive ZBufs
+/// in one body read in sequence (usrpwd's two, pubkey's three).
+pub fn read_zbuf(
+    cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
+) -> Option<alloc::vec::Vec<u8>> {
+    let len = cursor.read_vle_u64().ok()? as usize;
+    let slice = cursor.peek_slice(len).ok()?.to_vec();
+    cursor.advance(len).ok()?;
+    Some(slice)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +113,25 @@ mod tests {
         // Continuation bit set but slice ends.
         assert_eq!(read_vle_u64(&[0x80]), None);
         assert!(read_vle_u64(&[]).is_none());
+    }
+
+    #[test]
+    fn zbuf_round_trips_through_the_cursor() {
+        use sce_forge_runtime::codec::SceCursor;
+        // Two successive ZBufs in one body read back in sequence with the right
+        // boundary (the usrpwd {user, hmac} / pubkey {n, e} shape). The second
+        // length deliberately crosses the single-byte VLE boundary (300).
+        let mut out = alloc::vec::Vec::new();
+        write_zbuf(&mut out, b"alice");
+        write_zbuf(&mut out, &[0xAB; 300]);
+        let mut cursor = SceCursor::new(&out);
+        assert_eq!(read_zbuf(&mut cursor).as_deref(), Some(&b"alice"[..]));
+        assert_eq!(read_zbuf(&mut cursor).as_deref(), Some(&[0xAB; 300][..]));
+        assert_eq!(cursor.remaining(), 0, "both ZBufs consumed exactly");
+        // A truncated length-prefixed blob (claims 5 bytes, has 2) reads None.
+        let truncated = alloc::vec![0x05u8, 0x01, 0x02];
+        let mut t = SceCursor::new(&truncated);
+        assert_eq!(read_zbuf(&mut t), None);
     }
 
     #[test]

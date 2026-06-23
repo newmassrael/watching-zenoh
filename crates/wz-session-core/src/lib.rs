@@ -420,8 +420,11 @@ pub mod sample;
 
 /// Shared slice-based VLE decoder (the `SceCursor::read_vle_u64` borrowed-slice
 /// twin) — the SSOT for parsing a varint out of an already-buffered ext body.
+/// `pub` for the `read_zbuf` / `write_zbuf` "one zenoh ZBuf" framing primitive,
+/// consumed across the crate boundary by the AP-only pubkey auth method (the
+/// VLE u64 helpers stay `pub(crate)`); the rest is crate-internal.
 #[cfg(feature = "alloc")]
-pub(crate) mod vle;
+pub mod vle;
 
 /// R74 / R311di-11 — `NetworkMessage` application-layer envelope batch
 /// + `parse_frame_payload` dispatcher. Uses `Box<Request>` etc. so

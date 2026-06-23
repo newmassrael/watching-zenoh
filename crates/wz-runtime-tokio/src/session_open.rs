@@ -764,6 +764,13 @@ pub enum OpenError {
     /// establishment FSM `?`-propagating the usrpwd verify error into a close.
     #[cfg(feature = "session-extauth")]
     AuthRejected(wz_session_core::auth_dispatch::AuthError),
+    /// R4a — the accept-side auth seam could not draw a fresh per-handshake
+    /// challenge nonce from OS entropy (a sandbox without `/dev/urandom`). The
+    /// handshake is aborted rather than reused with a stale nonce (the usrpwd /
+    /// pubkey responder replay-defense contract); a near-impossible failure on a
+    /// normal host, surfaced typed rather than panicked.
+    #[cfg(feature = "session-extauth")]
+    AuthEntropy(getrandom::Error),
     /// The bounded iteration budget elapsed before Established (test guard;
     /// production passes `None`).
     IterationLimit,
@@ -1154,6 +1161,46 @@ pub async fn accept_and_open_session(
     // `accepting.inactivity_timeout` (the open-deadline this path enforces).
     engine.process_event(E::InboundStart);
 
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// R4a — [`accept_and_open_session`] with a Z_EXT_AUTH dispatch installed AND a
+/// fresh per-handshake challenge nonce drawn here from OS entropy: the
+/// accept-side counterpart of [`connect_and_open_session_with_auth`]. The SEAM
+/// (not the caller) draws the nonce, so the per-accepted-handshake freshness the
+/// usrpwd / pubkey responder replay-defense requires is enforced by
+/// construction — a caller cannot forget it and reuse a stale challenge. The
+/// caller builds the dispatch with the responder method(s) (the credential
+/// lookup / accepted-key set); this injects the live nonce before the FSM fires
+/// the InitAck challenge. zenoh draws `prng.gen()` per `StateAccept`; this is
+/// the wz equivalent at the accept seam.
+#[cfg(feature = "session-extauth")]
+pub async fn accept_and_open_session_with_auth(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    auth: AuthDispatch,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    actions.install_auth_dispatch(auth);
+    // Fresh challenge nonce per accepted handshake (the replay defense) — drawn
+    // from AP OS entropy here because the no_std session core cannot.
+    let nonce = crate::session_glue::nonce_from_os_entropy().map_err(OpenError::AuthEntropy)?;
+    actions.refresh_auth_challenge_nonce(nonce);
+
+    engine.process_event(E::InboundStart);
     drive_open_loop(
         inbound,
         actions,

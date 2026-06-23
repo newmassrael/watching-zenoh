@@ -49,6 +49,20 @@ use crate::ext_chain::{decode_ext_chain, encode_ext_chain};
 use crate::ext_header::{EXT_ENC_Z64, EXT_ENC_ZBUF};
 use crate::extauth::{decode_auth_ext, encode_auth_ext};
 
+/// The Z_EXT_AUTH method-id namespace (the wz mirror of zenoh `auth::id`). Each
+/// concrete method routes its per-method sub-ext within the auth ext by this id;
+/// the kernel demuxes by it (`ztake!` analogue). Centralised here in the
+/// method-agnostic kernel so the id space is one auditable SSOT as the catalog
+/// grows — a method must NOT hard-code a bare literal. Ids must fit the 4-bit
+/// ext id field (`<= 0x0F`) and be distinct across a dispatch (both enforced in
+/// [`AuthDispatch::new`]).
+pub mod id {
+    /// pubkey RSA challenge-response (zenoh `id::PUBKEY`).
+    pub const PUBKEY: u8 = 0x1;
+    /// usrpwd HMAC challenge-response (zenoh `id::USRPWD`).
+    pub const USRPWD: u8 = 0x2;
+}
+
 /// A method's per-stage auth sub-extension — the encoding + value zenoh's
 /// `ZExt{Unit,Z64,ZBuf}` carries inside the auth ext, abstracted so a method
 /// never touches the wire `ExtEntry` types. A `Unit` is a present-but-empty
@@ -125,9 +139,11 @@ pub enum AuthError {
 /// [`SessionLinkActions`](crate::session_actions::SessionLinkActions) auth slot,
 /// behind the per-runtime `Mutex` whose `with_mutex_mut` requires `T: Send` for
 /// every runtime (the AP tokio profile shares it across tasks). The shipped
-/// methods (usrpwd) are naturally `Send` (owned `Vec<u8>` credentials); the
-/// bound makes that an explicit, compiler-checked contract rather than an
-/// accidental property.
+/// methods (usrpwd; pubkey's `rsa` key material is `Send` too) are naturally
+/// `Send` (owned `Vec<u8>` credentials); the bound makes that an explicit,
+/// compiler-checked contract rather than an accidental property. It is a
+/// requirement on EVERY future method — one wrapping a non-`Send` handle (e.g.
+/// an `Rc`-based HSM client) would fail to compile here, by design.
 pub trait AuthMethod: Send {
     /// The method id used to route this method's sub-ext within the auth ext
     /// (zenoh `id::PUBKEY = 0x1` / `id::USRPWD = 0x2`). Must be `<= 0x0F` (the
@@ -191,7 +207,23 @@ pub struct AuthDispatch {
 
 impl AuthDispatch {
     /// A dispatch over `methods` (each must carry a distinct [`AuthMethod::id`]).
+    /// The distinctness + 4-bit-id-bound invariants the kernel relies on for
+    /// routing are debug-asserted here so a construction mistake is a checked
+    /// failure in test/debug rather than a silent wrong-routing at runtime
+    /// (the dispatch's `find_method_sub_ext` picks the FIRST id match).
     pub fn new(methods: Vec<Box<dyn AuthMethod>>) -> Self {
+        debug_assert!(
+            methods.iter().all(|m| m.id() <= 0x0F),
+            "auth method id must fit the 4-bit ext id field (<= 0x0F)"
+        );
+        debug_assert!(
+            {
+                let mut ids: Vec<u8> = methods.iter().map(|m| m.id()).collect();
+                ids.sort_unstable();
+                ids.windows(2).all(|w| w[0] != w[1])
+            },
+            "auth methods must carry distinct ids (sub-exts route by id)"
+        );
         Self { methods }
     }
 

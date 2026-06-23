@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use tokio::net::TcpListener;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
@@ -36,6 +37,10 @@ use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, nonce_from_os_entropy, parse_inbound,
     poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, InboundFrame, SessionLinkActions,
 };
+use wz_runtime_tokio::session_open::{
+    accept_and_open_session_with_auth, connect_and_open_session_with_auth, DialConfig, DialedLink,
+    DEFAULT_OPEN_TICK_MS,
+};
 use wz_runtime_tokio::{LinkEvent, RxFrame};
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
@@ -43,9 +48,12 @@ use wz_runtime_tokio_test_support::{
 use wz_session_core::auth_dispatch::AuthDispatch;
 use wz_session_core::extauth::decode_auth_ext;
 use wz_session_core::extauth_usrpwd::UsrPwdMethod;
+use wz_session_core::locator::parse_any_locator;
 
 const USER: &[u8] = b"alice";
 const PASSWORD: &[u8] = b"s3cret";
+/// Iteration cap for the real-TCP open loops (matches accept_and_open_session.rs).
+const ITER_CAP_OPEN: usize = 64;
 
 /// Build one session side: actions over a recording outbound driver with the
 /// usrpwd `dispatch` installed, plus its initialized engine.
@@ -84,7 +92,8 @@ struct HandshakeOutcome {
 async fn drive_handshake(initiator_password: &[u8]) -> HandshakeOutcome {
     // Fresh per-handshake challenge nonce from OS entropy (the AP-layer
     // injection — the no_std core draws none).
-    let nonce = nonce_from_os_entropy().expect("OS entropy for the usrpwd challenge nonce");
+    let challenge_nonce =
+        nonce_from_os_entropy().expect("OS entropy for the usrpwd challenge nonce");
 
     let init_driver = Arc::new(LifecycleRecordingDriver::default());
     let resp_driver = Arc::new(LifecycleRecordingDriver::default());
@@ -93,13 +102,19 @@ async fn drive_handshake(initiator_password: &[u8]) -> HandshakeOutcome {
         USER.to_vec(),
         initiator_password.to_vec(),
     )) as _]);
+    // R4a — the responder is built with a SENTINEL nonce (0); the live
+    // per-handshake nonce is injected via `refresh_auth_challenge_nonce` below,
+    // exercising the SAME path the production accept seam
+    // (`accept_and_open_session_with_auth`) drives — not the constructor. This
+    // keeps the responder replay-defense an exercised contract, not a dead API.
     let responder_dispatch = AuthDispatch::new(vec![Box::new(UsrPwdMethod::responder(
         vec![(USER.to_vec(), PASSWORD.to_vec())],
-        nonce,
+        0,
     )) as _]);
 
     let init_actions = side(&init_driver, initiator_dispatch);
     let resp_actions = side(&resp_driver, responder_dispatch);
+    resp_actions.refresh_auth_challenge_nonce(challenge_nonce);
 
     let mut init_engine = new_session_engine(&init_actions);
     init_engine.initialize();
@@ -232,5 +247,73 @@ async fn usrpwd_bad_password_rejects_and_tears_down_the_responder() {
     assert!(
         resp_trace.set_close_reason_count >= 1,
         "the reject must run set_close_reason_invalid (wire Close(INVALID))"
+    );
+}
+
+/// R4a — the PRODUCTION open seams, end-to-end over a real TCP loopback: the
+/// responder runs `accept_and_open_session_with_auth` (which draws a fresh
+/// per-handshake challenge nonce IN-SEAM from OS entropy) and the initiator runs
+/// `connect_and_open_session_with_auth`, both with a matching usrpwd dispatch.
+/// This closes the review's C1: the responder auth path is no longer
+/// test-double-only — the actual production accept seam authenticates a real
+/// initiator over a real socket. Mirrors `accept_and_open_session.rs`'s
+/// happy-path pairing, with auth on both sides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usrpwd_production_open_seams_authenticate_over_real_tcp() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // Responder: accept -> accept_and_open_session_with_auth. The dispatch
+    // carries the credential lookup; the SEAM injects the live challenge nonce.
+    let acceptor_fut = async move {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        let responder = AuthDispatch::new(vec![Box::new(UsrPwdMethod::responder(
+            vec![(USER.to_vec(), PASSWORD.to_vec())],
+            0, // sentinel; the seam refreshes it from OS entropy per handshake
+        )) as _]);
+        accept_and_open_session_with_auth(
+            DialedLink::Tcp(stream),
+            params,
+            responder,
+            TokioTime::new(),
+            Some(ITER_CAP_OPEN),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+    };
+
+    // Initiator: connect_and_open_session_with_auth with the matching credential.
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x01; 4];
+    let cfg = DialConfig::default();
+    let initiator =
+        AuthDispatch::new(vec![
+            Box::new(UsrPwdMethod::initiator(USER.to_vec(), PASSWORD.to_vec())) as _,
+        ]);
+    let initiator_fut = connect_and_open_session_with_auth(
+        locator,
+        params,
+        initiator,
+        &cfg,
+        TokioTime::new(),
+        Some(ITER_CAP_OPEN),
+        DEFAULT_OPEN_TICK_MS,
+    );
+
+    let (accepted, opened) = tokio::join!(acceptor_fut, initiator_fut);
+    let accepted = accepted
+        .expect("usrpwd responder reaches Established via accept_and_open_session_with_auth");
+    let opened = opened
+        .expect("usrpwd initiator reaches Established via connect_and_open_session_with_auth");
+    assert!(
+        accepted.actions.trace_snapshot().record_established_at >= 1,
+        "responder Established after authenticating the real initiator"
+    );
+    assert!(
+        opened.actions.trace_snapshot().record_established_at >= 1,
+        "initiator Established after the usrpwd handshake over real TCP"
     );
 }
