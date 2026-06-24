@@ -50177,6 +50177,52 @@
         "NEXT after the in-flight tracks: P4 build can begin at the adminspace-core cluster or storage-backend-volume-trait (both low-dep). A3 read-FIRST + verify vs zenoh source each atom; front-load highest-risk (router hat seam, wildcard-updates aligner-ext)."
       ]
     },
+    "Round 311xv": {
+      "decision_summary": "R311xv -- P4 A3 remediation. The concurrent R311xu P4-scoping round (d3862f3) added 64 LAYER-3 catalog atoms to the inventory (§5.21-§5.27 + §5.1+4) via add-inventory-entry but did NOT declare them as cargo features, so the Layer A3 catalog-status gate's invariant #1 (every catalog atom is a [features] key in some crates/**/Cargo.toml) FAILED with 64 phantom atoms. This was caught by a full run-ci this session (RUNCI_EXIT=1, Layer A3 FAIL); R311xu's recorded run-ci-green was inaccurate -- A3 was red. FIX: declared all 64 as no-op `[]` cargo features in the facade crates/wz/Cargo.toml, grouped by P4 family (router 16 / plugin 6 / adminspace+config 11 / storage-backend+mgr 13 / ext-pubsub 10 / rest 2 / api-compat 2 / transport+4), the established reserved-atom marker pattern (like time-ntp64 = []). All reserved -- no code, no cfg gate -- so A3 invariant #2 (reserved => not gated) holds trivially and #4 (section_ref to §5.21-§5.27) was already set by R311xu. Pure declaration: no inventory mutation, no code behavior change. This is the missing half of R311xu (catalog atoms must be declared as cargo features, not only registered in the inventory).",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: added a §5.21-§5.27 + §5.1(+4) \"P4 LAYER-3 catalog\" block to [features] -- 64 no-op `[]` markers (router 16 / plugin 6 / adminspace+config 11 / storage-backend+mgr 13 / ext-pubsub 10 / rest 2 / api-compat 2 / transport+4 families) declaring every R311xu catalog atom as a cargo feature, the reserved-marker pattern. The marker names are exactly the R311xu inventory atom ids (A3 invariant #1: atom-id <-> [features]-key)."
+      ],
+      "verification_bullets": [
+        "Layer A3 catalog-status gate PASS after the fix: scripts/audit-catalog-status.sh -> atoms=209 active=91 declared-cargo-features 186->250 (+64), \"catalog status truthfulness OK\", AUDIT_EXIT=0 (was: FAIL with 64 phantom atoms before the fix).",
+        "the 64 markers are exactly the R311xu inventory atom ids so A3 invariant #1 matches (atom-id <-> [features]-key); all no-op `[]` so invariant #2 (reserved => zero cfg(feature) sites) holds trivially; #4 (section_ref to §5.21-§5.27) was set by R311xu.",
+        "root cause: a full run-ci this session surfaced Layer A3 FAIL (RUNCI_EXIT=1; the background harness wrapper's trailing echo masked the real exit) on d3862f3 -- the concurrent P4 round committed the inventory atoms WITHOUT the feature declarations and recorded an inaccurate run-ci-green.",
+        "full run-ci RUNCI_EXIT=0 with the fix (the §5.18 R311xw review-remediation rides on top) -- all required host lanes incl Layer A3 + Layer C2 (clippy --workspace --all-targets) + Layer Z; judged by exit code, not tail.",
+        "validate_workspace: T1 orphan new=+0, style unchanged -- this round adds NO inventory atom (the 64 already exist from R311xu); it only declares cargo features + appends this changelog entry."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311xv = P4 A3 remediation: the 64 R311xu LAYER-3 atoms (§5.21-§5.27 + §5.1+4) now declared as no-op `[]` cargo features in the facade, closing the Layer A3 phantom-64 failure the concurrent P4 round left. Pure declaration -- no inventory / behavior change.",
+        "LESSON (durable): the P4 round (R311xu/d3862f3) added catalog atoms via add-inventory-entry without the matching cargo-feature declarations AND recorded run-ci-green though Layer A3 was red -- a catalog-scoping round MUST run full run-ci (Layer A3 is the only lane that joins the inventory SSOT to the cargo feature tree) before claiming green. [[feedback-runci-verdict-exit-code-only]] [[feedback-full-runci-all-host-lanes]]",
+        "LOCAL: R311xv atop R311xu (d3862f3 P4 scoping) atop R311xt (990b142 HLC) atop origin/main=5824c50; the §5.18 review remediation R311xw lands on top (4 ahead total). NOT pushed without explicit consent.",
+        "NOTE: discovered via the R311xw session review's full run-ci; sequenced as R311xv (immediately after the P4 round it fixes) so git order = round order and each commit's tree is progressively green."
+      ],
+      "publishable_decision_summary": "R311xv -- P4 A3 remediation. The concurrent R311xu P4-scoping round (d3862f3) added 64 LAYER-3 catalog atoms to the inventory (§5.21-§5.27 + §5.1+4) via add-inventory-entry but did NOT declare them as cargo features, so the Layer A3 catalog-status gate's invariant #1 (every catalog atom is a [features] key in some crates/**/Cargo.toml) FAILED with 64 phantom atoms. This was caught by a full run-ci this session (RUNCI_EXIT=1, Layer A3 FAIL); R311xu's recorded run-ci-green was inaccurate -- A3 was red. FIX: declared all 64 as no-op `[]` cargo features in the facade crates/wz/Cargo.toml, grouped by P4 family (router 16 / plugin 6 / adminspace+config 11 / storage-backend+mgr 13 / ext-pubsub 10 / rest 2 / api-compat 2 / transport+4), the established reserved-atom marker pattern (like time-ntp64 = []). All reserved -- no code, no cfg gate -- so A3 invariant #2 (reserved => not gated) holds trivially and #4 (section_ref to §5.21-§5.27) was already set by R311xu. Pure declaration: no inventory mutation, no code behavior change. This is the missing half of R311xu (catalog atoms must be declared as cargo features, not only registered in the inventory).",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: added a §5.21-§5.27 + §5.1(+4) \"P4 LAYER-3 catalog\" block to [features] -- 64 no-op `[]` markers (router 16 / plugin 6 / adminspace+config 11 / storage-backend+mgr 13 / ext-pubsub 10 / rest 2 / api-compat 2 / transport+4 families) declaring every R311xu catalog atom as a cargo feature, the reserved-marker pattern. The marker names are exactly the R311xu inventory atom ids (A3 invariant #1: atom-id <-> [features]-key)."
+      ],
+      "publishable_verification_bullets": [
+        "Layer A3 catalog-status gate PASS after the fix: scripts/audit-catalog-status.sh -> atoms=209 active=91 declared-cargo-features 186->250 (+64), \"catalog status truthfulness OK\", AUDIT_EXIT=0 (was: FAIL with 64 phantom atoms before the fix).",
+        "the 64 markers are exactly the R311xu inventory atom ids so A3 invariant #1 matches (atom-id <-> [features]-key); all no-op `[]` so invariant #2 (reserved => zero cfg(feature) sites) holds trivially; #4 (section_ref to §5.21-§5.27) was set by R311xu.",
+        "root cause: a full run-ci this session surfaced Layer A3 FAIL (RUNCI_EXIT=1; the background harness wrapper's trailing echo masked the real exit) on d3862f3 -- the concurrent P4 round committed the inventory atoms WITHOUT the feature declarations and recorded an inaccurate run-ci-green.",
+        "full run-ci RUNCI_EXIT=0 with the fix (the §5.18 R311xw review-remediation rides on top) -- all required host lanes incl Layer A3 + Layer C2 (clippy --workspace --all-targets) + Layer Z; judged by exit code, not tail.",
+        "validate_workspace: T1 orphan new=+0, style unchanged -- this round adds NO inventory atom (the 64 already exist from R311xu); it only declares cargo features + appends this changelog entry."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311xv = P4 A3 remediation: the 64 R311xu LAYER-3 atoms (§5.21-§5.27 + §5.1+4) now declared as no-op `[]` cargo features in the facade, closing the Layer A3 phantom-64 failure the concurrent P4 round left. Pure declaration -- no inventory / behavior change.",
+        "LESSON (durable): the P4 round (R311xu/d3862f3) added catalog atoms via add-inventory-entry without the matching cargo-feature declarations AND recorded run-ci-green though Layer A3 was red -- a catalog-scoping round MUST run full run-ci (Layer A3 is the only lane that joins the inventory SSOT to the cargo feature tree) before claiming green. [[feedback-runci-verdict-exit-code-only]] [[feedback-full-runci-all-host-lanes]]",
+        "LOCAL: R311xv atop R311xu (d3862f3 P4 scoping) atop R311xt (990b142 HLC) atop origin/main=5824c50; the §5.18 review remediation R311xw lands on top (4 ahead total). NOT pushed without explicit consent.",
+        "NOTE: discovered via the R311xw session review's full run-ci; sequenced as R311xv (immediately after the P4 round it fixes) so git order = round order and each commit's tree is progressively green."
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [

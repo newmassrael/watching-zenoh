@@ -719,6 +719,96 @@ transport-shm = ["wz-runtime-tokio?/transport-shm"]
 transport-unicast = ["wz-runtime-tokio?/transport-unicast"]
 
 # ============================================================
+# §5.21-§5.27 + §5.1(+4) — P4 LAYER-3 catalog (zenoh-full beyond the
+# §5.1-§5.20 core), 64 atoms scoped in R311xu. R311xv declares them as
+# no-op `[]` cargo features so the Layer A3 catalog-status gate invariant
+# "every catalog atom is a [features] key" holds (R311xu added the
+# inventory atoms + section_refs but not the feature keys, which failed
+# A3). All reserved (no code, no cfg gate); a marker flips to a real
+# forwarding gate when its atom is built.
+# ============================================================
+
+# ----- §5.21 router (16 atomic, all reserved) -----
+router-connect-reconcile = []
+router-face-management = []
+router-hat-multihat = []
+router-hat-router = []
+router-master-election = []
+router-multicast-faces = []
+router-orchestration = []
+routing-data-route-compute = []
+routing-interceptor-framework = []
+routing-interceptor-hotreload = []
+routing-interest-broker = []
+routing-interest-pending-gc = []
+routing-namespace = []
+routing-query-route-compute = []
+routing-route-cache = []
+routing-token-tables = []
+
+# ----- §5.22 plugin (6 atomic, all reserved) -----
+plugin-abi-compat = []
+plugin-dynamic-loading = []
+plugin-host-trait = []
+plugin-lifecycle = []
+plugin-manager = []
+plugin-static-registration = []
+
+# ----- §5.23 adminspace + config (11 atomic, all reserved) -----
+adminspace-config-hotreload = []
+adminspace-core = []
+adminspace-introspection-handlers = []
+adminspace-metrics = []
+adminspace-plugins-handlers = []
+adminspace-read = []
+adminspace-write = []
+config-change-notifier = []
+config-json-pointer-access = []
+config-mutate-runtime = []
+config-plugin-validator = []
+
+# ----- §5.24 storage-backend + manager (13 atomic, all reserved) -----
+storage-backend-capability = []
+storage-backend-external-db = []
+storage-backend-filesystem = []
+storage-backend-memory-volume = []
+storage-backend-rocksdb = []
+storage-backend-volume-trait = []
+storage-mgr-complete-flag = []
+storage-mgr-config = []
+storage-mgr-dynamic-volume-loading = []
+storage-mgr-garbage-collection = []
+storage-mgr-multi-storage-host = []
+storage-mgr-strip-prefix = []
+storage-mgr-wildcard-updates = []
+
+# ----- §5.25 ext-pubsub (10 atomic, all reserved) -----
+ext-pubsub-advanced-cache = []
+ext-pubsub-advanced-history = []
+ext-pubsub-advanced-publisher = []
+ext-pubsub-advanced-recovery = []
+ext-pubsub-advanced-subscriber = []
+ext-pubsub-fetching-subscriber = []
+ext-pubsub-group-membership = []
+ext-pubsub-querying-subscriber = []
+ext-pubsub-sample-miss-detection = []
+ext-pubsub-serde-codec = []
+
+# ----- §5.26 rest (2 atomic, all reserved) -----
+rest-http-bridge = []
+rest-sse-subscribe = []
+
+# ----- §5.27 api-compat (2 atomic, all reserved) -----
+api-compat-c = []
+api-compat-pico = []
+
+# ----- §5.1 transport additions (4 atomic, all reserved) -----
+transport-link-quic-datagram = []
+transport-link-unixpipe = []
+transport-multilink = []
+transport-stats = []
+
+# ============================================================
 # Domain aggregates (19 entries, each = union of domain's atomic set)
 #
 # Use a domain-aggregate when you want every capability in a domain
