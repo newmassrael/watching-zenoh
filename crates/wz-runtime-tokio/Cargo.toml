@@ -760,6 +760,18 @@ pubsub-source-info = ["wz-session-core/pubsub-source-info"]
 pubsub-priority = ["wz-session-core/pubsub-priority"]
 pubsub-congestion-control = ["wz-session-core/pubsub-congestion-control"]
 pubsub-express = ["wz-session-core/pubsub-express"]
+# R311xt — §5.18 time-hlc: the Hybrid Logical Clock timestamp source, the
+# wz mirror of zenoh's `Option<Arc<uhlc::HLC>>` on the Runtime
+# (zenoh/src/net/runtime/mod.rs:147 — an HLC is created when `timestamping`
+# is enabled). Gates the `uhlc` dep (zenoh's own crate, same 0.8 pin) and
+# the HLC branch of the storage fallback stamper (`timestamp_source`): with
+# the feature ON an un-timestamped stored sample is stamped by an HLC (a
+# logical counter + monotonicity + drift bound layered OVER the wall-clock
+# NTP64 source — the HLC wraps the physical clock, it is not an alternative
+# to it), with it OFF the bare `wall_clock_ntp64` SSOT is used
+# (byte-identical to the prior behavior). NOT default — an opt-in
+# alternative timestamp source, like the other advanced composition knobs.
+time-hlc = ["dep:uhlc"]
 # R311gi gc-2c — statechart switchboard (the AP dynamic keyexpr -> SCXML
 # domain-event inbound adapter). Forwards to wz-session-core/switchboard
 # (the `ApplicationLayerObserver::switchboard` field + `dispatch_switchboard`
@@ -954,6 +966,17 @@ base64 = { version = "0.22", optional = true }
 # version-steady mmap wrapper (vs nix's shifting mman API). The wire carries the
 # descriptor, not the local mmap mechanism, so this is faithful for same-host.
 memmap2 = { version = "0.9", optional = true }
+# R311xt — uhlc is zenoh's own Hybrid Logical Clock crate (zenoh pins the
+# same 0.8 at its workspace root, `default-features = false` for no_std
+# usage). wz reuses it rather than re-deriving the subtle
+# logical-counter-in-low-CSIZE-bits + drift + Timestamp `Ord` algorithm (the
+# SSOT for the HLC is upstream, not a wz copy — the same reuse stance as the
+# lz4_flex / memmap2 deps). `default-features = false` drops uhlc's `std`
+# system clock + env-var delta; wz injects its OWN physical clock
+# (`NTP64(wall_clock_ntp64())`, byte-identical to uhlc's `system_time_clock`)
+# via `HLCBuilder::with_clock`, so no std feature is needed. Behind the
+# `time-hlc` feature (`dep:uhlc`).
+uhlc = { version = "0.8", default-features = false, optional = true }
 # R311xk — host QUIC link backend, behind the optional `transport-link-quic`
 # feature. quinn is the async QUIC implementation zenoh-link-vsock... no:
 # zenoh-link-quic uses quinn 0.11.5 (workspace pin). wz pins the same 0.11.

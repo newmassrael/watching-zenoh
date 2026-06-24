@@ -597,6 +597,14 @@ pub mod session_open;
 /// capture -> newer-wins; query -> per-key reply). Gated on
 /// `storage-backend` (which forwards the kernel + `query-queryable`), so a
 /// profile without storage never compiles the driver.
+/// R311xt — §5.18 time: the [`FallbackStamp`](timestamp_source::FallbackStamp)
+/// timestamp-source seam (`time-timestamp-source`, FOUNDATIONAL) plus the
+/// optional [`uhlc::HLC`] source (`time-hlc`, active). Consumed by
+/// [`storage_service`] to stamp un-timestamped captured samples — wz's only
+/// auto-stamp site today — so the module is gated on `storage-backend`.
+#[cfg(feature = "storage-backend")]
+pub mod timestamp_source;
+
 #[cfg(feature = "storage-backend")]
 pub mod storage_service;
 

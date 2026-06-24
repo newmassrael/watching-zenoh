@@ -1079,6 +1079,29 @@ layer_c1ag_cargo_test_transport_compose() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings)
 }
 
+# ─── Layer C1ah — time-hlc: §5.18 HLC timestamp source + storage seam ─
+#
+# R311xt: time-hlc is the active §5.18 atom -- the uhlc::HLC variant of the
+# storage fallback stamper (wz-runtime-tokio::timestamp_source::FallbackStamp),
+# the wz mirror of zenoh's Option<Arc<HLC>> on the Runtime. The HLC WRAPS wz's
+# wall_clock_ntp64 physical clock (injected via HLCBuilder::with_clock) and adds
+# a logical counter (the low CSIZE bits) + a drift bound, so an un-timestamped
+# captured sample is stamped with a strictly-monotonic NTP64. This lane:
+#   1. runs the timestamp_source unit tests under storage-backend,time-hlc (the
+#      HLC strictly-increases-within-one-physical-instant proof -- the logical
+#      counter -- plus the zid-preservation + real-magnitude checks);
+#   2. clippy-gates the ON path (--all-targets) -- the HLC build + the stamper
+#      seam + the storage wiring;
+#   3. clippy-gates the OFF path (storage-backend WITHOUT time-hlc) to prove the
+#      bare wall_clock_ntp64 fallback is byte-identical + unused-free (the
+#      TimestampHint import goes test-only, the HLC fns elide cleanly).
+layer_c1ah_cargo_test_time_hlc() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --features storage-backend,time-hlc --lib timestamp_source --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend,time-hlc --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3497,6 +3520,7 @@ run_layer C1ad layer_c1ad_cargo_test_lowlatency || overall=1
 run_layer C1ae layer_c1ae_cargo_test_compression || overall=1
 run_layer C1af layer_c1af_cargo_test_shm || overall=1
 run_layer C1ag layer_c1ag_cargo_test_transport_compose || overall=1
+run_layer C1ah layer_c1ah_cargo_test_time_hlc || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

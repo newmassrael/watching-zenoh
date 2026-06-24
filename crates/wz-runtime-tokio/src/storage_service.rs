@@ -34,26 +34,29 @@
 //!
 //! zenoh stamps an un-timestamped sample with the session HLC
 //! (`sample.timestamp().cloned().unwrap_or(session.new_timestamp())`,
-//! service.rs:182) so newer-wins always has a timestamp. wz's HLC / time
-//! sources are still reserved (§5.18), so this driver stamps an
-//! un-timestamped sample with a **wall-clock NTP64** ([`wall_clock_ntp64`])
-//! under the storage's `local_zid` — the same NTP64 word shape a real
-//! publisher's timestamp carries, so a fallback stamp is directly
-//! comparable to a real one. This is the deliberate fix for the prior
-//! monotonic-counter design, which produced tiny counter values (1, 2, …)
-//! that any real NTP64 (~10^18) dominated: under newer-wins a single
-//! real-timestamped Put then made every subsequent un-timestamped Put lose
-//! as Outdated — silent data loss in a mixed-publisher deployment. A
-//! wall-clock stamp competes fairly by time instead.
+//! service.rs:182) so newer-wins always has a timestamp. wz routes the same
+//! fallback through the §5.18 timestamp-source seam
+//! ([`crate::timestamp_source::FallbackStamp`]), built over the storage's
+//! `local_zid`. The stamp is the same NTP64 word shape a real publisher's
+//! timestamp carries, so a fallback stamp is directly comparable to a real
+//! one. This is the deliberate fix for the prior monotonic-counter design,
+//! which produced tiny counter values (1, 2, …) that any real NTP64
+//! (~10^18) dominated: under newer-wins a single real-timestamped Put then
+//! made every subsequent un-timestamped Put lose as Outdated — silent data
+//! loss in a mixed-publisher deployment. A wall-clock-magnitude stamp
+//! competes fairly by time instead.
 //!
-//! Residual limits (the real fix is the §5.18 HLC, the proper source):
-//! wall-clock is not guaranteed monotonic across NTP adjustments, and two
-//! un-timestamped Puts within one nanosecond collide (same `(time, zid)`,
-//! the later one Replaces). An HLC's logical counter removes both; a
-//! sample that DOES carry a timestamp always uses it, so a
-//! timestamped-publisher deployment is unaffected either way. The fallback
-//! is injectable at the [`StorageState::apply_sample`] seam (it takes the
-//! stamp closure by `FnOnce`), so the §5.18 HLC is a drop-in when it lands.
+//! The source the seam selects (R311xt):
+//! - `time-hlc` OFF (default): the bare [`wall_clock_ntp64`] SSOT. Not
+//!   guaranteed monotonic across NTP adjustments, and two un-timestamped
+//!   Puts within one fraction-tick collide (same `(time, zid)`, the later
+//!   one Replaces).
+//! - `time-hlc` ON: an `uhlc::HLC` over that same wall clock — its logical
+//!   counter removes both limits (successive stamps strictly increase even
+//!   within one physical instant).
+//!
+//! A sample that DOES carry a timestamp always uses it, so a
+//! timestamped-publisher deployment is unaffected by the source choice.
 //!
 //! ## NON-goals (this atom)
 //!
@@ -69,6 +72,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use wz_session_core::query_sink::{QueryView, ReplyOut};
+// The fallback stamp is now produced by `timestamp_source::FallbackStamp`
+// (the §5.18 source seam); `TimestampHint` is referenced directly only by
+// the tests below.
+#[cfg(test)]
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::sink::SampleView;
 use wz_session_core::storage_backend::{MemoryStorage, StorageBackend};
@@ -165,16 +172,18 @@ where
         // carries none (the §5.18 seam) — comparable to a real publisher
         // timestamp, so newer-wins competes fairly (see the module note).
         let sub_state = Arc::clone(&state);
-        let fallback_zid = local_zid;
+        // The §5.18 timestamp-source seam: with `time-hlc` on, an
+        // un-timestamped sample is stamped by the HLC (a logical counter +
+        // monotonicity over the wall clock); off, by the bare
+        // `wall_clock_ntp64` SSOT. Built once over the storage identity and
+        // shared by the (possibly multi-threaded) capture callback.
+        let stamper = crate::timestamp_source::FallbackStamp::new(local_zid);
         let subscriber = session.declare_subscriber(
             keyexpr.clone(),
             SubscribeOptions::default(),
             move |view: &dyn SampleView| {
                 let mut guard = sub_state.lock().expect("storage state mutex poisoned");
-                guard.apply_sample(view, || TimestampHint {
-                    time: wall_clock_ntp64(),
-                    zid: fallback_zid.clone(),
-                });
+                guard.apply_sample(view, || stamper.stamp());
             },
         )?;
 

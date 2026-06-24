@@ -600,12 +600,16 @@ storage-history = ["storage-backend", "wz-runtime-tokio?/storage-history"]
 # (zenoh's digest assumes Latest), so it does NOT imply storage-history.
 storage-replication = ["storage-backend", "wz-runtime-tokio?/storage-replication"]
 
-# ----- domain: time (4 atomic, 0 active / 4 reserved) -----
+# ----- domain: time (4 atomic, 1 active / 3 foundational-reserved) -----
 # R311ci — audit-only ratify. Sample.timestamp (NTP64 wire word) is
-# already gated by pubsub-timestamp (R311cc). time-* features are
-# higher-level abstractions (HLC clock, timestamp source selection)
-# not yet wired in source. "2 active / 2 reserved" estimate -> 0/4.
-time-hlc = []
+# already gated by pubsub-timestamp (R311cc). R311xt — time-hlc is now a
+# real source: it forwards to wz-runtime-tokio's HLC timestamp source
+# (the storage fallback stamper). The other three are FOUNDATIONAL (done +
+# always-on, no toggle): time-ntp64 (the NTP64 word + codec, folded into
+# pubsub-timestamp), time-system-clock (the wall_clock_ntp64 physical
+# source the HLC wraps), time-timestamp-source (the FallbackStamp seam) —
+# they stay no-op markers (A3: active <=> a real cfg toggle).
+time-hlc = ["wz-runtime-tokio?/time-hlc"]
 time-ntp64 = []
 time-system-clock = []
 time-timestamp-source = []
