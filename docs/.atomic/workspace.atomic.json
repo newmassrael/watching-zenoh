@@ -49845,6 +49845,50 @@
         "On /load: the transport-advanced+SHM track is DONE; remaining AP-full tracks per the roadmap = encoding (7 atoms) / HLC 5.18 (3). The transport ext id space is now fully exercised (0x3 Auth, 0x5 LowLatency, 0x6 Compression, 0x2 Shm). Front-load the highest-risk unknown first (memmap2-vs-nix, the resolver injection ownership -- both de-risked by direct-read / Plan)."
       ]
     },
+    "Round 311xp": {
+      "decision_summary": "R311xp corrects the inventory `reason` fields that falsely modeled io_uring / zero-copy as a transport-shm PREREQUISITE -- actioning the R311xn direct-read finding (zenoh-shm uses NEITHER io_uring NOR a zero-copy buffer pool; it is plain tokio + POSIX shm via nix/memmap2). transport-shm's reason drops \\\"requires runtime-zero-copy\\\" (now: standalone POSIX shm, no io_uring prereq); runtime-zero-copy + runtime-tokio-uring reasons now state they are an ORTHOGONAL io_uring-reactor performance concern, NOT a shm prereq. STATUSES UNCHANGED (transport-shm / session-extshm active; runtime-zero-copy / runtime-tokio-uring reserved -- they remain genuinely-inert orthogonal atoms, a future AP-perf track). No code change: the SHM transport (R311xn/xo) already shipped without either dependency, which is the empirical proof the prereq was an artifact.",
+      "changes_bullets": [
+        "inventory transport-shm reason: \"...zero-copy opt-in, requires runtime-zero-copy\" -> \"...standalone POSIX shm (memmap2), NO io_uring/runtime-zero-copy prereq (R311xn direct-read: zenoh uses neither)\".",
+        "inventory runtime-zero-copy reason: + \"ORTHOGONAL to transport-shm (NOT a shm prereq -- R311xn)\" (its own \"requires runtime-tokio-uring or runtime-lwip\" stays -- that is the zero-copy pool's legitimate reactor dep, distinct from any shm coupling).",
+        "inventory runtime-tokio-uring reason: + \"ORTHOGONAL io_uring perf concern, NOT a transport-shm prereq (R311xn)\".",
+        "No status change (transport-shm / session-extshm stay active; runtime-zero-copy / runtime-tokio-uring stay reserved); no code change. session-extshm reason (\"requires transport-shm\") left unchanged -- correct (the handshake does need the data path).",
+        "The memory roadmap body (project_north_star_remaining_roadmap.md) was checked: it lists uring/zero-copy only as 2 runtime atoms (no false shm coupling), so no correction was needed there."
+      ],
+      "verification_bullets": [
+        "scripts/audit-catalog-status.sh: truthfulness OK (statuses unchanged, no new drift). validate_workspace: T1 orphan new=+0 (13 ledgered), T3 warn=4 / T4 info=4 unchanged, sections 259 unchanged (a reason-only edit touches no cross-ref / section).",
+        "The correction is grounded in the R311xn whole-tree grep (zenoh has ZERO io_uring usage) + the shipped R311xn/xo SHM transport, which uses memmap2 + POSIX shm and NO io_uring / zero-copy -- empirical proof the modeled prereq was an artifact."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "R311xp = inventory-reason correction: io_uring / zero-copy DECOUPLED from transport-shm (the R311xn finding actioned). runtime-tokio-uring + runtime-zero-copy stay RESERVED as ORTHOGONAL io_uring-reactor performance atoms (a future track if AP zero-copy perf is wanted), no longer mismodeled as shm prereqs.",
+        "The transport-advanced+SHM track is CLOSED: R311xl (lowlatency) + R311xm (compression+extcompression) + R311xn (shm R3a) + R311xo (shm R3b) + this R311xp (reason correction). 5 commits LOCAL atop origin/main=94cb509, NOT pushed without explicit consent.",
+        "NEXT TRACK (per roadmap, none chosen yet): encoding (7 atoms) / HLC §5.18 (3)."
+      ],
+      "publishable_decision_summary": "R311xp corrects the inventory `reason` fields that falsely modeled io_uring / zero-copy as a transport-shm PREREQUISITE -- actioning the R311xn direct-read finding (zenoh-shm uses NEITHER io_uring NOR a zero-copy buffer pool; it is plain tokio + POSIX shm via nix/memmap2). transport-shm's reason drops \\\"requires runtime-zero-copy\\\" (now: standalone POSIX shm, no io_uring prereq); runtime-zero-copy + runtime-tokio-uring reasons now state they are an ORTHOGONAL io_uring-reactor performance concern, NOT a shm prereq. STATUSES UNCHANGED (transport-shm / session-extshm active; runtime-zero-copy / runtime-tokio-uring reserved -- they remain genuinely-inert orthogonal atoms, a future AP-perf track). No code change: the SHM transport (R311xn/xo) already shipped without either dependency, which is the empirical proof the prereq was an artifact.",
+      "publishable_changes_bullets": [
+        "inventory transport-shm reason: \"...zero-copy opt-in, requires runtime-zero-copy\" -> \"...standalone POSIX shm (memmap2), NO io_uring/runtime-zero-copy prereq (R311xn direct-read: zenoh uses neither)\".",
+        "inventory runtime-zero-copy reason: + \"ORTHOGONAL to transport-shm (NOT a shm prereq -- R311xn)\" (its own \"requires runtime-tokio-uring or runtime-lwip\" stays -- that is the zero-copy pool's legitimate reactor dep, distinct from any shm coupling).",
+        "inventory runtime-tokio-uring reason: + \"ORTHOGONAL io_uring perf concern, NOT a transport-shm prereq (R311xn)\".",
+        "No status change (transport-shm / session-extshm stay active; runtime-zero-copy / runtime-tokio-uring stay reserved); no code change. session-extshm reason (\"requires transport-shm\") left unchanged -- correct (the handshake does need the data path).",
+        "The memory roadmap body (project_north_star_remaining_roadmap.md) was checked: it lists uring/zero-copy only as 2 runtime atoms (no false shm coupling), so no correction was needed there."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/audit-catalog-status.sh: truthfulness OK (statuses unchanged, no new drift). validate_workspace: T1 orphan new=+0 (13 ledgered), T3 warn=4 / T4 info=4 unchanged, sections 259 unchanged (a reason-only edit touches no cross-ref / section).",
+        "The correction is grounded in the R311xn whole-tree grep (zenoh has ZERO io_uring usage) + the shipped R311xn/xo SHM transport, which uses memmap2 + POSIX shm and NO io_uring / zero-copy -- empirical proof the modeled prereq was an artifact."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311xp = inventory-reason correction: io_uring / zero-copy DECOUPLED from transport-shm (the R311xn finding actioned). runtime-tokio-uring + runtime-zero-copy stay RESERVED as ORTHOGONAL io_uring-reactor performance atoms (a future track if AP zero-copy perf is wanted), no longer mismodeled as shm prereqs.",
+        "The transport-advanced+SHM track is CLOSED: R311xl (lowlatency) + R311xm (compression+extcompression) + R311xn (shm R3a) + R311xo (shm R3b) + this R311xp (reason correction). 5 commits LOCAL atop origin/main=94cb509, NOT pushed without explicit consent.",
+        "NEXT TRACK (per roadmap, none chosen yet): encoding (7 atoms) / HLC §5.18 (3)."
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [
@@ -55359,13 +55403,13 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "docs/runtime-crate-tokio.md §4 io_uring opt-in",
-      "reason": "F=io_uring fixed-buf adapter; P=ARCHITECTURE §9.5 row 3; C=alternative reactor under runtime-tokio"
+      "reason": "F=io_uring fixed-buf adapter; P=ARCHITECTURE §9.5 row 3; C=alternative reactor under runtime-tokio; ORTHOGONAL io_uring perf concern, NOT a transport-shm prereq (R311xn)"
     },
     "runtime-zero-copy": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "RFC §5.E buffer pool",
-      "reason": "F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in performance, requires runtime-tokio-uring or runtime-lwip"
+      "reason": "F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in perf over runtime-tokio-uring or runtime-lwip; ORTHOGONAL to transport-shm (NOT a shm prereq — R311xn)"
     },
     "scouting-active": {
       "status": "active",
@@ -55609,7 +55653,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-shm crate",
-      "reason": "F=est shared-memory ring; P=zenoh-shm Z_EXT_SHM; C=zero-copy opt-in, requires runtime-zero-copy"
+      "reason": "F=POSIX shared-memory zero-copy payload (descriptor on wire + mmap'd /dev/shm segment); P=zenoh-shm Z_EXT_SHM; C=standalone POSIX shm (memmap2), NO io_uring/runtime-zero-copy prereq (R311xn direct-read: zenoh uses neither)"
     },
     "transport-unicast": {
       "status": "active",
