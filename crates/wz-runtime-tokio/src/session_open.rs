@@ -1279,6 +1279,24 @@ pub async fn connect_and_open_session_with_compression(
         .await
 }
 
+/// session-extshm — [`connect_and_open_session`] that OFFERS SHM: dials the
+/// locator then opens with the SHM capability offer staged. The InitSyn carries
+/// the 0x2 SHM establishment unit ext; if the peer reflects it, an SHM-backed
+/// `publish_shm` sends descriptors instead of bytes. Signature-stable additive
+/// sibling.
+#[cfg(feature = "session-extshm")]
+pub async fn connect_and_open_session_with_shm(
+    locator: AnyLocator,
+    params: SessionInitParams,
+    cfg: &DialConfig,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let dialed = dial_locator(locator, cfg).await.map_err(OpenError::Dial)?;
+    initiate_and_open_session_with_shm(dialed, params, clock, max_iters, tick_interval_ms).await
+}
+
 /// Bring up a session in the Initiator role from an already-connected
 /// transport — the dialed-link half of [`connect_and_open_session`], split out
 /// so a caller that already holds a connected stream (e.g. wz-ap-demo's
@@ -1387,6 +1405,32 @@ pub async fn initiate_and_open_session_with_compression(
     let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let actions = new_session_actions(outbound, params, clock);
     actions.set_compression_offer(true);
+    initiator_open(
+        inbound,
+        actions,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// session-extshm — [`initiate_and_open_session`] with the SHM capability offered
+/// before the handshake drives (the InitSyn carries the 0x2 SHM establishment
+/// ext). Initiator side; the acceptor reflects via
+/// [`accept_and_open_session_with_shm`].
+#[cfg(feature = "session-extshm")]
+pub async fn initiate_and_open_session_with_shm(
+    connected: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
+    let actions = new_session_actions(outbound, params, clock);
+    actions.set_shm_offer(true);
     initiator_open(
         inbound,
         actions,
@@ -1575,6 +1619,35 @@ pub async fn accept_and_open_session_with_compression(
     let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
     actions.set_compression_offer(true);
+
+    engine.process_event(E::InboundStart);
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// session-extshm — [`accept_and_open_session`] that OFFERS SHM on the accept
+/// side: the acceptor reflects the 0x2 SHM ext in its InitAck iff the peer's
+/// InitSyn offered it (the `&=` merge). The accept-side counterpart of
+/// [`connect_and_open_session_with_shm`].
+#[cfg(feature = "session-extshm")]
+pub async fn accept_and_open_session_with_shm(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+    actions.set_shm_offer(true);
 
     engine.process_event(E::InboundStart);
     drive_open_loop(

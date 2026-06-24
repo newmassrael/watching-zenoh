@@ -97,6 +97,36 @@ pub fn body_has_shm_marker(extensions: &[ExtEntryOwned]) -> bool {
     extensions.iter().any(|e| e.ext_id() == SHM_BODY_EXT_ID)
 }
 
+/// The Z_EXT_SHM ESTABLISHMENT ext id (on Init / Open) — a DISTINCT carrier from
+/// the body marker above though it shares the numeric 0x2 (zenoh's establishment
+/// Shm ext space, `commons/zenoh-protocol/src/transport/init.rs:149`). SCOPED: wz
+/// negotiates SHM with a UNIT capability ext (offer / reflect / `&=`, the
+/// lowlatency / compression pattern), NOT zenoh's ZBuf-on-Init / z64-on-Open
+/// CHALLENGE-RESPONSE (which additionally proves both peers can MAP each other's
+/// segment). The challenge-response + cross-impl are a disclosed deferral — for
+/// same-host trusted peers the capability AND-merge correctly gates the data
+/// path. No M bit (a non-SHM peer drops the offer silently).
+#[cfg(feature = "session-extshm")]
+pub const SHM_ESTABLISHMENT_EXT_ID: u8 = 0x02;
+
+/// Build the establishment SHM capability offer (the UNIT ext on Init / Open).
+#[cfg(feature = "session-extshm")]
+pub fn encode_shm_establishment_ext() -> ExtEntryOwned {
+    ExtEntryOwned {
+        header: SHM_ESTABLISHMENT_EXT_ID,
+        body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
+    }
+}
+
+/// Project the peer's SHM capability from an Init / Open ext chain — ANDed against
+/// the local offer to finalize `is_shm` (zenoh `is_shm &= other.is_some()`).
+#[cfg(feature = "session-extshm")]
+pub fn peer_offered_shm(extensions: &[ExtEntryOwned]) -> bool {
+    extensions
+        .iter()
+        .any(|e| e.ext_id() == SHM_ESTABLISHMENT_EXT_ID)
+}
+
 /// The no_std/std seam: an SHM-backed Put's descriptor is resolved to its bytes
 /// by an AP-injected resolver (the `std` mmap-open lives in
 /// `wz-runtime-tokio::shm_provider`, behind this trait). `None` when the segment

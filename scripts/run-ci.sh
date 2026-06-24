@@ -1020,31 +1020,40 @@ layer_c1ae_cargo_test_compression() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-compression --quiet -- -D warnings)
 }
 
-# ─── Layer C1af — SHM transport (R3a foundation): provider + descriptor codec ─
+# ─── Layer C1af — SHM transport (R3a+R3b): provider + live swap + e2e ─
 #
-# R311xn: transport-shm R3a -- the scoped same-host SHM data-path MACHINERY (the
-# wz mirror of zenoh's zero-copy SHM payload: a descriptor on the wire + an mmap'd
-# /dev/shm segment). The no_std core (extshm: the ShmDescriptor + its VLE codec,
-# the 0x2 Put-body marker, the ShmResolver trait seam) + the AP provider
-# (shm_provider: memmap2 ShmBackedPayload + PosixShmResolver). io_uring / zero-copy
-# are NOT prerequisites (zenoh uses neither -- a wz modeling artifact). R3a is the
-# INERT machinery (is_shm always false); the live swap + the Z_EXT_SHM 0x2
-# challenge handshake + the zero-copy e2e are R3b (session-extshm). This lane:
-#   1. runs the extshm unit tests (the descriptor VLE round-trip + truncation
-#      guard, the 0x2 | M marker header, marker discrimination vs 0x1/0x3);
+# R311xn (R3a) + R311xo (R3b): the scoped same-host SHM transport -- the wz mirror
+# of zenoh's zero-copy SHM payload (a descriptor on the wire + an mmap'd /dev/shm
+# segment). R3a: the no_std core (extshm: ShmDescriptor + VLE codec, the 0x2
+# Put-body marker, the ShmResolver trait) + the AP provider (shm_provider: memmap2
+# ShmBackedPayload + PosixShmResolver). R3b: the live TX swap (build_push_shm_literal
+# emits the descriptor + marker), the RX un-swap (pubsub resolves via the
+# registry-stored resolver), the scoped Z_EXT_SHM 0x2 establishment negotiation (a
+# UNIT capability `&=`, NOT zenoh's challenge-response -- deferred), publish_shm +
+# the open helpers. io_uring / zero-copy are NOT prerequisites (zenoh uses neither).
+# This lane:
+#   1. runs the session-core SHM unit tests (extshm descriptor/marker + the
+#      build_push_shm_literal TX-swap wire-form proof: payload=descriptor + 0x2);
 #   2. runs the shm_provider unit tests over REAL /dev/shm (a payload written to a
 #      fresh segment is read back byte-exact by the resolver opening it by
 #      descriptor; owner-drop unlinks; distinct ids) -- fully runnable, NO #[ignore]
 #      (/dev/shm is present), like the QUIC lane closed vsock's gap;
-#   3. clippy-gates the cfg under --all-targets (the provider + memmap2);
-#   4. clippy-gates the bare core (--no-default-features --features transport-shm):
-#      the inert descriptor/marker codec + is_shm slot compose standalone.
+#   3. runs the shm_e2e integration tests (gated all(session-extshm,
+#      transport-unicast, transport-link-tcp)): wz<->wz negotiate SHM over real TCP
+#      + deliver a Put ZERO-COPY (the publisher writes /dev/shm, the descriptor
+#      rides the wire, the acceptor's PosixShmResolver mmaps + reads it byte-exact),
+#      plus the negotiation `&=` (one-sided offer -> both off);
+#   4. clippy-gates the cfg under --all-targets (the provider + the live swap);
+#   5. clippy-gates BOTH bare cores standalone: --features transport-shm (the inert
+#      R3a primitive) and --features session-extshm (the negotiation + swap).
 layer_c1af_cargo_test_shm() {
     (cd crates \
-        && cargo test -p wz-session-core --features transport-shm --lib extshm --quiet \
-        && cargo test -p wz-runtime-tokio --features transport-shm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-shm,transport-unicast,transport-link-tcp --quiet -- -D warnings \
-        && cargo clippy -p wz-session-core --no-default-features --features transport-shm --quiet -- -D warnings)
+        && cargo test -p wz-session-core --features session-extshm,codec-push --lib shm --quiet \
+        && cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+        && cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --test shm_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features transport-shm --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features session-extshm --quiet -- -D warnings)
 }
 
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─

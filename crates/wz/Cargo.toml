@@ -542,7 +542,7 @@ scouting-static = [
 session-extauth = ["wz-runtime-tokio?/session-extauth"]
 session-extcompression = ["transport-compression", "wz-runtime-tokio?/session-extcompression"]
 session-extqos = []
-session-extshm = ["transport-shm"]
+session-extshm = ["transport-shm", "wz-runtime-tokio?/session-extshm"]
 session-multicast = []
 # A4 (R311jr/js) — session-reconnect: declaration cache + reset/replay
 # (wz-session-core, via the runtime forward) + the AP re-dial +

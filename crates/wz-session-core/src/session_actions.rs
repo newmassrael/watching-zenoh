@@ -1233,6 +1233,41 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
+    /// session-extshm — the AP layer's "this deploy offers SHM toward this peer"
+    /// config, set once at bring-up BEFORE the handshake drives. Seeds
+    /// [`Self::is_shm`]; the peer's offer is ANDed in by
+    /// [`Self::negotiate_shm_against_peer`].
+    #[cfg(feature = "session-extshm")]
+    pub fn set_shm_offer(&self, offer: bool) {
+        R::with_mutex_mut(&self.is_shm, |s| *s = offer);
+    }
+
+    /// session-extshm — AND the peer's Init / InitAck SHM offer into the local
+    /// capability (zenoh `is_shm &= other.is_some()`), called from the
+    /// establishment demux on every inbound Init frame; the result is
+    /// `local_offer && peer_offer`, finalized at the Init exchange.
+    #[cfg(feature = "session-extshm")]
+    pub fn negotiate_shm_against_peer(&self, peer_offered: bool) {
+        R::with_mutex_mut(&self.is_shm, |s| *s &= peer_offered);
+    }
+
+    /// session-extshm — stage (or clear) the SHM establishment offer in `role`'s
+    /// ext chain, IDEMPOTENTLY (the [`Self::stage_compression_send`] mirror).
+    #[cfg(all(
+        feature = "session-extshm",
+        feature = "codec-init-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    fn stage_shm_send(&self, role: ExtChainRole) {
+        let offer = self.is_shm();
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            chain.retain(|e| e.ext_id() != crate::extshm::SHM_ESTABLISHMENT_EXT_ID);
+            if offer {
+                chain.push(crate::extshm::encode_shm_establishment_ext());
+            }
+        });
+    }
+
     pub fn trace_snapshot(&self) -> ActionTrace {
         R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
     }
@@ -4026,6 +4061,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // ext) in InitSyn iff this deploy enabled it (zenoh send_init_syn).
             #[cfg(feature = "session-extcompression")]
             a.stage_compression_send(ExtChainRole::InitSyn);
+            // session-extshm — initiator offers the SHM capability (the 0x2 unit
+            // establishment ext) in InitSyn iff this deploy enabled it.
+            #[cfg(feature = "session-extshm")]
+            a.stage_shm_send(ExtChainRole::InitSyn);
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -4091,6 +4130,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // compression-capable).
             #[cfg(feature = "session-extcompression")]
             a.stage_compression_send(ExtChainRole::InitAck);
+            // session-extshm — acceptor reflects the SHM offer in InitAck iff it
+            // is STILL offering after the InitSyn `&=` merge.
+            #[cfg(feature = "session-extshm")]
+            a.stage_shm_send(ExtChainRole::InitAck);
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),

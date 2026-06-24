@@ -274,6 +274,16 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// `dispatch_push`; `alloc`-gated per the borrow boundary.
     #[cfg(feature = "alloc")]
     own_zid: Option<alloc::vec::Vec<u8>>,
+    /// transport-shm — the AP-injected resolver that maps an inbound SHM
+    /// descriptor's segment off /dev/shm (the no_std/std seam; the impl is
+    /// `wz-runtime-tokio::shm_provider::PosixShmResolver`). `None` until the AP
+    /// bring-up installs it via [`set_shm_resolver`](Self::set_shm_resolver) — an
+    /// SHM Put arriving with no resolver installed drops (the marker is honoured,
+    /// the descriptor unresolvable). Boxed (not a generic param) so the ~110
+    /// registry construction sites keep their inferred `C = BoxedSink`; `Send +
+    /// Sync` keeps `ApplicationLayerObserver: Send` (the drive-task boundary).
+    #[cfg(feature = "transport-shm")]
+    shm_resolver: Option<alloc::boxed::Box<dyn crate::extshm::ShmResolver + Send + Sync>>,
 }
 
 impl<C: SampleSink> Default for SubscriberRegistry<C> {
@@ -302,6 +312,8 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             peer_keyexpr_table: HashMap::new(),
             #[cfg(feature = "alloc")]
             own_zid: None,
+            #[cfg(feature = "transport-shm")]
+            shm_resolver: None,
         }
     }
 
@@ -328,6 +340,18 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         }
         self.own_zid = Some(zid);
         true
+    }
+
+    /// transport-shm — install the AP SHM resolver (the `std` mmap-open impl). The
+    /// single mutation entry point for the gated `shm_resolver` field, called once
+    /// at AP bring-up (the wz-runtime-tokio `Session::set_shm_resolver` forwarder),
+    /// so the ~110 registry construction sites keep their unchanged signatures.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_resolver(
+        &mut self,
+        resolver: alloc::boxed::Box<dyn crate::extshm::ShmResolver + Send + Sync>,
+    ) {
+        self.shm_resolver = Some(resolver);
     }
 
     /// R231 — release the previously-installed own zid (e.g. on
@@ -660,9 +684,29 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     let body_encoding = put.encoding.as_ref().map(EncodingHint::from_codec);
                     #[cfg(not(feature = "pubsub-encoding"))]
                     let body_encoding: Option<EncodingHint> = None;
+                    // transport-shm — the RX un-swap: if the body carries the 0x2
+                    // ext_shm marker, the payload field is a DESCRIPTOR (not data);
+                    // decode it + resolve the segment off /dev/shm via the
+                    // AP-injected resolver. A stale / foreign descriptor, or no
+                    // resolver installed, drops the Sample (the scoped lifecycle:
+                    // the owner backs the segment until the round-trip completes).
+                    // Absent the marker, the inline-bytes path is byte-identical.
+                    #[cfg(feature = "transport-shm")]
+                    let put_payload = if crate::extshm::body_has_shm_marker(body_exts) {
+                        match crate::extshm::decode_shm_descriptor(put.payload.as_slice())
+                            .and_then(|d| self.shm_resolver.as_ref().and_then(|r| r.resolve(&d)))
+                        {
+                            Some(bytes) => bytes,
+                            None => return,
+                        }
+                    } else {
+                        put.payload.as_slice().to_vec()
+                    };
+                    #[cfg(not(feature = "transport-shm"))]
+                    let put_payload = put.payload.as_slice().to_vec();
                     (
                         SampleKind::Put,
-                        put.payload.as_slice().to_vec(),
+                        put_payload,
                         body_timestamp,
                         body_encoding,
                         body_attachment,

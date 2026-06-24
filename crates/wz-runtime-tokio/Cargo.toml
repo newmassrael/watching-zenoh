@@ -369,6 +369,11 @@ session-extcompression = ["wz-session-core/session-extcompression"]
 # -- pico has no SHM). R3a is the inert provider + codec; R3b adds the live swap +
 # the Z_EXT_SHM challenge handshake (session-extshm).
 transport-shm = ["wz-session-core/transport-shm", "dep:memmap2"]
+
+# session-extshm — the scoped Z_EXT_SHM establishment handshake (a UNIT capability
+# offer/`&=`, NOT zenoh's full challenge-response); forwards the session-core
+# negotiation + transport-shm (the data path it enables). AP-only.
+session-extshm = ["wz-session-core/session-extshm", "transport-shm"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +

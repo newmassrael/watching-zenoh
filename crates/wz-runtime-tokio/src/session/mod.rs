@@ -821,6 +821,20 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         })
     }
 
+    /// transport-shm — install the AP SHM resolver onto the subscriber registry
+    /// (the std mmap-open `PosixShmResolver`). Call once at bring-up so an inbound
+    /// SHM Put's descriptor can be resolved off /dev/shm; absent the resolver an
+    /// SHM Put drops. The registry forwarder (the `set_own_zid` sibling).
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_resolver(
+        &self,
+        resolver: Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync>,
+    ) {
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.set_shm_resolver(resolver);
+        });
+    }
+
     /// R231 — release the previously-installed own zid (paired with
     /// [`Session::set_own_zid`]). After clear, every wire-arrived
     /// Push fires its matching subscribers; the self-echo guard
@@ -1081,6 +1095,54 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// transport mismatch is a compile error rather than a runtime reject.
     pub fn actions(&self) -> &Arc<SessionLinkActions<R, T>> {
         &self.transport
+    }
+
+    /// transport-shm — publish a SHM-backed payload. When this session has
+    /// NEGOTIATED SHM, the REMOTE leg carries only the segment DESCRIPTOR (+ the
+    /// 0x2 ext_shm marker) instead of the bytes — the receiver mmaps the segment
+    /// off /dev/shm (zero-copy on the wire). The LOCAL loopback leg delivers the
+    /// bytes directly (same-host). Without negotiation, this is the ordinary
+    /// inline `publish` of the bytes read back from the segment, so the API is
+    /// always usable. The caller must keep `payload` alive until the round-trip
+    /// completes (the scoped lifecycle: the owner backs the segment, Drop
+    /// unlinks).
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm(
+        &self,
+        keyexpr: &str,
+        payload: &crate::shm_provider::ShmBackedPayload,
+        opts: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        #[cfg(feature = "codec-push")]
+        if self.actions().is_shm() && opts.allowed_destination.allows_remote() {
+            use wz_session_core::send_wire_error::SendWireError;
+            let meta = opts.push_metadata();
+            let push = wz_session_core::push_build::build_push_shm_literal(
+                keyexpr,
+                &payload.descriptor(),
+                &meta,
+            )
+            .map_err(SendWireError::Codec)?;
+            self.send_network_message(
+                wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+                opts.reliable_bool(),
+                meta.is_express(),
+            )?;
+            // The remote leg fired the descriptor; deliver the bytes to any LOCAL
+            // subscriber (same-host) directly.
+            #[cfg(feature = "pubsub-allow-loop")]
+            if opts.allowed_destination.allows_local() {
+                let sample = build_loopback_sample(keyexpr, payload.bytes(), &opts);
+                let delivered =
+                    R::with_mutex_mut(&self.observer, |o| o.subscribers.local_publish(&sample));
+                self.drain_deferred_fires();
+                return Ok(delivered);
+            }
+            return Ok(0);
+        }
+        // Not negotiated (or remote disabled) -> ordinary inline publish of the
+        // bytes read back out of the segment.
+        self.publish(keyexpr, payload.bytes(), opts)
     }
 
     // R311mn (B2) — `observer` / `drain_deferred_fires` are

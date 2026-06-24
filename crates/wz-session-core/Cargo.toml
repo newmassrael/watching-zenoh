@@ -154,6 +154,16 @@ session-extcompression = ["transport-compression", "codec-frame", "session-unica
 # challenge handshake + the zero-copy e2e are R3b (session-extshm).
 transport-shm = ["alloc"]
 
+# session-extshm — the scoped Z_EXT_SHM (0x2) establishment handshake (the wz
+# mirror of zenoh's SHM negotiation). Gates the establishment ext codec
+# (extshm::encode_shm_establishment_ext / peer_offered_shm) + the offer/`&=`
+# negotiation that SETS is_shm, and FORWARDS transport-shm (the negotiation
+# enables the data-path swap). Pulls session-unicast (the establishment FSM it
+# rides). The Init offer/merge is additively gated on codec-init-body at its use
+# sites (so a bare build carries no dead handshake seam). SCOPED: a UNIT
+# capability AND-merge, NOT zenoh's ZBuf/z64 challenge-response (deferred).
+session-extshm = ["transport-shm", "session-unicast"]
+
 # MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
 # build (heapless, no http-send / scripting — those are std-coupled and
 # mutually exclusive with no_std, enforced by a compile_error! in

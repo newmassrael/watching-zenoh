@@ -106,6 +106,13 @@ impl ShmBackedPayload {
             generation: 0,
         }
     }
+
+    /// The payload bytes in the shared segment — the source for the inline-bytes
+    /// fallback when a session did NOT negotiate SHM (`publish_shm` then ships the
+    /// bytes the ordinary way).
+    pub fn bytes(&self) -> &[u8] {
+        &self.mmap[..self.len]
+    }
 }
 
 impl Drop for ShmBackedPayload {

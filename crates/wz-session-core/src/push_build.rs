@@ -597,6 +597,77 @@ pub fn build_push_literal_with_meta(
     })
 }
 
+/// transport-shm — build a `MsgPut` whose PAYLOAD is the SHM descriptor (not the
+/// data bytes) and whose body ext chain carries the `ext_shm` 0x2 marker
+/// (`crate::extshm`). The parallel of [`build_msg_put_with_meta`] for the SHM
+/// swap: the data lives in the shared segment, the wire carries only the
+/// descriptor + the marker that tells the RX to resolve it. The chain always has
+/// at least the marker, so the Z header bit (0x80) is always set.
+#[cfg(feature = "transport-shm")]
+fn build_msg_put_shm(
+    descriptor: &crate::extshm::ShmDescriptor,
+    timestamp: Option<&crate::sample::TimestampHint>,
+    encoding: Option<&crate::sample::EncodingHint>,
+    source_info: Option<&crate::sample::SourceInfo>,
+    attachment: Option<&[u8]>,
+) -> Result<MsgPutOwned, CodecError> {
+    let descriptor_bytes = crate::extshm::encode_shm_descriptor(descriptor);
+    let payload_len = descriptor_bytes.len() as u64;
+    // Reuse the source_info / attachment SSOT, then append the 0x2 marker and
+    // re-normalise the chain-continuation Z bits over the full chain.
+    let mut exts = build_body_extensions(source_info, attachment)?.unwrap_or_default();
+    exts.push(crate::extshm::encode_shm_marker_ext());
+    crate::ext_nodeid::apply_chain_z_bits(&mut exts);
+    let mut put = MsgPutOwned {
+        header: 0x01,
+        timestamp: gated_timestamp_field(timestamp)?,
+        encoding: gated_encoding_field(encoding)?,
+        extensions: Some(exts),
+        payload_len,
+        payload: crate::codec_owned::owned_bytes(&descriptor_bytes)?,
+    };
+    if put.timestamp.is_some() {
+        put.header |= 0x20;
+    }
+    if put.encoding.is_some() {
+        put.header |= 0x40;
+    }
+    // The body ext chain always carries the marker, so Z (0x80) is always set.
+    put.header |= 0x80;
+    Ok(put)
+}
+
+/// transport-shm — the SHM counterpart of [`build_push_literal_with_meta`]: the
+/// Put carries the descriptor + the 0x2 marker. Used by `publish_shm` when the
+/// session has negotiated SHM.
+#[cfg(feature = "transport-shm")]
+pub fn build_push_shm_literal(
+    keyexpr_suffix: &str,
+    descriptor: &crate::extshm::ShmDescriptor,
+    meta: &PushMetadata,
+) -> Result<PushOwned, CodecError> {
+    let outer_exts = build_push_outer_extensions(meta.qos);
+    let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
+    Ok(PushOwned {
+        header: wire_const::N_MID_PUSH | 0x20 | z_flag,
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                id: 0,
+                suffix_len: Some(keyexpr_suffix.len() as u64),
+                suffix: Some(crate::codec_owned::owned_string(keyexpr_suffix)?),
+            }),
+        },
+        extensions: outer_exts,
+        body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_shm(
+            descriptor,
+            meta.timestamp.as_ref(),
+            meta.encoding.as_ref(),
+            meta.source_info.as_ref(),
+            meta.attachment.as_deref(),
+        )?),
+    })
+}
+
 /// R233 — metadata-bearing counterpart of [`build_push_aliased`].
 pub fn build_push_aliased_with_meta(
     mapping_id: u64,
@@ -740,6 +811,36 @@ mod tests {
     #[cfg(feature = "pubsub-source-info")]
     use crate::sample::SourceInfo;
     use crate::sample::{QosLevel, TimestampHint};
+
+    /// transport-shm — the TX swap: `build_push_shm_literal` carries the SHM
+    /// DESCRIPTOR as the Put payload (not data bytes) and the 0x2 ext_shm marker
+    /// on the body ext chain. The deterministic wire-form proof (the live
+    /// is_shm-gated publish_shm path is proven end-to-end by shm_e2e).
+    #[cfg(feature = "transport-shm")]
+    #[test]
+    fn build_push_shm_literal_carries_descriptor_and_marker() {
+        let descriptor = crate::extshm::ShmDescriptor {
+            segment_id: 0x1234,
+            length: 4096,
+            generation: 0,
+        };
+        let meta = PushMetadata::default();
+        let push = build_push_shm_literal("demo/shm", &descriptor, &meta).expect("build shm push");
+        let put = match &push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => put,
+            _ => panic!("expected a MsgPut body"),
+        };
+        assert_eq!(
+            crate::extshm::decode_shm_descriptor(put.payload.as_slice()),
+            Some(descriptor),
+            "the Put payload field is the SHM descriptor, not data bytes"
+        );
+        let exts = put.extensions.as_deref().unwrap_or(&[]);
+        assert!(
+            crate::extshm::body_has_shm_marker(exts),
+            "the Put body carries the ext_shm 0x2 marker"
+        );
+    }
 
     #[cfg(all(feature = "codec-push", feature = "pubsub-timestamp"))]
     #[test]

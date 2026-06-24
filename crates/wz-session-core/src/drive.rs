@@ -239,6 +239,15 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                                 crate::extcompression::peer_offered_compression(extensions),
                             );
                         }
+                        // session-extshm — the same `&=` merge for the SHM
+                        // capability (the scoped unit-ext negotiation) on every
+                        // admitted Init frame, BEFORE the InitAck reflect.
+                        #[cfg(all(feature = "session-extshm", feature = "codec-init-body"))]
+                        if let InboundFrame::Init { extensions, .. } = &frame {
+                            actions.negotiate_shm_against_peer(crate::extshm::peer_offered_shm(
+                                extensions,
+                            ));
+                        }
                         // R3b — feed the admitted handshake frame's ext chain into
                         // the matching Z_EXT_AUTH demux stage BEFORE advancing the
                         // FSM, so a usrpwd reject tears the session down instead of
