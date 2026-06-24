@@ -414,3 +414,69 @@ jobs:
 
       - name: Layer Q — QEMU mps2/microbit e2e + footprint gate
         run: bash scripts/run-ci.sh --layer Q
+
+  # R311y11 — macOS + Windows NATIVE portability check of the wz AP stack.
+  # The Linux `ci` job above cannot catch target_os-routed regressions (the
+  # quic-datagram per-OS max_datagram MTU consts at quic_datagram_pipeline /
+  # lib.rs select per linux/macos/windows; the unixpipe + vsock backends are
+  # Linux-only and must compile OUT cleanly off-Linux). GitHub provides real
+  # macOS + Windows runners, so this compiles NATIVELY (not cross). It is a
+  # `cargo check` portability GATE (not test): no runtime/test-env dependency,
+  # and it skips the Linux-only Layer A-F deps (mnemosyne-cli / protoc /
+  # zenoh-pico) the AP-stack compile does not need. The wz AP crates are
+  # pure-Rust over sce-codegen, so the only platform input is build-sce.sh +
+  # the wz-session-core build.rs codegen. Scope = the PORTABLE feature surface:
+  # the default set (tcp/udp, no unix-only backend) + transport-link-quic-datagram
+  # (quinn is cross-platform). It deliberately does NOT enable
+  # transport-link-{unixpipe,vsock} off-Linux: those features pull `dep:libc` /
+  # `dep:tokio-vsock` from the `[target.linux]` table, so enabling them on a
+  # non-Linux target is an invalid `dep:` reference by construction (they are
+  # Linux-only backends, verified by the `ci` job's Linux lanes C1al / vsock).
+  portability:
+    name: portability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # Independent legs: a macOS failure must not mask the Windows result (or
+      # vice versa) — each platform is its own signal.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Build sce-codegen (vendor/sce)
+        # bash so the script runs on the Windows runner (git-bash) too; the
+        # binary lands at vendor/sce/target/release/sce-codegen[.exe], located
+        # by the shared wz-session-core build.rs codegen helper.
+        shell: bash
+        run: bash scripts/build-sce.sh
+
+      - name: cargo check — wz-runtime-tokio (default AP surface)
+        # The portable AP stack (tcp/udp transport, pub/sub, query, declare,
+        # liveliness). No unix-only backend in the default set, so this compiles
+        # natively on both macOS and Windows.
+        shell: bash
+        run: (cd crates && cargo check -p wz-runtime-tokio)
+
+      - name: cargo check — quic-datagram (per-OS max_datagram MTU)
+        # The one explicitly target_os-routed AP atom: the datagram MTU cap is a
+        # per-(linux/macos/windows) const, so this leg compiles the macOS /
+        # Windows arm natively — exactly what the Linux `ci` job cannot reach.
+        shell: bash
+        run: (cd crates && cargo check -p wz-runtime-tokio --features transport-link-quic-datagram)
