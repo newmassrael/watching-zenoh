@@ -368,8 +368,9 @@ run_layer() {
 # Run one QEMU MCU case, CAPTURING qemu stdout+stderr so a FAIL is diagnosable
 # from a SINGLE run (no reproduction needed). On PASS the output is discarded
 # (the lane stays quiet); on FAIL the captured output AND the exit-code meaning
-# (124 = the outer 10s timeout = hang / runaway loop, vs a non-zero semihost
-# SYS_EXIT) are surfaced to stderr. Pre-R311q2 every Q.0/Q.2/Q.4 qemu run
+# (124 = the outer wall-clock timeout [R311y14: 30s, was 10s] = hang / runaway
+# loop, vs a non-zero semihost SYS_EXIT) are surfaced to stderr. Pre-R311q2
+# every Q.0/Q.2/Q.4 qemu run
 # redirected to /dev/null, so a rare emulator transient (the R311pw an385 /
 # R311q1 an386 SYS_EXIT hiccup) left ZERO forensic trace and could only be
 # chased by re-running — this helper records everything the first time.
@@ -379,10 +380,20 @@ run_qemu_case() {
     local label="$1" cpu="$2" machine="$3" kernel="$4"
     local qlog rc
     qlog="$(mktemp)"
+    # R311y14 — wall-clock bound on the qemu run. 10s was too tight: under
+    # full-CI concurrent load (parallel cargo builds + several qemu instances)
+    # the emulator's wall-clock slows enough that a ~2s-standalone e2e exceeded
+    # 10s and the lane flaked (the Layer-Q-qemu-load-flake — passed standalone /
+    # retry, never a real regression). 30s (~15x the standalone runtime) absorbs
+    # that load slowdown while still bounding a GENUINE runaway loop: a real hang
+    # runs the full 30s vs the ~2s normal, clearly distinguishable in the
+    # captured log. [[feedback-no-flaky-ever]] — root-cause the flake (the
+    # timeout ignored CI-load slowdown), not retry-until-green / --no-verify.
+    local timeout_s=30
     # `else rc=$?` (not a post-`fi` capture): after a false `if cond; then …;
     # fi` bash resets $? to 0, so the timeout exit code is only readable inside
     # the else branch.
-    if timeout 10 qemu-system-arm \
+    if timeout "$timeout_s" qemu-system-arm \
         -cpu "$cpu" -machine "$machine" \
         -nographic -semihosting-config enable=on,target=native \
         -kernel "$kernel" >"$qlog" 2>&1; then
@@ -394,7 +405,7 @@ run_qemu_case() {
     fi
     local why="exit=${rc}"
     if [[ "$rc" -eq 124 ]]; then
-        why="exit=124 (10s timeout — hang / runaway loop)"
+        why="exit=124 (${timeout_s}s timeout — hang / runaway loop)"
     fi
     {
         echo "  ${label} FAIL (${why})"
@@ -3035,8 +3046,9 @@ layer_g_cross_compile_cortex_m() {
 #                   sub-lane.
 #   Q.2.<m> run     qemu-system-arm -machine <m> -cpu <cpu> boots
 #                   the built ELF and asserts on the semihost
-#                   SYS_EXIT exit code. PASS=0 / FAIL=1; 10s timeout
-#                   bounds a runaway loop. SKIPs Q.2 if qemu-system-arm
+#                   SYS_EXIT exit code. PASS=0 / FAIL=1; the run_qemu_case
+#                   wall-clock timeout (30s, R311y14) bounds a runaway loop.
+#                   SKIPs Q.2 if qemu-system-arm
 #                   is absent.
 #
 # Phase W ladder FULL closure mantissa: composable-framework MCU
@@ -3206,8 +3218,9 @@ layer_q_qemu_mcu_e2e() {
 
             # Q.2.<machine> run — boot the ELF in QEMU. Semihost
             # SYS_EXIT propagates the demo's PASS/FAIL into the QEMU
-            # process exit code (0 / 1); a 10s outer timeout bounds
-            # a runaway loop so a hung demo does not block CI
+            # process exit code (0 / 1); the run_qemu_case wall-clock
+            # timeout (30s, R311y14) bounds a runaway loop so a hung demo
+            # does not block CI
             # indefinitely.
             if ! run_qemu_case \
                 "Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine}" \
