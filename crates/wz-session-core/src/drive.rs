@@ -68,6 +68,12 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             DriverLoopOutcome::LinkLost(cause)
         }
         LinkEvent::Rx(rx) => {
+            // transport-stats — count the RAW link bytes received (the on-the-
+            // wire total, BEFORE the optional decompression below), the zenoh
+            // rx_bytes parity point. The single inbound chokepoint every link
+            // kind funnels through.
+            #[cfg(feature = "transport-stats")]
+            actions.stats.inc_rx(rx.bytes.len());
             // transport-compression — un-wrap the OUTERMOST wire layer FIRST
             // (zenoh decompresses the batch before any transport-message
             // dispatch). Once compression is negotiated AND established, the

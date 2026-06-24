@@ -988,6 +988,17 @@ impl OpenedSession {
         self.actions.peer_zid()
     }
 
+    /// R311y9 — public snapshot of this session's transport byte/message
+    /// counters (`transport-stats`). Delegates to
+    /// [`SessionLinkActions::stats_report`](wz_session_core::session_actions::SessionLinkActions::stats_report);
+    /// the standalone read path (the adminspace `@/<zid>/.../stats` consumer
+    /// stays P4). Returns a plain-integer
+    /// [`wz_session_core::stats::TransportStatsReport`].
+    #[cfg(feature = "transport-stats")]
+    pub fn stats(&self) -> wz_session_core::stats::TransportStatsReport {
+        self.actions.stats_report()
+    }
+
     pub async fn drain_to_close(self) {
         let OpenedSession {
             engine,

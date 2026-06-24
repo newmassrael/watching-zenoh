@@ -695,6 +695,14 @@ pub mod extlowlatency;
 #[cfg(feature = "transport-compression")]
 pub mod compression;
 
+/// R311y9 — per-session transport byte/message counters (`transport-stats`) —
+/// the wz mirror of zenoh's `zenoh-transport` `stats` feature. Additive
+/// instrumentation counting wire bytes + messages at the `send_wire` (TX) /
+/// `dispatch_link_event` (RX) seams, with a public snapshot accessor. Off by
+/// default; the adminspace consumer stays P4.
+#[cfg(feature = "transport-stats")]
+pub mod stats;
+
 /// SSOT for the Z_EXT_COMPRESSION establishment ext (`session-extcompression`) —
 /// the wz mirror of zenoh `init::ext::Compression` (`zextunit!(0x6,false)`). The
 /// codec layer (the 0x6 unit ext + the peer-offer projector); the per-session

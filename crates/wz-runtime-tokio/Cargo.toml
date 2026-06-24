@@ -372,6 +372,11 @@ transport-lowlatency = ["wz-session-core/transport-lowlatency"]
 # forward, as session-extauth / transport-lowlatency are AP-only). NO new dep
 # at the runtime layer (lz4_flex rides session-core).
 transport-compression = ["wz-session-core/transport-compression"]
+# R311y9 — per-session transport byte/message counters. Forwards the
+# wz-session-core atom (where the send_wire/dispatch_link_event seams + the
+# TransportStats struct live); the AP `OpenedSession::stats()` accessor reads
+# the snapshot. Zero extra deps. Off by default; adminspace consumer is P4.
+transport-stats = ["wz-session-core/transport-stats"]
 session-extcompression = ["wz-session-core/session-extcompression"]
 
 # transport-shm — the scoped same-host SHM data path: forwards the session-core

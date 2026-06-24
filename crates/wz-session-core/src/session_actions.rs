@@ -196,6 +196,12 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
     /// pure `&dyn BoxedLinkDriver` through [`Self::link_driver`].
     pub driver: R::LinkSink,
+    /// R311y9 — per-session wire byte/message counters (`transport-stats`).
+    /// Interior-mutable atomics, incremented at the [`Self::send_wire`] (TX)
+    /// and [`crate::drive::dispatch_link_event`] (RX) seams; read via
+    /// [`Self::stats_report`]. Off by default (the adminspace consumer is P4).
+    #[cfg(feature = "transport-stats")]
+    pub stats: crate::stats::TransportStats,
     pub params: SessionInitParams,
     pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
@@ -726,6 +732,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // bundle off ARMv6-M (no `target_has_atomic = "ptr"`).
         R::wrap_actions(Self {
             driver,
+            #[cfg(feature = "transport-stats")]
+            stats: crate::stats::TransportStats::default(),
             params,
             trace: R::new_mutex(ActionTrace::default()),
             inbound_cookie: R::new_mutex(None::<Vec<u8>>),
@@ -789,6 +797,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::link_driver(&self.driver)
     }
 
+    /// R311y9 — public snapshot of this session's transport byte/message
+    /// counters (`transport-stats`). The standalone read path (the adminspace
+    /// `@/<zid>/.../stats` consumer stays P4); surfaced on the AP
+    /// `OpenedSession` as `.stats()`. Returns a plain-integer
+    /// [`crate::stats::TransportStatsReport`].
+    #[cfg(feature = "transport-stats")]
+    pub fn stats_report(&self) -> crate::stats::TransportStatsReport {
+        self.stats.report()
+    }
+
     /// R311kw — the one wire-emit seam: stamp [`Self::last_outbound_at`]
     /// and forward to the link driver. Every production TX path routes
     /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
@@ -841,9 +859,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "transport-compression")]
         if self.is_compression() && self.is_established() {
             let wrapped = crate::compression::compress_batch(bytes);
+            // transport-stats — count the ACTUAL wire bytes (post-compression).
+            #[cfg(feature = "transport-stats")]
+            self.stats.inc_tx(wrapped.len());
             self.link_driver().send_blocking(&wrapped, reliability);
             return;
         }
+        #[cfg(feature = "transport-stats")]
+        self.stats.inc_tx(bytes.len());
         self.link_driver().send_blocking(bytes, reliability);
     }
 

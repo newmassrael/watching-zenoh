@@ -134,6 +134,12 @@ transport-lowlatency = ["alloc", "codec-frame", "session-unicast"]
 # bare transport-lowlatency rx primitive). NO handshake codecs forced.
 transport-compression = ["alloc", "dep:lz4_flex"]
 
+# R311y9 — per-session transport byte/message counters. Additive instrumentation
+# (4 AtomicUsize + 2 single-site increments at the send_wire/dispatch_link_event
+# seams + a public snapshot accessor); zero extra deps. Off by default; the
+# adminspace-metrics consumer stays P4. AP-only (never on an MCU lane).
+transport-stats = []
+
 # session-extcompression — the Z_EXT_COMPRESSION (0x6) establishment handshake
 # (the wz mirror of zenoh's compression ext). Gates the `extcompression` ext
 # codec + the offer/`&=` negotiation that SETS is_compression, and FORWARDS

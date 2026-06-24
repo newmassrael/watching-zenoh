@@ -1163,6 +1163,26 @@ layer_c1aj_cargo_test_quic_datagram() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
 }
 
+# ─── Layer C1ak — transport-stats: per-session byte/msg counters ─
+#
+# R311y9: `transport-stats` (OFF in the default set) adds per-session
+# tx/rx byte+message counters at the single send_wire (TX) + dispatch_link_event
+# (RX) seams in wz-session-core, with a public OpenedSession::stats() snapshot.
+# Zero extra deps; the adminspace consumer stays P4. This lane:
+#   1. runs the wz-session-core stats unit tests (counter accumulation + report);
+#   2. runs the transport_stats_e2e integration test (gated
+#      all(transport-stats, transport-unicast)): two nodes handshake over a
+#      loopback TCP link to Established and BOTH peers show non-zero tx/rx
+#      byte+message counters — the increments fire on a real driven session;
+#   3. clippy-gates the `transport-stats` cfg on both crates (`--all-targets`).
+layer_c1ak_cargo_test_transport_stats() {
+    (cd crates \
+        && cargo test -p wz-session-core --features transport-stats --lib stats --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-stats --test transport_stats_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-stats --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --all-targets --features transport-stats --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3584,6 +3604,7 @@ run_layer C1ag layer_c1ag_cargo_test_transport_compose || overall=1
 run_layer C1ah layer_c1ah_cargo_test_time_hlc || overall=1
 run_layer C1ai layer_c1ai_cargo_test_liveliness_history || overall=1
 run_layer C1aj layer_c1aj_cargo_test_quic_datagram || overall=1
+run_layer C1ak layer_c1ak_cargo_test_transport_stats || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1
