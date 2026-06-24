@@ -1146,28 +1146,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.is_lowlatency, |s| *s)
     }
 
-    /// transport-lowlatency — stage (or clear) the Z_EXT_LOWLATENCY offer in
-    /// `role`'s ext chain, IDEMPOTENTLY (mirrors [`Self::stage_auth_send`]): any
-    /// prior lowlatency ext is dropped first so a re-handshake never duplicates
-    /// it (the slots persist across `reset_for_reopen`), then the unit ext is
-    /// pushed iff this session is still offering lowlatency. The offer read is
-    /// taken and released before the ext-chain mutex is acquired (non-reentrant
-    /// per-profile mutex; 2b-(1) reentrancy discipline).
+    /// R311xr — stage (or clear) a UNIT capability offer in `role`'s ext chain,
+    /// IDEMPOTENTLY (the generic mechanism the lowlatency / compression / shm
+    /// establishment offers share, replacing the three near-identical
+    /// `stage_X_send` bodies): the prior entry with this id is dropped first so a
+    /// re-handshake never duplicates it (the slots persist across
+    /// `reset_for_reopen`), then `build`'s ext is pushed iff `offer`. The
+    /// per-capability `build` fn (e.g. [`crate::extlowlatency::encode_lowlatency_ext`])
+    /// is the single source of both the id (which drives the idempotent retain)
+    /// and the content — invoked once for the id (a 1-byte unit ext) and again to
+    /// push, so no id param is threaded.
     ///
-    /// Gated on the UNION of its two send-action callers (`send_init_syn` /
-    /// `send_init_ack_with_cookie`), so a subset build that compiles neither
-    /// does not carry it as dead code under `-D warnings`.
+    /// Gated on the UNION of the three capabilities' send-action callers, so a
+    /// subset build that compiles none does not carry it as dead code under
+    /// `-D warnings`.
     #[cfg(all(
-        feature = "transport-lowlatency",
+        any(
+            feature = "transport-lowlatency",
+            feature = "session-extcompression",
+            feature = "session-extshm"
+        ),
         feature = "codec-init-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
     ))]
-    fn stage_lowlatency_send(&self, role: ExtChainRole) {
-        let offer = self.is_lowlatency();
+    fn stage_capability(&self, role: ExtChainRole, offer: bool, build: fn() -> ExtEntryOwned) {
+        let ext_id = build().ext_id();
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| e.ext_id() != crate::extlowlatency::LOWLATENCY_EXT_ID);
+            chain.retain(|e| e.ext_id() != ext_id);
             if offer {
-                chain.push(crate::extlowlatency::encode_lowlatency_ext());
+                chain.push(build());
             }
         });
     }
@@ -1214,25 +1221,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.is_compression, |s| *s &= peer_offered);
     }
 
-    /// session-extcompression — stage (or clear) the Z_EXT_COMPRESSION offer in
-    /// `role`'s ext chain, IDEMPOTENTLY (mirrors [`Self::stage_lowlatency_send`]).
-    /// Gated on the UNION of its two send-action callers so a subset build that
-    /// compiles neither does not carry it as dead code under `-D warnings`.
-    #[cfg(all(
-        feature = "session-extcompression",
-        feature = "codec-init-body",
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-    ))]
-    fn stage_compression_send(&self, role: ExtChainRole) {
-        let offer = self.is_compression();
-        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| e.ext_id() != crate::extcompression::COMPRESSION_EXT_ID);
-            if offer {
-                chain.push(crate::extcompression::encode_compression_ext());
-            }
-        });
-    }
-
     /// session-extshm — the AP layer's "this deploy offers SHM toward this peer"
     /// config, set once at bring-up BEFORE the handshake drives. Seeds
     /// [`Self::is_shm`]; the peer's offer is ANDed in by
@@ -1249,23 +1237,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "session-extshm")]
     pub fn negotiate_shm_against_peer(&self, peer_offered: bool) {
         R::with_mutex_mut(&self.is_shm, |s| *s &= peer_offered);
-    }
-
-    /// session-extshm — stage (or clear) the SHM establishment offer in `role`'s
-    /// ext chain, IDEMPOTENTLY (the [`Self::stage_compression_send`] mirror).
-    #[cfg(all(
-        feature = "session-extshm",
-        feature = "codec-init-body",
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-    ))]
-    fn stage_shm_send(&self, role: ExtChainRole) {
-        let offer = self.is_shm();
-        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-            chain.retain(|e| e.ext_id() != crate::extshm::SHM_ESTABLISHMENT_EXT_ID);
-            if offer {
-                chain.push(crate::extshm::encode_shm_establishment_ext());
-            }
-        });
     }
 
     pub fn trace_snapshot(&self) -> ActionTrace {
@@ -4051,20 +4022,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // R3b — initiator usrpwd offer (Unit) staged into the InitSyn chain.
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitSyn, |d| d.open_init_syn());
-            // transport-lowlatency — initiator offers the lowlatency capability
-            // (the unit ext) in InitSyn iff this deploy enabled it; the helper
-            // self-clears a stale ext when the offer is off (zenoh
-            // `send_init_syn` emits `LowLatency::new()` only when is_lowlatency).
+            // transport-lowlatency / -compression / -shm — the initiator offers
+            // each negotiated capability (a unit ext) in InitSyn iff this deploy
+            // enabled it; `stage_capability` self-clears a stale ext when the
+            // offer is off (zenoh `send_init_syn` emits the ext only when the
+            // capability is set).
             #[cfg(feature = "transport-lowlatency")]
-            a.stage_lowlatency_send(ExtChainRole::InitSyn);
-            // session-extcompression — initiator offers compression (the 0x6 unit
-            // ext) in InitSyn iff this deploy enabled it (zenoh send_init_syn).
+            a.stage_capability(
+                ExtChainRole::InitSyn,
+                a.is_lowlatency(),
+                crate::extlowlatency::encode_lowlatency_ext,
+            );
             #[cfg(feature = "session-extcompression")]
-            a.stage_compression_send(ExtChainRole::InitSyn);
-            // session-extshm — initiator offers the SHM capability (the 0x2 unit
-            // establishment ext) in InitSyn iff this deploy enabled it.
+            a.stage_capability(
+                ExtChainRole::InitSyn,
+                a.is_compression(),
+                crate::extcompression::encode_compression_ext,
+            );
             #[cfg(feature = "session-extshm")]
-            a.stage_shm_send(ExtChainRole::InitSyn);
+            a.stage_capability(
+                ExtChainRole::InitSyn,
+                a.is_shm(),
+                crate::extshm::encode_shm_establishment_ext,
+            );
             let bytes = a
                 .encode_init_with_role(
                     /*is_ack=*/ false,
@@ -4116,24 +4096,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // handshake before this fires (replay defense).
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
-            // transport-lowlatency — acceptor REFLECTS the lowlatency capability
-            // in InitAck iff it is STILL offering after the InitSyn `&=` merge
-            // (which ran at InitSyn arrival, before this send): the helper reads
-            // the merged `is_lowlatency()`, so it pushes the ext only when both
-            // sides agreed (zenoh `recv_init_syn` ANDs, then `send_init_ack`
-            // emits the ext only if is_lowlatency still holds).
+            // transport-lowlatency / -compression / -shm — the acceptor REFLECTS
+            // each capability in InitAck iff it is STILL offering after the
+            // InitSyn `&=` merge (which ran at InitSyn arrival, before this send):
+            // `stage_capability` reads the merged `is_X()`, so it pushes the ext
+            // only when BOTH sides agreed (zenoh `recv_init_syn` ANDs, then
+            // `send_init_ack` emits the ext only if the capability still holds).
             #[cfg(feature = "transport-lowlatency")]
-            a.stage_lowlatency_send(ExtChainRole::InitAck);
-            // session-extcompression — acceptor REFLECTS compression in InitAck
-            // iff it is STILL offering after the InitSyn `&=` merge (zenoh
-            // recv_init_syn ANDs, then send_init_ack emits the ext only if still
-            // compression-capable).
+            a.stage_capability(
+                ExtChainRole::InitAck,
+                a.is_lowlatency(),
+                crate::extlowlatency::encode_lowlatency_ext,
+            );
             #[cfg(feature = "session-extcompression")]
-            a.stage_compression_send(ExtChainRole::InitAck);
-            // session-extshm — acceptor reflects the SHM offer in InitAck iff it
-            // is STILL offering after the InitSyn `&=` merge.
+            a.stage_capability(
+                ExtChainRole::InitAck,
+                a.is_compression(),
+                crate::extcompression::encode_compression_ext,
+            );
             #[cfg(feature = "session-extshm")]
-            a.stage_shm_send(ExtChainRole::InitAck);
+            a.stage_capability(
+                ExtChainRole::InitAck,
+                a.is_shm(),
+                crate::extshm::encode_shm_establishment_ext,
+            );
             // R86 — Accepting-side cookie binding per RFC §5.M
             // anti-amplification. If the inbound InitSyn already arrived
             // (`inbound_peer_zid` slot populated by `handle_inbound`),

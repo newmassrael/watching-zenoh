@@ -284,6 +284,14 @@ pub struct SubscriberRegistry<C: SampleSink> {
     /// Sync` keeps `ApplicationLayerObserver: Send` (the drive-task boundary).
     #[cfg(feature = "transport-shm")]
     shm_resolver: Option<alloc::boxed::Box<dyn crate::extshm::ShmResolver + Send + Sync>>,
+    /// transport-shm — count of SHM Puts dropped because their descriptor could
+    /// NOT be resolved (no resolver installed, or a stale / foreign segment). The
+    /// drop is silent on the data path (the Sample is discarded), but it is
+    /// OBSERVABLE here so a misconfiguration (resolver never installed) is a
+    /// readable counter rather than a mystery of vanishing samples
+    /// ([`shm_unresolved_drops`](Self::shm_unresolved_drops)).
+    #[cfg(feature = "transport-shm")]
+    shm_unresolved_drops: u64,
 }
 
 impl<C: SampleSink> Default for SubscriberRegistry<C> {
@@ -314,6 +322,8 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             own_zid: None,
             #[cfg(feature = "transport-shm")]
             shm_resolver: None,
+            #[cfg(feature = "transport-shm")]
+            shm_unresolved_drops: 0,
         }
     }
 
@@ -352,6 +362,15 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         resolver: alloc::boxed::Box<dyn crate::extshm::ShmResolver + Send + Sync>,
     ) {
         self.shm_resolver = Some(resolver);
+    }
+
+    /// transport-shm — the number of SHM Puts dropped because their descriptor
+    /// could not be resolved (no resolver installed, or a stale / foreign
+    /// segment). A non-zero value at steady state usually means the AP forgot to
+    /// [`set_shm_resolver`](Self::set_shm_resolver).
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unresolved_drops(&self) -> u64 {
+        self.shm_unresolved_drops
     }
 
     /// R231 — release the previously-installed own zid (e.g. on
@@ -697,7 +716,13 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                             .and_then(|d| self.shm_resolver.as_ref().and_then(|r| r.resolve(&d)))
                         {
                             Some(bytes) => bytes,
-                            None => return,
+                            None => {
+                                // Unresolvable descriptor (no resolver, or a stale
+                                // / foreign segment): drop the Sample, but COUNT it
+                                // so the misconfiguration is observable.
+                                self.shm_unresolved_drops += 1;
+                                return;
+                            }
                         }
                     } else {
                         put.payload.as_slice().to_vec()
@@ -2904,6 +2929,45 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "wire-arrived self-echo (source_info.zid == own_zid) must not fire local subscribers"
+        );
+    }
+
+    /// transport-shm — an SHM Put whose descriptor cannot be resolved (here: no
+    /// resolver installed) delivers nothing AND increments the observable drop
+    /// counter, so a missing-`set_shm_resolver` misconfiguration is a readable
+    /// number rather than silently vanishing samples (R311xr review remediation).
+    #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
+    #[test]
+    fn shm_put_with_no_resolver_drops_observably() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        registry.register("demo/shm", move |_s| {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
+        // No resolver installed -> the descriptor is unresolvable.
+        let descriptor = crate::extshm::ShmDescriptor {
+            segment_id: 0x1234,
+            length: 4,
+            generation: 0,
+        };
+        let push = crate::push_build::build_push_shm_literal(
+            "demo/shm",
+            &descriptor,
+            &crate::metadata::PushMetadata::default(),
+        )
+        .expect("build the SHM Put");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "an unresolvable SHM Put delivers nothing"
+        );
+        assert_eq!(
+            registry.shm_unresolved_drops(),
+            1,
+            "but the drop is COUNTED, so the missing-resolver misconfiguration is observable"
         );
     }
 

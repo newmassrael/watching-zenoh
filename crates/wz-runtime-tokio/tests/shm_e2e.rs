@@ -43,32 +43,19 @@ use tokio::net::TcpListener;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
-use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
-use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, new_session_actions, new_session_engine, poll_and_dispatch_one,
-    BoxedLinkDriver, SessionLinkActions,
-};
+use wz_runtime_tokio::session_glue::drive_session_until_terminal;
 use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_shm, connect_and_open_session_with_shm, DialConfig, DialedLink,
     DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::shm_provider::{PosixShmResolver, ShmBackedPayload};
 use wz_runtime_tokio::sync::Mutex;
-use wz_runtime_tokio::{LinkEvent, RxFrame};
-use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
-};
+use wz_runtime_tokio_test_support::{establish_capability_pair, fixture_params_with_zid};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
 const ITER_CAP: usize = 4096;
 const KEYEXPR: &str = "demo/shm";
-
-fn params(zid_byte: u8) -> wz_session_core::session_init_params::SessionInitParams {
-    let mut p = fixture_session_init_params();
-    p.zid = vec![zid_byte; 4];
-    p
-}
 
 /// Test 1 — two wz nodes handshake over loopback TCP, BOTH offering SHM, reach
 /// Established with the capability negotiated on, and a Put published from a
@@ -85,7 +72,7 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
         let (stream, _peer) = listener.accept().await.expect("accept tcp peer");
         accept_and_open_session_with_shm(
             DialedLink::Tcp(stream),
-            params(0x02),
+            fixture_params_with_zid(0x02),
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,
@@ -98,7 +85,7 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
         let cfg = DialConfig::default();
         connect_and_open_session_with_shm(
             locator,
-            params(0x01),
+            fixture_params_with_zid(0x01),
             &cfg,
             TokioTime::new(),
             Some(ITER_CAP),
@@ -194,80 +181,29 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
     );
 }
 
-/// Drive a complete wz<->wz handshake over recording drivers to Established, with
-/// `init_offer` / `resp_offer` controlling each side's SHM offer. Returns the
-/// initiator + responder actions. No socket — a deterministic feed.
-async fn establish_pair(
-    init_offer: bool,
-    resp_offer: bool,
-) -> (Arc<SessionLinkActions>, Arc<SessionLinkActions>) {
-    let init_driver = Arc::new(LifecycleRecordingDriver::default());
-    let resp_driver = Arc::new(LifecycleRecordingDriver::default());
-
-    let init_actions = {
-        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = init_driver.clone();
-        let a = new_session_actions(outbound, params(0x01), TokioTime::new());
-        if init_offer {
-            a.set_shm_offer(true);
-        }
-        a
-    };
-    let resp_actions = {
-        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = resp_driver.clone();
-        let a = new_session_actions(outbound, params(0x02), TokioTime::new());
-        if resp_offer {
-            a.set_shm_offer(true);
-        }
-        a
-    };
-
-    let mut init_engine = new_session_engine(&init_actions);
-    init_engine.initialize();
-    let mut resp_engine = new_session_engine(&resp_actions);
-    resp_engine.initialize();
-
-    let last_send =
-        |d: &LifecycleRecordingDriver| d.snapshot().sends.last().expect("a send").0.clone();
-
-    resp_engine.process_event(E::InboundStart);
-    init_engine.process_event(E::OutboundStart);
-    init_engine.process_event(E::LinkOpened);
-    let init_syn = last_send(&init_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
-    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
-    let init_ack = last_send(&resp_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_ack))]);
-    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
-    let open_syn = last_send(&init_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_syn))]);
-    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
-    let open_ack = last_send(&resp_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_ack))]);
-    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
-
-    (init_actions, resp_actions)
-}
-
 /// Test 2 — the deterministic negotiation `&=`: both offer -> both on; a
 /// one-sided offer leaves BOTH sides off (the peer never reflects), so the data
-/// path stays inert.
+/// path stays inert. The handshake drive is the shared
+/// `establish_capability_pair`; the SHM offer is the closure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shm_negotiation_and_merge() {
-    let (init, resp) = establish_pair(true, true).await;
-    assert!(init.is_shm(), "initiator negotiated SHM on");
-    assert!(resp.is_shm(), "acceptor negotiated SHM on");
+    let both = establish_capability_pair(true, true, |a| {
+        a.set_shm_offer(true);
+    })
+    .await;
+    assert!(both.init_actions.is_shm(), "initiator negotiated SHM on");
+    assert!(both.resp_actions.is_shm(), "acceptor negotiated SHM on");
 
-    let (init_one, resp_one) = establish_pair(true, false).await;
+    let one = establish_capability_pair(true, false, |a| {
+        a.set_shm_offer(true);
+    })
+    .await;
     assert!(
-        !init_one.is_shm(),
+        !one.init_actions.is_shm(),
         "a one-sided offer leaves the initiator off (peer did not reflect)"
     );
     assert!(
-        !resp_one.is_shm(),
+        !one.resp_actions.is_shm(),
         "the responder never offered, so it stays off"
     );
 }

@@ -40,19 +40,14 @@ use wz_codecs::wire_const;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
-use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
-use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, new_session_actions, new_session_engine, poll_and_dispatch_one,
-    BoxedLinkDriver, SessionLinkActions,
-};
+use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
 use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_compression, connect_and_open_session_with_compression,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio::sync::Mutex;
-use wz_runtime_tokio::{LinkEvent, RxFrame};
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, LifecycleRecordingDriver, QueueDriver,
+    establish_capability_pair, fixture_params_with_zid, LifecycleRecordingDriver,
 };
 use wz_session_core::compression::{decompress_batch, BATCH_HEADER_COMPRESSION};
 use wz_session_core::locator::parse_any_locator;
@@ -65,14 +60,6 @@ const KEYEXPR: &str = "demo/compression";
 /// COMPRESSION bit is set.
 fn compressible_payload() -> Vec<u8> {
     vec![0xABu8; 4096]
-}
-
-/// Fixture params with a distinct zid (the accept-side cookie binds to the peer
-/// zid, so the two sides must differ).
-fn params(zid_byte: u8) -> wz_session_core::session_init_params::SessionInitParams {
-    let mut p = fixture_session_init_params();
-    p.zid = vec![zid_byte; 4];
-    p
 }
 
 /// The most recent outbound frame the recording driver captured.
@@ -101,7 +88,7 @@ async fn compression_negotiates_and_delivers_put_over_real_tcp() {
         let (stream, _peer) = listener.accept().await.expect("accept tcp peer");
         accept_and_open_session_with_compression(
             DialedLink::Tcp(stream),
-            params(0x02),
+            fixture_params_with_zid(0x02),
             TokioTime::new(),
             Some(ITER_CAP),
             DEFAULT_OPEN_TICK_MS,
@@ -114,7 +101,7 @@ async fn compression_negotiates_and_delivers_put_over_real_tcp() {
         let cfg = DialConfig::default();
         connect_and_open_session_with_compression(
             locator,
-            params(0x01),
+            fixture_params_with_zid(0x01),
             &cfg,
             TokioTime::new(),
             Some(ITER_CAP),
@@ -205,66 +192,6 @@ async fn compression_negotiates_and_delivers_put_over_real_tcp() {
     );
 }
 
-/// Drive a complete wz<->wz handshake over recording drivers to Established, with
-/// `init_offer` / `resp_offer` controlling each side's compression offer. Returns
-/// the initiator + responder actions and the initiator's recording driver. No
-/// socket, no clock — a deterministic feed (the lowlatency_e2e pattern).
-async fn establish_pair(
-    init_offer: bool,
-    resp_offer: bool,
-) -> (
-    Arc<SessionLinkActions>,
-    Arc<SessionLinkActions>,
-    Arc<LifecycleRecordingDriver>,
-) {
-    let init_driver = Arc::new(LifecycleRecordingDriver::default());
-    let resp_driver = Arc::new(LifecycleRecordingDriver::default());
-
-    let init_actions = {
-        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = init_driver.clone();
-        let a = new_session_actions(outbound, params(0x01), TokioTime::new());
-        if init_offer {
-            a.set_compression_offer(true);
-        }
-        a
-    };
-    let resp_actions = {
-        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = resp_driver.clone();
-        let a = new_session_actions(outbound, params(0x02), TokioTime::new());
-        if resp_offer {
-            a.set_compression_offer(true);
-        }
-        a
-    };
-
-    let mut init_engine = new_session_engine(&init_actions);
-    init_engine.initialize();
-    let mut resp_engine = new_session_engine(&resp_actions);
-    resp_engine.initialize();
-
-    resp_engine.process_event(E::InboundStart);
-    init_engine.process_event(E::OutboundStart);
-    init_engine.process_event(E::LinkOpened);
-    let init_syn = last_send(&init_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
-    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
-    let init_ack = last_send(&resp_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_ack))]);
-    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
-    let open_syn = last_send(&init_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_syn))]);
-    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
-    let open_ack = last_send(&resp_driver);
-
-    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_ack))]);
-    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
-
-    (init_actions, resp_actions, init_driver)
-}
-
 /// Publish a Put on `actions` and return its captured outbound wire bytes.
 fn publish_and_capture(
     actions: &Arc<SessionLinkActions>,
@@ -291,12 +218,22 @@ fn publish_and_capture(
 async fn compression_put_rides_a_batch_header_not_a_bare_frame() {
     let payload = compressible_payload();
 
+    let offer = |a: &Arc<SessionLinkActions>| {
+        a.set_compression_offer(true);
+    };
+
     // Both offer -> negotiated on -> the Put batch leads with the COMPRESSION
     // BatchHeader, and the lz4 payload decompresses back to a T_MID_FRAME.
-    let (init, resp, init_driver) = establish_pair(true, true).await;
-    assert!(init.is_compression(), "initiator negotiated compression on");
-    assert!(resp.is_compression(), "acceptor negotiated compression on");
-    let wire = publish_and_capture(&init, &init_driver, &payload);
+    let both = establish_capability_pair(true, true, offer).await;
+    assert!(
+        both.init_actions.is_compression(),
+        "initiator negotiated compression on"
+    );
+    assert!(
+        both.resp_actions.is_compression(),
+        "acceptor negotiated compression on"
+    );
+    let wire = publish_and_capture(&both.init_actions, &both.init_driver, &payload);
     assert_eq!(
         wire[0], BATCH_HEADER_COMPRESSION,
         "the compressible Put batch leads with the COMPRESSION BatchHeader (0x01)"
@@ -310,10 +247,16 @@ async fn compression_put_rides_a_batch_header_not_a_bare_frame() {
 
     // CONTROL: neither offers -> the Put ships as a bare uncompressed T_MID_FRAME
     // (no BatchHeader prefix at all).
-    let (init_u, resp_u, init_driver_u) = establish_pair(false, false).await;
-    assert!(!init_u.is_compression(), "initiator stays uncompressed");
-    assert!(!resp_u.is_compression(), "acceptor stays uncompressed");
-    let raw = publish_and_capture(&init_u, &init_driver_u, &payload);
+    let none = establish_capability_pair(false, false, offer).await;
+    assert!(
+        !none.init_actions.is_compression(),
+        "initiator stays uncompressed"
+    );
+    assert!(
+        !none.resp_actions.is_compression(),
+        "acceptor stays uncompressed"
+    );
+    let raw = publish_and_capture(&none.init_actions, &none.init_driver, &payload);
     assert_eq!(
         raw[0] & 0x1F,
         wire_const::T_MID_FRAME,
@@ -322,13 +265,13 @@ async fn compression_put_rides_a_batch_header_not_a_bare_frame() {
 
     // NEGOTIATION `&=`: only the initiator offers -> the responder never reflects,
     // so BOTH finalize uncompressed (zenoh `is_compression &= other`).
-    let (init_one, resp_one, _) = establish_pair(true, false).await;
+    let one = establish_capability_pair(true, false, offer).await;
     assert!(
-        !init_one.is_compression(),
+        !one.init_actions.is_compression(),
         "a one-sided offer leaves the initiator uncompressed (peer did not reflect)"
     );
     assert!(
-        !resp_one.is_compression(),
+        !one.resp_actions.is_compression(),
         "the responder never offered, so it stays uncompressed"
     );
 }

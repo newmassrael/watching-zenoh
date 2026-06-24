@@ -826,3 +826,102 @@ mod tests {
         assert_eq!(chaos.reordered, 0);
     }
 }
+
+// ── R311xr — shared establishment-handshake driver for the capability e2e tests
+//    (lowlatency / compression / shm). Extracted from the three byte-identical
+//    `establish_pair` helpers (one differing line: which `set_*_offer` was
+//    called) per the project's "test fixtures -> sibling crate" rule. The one
+//    differing line becomes the `apply_offer` closure the caller supplies, so the
+//    feature-gated setter stays in the (feature-on) e2e crate and test-support
+//    carries none of it.
+
+use std::sync::Arc;
+
+use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as FsmEvent;
+use wz_runtime_tokio::session_glue::{
+    new_session_actions, new_session_engine, poll_and_dispatch_one, SessionLinkActions,
+};
+
+/// `SessionInitParams` with a distinct 4-byte zid (the accept-side cookie binds
+/// to the peer zid, so the two sides of a handshake must differ).
+pub fn fixture_params_with_zid(zid_byte: u8) -> SessionInitParams {
+    let mut p = fixture_session_init_params();
+    p.zid = vec![zid_byte; 4];
+    p
+}
+
+/// The two actions bundles + their recording drivers from a completed
+/// recording-driver handshake.
+pub struct EstablishedPair {
+    pub init_actions: Arc<SessionLinkActions>,
+    pub resp_actions: Arc<SessionLinkActions>,
+    pub init_driver: Arc<LifecycleRecordingDriver>,
+    pub resp_driver: Arc<LifecycleRecordingDriver>,
+}
+
+/// Drive a complete wz<->wz unicast handshake over recording drivers to
+/// Established (no socket -- a deterministic feed of each side's captured bytes
+/// into the other). `apply_offer` stages a capability on a side that offers
+/// (e.g. `|a| { a.set_lowlatency_offer(true); }`) before the drive -- the one
+/// line the per-capability e2e helpers differed on.
+pub async fn establish_capability_pair(
+    init_offer: bool,
+    resp_offer: bool,
+    apply_offer: impl Fn(&Arc<SessionLinkActions>),
+) -> EstablishedPair {
+    let init_driver = Arc::new(LifecycleRecordingDriver::default());
+    let resp_driver = Arc::new(LifecycleRecordingDriver::default());
+
+    let init_actions = {
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = init_driver.clone();
+        let a = new_session_actions(outbound, fixture_params_with_zid(0x01), TokioTime::new());
+        if init_offer {
+            apply_offer(&a);
+        }
+        a
+    };
+    let resp_actions = {
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = resp_driver.clone();
+        let a = new_session_actions(outbound, fixture_params_with_zid(0x02), TokioTime::new());
+        if resp_offer {
+            apply_offer(&a);
+        }
+        a
+    };
+
+    let mut init_engine = new_session_engine(&init_actions);
+    init_engine.initialize();
+    let mut resp_engine = new_session_engine(&resp_actions);
+    resp_engine.initialize();
+
+    let last_send =
+        |d: &LifecycleRecordingDriver| d.snapshot().sends.last().expect("a send").0.clone();
+
+    resp_engine.process_event(FsmEvent::InboundStart);
+    init_engine.process_event(FsmEvent::OutboundStart);
+    init_engine.process_event(FsmEvent::LinkOpened);
+    let init_syn = last_send(&init_driver);
+
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_syn))]);
+    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
+    let init_ack = last_send(&resp_driver);
+
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(init_ack))]);
+    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
+    let open_syn = last_send(&init_driver);
+
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_syn))]);
+    poll_and_dispatch_one(&mut d, &resp_actions, &mut resp_engine).await;
+    let open_ack = last_send(&resp_driver);
+
+    let mut d = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(open_ack))]);
+    poll_and_dispatch_one(&mut d, &init_actions, &mut init_engine).await;
+
+    EstablishedPair {
+        init_actions,
+        resp_actions,
+        init_driver,
+        resp_driver,
+    }
+}

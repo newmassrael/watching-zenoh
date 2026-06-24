@@ -674,6 +674,17 @@ pub mod extauth;
 /// projector); the per-session `is_lowlatency` runtime state, the offer/`&=`
 /// negotiation, and the lean no-Frame tx / rx data path live in `session_actions`
 /// / `drive`.
+/// R311xr — SSOT for the zero-payload UNIT capability-ext mechanism (encode +
+/// presence-detect) shared by the lowlatency / compression / shm establishment
+/// negotiations; each per-capability module keeps its named id + wrapper and
+/// delegates the identical mechanism here.
+#[cfg(any(
+    feature = "transport-lowlatency",
+    feature = "session-extcompression",
+    feature = "transport-shm"
+))]
+pub mod unit_ext;
+
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;
 

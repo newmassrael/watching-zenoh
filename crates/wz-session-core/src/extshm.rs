@@ -92,9 +92,10 @@ pub fn encode_shm_marker_ext() -> ExtEntryOwned {
 }
 
 /// `true` iff a Put body ext chain carries the `ext_shm` marker — the RX signal
-/// that the payload field is a descriptor to resolve (not raw bytes).
+/// that the payload field is a descriptor to resolve (not raw bytes). Detects by
+/// id (the [`crate::unit_ext`] mechanism), so the marker's M bit is ignored.
 pub fn body_has_shm_marker(extensions: &[ExtEntryOwned]) -> bool {
-    extensions.iter().any(|e| e.ext_id() == SHM_BODY_EXT_ID)
+    crate::unit_ext::chain_has_ext_id(extensions, SHM_BODY_EXT_ID)
 }
 
 /// The Z_EXT_SHM ESTABLISHMENT ext id (on Init / Open) — a DISTINCT carrier from
@@ -109,22 +110,18 @@ pub fn body_has_shm_marker(extensions: &[ExtEntryOwned]) -> bool {
 #[cfg(feature = "session-extshm")]
 pub const SHM_ESTABLISHMENT_EXT_ID: u8 = 0x02;
 
-/// Build the establishment SHM capability offer (the UNIT ext on Init / Open).
+/// Build the establishment SHM capability offer (the UNIT ext on Init / Open,
+/// the [`crate::unit_ext`] mechanism at the SHM establishment id).
 #[cfg(feature = "session-extshm")]
 pub fn encode_shm_establishment_ext() -> ExtEntryOwned {
-    ExtEntryOwned {
-        header: SHM_ESTABLISHMENT_EXT_ID,
-        body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-    }
+    crate::unit_ext::encode_unit_ext(SHM_ESTABLISHMENT_EXT_ID)
 }
 
 /// Project the peer's SHM capability from an Init / Open ext chain — ANDed against
 /// the local offer to finalize `is_shm` (zenoh `is_shm &= other.is_some()`).
 #[cfg(feature = "session-extshm")]
 pub fn peer_offered_shm(extensions: &[ExtEntryOwned]) -> bool {
-    extensions
-        .iter()
-        .any(|e| e.ext_id() == SHM_ESTABLISHMENT_EXT_ID)
+    crate::unit_ext::chain_has_ext_id(extensions, SHM_ESTABLISHMENT_EXT_ID)
 }
 
 /// The no_std/std seam: an SHM-backed Put's descriptor is resolved to its bytes

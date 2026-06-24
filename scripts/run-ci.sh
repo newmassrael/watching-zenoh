@@ -1056,6 +1056,29 @@ layer_c1af_cargo_test_shm() {
         && cargo clippy -p wz-session-core --no-default-features --features session-extshm --quiet -- -D warnings)
 }
 
+# ─── Layer C1ag — transport-advanced COMPOSITION + R311xr review remediation ─
+#
+# R311xr: the three transport-advanced capabilities (lowlatency / compression /
+# shm) COMPOSE on one session, plus the review-remediation tests. This lane:
+#   1. runs the shared unit_ext SSOT test (the encode/detect mechanism the three
+#      establishment negotiations delegate to);
+#   2. runs the SHM unresolved-drop observability test (a marker Put with no
+#      resolver drops AND increments the observable counter -- fail-observable,
+#      not fail-silent) under the heavily-gated pubsub dispatch test module;
+#   3. runs transport_compose_e2e (all three negotiated on one session; an SHM Put
+#      shows the wire LAYERING compression(lean(shm-descriptor)) -- the 3-way
+#      composition the single-mode e2e could not prove);
+#   4. clippy-gates the combined three-feature cfg --all-targets (the only build
+#      where all three data paths + the shared establish_capability_pair helper
+#      compile together).
+layer_c1ag_cargo_test_transport_compose() {
+    (cd crates \
+        && cargo test -p wz-session-core --features transport-lowlatency,session-extcompression,session-extshm --lib unit_ext --quiet \
+        && cargo test -p wz-session-core --features transport-shm,codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --lib shm_put_with_no_resolver --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --test transport_compose_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-lowlatency,session-extcompression,session-extshm,transport-unicast,transport-link-tcp --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3473,6 +3496,7 @@ run_layer C1ac layer_c1ac_cargo_test_quic || overall=1
 run_layer C1ad layer_c1ad_cargo_test_lowlatency || overall=1
 run_layer C1ae layer_c1ae_cargo_test_compression || overall=1
 run_layer C1af layer_c1af_cargo_test_shm || overall=1
+run_layer C1ag layer_c1ag_cargo_test_transport_compose || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

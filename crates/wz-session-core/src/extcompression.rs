@@ -24,8 +24,9 @@
 //! distinct establishment UNIT ext in the neighbouring 0x6 id slot), reusing the
 //! same `ExtUnit` codec -- zero new codec work.
 
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_unit::ExtUnit;
+use wz_codecs::ext_entry::ExtEntryOwned;
+
+use crate::unit_ext::{chain_has_ext_id, encode_unit_ext};
 
 /// Z_EXT_COMPRESSION ext id on the Init / Open establishment messages -- zenoh
 /// `init.rs:168` / `open.rs:134` `zextunit!(0x6, false)`. The establishment
@@ -34,23 +35,19 @@ use wz_codecs::ext_unit::ExtUnit;
 pub const COMPRESSION_EXT_ID: u8 = 0x06;
 
 /// Build the Z_EXT_COMPRESSION `ExtEntry`: the unit (zero-length) marker that
-/// advertises compression capability. Header = the compression id with the UNIT
-/// encoding (encoding bits clear) and no mandatory bit; the surrounding
+/// advertises compression capability (the [`crate::unit_ext`] mechanism at the
+/// compression id). zenoh `zextunit!(0x6, false)`; the surrounding
 /// [`crate::ext_chain::encode_ext_chain`] applies the chain-continuation `Z` bit.
-/// Infallible -- a unit ext carries no payload.
 pub fn encode_compression_ext() -> ExtEntryOwned {
-    ExtEntryOwned {
-        header: COMPRESSION_EXT_ID,
-        body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-    }
+    encode_unit_ext(COMPRESSION_EXT_ID)
 }
 
 /// Project the peer's compression capability from an establishment ext chain:
-/// `true` iff the chain carries the Z_EXT_COMPRESSION id. Presence is the whole
-/// signal. The merge side (`negotiate_compression_against_peer`) ANDs this against
-/// the local offer, reproducing zenoh `is_compression &= other_ext.is_some()`.
+/// `true` iff the chain carries the Z_EXT_COMPRESSION id. The merge side
+/// (`negotiate_compression_against_peer`) ANDs this against the local offer,
+/// reproducing zenoh `is_compression &= other_ext.is_some()`.
 pub fn peer_offered_compression(extensions: &[ExtEntryOwned]) -> bool {
-    extensions.iter().any(|e| e.ext_id() == COMPRESSION_EXT_ID)
+    chain_has_ext_id(extensions, COMPRESSION_EXT_ID)
 }
 
 #[cfg(test)]
@@ -82,10 +79,7 @@ mod tests {
     fn peer_offer_detected_and_not_confused_with_neighbour() {
         assert!(peer_offered_compression(&[encode_compression_ext()]));
         assert!(!peer_offered_compression(&[]));
-        let lowlatency = ExtEntryOwned {
-            header: 0x05,
-            body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-        };
-        assert!(!peer_offered_compression(&[lowlatency]));
+        // The NEIGHBOURING lowlatency ext (0x5) is not mistaken for 0x6.
+        assert!(!peer_offered_compression(&[encode_unit_ext(0x05)]));
     }
 }

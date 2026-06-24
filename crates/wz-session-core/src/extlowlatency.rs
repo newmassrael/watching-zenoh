@@ -41,8 +41,9 @@
 //! ext lands later, the guard belongs at the offer-injection point, not in this
 //! codec.
 
-use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-use wz_codecs::ext_unit::ExtUnit;
+use wz_codecs::ext_entry::ExtEntryOwned;
+
+use crate::unit_ext::{chain_has_ext_id, encode_unit_ext};
 
 /// Z_EXT_LOWLATENCY ext id on the Init / Open establishment messages — zenoh
 /// `init.rs:162` / `open.rs:128` `zextunit!(0x5, false)`. The establishment
@@ -51,26 +52,19 @@ use wz_codecs::ext_unit::ExtUnit;
 pub const LOWLATENCY_EXT_ID: u8 = 0x05;
 
 /// Build the Z_EXT_LOWLATENCY `ExtEntry`: the unit (zero-length) marker that
-/// advertises lowlatency capability. The header is the lowlatency id with the
-/// UNIT encoding (encoding bits clear, [`crate::ext_header`] vocabulary) and no
-/// mandatory bit; the surrounding [`crate::ext_chain::encode_ext_chain`] applies
-/// the chain-continuation `Z` bit. Infallible — a unit ext carries no payload
-/// (unlike [`crate::extauth::encode_auth_ext`], which copies a byte buffer).
+/// advertises lowlatency capability (the [`crate::unit_ext`] mechanism at the
+/// lowlatency id). zenoh `zextunit!(0x5, false)`; the surrounding
+/// [`crate::ext_chain::encode_ext_chain`] applies the chain-continuation `Z` bit.
 pub fn encode_lowlatency_ext() -> ExtEntryOwned {
-    ExtEntryOwned {
-        header: LOWLATENCY_EXT_ID,
-        body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-    }
+    encode_unit_ext(LOWLATENCY_EXT_ID)
 }
 
 /// Project the peer's lowlatency capability from an establishment ext chain:
-/// `true` iff the chain carries the Z_EXT_LOWLATENCY id. Presence is the whole
-/// signal — a unit ext has no value to inspect — so this returns `bool`, not a
-/// borrowed payload (cf. [`crate::extauth::decode_auth_ext`]). The merge side
-/// (`SessionLinkActions::negotiate_lowlatency_against_peer`) ANDs this against
-/// the local offer, reproducing zenoh `is_lowlatency &= other_ext.is_some()`.
+/// `true` iff the chain carries the Z_EXT_LOWLATENCY id. The merge side
+/// (`SessionLinkActions::negotiate_lowlatency_against_peer`) ANDs this against the
+/// local offer, reproducing zenoh `is_lowlatency &= other_ext.is_some()`.
 pub fn peer_offered_lowlatency(extensions: &[ExtEntryOwned]) -> bool {
-    extensions.iter().any(|e| e.ext_id() == LOWLATENCY_EXT_ID)
+    chain_has_ext_id(extensions, LOWLATENCY_EXT_ID)
 }
 
 #[cfg(test)]
@@ -111,10 +105,7 @@ mod tests {
     #[test]
     fn peer_offer_absent_without_the_ext() {
         assert!(!peer_offered_lowlatency(&[]));
-        let foreign = ExtEntryOwned {
-            header: 0x06,
-            body: ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
-        };
-        assert!(!peer_offered_lowlatency(&[foreign]));
+        // A foreign establishment ext (a 0x06 Compression-shaped unit entry).
+        assert!(!peer_offered_lowlatency(&[encode_unit_ext(0x06)]));
     }
 }
