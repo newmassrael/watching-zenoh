@@ -416,13 +416,14 @@ jobs:
         run: bash scripts/run-ci.sh --layer Q
 
   # R311y11 — macOS + Windows NATIVE portability check of the wz AP stack.
-  # The Linux `ci` job above cannot catch target_os-routed regressions (the
-  # quic-datagram per-OS max_datagram MTU consts at quic_datagram_pipeline /
-  # lib.rs select per linux/macos/windows; the unixpipe + vsock backends are
-  # Linux-only and must compile OUT cleanly off-Linux). GitHub provides real
-  # macOS + Windows runners, so this compiles NATIVELY (not cross). It is a
-  # `cargo check` portability GATE (not test): no runtime/test-env dependency,
-  # and it skips the Linux-only Layer A-F deps (mnemosyne-cli / protoc /
+  # The Linux `ci` job above cannot catch target_os-routed regressions: the
+  # default AP stack must compile clean off-Linux, the quinn/rustls datagram
+  # backend must compile natively on macOS + Windows, and the unixpipe + vsock
+  # backends (Linux-only by design) must compile OUT cleanly off-Linux. GitHub
+  # provides real macOS + Windows runners, so this compiles NATIVELY (not cross).
+  # R311y13: a `cargo clippy -D warnings` portability GATE (upgraded from bare
+  # `check` — matches the project's universal lint bar + runs codegen, not just
+  # type-check); it skips the Linux-only Layer A-F deps (mnemosyne-cli / protoc /
   # zenoh-pico) the AP-stack compile does not need. The wz AP crates are
   # pure-Rust over sce-codegen, so the only platform input is build-sce.sh +
   # the wz-session-core build.rs codegen. Scope = the PORTABLE feature surface:
@@ -467,16 +468,20 @@ jobs:
         shell: bash
         run: bash scripts/build-sce.sh
 
-      - name: cargo check — wz-runtime-tokio (default AP surface)
+      - name: cargo clippy — wz-runtime-tokio (default AP surface)
         # The portable AP stack (tcp/udp transport, pub/sub, query, declare,
-        # liveliness). No unix-only backend in the default set, so this compiles
-        # natively on both macOS and Windows.
+        # liveliness). No unix-only backend in the default set, so it compiles
+        # natively on macOS + Windows. R311y13: clippy -D warnings (not bare
+        # `check`) so the mac/win gate matches the project's universal lint bar
+        # and runs codegen, not just type-check.
         shell: bash
-        run: (cd crates && cargo check -p wz-runtime-tokio)
+        run: (cd crates && cargo clippy -p wz-runtime-tokio -- -D warnings)
 
-      - name: cargo check — quic-datagram (per-OS max_datagram MTU)
-        # The one explicitly target_os-routed AP atom: the datagram MTU cap is a
-        # per-(linux/macos/windows) const, so this leg compiles the macOS /
-        # Windows arm natively — exactly what the Linux `ci` job cannot reach.
+      - name: cargo clippy — quic-datagram (portable quinn datagram path)
+        # The off-default datagram backend. quinn is cross-platform; wz reads the
+        # per-datagram MTU at RUNTIME (connection.max_datagram_size), so there is
+        # no per-OS const — this leg proves the quinn/rustls datagram stack
+        # compiles + lints clean natively on macOS + Windows, the arms the Linux
+        # `ci` job cannot reach. R311y13: clippy -D warnings, not bare `check`.
         shell: bash
-        run: (cd crates && cargo check -p wz-runtime-tokio --features transport-link-quic-datagram)
+        run: (cd crates && cargo clippy -p wz-runtime-tokio --features transport-link-quic-datagram -- -D warnings)

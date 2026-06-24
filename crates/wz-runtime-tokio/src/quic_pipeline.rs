@@ -127,29 +127,80 @@ pub(crate) fn client_bind_addr(target: SocketAddr) -> SocketAddr {
     }
 }
 
-/// Dial a QUIC connection to `addr`, verifying the server against `client_config`
-/// (a TLS-1.3 + ALPN-`hq-29` rustls config from [`crate::quic_config`]) with
-/// `server_name` as the SNI / cert name, then open the single bidirectional
-/// stream. Returns a [`QuicLink`] ready for [`wire_quic_stream`].
-///
-/// The primitive [`crate::session_open::dial_locator`] calls when a `quic/...`
-/// locator carries a [`crate::session_open::DialConfig`]`.quic` (the TLS-style
-/// cert threading); also callable directly. Mirrors zenoh's `new_link`: bind a
-/// client `Endpoint`, install the rustls client config, `connect`, `open_bi`.
-pub async fn dial_quic(
+/// Build a client [`Endpoint`] bound to an ephemeral local socket of `addr`'s
+/// family, install the TLS-1.3 + ALPN-`hq-29` rustls `client_config`, and connect
+/// to `addr` (SNI = `server_name`) — the shared QUIC client-handshake SSOT for
+/// BOTH the stream backend ([`dial_quic`]) and the datagram backend
+/// ([`crate::quic_datagram_pipeline::dial_quic_datagram`]). Returns the endpoint
+/// (the caller keeps it alive — its driver pumps the connection) + the
+/// established [`Connection`], BEFORE any stream is opened; the caller chooses
+/// `open_bi` (stream) vs riding datagrams. Mirrors zenoh's `new_link` client half.
+pub(crate) async fn connect_quic_client(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
-) -> io::Result<QuicLink> {
+) -> io::Result<(Endpoint, Connection)> {
     let mut endpoint = Endpoint::client(client_bind_addr(addr))?;
     let quic_crypto = QuicClientConfig::try_from(client_config).map_err(io_other)?;
     endpoint.set_default_client_config(QuinnClientConfig::new(Arc::new(quic_crypto)));
-
     let connection = endpoint
         .connect(addr, server_name)
         .map_err(io_other)?
         .await
         .map_err(io_other)?;
+    Ok((endpoint, connection))
+}
+
+/// Build a server [`Endpoint`] at `addr` presenting the TLS-1.3 + ALPN-`hq-29`
+/// rustls `server_config`, capping application streams at `max_bidi`
+/// bidirectional + 0 unidirectional — the shared QUIC server-endpoint SSOT for
+/// BOTH the stream backend ([`bind_quic`], `max_bidi = 1` = exactly one
+/// StreamEnvelope stream) and the datagram backend
+/// ([`crate::quic_datagram_pipeline::bind_quic_datagram`], `max_bidi = 0` =
+/// datagram-only). uni is always 0 (wz uses neither). The QUIC handshake rides
+/// crypto frames, not application streams, so it completes regardless of the
+/// limit. Mirrors zenoh's `new_listener` stream-limit setup.
+pub(crate) fn quic_server_endpoint(
+    addr: SocketAddr,
+    server_config: Arc<RustlsServerConfig>,
+    max_bidi: u8,
+) -> io::Result<Endpoint> {
+    let quic_crypto = QuicServerConfig::try_from(server_config).map_err(io_other)?;
+    let mut sc = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
+    let mut transport = TransportConfig::default();
+    transport.max_concurrent_uni_streams(0u8.into());
+    transport.max_concurrent_bidi_streams(max_bidi.into());
+    sc.transport_config(Arc::new(transport));
+    Endpoint::server(sc, addr)
+}
+
+/// Accept one inbound QUIC connection from a *borrowed* server [`Endpoint`] and
+/// complete its handshake — the shared accept-handshake SSOT for BOTH the stream
+/// backend ([`accept_quic_on`]) and the datagram backend
+/// ([`crate::quic_datagram_pipeline::accept_quic_datagram_on`]). Returns the
+/// established [`Connection`] BEFORE any stream is accepted; the caller chooses
+/// `accept_bi` (stream) vs riding datagrams. Borrowing the endpoint lets a
+/// multi-peer acceptor loop.
+pub(crate) async fn accept_quic_connection(endpoint: &Endpoint) -> io::Result<Connection> {
+    let incoming = endpoint
+        .accept()
+        .await
+        .ok_or_else(|| io_other("quic endpoint closed before a peer connected"))?;
+    incoming.await.map_err(io_other)
+}
+
+/// Dial a QUIC connection to `addr` (SNI `server_name`, TLS-1.3 + ALPN-`hq-29`
+/// `client_config` from [`crate::quic_config`]) and open the single bidirectional
+/// stream. Returns a [`QuicLink`] ready for [`wire_quic_stream`]. The primitive
+/// [`crate::session_open::dial_locator`] calls for a `quic/...` locator carrying
+/// [`crate::session_open::DialConfig`]`.quic`. Mirrors zenoh's `new_link`: the
+/// shared [`connect_quic_client`] handshake, then `open_bi`.
+pub async fn dial_quic(
+    addr: SocketAddr,
+    client_config: Arc<RustlsClientConfig>,
+    server_name: &str,
+) -> io::Result<QuicLink> {
+    let (endpoint, connection) = connect_quic_client(addr, client_config, server_name).await?;
     // The initiator opens the one bidirectional stream; the responder
     // `accept_bi`s it (zenoh: open_bi on dial, accept_bi on listen).
     let (send, recv) = connection.open_bi().await.map_err(io_other)?;
@@ -161,38 +212,25 @@ pub async fn dial_quic(
     })
 }
 
-/// Bind a QUIC server [`Endpoint`] at `addr` presenting `server_config` (a
-/// TLS-1.3 + ALPN-`hq-29` rustls server config from [`crate::quic_config`]) —
-/// the accept-side "listen half" symmetric to [`dial_quic`]. Restricts the
-/// connection to ONE bidirectional stream and ZERO unidirectional, mirroring
-/// zenoh's `new_listener` (`max_concurrent_uni_streams(0)` /
-/// `max_concurrent_bidi_streams(1)`), so the QUIC link is exactly one
-/// StreamEnvelope byte stream. The caller (the e2e harness / a future acceptor)
-/// owns the returned `Endpoint` and loops [`accept_quic_on`] over it.
+/// Bind a QUIC server [`Endpoint`] at `addr` presenting `server_config` — the
+/// accept-side "listen half" symmetric to [`dial_quic`]. Restricts the connection
+/// to ONE bidirectional stream and ZERO unidirectional (the shared
+/// [`quic_server_endpoint`] with `max_bidi = 1`), mirroring zenoh's
+/// `new_listener`, so the QUIC link is exactly one StreamEnvelope byte stream.
+/// The caller owns the returned `Endpoint` and loops [`accept_quic_on`] over it.
 pub fn bind_quic(addr: SocketAddr, server_config: Arc<RustlsServerConfig>) -> io::Result<Endpoint> {
-    let quic_crypto = QuicServerConfig::try_from(server_config).map_err(io_other)?;
-    let mut sc = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
-    let mut transport = TransportConfig::default();
-    transport.max_concurrent_uni_streams(0u8.into());
-    transport.max_concurrent_bidi_streams(1u8.into());
-    sc.transport_config(Arc::new(transport));
-    Endpoint::server(sc, addr)
+    quic_server_endpoint(addr, server_config, 1)
 }
 
 /// Accept ONE inbound QUIC connection from a *borrowed* server [`Endpoint`],
-/// complete its handshake, and accept the peer's single bidirectional stream —
-/// the QUIC mirror of [`crate::link_pipeline::accept_tcp_on`]. Returns a
-/// [`QuicLink`] (the endpoint is cloned in as the keep-alive). Borrowing the
-/// endpoint lets a multi-peer acceptor loop. `accept_bi` resolves once the peer
-/// (the initiator) opens + writes the stream — which the wz handshake does
-/// immediately (the initiator's InitSyn is the first wire byte), so this is the
-/// accept-side counterpart of a TCP `accept` resolving after `connect`.
+/// complete its handshake (the shared [`accept_quic_connection`]), and accept the
+/// peer's single bidirectional stream — the QUIC mirror of
+/// [`crate::link_pipeline::accept_tcp_on`]. Returns a [`QuicLink`] (the endpoint
+/// is cloned in as the keep-alive). `accept_bi` resolves once the peer (the
+/// initiator) opens + writes the stream — which the wz handshake does immediately
+/// (the initiator's InitSyn is the first wire byte).
 pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
-    let incoming = endpoint
-        .accept()
-        .await
-        .ok_or_else(|| io_other("quic endpoint closed before a peer connected"))?;
-    let connection = incoming.await.map_err(io_other)?;
+    let connection = accept_quic_connection(endpoint).await?;
     let (send, recv) = connection.accept_bi().await.map_err(io_other)?;
     Ok(QuicLink {
         endpoint: endpoint.clone(),

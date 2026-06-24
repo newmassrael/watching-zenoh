@@ -50,11 +50,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{
-    ClientConfig as QuinnClientConfig, Connection, Endpoint, ServerConfig as QuinnServerConfig,
-    TransportConfig,
-};
+use quinn::{Connection, Endpoint};
 use tokio::sync::mpsc;
 use tokio_rustls::rustls::{
     ClientConfig as RustlsClientConfig, ServerConfig as RustlsServerConfig,
@@ -62,18 +58,23 @@ use tokio_rustls::rustls::{
 
 use wz_runtime_core::Runtime;
 
-use crate::quic_pipeline::{client_bind_addr, io_other};
+// R311y13 — the QUIC handshake SSOT (client connect / server endpoint / accept)
+// is shared from quic_pipeline; this module owns only the datagram-vs-stream
+// delta (no open_bi/accept_bi, max_bidi=0, the datagram read/write drivers).
+use crate::quic_pipeline::{accept_quic_connection, connect_quic_client, quic_server_endpoint};
 use crate::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
-use wz_session_core::link::{BoxedLinkDriver, DEFAULT_LINK_MTU};
+use wz_session_core::link::BoxedLinkDriver;
 
 /// Conservative per-datagram MTU floor used when the connection has not yet
 /// reported a negotiated `max_datagram_size` (the QUIC initial datagram budget
 /// is ~1200 B). [`wire_quic_datagram`] prefers the real negotiated value when
-/// present; this is the fallback floor. It binds BELOW [`DEFAULT_LINK_MTU`]
-/// (the unbounded stream default) so the transport's `negotiated_batch_mtu` min
-/// term is live and a >MTU frame actually fragments — the same invariant
-/// [`crate::udp_pipeline::UDP_LINK_MTU`] holds.
+/// present; this is only the fallback floor. It sits well below the unbounded
+/// stream-default link MTU, so the transport's `negotiated_batch_mtu` min term
+/// fragments a >MTU frame to it — the same invariant
+/// [`crate::udp_pipeline::UDP_LINK_MTU`] holds. (quinn's `max_datagram_size`
+/// already subtracts QUIC's per-packet framing overhead, so the negotiated value
+/// is itself structurally below the stream default — no clamp needed.)
 pub const QUIC_DATAGRAM_LINK_MTU: usize = 1200;
 
 /// A dialed / accepted QUIC datagram link: the endpoint + connection, kept alive
@@ -125,12 +126,15 @@ impl LinkDriver for QuicDatagramReadDriver {
 
     async fn poll_event(&mut self) -> LinkEvent {
         // One datagram = one wire message (QUIC preserves datagram boundaries,
-        // so no length-prefix reassembly). A read error means the connection is
-        // gone (peer closed / transport error) -> Lost.
+        // so no length-prefix reassembly). A read error means the connection
+        // ended (transport error / peer close) -> Lost; OsError matches the
+        // udp_pipeline / stream-driver convention for a link-level I/O failure
+        // (the FSM maps every LostCause to LinkLost, so this is diagnostic
+        // fidelity, not behavior).
         match self.connection.read_datagram().await {
             Ok(bytes) => LinkEvent::Rx(RxFrame::new(bytes.to_vec())),
             Err(_) => LinkEvent::Lost {
-                cause: LostCause::PeerClosed,
+                cause: LostCause::OsError,
             },
         }
     }
@@ -227,15 +231,7 @@ pub async fn dial_quic_datagram(
     client_config: Arc<RustlsClientConfig>,
     server_name: &str,
 ) -> io::Result<QuicDatagramLink> {
-    let mut endpoint = Endpoint::client(client_bind_addr(addr))?;
-    let quic_crypto = QuicClientConfig::try_from(client_config).map_err(io_other)?;
-    endpoint.set_default_client_config(QuinnClientConfig::new(Arc::new(quic_crypto)));
-
-    let connection = endpoint
-        .connect(addr, server_name)
-        .map_err(io_other)?
-        .await
-        .map_err(io_other)?;
+    let (endpoint, connection) = connect_quic_client(addr, client_config, server_name).await?;
     Ok(QuicDatagramLink {
         endpoint,
         connection,
@@ -253,18 +249,12 @@ pub fn bind_quic_datagram(
     addr: SocketAddr,
     server_config: Arc<RustlsServerConfig>,
 ) -> io::Result<Endpoint> {
-    let quic_crypto = QuicServerConfig::try_from(server_config).map_err(io_other)?;
-    let mut sc = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
-    let mut transport = TransportConfig::default();
-    // Datagram-only: no application streams in either direction. The QUIC
-    // handshake rides crypto frames, not application streams, so it still
-    // completes; datagram support is on by default (TransportConfig default
-    // sets datagram_receive_buffer_size = Some), so this is the datagram mirror
-    // of bind_quic's `max_concurrent_bidi_streams(1)`.
-    transport.max_concurrent_uni_streams(0u8.into());
-    transport.max_concurrent_bidi_streams(0u8.into());
-    sc.transport_config(Arc::new(transport));
-    Endpoint::server(sc, addr)
+    // Datagram-only: max_bidi = 0 (the shared quic_server_endpoint also pins
+    // uni = 0). The QUIC handshake rides crypto frames, not application streams,
+    // so it completes; datagrams are on by default (TransportConfig default sets
+    // datagram_receive_buffer_size = Some). The datagram mirror of bind_quic's
+    // max_bidi = 1.
+    quic_server_endpoint(addr, server_config, 0)
 }
 
 /// Accept ONE inbound QUIC datagram connection from a *borrowed* server
@@ -275,11 +265,7 @@ pub fn bind_quic_datagram(
 /// connection resolves once the peer (initiator) completes the QUIC + TLS-1.3
 /// handshake — which the wz initiator drives immediately.
 pub async fn accept_quic_datagram_on(endpoint: &Endpoint) -> io::Result<QuicDatagramLink> {
-    let incoming = endpoint
-        .accept()
-        .await
-        .ok_or_else(|| io_other("quic datagram endpoint closed before a peer connected"))?;
-    let connection = incoming.await.map_err(io_other)?;
+    let connection = accept_quic_connection(endpoint).await?;
     Ok(QuicDatagramLink {
         endpoint: endpoint.clone(),
         connection,
@@ -296,8 +282,9 @@ pub async fn accept_quic_datagram_on(endpoint: &Endpoint) -> io::Result<QuicData
 /// the read driver's `read_datagram` while the writer task holds another for
 /// `send_datagram`, the UDP shared-handle shape. The per-datagram `mtu` is the
 /// connection's negotiated `max_datagram_size` (or the [`QUIC_DATAGRAM_LINK_MTU`]
-/// floor when the peer has not advertised one), clamped below [`DEFAULT_LINK_MTU`]
-/// so the transport fragments to it.
+/// floor when the peer has not advertised one) — already below the stream-default
+/// link MTU by QUIC's per-packet framing overhead, so the transport's
+/// `negotiated_batch_mtu` min term fragments to it with no clamp.
 pub fn wire_quic_datagram(
     link: QuicDatagramLink,
 ) -> (
@@ -311,7 +298,6 @@ pub fn wire_quic_datagram(
     } = link;
     let mtu = connection
         .max_datagram_size()
-        .map(|m| m.min(DEFAULT_LINK_MTU - 1))
         .unwrap_or(QUIC_DATAGRAM_LINK_MTU);
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = TokioRuntime.spawn(quic_datagram_writer_task(connection.clone(), rx));
@@ -326,6 +312,7 @@ pub fn wire_quic_datagram(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::link::DEFAULT_LINK_MTU;
 
     /// The datagram MTU floor must bind BELOW the unbounded stream
     /// `DEFAULT_LINK_MTU`, else the transport's `negotiated_batch_mtu` min term

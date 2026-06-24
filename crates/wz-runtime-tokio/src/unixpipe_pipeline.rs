@@ -101,6 +101,13 @@ fn suffixed(path: &str, suffix: &str) -> String {
 /// unixpipe analogue of [`crate::unixsock_pipeline::bind_unixsock`]'s stale-
 /// socket unlink; the narrow single-owner seam unlinks unconditionally (a
 /// `NotFound` is the normal first-bind case and is not an error).
+///
+/// R311y13 disclosure: mode 0o600 (owner-only) is a deliberate hardening over
+/// zenoh's default 0o777 (world-rwx) for this same-host IPC node; wz does NOT
+/// model zenoh's configurable `file_mask` locator parameter
+/// (zenoh-link-unixpipe `unix/mod.rs` `FILE_ACCESS_MASK`). A tighter, fixed
+/// default — a security improvement, not a regression, but a narrowing of
+/// zenoh's surface recorded here for the superset-not-mirror ledger.
 fn make_fifo(path: &str) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
