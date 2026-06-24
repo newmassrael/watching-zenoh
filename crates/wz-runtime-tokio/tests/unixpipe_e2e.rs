@@ -1,0 +1,183 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#![cfg(all(
+    feature = "transport-link-unixpipe",
+    target_os = "linux",
+    feature = "transport-unicast"
+))]
+
+//! R311y10 — wz<->wz session end to end over a real loopback unix named-pipe
+//! (FIFO-pair) link.
+//!
+//! The FIFO sibling of `unixsock_e2e`: the acceptor `mkfifo`s an uplink +
+//! downlink FIFO pair (`bind_unixpipe`) and opens its `(receiver, sender)` ends
+//! (`accept_unixpipe_on`); the initiator dials a `unixpipe/<path>` LOCATOR
+//! through the dial seam (`connect_and_open_session` -> `dial_locator` ->
+//! `dial_unixpipe`), which opens the mirror ends. Both nodes reach Established
+//! over the FIFO byte stream (the SAME StreamEnvelope framing as TCP/unixsock,
+//! reused unchanged via tokio's native `pipe::Sender`/`Receiver`) and a `Put`
+//! published on the initiator is delivered byte-exact to a subscriber on the
+//! acceptor.
+//!
+//! ## Fully runnable (NO `#[ignore]`)
+//!
+//! A FIFO pair under the temp dir needs no special privilege; the kernel pipe
+//! buffer makes the open order race-free (a frame written before the peer opens
+//! its receiver is buffered, not dropped). Linux-only (the backend's
+//! `target_os = "linux"` gate; the tokio `read_write` open-rendezvous knob).
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::session::{PublishOptions, TokioSession};
+use wz_runtime_tokio::session_glue::drive_session_until_terminal;
+use wz_runtime_tokio::session_open::{
+    accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
+};
+use wz_runtime_tokio::sync::Mutex;
+use wz_runtime_tokio::unixpipe_pipeline::{accept_unixpipe_on, bind_unixpipe};
+use wz_runtime_tokio_test_support::fixture_session_init_params;
+use wz_session_core::locator::parse_any_locator;
+use wz_session_core::session_timeouts::SessionTimeouts;
+
+const ITER_CAP: usize = 4096;
+const KEYEXPR: &str = "demo/unixpipe";
+
+/// Two wz nodes handshake over a loopback unixpipe link (the initiator via a
+/// `unixpipe/<path>` locator), reach Established, and a `Put` published on the
+/// initiator is delivered byte-exact to a subscriber on the acceptor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wz_to_wz_over_unixpipe_reaches_established_and_delivers_put() {
+    let payload = b"unixpipe-framed-hello".to_vec();
+
+    // A unique FIFO-pair base path under the temp dir (pid-unique for parallel
+    // test binaries); the locator is `unixpipe/<base>` (double-slash for the
+    // absolute path).
+    let base = std::env::temp_dir()
+        .join(format!("wz-unixpipe-e2e-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+
+    // mkfifo the rendezvous pair BEFORE the dialer opens it (the bind/accept
+    // split): the acceptor owns the FIFOs so they outlive both sessions.
+    let paths = bind_unixpipe(&base).expect("bind unixpipe fifo pair");
+
+    let acc_open = async {
+        let link = accept_unixpipe_on(&paths).expect("accept unixpipe peer");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4]; // distinct from the initiator
+        accept_and_open_session(
+            DialedLink::Unixpipe(link),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established over unixpipe")
+    };
+    let init_open = async {
+        let locator =
+            parse_any_locator(&format!("unixpipe/{base}")).expect("parse unixpipe locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        let cfg = DialConfig::default();
+        connect_and_open_session(
+            locator,
+            params,
+            &cfg,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established over unixpipe via locator")
+    };
+    let (mut opened_acc, mut opened_init) = tokio::join!(acc_open, init_open);
+
+    assert!(
+        opened_init.actions.trace_snapshot().record_established_at >= 1,
+        "initiator established over unixpipe"
+    );
+    assert!(
+        opened_acc.actions.trace_snapshot().record_established_at >= 1,
+        "acceptor established over unixpipe"
+    );
+
+    // ── Subscriber on the acceptor; asserts the delivered payload byte-exact.
+    let fired = Arc::new(AtomicUsize::new(0));
+    let mut observer = ApplicationLayerObserver::new();
+    {
+        let fired = fired.clone();
+        let expect = payload.clone();
+        observer.subscribers.register(KEYEXPR, move |sample| {
+            assert_eq!(sample.keyexpr(), KEYEXPR);
+            assert_eq!(
+                sample.payload(),
+                &expect[..],
+                "the payload delivered over unixpipe matches the Put byte-for-byte"
+            );
+            fired.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    let publisher = TokioSession::new(
+        opened_init.actions.clone(),
+        Arc::new(Mutex::new(ApplicationLayerObserver::new())),
+        Arc::new(opened_init.clock),
+    );
+
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive_acc = drive_session_until_terminal(
+        &mut opened_acc.inbound,
+        &opened_acc.actions,
+        &mut opened_acc.engine,
+        None,
+        &opened_acc.clock,
+        &timeouts,
+        |event| observer.dispatch_event(event),
+    );
+    let drive_init = drive_session_until_terminal(
+        &mut opened_init.inbound,
+        &opened_init.actions,
+        &mut opened_init.engine,
+        None,
+        &opened_init.clock,
+        &timeouts,
+        |_| {},
+    );
+
+    let fired_probe = fired.clone();
+    let scenario = async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let delivered = publisher
+            .publish(KEYEXPR, &payload, PublishOptions::put())
+            .expect("unixpipe publish builds and routes through the send seam");
+        assert_eq!(delivered, 0, "no local subscriber on the publisher side");
+        for _ in 0..100 {
+            if fired_probe.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("subscriber did not fire within the ~3s budget");
+    };
+
+    tokio::select! {
+        _ = drive_acc => panic!("acceptor drive loop ended unexpectedly"),
+        _ = drive_init => panic!("initiator drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "exactly one delivery from the Put over the unixpipe link"
+    );
+
+    let _ = std::fs::remove_file(&paths.uplink);
+    let _ = std::fs::remove_file(&paths.downlink);
+}

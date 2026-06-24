@@ -135,6 +135,15 @@ use crate::vsock_pipeline::{dial_vsock, wire_vsock_stream, VsockReadDriver};
 #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
 use tokio_vsock::VsockStream;
 
+// R311y10 — the unixpipe arm: a same-host named-FIFO-pair link, Linux-only
+// (the tokio `read_write` open-rendezvous knob is target_os=linux). A connected
+// `UnixpipeLink` (a Receiver/Sender FIFO pair) reuses the shared `stream_link`
+// StreamEnvelope drivers, like unixsock/vsock.
+#[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+use crate::unixpipe_pipeline::{
+    dial_unixpipe, wire_unixpipe_stream, UnixpipeLink, UnixpipeReadDriver,
+};
+
 /// Default cadence at which [`connect_and_open_session`] sweeps the host
 /// handshake deadline (R311il — the engine-free FSM arms no `<send delay>`,
 /// so there is no SCE scheduler to pump) while waiting on the handshake. It
@@ -275,6 +284,15 @@ pub enum DialedLink {
     /// gated with the backend.
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockStream),
+    /// A connected unix named-pipe (FIFO-pair) link, wired downstream via
+    /// [`wire_unixpipe_stream`] (R311y10). A reliable byte STREAM like
+    /// TCP/unixsock (the FIFO is streamed), so the steady-state is uniform with
+    /// [`Self::Tcp`]. NOT `Box`ed (a [`UnixpipeLink`] is a thin Receiver/Sender
+    /// fd pair). Produced by [`dial_locator`] for a `unixpipe/...` locator (no
+    /// cert config, like unixsock/udp). Linux-only (the FIFO open-rendezvous),
+    /// gated with the backend.
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    Unixpipe(UnixpipeLink),
     /// A connected + QUIC-handshaked link, split downstream via
     /// [`wire_quic_stream`] (R311xk). Like serial/tls, the handshake (here the
     /// QUIC + TLS-1.3 handshake) has ALREADY run by the time this is built —
@@ -325,6 +343,8 @@ impl DialedLink {
             DialedLink::Unixsock(_) => "unixsock",
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             DialedLink::Vsock(_) => "vsock",
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            DialedLink::Unixpipe(_) => "unixpipe",
             #[cfg(feature = "transport-link-quic")]
             DialedLink::Quic(_) => "quic",
             #[cfg(feature = "transport-link-quic-datagram")]
@@ -548,6 +568,25 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             io::ErrorKind::Unsupported,
             "vsock session-open requires the transport-link-vsock feature on a Linux target",
         )),
+        // R311y10 — a `unixpipe/...` endpoint dials through the named-FIFO-pair
+        // backend: `dial_unixpipe` opens the dialer's (receiver, sender) FIFO
+        // ends (no dial-time handshake — the FIFO open IS the rendezvous, ready
+        // for the uniform split, like unixsock). `dial_unixpipe` is SYNC (a FIFO
+        // open is non-blocking) but must run within the tokio runtime, which this
+        // async dial seam provides. No cert config (like unixsock/udp).
+        #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+        AnyLocator::Unixpipe(ep) => Ok(DialedLink::Unixpipe(dial_unixpipe(&ep.path)?)),
+        // R311y10 — `AnyLocator::Unixpipe` is an ALWAYS-present, PLATFORM-
+        // INDEPENDENT variant (the unixpipe locator leaf is ungated in
+        // wz-session-core), so this arm must exist on every target / feature
+        // combo. Without the backend (feature off, or a non-Linux target) it
+        // dials to a typed `Unsupported`, exactly as vsock/serial/udp do —
+        // keeping the match exhaustive and avoiding cross-crate/cross-target skew.
+        #[cfg(not(all(feature = "transport-link-unixpipe", target_os = "linux")))]
+        AnyLocator::Unixpipe(_ep) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "unixpipe session-open requires the transport-link-unixpipe feature on a Linux target",
+        )),
     }
 }
 
@@ -704,6 +743,16 @@ pub async fn bind_locator(locator: AnyLocator) -> io::Result<TcpListener> {
             "vsock accept is a VsockListener bind (bind_vsock + accept_vsock_on), not a \
              TcpListener; the listen side is owned by the acceptor, unwired here",
         )),
+        // R311y10 — a unixpipe acceptor is a `mkfifo` pair bind + open
+        // (`unixpipe_pipeline::bind_unixpipe` / `accept_unixpipe_on`), NOT the
+        // `TcpListener` this seam returns, so it cannot fit here — the listen
+        // side is owned by the acceptor / e2e harness (the same not-yet-wired
+        // acceptor extension point ws/tls/udp/unixsock/vsock document). The DIAL
+        // side IS wired (`dial_locator` above); only the listen seam is unwired.
+        AnyLocator::Unixpipe(_) => Err(unsupported(
+            "unixpipe accept is a mkfifo pair bind (bind_unixpipe + accept_unixpipe_on), not a \
+             TcpListener; the listen side is owned by the acceptor, unwired here",
+        )),
     }
 }
 
@@ -782,6 +831,8 @@ pub enum InboundLink {
     Unixsock(UnixsockReadDriver),
     #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
     Vsock(VsockReadDriver),
+    #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+    Unixpipe(UnixpipeReadDriver),
     #[cfg(feature = "transport-link-quic")]
     Quic(QuicReadDriver),
     #[cfg(feature = "transport-link-quic-datagram")]
@@ -804,6 +855,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.open().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.open().await,
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            InboundLink::Unixpipe(d) => d.open().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.open().await,
             #[cfg(feature = "transport-link-quic-datagram")]
@@ -826,6 +879,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.send(frame, reliability).await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.send(frame, reliability).await,
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            InboundLink::Unixpipe(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-quic-datagram")]
@@ -848,6 +903,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.close().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.close().await,
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            InboundLink::Unixpipe(d) => d.close().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.close().await,
             #[cfg(feature = "transport-link-quic-datagram")]
@@ -870,6 +927,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Unixsock(d) => d.poll_event().await,
             #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
             InboundLink::Vsock(d) => d.poll_event().await,
+            #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+            InboundLink::Unixpipe(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-quic-datagram")]
@@ -925,6 +984,11 @@ pub fn wire_dialed_link(
         DialedLink::Vsock(stream) => {
             let (inbound, outbound, handle) = wire_vsock_stream(stream);
             (InboundLink::Vsock(inbound), outbound, handle)
+        }
+        #[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+        DialedLink::Unixpipe(link) => {
+            let (inbound, outbound, handle) = wire_unixpipe_stream(link);
+            (InboundLink::Unixpipe(inbound), outbound, handle)
         }
         #[cfg(feature = "transport-link-quic")]
         DialedLink::Quic(link) => {

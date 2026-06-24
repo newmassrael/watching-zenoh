@@ -548,6 +548,23 @@ pub mod unixsock_pipeline;
 #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
 pub mod vsock_pipeline;
 
+/// R311y10 — host Unix named-pipe (FIFO) backend. The same-host FIFO sibling of
+/// [`unixsock_pipeline`] (AF_UNIX stream): zenoh's `zenoh-link-unixpipe` carries
+/// a batch over a PAIR of named FIFOs (uplink + downlink), distinct from the
+/// AF_UNIX socket. wz uses tokio's NATIVE FIFO support (`tokio::net::unix::pipe`
+/// — `Sender` is `AsyncWrite`, `Receiver` is `AsyncRead`), so a FIFO link reuses
+/// the shared `stream_link` StreamEnvelope drivers UNCHANGED (a FIFO is a byte
+/// stream), needing only a one-call `libc::mkfifo` — no `unix_named_pipe` crate,
+/// no `advisory-lock`, no `AsyncFd` dance. Gated `transport-link-unixpipe`
+/// (forwards `transport-link-tcp` for the shared `stream_link` SSOT) AND
+/// `target_os = "linux"` (the `read_write` open-rendezvous knob that liquidates
+/// the FIFO `ENXIO` open-ordering race is Linux-only in tokio — the same
+/// platform-gate shape as vsock). The `unixpipe/...` locator PARSE is
+/// platform-independent + ungated in `wz-session-core`; only this dial/accept
+/// backend is gated.
+#[cfg(all(feature = "transport-link-unixpipe", target_os = "linux"))]
+pub mod unixpipe_pipeline;
+
 /// R311xk — TLS-1.3 + ALPN-`hq-29` rustls config builders for the QUIC link.
 /// QUIC mandates TLS 1.3, so its rustls config differs from the TLS link's two
 /// ways (TLS-1.3-only, ALPN `hq-29`); everything else (PEM loaders, `ring`

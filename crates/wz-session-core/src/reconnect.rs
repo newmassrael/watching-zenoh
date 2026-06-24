@@ -104,6 +104,12 @@ pub enum NotReconnectable {
     /// cid-bearing [`ReconnectLocator`] arm is a clean extension point if
     /// VM-host reconnect is ever wanted.
     Vsock,
+    /// A `unixpipe/...` endpoint (R311y10): a same-host named-FIFO-pair link is
+    /// non-IP, so — like unixsock/vsock — it is outside the IP-family reconnect
+    /// set this supervisor models (pico's `Z_FEATURE_AUTO_RECONNECT` is
+    /// tcp/udp/tls/ws; pico has no unixpipe). A path-bearing [`ReconnectLocator`]
+    /// arm is a clean extension point if local-IPC reconnect is ever wanted.
+    Unixpipe,
 }
 
 impl From<ReconnectLocator> for AnyLocator {
@@ -139,6 +145,10 @@ impl TryFrom<AnyLocator> for ReconnectLocator {
             // R311xj — vsock: non-IP (cid:port), not in the reconnect set
             // (see [`NotReconnectable::Vsock`]). Rejected like unixsock/serial.
             AnyLocator::Vsock(_) => Err(NotReconnectable::Vsock),
+            // R311y10 — unixpipe: non-IP same-host FIFO pair, not in the
+            // reconnect set (see [`NotReconnectable::Unixpipe`]). Rejected like
+            // unixsock/vsock.
+            AnyLocator::Unixpipe(_) => Err(NotReconnectable::Unixpipe),
         }
     }
 }

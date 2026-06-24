@@ -1183,6 +1183,30 @@ layer_c1ak_cargo_test_transport_stats() {
         && cargo clippy -p wz-session-core --all-targets --features transport-stats --quiet -- -D warnings)
 }
 
+# ─── Layer C1al — unixpipe link: locator parse + FIFO-pair backend e2e ─
+#
+# R311y10: the named-FIFO-pair sibling of C1aa (unixsock). transport-link-unixpipe
+# (OFF in the default set, Linux-only) carries a zenoh batch over a uplink +
+# downlink FIFO pair using tokio's native pipe support — the SAME StreamEnvelope
+# byte-stream framing as unixsock, reused unchanged. This lane:
+#   1. runs the locator tests (the `unixpipe/<path>` parse is `AnyLocator::Unixpipe`
+#      — ungated + platform-independent, like unixsock/vsock);
+#   2. runs the `unixpipe_e2e` integration test (gated all(transport-link-unixpipe,
+#      target_os="linux", transport-unicast)): two nodes reach Established over a
+#      loopback FIFO pair — the initiator via a `unixpipe/...` LOCATOR — and a Put
+#      is delivered byte-exact over the FIFO byte stream;
+#   3. clippy-gates the `transport-link-unixpipe` cfg (`--all-targets`);
+#   4. clippy-gates the LIB under `--no-default-features --features
+#      transport-link-unixpipe` to prove `unixpipe_pipeline` composes standalone
+#      (it pulls transport-link-tcp's shared stream_link + libc for mkfifo).
+layer_c1al_cargo_test_unixpipe() {
+    (cd crates \
+        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-unixpipe --test unixpipe_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-unixpipe --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3605,6 +3629,7 @@ run_layer C1ah layer_c1ah_cargo_test_time_hlc || overall=1
 run_layer C1ai layer_c1ai_cargo_test_liveliness_history || overall=1
 run_layer C1aj layer_c1aj_cargo_test_quic_datagram || overall=1
 run_layer C1ak layer_c1ak_cargo_test_transport_stats || overall=1
+run_layer C1al layer_c1al_cargo_test_unixpipe || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

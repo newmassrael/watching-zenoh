@@ -360,6 +360,57 @@ pub fn parse_unixsock_locator(locator: &str) -> Result<UnixsockEndpoint, Unixsoc
     })
 }
 
+// ─── unixpipe locator leaf ───
+//
+// R311y10 — the `unixpipe/<path>` locator GRAMMAR is universal and pure string
+// work (a same-host named-FIFO-pair base path), so it lives HERE unconditionally
+// alongside the unixsock/serial/vsock leaves; only the unixpipe BACKEND
+// (`wz-runtime-tokio::unixpipe_pipeline`, Linux-only) is feature-gated. The
+// `unixpipe/...` string always parses to [`AnyLocator::Unixpipe`] whether or not
+// the backend is compiled (or the target is Linux) — dialing without one fails
+// at dial time, the serial/unixsock/vsock model.
+
+/// A unix named-pipe (FIFO-pair) endpoint (`unixpipe/...`). Like
+/// [`UnixsockEndpoint`], a filesystem PATH (the FIFO-pair base, to which the
+/// backend appends `_uplink`/`_downlink`), not a [`SocketAddr`]. An absolute
+/// path yields the double-slash locator `unixpipe//tmp/wz.pipe`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnixpipeEndpoint {
+    /// The FIFO-pair base path, taken verbatim from the locator address.
+    pub path: String,
+}
+
+/// Why a `unixpipe/...` locator string did not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnixpipeLocatorError {
+    /// The locator does not begin with the `unixpipe/` scheme.
+    NotUnixpipeScheme,
+    /// The path (after the scheme) is empty (`unixpipe/`).
+    EmptyPath,
+}
+
+const UNIXPIPE_SCHEME: &str = "unixpipe";
+
+/// Parse a `unixpipe/...` locator into a [`UnixpipeEndpoint`] — the FIFO-pair
+/// sibling of [`parse_unixsock_locator`]. The scheme is the substring before
+/// the first `/`; the remainder is the FIFO-pair base path, taken verbatim (an
+/// absolute path keeps its leading `/`: `unixpipe//tmp/wz.pipe` -> path
+/// `/tmp/wz.pipe`). An empty path is rejected ([`UnixpipeLocatorError::EmptyPath`]).
+pub fn parse_unixpipe_locator(locator: &str) -> Result<UnixpipeEndpoint, UnixpipeLocatorError> {
+    let (scheme, path) = locator
+        .split_once('/')
+        .ok_or(UnixpipeLocatorError::NotUnixpipeScheme)?;
+    if scheme != UNIXPIPE_SCHEME {
+        return Err(UnixpipeLocatorError::NotUnixpipeScheme);
+    }
+    if path.is_empty() {
+        return Err(UnixpipeLocatorError::EmptyPath);
+    }
+    Ok(UnixpipeEndpoint {
+        path: path.to_string(),
+    })
+}
+
 // ─── vsock locator leaf ───
 //
 // R311xj — the `vsock/<CID>:<PORT>` locator GRAMMAR is universal and pure
@@ -538,6 +589,16 @@ pub enum AnyLocator {
     /// `transport-link-serial`. A non-IP endpoint (a socket path, not a
     /// [`SocketAddr`]), so — like serial — it cannot be a [`Proto`] variant.
     Unixsock(UnixsockEndpoint),
+    /// A unix named-pipe (FIFO-pair) endpoint (`unixpipe/...`) — see
+    /// [`UnixpipeEndpoint`]. ALWAYS present (R311y10: the unixpipe locator leaf
+    /// is ungated + platform-independent pure string work, like unixsock/vsock),
+    /// so a `unixpipe/...` string parses to this on any alloc build. Whether it
+    /// can be DIALED is the runtime backend's concern (`transport-link-unixpipe`,
+    /// Linux-only via tokio's native FIFO support), surfaced at dial time as
+    /// `Unsupported` off-Linux or feature-off — as unixsock/serial/udp surface a
+    /// missing backend. A non-IP endpoint (a FIFO-pair path), so — like
+    /// unixsock / serial / vsock — not a [`Proto`].
+    Unixpipe(UnixpipeEndpoint),
     /// An AF_VSOCK endpoint (`vsock/<CID>:<PORT>`) — see [`VsockEndpoint`].
     /// ALWAYS present and PLATFORM-INDEPENDENT (R311xj: the vsock locator leaf
     /// is ungated and pure string work, so a `vsock/...` string parses to this
@@ -563,6 +624,9 @@ pub enum AnyLocatorError {
     /// The unixsock leaf ([`parse_unixsock_locator`]) rejected a
     /// `unixsock-stream/...` string (R311xi).
     Unixsock(UnixsockLocatorError),
+    /// The unixpipe leaf ([`parse_unixpipe_locator`]) rejected a
+    /// `unixpipe/...` string (R311y10).
+    Unixpipe(UnixpipeLocatorError),
     /// The vsock leaf ([`parse_vsock_locator`]) rejected a `vsock/...`
     /// string (R311xj).
     Vsock(VsockLocatorError),
@@ -596,6 +660,17 @@ pub fn parse_any_locator(locator: &str) -> Result<AnyLocator, AnyLocatorError> {
         return parse_unixsock_locator(locator)
             .map(AnyLocator::Unixsock)
             .map_err(AnyLocatorError::Unixsock);
+    }
+    // R311y10 — `unixpipe/...` routes to the unixpipe leaf, like unixsock above.
+    // Checked before the IP leaf (which would reject `unixpipe` as an
+    // UnknownProto); the leaf is unconditional + platform-independent, so the
+    // string always parses to [`AnyLocator::Unixpipe`] whether or not a unixpipe
+    // BACKEND is compiled (or the target is Linux) — dialing without one fails
+    // at dial time (the unixsock/serial/udp model).
+    if matches!(locator.split_once('/'), Some(("unixpipe", _))) {
+        return parse_unixpipe_locator(locator)
+            .map(AnyLocator::Unixpipe)
+            .map_err(AnyLocatorError::Unixpipe);
     }
     // R311xj — `vsock/...` routes to the vsock leaf, like serial/unixsock.
     // Checked before the IP leaf (which would reject `vsock` as UnknownProto);
@@ -953,6 +1028,32 @@ mod tests {
         // absolute path is preserved.
         let ep = parse_unixsock_locator("unixsock-stream//tmp/zenoh.sock").expect("abs path");
         assert_eq!(ep.path, "/tmp/zenoh.sock");
+    }
+
+    #[test]
+    fn parse_any_routes_unixpipe_to_the_unixpipe_leaf() {
+        // R311y10 — unconditional (no `transport-link-unixpipe` cfg, no target
+        // gate): the unixpipe leaf is always compiled, so a `unixpipe/...` string
+        // always routes here whether or not the Linux backend exists, exactly
+        // like the unixsock/vsock schemes.
+        let any = parse_any_locator("unixpipe//tmp/wz.pipe").expect("unixpipe locator");
+        assert_eq!(
+            any,
+            AnyLocator::Unixpipe(parse_unixpipe_locator("unixpipe//tmp/wz.pipe").unwrap())
+        );
+        // And the unixpipe leaf error composes through too.
+        assert_eq!(
+            parse_any_locator("unixpipe/"),
+            Err(AnyLocatorError::Unixpipe(UnixpipeLocatorError::EmptyPath))
+        );
+    }
+
+    #[test]
+    fn parses_unixpipe_absolute_path() {
+        // The double-slash shape (scheme `/` + absolute path): the FIFO-pair
+        // base path is taken verbatim, leading `/` preserved.
+        let ep = parse_unixpipe_locator("unixpipe//tmp/wz.pipe").expect("abs path");
+        assert_eq!(ep.path, "/tmp/wz.pipe");
     }
 
     #[test]

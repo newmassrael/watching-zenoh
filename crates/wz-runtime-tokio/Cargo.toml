@@ -545,6 +545,16 @@ transport-link-unixsock = ["transport-link-tcp"]
 # arm is `#[cfg(all(transport-link-vsock, target_os="linux"))]`. NOT default —
 # pico has no vsock transport (host VM-IPC link).
 transport-link-vsock = ["transport-link-tcp", "dep:tokio-vsock"]
+# R311y10 — host Unix named-pipe (FIFO) link backend. Forwards
+# `transport-link-tcp` (the FIFO is a byte stream, so it reuses the shared
+# `stream_link` StreamEnvelope SSOT, like unixsock) and pulls `dep:libc` for the
+# one `mkfifo` call (tokio's `net` feature carries the FIFO Sender/Receiver). The
+# `unixpipe/...` locator PARSE is platform-independent + ungated in
+# wz-session-core; only the dial/accept BACKEND is gated here, and the
+# `session_open` DialedLink::Unixpipe arm is `#[cfg(all(transport-link-unixpipe,
+# target_os="linux"))]` (the FIFO `read_write` open-rendezvous is Linux-only in
+# tokio). NOT default — pico has no unixpipe transport (same-host IPC link).
+transport-link-unixpipe = ["transport-link-tcp", "dep:libc"]
 # R311xk — host QUIC link backend. Like tls (and UNLIKE ws), forwards
 # `transport-link-tcp`: QUIC frames a zenoh batch over ONE bidirectional stream
 # with the SAME StreamEnvelope length-prefix as TCP, reusing the entire
@@ -1170,6 +1180,13 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 # to 0.5 to match zenoh-link-vsock 1.5.0.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = { version = "0.5", optional = true }
+# R311y10 — `libc` for the one `mkfifo` FFI call the unixpipe backend needs to
+# create the named-FIFO-pair rendezvous nodes (tokio's `pipe` module opens
+# existing FIFOs but does not create them). Optional, pulled only by
+# `transport-link-unixpipe`; Linux-only (this target table), matching the
+# backend's `target_os="linux"` gate. Already in the tree transitively (tokio /
+# socket2), so it unifies to one version.
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
