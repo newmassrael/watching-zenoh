@@ -898,6 +898,48 @@
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
       ]
     },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router": {
+      "title": "Router mode — full routing plane (zenohd-equivalent)",
+      "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin": {
+      "title": "Plugin framework — host trait + lifecycle + static/dynamic loading",
+      "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace": {
+      "title": "Admin space + config introspection",
+      "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend": {
+      "title": "Storage manager + pluggable backend/volume abstraction",
+      "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub": {
+      "title": "Advanced pub/sub — zenoh-ext (cache/recovery/group/serde)",
+      "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-26-rest": {
+      "title": "REST/HTTP bridge plugin (AP-only)",
+      "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat": {
+      "title": "zenoh-c / zenoh-pico API-compat FFI shim",
+      "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting": {
       "title": "§5.3 Scouting",
       "parent_doc": "docs/feature_inventory.md",
@@ -50079,6 +50121,62 @@
         "NEXT TRACK (per roadmap): the remaining genuine atoms -- link 5 / scouting passive+multicast / locator-new 4 / liveliness-history 2 / attachment 1 / runtime uring+zero-copy 2. A3 read-FIRST + verify vs zenoh source; front-load the highest-risk unknown."
       ]
     },
+    "Round 311xu": {
+      "decision_summary": "R311xu -- P4 scoping round: decomposed the zenoh-full catalog BEYOND the existing §5.1-§5.20 catalog (north-star LAYER 3, the largest/least-bounded remaining frontier) into 64 atomic feature-catalog atoms, verified by 5 parallel source-reading agents against zenoh 1.5.0 (49c8a53). New families §5.21 router / §5.22 plugin / §5.23 adminspace+config / §5.24 storage-backend / §5.25 ext-pubsub / §5.26 rest / §5.27 api-compat, plus 4 additions to §5.1 transport. All 64 registered status=reserved (none built). Classification: 39 cfg-buildable + 14 foundational + 2 foundational-inert + 9 out-of-scope. PURPOSE: make P4 COUNTABLE in the inventory SSOT so \"how many rounds left\" is atom-grounded, not a guess. Dedup/exclusions by direct read: adminspace scoped from 2 agents merged to one family; storage core (digest/aligner/era) already-covered by §5.11 so only the manager/volume layer registered; publication-cache excluded (zenoh #[deprecated], jwt precedent) and subscription-aggregation excluded (phantom -- no zenoh module, emergent in advanced-subscriber); BLE/raweth confirmed ABSENT from zenoh's io/zenoh-links tree (corrects the prior roadmap note).",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json: import-sections created 7 new catalog sections §5.21-§5.27 (router/plugin/adminspace/storage-backend/ext-pubsub/rest/api-compat) under §5-atomic-feature-catalog; sections 259->266.",
+        "docs/.atomic/workspace.atomic.json: 64 reserved inventory atoms added (add-inventory-entry); inventory 151->215, reserved 53->117. Per-family: router 16, plugin 6, adminspace+config 11, storage-backend 13, ext-pubsub 10, rest 2, api-compat 2, transport(+4) 4.",
+        "Each atom carries a source-cited reason (zenoh file:line) + a class= tag (cfg / foundational / foundational-inert / out-of-scope) for honest A3 classification; source field = \"zenoh 1.5.0 49c8a53 (P4 scoping R311xu)\"."
+      ],
+      "verification_bullets": [
+        "5 parallel agents each read one zenoh subsystem directly (zenoh/src/net/routing/** + zenohd; plugins/zenoh-plugin-{trait,rest} + adminspace + zenoh-config; plugins/zenoh-plugin-storage-manager + zenoh-backend-traits; zenoh-ext/src/**; io/zenoh-links/** + api-compat) and returned source-cited atom candidates; synthesized + deduped by direct read (no invented atoms).",
+        "import-sections: 7 created / 0 no-op (atomic). add-inventory-entry: ok=64 fail=0. validate_workspace after: T1 orphan total=13 (new=+0, resolved=-0), T3 warn=4 / T4 info=4 (UNCHANGED), sections 259->266, inventory 151->215, entries 992 (pre-ledger).",
+        "Classification tally from stored reasons: 39 cfg-buildable + 14 foundational + 2 foundational-inert + 9 out-of-scope. All status=reserved (zero cfg sites, A3-consistent -- none built)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-26-rest",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311xu = P4 scoping: north-star LAYER 3 (zenoh-full catalog beyond §5.1-§5.20) is now COUNTABLE in the inventory -- 64 atoms across §5.21-§5.27 + §5.1(+4). In-scope ~55 (39 cfg-buildable + 16 foundational/inert), out-of-scope 9 (dynamic .so plugin/volume loading, REST+SSE, rocksdb/influxdb-s3/filesystem backends, zenoh-c/pico api-compat -- tracked-reserved, re-openable per north-star superset-not-mirror).",
+        "Build-order keystones: storage-backend-volume-trait (the one net-new storage abstraction); router needs hat-multihat -> hat-router -> route-cache first; ext-pubsub-serde-codec is a prereq for miss-detection/recovery; adminspace-core+read+introspection is the highest-value/lowest-dep router-mode cluster (no plugin fw needed, data paths no_std-feasible).",
+        "Revised north-star picture: catalog now 215 atoms (97 active + 1 deprecated + 117 reserved). Layer1 AP/std ~13-17 (mostly done incl HLC R311xt); Layer2 pico ~85% (cross-impl + optional links); Layer3 P4 = ~55 in-scope atoms now atom-grounded. The \"몇 라운드\" estimate for P4 can now be built per-atom, not guessed.",
+        "NEXT after the in-flight tracks: P4 build can begin at the adminspace-core cluster or storage-backend-volume-trait (both low-dep). A3 read-FIRST + verify vs zenoh source each atom; front-load highest-risk (router hat seam, wildcard-updates aligner-ext)."
+      ],
+      "publishable_decision_summary": "R311xu -- P4 scoping round: decomposed the zenoh-full catalog BEYOND the existing §5.1-§5.20 catalog (north-star LAYER 3, the largest/least-bounded remaining frontier) into 64 atomic feature-catalog atoms, verified by 5 parallel source-reading agents against zenoh 1.5.0 (49c8a53). New families §5.21 router / §5.22 plugin / §5.23 adminspace+config / §5.24 storage-backend / §5.25 ext-pubsub / §5.26 rest / §5.27 api-compat, plus 4 additions to §5.1 transport. All 64 registered status=reserved (none built). Classification: 39 cfg-buildable + 14 foundational + 2 foundational-inert + 9 out-of-scope. PURPOSE: make P4 COUNTABLE in the inventory SSOT so \"how many rounds left\" is atom-grounded, not a guess. Dedup/exclusions by direct read: adminspace scoped from 2 agents merged to one family; storage core (digest/aligner/era) already-covered by §5.11 so only the manager/volume layer registered; publication-cache excluded (zenoh #[deprecated], jwt precedent) and subscription-aggregation excluded (phantom -- no zenoh module, emergent in advanced-subscriber); BLE/raweth confirmed ABSENT from zenoh's io/zenoh-links tree (corrects the prior roadmap note).",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json: import-sections created 7 new catalog sections §5.21-§5.27 (router/plugin/adminspace/storage-backend/ext-pubsub/rest/api-compat) under §5-atomic-feature-catalog; sections 259->266.",
+        "docs/.atomic/workspace.atomic.json: 64 reserved inventory atoms added (add-inventory-entry); inventory 151->215, reserved 53->117. Per-family: router 16, plugin 6, adminspace+config 11, storage-backend 13, ext-pubsub 10, rest 2, api-compat 2, transport(+4) 4.",
+        "Each atom carries a source-cited reason (zenoh file:line) + a class= tag (cfg / foundational / foundational-inert / out-of-scope) for honest A3 classification; source field = \"zenoh 1.5.0 49c8a53 (P4 scoping R311xu)\"."
+      ],
+      "publishable_verification_bullets": [
+        "5 parallel agents each read one zenoh subsystem directly (zenoh/src/net/routing/** + zenohd; plugins/zenoh-plugin-{trait,rest} + adminspace + zenoh-config; plugins/zenoh-plugin-storage-manager + zenoh-backend-traits; zenoh-ext/src/**; io/zenoh-links/** + api-compat) and returned source-cited atom candidates; synthesized + deduped by direct read (no invented atoms).",
+        "import-sections: 7 created / 0 no-op (atomic). add-inventory-entry: ok=64 fail=0. validate_workspace after: T1 orphan total=13 (new=+0, resolved=-0), T3 warn=4 / T4 info=4 (UNCHANGED), sections 259->266, inventory 151->215, entries 992 (pre-ledger).",
+        "Classification tally from stored reasons: 39 cfg-buildable + 14 foundational + 2 foundational-inert + 9 out-of-scope. All status=reserved (zero cfg sites, A3-consistent -- none built)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-26-rest",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311xu = P4 scoping: north-star LAYER 3 (zenoh-full catalog beyond §5.1-§5.20) is now COUNTABLE in the inventory -- 64 atoms across §5.21-§5.27 + §5.1(+4). In-scope ~55 (39 cfg-buildable + 16 foundational/inert), out-of-scope 9 (dynamic .so plugin/volume loading, REST+SSE, rocksdb/influxdb-s3/filesystem backends, zenoh-c/pico api-compat -- tracked-reserved, re-openable per north-star superset-not-mirror).",
+        "Build-order keystones: storage-backend-volume-trait (the one net-new storage abstraction); router needs hat-multihat -> hat-router -> route-cache first; ext-pubsub-serde-codec is a prereq for miss-detection/recovery; adminspace-core+read+introspection is the highest-value/lowest-dep router-mode cluster (no plugin fw needed, data paths no_std-feasible).",
+        "Revised north-star picture: catalog now 215 atoms (97 active + 1 deprecated + 117 reserved). Layer1 AP/std ~13-17 (mostly done incl HLC R311xt); Layer2 pico ~85% (cross-impl + optional links); Layer3 P4 = ~55 in-scope atoms now atom-grounded. The \"몇 라운드\" estimate for P4 can now be built per-atom, not guessed.",
+        "NEXT after the in-flight tracks: P4 build can begin at the adminspace-core cluster or storage-backend-volume-trait (both low-dep). A3 read-FIRST + verify vs zenoh source each atom; front-load highest-risk (router hat seam, wildcard-updates aligner-ext)."
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [
@@ -54989,6 +55087,60 @@
       "source": "zenoh per-key quota",
       "reason": "F=per-key payload-size cap (zenoh low_pass realization, not cumulative accounting); P=zenoh low_pass; C=cfg knob access-quota (routing-peer interceptor)"
     },
+    "adminspace-config-hotreload": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=live plugin start/stop on config-diff; P=zenoh adminspace.rs:258; C=needs write+plugin-fw; AP-leaning; class=cfg"
+    },
+    "adminspace-core": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=@/<zid>/<whatami>/** queryable + config sub + local_data JSON; P=zenoh adminspace.rs:155,561; C=enable knob needs queryable; class=cfg"
+    },
+    "adminspace-introspection-handlers": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=sub/pub/qabl/querier + router linkstate/route-successor handlers; P=zenoh adminspace.rs:741; C=needs core (router legs need hat-router); class=cfg"
+    },
+    "adminspace-metrics": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=OpenMetrics/Prometheus export (@/.../metrics); P=zenoh adminspace.rs:706; C=needs core+transport-stats; class=cfg"
+    },
+    "adminspace-plugins-handlers": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=plugins/** + status/plugins/** admin handlers; P=zenoh adminspace.rs:921; C=needs core+plugin-manager; class=cfg-inert"
+    },
+    "adminspace-read": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=GET permission gate (permissions.read); P=zenoh adminspace.rs:457; C=needs adminspace-core; class=cfg"
+    },
+    "adminspace-write": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=runtime config mutate over admin (PUT config/<key>); P=zenoh adminspace.rs:392; C=needs core+config-mutate; class=cfg"
+    },
+    "api-compat-c": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE(separate-repo): zenoh-c compatible C ABI (z_open/put/sub/get); P=zenoh-c (separate repo cbindgen); C=additive FFI AP-only; class=out-of-scope"
+    },
+    "api-compat-pico": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE(separate-repo): zenoh-pico compatible embedded C API (zp_*); P=zenoh-pico ~/zenoh-pico (separate repo); C=no_std FFI ties to pico-parity; class=out-of-scope"
+    },
     "attachment-bytes": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
@@ -55085,6 +55237,30 @@
       "source": "sources/codecs/scout.scxml",
       "reason": "F=SCOUT codec; P=zenoh-pico codec_zenoh_scout; C=requires scouting-active or -multicast"
     },
+    "config-change-notifier": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=config-change pub/sub (Notifier subscribe/notify); P=zenoh api/config.rs:173; C=prereq for hotreload; class=foundational"
+    },
+    "config-json-pointer-access": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=JSON-pointer get/set over config tree (insert_json5/remove/keys); P=zenoh config lib.rs:1163; C=no_std-feasible; class=foundational"
+    },
+    "config-mutate-runtime": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=runtime-mutable config w/ list key=id semantics; P=zenoh api/config.rs:63; C=needs json-pointer+notifier; class=cfg"
+    },
+    "config-plugin-validator": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=ConfigValidator veto/rewrite hook on config change; P=zenoh config lib.rs:389; C=inert w/o config-mutate+plugin-fw; class=foundational-inert"
+    },
     "declare-final": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
@@ -55168,6 +55344,66 @@
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml text/plain arm",
       "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=text/plain UTF-8 tag (id 4); P=zenoh; C=EncodingHint::TEXT_PLAIN const (data, not a toggle)"
+    },
+    "ext-pubsub-advanced-cache": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=publisher sample ring-buffer queryable on <ke>/@adv/** (_sn/_max); P=zenoh advanced_cache.rs:209; C=needs queryable+timestamp; class=cfg"
+    },
+    "ext-pubsub-advanced-history": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=startup history query @adv/** + late-joiner liveliness detect; P=zenoh advanced_subscriber.rs:763; C=needs advanced-sub+query-get+liveliness; class=cfg"
+    },
+    "ext-pubsub-advanced-publisher": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=per-sample SourceInfo seqnum + cache/liveliness detection; P=zenoh advanced_publisher.rs:286; C=needs source-info; class=cfg"
+    },
+    "ext-pubsub-advanced-recovery": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=gap recovery query (periodic/heartbeat-driven _sn range); P=zenoh advanced_subscriber.rs:578; C=needs advanced-sub+query+serde-codec; class=cfg"
+    },
+    "ext-pubsub-advanced-subscriber": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=reorder-by-seqnum/timestamp + per-source dedup state machine; P=zenoh advanced_subscriber.rs:443; C=needs source-info; heaviest; class=cfg"
+    },
+    "ext-pubsub-fetching-subscriber": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=startup fetch-closure + merge-by-timestamp subscriber; P=zenoh querying_subscriber.rs:768; C=needs subscriber+timestamp; class=cfg"
+    },
+    "ext-pubsub-group-membership": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=group Join/Leave/KeepAlive view + lease watchdog + leader election; P=zenoh group.rs:362; C=needs pubsub+query; self-contained; class=cfg"
+    },
+    "ext-pubsub-querying-subscriber": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=fetch=session.get/liveliness.get history-fill subscriber; P=zenoh querying_subscriber.rs:72; C=needs fetching-sub+query-get; class=cfg"
+    },
+    "ext-pubsub-sample-miss-detection": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=heartbeat state-publisher (last-seqnum on @adv/pub); P=zenoh advanced_publisher.rs:373; C=needs advanced-pub+serde-codec; class=cfg"
+    },
+    "ext-pubsub-serde-codec": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=z_serialize/z_deserialize typed codec (LE+LEB128 golden vectors); P=zenoh serialization.rs:36; C=prereq for miss-detection/recovery; class=cfg"
     },
     "keyexpr-canon": {
       "status": "reserved",
@@ -55373,6 +55609,42 @@
       "source": "zenoh-pico Zephyr port",
       "reason": "F=Zephyr API; P=zenoh-pico; C=alternative MCU OS"
     },
+    "plugin-abi-compat": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=cross-binary ABI compat gate (Compatibility/StructVersion); P=zenoh compatibility.rs:57; C=inert w/o dynamic-loading; class=foundational-inert"
+    },
+    "plugin-dynamic-loading": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE-AP: dlopen .so loading (libloading); P=zenoh dynamic_plugin.rs:30 vtable.rs:61; C=no_std-impossible unsafe-FFI AP-only re-openable; class=out-of-scope"
+    },
+    "plugin-host-trait": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=Plugin trait (StartArgs/Instance/start) + control/instance markers; P=zenoh plugin.rs:182; C=no_std-able; class=foundational"
+    },
+    "plugin-lifecycle": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=Declared->Loaded->Started FSM; P=zenoh manager.rs:26 static_plugin.rs:79; C=needs host-trait; class=foundational"
+    },
+    "plugin-manager": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=PluginsManager registry (declare/query, static_plugins_only); P=zenoh manager.rs:104; C=needs host-trait+lifecycle; class=cfg"
+    },
+    "plugin-static-registration": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-22-plugin",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=compile-time static plugin linking (declare_static_plugin); P=zenoh manager.rs:131; C=needs manager; no_std-safe; class=cfg"
+    },
     "preset-ap-client": {
       "status": "active",
       "source": "docs/feature_inventory.md §6.3",
@@ -55529,11 +55801,71 @@
       "source": "crates/wz-runtime-tokio/src/query.rs timeout option",
       "reason": "F=per-query deadline; P=zenoh GetOptions::timeout; C=indep client-side"
     },
+    "rest-http-bridge": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-26-rest",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE-AP: HTTP->zenoh bridge (GET/PUT/DELETE tide server); P=zenoh plugin-rest/lib.rs:358; C=heavy std HTTP dep AP-only; class=out-of-scope"
+    },
+    "rest-sse-subscribe": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-26-rest",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE-AP: Server-Sent-Events streaming subscriber; P=zenoh plugin-rest/lib.rs:373; C=needs http-bridge AP-only; class=out-of-scope"
+    },
+    "router-connect-reconcile": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=dynamic connect-list reconcile (update_peers) + auto-reconnect; P=zenoh orchestrator.rs:413,1194; C=needs orchestration; class=cfg"
+    },
+    "router-face-management": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=router-grade FaceState (interest maps, query reverse-path, dispatch shell); P=zenoh face.rs:63,296; C=needs hat-multihat; class=foundational"
+    },
+    "router-hat-multihat": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=HatTrait multi-hat polymorphism seam (per-face/resource/tables Box<dyn Any>); P=zenoh hat/mod.rs:78,272; C=prereq for all router atoms; class=foundational"
+    },
+    "router-hat-router": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=full router HatCode (routers_net+linkstatepeers_net dual mesh); P=zenoh hat/router/mod.rs:167,320; C=needs hat-multihat; promotes routing-router; class=cfg"
+    },
+    "router-master-election": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=hash-based master-router election for dedup delivery; P=zenoh hat/router/mod.rs:244; C=needs hat-router; class=foundational"
+    },
+    "router-multicast-faces": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=router multicast face/group routing (mcast_groups, McastMux egress); P=zenoh router.rs:181; C=needs face-mgmt+multicast; class=cfg"
+    },
+    "router-orchestration": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=start_router bootstrap (router-scoped listen/connect/scout); P=zenoh orchestrator.rs:230; C=needs scouting/gossip; class=cfg"
+    },
     "routing-client": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "crates/wz-ap-demo/src/main.rs client mode",
       "reason": "FOUNDATIONAL always-on, no cfg toggle; F=client-only routing; P=zenoh client; C=indep mode, smallest topology footprint"
+    },
+    "routing-data-route-compute": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=router compute_data_route fan across 3 source types; P=zenoh hat/router/pubsub.rs:1215; C=needs route-cache+master; class=cfg"
     },
     "routing-failover": {
       "status": "reserved",
@@ -55541,11 +55873,53 @@
       "source": "zenoh failover brokering",
       "reason": "F=failover policy; P=zenoh; C=requires routing-router"
     },
+    "routing-interceptor-framework": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=pluggable InterceptorTrait+Chain+factory seam (generalizes ACL chain); P=zenoh interceptor/mod.rs:101; C=refactor of access interceptors; class=foundational"
+    },
+    "routing-interceptor-hotreload": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=version-keyed ArcSwap interceptor hot-reload + keyexpr cache; P=zenoh tables.rs:81 face.rs:151; C=needs interceptor-framework; class=foundational"
+    },
+    "routing-interest-broker": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=router interest current-snapshot + DeclareFinal + future-push; P=zenoh hat/router/interests.rs:41; C=needs hat-router; class=cfg"
+    },
+    "routing-interest-pending-gc": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=pending-current-interest GC + multihop DeclareFinal unwind; P=zenoh dispatcher/interests.rs:79; C=needs interest-broker; class=foundational"
+    },
+    "routing-namespace": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=per-face keyexpr prefix/strip namespace decorator; P=zenoh namespace.rs:32,124; C=needs keyexpr nonwild-strip; standalone; class=cfg"
+    },
     "routing-peer": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh peer mode",
       "reason": "R311qg+ql: dial+accept mesh-node foundation (peer_loop reuses the accept_loop face-drive core + a dial-out face source; demo --peer; lib + e2e). Status=active because it gates real code (A3 catalog-truthfulness audit) — \"hold-only\" is a maturity caveat, not \"no code\": mesh forwarding + zid-keyed loop dedup are later atoms. F=peer-to-peer routing; P=zenoh peer."
+    },
+    "routing-query-route-compute": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=router compute_query_route w/ complete-aggregation+graph distance; P=zenoh hat/router/queries.rs:1426; C=needs route-cache; class=cfg"
+    },
+    "routing-route-cache": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=per-resource 3-way (routers/peers/clients) route cache get_or_set_route; P=zenoh resource.rs:147; C=needs hat-multihat; class=foundational"
     },
     "routing-router": {
       "status": "active",
@@ -55564,6 +55938,12 @@
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh static route config",
       "reason": "F=config static routes; P=zenoh; C=requires routing-router"
+    },
+    "routing-token-tables": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=router-scope liveliness-token mesh propagation tables; P=zenoh hat/router/token.rs; C=needs hat-router; class=cfg"
     },
     "runtime-async-std": {
       "status": "reserved",
@@ -55713,11 +56093,89 @@
       "source": "zenoh-backend-traits crate",
       "reason": "R311uy: StorageService driver landed (S1 backend + S2 gate + S3 driver); facade wz storage-backend forwards real code"
     },
+    "storage-backend-capability": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=Capability{persistence,history}+Persistence enum; P=zenoh backend-traits/lib.rs:142; C=History covered by §5.11 Persistence new; class=foundational"
+    },
+    "storage-backend-external-db": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE: InfluxDB/S3 Durable backends (History::All consumers); P=zenoh-backend-{influxdb,s3} (separate repos); C=heavy network/DB deps; class=out-of-scope"
+    },
+    "storage-backend-filesystem": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE(re-openable): filesystem Durable backend; P=zenoh-backend-filesystem (separate repo); C=lowest-dep Durable candidate std-only; class=out-of-scope"
+    },
+    "storage-backend-memory-volume": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=MemoryBackend Volume wrapper over existing MemoryStorage; P=zenoh memory_backend/mod.rs:32; C=needs volume-trait; class=cfg"
+    },
+    "storage-backend-rocksdb": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE: RocksDB Durable backend; P=zenoh-backend-rocksdb (separate repo); C=heavy C++ dep plugin territory; class=out-of-scope"
+    },
+    "storage-backend-volume-trait": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=Volume factory trait (create_storage per config) above existing §5.11 Storage; P=zenoh backend-traits/lib.rs:184; C=keystone net-new; class=foundational"
+    },
     "storage-history": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh Z_EXT_HISTORY emit",
       "reason": "R311uz: History::All version-keeping landed end-to-end (HistoryStorage backend + StorageState gate-skip + driver matching_versions); facade storage-history forwards real code"
+    },
+    "storage-mgr-complete-flag": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=complete:bool config (authoritative vs partial queryable); P=zenoh storages_mgt/service.rs:151; C=wz hardcodes true today; class=cfg"
+    },
+    "storage-mgr-config": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=PluginConfig/StorageConfig declarative model (key_expr/complete/strip_prefix/GC); P=zenoh backend-traits/config.rs:29; C=foundational data model; class=foundational"
+    },
+    "storage-mgr-dynamic-volume-loading": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "OUT-OF-SCOPE-AP: dlopen backend .so loading; P=zenoh storage-mgr/lib.rs:124,220; C=build-time-composed in wz; class=out-of-scope"
+    },
+    "storage-mgr-garbage-collection": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=periodic GC of stale wildcard/latest metadata; P=zenoh storages_mgt/service.rs:661; C=needs wildcard-updates; class=cfg"
+    },
+    "storage-mgr-multi-storage-host": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=manager hosting N named storages (volume->storage map); P=zenoh storage-mgr/lib.rs:95,263; C=needs mgr-config+§5.11; class=cfg"
+    },
+    "storage-mgr-strip-prefix": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=strip_prefix config (store w/ prefix removed aligner-aware); P=zenoh storages_mgt/service.rs:268; C=needs mgr-config; closes wz aligner gap; class=cfg"
+    },
+    "storage-mgr-wildcard-updates": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=wildcard Put/Del KeBoxTree override + replication-log Action; P=zenoh storages_mgt/service.rs:213; C=needs §5.11 aligner ext (rejects variants today); largest gap; class=cfg"
     },
     "storage-replication": {
       "status": "active",
@@ -55785,6 +56243,12 @@
       "source": "zenoh-link-quic crate",
       "reason": "R311xk: quic_pipeline backend (dial_quic/bind_quic/accept_quic_on + QuicReadDriver reusing the TCP stream_link StreamEnvelope SSOT over a quinn SendStream/RecvStream pair, already split) lands; transport-link-quic now a real cfg gate (forwards transport-link-tcp, pulls quinn 0.11 + the tls rustls stack), facade forwards wz-runtime-tokio/transport-link-quic. quic_config builds the TLS-1.3 + ALPN hq-29 rustls configs reusing the tls_config PEM loaders; cert threaded via DialConfig.quic (the tls pattern). Proto::Quic is IP-family (numeric host:port, like tls/ws), ungated parse. wz<->wz loopback e2e (self-signed rcgen) reaches Established + delivers Put, FULLY RUNNABLE zero-flake 3/3 (no #[ignore])."
     },
+    "transport-link-quic-datagram": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=QUIC unreliable DATAGRAM transport (RFC9221 reuses quic stack); P=zenoh zenoh-link-quic_datagram/lib.rs:35; C=needs existing quic backend; class=cfg"
+    },
     "transport-link-serial": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
@@ -55808,6 +56272,12 @@
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "crates/wz-ap-demo/src/link_driver.rs",
       "reason": "F=measured wz UdpSocket adapter; P=zenoh-pico transport_link_udp.c; C=independent of TCP/TLS/QUIC link kinds"
+    },
+    "transport-link-unixpipe": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=same-host link over named-pipe (FIFO) pair (vs unixsock AF_UNIX); P=zenoh zenoh-link-unixpipe/unix/mod.rs:32; C=unix_named_pipe dep AP unicast-only; class=cfg"
     },
     "transport-link-unixsock": {
       "status": "active",
@@ -55839,11 +56309,23 @@
       "source": "zenoh-pico src/transport/multicast/",
       "reason": "Round C (R311ji): gates the wz-runtime-tokio multicast_glue drive loop (periodic JOIN beacon + RX classify->dispatch + lease sweep over a multicast UdpDriver) + the generalised bind_multicast_v4. Forwards to session-multicast + codec-join."
     },
+    "transport-multilink": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=single unicast session aggregating multiple physical links (max_links>1); P=zenoh establishment/ext/multilink.rs:35; C=needs auth_pubkey + FSM ext; class=cfg"
+    },
     "transport-shm": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-shm crate",
       "reason": "F=POSIX shared-memory zero-copy payload (descriptor on wire + mmap'd /dev/shm segment); P=zenoh-shm Z_EXT_SHM; C=standalone POSIX shm (memmap2), NO io_uring/runtime-zero-copy prereq (R311xn direct-read: zenoh uses neither)"
+    },
+    "transport-stats": {
+      "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+      "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
+      "reason": "F=per-transport byte/msg counters (tx/rx/dropped); P=zenoh zenoh-transport stats feature; C=additive instrumentation; prereq for adminspace-metrics; class=cfg"
     },
     "transport-unicast": {
       "status": "active",
