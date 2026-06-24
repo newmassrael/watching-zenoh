@@ -554,6 +554,17 @@ transport-link-vsock = ["transport-link-tcp", "dep:tokio-vsock"]
 # threaded via `DialConfig.quic` (the tls pattern), so the generic
 # `dial_locator` returns Unsupported for `quic/...` without it. NOT default.
 transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64"]
+# R311y8 — host QUIC unreliable-DATAGRAM link backend (RFC9221). IMPLIES
+# `transport-link-quic`: it reuses that backend's `quic_config` TLS-1.3 + ALPN
+# builders + the quinn/rustls stack, swapping the bidi stream for the
+# connection's datagram path (`send_datagram`/`read_datagram`, `rel=0`) and the
+# StreamEnvelope drivers for the UDP datagram driver shape (one datagram = one
+# frame). Pulls `bytes` for the `quinn::Connection::send_datagram(Bytes)`
+# signature. The locator PARSE (`Proto::QuicDatagram`, scheme `quic-datagram`)
+# is unconditional in wz-session-core; only the dial/accept BACKEND is gated
+# here. Cert threaded via `DialConfig.quic` (same cert as `quic`). NOT default —
+# zenoh-default upstream, but an opt-in unreliable transport in wz.
+transport-link-quic-datagram = ["transport-link-quic", "dep:bytes"]
 # R311qa — multi-peer accept-and-hold capability (the `routing-router` /
 # future `routing-peer` foundation). Gates `pub mod accept_loop` (lib.rs) and
 # pulls its prerequisites: the TCP listen path (`transport-link-tcp`), the
@@ -1003,6 +1014,12 @@ uhlc = { version = "0.8", default-features = false, optional = true }
 # `aws-lc-rs` provider so it shares wz's single `ring` provider (the tls_config
 # reasoning). `runtime-tokio` binds quinn's reactor to tokio. NOT default.
 quinn = { version = "0.11", default-features = false, features = ["ring", "rustls", "runtime-tokio"], optional = true }
+# R311y8 — `bytes` for the QUIC datagram backend: `quinn::Connection::
+# send_datagram` takes a `bytes::Bytes`, so the datagram writer task constructs
+# one per outbound frame. bytes 1.x is the same crate quinn already depends on
+# (semver-stable at 1.x), so it unifies to one version. Pulled only by
+# `transport-link-quic-datagram`.
+bytes = { version = "1", optional = true }
 # R311ob — host WebSocket link backend, behind the optional `transport-link-ws`
 # feature. tokio-tungstenite is the async RFC6455 protocol layer: `client_async`
 # / `accept_async` run the HTTP-Upgrade handshake over a `TcpStream`, then the

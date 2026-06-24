@@ -107,6 +107,19 @@ pub enum Proto {
     /// `wz-runtime-tokio::session_open::DialConfig.quic` supplies it; otherwise
     /// `dial_locator` returns a typed `Unsupported`.
     Quic,
+    /// `quic-datagram/...` — QUIC unreliable DATAGRAM transport (RFC9221): the
+    /// same numeric `host:port` grammar as `quic`, but each zenoh batch rides
+    /// ONE QUIC datagram (`send_datagram`/`read_datagram`) instead of a bidi
+    /// stream — message boundaries delimit a frame with no length prefix,
+    /// exactly like UDP/WS (NOT the StreamEnvelope). zenoh overloads the `quic`
+    /// scheme + a `rel=0` metadata flag for this; wz's metadata-light locator
+    /// grammar instead gives it a DISTINCT scheme (`quic-datagram`), one
+    /// scheme = one backend. Parses unconditionally like every proto; the
+    /// BACKEND dial is gated (`transport-link-quic-datagram`, which implies
+    /// `transport-link-quic`) and — LIKE `quic` — needs the same TLS-1.3 cert
+    /// config the locator alone cannot carry, so it dials only when the threaded
+    /// `DialConfig.quic` supplies it; otherwise a typed `Unsupported`.
+    QuicDatagram,
 }
 
 /// A locator parsed into its transport protocol and numeric endpoint.
@@ -146,6 +159,7 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
         "tls" => Proto::Tls,
         "ws" => Proto::Ws,
         "quic" => Proto::Quic,
+        "quic-datagram" => Proto::QuicDatagram,
         other => return Err(LocatorParseError::UnknownProto(other.to_string())),
     };
     let addr = SocketAddr::from_str(addr_str)
@@ -625,6 +639,7 @@ fn classify_named_ip(locator: &str) -> Option<(Proto, String, u16)> {
         "tls" => Proto::Tls,
         "ws" => Proto::Ws,
         "quic" => Proto::Quic,
+        "quic-datagram" => Proto::QuicDatagram,
         _ => return None,
     };
     // A bracketed address is an IPv6 literal; if it did not parse as a
@@ -747,6 +762,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_quic_datagram_ipv4() {
+        // R311y8 — `quic-datagram` is a DISTINCT scheme (zenoh overloads `quic`
+        // + a `rel=0` metadata flag; wz's metadata-light grammar gives the
+        // unreliable-datagram link its own scheme, one scheme = one backend).
+        // Same numeric host:port grammar as `quic`; parsing is unconditional,
+        // only the dial backend is gated (`transport-link-quic-datagram`).
+        let p =
+            parse_locator("quic-datagram/192.168.1.10:7447").expect("valid quic-datagram locator");
+        assert_eq!(p.proto, Proto::QuicDatagram);
+        assert_eq!(p.addr, "192.168.1.10:7447".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
     fn parse_any_classifies_quic_dns_name_as_named() {
         // DNS-vs-numeric is an address-token property orthogonal to scheme:
         // a `quic/HOST:PORT` with a DNS host classifies to Named (the QUIC dial
@@ -841,6 +869,7 @@ mod tests {
             ("udp/example.org:7447", Proto::Udp),
             ("ws/example.org:7447", Proto::Ws),
             ("tls/example.org:7447", Proto::Tls),
+            ("quic-datagram/example.org:7447", Proto::QuicDatagram),
         ] {
             assert_eq!(
                 parse_any_locator(s),

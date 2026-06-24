@@ -580,6 +580,20 @@ pub mod shm_provider;
 #[cfg(feature = "transport-link-quic")]
 pub mod quic_pipeline;
 
+/// R311y8 — host QUIC unreliable-DATAGRAM backend (RFC9221). The DATAGRAM
+/// sibling of [`quic_pipeline`]: zenoh ships `zenoh-link-quic_datagram` beside
+/// `zenoh-link-quic`, sharing the TLS config but carrying each batch as ONE
+/// QUIC datagram (`send_datagram`/`read_datagram`, `rel=0`) instead of over a
+/// bidi stream — the datagram boundary is the framing, so it reuses the UDP
+/// read/write driver shape (shared `Connection` handle, one datagram = one
+/// frame), NOT the StreamEnvelope drivers. Gated `transport-link-quic-datagram`,
+/// which IMPLIES `transport-link-quic` (reuses [`quic_config`] + the quinn/rustls
+/// stack); the only new surface is the datagram path + the per-datagram MTU. The
+/// `session_open` DialedLink::QuicDatagram arm reuses `DialConfig.quic` (same
+/// cert), like tls/quic.
+#[cfg(feature = "transport-link-quic-datagram")]
+pub mod quic_datagram_pipeline;
+
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
 /// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`

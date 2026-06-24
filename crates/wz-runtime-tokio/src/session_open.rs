@@ -95,6 +95,15 @@ use tokio_rustls::TlsStream;
 #[cfg(feature = "transport-link-quic")]
 use crate::quic_pipeline::{dial_quic, wire_quic_stream, QuicLink, QuicReadDriver};
 
+// R311y8 — the QUIC DATAGRAM arm, like udp/ws, rides this tcp+unicast-gated
+// module as an additive DATAGRAM transport. Reuses `DialConfig.quic` (same
+// cert as the stream backend); `transport-link-quic-datagram` implies
+// `transport-link-quic`.
+#[cfg(feature = "transport-link-quic-datagram")]
+use crate::quic_datagram_pipeline::{
+    dial_quic_datagram, wire_quic_datagram, QuicDatagramLink, QuicDatagramReadDriver,
+};
+
 // R311ob — the WS arm, like udp, rides this tcp+unicast-gated module as an
 // additive DATAGRAM transport. The stream type is the RFC6455
 // `WebSocketStream<TcpStream>` produced by `ws_pipeline::dial_ws`/`accept_ws`.
@@ -277,6 +286,18 @@ pub enum DialedLink {
     /// [`DialConfig`] carries `quic` (the TLS-style cert threading).
     #[cfg(feature = "transport-link-quic")]
     Quic(Box<QuicLink>),
+    /// A connected + QUIC-handshaked DATAGRAM link, shared downstream via
+    /// [`wire_quic_datagram`] (R311y8). Like [`Self::Quic`] the QUIC + TLS-1.3
+    /// handshake has ALREADY run by the time this is built
+    /// ([`crate::quic_datagram_pipeline::dial_quic_datagram`] /
+    /// `accept_quic_datagram_on`), but the steady state is DATAGRAM (each batch =
+    /// one QUIC datagram, no bidi stream), so it is uniform with UDP/WS, not
+    /// TCP/TLS. `Box`ed for the same reason as [`Self::Quic`] (the endpoint +
+    /// connection keep-alive handles; clippy `large_enum_variant`). Produced by
+    /// [`dial_locator`] when its [`DialConfig`] carries `quic` (the same cert as
+    /// the stream backend).
+    #[cfg(feature = "transport-link-quic-datagram")]
+    QuicDatagram(Box<QuicDatagramLink>),
 }
 
 impl DialedLink {
@@ -306,6 +327,8 @@ impl DialedLink {
             DialedLink::Vsock(_) => "vsock",
             #[cfg(feature = "transport-link-quic")]
             DialedLink::Quic(_) => "quic",
+            #[cfg(feature = "transport-link-quic-datagram")]
+            DialedLink::QuicDatagram(_) => "quic-datagram",
         }
     }
 }
@@ -417,6 +440,29 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
             Proto::Quic => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "quic session-open requires the transport-link-quic feature",
+            )),
+            // R311y8 — `quic-datagram/...` dials from the locator when `cfg.quic`
+            // supplies the cert (the SAME TLS-1.3 config as the `quic` stream
+            // backend; quic-datagram implies transport-link-quic, so the field
+            // is present). Absent config => typed `Unsupported`, like `quic`.
+            // `dial_quic_datagram` (build a client endpoint, connect — no bidi
+            // stream) is the primitive; this arm orchestrates it.
+            #[cfg(feature = "transport-link-quic-datagram")]
+            Proto::QuicDatagram => match &cfg.quic {
+                Some(q) => Ok(DialedLink::QuicDatagram(Box::new(
+                    dial_quic_datagram(ip.addr, q.client_config.clone(), &q.server_name).await?,
+                ))),
+                None => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "quic-datagram dial requires DialConfig.quic (rustls client config + SNI name)",
+                )),
+            },
+            // With the backend off, the same `Unsupported` shape as the quic/tls
+            // arms — `quic-datagram/...` still parses, only its dial is absent.
+            #[cfg(not(feature = "transport-link-quic-datagram"))]
+            Proto::QuicDatagram => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "quic-datagram session-open requires the transport-link-quic-datagram feature",
             )),
         },
         // R311ps — a DNS-named IP-family endpoint (`tcp/example.org:7447`). The
@@ -738,6 +784,8 @@ pub enum InboundLink {
     Vsock(VsockReadDriver),
     #[cfg(feature = "transport-link-quic")]
     Quic(QuicReadDriver),
+    #[cfg(feature = "transport-link-quic-datagram")]
+    QuicDatagram(QuicDatagramReadDriver),
 }
 
 impl LinkDriver for InboundLink {
@@ -758,6 +806,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Vsock(d) => d.open().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.open().await,
+            #[cfg(feature = "transport-link-quic-datagram")]
+            InboundLink::QuicDatagram(d) => d.open().await,
         }
     }
 
@@ -778,6 +828,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Vsock(d) => d.send(frame, reliability).await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.send(frame, reliability).await,
+            #[cfg(feature = "transport-link-quic-datagram")]
+            InboundLink::QuicDatagram(d) => d.send(frame, reliability).await,
         }
     }
 
@@ -798,6 +850,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Vsock(d) => d.close().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.close().await,
+            #[cfg(feature = "transport-link-quic-datagram")]
+            InboundLink::QuicDatagram(d) => d.close().await,
         }
     }
 
@@ -818,6 +872,8 @@ impl LinkDriver for InboundLink {
             InboundLink::Vsock(d) => d.poll_event().await,
             #[cfg(feature = "transport-link-quic")]
             InboundLink::Quic(d) => d.poll_event().await,
+            #[cfg(feature = "transport-link-quic-datagram")]
+            InboundLink::QuicDatagram(d) => d.poll_event().await,
         }
     }
 }
@@ -874,6 +930,11 @@ pub fn wire_dialed_link(
         DialedLink::Quic(link) => {
             let (inbound, outbound, handle) = wire_quic_stream(*link);
             (InboundLink::Quic(inbound), outbound, handle)
+        }
+        #[cfg(feature = "transport-link-quic-datagram")]
+        DialedLink::QuicDatagram(link) => {
+            let (inbound, outbound, handle) = wire_quic_datagram(*link);
+            (InboundLink::QuicDatagram(inbound), outbound, handle)
         }
     }
 }

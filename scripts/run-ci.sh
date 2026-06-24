@@ -1136,6 +1136,33 @@ layer_c1ai_cargo_test_liveliness_history() {
             --features transport-unicast,liveliness-subscriber --lib effective_history --quiet)
 }
 
+# ─── Layer C1aj — QUIC DATAGRAM link: locator parse + datagram backend e2e ─
+#
+# R311y8: the DATAGRAM sibling of C1ac (quic). `transport-link-quic-datagram`
+# (OFF in the default set, IMPLIES `transport-link-quic`) carries each zenoh
+# batch as ONE QUIC unreliable datagram (send_datagram/read_datagram, RFC9221) —
+# the UDP datagram driver shape, NOT the StreamEnvelope stream of C1ac. This
+# lane:
+#   1. runs the locator tests (the `quic-datagram/<host>:<port>` parse is the new
+#      `Proto::QuicDatagram`, the IP-family numeric grammar — ungated parse);
+#   2. runs the `quic_datagram_e2e` integration test (gated
+#      `all(transport-link-quic-datagram, transport-unicast)`): two nodes complete
+#      the QUIC + TLS-1.3 handshake over loopback — the initiator via a
+#      `quic-datagram/...` LOCATOR + DialConfig.quic (the SAME cert as quic) —
+#      reach Established, and a Put is delivered byte-exact over the QUIC datagram
+#      data path;
+#   3. clippy-gates the `transport-link-quic-datagram` cfg (`--all-targets`);
+#   4. clippy-gates the LIB under `--no-default-features --features
+#      transport-link-quic-datagram` to prove `quic_datagram_pipeline` composes
+#      standalone (it pulls transport-link-quic's quinn + tls stack + `bytes`).
+layer_c1aj_cargo_test_quic_datagram() {
+    (cd crates \
+        && cargo test -p wz-session-core --features alloc --lib locator --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-link-quic-datagram --test quic_datagram_e2e --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-quic-datagram --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-quic-datagram --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3556,6 +3583,7 @@ run_layer C1af layer_c1af_cargo_test_shm || overall=1
 run_layer C1ag layer_c1ag_cargo_test_transport_compose || overall=1
 run_layer C1ah layer_c1ah_cargo_test_time_hlc || overall=1
 run_layer C1ai layer_c1ai_cargo_test_liveliness_history || overall=1
+run_layer C1aj layer_c1aj_cargo_test_quic_datagram || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

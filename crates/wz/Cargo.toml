@@ -813,8 +813,12 @@ rest-sse-subscribe = []
 api-compat-c = []
 api-compat-pico = []
 
-# ----- §5.1 transport additions (4 atomic, all reserved) -----
-transport-link-quic-datagram = []
+# ----- §5.1 transport additions (4 atomic: 1 active, 3 reserved) -----
+# R311y8 — quic-datagram is the first of the R311y7 re-audit's LAYER-1 trio to
+# build: forwards the wz-runtime-tokio backend (which implies transport-link-quic
+# for the shared cert + quinn stack). unixpipe + stats stay reserved (build next
+# rounds); multilink stays reserved/P4 (auth_pubkey RSA + multi-link aggregation).
+transport-link-quic-datagram = ["transport-link-quic", "wz-runtime-tokio?/transport-link-quic-datagram"]
 transport-link-unixpipe = []
 transport-multilink = []
 transport-stats = []

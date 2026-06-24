@@ -105,7 +105,9 @@ impl LinkDriver for QuicReadDriver {
 }
 
 /// Map a quinn / rustls error into the `io::Result` the pipeline surface speaks.
-fn io_other<E>(err: E) -> io::Error
+/// `pub(crate)` so the datagram sibling [`crate::quic_datagram_pipeline`] reuses
+/// the one error-mapping SSOT (R311y8) rather than re-deriving it.
+pub(crate) fn io_other<E>(err: E) -> io::Error
 where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
@@ -116,7 +118,9 @@ where
 /// client endpoint binds an ephemeral local UDP socket, and it must match the
 /// target's family (a V4 socket cannot reach a V6 peer). Mirrors zenoh's
 /// INADDR_ANY / in6addr_any auto-select on dial (`zenoh-link-quic` `new_link`).
-fn client_bind_addr(target: SocketAddr) -> SocketAddr {
+/// `pub(crate)` so the datagram sibling [`crate::quic_datagram_pipeline`] shares
+/// the one ephemeral-bind-family SSOT (R311y8).
+pub(crate) fn client_bind_addr(target: SocketAddr) -> SocketAddr {
     match target {
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
         SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
