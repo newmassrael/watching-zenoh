@@ -49987,6 +49987,38 @@
         "LESSON (durable): on the textbook/SSOT/north-star review trigger, run INDEPENDENT adversarial agents (distinct lenses) + arbitrate by direct-read; a finding TWO independent agents converge on is real, a lone over-flag is filtered. Not every flag is actioned -- declining with a consistency/YAGNI rationale is part of the review. [[feedback-textbook-over-cost]]"
       ]
     },
+    "Round 311xs": {
+      "decision_summary": "R311xs -- pre-push Layer C2 (cargo clippy --workspace --all-targets -- -D warnings) caught clippy::items_after_test_module in R311xr's test-support refactor: the moved fixture_params_with_zid / EstablishedPair / establish_capability_pair (+ their use imports) were appended AFTER the #[cfg(test)] mod tests block. Fixed by relocating the whole block to BEFORE the test module (no behavior/wire/inventory change). LESSON: reproduce the ACTUAL failing lane -- R311xr ran the C1ag subset (test-support 7 + a targeted clippy) but NOT the full C2 --workspace --all-targets -D warnings, where this default-feature lib-test lint fires; a C1ag subset is not the full run-ci. Full C2 + fmt re-run green.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: moved the R311xr establish_capability_pair + EstablishedPair + fixture_params_with_zid block (and its use imports) from AFTER the #[cfg(test)] mod tests to BEFORE it -- the textbook fix for clippy::items_after_test_module (relocation, NOT an #[allow] suppression). The items themselves are byte-unchanged."
+      ],
+      "verification_bullets": [
+        "Targeted `cargo clippy -p wz-runtime-tokio-test-support --all-targets -- -D warnings` green (EXIT=0); the full Layer C2 `cargo clippy --workspace --all-targets <C2 excludes> -- -D warnings` green (EXIT=0) -- the items_after_test_module error that failed the R311xr push is gone.",
+        "cargo fmt -p wz-runtime-tokio-test-support -- --check clean. No behavior/wire/inventory change, so no other lane is affected; the full run-ci re-runs at pre-push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "R311xs = the C2 fix for R311xr: test-support items relocated before the #[cfg(test)] mod tests. e486d59 (R311xr) stays intact (its SHA is cited in the R311xr carry_forward + memory), so this is a NEW commit, not an amend.",
+        "LESSON (durable): a pre-push gate caught items_after_test_module that the in-session C1ag subset missed -- reproduce the EXACT failing lane (full clippy --workspace --all-targets -- -D warnings), never a narrower per-crate / per-feature subset, before claiming all-configs-green. [[feedback-full-runci-all-host-lanes]]"
+      ],
+      "publishable_decision_summary": "R311xs -- pre-push Layer C2 (cargo clippy --workspace --all-targets -- -D warnings) caught clippy::items_after_test_module in R311xr's test-support refactor: the moved fixture_params_with_zid / EstablishedPair / establish_capability_pair (+ their use imports) were appended AFTER the #[cfg(test)] mod tests block. Fixed by relocating the whole block to BEFORE the test module (no behavior/wire/inventory change). LESSON: reproduce the ACTUAL failing lane -- R311xr ran the C1ag subset (test-support 7 + a targeted clippy) but NOT the full C2 --workspace --all-targets -D warnings, where this default-feature lib-test lint fires; a C1ag subset is not the full run-ci. Full C2 + fmt re-run green.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: moved the R311xr establish_capability_pair + EstablishedPair + fixture_params_with_zid block (and its use imports) from AFTER the #[cfg(test)] mod tests to BEFORE it -- the textbook fix for clippy::items_after_test_module (relocation, NOT an #[allow] suppression). The items themselves are byte-unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "Targeted `cargo clippy -p wz-runtime-tokio-test-support --all-targets -- -D warnings` green (EXIT=0); the full Layer C2 `cargo clippy --workspace --all-targets <C2 excludes> -- -D warnings` green (EXIT=0) -- the items_after_test_module error that failed the R311xr push is gone.",
+        "cargo fmt -p wz-runtime-tokio-test-support -- --check clean. No behavior/wire/inventory change, so no other lane is affected; the full run-ci re-runs at pre-push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311xs = the C2 fix for R311xr: test-support items relocated before the #[cfg(test)] mod tests. e486d59 (R311xr) stays intact (its SHA is cited in the R311xr carry_forward + memory), so this is a NEW commit, not an amend.",
+        "LESSON (durable): a pre-push gate caught items_after_test_module that the in-session C1ag subset missed -- reproduce the EXACT failing lane (full clippy --workspace --all-targets -- -D warnings), never a narrower per-crate / per-feature subset, before claiming all-configs-green. [[feedback-full-runci-all-host-lanes]]"
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [
