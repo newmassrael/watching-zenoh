@@ -418,6 +418,15 @@ pub mod send_wire_error;
 #[cfg(feature = "alloc")]
 pub mod sample;
 
+/// §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror
+/// of zenoh's high-level Encoding API (the convenience layer the encoding-* atoms
+/// name, on top of the active `pubsub-encoding` wire field). FOUNDATIONAL
+/// (always-on, no cfg toggle — encoding identity is a data value, not a
+/// composable code path). Gated on `alloc` (it builds the `String`-bearing
+/// [`sample::EncodingHint`]).
+#[cfg(feature = "alloc")]
+pub mod encoding;
+
 /// Shared slice-based VLE decoder (the `SceCursor::read_vle_u64` borrowed-slice
 /// twin) — the SSOT for parsing a varint out of an already-buffered ext body.
 /// `pub` for the `read_zbuf` / `write_zbuf` "one zenoh ZBuf" framing primitive,

@@ -49889,6 +49889,52 @@
         "NEXT TRACK (per roadmap, none chosen yet): encoding (7 atoms) / HLC §5.18 (3)."
       ]
     },
+    "Round 311xq": {
+      "decision_summary": "R311xq implements the foundational predefined Encoding constants + the MIME id<->str table (the §5.19 encoding domain), the wz mirror of zenoh's high-level Encoding API (api/encoding.rs), layered on the already-active pubsub-encoding wire field codec. DIRECT-READ DECISION: the 7 encoding atoms are NOT cfg-toggleable -- encoding identity is a DATA value (a numeric id + a free-form schema string), and the §5.19 audit (R311cg/R311hr) + the audit-catalog-status.sh A3 rule (active <=> a real cfg toggle; an always-on FOUNDATIONAL capability = status=reserved + a FOUNDATIONAL reason, the keyexpr-canon precedent) mean cfg-gating an encoding NAME is a dead-code stub. So the constants are IMPLEMENTED ungated-foundational and the 7 atoms STAY status=reserved with a FOUNDATIONAL reason -- NOT flipped to active (they are not knobs). This CORRECTS the user's chosen-option label (\\\"reserved->active-foundational\\\") to the audit-faithful \\\"reserved-FOUNDATIONAL\\\" (active is reserved for real toggles -- keeps the active set honest). The active-atom count is UNCHANGED (90); the atoms moved inert-reserved -> FOUNDATIONAL-reserved (implemented).",
+      "changes_bullets": [
+        "crates/wz-session-core/src/encoding.rs (NEW, alloc, foundational/ungated): the wz mirror of zenoh's Encoding API -- the predefined id constants (0=zenoh/bytes, 3=octet-stream, 4=text/plain, 5=json, 8=cbor, 13=protobuf, the EncodingId=u16 type + ID_CUSTOM 0xFFFF), 6 named EncodingHint const constructors (ZENOH_BYTES / APPLICATION_OCTET_STREAM / TEXT_PLAIN / APPLICATION_JSON / APPLICATION_CBOR / APPLICATION_PROTOBUF -- packed_id = id<<1, the wire-packed no-schema form) + EncodingHint::id(), the full 53-entry MIME id<->str table (mime_for_id / id_for_mime), and encoding_from_mime / encoding_to_mime (the zenoh from_str/to_str: known MIME -> predefined id, \"mime;schema\" split, unknown -> custom 0xFFFF + whole-string schema). + 5 unit tests.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature=alloc)] pub mod encoding (sibling of sample, gated alloc for the String-bearing EncodingHint).",
+        "NO cfg(feature=encoding-X) gate sites added (the constants are ungated foundational); the 7 encoding-* facade features stay [] no-op markers (satisfying the audit's \"declared\" invariant without gating).",
+        "inventory: the 7 encoding atoms (empty/bytes/utf8/json/cbor/protobuf/mime) reason updated to the FOUNDATIONAL prefix (\"FOUNDATIONAL always-on, no cfg toggle (R311xq impl); F=...; C=EncodingHint::X const ...\") -- status KEPT reserved (the A3 rule: active = a real cfg toggle only)."
+      ],
+      "verification_bullets": [
+        "wz-session-core --features alloc --lib encoding: 5 pass (named-constant packed_ids = id<<1, the 53-entry MIME table round-trip, from/to_mime known + known-with-schema + unknown-custom). clippy -D warnings green: alloc --all-targets + OFF default (the module is alloc-gated -- absent + no regression OFF). facade wz --features encoding-json,encoding-mime resolves + builds (no-op markers).",
+        "scripts/audit-catalog-status.sh: truthfulness OK. grep `feature = \"encoding-` in crates/**/src = 0 sites (reserved => not-gated holds for all 7). validate_workspace: T1 orphan new=+0 (13 ledgered), T3 warn=4 / T4 info=4 unchanged, sections 259 unchanged (a reason-only inventory edit touches no cross-ref).",
+        "A3 read-FIRST + direct-read DECISION: an Explore mapped zenoh's Encoding (id u16 + optional schema ZSlice; the wire VLE id<<1|S; the 53 predefined ids 0-52 + 0xFFFF custom; the str<->id phf maps) + wz's EncodingHint (the packed_id wire form + the already-active pubsub-encoding field codec). The §5.19 audit + the audit-catalog-status.sh rule (foundational always-on = reserved, keyexpr-canon-style, 0 cfg sites) were direct-read to CORRECT the activation expectation BEFORE building fake gates."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding"
+      ],
+      "carry_forward_bullets": [
+        "R311xq = the §5.19 Encoding constants implemented as FOUNDATIONAL (encoding.rs: zenoh's predefined-id constants + the 53-entry MIME table + from/to_mime, on the active pubsub-encoding field). The 7 encoding atoms stay status=reserved-FOUNDATIONAL (active = a real cfg toggle ONLY per the catalog A3 rule; encoding identity is data, not a knob -- cfg-gating = a dead-code stub the §5.19 audit forbids). Active-atom count UNCHANGED (90); the atoms moved inert-reserved -> FOUNDATIONAL-reserved (implemented).",
+        "LESSON (durable): the catalog A3 rule is active <=> a real cfg toggle; an always-on implemented capability is RESERVED + a \"FOUNDATIONAL\" reason prefix (keyexpr-canon / pubsub-sample / time-system-clock precedent), NOT active. \"Building\" a foundational domain implements the code + sets the FOUNDATIONAL reason; it does NOT raise the active count.",
+        "LOW-PRIORITY follow-up: the §5.19 section BODY still says \"declaration-only\" (now slightly understated -- there is a foundational impl); reconcile per the R311hr \"§5 prose understates\" carry (R408 makes §5 prose non-authoritative, so the inventory reason SSOT is what matters and is already updated).",
+        "LOCAL: R311xq atop origin/main=b5a4216. 1 commit ahead, NOT pushed without explicit consent.",
+        "NEXT TRACK (per roadmap): HLC §5.18 (3 atoms -- a genuinely cfg-toggleable track, unlike encoding). Or the beyond-zenoh per-encoding codecs (the cfg-active superset) if per-encoding behavior is ever wanted."
+      ],
+      "publishable_decision_summary": "R311xq implements the foundational predefined Encoding constants + the MIME id<->str table (the §5.19 encoding domain), the wz mirror of zenoh's high-level Encoding API (api/encoding.rs), layered on the already-active pubsub-encoding wire field codec. DIRECT-READ DECISION: the 7 encoding atoms are NOT cfg-toggleable -- encoding identity is a DATA value (a numeric id + a free-form schema string), and the §5.19 audit (R311cg/R311hr) + the audit-catalog-status.sh A3 rule (active <=> a real cfg toggle; an always-on FOUNDATIONAL capability = status=reserved + a FOUNDATIONAL reason, the keyexpr-canon precedent) mean cfg-gating an encoding NAME is a dead-code stub. So the constants are IMPLEMENTED ungated-foundational and the 7 atoms STAY status=reserved with a FOUNDATIONAL reason -- NOT flipped to active (they are not knobs). This CORRECTS the user's chosen-option label (\\\"reserved->active-foundational\\\") to the audit-faithful \\\"reserved-FOUNDATIONAL\\\" (active is reserved for real toggles -- keeps the active set honest). The active-atom count is UNCHANGED (90); the atoms moved inert-reserved -> FOUNDATIONAL-reserved (implemented).",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/encoding.rs (NEW, alloc, foundational/ungated): the wz mirror of zenoh's Encoding API -- the predefined id constants (0=zenoh/bytes, 3=octet-stream, 4=text/plain, 5=json, 8=cbor, 13=protobuf, the EncodingId=u16 type + ID_CUSTOM 0xFFFF), 6 named EncodingHint const constructors (ZENOH_BYTES / APPLICATION_OCTET_STREAM / TEXT_PLAIN / APPLICATION_JSON / APPLICATION_CBOR / APPLICATION_PROTOBUF -- packed_id = id<<1, the wire-packed no-schema form) + EncodingHint::id(), the full 53-entry MIME id<->str table (mime_for_id / id_for_mime), and encoding_from_mime / encoding_to_mime (the zenoh from_str/to_str: known MIME -> predefined id, \"mime;schema\" split, unknown -> custom 0xFFFF + whole-string schema). + 5 unit tests.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature=alloc)] pub mod encoding (sibling of sample, gated alloc for the String-bearing EncodingHint).",
+        "NO cfg(feature=encoding-X) gate sites added (the constants are ungated foundational); the 7 encoding-* facade features stay [] no-op markers (satisfying the audit's \"declared\" invariant without gating).",
+        "inventory: the 7 encoding atoms (empty/bytes/utf8/json/cbor/protobuf/mime) reason updated to the FOUNDATIONAL prefix (\"FOUNDATIONAL always-on, no cfg toggle (R311xq impl); F=...; C=EncodingHint::X const ...\") -- status KEPT reserved (the A3 rule: active = a real cfg toggle only)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core --features alloc --lib encoding: 5 pass (named-constant packed_ids = id<<1, the 53-entry MIME table round-trip, from/to_mime known + known-with-schema + unknown-custom). clippy -D warnings green: alloc --all-targets + OFF default (the module is alloc-gated -- absent + no regression OFF). facade wz --features encoding-json,encoding-mime resolves + builds (no-op markers).",
+        "scripts/audit-catalog-status.sh: truthfulness OK. grep `feature = \"encoding-` in crates/**/src = 0 sites (reserved => not-gated holds for all 7). validate_workspace: T1 orphan new=+0 (13 ledgered), T3 warn=4 / T4 info=4 unchanged, sections 259 unchanged (a reason-only inventory edit touches no cross-ref).",
+        "A3 read-FIRST + direct-read DECISION: an Explore mapped zenoh's Encoding (id u16 + optional schema ZSlice; the wire VLE id<<1|S; the 53 predefined ids 0-52 + 0xFFFF custom; the str<->id phf maps) + wz's EncodingHint (the packed_id wire form + the already-active pubsub-encoding field codec). The §5.19 audit + the audit-catalog-status.sh rule (foundational always-on = reserved, keyexpr-canon-style, 0 cfg sites) were direct-read to CORRECT the activation expectation BEFORE building fake gates."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311xq = the §5.19 Encoding constants implemented as FOUNDATIONAL (encoding.rs: zenoh's predefined-id constants + the 53-entry MIME table + from/to_mime, on the active pubsub-encoding field). The 7 encoding atoms stay status=reserved-FOUNDATIONAL (active = a real cfg toggle ONLY per the catalog A3 rule; encoding identity is data, not a knob -- cfg-gating = a dead-code stub the §5.19 audit forbids). Active-atom count UNCHANGED (90); the atoms moved inert-reserved -> FOUNDATIONAL-reserved (implemented).",
+        "LESSON (durable): the catalog A3 rule is active <=> a real cfg toggle; an always-on implemented capability is RESERVED + a \"FOUNDATIONAL\" reason prefix (keyexpr-canon / pubsub-sample / time-system-clock precedent), NOT active. \"Building\" a foundational domain implements the code + sets the FOUNDATIONAL reason; it does NOT raise the active count.",
+        "LOW-PRIORITY follow-up: the §5.19 section BODY still says \"declaration-only\" (now slightly understated -- there is a foundational impl); reconcile per the R311hr \"§5 prose understates\" carry (R408 makes §5 prose non-authoritative, so the inventory reason SSOT is what matters and is already updated).",
+        "LOCAL: R311xq atop origin/main=b5a4216. 1 commit ahead, NOT pushed without explicit consent.",
+        "NEXT TRACK (per roadmap): HLC §5.18 (3 atoms -- a genuinely cfg-toggleable track, unlike encoding). Or the beyond-zenoh per-encoding codecs (the cfg-active superset) if per-encoding behavior is ever wanted."
+      ]
+    },
     "Round 311y": {
       "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
       "changes_bullets": [
@@ -54941,43 +54987,43 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml octet-stream arm",
-      "reason": "F=application/octet-stream tag; P=zenoh; C=indep encoding tag"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/octet-stream tag (id 3); P=zenoh; C=EncodingHint::APPLICATION_OCTET_STREAM const (data, not a toggle)"
     },
     "encoding-cbor": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/cbor encoding",
-      "reason": "F=CBOR encoding tag; P=zenoh; C=indep encoding tag"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/cbor tag (id 8); P=zenoh; C=EncodingHint::APPLICATION_CBOR const (data, not a toggle)"
     },
     "encoding-empty": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml empty arm",
-      "reason": "F=empty encoding tag; P=zenoh encoding empty; C=baseline tag value"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=empty/default encoding tag = zenoh/bytes (id 0); P=zenoh encoding empty; C=EncodingHint::ZENOH_BYTES const (encoding identity is data, not a composable code path -- cfg-gating would be a dead-code stub per the §5.19 audit)"
     },
     "encoding-json": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/json encoding",
-      "reason": "F=JSON encoding tag; P=zenoh; C=indep, payload still bytes"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/json tag (id 5); P=zenoh; C=EncodingHint::APPLICATION_JSON const (data, not a toggle)"
     },
     "encoding-mime": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh RFC 6838 full MIME registry",
-      "reason": "F=full MIME tag table; P=zenoh RFC 6838; C=superset of bespoke encoding-* tags"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=full 53-entry MIME id<->str table + from/to_mime parse; P=zenoh RFC 6838; C=encoding::mime_for_id / id_for_mime / encoding_from_mime / encoding_to_mime (superset of the bespoke encoding-* consts; data, not a toggle)"
     },
     "encoding-protobuf": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/protobuf encoding",
-      "reason": "F=Protobuf encoding tag; P=zenoh; C=indep encoding tag"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=application/protobuf tag (id 13); P=zenoh; C=EncodingHint::APPLICATION_PROTOBUF const (data, not a toggle)"
     },
     "encoding-utf8": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml text/plain arm",
-      "reason": "F=text/plain UTF-8 tag; P=zenoh; C=indep encoding tag"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle (R311xq impl in encoding.rs); F=text/plain UTF-8 tag (id 4); P=zenoh; C=EncodingHint::TEXT_PLAIN const (data, not a toggle)"
     },
     "keyexpr-canon": {
       "status": "reserved",
