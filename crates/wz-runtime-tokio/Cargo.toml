@@ -362,6 +362,13 @@ transport-lowlatency = ["wz-session-core/transport-lowlatency"]
 # at the runtime layer (lz4_flex rides session-core).
 transport-compression = ["wz-session-core/transport-compression"]
 session-extcompression = ["wz-session-core/session-extcompression"]
+
+# transport-shm — the scoped same-host SHM data path: forwards the session-core
+# no_std machinery (descriptor + 0x2 marker + is_shm + ShmResolver trait) and
+# pulls memmap2 for the AP POSIX segment (shm_provider). AP-only (no MCU forward
+# -- pico has no SHM). R3a is the inert provider + codec; R3b adds the live swap +
+# the Z_EXT_SHM challenge handshake (session-extshm).
+transport-shm = ["wz-session-core/transport-shm", "dep:memmap2"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +
@@ -936,6 +943,12 @@ rustls-pemfile = { version = "2", optional = true }
 # `base64_decode` in `zenoh-link-tls/src/utils.rs`. Optional + tls-gated like
 # the other TLS deps.
 base64 = { version = "0.22", optional = true }
+# transport-shm — the AP POSIX shared-memory provider (behind the optional
+# `transport-shm` feature). A /dev/shm tmpfs file mmap'd MAP_SHARED is exactly
+# POSIX shared memory for the same-host scoped proof; memmap2 is the stable,
+# version-steady mmap wrapper (vs nix's shifting mman API). The wire carries the
+# descriptor, not the local mmap mechanism, so this is faithful for same-host.
+memmap2 = { version = "0.9", optional = true }
 # R311xk — host QUIC link backend, behind the optional `transport-link-quic`
 # feature. quinn is the async QUIC implementation zenoh-link-vsock... no:
 # zenoh-link-quic uses quinn 0.11.5 (workspace pin). wz pins the same 0.11.

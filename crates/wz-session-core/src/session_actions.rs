@@ -377,6 +377,13 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// (the wz mirror of zenoh's per-batch compression). Behind its own mutex.
     #[cfg(feature = "transport-compression")]
     pub is_compression: R::Mutex<bool>,
+    /// transport-shm — the negotiated SHM capability for THIS session (zenoh
+    /// `negotiated_to_use_shm`). R3a: always false (the inert data-path
+    /// machinery never fires); R3b's Z_EXT_SHM 0x2 challenge-response handshake
+    /// flips it, after which an SHM-backed Put sends a descriptor + the 0x2 body
+    /// marker instead of the bytes. Behind its own mutex.
+    #[cfg(feature = "transport-shm")]
+    pub is_shm: R::Mutex<bool>,
     /// R121d — sizing parameters parsed from the peer's inbound
     /// `InitSyn`. The Accepting side caps its outbound InitAck
     /// `seq_num_res / req_id_res / batch_size` to `min(own,
@@ -752,6 +759,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             is_lowlatency: R::new_mutex(false),
             #[cfg(feature = "transport-compression")]
             is_compression: R::new_mutex(false),
+            #[cfg(feature = "transport-shm")]
+            is_shm: R::new_mutex(false),
             inbound_peer_init_caps: R::new_mutex(None::<PeerInitCaps>),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             rx_sn: R::new_mutex(crate::sn::RxSn::default()),
@@ -1173,6 +1182,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-compression")]
     pub fn is_compression(&self) -> bool {
         R::with_mutex_mut(&self.is_compression, |s| *s)
+    }
+
+    /// transport-shm — the negotiated SHM capability for this session (zenoh
+    /// `negotiated_to_use_shm`). R3a: always false (the data path is inert);
+    /// R3b's Z_EXT_SHM challenge handshake flips it. Read by the TX descriptor
+    /// swap + the RX un-swap (R3b).
+    #[cfg(feature = "transport-shm")]
+    pub fn is_shm(&self) -> bool {
+        R::with_mutex_mut(&self.is_shm, |s| *s)
     }
 
     /// session-extcompression — the AP layer's "this deploy offers compression

@@ -1020,6 +1020,33 @@ layer_c1ae_cargo_test_compression() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-compression --quiet -- -D warnings)
 }
 
+# ─── Layer C1af — SHM transport (R3a foundation): provider + descriptor codec ─
+#
+# R311xn: transport-shm R3a -- the scoped same-host SHM data-path MACHINERY (the
+# wz mirror of zenoh's zero-copy SHM payload: a descriptor on the wire + an mmap'd
+# /dev/shm segment). The no_std core (extshm: the ShmDescriptor + its VLE codec,
+# the 0x2 Put-body marker, the ShmResolver trait seam) + the AP provider
+# (shm_provider: memmap2 ShmBackedPayload + PosixShmResolver). io_uring / zero-copy
+# are NOT prerequisites (zenoh uses neither -- a wz modeling artifact). R3a is the
+# INERT machinery (is_shm always false); the live swap + the Z_EXT_SHM 0x2
+# challenge handshake + the zero-copy e2e are R3b (session-extshm). This lane:
+#   1. runs the extshm unit tests (the descriptor VLE round-trip + truncation
+#      guard, the 0x2 | M marker header, marker discrimination vs 0x1/0x3);
+#   2. runs the shm_provider unit tests over REAL /dev/shm (a payload written to a
+#      fresh segment is read back byte-exact by the resolver opening it by
+#      descriptor; owner-drop unlinks; distinct ids) -- fully runnable, NO #[ignore]
+#      (/dev/shm is present), like the QUIC lane closed vsock's gap;
+#   3. clippy-gates the cfg under --all-targets (the provider + memmap2);
+#   4. clippy-gates the bare core (--no-default-features --features transport-shm):
+#      the inert descriptor/marker codec + is_shm slot compose standalone.
+layer_c1af_cargo_test_shm() {
+    (cd crates \
+        && cargo test -p wz-session-core --features transport-shm --lib extshm --quiet \
+        && cargo test -p wz-runtime-tokio --features transport-shm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features transport-shm,transport-unicast,transport-link-tcp --quiet -- -D warnings \
+        && cargo clippy -p wz-session-core --no-default-features --features transport-shm --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3436,6 +3463,7 @@ run_layer C1ab layer_c1ab_cargo_test_vsock || overall=1
 run_layer C1ac layer_c1ac_cargo_test_quic || overall=1
 run_layer C1ad layer_c1ad_cargo_test_lowlatency || overall=1
 run_layer C1ae layer_c1ae_cargo_test_compression || overall=1
+run_layer C1af layer_c1af_cargo_test_shm || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

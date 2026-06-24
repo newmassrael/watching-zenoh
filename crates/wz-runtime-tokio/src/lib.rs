@@ -556,6 +556,14 @@ pub mod vsock_pipeline;
 #[cfg(feature = "transport-link-quic")]
 pub mod quic_config;
 
+/// transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
+/// `ShmBackedPayload` (owner alloc/write) + `PosixShmResolver` (the reader-side
+/// impl of the no_std `wz_session_core::extshm::ShmResolver` seam). The std mmap
+/// half of the scoped same-host SHM transport; the descriptor + 0x2 marker codec
+/// live in the no_std core.
+#[cfg(feature = "transport-shm")]
+pub mod shm_provider;
+
 /// R311xk — host QUIC backend. The STREAM sibling of [`tls_pipeline`]: zenoh
 /// carries a batch over ONE bidirectional QUIC stream (uni rejected, bidi=1)
 /// with the SAME StreamEnvelope length-prefix as TCP/TLS (`is_streamed = true`,

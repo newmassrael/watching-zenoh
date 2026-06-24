@@ -683,6 +683,14 @@ pub mod compression;
 #[cfg(feature = "session-extcompression")]
 pub mod extcompression;
 
+/// SSOT for the scoped same-host SHM descriptor + the Put-body `ext_shm` 0x2
+/// marker + the [`extshm::ShmResolver`] no_std/std seam (`transport-shm`) — the
+/// wz mirror of zenoh's zero-copy SHM payload (a descriptor on the wire + an
+/// mmap'd segment off /dev/shm). The std POSIX segment lives in
+/// `wz-runtime-tokio::shm_provider` behind the resolver trait.
+#[cfg(feature = "transport-shm")]
+pub mod extshm;
+
 /// The method-agnostic Z_EXT_AUTH dispatch kernel — the wz mirror of zenoh
 /// `establishment/ext/auth/mod.rs` (`AuthFsm`'s OpenFsm + AcceptFsm). Mux/demux
 /// of per-method sub-exts (keyed by method id) into / out of the auth ext

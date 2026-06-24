@@ -144,6 +144,16 @@ transport-compression = ["alloc", "dep:lz4_flex"]
 # seam, exactly the transport-lowlatency discipline).
 session-extcompression = ["transport-compression", "codec-frame", "session-unicast"]
 
+# transport-shm — the no_std SHM machinery (the `extshm` descriptor + the 0x2
+# Put-body marker codec + the per-session is_shm slot + the ShmResolver trait
+# seam). The wz mirror of zenoh's zero-copy SHM payload: a descriptor on the wire
+# in place of the bytes, the real POSIX segment resolved by the AP runtime behind
+# the trait (the std mmap lives in wz-runtime-tokio::shm_provider). Pulls `alloc`
+# (the descriptor Vec); NO new external dep at the core (mmap is std, AP-only).
+# R3a is the inert machinery (is_shm always false); the live swap + the Z_EXT_SHM
+# challenge handshake + the zero-copy e2e are R3b (session-extshm).
+transport-shm = ["alloc"]
+
 # MCU bare-metal profile selector: forwards to sce-rust-runtime's no_std
 # build (heapless, no http-send / scripting — those are std-coupled and
 # mutually exclusive with no_std, enforced by a compile_error! in
