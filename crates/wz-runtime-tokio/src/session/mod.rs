@@ -3059,17 +3059,12 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         {
             let keyexpr_string = keyexpr.into();
             let interest_id = self.actions().alloc_next_interest_id();
-            // R311xy — `liveliness-history` gates the CURRENT-state-replay
-            // REQUEST (R311cl's prescribed per-call gate, NOT a field gate):
-            // with the feature off, `history` is forced false so the
-            // subscriber is future-only — no CURRENT bit on the outbound
-            // Interest, `history_complete()` stays false — while
-            // `LivelinessSubscriberOptions.history` / `with_history()` remain
-            // callable (signature-stable; a documented no-op when off).
-            #[cfg(feature = "liveliness-history")]
-            let history = options.history;
-            #[cfg(not(feature = "liveliness-history"))]
-            let history = false;
+            // R311y1 — the CURRENT-state-replay request gate, consolidated
+            // into LivelinessSubscriberOptions::effective_history (the SSOT;
+            // was a 4-line `#[cfg]` block duplicated per declare path,
+            // R311cl's "per-call gate, not field gate"). Off -> future-only;
+            // options.history / with_history() stay signature-stable no-ops.
+            let history = options.effective_history();
             // R311lg — DEFERRED FIRE (the R311lf lock-free callback
             // invariant on the liveliness-sample plane): the registry
             // stores a staging sink that copies each matched sample out
@@ -3263,13 +3258,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 }
             };
             let interest_id = self.actions().alloc_next_interest_id();
-            // R311xy — `liveliness-history` gates the CURRENT-state-replay
-            // REQUEST (the per-call gate, mirror of the literal
-            // `declare_liveliness_subscriber`): future-only when off.
-            #[cfg(feature = "liveliness-history")]
-            let history = options.history;
-            #[cfg(not(feature = "liveliness-history"))]
-            let history = false;
+            // R311y1 — CURRENT-state-replay request gate via the
+            // effective_history SSOT (mirror of the literal path).
+            let history = options.effective_history();
             // R311lg — deferred staging sink; same lock-free callback
             // contract as `declare_liveliness_subscriber`.
             let (cell, sink) = self.deferred_liveliness_sample_sink(callback);

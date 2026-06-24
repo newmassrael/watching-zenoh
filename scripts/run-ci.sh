@@ -1121,12 +1121,19 @@ layer_c1ah_cargo_test_time_hlc() {
 #      prove the future-only build composes -- the `not(liveliness-history)` arm
 #      forces history=false, so the CURRENT-bit request elides cleanly while
 #      options.history / with_history() stay callable no-ops (signature-stable).
+#   3. cargo TEST the OFF path's BEHAVIOR (R311y1 review remediation): the
+#      effective_history gate test asserts effective_history()==false under
+#      not(liveliness-history) even when history=true -- the OFF-arm
+#      behavioral assertion the prior clippy-only lane (despite its
+#      `cargo_test` name) never actually ran.
 layer_c1ai_cargo_test_liveliness_history() {
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --no-default-features \
             --features transport-unicast,liveliness-subscriber,liveliness-history --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features \
-            --features transport-unicast,liveliness-subscriber --quiet -- -D warnings)
+            --features transport-unicast,liveliness-subscriber --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --no-default-features \
+            --features transport-unicast,liveliness-subscriber --lib effective_history --quiet)
 }
 
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─

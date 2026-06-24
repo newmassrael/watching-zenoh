@@ -444,6 +444,28 @@ impl LivelinessSubscriberOptions {
         self.history = history;
         self
     }
+
+    /// R311y1 — the effective CURRENT-state-replay request: the SINGLE
+    /// source of the `liveliness-history` per-call gate (R311cl's "per-call
+    /// gate, not field gate"), consolidated here so both declare paths share
+    /// it instead of each carrying a duplicated `#[cfg]` block. Returns
+    /// `self.history` when the `liveliness-history` feature is on, forced
+    /// `false` (future-only) when off; `history` / `with_history()` stay
+    /// callable no-ops in the off build (signature-stable). Gated on
+    /// `liveliness-subscriber`: its only callers are the subscriber-gated
+    /// declare paths, so without the feature it would be dead code (R311y1
+    /// full-run-ci handshake-only-subset catch).
+    #[cfg(feature = "liveliness-subscriber")]
+    pub(crate) fn effective_history(&self) -> bool {
+        #[cfg(feature = "liveliness-history")]
+        {
+            self.history
+        }
+        #[cfg(not(feature = "liveliness-history"))]
+        {
+            false
+        }
+    }
 }
 
 /// R280 — handle for a liveliness subscriber declared through
@@ -606,18 +628,20 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
     }
 
     /// `true` when the subscriber requested `history = true` AND the
-    /// peer has signaled history-complete by emitting
-    /// `Interest(Final)` for our `interest_id`. Returns `false` for a
+    /// peer has signaled history-complete by emitting its terminating
+    /// `Declare(DeclFinal)` for our `interest_id`. Returns `false` for a
     /// `history = false` subscriber (no replay was requested → the
     /// flag is meaningless and stays `false`) and for a
     /// history-enabled subscriber that has not yet observed its
-    /// matching `InterestFinal`.
+    /// matching `Declare(DeclFinal)`.
     ///
-    /// Mirrors zenoh-pico's `_z_interest_process_interest_final`
-    /// post-condition (`vendor/zenoh-pico/src/session/interest.c:524`):
-    /// `InterestFinal` arrival marks the subscription's historical
-    /// replay complete; subsequent `Decl*Token` records arrive as
-    /// new (future) events.
+    /// Mirrors zenoh-pico's `_z_interest_process_declare_final`
+    /// post-condition (`vendor/zenoh-pico/src/session/interest.c:508`):
+    /// the `DeclFinal` arrival marks the subscription's historical
+    /// replay complete; subsequent `Decl*Token` records arrive as new
+    /// (future) events. (R311xx corrected this from the no-op
+    /// `_z_interest_process_interest_final` at interest.c:524 — the
+    /// wrong terminator, which is why completion never fired before.)
     pub fn history_complete(&self) -> bool {
         // R311dh — observer access via R::with_mutex_mut closure form.
         // Per-profile poison-recovery lives inside the runtime impl; the
@@ -854,5 +878,32 @@ impl From<SendWireError> for LivelinessSubscriberAliasError {
             SendWireError::TransportUnavailable => LivelinessSubscriberAliasError::NotEstablished,
             SendWireError::UnsupportedVariant => LivelinessSubscriberAliasError::RequiresUnicast,
         }
+    }
+}
+
+#[cfg(all(test, feature = "liveliness-subscriber"))]
+mod effective_history_tests {
+    use super::LivelinessSubscriberOptions;
+
+    /// R311y1 — assert the `liveliness-history` per-call gate via the
+    /// `effective_history` SSOT in BOTH feature arms: ON honors the
+    /// requested `history`, OFF forces `false` (future-only) regardless of
+    /// the field. The OFF assertion is exercised by the CI Layer C1ai
+    /// `liveliness-history`-OFF cargo-test lane (the gap the prior
+    /// clippy-only lane left); the ON assertion runs in the default
+    /// (feature-ON) test build.
+    #[test]
+    fn effective_history_honors_the_feature_gate() {
+        let opts = LivelinessSubscriberOptions::default().with_history(true);
+        #[cfg(feature = "liveliness-history")]
+        assert!(
+            opts.effective_history(),
+            "liveliness-history ON: the requested history=true must be honored",
+        );
+        #[cfg(not(feature = "liveliness-history"))]
+        assert!(
+            !opts.effective_history(),
+            "liveliness-history OFF: history must be forced false (future-only)",
+        );
     }
 }

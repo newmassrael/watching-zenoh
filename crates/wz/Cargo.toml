@@ -270,7 +270,7 @@ keyexpr-intersect = []
 keyexpr-literal = []
 keyexpr-mapping = []
 
-# ----- domain: link (5 atomic, 0 active / 5 reserved) -----
+# ----- domain: link (5 atomic, 0 active / 3 FOUNDATIONAL-reserved / 2 deprecated; R311y0) -----
 # R311ci — audit-only ratify. link-* features overlap conceptually
 # with transport-* (transport-batching, transport-fragmentation
 # already gate the actual behavior in wz-runtime-tokio). R311y0 A3 audit:
@@ -278,13 +278,17 @@ keyexpr-mapping = []
 # core / the active transport-fragmentation / the active transport-batching);
 # flow-control + tx-cache are zenoh phantoms (no link flow-control, no tx
 # retransmit) -> deprecated. No genuine link-opt-in build remained.
+# Cargo-dep asymmetry is intentional: link-fragment / link-batching FORWARD
+# to their active transport-* sibling features, but link-frame stays `[]`
+# because the Frame envelope is unconditional transport CORE -- there is no
+# `transport-frame` feature to compose (nothing to gate or forward to).
 link-batching = ["transport-batching"]
 link-flow-control = []
 link-fragment = ["transport-fragmentation"]
 link-frame = []
 link-tx-cache = []
 
-# ----- domain: liveliness (5 atomic, 3 active / 2 reserved) -----
+# ----- domain: liveliness (5 atomic, 4 active / 1 FOUNDATIONAL-reserved; R311xy) -----
 # liveliness-get — requester-side snapshot get. Source-gated (forwards
 # into wz-runtime-tokio iff runtime-tokio is active, cargo's `?` syntax),
 # mirror of liveliness-subscriber / liveliness-token. NOT `query-get`:

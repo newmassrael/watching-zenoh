@@ -44,8 +44,8 @@
 //! * the user-supplied [`LivelinessSampleSink`];
 //! * `history` flag — `true` when the subscriber requested current +
 //!   future replay (CURRENT bit on the outbound Interest); the
-//!   inbound `InterestFinal` flips `history_complete` to `true`
-//!   (R281+ wire-up);
+//!   responder's inbound `Declare(DeclFinal)` (carrying our
+//!   `interest_id`) flips `history_complete` to `true` (R311xx);
 //! * `history_complete` — observable via
 //!   [`Self::history_complete`] so an integration test can await
 //!   replay completion.
@@ -128,14 +128,15 @@ struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
     /// `true` when the subscriber requested CURRENT replay (the
     /// `history` flag on the outbound Interest sets the C bit).
     history: bool,
-    /// `true` once an `InterestFinal` for this subscriber's
-    /// `interest_id` has been observed inbound — i.e. the peer has
-    /// finished replaying the historical token set. Stays `false`
-    /// when `history == false` (no replay was requested; the flag is
-    /// only meaningful for history-enabled subscribers).
+    /// `true` once the responder's `Declare(DeclFinal)` for this
+    /// subscriber's `interest_id` has been observed inbound — i.e. the
+    /// peer has finished replaying the historical token set. Stays
+    /// `false` when `history == false` (no replay was requested; the flag
+    /// is only meaningful for history-enabled subscribers).
     ///
-    /// R281+ wire-up sets this from the
-    /// [`NetworkMessage::Interest`] inbound arm.
+    /// R311xx sets this from the `Declare(DeclFinal)` arm of
+    /// [`Self::dispatch_messages`] (NOT an `Interest(Final)`, which the
+    /// responder never sends — that was the pre-R311xx bug).
     history_complete: bool,
 }
 
@@ -202,8 +203,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// callback with the resolved keyexpr literal. `history = true`
     /// records the subscriber's request for CURRENT replay (the C
     /// bit on the outbound Interest); the flag is consumed by
-    /// [`Self::history_complete`] queries and by the R281+
-    /// `InterestFinal` arm of [`Self::dispatch_messages`].
+    /// [`Self::history_complete`] queries and by the R311xx
+    /// `Declare(DeclFinal)` arm of [`Self::dispatch_messages`].
     ///
     /// R311gb-3d — takes an explicit [`LivelinessSampleSink`] (the DIP
     /// seam; `C = BoxedLivelinessSampleSink` on AP, a consumer-supplied
@@ -258,10 +259,10 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     }
 
     /// Mark the subscriber with `interest_id` as history-complete.
-    /// Called from the R281+ `InterestFinal` inbound arm. No-op when
-    /// the id is unknown (the peer may emit an `InterestFinal` for
-    /// an id whose subscriber was already unregistered locally;
-    /// dropping the signal silently is the correct response).
+    /// Called from the R311xx `Declare(DeclFinal)` inbound arm. No-op
+    /// when the id is unknown (the peer may emit a `DeclFinal` for an
+    /// id whose subscriber was already unregistered locally; dropping
+    /// the signal silently is the correct response).
     pub fn mark_history_complete(&mut self, interest_id: u64) {
         if let Some(slot) = self.slots.iter_mut().find(|s| s.interest_id == interest_id) {
             slot.history_complete = true;
@@ -286,10 +287,10 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     }
 
     /// `true` when the subscriber requested CURRENT replay AND the
-    /// peer has signaled history-complete via `InterestFinal`.
+    /// peer has signaled history-complete via its `Declare(DeclFinal)`.
     /// Returns `false` for an unknown id, for a `history = false`
     /// subscriber (no replay requested → flag never flips), or
-    /// before the peer's `InterestFinal` arrives.
+    /// before the peer's `Declare(DeclFinal)` arrives.
     pub fn history_complete(&self, interest_id: u64) -> bool {
         self.slots
             .iter()
@@ -467,6 +468,17 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 // the arm matches the wire reality.
                 #[cfg(feature = "codec-declare")]
                 NetworkMessage::Declare(decl) => {
+                    // R311y1 — `dispatch_declare` is the keyexpr-matched
+                    // token FAN (DeclToken/UndeclToken -> Put/Delete, matched
+                    // by the subscriber's keyexpr pattern). The DeclFinal
+                    // completion below is a DISTINCT correlation model —
+                    // matched by `interest_id`, not keyexpr — so it stays in
+                    // this message demux rather than folding into
+                    // `dispatch_declare`. This is a deliberate NON-mirror of
+                    // the liveliness-get registry's single-key envelope
+                    // dispatch (get is interest_id-only); conflating the two
+                    // correlation models here would lose separation, not gain
+                    // symmetry.
                     self.dispatch_declare(&decl.body, peer_keyexpr_table);
                     // R311xx — the responder terminates a CURRENT replay
                     // with `Declare(DeclFinal)` carrying our `interest_id`

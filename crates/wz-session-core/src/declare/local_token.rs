@@ -102,20 +102,6 @@ use crate::network_message::NetworkMessage;
 #[cfg(feature = "alloc")]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
-/// Outer Interest header `C` (CURRENT) mask. Only a CURRENT (or
-/// CurrentFuture) interest solicits a current-token replay — zenoh gates
-/// the responder's token enumeration on `mode.current()`
-/// (`hat/client/token.rs:354`). A FUTURE-only interest (`C` clear, `F`
-/// set) registers for future declares, which the declarer covers via its
-/// proactive `Declare(DeclToken)` at token-declare time, NOT by replaying
-/// current state; a FINAL interest (`C`/`F` both clear) is the
-/// subscriber's terminator. Both stage nothing here. (An Interest-flag
-/// mask, not a declaration MID, so it stays local rather than in
-/// `wire_const`'s declaration-MID block.) Consumed only by the `alloc`
-/// inbound-parse path ([`LocalTokenRegistry::respond_to_interest`]).
-#[cfg(feature = "alloc")]
-const INTEREST_CURRENT_MASK: u8 = 0x20;
-
 /// One staged declarer-side interest-response record. The no-heap
 /// replacement for the prior owned `DeclareOwned` staging: it carries
 /// exactly the *identity* the [`crate::response_sink::ResponseSink`]
@@ -318,11 +304,13 @@ impl LocalTokenRegistry {
         peer_keyexpr_table: &HashMap<u64, String>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
     ) {
-        if (interest.header & INTEREST_CURRENT_MASK) == 0 {
-            // No CURRENT bit: a FUTURE-only interest (live updates come
-            // from the declarer's proactive Declare(DeclToken)) or a
-            // FINAL terminator. Neither solicits a current-token replay
-            // (zenoh `if mode.current()`, hat/client/token.rs:354).
+        if !interest.c() {
+            // No CURRENT bit (read via the generated `<sce:flags>` `c()`
+            // accessor -- the SSOT for that bit, not a hand-rolled mask):
+            // a FUTURE-only interest (live updates come from the declarer's
+            // proactive Declare(DeclToken)) or a FINAL terminator. Neither
+            // solicits a current-token replay -- zenoh gates the enumeration
+            // on `mode.current()` (hat/client/token.rs).
             return;
         }
         let body = match &interest.body {
