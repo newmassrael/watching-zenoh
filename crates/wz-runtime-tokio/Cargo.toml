@@ -771,7 +771,7 @@ pubsub-express = ["wz-session-core/pubsub-express"]
 # to it), with it OFF the bare `wall_clock_ntp64` SSOT is used
 # (byte-identical to the prior behavior). NOT default — an opt-in
 # alternative timestamp source, like the other advanced composition knobs.
-time-hlc = ["dep:uhlc"]
+time-hlc = ["storage-backend", "dep:uhlc"]
 # R311gi gc-2c — statechart switchboard (the AP dynamic keyexpr -> SCXML
 # domain-event inbound adapter). Forwards to wz-session-core/switchboard
 # (the `ApplicationLayerObserver::switchboard` field + `dispatch_switchboard`

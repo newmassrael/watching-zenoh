@@ -114,7 +114,7 @@ use crate::session::{
 };
 use crate::session_glue::SessionLinkActions;
 use crate::storage_replication_service::DigestSubscriber;
-use crate::storage_service::wall_clock_ntp64;
+use crate::timestamp_source::wall_clock_ntp64;
 
 /// Per-query alignment timeout. The wire query is issued with this
 /// `with_timeout_ms`, so a session that runs the reply-timeout **sweep** fires

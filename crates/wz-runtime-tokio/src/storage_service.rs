@@ -47,7 +47,8 @@
 //! competes fairly by time instead.
 //!
 //! The source the seam selects (R311xt):
-//! - `time-hlc` OFF (default): the bare [`wall_clock_ntp64`] SSOT. Not
+//! - `time-hlc` OFF (default): the bare
+//!   [`wall_clock_ntp64`](crate::timestamp_source::wall_clock_ntp64) SSOT. Not
 //!   guaranteed monotonic across NTP adjustments, and two un-timestamped
 //!   Puts within one fraction-tick collide (same `(time, zid)`, the later
 //!   one Replaces).
@@ -69,7 +70,6 @@
 //! [`wz_session_core::storage_state`]).
 
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 // The fallback stamp is now produced by `timestamp_source::FallbackStamp`
@@ -89,30 +89,6 @@ use crate::session::{
     Subscriber, Unicast,
 };
 use crate::session_glue::SessionLinkActions;
-
-/// A wall-clock NTP64 timestamp word: `(unix_seconds << 32) | fraction`,
-/// the same NTP64 layout uhlc / a publisher's `Timestamp` carries
-/// (fraction = `subsec_nanos * 2^32 / 1e9`). The driver's fallback stamp
-/// for an un-timestamped sample (see the module-level fallback note) — a
-/// value of the same magnitude as a real publisher timestamp, so it
-/// competes fairly under newer-wins instead of being dominated by every
-/// real NTP64. NOT an HLC (no logical counter, not guaranteed monotonic
-/// across NTP steps); the §5.18 HLC is the proper source.
-///
-/// `pub` because it is the wall-clock NTP64 SSOT for the storage stack:
-/// the fallback stamp, the digest publisher / subscriber Hot-era upper
-/// bound ([`crate::storage_replication_service`]), and the aligner answer
-/// `now` ([`crate::storage_aligner_service`]) all read it, and a downstream
-/// consumer seeding a [`StorageState`] (or the two-replica convergence
-/// e2e) needs the SAME recipe rather than a re-derived duplicate.
-pub fn wall_clock_ntp64() -> u64 {
-    let since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = since_epoch.as_secs();
-    let frac = (u64::from(since_epoch.subsec_nanos()) << 32) / 1_000_000_000;
-    (secs << 32) | frac
-}
 
 /// Shared, lockable storage gate over a backend `B`. The subscriber
 /// callback locks it to write (capture Put / Delete) and the queryable

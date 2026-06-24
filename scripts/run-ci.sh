@@ -1086,19 +1086,23 @@ layer_c1ag_cargo_test_transport_compose() {
 # the wz mirror of zenoh's Option<Arc<HLC>> on the Runtime. The HLC WRAPS wz's
 # wall_clock_ntp64 physical clock (injected via HLCBuilder::with_clock) and adds
 # a logical counter (the low CSIZE bits) + a drift bound, so an un-timestamped
-# captured sample is stamped with a strictly-monotonic NTP64. This lane:
-#   1. runs the timestamp_source unit tests under storage-backend,time-hlc (the
-#      HLC strictly-increases-within-one-physical-instant proof -- the logical
-#      counter -- plus the zid-preservation + real-magnitude checks);
-#   2. clippy-gates the ON path (--all-targets) -- the HLC build + the stamper
-#      seam + the storage wiring;
+# captured sample is stamped with a strictly-monotonic NTP64. R311xw: time-hlc
+# now IMPLIES storage-backend (its only consumer), so this lane drives `time-hlc`
+# ALONE (no explicit storage-backend) to prove the implication holds + no dead
+# uhlc dep, the gap the prior always-paired lane missed. This lane:
+#   1. runs the timestamp_source unit tests under `time-hlc` alone (the
+#      counter-isolating frozen-clock proof + the observable strict-increase +
+#      zid-preservation + real-magnitude checks) -- the test compiling at all
+#      proves time-hlc pulled storage-backend (timestamp_source is storage-gated);
+#   2. clippy-gates the ON path (--all-targets, `time-hlc` alone) -- the HLC
+#      build + the stamper seam + the storage wiring + the implied storage stack;
 #   3. clippy-gates the OFF path (storage-backend WITHOUT time-hlc) to prove the
 #      bare wall_clock_ntp64 fallback is byte-identical + unused-free (the
 #      TimestampHint import goes test-only, the HLC fns elide cleanly).
 layer_c1ah_cargo_test_time_hlc() {
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features storage-backend,time-hlc --lib timestamp_source --quiet \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend,time-hlc --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features time-hlc --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings)
 }
 

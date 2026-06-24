@@ -1,8 +1,21 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311xt — §5.18 time: the timestamp SOURCE seam for an un-timestamped
-//! sample, plus the optional Hybrid Logical Clock source (`time-hlc`).
+//! R311xt / R311xw — §5.18 time: the AP-side wall-clock NTP64 source
+//! ([`wall_clock_ntp64`]), the timestamp source-selection seam
+//! ([`FallbackStamp`]), and the optional Hybrid Logical Clock source
+//! (`time-hlc`).
+//!
+//! This is the AP/std home of the §5.18 time primitives. The runtime-agnostic
+//! no_std core owns the timestamp TYPE ([`wz_session_core::sample::TimestampHint`])
+//! and the source INJECTION point
+//! ([`apply_sample`](wz_session_core::storage_state::StorageState::apply_sample)
+//! takes the stamp as a `FnOnce`); only the concrete source IMPLEMENTATION
+//! lives here, std-side, where its physical clock ([`std::time::SystemTime`])
+//! and its sole consumer ([`crate::storage_service`]) live. (`wz-runtime-core`'s
+//! `TimeSource` trait is the no_std MONOTONIC clock for timeouts/scheduling and
+//! deliberately excludes the wall clock — a distinct axis from this NTP64
+//! sample-timestamp source.)
 //!
 //! ## What this realizes (two §5.18 atoms)
 //!
@@ -21,13 +34,12 @@
 //!   (`zenoh/src/net/runtime/mod.rs:147`, an HLC created when `timestamping`
 //!   is enabled). wz reuses the `uhlc` crate verbatim — the SSOT for the
 //!   subtle logical-counter-in-low-[`uhlc::CSIZE`]-bits + drift + Timestamp
-//!   `Ord` algorithm is upstream, not a wz copy — and injects wz's own
-//!   [`wall_clock_ntp64`](crate::storage_service::wall_clock_ntp64) as the
-//!   HLC's physical clock (`HLCBuilder::with_clock`). So the HLC WRAPS the
-//!   wall-clock source (it is not an alternative to it: the system clock is
-//!   the HLC's physical layer, the uhlc/zenoh model), and an HLC stamp keeps
-//!   the same NTP64 magnitude the rest of the storage stack (digest /
-//!   aligner) uses.
+//!   `Ord` algorithm is upstream, not a wz copy — and injects
+//!   [`wall_clock_ntp64`] as the HLC's physical clock
+//!   (`HLCBuilder::with_clock`). So the HLC WRAPS the wall-clock source (it
+//!   is not an alternative to it: the system clock is the HLC's physical
+//!   layer, the uhlc/zenoh model), and an HLC stamp keeps the same NTP64
+//!   magnitude the rest of the storage stack (digest / aligner) uses.
 //!
 //! ## What the HLC adds over the bare wall-clock fallback
 //!
@@ -41,11 +53,52 @@
 //! so a timestamped deployment is unaffected by the source choice. Only the
 //! TIME word is upgraded; the stamp's `zid` stays the storage identity (so a
 //! source switch never changes the tie-breaker, only the ordering word).
+//!
+//! ## Scope: the HLC is per-storage, not yet node-wide (R311xw disclosure)
+//!
+//! [`FallbackStamp::new`] builds a fresh HLC per storage. zenoh keeps ONE
+//! `Arc<HLC>` on the Runtime, shared by every publish / router / storage on
+//! the node, so its "unique across the system" guarantee is node-wide. wz's
+//! per-storage HLC delivers that guarantee WITHIN one storage (the common
+//! single-storage-per-node deployment), but two storages on the SAME node
+//! could stamp two simultaneous un-timestamped samples with the same
+//! `(time, zid)`. This is acceptable while storage is the only auto-stamp
+//! consumer; the textbook resolution is NOT to grow node-wide HLC
+//! infrastructure for a single consumer (premature abstraction) but to
+//! promote the HLC to a single session/runtime-scoped `Option<Arc<HLC>>`
+//! (zenoh's shape) WHEN the second consumer — publish auto-stamp
+//! (`zenoh api/session.rs:2129`) — lands, at which point the storage stamper
+//! borrows the shared node HLC instead of building its own. Until then, a
+//! single node HLC would have exactly one consumer.
 
 use wz_session_core::sample::TimestampHint;
 
-#[cfg(feature = "time-hlc")]
-use std::sync::Arc;
+/// A wall-clock NTP64 timestamp word: `(unix_seconds << 32) | fraction`,
+/// the same NTP64 layout uhlc / a publisher's `Timestamp` carries
+/// (fraction = `subsec_nanos * 2^32 / 1e9`) — byte-identical to uhlc's
+/// `system_time_clock` for any post-epoch instant. The fallback stamp for
+/// an un-timestamped sample — a value of the same magnitude as a real
+/// publisher timestamp, so it competes fairly under newer-wins instead of
+/// being dominated by every real NTP64. By itself NOT an HLC (no logical
+/// counter, not guaranteed monotonic across NTP steps); the `time-hlc`
+/// source wraps it for that.
+///
+/// `pub` because it is the wall-clock NTP64 SSOT for the storage stack: the
+/// fallback stamp ([`FallbackStamp`]), the digest publisher / subscriber
+/// Hot-era upper bound ([`crate::storage_replication_service`]), and the
+/// aligner answer `now` ([`crate::storage_aligner_service`]) all read it, so
+/// a downstream consumer seeding a
+/// [`StorageState`](wz_session_core::storage_state::StorageState) (or the
+/// two-replica convergence e2e) shares the SAME recipe rather than a
+/// re-derived duplicate.
+pub fn wall_clock_ntp64() -> u64 {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    let frac = (u64::from(since_epoch.subsec_nanos()) << 32) / 1_000_000_000;
+    (secs << 32) | frac
+}
 
 /// The fallback timestamp source for an un-timestamped sample: the seam that
 /// selects HOW the stamp's time word is produced. Constructed once per
@@ -53,28 +106,30 @@ use std::sync::Arc;
 /// un-timestamped sample.
 ///
 /// `Send + Sync` (the session may fire the capture callback from different
-/// worker threads): the `time-hlc` variant holds an `Arc<uhlc::HLC>` whose
-/// interior `last_time` is a `spin::Mutex`, the `time-hlc`-off variant holds
-/// only the `zid`.
+/// worker threads): the `time-hlc` variant holds a [`uhlc::HLC`] whose
+/// interior `last_time` is a `spin::Mutex` (so `&self` generation is
+/// thread-safe), the `time-hlc`-off variant holds only the `zid`. Held by
+/// value (single owner — the one capture closure; not shared / cloned, so no
+/// `Arc`).
 pub(crate) struct FallbackStamp {
     /// The storage's identity, attached to every fallback stamp as the `zid`
     /// tie-breaker — identical across both source variants, so the source
     /// choice only upgrades the TIME word, never the identity.
     zid: Vec<u8>,
     /// The Hybrid Logical Clock source. Present only with `time-hlc`; wraps
-    /// wz's `wall_clock_ntp64` physical clock (injected at construction).
+    /// the [`wall_clock_ntp64`] physical clock (injected at construction).
     #[cfg(feature = "time-hlc")]
-    hlc: Arc<uhlc::HLC>,
+    hlc: uhlc::HLC,
 }
 
 impl FallbackStamp {
     /// Build the fallback source for a storage whose identity is `zid`. With
     /// `time-hlc` on this also constructs the HLC (id derived from `zid`,
-    /// physical clock = wz's `wall_clock_ntp64`).
+    /// physical clock = [`wall_clock_ntp64`]).
     pub(crate) fn new(zid: Vec<u8>) -> Self {
         #[cfg(feature = "time-hlc")]
         {
-            let hlc = Arc::new(build_hlc(&zid));
+            let hlc = build_hlc(&zid);
             Self { zid, hlc }
         }
         #[cfg(not(feature = "time-hlc"))]
@@ -98,18 +153,18 @@ impl FallbackStamp {
         self.hlc.new_timestamp().get_time().as_u64()
     }
 
-    /// Bare wall-clock source: the `wall_clock_ntp64` SSOT (byte-identical to
-    /// the pre-HLC behavior).
+    /// Bare wall-clock source: the [`wall_clock_ntp64`] SSOT (byte-identical
+    /// to the pre-HLC behavior).
     #[cfg(not(feature = "time-hlc"))]
     fn now_word(&self) -> u64 {
-        crate::storage_service::wall_clock_ntp64()
+        wall_clock_ntp64()
     }
 }
 
-/// Construct an HLC whose physical clock is wz's `wall_clock_ntp64` (so the
-/// HLC wraps the same source the digest / aligner read) and whose id is
-/// derived from the storage `zid`. The default 500ms drift bound and the
-/// `CSIZE`-bit logical counter come from `uhlc`.
+/// Construct an HLC whose physical clock is [`wall_clock_ntp64`] (so the HLC
+/// wraps the same source the digest / aligner read) and whose id is derived
+/// from the storage `zid`. The default 500ms drift bound and the `CSIZE`-bit
+/// logical counter come from `uhlc`.
 #[cfg(feature = "time-hlc")]
 fn build_hlc(zid: &[u8]) -> uhlc::HLC {
     uhlc::HLCBuilder::new()
@@ -124,7 +179,7 @@ fn build_hlc(zid: &[u8]) -> uhlc::HLC {
 /// `HLCBuilder::with_clock(fn() -> NTP64)`.
 #[cfg(feature = "time-hlc")]
 fn wz_physical_clock() -> uhlc::NTP64 {
-    uhlc::NTP64(crate::storage_service::wall_clock_ntp64())
+    uhlc::NTP64(wall_clock_ntp64())
 }
 
 /// Derive a non-zero `uhlc::ID` from the storage `zid`. `uhlc::ID` is 1..=16
@@ -158,20 +213,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wall_clock_ntp64_is_a_real_post_epoch_ntp64() {
+        // The moved SSOT still produces a post-epoch NTP64 (seconds in the
+        // high 32 bits), in BOTH feature configs (this test is not gated).
+        assert!(wall_clock_ntp64() >= (1u64 << 32));
+    }
+
     #[cfg(feature = "time-hlc")]
     #[test]
-    fn hlc_stamps_strictly_increase_within_one_physical_instant() {
-        // The value the HLC adds over the bare wall clock: successive stamps
-        // strictly increase even when called faster than the physical clock
-        // ticks (the logical counter in the low CSIZE bits). Guaranteed by the
-        // algorithm, so this is zero-flake regardless of host timing.
+    fn hlc_stamps_are_strictly_increasing() {
+        // The observable FallbackStamp contract under `time-hlc`: successive
+        // stamps strictly increase. Guaranteed by the HLC algorithm, so this
+        // is zero-flake regardless of host timing. (This tests the contract,
+        // not which branch provides it — see the frozen-clock test below for
+        // the logical-counter isolation.)
         let stamper = FallbackStamp::new(vec![0x01]);
         let mut prev = stamper.stamp().time;
         for _ in 0..1000 {
             let next = stamper.stamp().time;
             assert!(
                 next > prev,
-                "HLC stamp must strictly increase (logical counter): {next} !> {prev}"
+                "HLC stamp must strictly increase: {next} !> {prev}"
+            );
+            prev = next;
+        }
+    }
+
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn hlc_logical_counter_advances_when_physical_clock_is_frozen() {
+        // Isolate the logical counter: with a FROZEN physical clock, the only
+        // way successive timestamps can strictly increase is the low-CSIZE-bit
+        // counter (the `else { last_time += 1 }` branch). This proves the
+        // counter specifically, which the observable-contract test above
+        // cannot (its real clock may always advance).
+        fn frozen_clock() -> uhlc::NTP64 {
+            uhlc::NTP64(0x0000_1234_0000_0000)
+        }
+        let hlc = uhlc::HLCBuilder::new()
+            .with_clock(frozen_clock)
+            .with_id(hlc_id_from_zid(&[0x01]))
+            .build();
+        let mut prev = hlc.new_timestamp().get_time().as_u64();
+        for _ in 0..16 {
+            let next = hlc.new_timestamp().get_time().as_u64();
+            assert!(
+                next > prev,
+                "with the physical clock frozen, the logical counter must still advance: {next} !> {prev}"
             );
             prev = next;
         }

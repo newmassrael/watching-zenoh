@@ -55,7 +55,7 @@ use crate::session::{
     PublishError, PublishOptions, Session, SubscribeError, SubscribeOptions, Subscriber, Unicast,
 };
 use crate::session_glue::SessionLinkActions;
-use crate::storage_service::wall_clock_ntp64;
+use crate::timestamp_source::wall_clock_ntp64;
 
 /// The keyexpr a replica publishes its Digest on:
 /// `@-digest/<zid-hex>/<config-fp>`. zenoh `digest_key_expr_formatter`
