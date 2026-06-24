@@ -596,7 +596,10 @@
         "R311lr: multicast-declarations TX landed - interest-response Declare drains to the group.",
         "R311y6: R311xu's 4 P4-tagged transport atoms here need a LAYER-1-vs-P4 re-audit.",
         "multilink + quic-datagram = zenoh-default (Cargo.toml:34-44); stats + unixpipe opt-in.",
-        "y2..y5 AP-full sweep left these 4 untouched (out of reclassify scope); see R311y6 ledger."
+        "y2..y5 AP-full sweep left these 4 untouched (out of reclassify scope); see R311y6 ledger.",
+        "R311y7 re-audit DONE: quic-datagram + stats + unixpipe -> LAYER-1 (build-pending, reserved).",
+        "multilink -> CONFIRMED P4: auth_pubkey RSA hard-dep + multi-link aggregation, beyond-pico.",
+        "Verdict + direct-read evidence in R311y7 ledger; 3 LAYER-1 atoms build in following rounds."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -50830,6 +50833,58 @@
         "LOCAL: R311y6 atop R311y5 (11e782a) / y4 (3f3b4fe) / y3 (5f0f6ef) / y2 (5bed8ce) atop origin/main=9aa94c6. 5 commits ahead after this commits. NOT pushed without explicit consent."
       ]
     },
+    "Round 311y7": {
+      "decision_summary": "R311y7 -- §5.1 transport P4-boundary re-audit VERDICT (the R311y6-OWED item; direct-read of zenoh 49c8a53 by 4 dedicated source agents, each finding arbitrated against the wz link/transport seam, not taken on assertion). R311xu bulk-tagged 4 §5.1 atoms P4; the re-audit finds 3 were MIS-TAGGED -- transport-link-quic-datagram, transport-stats, transport-link-unixpipe are self-contained LAYER-1 AP/std atoms (no full-zenoh infra; buildable on the existing link/instrumentation seam), reclassified LAYER-1 in-scope/build-pending -- and only transport-multilink is genuinely P4 (transport_multilink=[auth_pubkey] hard RSA dep + multi-link session-core aggregation that wz's pico-faithful single-link transport lacks; pico has none), CONFIRMED reserved/P4. Inventory reasons + 3 §5.1 caveats only, NO code/Cargo/CI change; A3 stays consistent (no status flip -- all 4 stay reserved with `= []` keys + 0 cfg sites; active count unchanged at 92). The 3 LAYER-1 atoms build in following rounds (quic-datagram -> stats -> unixpipe, front-loaded by zenoh-default + lightness). full run-ci RUNCI_EXIT=0; validate_workspace orphan new=+0.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): 4 §5.1-transport atom reasons rewritten with the direct-read verdict; status UNCHANGED (all 4 stay reserved).",
+        "transport-link-quic-datagram: reason -> LAYER-1 in-scope/build-pending. ~120-150 genuinely-new LOC over the ACTIVE transport-link-quic backend (0 extra deps): connection.send_datagram/read_datagram (RFC9221, unicast.rs:103-129), per-OS MTU consts (lib.rs:38), NO establishment-FSM/auth/multilink coupling. wz maps it to the quic_pipeline connection setup (minus open_bi/accept_bi) + a non-streamed datagram driver modeled on the active udp_pipeline (wz already carries the unreliable-link path via transport-link-udp). zenoh-DEFAULT.",
+        "transport-stats: reason -> LAYER-1 in-scope/build-pending. stats=[] is zero-extra-dep additive instrumentation -- TransportStats ~30 AtomicUsize (common/stats.rs:257), ~29 cfg-gated increments on tx/rx hot paths, a PUBLIC get_stats() accessor (unicast/mod.rs:148) usable WITHOUT adminspace. The adminspace-metrics consumer stays P4; stats stands alone.",
+        "transport-link-unixpipe: reason -> LAYER-1 in-scope/build-pending but heavier (build LAST). zenoh-link-unixpipe (unicast.rs, 622 LOC) is NOT a unixsock socket-swap: an uplink/downlink FIFO PAIR + a 3-msg Invitation handshake + per-conn dedicated-pipe negotiation + AsyncFd-wrapped File I/O, pulling 3 new deps (unix-named-pipe, advisory-lock [non-macOS], filepath). Streamed envelope reuses stream_link. opt-in (not zenoh-default), same-host niche over the already-active unixsock.",
+        "transport-multilink: reason -> CONFIRMED P4/beyond-pico. transport_multilink=[auth_pubkey] HARD transitive dep (pulls rsa); mints its OWN RSA-512 keypair for a challenge-response wire ext 0x4 across all 4 establishment msgs (pubkey.rs:265-578); PURPOSE = aggregate N physical links into one session (max_links>1) needing transport-core multi-link management wz's pico-faithful single-link transport lacks; pico has none. STAYS reserved/P4 (deferred, re-openable).",
+        "§5.1-transport section: +3 caveats (each <=100 char) recording the re-audit RESOLUTION, closing the R311y6 OWED caveat."
+      ],
+      "verification_bullets": [
+        "Direct-read provenance (the arbiter): 4 source agents read zenoh 49c8a53 -- zenoh-link-quic_datagram (704 LOC, ~120-150 new, send/read_datagram, 0 extra deps), zenoh-transport stats (common/stats.rs:257, get_stats() unicast/mod.rs:148, stats=[] zero-dep), zenoh-link-unixpipe (unicast.rs 622 LOC, FIFO pair + Invitation handshake, 3 deps), establishment/ext/multilink.rs:35 + auth/pubkey.rs (transport_multilink=[auth_pubkey], RSA-512 challenge, max_links>1 aggregation). Each finding arbitrated against the wz seam (quic_pipeline/udp_pipeline/unixsock_pipeline + session_open.rs DialedLink dispatch), not taken on agent assertion.",
+        "A3 read-first (wz side): all 4 atoms are `= []` facades in crates/wz/Cargo.toml:817-820 with 0 cfg sites (pure reserved -- A3 invariants #1 declared / #2 reserved-not-gated both hold). The reason rewrites add no cfg sites, so A3 is unchanged.",
+        "full run-ci RUNCI_EXIT=0 -- 'all required layers pass' incl Layer A3 (atoms=209 active=92 declared-cargo-features=250; active count unchanged -- no status flip) + Layer Z; judged by exit code (R311xz / [[feedback-full-runci-all-host-lanes]]: a catalog-touch round runs full run-ci because A3 joins inventory<->cargo).",
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); the 4 reason rewrites + 3 caveat appends touch no §N cross-ref, so no orphan delta.",
+        "No behavior change: no code/Cargo/CI touched; all existing lanes unaffected. The round is a classification/disposition correction in the inventory SSOT + the §5.1 caveats."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311y7 = §5.1 transport P4-boundary re-audit VERDICT (the R311y6-OWED item, direct-read arbitrated): R311xu's bulk P4 tag was wrong for 3 of 4 -- transport-link-quic-datagram + transport-stats + transport-link-unixpipe are self-contained LAYER-1 AP/std atoms (reclassified LAYER-1 in-scope/build-pending, still reserved until their cfg gates land); only transport-multilink is genuinely P4 (auth_pubkey RSA hard-dep + multi-link session-core aggregation beyond wz's pico-faithful single-link transport; pico has none), CONFIRMED reserved/P4. Inventory reasons + 3 §5.1 caveats only; no status flip (active=92 steady), no code.",
+        "NEXT (the 3 LAYER-1 builds, front-loaded by zenoh-default + lightness): (1) transport-link-quic-datagram [zenoh-DEFAULT, moderate] -- quic_pipeline connection setup minus open_bi/accept_bi + a non-streamed datagram driver a la udp_pipeline; new Proto/locator scheme + DialedLink variant + per-OS MTU + wz<->wz loopback e2e (self-signed, like R311xk quic) + CI lane; flip reserved->active. (2) transport-stats [light] -- TransportStats atomic counters + cfg-gated tx/rx increments + a public accessor; flip active. (3) transport-link-unixpipe [moderate-heavy, opt-in, LAST] -- FIFO pair + Invitation handshake + AsyncFd File I/O + 3 deps; flip active. multilink stays P4.",
+        "THEN track 2 (macOS/Windows CI lanes -- the target_os-routed paths incl quic-datagram's per-OS MTU + unixpipe's non-macOS advisory-lock gate are currently unverified) + track 3 (LAYER-2 pico cross-impl + MCU cross-compile harness). User-directed 2026-06-24: automatic round progression through tracks 1->3.",
+        "LOCAL: R311y7 atop origin/main=8f7c70b (R311y6). NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311y7 -- §5.1 transport P4-boundary re-audit VERDICT (the R311y6-OWED item; direct-read of zenoh 49c8a53 by 4 dedicated source agents, each finding arbitrated against the wz link/transport seam, not taken on assertion). R311xu bulk-tagged 4 §5.1 atoms P4; the re-audit finds 3 were MIS-TAGGED -- transport-link-quic-datagram, transport-stats, transport-link-unixpipe are self-contained LAYER-1 AP/std atoms (no full-zenoh infra; buildable on the existing link/instrumentation seam), reclassified LAYER-1 in-scope/build-pending -- and only transport-multilink is genuinely P4 (transport_multilink=[auth_pubkey] hard RSA dep + multi-link session-core aggregation that wz's pico-faithful single-link transport lacks; pico has none), CONFIRMED reserved/P4. Inventory reasons + 3 §5.1 caveats only, NO code/Cargo/CI change; A3 stays consistent (no status flip -- all 4 stay reserved with `= []` keys + 0 cfg sites; active count unchanged at 92). The 3 LAYER-1 atoms build in following rounds (quic-datagram -> stats -> unixpipe, front-loaded by zenoh-default + lightness). full run-ci RUNCI_EXIT=0; validate_workspace orphan new=+0.",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): 4 §5.1-transport atom reasons rewritten with the direct-read verdict; status UNCHANGED (all 4 stay reserved).",
+        "transport-link-quic-datagram: reason -> LAYER-1 in-scope/build-pending. ~120-150 genuinely-new LOC over the ACTIVE transport-link-quic backend (0 extra deps): connection.send_datagram/read_datagram (RFC9221, unicast.rs:103-129), per-OS MTU consts (lib.rs:38), NO establishment-FSM/auth/multilink coupling. wz maps it to the quic_pipeline connection setup (minus open_bi/accept_bi) + a non-streamed datagram driver modeled on the active udp_pipeline (wz already carries the unreliable-link path via transport-link-udp). zenoh-DEFAULT.",
+        "transport-stats: reason -> LAYER-1 in-scope/build-pending. stats=[] is zero-extra-dep additive instrumentation -- TransportStats ~30 AtomicUsize (common/stats.rs:257), ~29 cfg-gated increments on tx/rx hot paths, a PUBLIC get_stats() accessor (unicast/mod.rs:148) usable WITHOUT adminspace. The adminspace-metrics consumer stays P4; stats stands alone.",
+        "transport-link-unixpipe: reason -> LAYER-1 in-scope/build-pending but heavier (build LAST). zenoh-link-unixpipe (unicast.rs, 622 LOC) is NOT a unixsock socket-swap: an uplink/downlink FIFO PAIR + a 3-msg Invitation handshake + per-conn dedicated-pipe negotiation + AsyncFd-wrapped File I/O, pulling 3 new deps (unix-named-pipe, advisory-lock [non-macOS], filepath). Streamed envelope reuses stream_link. opt-in (not zenoh-default), same-host niche over the already-active unixsock.",
+        "transport-multilink: reason -> CONFIRMED P4/beyond-pico. transport_multilink=[auth_pubkey] HARD transitive dep (pulls rsa); mints its OWN RSA-512 keypair for a challenge-response wire ext 0x4 across all 4 establishment msgs (pubkey.rs:265-578); PURPOSE = aggregate N physical links into one session (max_links>1) needing transport-core multi-link management wz's pico-faithful single-link transport lacks; pico has none. STAYS reserved/P4 (deferred, re-openable).",
+        "§5.1-transport section: +3 caveats (each <=100 char) recording the re-audit RESOLUTION, closing the R311y6 OWED caveat."
+      ],
+      "publishable_verification_bullets": [
+        "Direct-read provenance (the arbiter): 4 source agents read zenoh 49c8a53 -- zenoh-link-quic_datagram (704 LOC, ~120-150 new, send/read_datagram, 0 extra deps), zenoh-transport stats (common/stats.rs:257, get_stats() unicast/mod.rs:148, stats=[] zero-dep), zenoh-link-unixpipe (unicast.rs 622 LOC, FIFO pair + Invitation handshake, 3 deps), establishment/ext/multilink.rs:35 + auth/pubkey.rs (transport_multilink=[auth_pubkey], RSA-512 challenge, max_links>1 aggregation). Each finding arbitrated against the wz seam (quic_pipeline/udp_pipeline/unixsock_pipeline + session_open.rs DialedLink dispatch), not taken on agent assertion.",
+        "A3 read-first (wz side): all 4 atoms are `= []` facades in crates/wz/Cargo.toml:817-820 with 0 cfg sites (pure reserved -- A3 invariants #1 declared / #2 reserved-not-gated both hold). The reason rewrites add no cfg sites, so A3 is unchanged.",
+        "full run-ci RUNCI_EXIT=0 -- 'all required layers pass' incl Layer A3 (atoms=209 active=92 declared-cargo-features=250; active count unchanged -- no status flip) + Layer Z; judged by exit code (R311xz / [[feedback-full-runci-all-host-lanes]]: a catalog-touch round runs full run-ci because A3 joins inventory<->cargo).",
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); the 4 reason rewrites + 3 caveat appends touch no §N cross-ref, so no orphan delta.",
+        "No behavior change: no code/Cargo/CI touched; all existing lanes unaffected. The round is a classification/disposition correction in the inventory SSOT + the §5.1 caveats."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y7 = §5.1 transport P4-boundary re-audit VERDICT (the R311y6-OWED item, direct-read arbitrated): R311xu's bulk P4 tag was wrong for 3 of 4 -- transport-link-quic-datagram + transport-stats + transport-link-unixpipe are self-contained LAYER-1 AP/std atoms (reclassified LAYER-1 in-scope/build-pending, still reserved until their cfg gates land); only transport-multilink is genuinely P4 (auth_pubkey RSA hard-dep + multi-link session-core aggregation beyond wz's pico-faithful single-link transport; pico has none), CONFIRMED reserved/P4. Inventory reasons + 3 §5.1 caveats only; no status flip (active=92 steady), no code.",
+        "NEXT (the 3 LAYER-1 builds, front-loaded by zenoh-default + lightness): (1) transport-link-quic-datagram [zenoh-DEFAULT, moderate] -- quic_pipeline connection setup minus open_bi/accept_bi + a non-streamed datagram driver a la udp_pipeline; new Proto/locator scheme + DialedLink variant + per-OS MTU + wz<->wz loopback e2e (self-signed, like R311xk quic) + CI lane; flip reserved->active. (2) transport-stats [light] -- TransportStats atomic counters + cfg-gated tx/rx increments + a public accessor; flip active. (3) transport-link-unixpipe [moderate-heavy, opt-in, LAST] -- FIFO pair + Invitation handshake + AsyncFd File I/O + 3 deps; flip active. multilink stays P4.",
+        "THEN track 2 (macOS/Windows CI lanes -- the target_os-routed paths incl quic-datagram's per-OS MTU + unixpipe's non-macOS advisory-lock gate are currently unverified) + track 3 (LAYER-2 pico cross-impl + MCU cross-compile harness). User-directed 2026-06-24: automatic round progression through tracks 1->3.",
+        "LOCAL: R311y7 atop origin/main=8f7c70b (R311y6). NOT pushed without explicit consent."
+      ]
+    },
     "Round 311z": {
       "decision_summary": "R311z carry planning — SCE pin bump 55243e886 (33 commits ahead) surfaced as immediate-amortization candidate; synth-invoke untracked 4파일 + NL→IR Enum kind / EventSchema 18th kind 토대 확보 1-라운드 절차 lock.",
       "changes_bullets": [
@@ -56854,7 +56909,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=QUIC unreliable DATAGRAM transport (RFC9221 reuses quic stack); P=zenoh zenoh-link-quic_datagram/lib.rs:35; C=needs existing quic backend; class=cfg"
+      "reason": "F=QUIC unreliable DATAGRAM transport (RFC9221); P=zenoh zenoh-link-quic_datagram (unicast.rs:103-129 send_datagram/read_datagram, lib.rs:38 per-OS MTU); class=cfg. LAYER-1 in-scope (re-audit R311y7, direct-read zenoh 49c8a53): self-contained link kind -- ~120-150 genuinely-new LOC over the ACTIVE transport-link-quic backend, 0 extra deps, NO establishment-FSM/auth/multilink coupling; wz maps it to the quic_pipeline connection setup (minus open_bi/accept_bi) + a non-streamed datagram driver modeled on the active udp_pipeline (wz already carries the unreliable-link path via transport-link-udp). zenoh-DEFAULT. Build-pending (stays reserved until the cfg gate + datagram driver land). Was bulk-tagged P4 by R311xu -- corrected to LAYER-1."
     },
     "transport-link-serial": {
       "status": "active",
@@ -56884,7 +56939,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=same-host link over named-pipe (FIFO) pair (vs unixsock AF_UNIX); P=zenoh zenoh-link-unixpipe/unix/mod.rs:32; C=unix_named_pipe dep AP unicast-only; class=cfg"
+      "reason": "F=same-host link over a named-pipe (FIFO) PAIR (vs unixsock AF_UNIX); P=zenoh zenoh-link-unixpipe/unix/unicast.rs:622 (Invitation handshake + dedicated per-conn FIFOs); class=cfg. LAYER-1 in-scope (re-audit R311y7, direct-read) but heavier than unixsock -- NOT a socket swap: an uplink/downlink FIFO pair + a 3-msg Invitation handshake + per-conn dedicated-pipe negotiation + AsyncFd-wrapped File I/O, pulling 3 new deps (unix-named-pipe, advisory-lock [non-macOS], filepath). Streamed envelope reuses stream_link. opt-in (NOT zenoh-default), same-host niche over the already-active unixsock -> build LAST of the LAYER-1 trio. Build-pending (stays reserved). Was bulk-tagged P4 by R311xu -- corrected to LAYER-1."
     },
     "transport-link-unixsock": {
       "status": "active",
@@ -56920,7 +56975,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=single unicast session aggregating multiple physical links (max_links>1); P=zenoh establishment/ext/multilink.rs:35; C=needs auth_pubkey + FSM ext; class=cfg"
+      "reason": "F=single unicast session aggregating multiple physical links (max_links>1); P=zenoh establishment/ext/multilink.rs:35; class=cfg. CONFIRMED P4/beyond-pico (re-audit R311y7, direct-read zenoh 49c8a53): transport_multilink=[\"auth_pubkey\"] is a HARD transitive dep (pulls rsa); multilink mints its OWN RSA-512 keypair for a challenge-response carried as wire ext 0x4 across all 4 establishment msgs (InitSyn/InitAck/OpenSyn/OpenAck, pubkey.rs:265-578). PURPOSE = aggregate N physical links into ONE logical session -- needs transport-core multi-link management (accept/track N links per session, shared initial_sn) that wz's pico-faithful single-link transport lacks; pico has NO multilink. STAYS reserved/P4 (deferred to the zenoh-full push, re-openable). zenoh-DEFAULT but beyond-pico-heavy."
     },
     "transport-shm": {
       "status": "active",
@@ -56932,7 +56987,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh 1.5.0 49c8a53 (P4 scoping R311xu)",
-      "reason": "F=per-transport byte/msg counters (tx/rx/dropped); P=zenoh zenoh-transport stats feature; C=additive instrumentation; prereq for adminspace-metrics; class=cfg"
+      "reason": "F=per-transport byte/msg counters (tx/rx/dropped + discriminated user/admin); P=zenoh zenoh-transport stats feature (common/stats.rs:257 TransportStats ~30 AtomicUsize; public get_stats() unicast/mod.rs:148); class=cfg. LAYER-1 in-scope (re-audit R311y7, direct-read): self-contained additive instrumentation -- stats=[] zero extra deps, ~29 cfg-gated atomic increments on tx/rx hot paths, a PUBLIC get_stats() accessor usable WITHOUT adminspace (the adminspace-metrics consumer stays P4 but stats stands alone). Build-pending (stays reserved until the counters + cfg gate land); prereq for adminspace-metrics. Was bulk-tagged P4 by R311xu -- corrected to LAYER-1."
     },
     "transport-unicast": {
       "status": "active",
