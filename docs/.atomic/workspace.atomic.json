@@ -50727,6 +50727,60 @@
         "LOCAL: R311y4 atop R311y3 (5f0f6ef) atop R311y2 (5bed8ce) atop origin/main=9aa94c6. 3 commits ahead after this commits. NOT pushed without explicit consent."
       ]
     },
+    "Round 311y5": {
+      "decision_summary": "R311y5 -- runtime + platform final reclassification, CLOSING the AP-full LAYER-1 sweep (A3 read-first + zenoh 49c8a53 / pico / wz direct read via a runtime+platform source agent, arbitrated by direct-read). 8 atoms reclassified, NO LAYER-1 build. RUNTIME (4): runtime-async-std reserved -> DEPRECATED (zenoh PHANTOM -- zenoh is tokio-only, async-std survives only in the rest-plugin ignored-features list, no core executor; wz has no async-std code; jwt/session-resumable precedent, re-openable). runtime-no-std -> FOUNDATIONAL (the wz no_std kernel is built always-on -- wz-session-core / wz-runtime-core / wz-link-lwip #![no_std], proven by the mcu-session-acceptor QEMU e2e; LAYER-2 MCU foundation, no toggle). runtime-tokio-uring + runtime-zero-copy LEFT as-is (already reserved-INERT-ORTHOGONAL per R311xp -- zenoh uses neither io_uring nor a zero-copy reactor; future perf, not shm prereqs). PLATFORM (7): platform-linux LEFT (already FOUNDATIONAL target_os-routed baseline). platform-macos + platform-windows reasons corrected -> target_os-routed (NOT a cargo feature, like linux) + std/tokio host-portable but NO wz CI lane = unverified host. platform-qnx -> INERT beyond-zenoh/pico (no QNX port in either; OQ-W20 future; 2nd-horizon AUTOSAR candidate). platform-zephyr + platform-freertos + platform-bare-metal -> LAYER-2 MCU deferred (pico has the CMake ports; wz no_std kernel ready, the RTOS/bare-metal cross-compile harness is P4/LAYER-2-deferred). All non-deprecated stay reserved; reasons corrected. Inventory + ledger only, NO code/Cargo/CI change; full run-ci RUNCI_EXIT=0 (Layer A3 active=92 unchanged, declared-cargo-features=250); validate orphan new=+0.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): runtime-async-std reserved -> DEPRECATED (zenoh PHANTOM -- tokio-only; async-std only in the rest-plugin ignored list, no core executor; wz has no async-std; re-openable). Keeps its cargo key (runtime-async-std = []) so A3 invariant #1 (declared) holds.",
+        "docs/.atomic/workspace.atomic.json (inventory): runtime-no-std reason -> FOUNDATIONAL (wz no_std kernel built always-on: wz-session-core/wz-runtime-core/wz-link-lwip #![no_std], mcu-session-acceptor QEMU e2e proven; LAYER-2 MCU foundation, no toggle; cfg=0).",
+        "docs/.atomic/workspace.atomic.json (inventory): platform-macos + platform-windows reasons -> target_os-routed (NOT a cargo feature, like platform-linux); std+tokio host-portable but no wz CI lane = unverified host. cfg=0.",
+        "docs/.atomic/workspace.atomic.json (inventory): platform-qnx reason -> INERT beyond-zenoh/pico (no QNX port; OQ-W20 future; 2nd-horizon AUTOSAR candidate). platform-zephyr + platform-freertos + platform-bare-metal reasons -> LAYER-2 MCU deferred (pico CMake ports; wz no_std kernel ready, cross-compile harness P4/L2-deferred). cfg=0 each.",
+        "LEFT untouched (already correct): runtime-tokio-uring + runtime-zero-copy (reserved-INERT-ORTHOGONAL, R311xp); platform-linux (FOUNDATIONAL target_os baseline)."
+      ],
+      "verification_bullets": [
+        "full run-ci RUNCI_EXIT=0 -- 'all required layers pass' + Layer Z pass; cumulative over R311y2..y5 (build/clippy/test/QEMU/footprint/cross-impl lanes on byte-identical code + Layer A3 with runtime-async-std now deprecated). Judged by exit code.",
+        "Layer A3 pass: atoms=209 active=92 declared-cargo-features=250 -- active UNCHANGED at 92 (runtime-async-std reserved->deprecated keeps its [] cargo key; no atom flipped to/from active). All reclassified atoms have 0 cfg sites (A3 invariant #2 holds; deprecated untouched by reserved/active invariants).",
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); 8 set-inventory-status OK (sequential CLI loop, no parallel-write race).",
+        "Direct-read provenance (runtime+platform source agent, arbitrated): zenoh tokio-only (async-std only in rest-plugin ignored list); wz no_std crates #![no_std] (wz-session-core/wz-runtime-core/wz-link-lwip) + mcu-session-acceptor QEMU e2e; pico CMake platform profiles linux/macos/windows/zephyr/freertos; no QNX in zenoh or pico; zenoh 0 refs to tokio-uring/io_uring/zero-copy (R311xp confirmed).",
+        "No behavior change: no code/Cargo/CI touched; existing lanes unaffected; classification + reason correction in the inventory SSOT only."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "R311y5 = runtime + platform final reclassification, CLOSING the AP-full LAYER-1 sweep (Tracks 1-3 + sweep all done). runtime-async-std -> DEPRECATED (zenoh phantom, tokio-only); runtime-no-std -> FOUNDATIONAL (wz no_std kernel built, QEMU-proven); uring/zero-copy already INERT-ORTHOGONAL (R311xp); platform-linux FOUNDATIONAL; macos/windows target_os-routed-unverified; qnx beyond-zenoh-OQ-W20; zephyr/freertos/bare-metal LAYER-2-deferred. NO build.",
+        "AP-FULL LAYER-1 SWEEP COMPLETE (R311y2..y5): every non-P4 reserved atom is now honestly classified. The genuine LAYER-1 build surface in this sweep = ZERO -- all reclassify (FOUNDATIONAL / phantom-deprecate / INERT-future / P4-or-L2-deferred), confirming the standing pattern (liveliness-history R311xx/xy was the LAST real LAYER-1 build/active-flip; active stays 92). New deprecations this sweep: routing-static-routes (y2) + runtime-async-std (y5) = +2 phantoms (deprecated 5->6 total).",
+        "Remaining reserved atoms now partition cleanly: P4 LAYER-3 (§5.21-27 + transport-misc 4 + routing-failover + scouting-gossip/autoconnect router-embedded); LAYER-2 MCU cross-compile (platform zephyr/freertos/bare-metal, runtime-no-std foundation); FOUNDATIONAL (keyexpr 4 / pubsub-sample / locator 8 / encoding 7 / time / liveliness-historical-samples / attachment-encoding-aware / scouting multicast/gossip/autoconnect / runtime-no-std / platform-linux); INERT-future (locator-iface, scouting-passive, platform-qnx, runtime-tokio-uring, runtime-zero-copy).",
+        "NEXT (per the user-decided north-star sequence, finish zenoh+pico FULL before the 2nd horizon): (a) LAYER-2 pico cross-impl + the MCU cross-compile harness (zephyr/freertos/bare-metal); (b) the P4 zenoh-full LAYER-3 build (low-dep keystones: adminspace-core / storage-backend-volume-trait, per R311xu). THEN 2nd horizon (QoS extension + AUTOSAR integration).",
+        "LOCAL: R311y5 atop R311y4 (3f3b4fe) / R311y3 (5f0f6ef) / R311y2 (5bed8ce) atop origin/main=9aa94c6. 4 commits ahead after this commits. NOT pushed without explicit consent (user authorized autonomous round progression + commits; a push needs an explicit further OK)."
+      ],
+      "publishable_decision_summary": "R311y5 -- runtime + platform final reclassification, CLOSING the AP-full LAYER-1 sweep (A3 read-first + zenoh 49c8a53 / pico / wz direct read via a runtime+platform source agent, arbitrated by direct-read). 8 atoms reclassified, NO LAYER-1 build. RUNTIME (4): runtime-async-std reserved -> DEPRECATED (zenoh PHANTOM -- zenoh is tokio-only, async-std survives only in the rest-plugin ignored-features list, no core executor; wz has no async-std code; jwt/session-resumable precedent, re-openable). runtime-no-std -> FOUNDATIONAL (the wz no_std kernel is built always-on -- wz-session-core / wz-runtime-core / wz-link-lwip #![no_std], proven by the mcu-session-acceptor QEMU e2e; LAYER-2 MCU foundation, no toggle). runtime-tokio-uring + runtime-zero-copy LEFT as-is (already reserved-INERT-ORTHOGONAL per R311xp -- zenoh uses neither io_uring nor a zero-copy reactor; future perf, not shm prereqs). PLATFORM (7): platform-linux LEFT (already FOUNDATIONAL target_os-routed baseline). platform-macos + platform-windows reasons corrected -> target_os-routed (NOT a cargo feature, like linux) + std/tokio host-portable but NO wz CI lane = unverified host. platform-qnx -> INERT beyond-zenoh/pico (no QNX port in either; OQ-W20 future; 2nd-horizon AUTOSAR candidate). platform-zephyr + platform-freertos + platform-bare-metal -> LAYER-2 MCU deferred (pico has the CMake ports; wz no_std kernel ready, the RTOS/bare-metal cross-compile harness is P4/LAYER-2-deferred). All non-deprecated stay reserved; reasons corrected. Inventory + ledger only, NO code/Cargo/CI change; full run-ci RUNCI_EXIT=0 (Layer A3 active=92 unchanged, declared-cargo-features=250); validate orphan new=+0.",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): runtime-async-std reserved -> DEPRECATED (zenoh PHANTOM -- tokio-only; async-std only in the rest-plugin ignored list, no core executor; wz has no async-std; re-openable). Keeps its cargo key (runtime-async-std = []) so A3 invariant #1 (declared) holds.",
+        "docs/.atomic/workspace.atomic.json (inventory): runtime-no-std reason -> FOUNDATIONAL (wz no_std kernel built always-on: wz-session-core/wz-runtime-core/wz-link-lwip #![no_std], mcu-session-acceptor QEMU e2e proven; LAYER-2 MCU foundation, no toggle; cfg=0).",
+        "docs/.atomic/workspace.atomic.json (inventory): platform-macos + platform-windows reasons -> target_os-routed (NOT a cargo feature, like platform-linux); std+tokio host-portable but no wz CI lane = unverified host. cfg=0.",
+        "docs/.atomic/workspace.atomic.json (inventory): platform-qnx reason -> INERT beyond-zenoh/pico (no QNX port; OQ-W20 future; 2nd-horizon AUTOSAR candidate). platform-zephyr + platform-freertos + platform-bare-metal reasons -> LAYER-2 MCU deferred (pico CMake ports; wz no_std kernel ready, cross-compile harness P4/L2-deferred). cfg=0 each.",
+        "LEFT untouched (already correct): runtime-tokio-uring + runtime-zero-copy (reserved-INERT-ORTHOGONAL, R311xp); platform-linux (FOUNDATIONAL target_os baseline)."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci RUNCI_EXIT=0 -- 'all required layers pass' + Layer Z pass; cumulative over R311y2..y5 (build/clippy/test/QEMU/footprint/cross-impl lanes on byte-identical code + Layer A3 with runtime-async-std now deprecated). Judged by exit code.",
+        "Layer A3 pass: atoms=209 active=92 declared-cargo-features=250 -- active UNCHANGED at 92 (runtime-async-std reserved->deprecated keeps its [] cargo key; no atom flipped to/from active). All reclassified atoms have 0 cfg sites (A3 invariant #2 holds; deprecated untouched by reserved/active invariants).",
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); 8 set-inventory-status OK (sequential CLI loop, no parallel-write race).",
+        "Direct-read provenance (runtime+platform source agent, arbitrated): zenoh tokio-only (async-std only in rest-plugin ignored list); wz no_std crates #![no_std] (wz-session-core/wz-runtime-core/wz-link-lwip) + mcu-session-acceptor QEMU e2e; pico CMake platform profiles linux/macos/windows/zephyr/freertos; no QNX in zenoh or pico; zenoh 0 refs to tokio-uring/io_uring/zero-copy (R311xp confirmed).",
+        "No behavior change: no code/Cargo/CI touched; existing lanes unaffected; classification + reason correction in the inventory SSOT only."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y5 = runtime + platform final reclassification, CLOSING the AP-full LAYER-1 sweep (Tracks 1-3 + sweep all done). runtime-async-std -> DEPRECATED (zenoh phantom, tokio-only); runtime-no-std -> FOUNDATIONAL (wz no_std kernel built, QEMU-proven); uring/zero-copy already INERT-ORTHOGONAL (R311xp); platform-linux FOUNDATIONAL; macos/windows target_os-routed-unverified; qnx beyond-zenoh-OQ-W20; zephyr/freertos/bare-metal LAYER-2-deferred. NO build.",
+        "AP-FULL LAYER-1 SWEEP COMPLETE (R311y2..y5): every non-P4 reserved atom is now honestly classified. The genuine LAYER-1 build surface in this sweep = ZERO -- all reclassify (FOUNDATIONAL / phantom-deprecate / INERT-future / P4-or-L2-deferred), confirming the standing pattern (liveliness-history R311xx/xy was the LAST real LAYER-1 build/active-flip; active stays 92). New deprecations this sweep: routing-static-routes (y2) + runtime-async-std (y5) = +2 phantoms (deprecated 5->6 total).",
+        "Remaining reserved atoms now partition cleanly: P4 LAYER-3 (§5.21-27 + transport-misc 4 + routing-failover + scouting-gossip/autoconnect router-embedded); LAYER-2 MCU cross-compile (platform zephyr/freertos/bare-metal, runtime-no-std foundation); FOUNDATIONAL (keyexpr 4 / pubsub-sample / locator 8 / encoding 7 / time / liveliness-historical-samples / attachment-encoding-aware / scouting multicast/gossip/autoconnect / runtime-no-std / platform-linux); INERT-future (locator-iface, scouting-passive, platform-qnx, runtime-tokio-uring, runtime-zero-copy).",
+        "NEXT (per the user-decided north-star sequence, finish zenoh+pico FULL before the 2nd horizon): (a) LAYER-2 pico cross-impl + the MCU cross-compile harness (zephyr/freertos/bare-metal); (b) the P4 zenoh-full LAYER-3 build (low-dep keystones: adminspace-core / storage-backend-volume-trait, per R311xu). THEN 2nd horizon (QoS extension + AUTOSAR integration).",
+        "LOCAL: R311y5 atop R311y4 (3f3b4fe) / R311y3 (5f0f6ef) / R311y2 (5bed8ce) atop origin/main=9aa94c6. 4 commits ahead after this commits. NOT pushed without explicit consent (user authorized autonomous round progression + commits; a push needs an explicit further OK)."
+      ]
+    },
     "Round 311z": {
       "decision_summary": "R311z carry planning — SCE pin bump 55243e886 (33 commits ahead) surfaced as immediate-amortization candidate; synth-invoke untracked 4파일 + NL→IR Enum kind / EventSchema 18th kind 토대 확보 1-라운드 절차 lock.",
       "changes_bullets": [
@@ -56075,13 +56129,13 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "RFC §5.J.4 MCU class",
-      "reason": "F=bare-metal C11; P=RFC §5.J.4; C=MCU target, mutually exclusive with OS-bearing platforms"
+      "reason": "LAYER-2 MCU deferred: bare-metal Cortex-M cross-compile (no OS); wz no_std kernel ready (wz-link-lwip), the cross-compile harness (QEMU/physical boot, linker) is P4/LAYER-2-deferred. cfg=0; RFC §5.J.4"
     },
     "platform-freertos": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh-pico FreeRTOS port",
-      "reason": "F=FreeRTOS task primitives; P=zenoh-pico; C=alternative MCU OS"
+      "reason": "LAYER-2 MCU deferred: zenoh-pico has FreeRTOS-Plus-TCP / lwip CMake ports; wz no_std kernel ready, the FreeRTOS cross-compile harness is P4/LAYER-2-deferred. cfg=0"
     },
     "platform-linux": {
       "status": "reserved",
@@ -56093,25 +56147,25 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh macOS backend",
-      "reason": "F=Darwin syscalls; P=zenoh; C=alternative to platform-linux"
+      "reason": "target_os-routed (platform identity flows through Rust target_os, NOT a cargo feature, like platform-linux); std+tokio host-portable but NO wz CI lane -> unverified host. cfg=0. pico macos CMake profile exists"
     },
     "platform-qnx": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "OQ-W20 QNX-native runtime",
-      "reason": "F=QNX dispatch primitives; P=OQ-W20; C=alternative to platform-linux"
+      "reason": "INERT beyond-zenoh/pico: neither zenoh nor zenoh-pico has a QNX port; wz OQ-W20 future (QNX-native dispatch); niche RTOS, candidate for the 2nd-horizon AUTOSAR integration. cfg=0; re-openable"
     },
     "platform-windows": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh windows backend",
-      "reason": "F=Win32 syscalls; P=zenoh; C=alternative to platform-linux"
+      "reason": "target_os-routed (NOT a cargo feature, like platform-linux); std+tokio host-portable but NO wz CI lane -> unverified host. cfg=0. pico windows CMake profile exists"
     },
     "platform-zephyr": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh-pico Zephyr port",
-      "reason": "F=Zephyr API; P=zenoh-pico; C=alternative MCU OS"
+      "reason": "LAYER-2 MCU deferred: zenoh-pico has a Zephyr CMake port; wz no_std kernel is ready but the Zephyr cross-compile + RTOS port (toolchain, lwipopts, boot) is P4/LAYER-2-deferred. cfg=0"
     },
     "plugin-abi-compat": {
       "status": "reserved",
@@ -56450,10 +56504,10 @@
       "reason": "F=router-scope liveliness-token mesh propagation tables; P=zenoh hat/router/token.rs; C=needs hat-router; class=cfg"
     },
     "runtime-async-std": {
-      "status": "reserved",
+      "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "zenoh async-std backend",
-      "reason": "F=async-std executor; P=zenoh; C=alternative to runtime-tokio"
+      "reason": "zenoh PHANTOM: zenoh moved to tokio-only; async-std appears only in the rest-plugin ignored-features list, no core executor; wz has no async-std code. tokio-only; re-openable beyond-zenoh"
     },
     "runtime-lwip": {
       "status": "active",
@@ -56465,7 +56519,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "zenoh-pico #![no_std] core",
-      "reason": "F=no-std core lib; P=zenoh-pico; C=mutually exclusive with std-bearing runtimes"
+      "reason": "FOUNDATIONAL: the wz no_std kernel is built always-on (wz-session-core / wz-runtime-core / wz-link-lwip #![no_std], proven by the mcu-session-acceptor QEMU e2e); LAYER-2 MCU profile foundation; cfg=0, cargo = []. zenoh codec commons no_std-capable / pico native no_std"
     },
     "runtime-tokio": {
       "status": "active",
