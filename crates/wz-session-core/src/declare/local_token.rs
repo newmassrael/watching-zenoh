@@ -102,16 +102,19 @@ use crate::network_message::NetworkMessage;
 #[cfg(feature = "alloc")]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
-/// Outer Interest header `C | F` mask: a non-zero result means the
-/// Interest is non-final (CURRENT and/or FUTURE), i.e. a real request
-/// rather than an `InterestFinal` terminator. Mirrors the
-/// `(header & 0x60) == 0` final test in
-/// [`crate::declare::liveliness_subscriber`]. (An Interest-flag mask, not
-/// a declaration MID, so it stays local rather than in `wire_const`'s
-/// declaration-MID block.) Consumed only by the `alloc` inbound-parse
-/// path ([`LocalTokenRegistry::respond_to_interest`]).
+/// Outer Interest header `C` (CURRENT) mask. Only a CURRENT (or
+/// CurrentFuture) interest solicits a current-token replay — zenoh gates
+/// the responder's token enumeration on `mode.current()`
+/// (`hat/client/token.rs:354`). A FUTURE-only interest (`C` clear, `F`
+/// set) registers for future declares, which the declarer covers via its
+/// proactive `Declare(DeclToken)` at token-declare time, NOT by replaying
+/// current state; a FINAL interest (`C`/`F` both clear) is the
+/// subscriber's terminator. Both stage nothing here. (An Interest-flag
+/// mask, not a declaration MID, so it stays local rather than in
+/// `wire_const`'s declaration-MID block.) Consumed only by the `alloc`
+/// inbound-parse path ([`LocalTokenRegistry::respond_to_interest`]).
 #[cfg(feature = "alloc")]
-const INTEREST_NOT_FINAL_MASK: u8 = 0x60;
+const INTEREST_CURRENT_MASK: u8 = 0x20;
 
 /// One staged declarer-side interest-response record. The no-heap
 /// replacement for the prior owned `DeclareOwned` staging: it carries
@@ -315,9 +318,11 @@ impl LocalTokenRegistry {
         peer_keyexpr_table: &HashMap<u64, String>,
         pending: &mut BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
     ) {
-        if (interest.header & INTEREST_NOT_FINAL_MASK) == 0 {
-            // InterestFinal terminator — the subscriber-side registry
-            // handles it (history-complete marking); nothing to reply.
+        if (interest.header & INTEREST_CURRENT_MASK) == 0 {
+            // No CURRENT bit: a FUTURE-only interest (live updates come
+            // from the declarer's proactive Declare(DeclToken)) or a
+            // FINAL terminator. Neither solicits a current-token replay
+            // (zenoh `if mode.current()`, hat/client/token.rs:354).
             return;
         }
         let body = match &interest.body {
@@ -631,6 +636,47 @@ mod tests {
         let mut pending = new_pending();
         reg.respond_to_interest(&interest, &HashMap::new(), &mut pending);
         assert!(pending.is_empty());
+    }
+
+    /// R311xx (diagnose-first) — a FUTURE-only tokens Interest (the
+    /// history=false subscriber's declare) must NOT trigger a
+    /// current-token replay. zenoh gates the replay on `mode.current()`
+    /// (`hat/client/token.rs:354`); the FUTURE path is covered by the
+    /// declarer's proactive `Declare(DeclToken)` at token-declare time,
+    /// not by replaying current state to a future-only subscriber. The
+    /// pre-fix gate was "non-final" (C|F), which wrongly replied to a
+    /// FUTURE-only (C-clear) interest; this pins the corrected
+    /// CURRENT-only gate.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn future_only_interest_stages_nothing() {
+        use wz_codecs::interest_body::InterestBodyOwned;
+        use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+        use wz_codecs::wireexpr_local::WireexprLocalOwned;
+
+        let mut reg = LocalTokenRegistry::new();
+        reg.register(1, "group1/zenoh-pico").unwrap();
+        let interest = InterestOwned {
+            header: 0x19 | 0x40, // FUTURE only — no CURRENT bit
+            interest_id: 7,
+            body: Some(InterestBodyOwned {
+                header: 0x08, // tokens bit
+                keyexpr: Some(WireexprOwned {
+                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                        id: 0,
+                        suffix_len: Some(9),
+                        suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+                    }),
+                }),
+            }),
+            extensions: None,
+        };
+        let mut pending = new_pending();
+        reg.respond_to_interest(&interest, &HashMap::new(), &mut pending);
+        assert!(
+            pending.is_empty(),
+            "FUTURE-only interest must not stage a current-token replay",
+        );
     }
 
     /// `alloc` inbound-parse path: a non-final TOKENS Interest funnels

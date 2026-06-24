@@ -424,13 +424,21 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         fired
     }
 
-    /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`]
-    /// for the Declare arm and [`Self::mark_history_complete`] for the
-    /// `Interest(Final)` arm (R281 wire-up — an Interest whose outer
-    /// header carries neither `C` nor `F` is an InterestFinal per
-    /// `_Z_INTEREST_NOT_FINAL_MASK` at
-    /// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/
-    /// interest.h:35`).
+    /// Drain a `&[NetworkMessage]` through [`Self::dispatch_declare`]
+    /// (the `Decl*Token` sample fan) and flip
+    /// [`Self::mark_history_complete`] on the responder's
+    /// `Declare(DeclFinal)` terminator — the message that ENDS a CURRENT
+    /// replay, carrying our `interest_id` (pico
+    /// `_z_interest_process_declare_final`,
+    /// `vendor/zenoh-pico/src/session/interest.c:508`; mirror of the
+    /// liveliness-GET registry's `fire_final_for`). An inbound `Interest`
+    /// is the responder's concern (`LocalTokenRegistry`), not the
+    /// subscriber's — pico's `_z_interest_process_interest_final`
+    /// (interest.c:524) is a TODO no-op — so `Interest` messages are
+    /// ignored here. (R311xx: the prior R281 wire-up flipped
+    /// history-complete on an `Interest(Final)` the responder never
+    /// sends, so the snapshot-complete signal never fired on a real
+    /// wz<->wz / wz<->pico exchange.)
     #[cfg(feature = "alloc")]
     pub fn dispatch_messages(
         &mut self,
@@ -460,20 +468,25 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 #[cfg(feature = "codec-declare")]
                 NetworkMessage::Declare(decl) => {
                     self.dispatch_declare(&decl.body, peer_keyexpr_table);
-                }
-                NetworkMessage::Interest(interest) => {
-                    // Outer header bit5 = C (CURRENT), bit6 = F (FUTURE).
-                    // The `_Z_INTEREST_NOT_FINAL_MASK = C | F` gate
-                    // (interest.h:35) discriminates Final (both clear)
-                    // from non-final. An InterestFinal targeting one of
-                    // our outbound interest_ids marks the matching
-                    // subscriber history-complete; non-final Interests
-                    // from the peer are out of scope here (R283+).
-                    let is_final = (interest.header & 0x60) == 0;
-                    if is_final {
-                        self.mark_history_complete(interest.interest_id);
+                    // R311xx — the responder terminates a CURRENT replay
+                    // with `Declare(DeclFinal)` carrying our `interest_id`
+                    // (the declarer-side `LocalTokenRegistry` stages it via
+                    // `build_final_reply`; pico
+                    // `_z_interest_process_declare_final`, interest.c:508),
+                    // NOT an `Interest(Final)`. Flip history-complete for
+                    // the matching history-subscriber slot — the
+                    // `slot.history` guard in `history_complete` keeps the
+                    // flag meaningful only for history-enabled subscribers.
+                    if let Some(interest_id) = decl.interest_id {
+                        if matches!(decl.body, DeclareOwnedVariant::CodecZenohDeclFinal(_)) {
+                            self.mark_history_complete(interest_id);
+                        }
                     }
                 }
+                // R311xx — an inbound `Interest` is the responder's
+                // concern (`LocalTokenRegistry::respond_to_interest`), not
+                // the subscriber's; the CURRENT-replay completion arrives
+                // as the `Declare(DeclFinal)` handled above. Ignored here.
                 _ => {}
             }
         }
@@ -728,8 +741,15 @@ mod tests {
         assert_eq!(sink2.lock().unwrap().len(), 1, "alpha/* catches alpha/one");
     }
 
+    /// R311xx — history_complete flips on the responder's
+    /// `Declare(DeclFinal)` (echoing the subscriber's interest_id), and
+    /// the `slot.history` guard keeps it meaningful only for
+    /// history-enabled subscribers (a `history=false` slot stays `false`
+    /// even if a DeclFinal echoes its id). Replaces the pre-R311xx test
+    /// that wrongly drove completion from an `Interest(Final)` the
+    /// responder never sends.
     #[test]
-    fn interest_final_marks_history_complete_only_for_history_subscribers() {
+    fn declare_final_marks_history_complete_only_for_history_subscribers() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(1, "a", true, make_subscriber(sink.clone()))
@@ -737,39 +757,38 @@ mod tests {
         reg.register(2, "b", false, make_subscriber(sink.clone()))
             .unwrap();
 
-        // InterestFinal for interest_id=1.
-        let interest_final = Interest {
-            header: 0x19, // N_MID_INTEREST, no C, no F
-            interest_id: 1,
-            body: None,
-            extensions: None,
-        }
-        .try_into_owned()
-        .unwrap();
-        let messages = vec![NetworkMessage::Interest(interest_final)];
+        // The responder's CURRENT-replay terminator: one Declare(DeclFinal)
+        // per subscriber id, echoing that subscriber's interest_id.
+        let messages = vec![
+            NetworkMessage::Declare(Box::new(declare_envelope_decl_final_with_interest(1))),
+            NetworkMessage::Declare(Box::new(declare_envelope_decl_final_with_interest(2))),
+        ];
         reg.dispatch_messages(&messages, &HashMap::new());
 
         assert!(
             reg.history_complete(1),
-            "history-enabled subscriber must observe history_complete after InterestFinal",
+            "history-enabled subscriber observes history_complete after Declare(DeclFinal)",
         );
         assert!(
             !reg.history_complete(2),
-            "history=false subscriber returns false even after InterestFinal — replay was not requested",
+            "history=false subscriber stays false even if a DeclFinal echoes its id \
+             (the slot.history guard — replay was not requested)",
         );
     }
 
+    /// R311xx — an inbound `Interest` is the responder's concern
+    /// (`LocalTokenRegistry`), never the subscriber's: it must not touch
+    /// `history_complete` regardless of mode. (Pre-R311xx an
+    /// `Interest(Final)` wrongly flipped completion; the real terminator
+    /// is the `Declare(DeclFinal)` covered above.)
     #[test]
-    fn non_final_interest_does_not_mark_history_complete() {
+    fn inbound_interest_is_ignored_by_subscriber_registry() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(1, "x", true, make_subscriber(sink.clone()))
             .unwrap();
 
-        // Non-final Interest (FUTURE bit set) carrying a body. This is the
-        // shape the peer would emit if it ever asked us about tokens
-        // (R283 carry — bilateral Interest is out of scope at R280).
-        let non_final = Interest {
+        let interest = Interest {
             header: 0x19 | 0x40, // FUTURE
             interest_id: 1,
             body: Some(InterestBody {
@@ -786,12 +805,42 @@ mod tests {
         }
         .try_into_owned()
         .unwrap();
-        let messages = vec![NetworkMessage::Interest(non_final)];
+        let messages = vec![NetworkMessage::Interest(interest)];
         reg.dispatch_messages(&messages, &HashMap::new());
 
         assert!(
             !reg.history_complete(1),
-            "non-final Interest (C or F set) must not flip history_complete",
+            "an inbound Interest must not flip history_complete (responder's concern)",
+        );
+    }
+
+    /// R311xx (diagnose-first) — the RESPONDER terminates a CURRENT
+    /// replay with `Declare(DeclareFinal){interest_id}`, NOT
+    /// `Interest(Final)`: see [`crate::declare::local_token`]'s
+    /// `build_final_reply` and pico `_z_interest_process_declare_final`
+    /// (`vendor/zenoh-pico/src/session/interest.c:508`); the sibling
+    /// `_z_interest_process_interest_final` (interest.c:524) is a TODO
+    /// no-op. A history-subscriber must flip `history_complete` on that
+    /// inbound `Declare(DeclFinal)` whose `interest_id` echoes its own,
+    /// exactly as the liveliness-GET registry fires its final
+    /// ([`crate::declare::liveliness_get`] `fire_final_for`).
+    #[test]
+    fn history_complete_fires_on_responder_declare_final() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "live/**", true, make_subscriber(sink.clone()))
+            .unwrap();
+
+        // The responder's terminator: Declare(DeclFinal) carrying our
+        // interest_id (build_final_reply -> interest_id = Some(1)).
+        let decl_final = declare_envelope_decl_final_with_interest(1);
+        let messages = vec![NetworkMessage::Declare(Box::new(decl_final))];
+        reg.dispatch_messages(&messages, &HashMap::new());
+
+        assert!(
+            reg.history_complete(1),
+            "history-subscriber must flip history_complete on the responder's \
+             Declare(DeclFinal), not on an Interest(Final) the responder never sends",
         );
     }
 
@@ -842,5 +891,106 @@ mod tests {
         assert_eq!(got[0].0, LivelinessSampleKind::Put);
         assert_eq!(got[0].1, "live/dev/3");
         assert_eq!(got[0].2, 77);
+    }
+
+    /// R311xx — integrated responder->subscriber proof across BOTH
+    /// liveliness registries (the wiring the isolated unit tests +
+    /// [`history_complete_fires_on_responder_declare_final`] could not
+    /// give): a [`LocalTokenRegistry`] holding a token receives the
+    /// history-subscriber's CurrentFuture Interest, stages the
+    /// current-token replay, and that replay — reified into the wire
+    /// `Declare(DeclToken)`+`Declare(DeclFinal)` the sink emits — drives
+    /// the subscriber to (a) fire the current token as a PUT sample AND
+    /// (b) flip `history_complete` on the terminating `DeclFinal`. This
+    /// exercises both R311xx fixes together: the responder gates the
+    /// replay on the CURRENT bit, and the subscriber completes the
+    /// snapshot on the `DeclFinal` (not an `Interest(Final)`).
+    #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
+    #[test]
+    fn responder_replay_drives_subscriber_put_and_history_complete() {
+        use crate::bounded::BoundedVec;
+        use crate::caps;
+        use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
+        use wz_codecs::interest::InterestOwned;
+        use wz_codecs::interest_body::InterestBodyOwned;
+        use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+        use wz_codecs::wireexpr_local::WireexprLocalOwned;
+
+        // Responder: holds one token, receives the subscriber's
+        // CurrentFuture (C|F) tokens Interest, stages the replay.
+        let mut responder = LocalTokenRegistry::new();
+        responder.register(9, "live/dev1").unwrap();
+
+        let sub_interest_id = 3u64;
+        let interest = InterestOwned {
+            header: 0x19 | 0x20 | 0x40, // CurrentFuture: CURRENT + FUTURE
+            interest_id: sub_interest_id,
+            body: Some(InterestBodyOwned {
+                header: 0x08, // tokens
+                keyexpr: Some(WireexprOwned {
+                    body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+                        id: 0,
+                        suffix_len: Some(7),
+                        suffix: Some(crate::codec_owned::owned_string("live/**").unwrap()),
+                    }),
+                }),
+            }),
+            extensions: None,
+        };
+        let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
+            BoundedVec::new();
+        responder.respond_to_interest(&interest, &HashMap::new(), &mut pending);
+
+        // Reify the staged replay into the wire Declares the sink emits:
+        // one Declare(DeclToken{interest_id}) per match + the terminating
+        // Declare(DeclFinal{interest_id}) (build_token_reply /
+        // build_final_reply shape — interest_id echoed, inline keyexpr).
+        let mut wire: Vec<NetworkMessage> = Vec::new();
+        for item in pending.iter() {
+            match item {
+                DeclResponseItem::Token {
+                    token_id,
+                    interest_id,
+                } => {
+                    let ke = responder.keyexpr_for(*token_id).unwrap();
+                    wire.push(NetworkMessage::Declare(Box::new(
+                        declare_envelope_decl_token_with_interest(
+                            decl_token(*token_id, 0, Some(ke)),
+                            *interest_id,
+                        ),
+                    )));
+                }
+                DeclResponseItem::Final { interest_id } => {
+                    wire.push(NetworkMessage::Declare(Box::new(
+                        declare_envelope_decl_final_with_interest(*interest_id),
+                    )));
+                }
+            }
+        }
+
+        // Subscriber: history=true on live/**, consumes the replay.
+        let mut sub = LivelinessSubscriberRegistry::new();
+        let cap: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        sub.register(
+            sub_interest_id,
+            "live/**",
+            true,
+            make_subscriber(cap.clone()),
+        )
+        .unwrap();
+        sub.dispatch_messages(&wire, &HashMap::new());
+
+        // (a) the current token surfaced as a PUT sample...
+        let got = cap.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "exactly the one current token replayed");
+        assert_eq!(got[0].0, LivelinessSampleKind::Put);
+        assert_eq!(got[0].1, "live/dev1");
+        assert_eq!(got[0].2, 9);
+        // (b) ...and the DeclFinal terminator completed the snapshot.
+        assert!(
+            sub.history_complete(sub_interest_id),
+            "the responder's Declare(DeclFinal) must complete the history snapshot",
+        );
     }
 }
