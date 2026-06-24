@@ -50679,6 +50679,54 @@
         "LOCAL: R311y3 atop R311y2 (5bed8ce) atop origin/main=9aa94c6. 2 commits ahead after this commits. NOT pushed without explicit consent."
       ]
     },
+    "Round 311y4": {
+      "decision_summary": "R311y4 -- scouting + locator A3 cleanup (Track 3 of the AP-full sweep; A3 read-first + zenoh 49c8a53 / pico / wz direct read via 2 source agents, arbitrated by direct-read). All 13 atoms reclassify -- NO LAYER-1 build (the pattern holds). LOCATOR (9): locator-tcp/udp/tls/ws/quic/serial/unixsock/vsock = FOUNDATIONAL -- the locator-string parse is unconditional in wz-session-core/src/locator.rs (every scheme parses regardless of which links are enabled); the cfg TOGGLE is the forward-target transport-link-X (dial backend at session_open.rs, fails cleanly Unsupported when off). locator-iface = INERT-reserved (the #iface= interface-binding metadata suffix is not parsed -- rejected as BadAddress, locator.rs:61-64; unbuilt, no forward). SCOUTING (4): scouting-multicast = FOUNDATIONAL (UDP multicast group join + Scout/Hello always-on under scouting-active, no standalone gate); scouting-gossip + scouting-autoconnect = FOUNDATIONAL (link-state flood + AutoConnect policy implemented in wz-routing-graph, always-on, no gate -- cargo =[routing-router] is a semantic forward not a code gate; pico has neither, client-only); scouting-passive = INERT-reserved (beyond-zenoh/pico -- neither has a listen-only mode; wz OQ-W23 future, explicitly rejected at parse via ScoutingModeError::PassiveDeferred). All 13 stay reserved (no status change); reasons corrected. Inventory + ledger only, NO code/Cargo/CI change; validate orphan new=+0; A3 unaffected (reserved->reserved, all 0 cfg sites).",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): 8 locator atoms (tcp/udp/tls/ws/quic/serial/unixsock/vsock) reason -> FOUNDATIONAL. locator-string parse is unconditional (wz-session-core/src/locator.rs: scheme dispatch Proto::Tcp:144 .. + parse_serial:209 / parse_unixsock:322 / parse_vsock:407 leaves, all always-compiled); the cfg toggle is the forward-target transport-link-X dial backend (session_open.rs, Unsupported when off). cfg=0 each.",
+        "docs/.atomic/workspace.atomic.json (inventory): locator-iface reason -> INERT-reserved. The #iface=eth0 interface-binding metadata suffix is NOT parsed -- the IP leaf rejects the # tail as BadAddress (locator.rs:61-64); unbuilt future, no forward (= []). cfg=0.",
+        "docs/.atomic/workspace.atomic.json (inventory): scouting-multicast reason -> FOUNDATIONAL (UDP multicast group join + Scout/Hello always-on under scouting-active, group 224.0.0.224:7446; no standalone cfg gate). scouting-gossip + scouting-autoconnect reasons -> FOUNDATIONAL (link-state flood + AutoConnect policy implemented in wz-routing-graph + linkstate_forward.rs, always-on, no gate; cargo =[routing-router] is a semantic forward, not a code gate; pico none, client-only). All cfg=0.",
+        "docs/.atomic/workspace.atomic.json (inventory): scouting-passive reason -> INERT-reserved (beyond-zenoh/pico -- neither has a listen-only scouting mode; wz OQ-W23 future design, explicitly rejected at parse via ScoutingModeError::PassiveDeferred, scout_static.rs; re-openable). cfg=0."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); 13 reason edits do not affect orphans/sections/style. = the per-commit gate (project pre-commit hook). All 13 set-inventory-status OK (sequential CLI loop, no parallel-write race on the 8.7MB JSON).",
+        "A3 unaffected analytically: all 13 stay reserved (no status change), no cargo/cfg-site change -> invariant #1 (each is a declared cargo key) + #2 (reserved => 0 cfg sites; verified cfg=0 for all 13) hold; full run-ci runs cumulatively at sweep close (build/clippy/test lanes byte-identical to last-green HEAD).",
+        "Direct-read provenance (2 source agents, arbitrated): locator agent -- locator.rs unconditional scheme parse (Proto::Tcp:144 .. parse_vsock_locator:407) vs transport-link-X dial backend at session_open.rs; locator-iface # tail rejected (locator.rs:61-64). scouting agent -- multicast group 224.0.0.224 always-on under scouting-active; gossip+autoconnect impl in wz-routing-graph (autoconnect.rs mirror of zenoh net/common.rs, linkstate_forward.rs flood), cargo =[routing-router] semantic-only; scouting-passive PassiveDeferred (scout_static.rs); pico client-only (no gossip/autoconnect).",
+        "No behavior change: no code/Cargo/CI touched; existing lanes unaffected; classification + reason correction in the inventory SSOT only."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "R311y4 = scouting + locator A3 cleanup (Track 3; 13 atoms reclassify, NO build). LOCATOR: 8 FOUNDATIONAL (parse always-on, transport-link-X = the toggle) + locator-iface INERT-reserved (#iface= unparsed). SCOUTING: 3 FOUNDATIONAL (multicast under scouting-active; gossip+autoconnect impl wz-routing-graph, always-on) + scouting-passive INERT-reserved (beyond-zenoh OQ-W23). §5.2-locator + §5.3-scouting reasons now honest.",
+        "NEXT (final sweep, R311y5): runtime(4) + platform(7). runtime-async-std -> DEPRECATED (zenoh PHANTOM, tokio-only now; async-std only in rest-plugin ignored); runtime-no-std -> FOUNDATIONAL (wz no_std kernel built: wz-session-core/wz-runtime-core/wz-link-lwip #![no_std], proven by mcu-session-acceptor e2e); runtime-tokio-uring + runtime-zero-copy already INERT-ORTHOGONAL (R311xp, leave). platform-linux already FOUNDATIONAL; macos+windows -> target_os-routed-unverified-host; qnx -> beyond-zenoh OQ-W20 INERT; zephyr+freertos+bare-metal -> LAYER-2 MCU deferred (pico CMake ports; wz no_std kernel ready, cross-compile harness P4/L2-deferred). async-std deprecation = a status change -> run a cumulative full run-ci at this sweep close (A3 + all lanes).",
+        "transport-misc 4 (multilink/stats/quic-datagram/unixpipe) are P4 (src=R311xu P4 scoping), OUT of ap-full scope -- left untouched.",
+        "LOCAL: R311y4 atop R311y3 (5f0f6ef) atop R311y2 (5bed8ce) atop origin/main=9aa94c6. 3 commits ahead after this commits. NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311y4 -- scouting + locator A3 cleanup (Track 3 of the AP-full sweep; A3 read-first + zenoh 49c8a53 / pico / wz direct read via 2 source agents, arbitrated by direct-read). All 13 atoms reclassify -- NO LAYER-1 build (the pattern holds). LOCATOR (9): locator-tcp/udp/tls/ws/quic/serial/unixsock/vsock = FOUNDATIONAL -- the locator-string parse is unconditional in wz-session-core/src/locator.rs (every scheme parses regardless of which links are enabled); the cfg TOGGLE is the forward-target transport-link-X (dial backend at session_open.rs, fails cleanly Unsupported when off). locator-iface = INERT-reserved (the #iface= interface-binding metadata suffix is not parsed -- rejected as BadAddress, locator.rs:61-64; unbuilt, no forward). SCOUTING (4): scouting-multicast = FOUNDATIONAL (UDP multicast group join + Scout/Hello always-on under scouting-active, no standalone gate); scouting-gossip + scouting-autoconnect = FOUNDATIONAL (link-state flood + AutoConnect policy implemented in wz-routing-graph, always-on, no gate -- cargo =[routing-router] is a semantic forward not a code gate; pico has neither, client-only); scouting-passive = INERT-reserved (beyond-zenoh/pico -- neither has a listen-only mode; wz OQ-W23 future, explicitly rejected at parse via ScoutingModeError::PassiveDeferred). All 13 stay reserved (no status change); reasons corrected. Inventory + ledger only, NO code/Cargo/CI change; validate orphan new=+0; A3 unaffected (reserved->reserved, all 0 cfg sites).",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): 8 locator atoms (tcp/udp/tls/ws/quic/serial/unixsock/vsock) reason -> FOUNDATIONAL. locator-string parse is unconditional (wz-session-core/src/locator.rs: scheme dispatch Proto::Tcp:144 .. + parse_serial:209 / parse_unixsock:322 / parse_vsock:407 leaves, all always-compiled); the cfg toggle is the forward-target transport-link-X dial backend (session_open.rs, Unsupported when off). cfg=0 each.",
+        "docs/.atomic/workspace.atomic.json (inventory): locator-iface reason -> INERT-reserved. The #iface=eth0 interface-binding metadata suffix is NOT parsed -- the IP leaf rejects the # tail as BadAddress (locator.rs:61-64); unbuilt future, no forward (= []). cfg=0.",
+        "docs/.atomic/workspace.atomic.json (inventory): scouting-multicast reason -> FOUNDATIONAL (UDP multicast group join + Scout/Hello always-on under scouting-active, group 224.0.0.224:7446; no standalone cfg gate). scouting-gossip + scouting-autoconnect reasons -> FOUNDATIONAL (link-state flood + AutoConnect policy implemented in wz-routing-graph + linkstate_forward.rs, always-on, no gate; cargo =[routing-router] is a semantic forward, not a code gate; pico none, client-only). All cfg=0.",
+        "docs/.atomic/workspace.atomic.json (inventory): scouting-passive reason -> INERT-reserved (beyond-zenoh/pico -- neither has a listen-only scouting mode; wz OQ-W23 future design, explicitly rejected at parse via ScoutingModeError::PassiveDeferred, scout_static.rs; re-openable). cfg=0."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); 13 reason edits do not affect orphans/sections/style. = the per-commit gate (project pre-commit hook). All 13 set-inventory-status OK (sequential CLI loop, no parallel-write race on the 8.7MB JSON).",
+        "A3 unaffected analytically: all 13 stay reserved (no status change), no cargo/cfg-site change -> invariant #1 (each is a declared cargo key) + #2 (reserved => 0 cfg sites; verified cfg=0 for all 13) hold; full run-ci runs cumulatively at sweep close (build/clippy/test lanes byte-identical to last-green HEAD).",
+        "Direct-read provenance (2 source agents, arbitrated): locator agent -- locator.rs unconditional scheme parse (Proto::Tcp:144 .. parse_vsock_locator:407) vs transport-link-X dial backend at session_open.rs; locator-iface # tail rejected (locator.rs:61-64). scouting agent -- multicast group 224.0.0.224 always-on under scouting-active; gossip+autoconnect impl in wz-routing-graph (autoconnect.rs mirror of zenoh net/common.rs, linkstate_forward.rs flood), cargo =[routing-router] semantic-only; scouting-passive PassiveDeferred (scout_static.rs); pico client-only (no gossip/autoconnect).",
+        "No behavior change: no code/Cargo/CI touched; existing lanes unaffected; classification + reason correction in the inventory SSOT only."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y4 = scouting + locator A3 cleanup (Track 3; 13 atoms reclassify, NO build). LOCATOR: 8 FOUNDATIONAL (parse always-on, transport-link-X = the toggle) + locator-iface INERT-reserved (#iface= unparsed). SCOUTING: 3 FOUNDATIONAL (multicast under scouting-active; gossip+autoconnect impl wz-routing-graph, always-on) + scouting-passive INERT-reserved (beyond-zenoh OQ-W23). §5.2-locator + §5.3-scouting reasons now honest.",
+        "NEXT (final sweep, R311y5): runtime(4) + platform(7). runtime-async-std -> DEPRECATED (zenoh PHANTOM, tokio-only now; async-std only in rest-plugin ignored); runtime-no-std -> FOUNDATIONAL (wz no_std kernel built: wz-session-core/wz-runtime-core/wz-link-lwip #![no_std], proven by mcu-session-acceptor e2e); runtime-tokio-uring + runtime-zero-copy already INERT-ORTHOGONAL (R311xp, leave). platform-linux already FOUNDATIONAL; macos+windows -> target_os-routed-unverified-host; qnx -> beyond-zenoh OQ-W20 INERT; zephyr+freertos+bare-metal -> LAYER-2 MCU deferred (pico CMake ports; wz no_std kernel ready, cross-compile harness P4/L2-deferred). async-std deprecation = a status change -> run a cumulative full run-ci at this sweep close (A3 + all lanes).",
+        "transport-misc 4 (multilink/stats/quic-datagram/unixpipe) are P4 (src=R311xu P4 scoping), OUT of ap-full scope -- left untouched.",
+        "LOCAL: R311y4 atop R311y3 (5f0f6ef) atop R311y2 (5bed8ce) atop origin/main=9aa94c6. 3 commits ahead after this commits. NOT pushed without explicit consent."
+      ]
+    },
     "Round 311z": {
       "decision_summary": "R311z carry planning — SCE pin bump 55243e886 (33 commits ahead) surfaced as immediate-amortization candidate; synth-invoke untracked 4파일 + NL→IR Enum kind / EventSchema 18th kind 토대 확보 1-라운드 절차 lock.",
       "changes_bullets": [
@@ -55973,55 +56021,55 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator ?iface= query parameter",
-      "reason": "F=qparam parse; P=zenoh locator iface scope; C=multi-NIC qualifier, orthogonal"
+      "reason": "INERT-reserved: interface-binding metadata suffix (#iface=eth0) NOT parsed today -- the IP leaf rejects the # tail as BadAddress (locator.rs:61-64); unbuilt future, no forward (= []). zenoh carries iface in locator metadata. cfg=0"
     },
     "locator-quic": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator quic prefix",
-      "reason": "F=quic prefix dispatch; P=zenoh; C=requires transport-link-quic"
+      "reason": "FOUNDATIONAL: QUIC locator parse always-on (locator.rs:148 Proto::Quic); toggle = transport-link-quic dial backend (session_open.rs:403, R311xk). cfg=0"
     },
     "locator-serial": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh-pico locator serial prefix",
-      "reason": "F=serial prefix; P=zenoh-pico; C=requires transport-link-serial"
+      "reason": "FOUNDATIONAL: serial locator grammar parse always-on (locator.rs:209 parse_serial_locator); toggle = transport-link-serial backend (session_open.rs:450, R311nv). cfg=0; pico serial"
     },
     "locator-tcp": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "crates/wz-ap-demo/src/args.rs",
-      "reason": "F=parser branch; P=zenoh-pico locator tcp prefix; C=indep"
+      "reason": "FOUNDATIONAL: TCP locator parse always-on (locator.rs:144 Proto::Tcp); the cfg toggle is forward target transport-link-tcp (dial backend session_open.rs:348). cfg=0; pico TCP unicast"
     },
     "locator-tls": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator tls prefix",
-      "reason": "F=tls prefix dispatch; P=zenoh; C=requires transport-link-tls"
+      "reason": "FOUNDATIONAL: TLS locator parse always-on (locator.rs:146 Proto::Tls); toggle = transport-link-tls dial backend (session_open.rs:364). cfg=0; pico TLS"
     },
     "locator-udp": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "crates/wz-ap-demo/src/args.rs",
-      "reason": "F=parser branch; P=zenoh-pico locator udp prefix; C=indep prefix dispatch"
+      "reason": "FOUNDATIONAL: UDP locator parse always-on (locator.rs:145 Proto::Udp); toggle = transport-link-udp dial backend (session_open.rs:349). cfg=0; pico UDP uni+multicast"
     },
     "locator-unixsock": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator unixsock-stream prefix",
-      "reason": "F=unixsock prefix; P=zenoh; C=requires transport-link-unixsock"
+      "reason": "FOUNDATIONAL: unixsock-stream locator grammar parse always-on (locator.rs:322 parse_unixsock_locator); toggle = transport-link-unixsock backend (session_open.rs:472, R311xi). cfg=0"
     },
     "locator-vsock": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator vsock prefix",
-      "reason": "F=vsock prefix; P=zenoh; C=requires transport-link-vsock"
+      "reason": "FOUNDATIONAL: vsock locator grammar parse always-on + platform-independent (locator.rs:407 parse_vsock_locator); toggle = transport-link-vsock backend (session_open.rs:492, Linux-only, R311xj). cfg=0"
     },
     "locator-ws": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator ws prefix",
-      "reason": "F=ws prefix; P=zenoh; C=requires transport-link-ws"
+      "reason": "FOUNDATIONAL: WebSocket locator parse always-on (locator.rs:147 Proto::Ws); toggle = transport-link-ws dial backend (session_open.rs:388). cfg=0"
     },
     "platform-bare-metal": {
       "status": "reserved",
@@ -56447,25 +56495,25 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh autoconnect on HELLO",
-      "reason": "F=auto-connect logic; P=zenoh; C=opt-in policy on top of discovery"
+      "reason": "FOUNDATIONAL: AutoConnect policy in wz-routing-graph/src/autoconnect.rs (mirror of zenoh net/common.rs), always-on (no gate); cargo scouting-autoconnect=[routing-router] is a semantic forward. cfg=0; pico none"
     },
     "scouting-gossip": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh router gossip protocol",
-      "reason": "F=peer-to-peer gossip; P=zenoh router; C=router-side only, requires routing-router"
+      "reason": "FOUNDATIONAL: link-state gossip flood implemented in wz-routing-graph + linkstate_forward.rs, always-on (no separate gate); cargo scouting-gossip=[routing-router] is a semantic forward, not a code gate. cfg=0; pico none (client-only); P4-router-embedded"
     },
     "scouting-multicast": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh-pico scouting multicast UDP",
-      "reason": "F=multicast group join; P=zenoh-pico; C=requires transport-link-udp + multicast OS support"
+      "reason": "FOUNDATIONAL: UDP multicast group join + Scout/Hello always-on under scouting-active (wz multicast machinery, group 224.0.0.224:7446); no standalone cfg gate. cfg=0; zenoh runtime-config gate / pico Z_FEATURE_SCOUTING"
     },
     "scouting-passive": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "OQ-W23 ratify pending",
-      "reason": "F=listen-only path; P=OQ-W23 passive scouting mode; C=alternative to scouting-active"
+      "reason": "INERT-reserved: beyond-zenoh/pico -- neither has a passive (listen-only) scouting mode; wz OQ-W23 future design, explicitly rejected at parse (ScoutingModeError::PassiveDeferred, scout_static.rs). cfg=0; re-openable"
     },
     "scouting-static": {
       "status": "active",
