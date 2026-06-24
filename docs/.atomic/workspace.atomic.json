@@ -50643,6 +50643,42 @@
         "LOCAL: R311y2 atop origin/main=9aa94c6 (R311y1). 1 commit ahead after this commits. NOT pushed without explicit consent (user authorized autonomous round progression + commits, NOT a push)."
       ]
     },
+    "Round 311y3": {
+      "decision_summary": "R311y3 -- attachment-encoding-aware FOUNDATIONAL reclassification (Track 2 of the AP-full sweep; A3 read-first + direct read). attachment-encoding-aware is NOT a buildable cfg toggle -- it is a tag-typed DATA-VIEW on the already-active attachment-bytes codec. wz-session-core/src/attachment.rs is the SSOT for the attachment extension wire shape (ext_id 0x03 PUSH body / 0x05 Query, ExtZbuf ENC_ZBUF, non-mandatory so unknown peers drop silently), gated on attachment-bytes -- the catalog primitive the pubsub-attachment / query-attachment consumers select. 'encoding-aware' = interpreting that opaque payload through an Encoding tag, which is DATA (id + schema string) not a wire toggle, exactly the R311xq encoding-family precedent (encoding identity is DATA -> FOUNDATIONAL-reserved, not active). cfg=0, cargo attachment-encoding-aware=[attachment-bytes] (forwards the active primitive). Status stays reserved; reason corrected reserved-inert -> FOUNDATIONAL. Inventory + ledger only, NO code/Cargo/CI change; validate orphan new=+0; A3 unaffected (reserved->reserved, 0 cfg sites).",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): attachment-encoding-aware reason reserved-inert -> FOUNDATIONAL. It is a tag-typed data-view on the active attachment-bytes codec, not a separate wire toggle. wz-session-core/src/attachment.rs is the attachment-ext SSOT (ext_id 0x03 PUSH / 0x05 Query, ExtZbuf ENC_ZBUF, non-mandatory), gated on attachment-bytes; cfg=0; cargo attachment-encoding-aware=[attachment-bytes] forwards the active primitive. Status stays reserved (FOUNDATIONAL, no cfg site -- A3 invariant #2)."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); the reason edit does not affect orphans/sections/style. = the per-commit gate (project pre-commit hook).",
+        "A3 unaffected analytically: reserved -> reserved (no status change), no cargo/cfg-site change, so invariant #1 (declared: attachment-encoding-aware=[attachment-bytes] key present) + #2 (reserved => 0 cfg sites; cfg=0 confirmed) both hold; full run-ci runs cumulatively at sweep close (build/clippy/test lanes test byte-identical code).",
+        "Direct read: wz-session-core/src/attachment.rs module doc -- the (ext_id, ENC_ZBUF, ExtZbuf body) shape, gated on attachment-bytes, the SSOT for the 4 attachment encode/decode sites (sample::extract_attachment, query::extract_query_attachment, request_build, session_glue::build_body_extensions); pico ext_id citations message.c 314-322 (PUSH 0x03) / 446-448 (Query 0x05). 'encoding-aware' = an Encoding-tag data-view, DATA not a toggle (R311xq encoding-family precedent)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment"
+      ],
+      "carry_forward_bullets": [
+        "R311y3 = attachment-encoding-aware -> FOUNDATIONAL (Track 2; data-view on active attachment-bytes, R311xq encoding-DATA precedent; NOT a build). §5.17-attachment closed (attachment-bytes active + attachment-encoding-aware FOUNDATIONAL).",
+        "NEXT (Track 3): scouting(4)+locator(9) reclassify -- locator tcp/udp/tls/ws/quic/serial/unixsock/vsock = FOUNDATIONAL (parse always-on at locator.rs; transport-link-* forward = the toggle), locator-iface = INERT-reserved (unbuilt #iface= metadata suffix, rejected today), scouting-multicast/gossip/autoconnect = FOUNDATIONAL (always-on under scouting-active / routing-router, impl wz-routing-graph), scouting-passive = INERT-reserved (beyond-zenoh OQ-W23 future, wz rejects loudly via ScoutingModeError::PassiveDeferred). Then sweep runtime(4)+platform(7).",
+        "LOCAL: R311y3 atop R311y2 (5bed8ce) atop origin/main=9aa94c6. 2 commits ahead after this commits. NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311y3 -- attachment-encoding-aware FOUNDATIONAL reclassification (Track 2 of the AP-full sweep; A3 read-first + direct read). attachment-encoding-aware is NOT a buildable cfg toggle -- it is a tag-typed DATA-VIEW on the already-active attachment-bytes codec. wz-session-core/src/attachment.rs is the SSOT for the attachment extension wire shape (ext_id 0x03 PUSH body / 0x05 Query, ExtZbuf ENC_ZBUF, non-mandatory so unknown peers drop silently), gated on attachment-bytes -- the catalog primitive the pubsub-attachment / query-attachment consumers select. 'encoding-aware' = interpreting that opaque payload through an Encoding tag, which is DATA (id + schema string) not a wire toggle, exactly the R311xq encoding-family precedent (encoding identity is DATA -> FOUNDATIONAL-reserved, not active). cfg=0, cargo attachment-encoding-aware=[attachment-bytes] (forwards the active primitive). Status stays reserved; reason corrected reserved-inert -> FOUNDATIONAL. Inventory + ledger only, NO code/Cargo/CI change; validate orphan new=+0; A3 unaffected (reserved->reserved, 0 cfg sites).",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory, no code/Cargo/CI change): attachment-encoding-aware reason reserved-inert -> FOUNDATIONAL. It is a tag-typed data-view on the active attachment-bytes codec, not a separate wire toggle. wz-session-core/src/attachment.rs is the attachment-ext SSOT (ext_id 0x03 PUSH / 0x05 Query, ExtZbuf ENC_ZBUF, non-mandatory), gated on attachment-bytes; cfg=0; cargo attachment-encoding-aware=[attachment-bytes] forwards the active primitive. Status stays reserved (FOUNDATIONAL, no cfg site -- A3 invariant #2)."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), style unchanged (T3 warn=4 / T4 info=4); the reason edit does not affect orphans/sections/style. = the per-commit gate (project pre-commit hook).",
+        "A3 unaffected analytically: reserved -> reserved (no status change), no cargo/cfg-site change, so invariant #1 (declared: attachment-encoding-aware=[attachment-bytes] key present) + #2 (reserved => 0 cfg sites; cfg=0 confirmed) both hold; full run-ci runs cumulatively at sweep close (build/clippy/test lanes test byte-identical code).",
+        "Direct read: wz-session-core/src/attachment.rs module doc -- the (ext_id, ENC_ZBUF, ExtZbuf body) shape, gated on attachment-bytes, the SSOT for the 4 attachment encode/decode sites (sample::extract_attachment, query::extract_query_attachment, request_build, session_glue::build_body_extensions); pico ext_id citations message.c 314-322 (PUSH 0x03) / 446-448 (Query 0x05). 'encoding-aware' = an Encoding-tag data-view, DATA not a toggle (R311xq encoding-family precedent)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y3 = attachment-encoding-aware -> FOUNDATIONAL (Track 2; data-view on active attachment-bytes, R311xq encoding-DATA precedent; NOT a build). §5.17-attachment closed (attachment-bytes active + attachment-encoding-aware FOUNDATIONAL).",
+        "NEXT (Track 3): scouting(4)+locator(9) reclassify -- locator tcp/udp/tls/ws/quic/serial/unixsock/vsock = FOUNDATIONAL (parse always-on at locator.rs; transport-link-* forward = the toggle), locator-iface = INERT-reserved (unbuilt #iface= metadata suffix, rejected today), scouting-multicast/gossip/autoconnect = FOUNDATIONAL (always-on under scouting-active / routing-router, impl wz-routing-graph), scouting-passive = INERT-reserved (beyond-zenoh OQ-W23 future, wz rejects loudly via ScoutingModeError::PassiveDeferred). Then sweep runtime(4)+platform(7).",
+        "LOCAL: R311y3 atop R311y2 (5bed8ce) atop origin/main=9aa94c6. 2 commits ahead after this commits. NOT pushed without explicit consent."
+      ]
+    },
     "Round 311z": {
       "decision_summary": "R311z carry planning — SCE pin bump 55243e886 (33 commits ahead) surfaced as immediate-amortization candidate; synth-invoke untracked 4파일 + NL→IR Enum kind / EventSchema 18th kind 토대 확보 1-라운드 절차 lock.",
       "changes_bullets": [
@@ -55571,7 +55607,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
       "source": "zenoh encoding-tagged attachment",
-      "reason": "F=tag-typed attachment view; P=zenoh; C=builds on attachment-bytes"
+      "reason": "FOUNDATIONAL: tag-typed DATA-VIEW on the active attachment-bytes codec, not a separate wire toggle. wz-session-core/src/attachment.rs is the attachment-ext SSOT (ext_id 0x03 PUSH body / 0x05 Query, ExtZbuf ENC_ZBUF, non-mandatory), gated on attachment-bytes; cfg=0; cargo attachment-encoding-aware=[attachment-bytes] forwards the active primitive. Encoding identity is DATA (id+schema), R311xq encoding-family precedent -> FOUNDATIONAL-reserved, not active"
     },
     "codec-close": {
       "status": "active",
