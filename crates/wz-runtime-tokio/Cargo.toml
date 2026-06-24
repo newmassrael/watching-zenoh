@@ -87,6 +87,7 @@ path = "src/lib.rs"
 default = [
     "liveliness-token",
     "liveliness-subscriber",
+    "liveliness-history",
     "query-get",
     "query-queryable",
     "query-reply",
@@ -150,6 +151,16 @@ default = [
 # implications below are unchanged.
 liveliness-token = ["declare-token", "declare-undeclare", "wz-session-core/liveliness-token"]
 liveliness-subscriber = ["declare-interest", "declare-final", "wz-session-core/liveliness-subscriber"]
+# R311xy — liveliness-history: the CURRENT-state-replay REQUEST on a
+# liveliness subscriber (the `history = true` option -> CURRENT bit on the
+# outbound Interest + the history_complete snapshot signal). A real per-call
+# cfg gate (R311cl's "per-call gate, not field gate"): with this OFF a
+# liveliness-subscriber build is future-only (the history option is a
+# documented no-op, signature-stable). Implies liveliness-subscriber (the
+# gate lives inside the subscriber declare path). zenoh/zenoh-pico expose
+# history as a runtime option only; this compile-time elision is a wz
+# superset for slim/MCU presence-only builds.
+liveliness-history = ["liveliness-subscriber"]
 # liveliness-get — requester-side snapshot get. Wire = the declaration
 # plane: emit a CURRENT liveliness Interest (`declare-interest`), collect
 # the interest_id-tagged `Declare(DeclToken)` replies (`declare-token`)

@@ -1106,6 +1106,29 @@ layer_c1ah_cargo_test_time_hlc() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features storage-backend --quiet -- -D warnings)
 }
 
+# ─── Layer C1ai — liveliness-history: §5.10 CURRENT-state-replay request gate ─
+#
+# R311xy: liveliness-history is the active §5.10 atom -- the per-call cfg gate on
+# the subscriber-side CURRENT-state-replay REQUEST (the `history = true` option
+# -> CURRENT bit on the outbound Interest + the history_complete snapshot signal)
+# living inside `Session::declare_liveliness_subscriber{_aliased}` (R311cl's
+# "per-call gate, not field gate"). The default Layer C1 builds it ON, so this
+# lane pins the two ISOLATED paths the default does not exercise:
+#   1. clippy the ON path (--no-default-features, liveliness-subscriber +
+#      liveliness-history) -- the gate forwards options.history to the Interest
+#      builder + the register/cache sites;
+#   2. clippy the OFF path (liveliness-subscriber WITHOUT liveliness-history) to
+#      prove the future-only build composes -- the `not(liveliness-history)` arm
+#      forces history=false, so the CURRENT-bit request elides cleanly while
+#      options.history / with_history() stay callable no-ops (signature-stable).
+layer_c1ai_cargo_test_liveliness_history() {
+    (cd crates \
+        && cargo clippy -p wz-runtime-tokio --no-default-features \
+            --features transport-unicast,liveliness-subscriber,liveliness-history --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features \
+            --features transport-unicast,liveliness-subscriber --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3525,6 +3548,7 @@ run_layer C1ae layer_c1ae_cargo_test_compression || overall=1
 run_layer C1af layer_c1af_cargo_test_shm || overall=1
 run_layer C1ag layer_c1ag_cargo_test_transport_compose || overall=1
 run_layer C1ah layer_c1ah_cargo_test_time_hlc || overall=1
+run_layer C1ai layer_c1ai_cargo_test_liveliness_history || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

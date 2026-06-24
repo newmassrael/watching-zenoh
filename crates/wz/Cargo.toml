@@ -294,7 +294,12 @@ link-tx-cache = []
 # reply-delivery surface reuses the un-gated reply_sink::ReplySink seam.
 liveliness-get = ["wz-runtime-tokio?/liveliness-get"]
 liveliness-historical-samples = ["liveliness-history"]
-liveliness-history = []
+# R311xy — liveliness-history is now a real cfg gate (the subscriber-side
+# CURRENT-state-replay request), forwarded into the runtime crate; was a
+# no-op `= []` facade. liveliness-historical-samples stays FOUNDATIONAL
+# (the responder current-token replay is shared with the active
+# liveliness-get path) and just composes the request prerequisite here.
+liveliness-history = ["wz-runtime-tokio?/liveliness-history"]
 # R302b — first source-gated atomic features. Forward into
 # wz-runtime-tokio iff the runtime-tokio feature is also enabled
 # (cargo's `?` syntax: forward only if the optional crate is active).
@@ -1234,6 +1239,7 @@ preset-ap-client = [
     "query-consolidation",
     "liveliness-token",
     "liveliness-subscriber",
+    "liveliness-history",
     "liveliness-get",
     "locator-tcp",
     "locator-udp",
