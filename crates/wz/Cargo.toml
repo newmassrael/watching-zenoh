@@ -273,10 +273,12 @@ keyexpr-mapping = []
 # ----- domain: link (5 atomic, 0 active / 5 reserved) -----
 # R311ci — audit-only ratify. link-* features overlap conceptually
 # with transport-* (transport-batching, transport-fragmentation
-# already gate the actual behavior in wz-runtime-tokio). The link-*
-# axis is the higher-level routing-layer abstraction (per RFC §5.C)
-# and not yet wired in source. "3 active / 2 reserved" -> 0/5.
-link-batching = []
+# already gate the actual behavior in wz-runtime-tokio). R311y0 A3 audit:
+# frame/fragment/batching are FOUNDATIONAL (delivered by the always-on Frame
+# core / the active transport-fragmentation / the active transport-batching);
+# flow-control + tx-cache are zenoh phantoms (no link flow-control, no tx
+# retransmit) -> deprecated. No genuine link-opt-in build remained.
+link-batching = ["transport-batching"]
 link-flow-control = []
 link-fragment = ["transport-fragmentation"]
 link-frame = []

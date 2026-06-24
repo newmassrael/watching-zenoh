@@ -50481,6 +50481,62 @@
         "R311v carries unchanged: ReplyEmitter PhantomData, Reply/Push attach, ext mirror, R311n."
       ]
     },
+    "Round 311y0": {
+      "decision_summary": "R311y0 -- link-opt-in track A3 cfg-audit + reclassification (the user-chosen \"cheapest cleanup\" candidate). Direct read (zenoh 49c8a53 + wz source) found ZERO genuine build remaining: the 5 link-* atoms are 3 FOUNDATIONAL + 2 zenoh-phantom. link-frame (the Frame envelope codec is transport CORE -- always compiled across sn/frame_encode/handshake/pubsub/network_message/push_build, 0 cfg sites; transport-lowlatency runtime-skips the Frame but the codec stays), link-fragment (the Fragment codec is the ALREADY-ACTIVE transport-fragmentation atom, aliased), link-batching (the tx batch-pack is the ALREADY-ACTIVE transport-batching atom with 20 cfg sites; its cargo dep is fixed []->[transport-batching] so the facade composes the real capability instead of being a dead marker) -> stay reserved with FOUNDATIONAL reasons. link-flow-control (zenoh has NO link-level flow-control/backpressure -- grep=0; congestion-control is a separate DROP policy, already active as pubsub-congestion-control) + link-tx-cache (zenoh has NO transport retransmit -- grep retransmit/resend=0; reliability.rs is a SN-indexed RX ordering queue, reliable loss recovery is delegated to TCP) -> reserved->DEPRECATED phantoms. Inventory + a 1-line cargo dep + a comment refresh, NO wz code/CI; active count unchanged at 92; A3 stays consistent (deprecated + reserved atoms keep their cargo keys + 0 cfg sites). link-opt-in track CLOSED. The broader pattern across R311xz + R311y0: the roadmap's \"small AP-full remaining\" tracks keep resolving, on A3-read-first + zenoh direct-read, to reclassification (FOUNDATIONAL / phantom) rather than build -- the genuine LAYER-1 surface is smaller than the reserved count. full run-ci RUNCI_EXIT=0; validate_workspace orphan new=+0; direct-read is the arbiter.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory) + crates/wz/Cargo.toml (1-line dep + comment): the link-opt-in track reclassified by A3 cfg-audit + direct read of zenoh 49c8a53. No wz code / CI change.",
+        "link-frame: stays reserved, reason -> FOUNDATIONAL. The Frame envelope codec is transport CORE -- always compiled (sn.rs / frame_encode / handshake_encode / pubsub / network_message / push_build), 0 cfg sites; transport-lowlatency runtime-negotiates skipping the Frame on the wire but the codec stays compiled. Not a separate toggle.",
+        "link-fragment: stays reserved, reason -> FOUNDATIONAL. The Fragment codec is delivered by the ACTIVE transport-fragmentation atom (link-fragment = [transport-fragmentation] aliases it). Codec-layer view of an already-active capability.",
+        "link-batching: stays reserved, reason -> FOUNDATIONAL. The tx batch-pack capability is the ACTIVE transport-batching atom (20 cfg sites; batch_start/flush/stop). wz/Cargo.toml link-batching dep []-> [transport-batching] so the facade now composes the real batching instead of being a dead marker.",
+        "link-flow-control: reserved -> DEPRECATED. zenoh PHANTOM: grep flow-control/backpressure in io/zenoh-transport = 0 hits. zenoh's congestion-control is a DROP policy (already active as pubsub-congestion-control), NOT a backpressure flow-control signal. Nothing to mirror.",
+        "link-tx-cache: reserved -> DEPRECATED. zenoh PHANTOM: no transport-level retransmit -- grep retransmit/resend = 0 hits; reliability.rs is a SN-indexed RX ordering queue (ReliabilityQueue), not a TX retransmit-on-loss store. zenoh reliable loss recovery = the underlying transport (TCP); wz mirrors this (SN ordering + lease).",
+        "crates/wz/Cargo.toml: the link-* block comment updated from the stale \"0/5, not yet wired\" to the R311y0 finding (frame/fragment/batching FOUNDATIONAL, flow-control/tx-cache phantom-deprecated)."
+      ],
+      "verification_bullets": [
+        "full run-ci RUNCI_EXIT=0 -- \"all required layers pass\" + Layer Z pass; judged by exit code. R311xv lesson + [[feedback-full-runci-all-host-lanes]]: a catalog-status round MUST run full run-ci because Layer A3 joins inventory <-> cargo, and this round also changed a cargo dep (link-batching).",
+        "Layer A3 pass: active count UNCHANGED at 92 (reclassification only); link-frame / link-fragment / link-batching stay reserved with 0 cfg sites (invariant #2 reserved-not-gated holds); link-flow-control + link-tx-cache deprecated (untouched by the reserved/active invariants); all 5 keep their cargo [features] keys (invariant #1 declared). The link-batching []->[transport-batching] change is a cargo composition only -- it adds NO `feature=\"link-batching\"` cfg site, so link-batching stays correctly reserved.",
+        "Preset build matrix: builds clean with link-batching now transitively pulling the active transport-batching; no preset breakage from the dep change.",
+        "validate_workspace: T1 orphan new=+0 (ledger=13), style unchanged (T3 warn=4 / T4 info=4); atomic ledger entries 998 -> 999 (R311y0), sections 266 unchanged; set_inventory_status cascade_decay_hits = [] for all 5 (incl the 2 reserved->deprecated -- no cite-sites surfaced).",
+        "No .rs touched -> no fmt/clippy delta; the cargo-graph + A3 join are the validation surface, both green under full run-ci.",
+        "Direct-read provenance (arbiter): zenoh 49c8a53 io/zenoh-transport (flow-control/backpressure grep = 0; retransmit/resend grep = 0; reliability.rs = ReliabilityQueue RX ordering) + wz (Frame core always-compiled; transport-fragmentation active; transport-batching active, 20 cfg sites)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "R311y0 = link-opt-in track A3 cfg-audit + reclassification (the \"cheapest cleanup\" candidate; direct-read arbiter). Outcome: ZERO genuine build remained -- the 5 link-* atoms are 3 FOUNDATIONAL + 2 zenoh-phantom. link-frame (Frame core always-on), link-fragment (= active transport-fragmentation), link-batching (= active transport-batching; cargo dep fixed []->[transport-batching]) -> reserved/FOUNDATIONAL. link-flow-control (zenoh has no link flow-control/backpressure; congestion-control is a separate active drop-policy) + link-tx-cache (zenoh has no tx retransmit; reliability.rs is RX ordering + TCP) -> deprecated phantoms. Inventory + 1-line cargo, no wz code/CI; active count UNCHANGED at 92. link-opt-in track CLOSED.",
+        "PATTERN (3 tracks running): the roadmap's \"small AP-full remaining\" tracks keep resolving, on A3-read-first + zenoh direct-read, to mostly reclassification (FOUNDATIONAL / phantom-deprecate) rather than build -- liveliness-history was the exception (real bugs + a real active flip). session-hardening (R311xz) = 1 phantom + 2 beyond-pico-P4-deferred; link-opt-in (R311y0) = 3 FOUNDATIONAL + 2 phantom. The genuine LAYER-1 build surface is much smaller than the reserved count suggested. Direct-read is the arbiter (proven every track).",
+        "NEXT TRACK (per roadmap remaining): routing-policy (routing-failover / routing-static-routes -- verify vs zenoh hat routing) · attachment-encoding-aware (likely FOUNDATIONAL data-view on the active attachment-bytes) · A3 cleanup of already-built scouting+locator atoms (scouting-gossip/autoconnect impl in wz-routing-graph but 0 cfg sites; locator-tcp/udp/tls/quic/ws parsed unconditionally; suspected locator-unixsock/vsock). A3 read-FIRST + verify vs zenoh; front-load highest-risk.",
+        "LOCAL: R311y0 atop R311xz (56fc7f3) atop R311xy (413bc54) atop R311xx (9488d86) atop origin/main=59e3f10. 4 commits ahead after this commits. NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311y0 -- link-opt-in track A3 cfg-audit + reclassification (the user-chosen \"cheapest cleanup\" candidate). Direct read (zenoh 49c8a53 + wz source) found ZERO genuine build remaining: the 5 link-* atoms are 3 FOUNDATIONAL + 2 zenoh-phantom. link-frame (the Frame envelope codec is transport CORE -- always compiled across sn/frame_encode/handshake/pubsub/network_message/push_build, 0 cfg sites; transport-lowlatency runtime-skips the Frame but the codec stays), link-fragment (the Fragment codec is the ALREADY-ACTIVE transport-fragmentation atom, aliased), link-batching (the tx batch-pack is the ALREADY-ACTIVE transport-batching atom with 20 cfg sites; its cargo dep is fixed []->[transport-batching] so the facade composes the real capability instead of being a dead marker) -> stay reserved with FOUNDATIONAL reasons. link-flow-control (zenoh has NO link-level flow-control/backpressure -- grep=0; congestion-control is a separate DROP policy, already active as pubsub-congestion-control) + link-tx-cache (zenoh has NO transport retransmit -- grep retransmit/resend=0; reliability.rs is a SN-indexed RX ordering queue, reliable loss recovery is delegated to TCP) -> reserved->DEPRECATED phantoms. Inventory + a 1-line cargo dep + a comment refresh, NO wz code/CI; active count unchanged at 92; A3 stays consistent (deprecated + reserved atoms keep their cargo keys + 0 cfg sites). link-opt-in track CLOSED. The broader pattern across R311xz + R311y0: the roadmap's \"small AP-full remaining\" tracks keep resolving, on A3-read-first + zenoh direct-read, to reclassification (FOUNDATIONAL / phantom) rather than build -- the genuine LAYER-1 surface is smaller than the reserved count. full run-ci RUNCI_EXIT=0; validate_workspace orphan new=+0; direct-read is the arbiter.",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json (inventory) + crates/wz/Cargo.toml (1-line dep + comment): the link-opt-in track reclassified by A3 cfg-audit + direct read of zenoh 49c8a53. No wz code / CI change.",
+        "link-frame: stays reserved, reason -> FOUNDATIONAL. The Frame envelope codec is transport CORE -- always compiled (sn.rs / frame_encode / handshake_encode / pubsub / network_message / push_build), 0 cfg sites; transport-lowlatency runtime-negotiates skipping the Frame on the wire but the codec stays compiled. Not a separate toggle.",
+        "link-fragment: stays reserved, reason -> FOUNDATIONAL. The Fragment codec is delivered by the ACTIVE transport-fragmentation atom (link-fragment = [transport-fragmentation] aliases it). Codec-layer view of an already-active capability.",
+        "link-batching: stays reserved, reason -> FOUNDATIONAL. The tx batch-pack capability is the ACTIVE transport-batching atom (20 cfg sites; batch_start/flush/stop). wz/Cargo.toml link-batching dep []-> [transport-batching] so the facade now composes the real batching instead of being a dead marker.",
+        "link-flow-control: reserved -> DEPRECATED. zenoh PHANTOM: grep flow-control/backpressure in io/zenoh-transport = 0 hits. zenoh's congestion-control is a DROP policy (already active as pubsub-congestion-control), NOT a backpressure flow-control signal. Nothing to mirror.",
+        "link-tx-cache: reserved -> DEPRECATED. zenoh PHANTOM: no transport-level retransmit -- grep retransmit/resend = 0 hits; reliability.rs is a SN-indexed RX ordering queue (ReliabilityQueue), not a TX retransmit-on-loss store. zenoh reliable loss recovery = the underlying transport (TCP); wz mirrors this (SN ordering + lease).",
+        "crates/wz/Cargo.toml: the link-* block comment updated from the stale \"0/5, not yet wired\" to the R311y0 finding (frame/fragment/batching FOUNDATIONAL, flow-control/tx-cache phantom-deprecated)."
+      ],
+      "publishable_verification_bullets": [
+        "full run-ci RUNCI_EXIT=0 -- \"all required layers pass\" + Layer Z pass; judged by exit code. R311xv lesson + [[feedback-full-runci-all-host-lanes]]: a catalog-status round MUST run full run-ci because Layer A3 joins inventory <-> cargo, and this round also changed a cargo dep (link-batching).",
+        "Layer A3 pass: active count UNCHANGED at 92 (reclassification only); link-frame / link-fragment / link-batching stay reserved with 0 cfg sites (invariant #2 reserved-not-gated holds); link-flow-control + link-tx-cache deprecated (untouched by the reserved/active invariants); all 5 keep their cargo [features] keys (invariant #1 declared). The link-batching []->[transport-batching] change is a cargo composition only -- it adds NO `feature=\"link-batching\"` cfg site, so link-batching stays correctly reserved.",
+        "Preset build matrix: builds clean with link-batching now transitively pulling the active transport-batching; no preset breakage from the dep change.",
+        "validate_workspace: T1 orphan new=+0 (ledger=13), style unchanged (T3 warn=4 / T4 info=4); atomic ledger entries 998 -> 999 (R311y0), sections 266 unchanged; set_inventory_status cascade_decay_hits = [] for all 5 (incl the 2 reserved->deprecated -- no cite-sites surfaced).",
+        "No .rs touched -> no fmt/clippy delta; the cargo-graph + A3 join are the validation surface, both green under full run-ci.",
+        "Direct-read provenance (arbiter): zenoh 49c8a53 io/zenoh-transport (flow-control/backpressure grep = 0; retransmit/resend grep = 0; reliability.rs = ReliabilityQueue RX ordering) + wz (Frame core always-compiled; transport-fragmentation active; transport-batching active, 20 cfg sites)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y0 = link-opt-in track A3 cfg-audit + reclassification (the \"cheapest cleanup\" candidate; direct-read arbiter). Outcome: ZERO genuine build remained -- the 5 link-* atoms are 3 FOUNDATIONAL + 2 zenoh-phantom. link-frame (Frame core always-on), link-fragment (= active transport-fragmentation), link-batching (= active transport-batching; cargo dep fixed []->[transport-batching]) -> reserved/FOUNDATIONAL. link-flow-control (zenoh has no link flow-control/backpressure; congestion-control is a separate active drop-policy) + link-tx-cache (zenoh has no tx retransmit; reliability.rs is RX ordering + TCP) -> deprecated phantoms. Inventory + 1-line cargo, no wz code/CI; active count UNCHANGED at 92. link-opt-in track CLOSED.",
+        "PATTERN (3 tracks running): the roadmap's \"small AP-full remaining\" tracks keep resolving, on A3-read-first + zenoh direct-read, to mostly reclassification (FOUNDATIONAL / phantom-deprecate) rather than build -- liveliness-history was the exception (real bugs + a real active flip). session-hardening (R311xz) = 1 phantom + 2 beyond-pico-P4-deferred; link-opt-in (R311y0) = 3 FOUNDATIONAL + 2 phantom. The genuine LAYER-1 build surface is much smaller than the reserved count suggested. Direct-read is the arbiter (proven every track).",
+        "NEXT TRACK (per roadmap remaining): routing-policy (routing-failover / routing-static-routes -- verify vs zenoh hat routing) · attachment-encoding-aware (likely FOUNDATIONAL data-view on the active attachment-bytes) · A3 cleanup of already-built scouting+locator atoms (scouting-gossip/autoconnect impl in wz-routing-graph but 0 cfg sites; locator-tcp/udp/tls/quic/ws parsed unconditionally; suspected locator-unixsock/vsock). A3 read-FIRST + verify vs zenoh; front-load highest-risk.",
+        "LOCAL: R311y0 atop R311xz (56fc7f3) atop R311xy (413bc54) atop R311xx (9488d86) atop origin/main=59e3f10. 4 commits ahead after this commits. NOT pushed without explicit consent."
+      ]
+    },
     "Round 311z": {
       "decision_summary": "R311z carry planning — SCE pin bump 55243e886 (33 commits ahead) surfaced as immediate-amortization candidate; synth-invoke untracked 4파일 + NL→IR Enum kind / EventSchema 18th kind 토대 확보 1-라운드 절차 lock.",
       "changes_bullets": [
@@ -55715,31 +55771,31 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "crates/wz-runtime-tokio/src/session_glue.rs tx batch",
-      "reason": "F=multi-msg pack; P=zenoh batch; C=opt-in throughput"
+      "reason": "FOUNDATIONAL (R311y0): the tx batch-pack capability is the ACTIVE transport-batching atom (20 cfg sites; batch_start/flush/stop + the frame_encode transport-batching gate). link-batching is the link-layer view of that same active capability; its cargo dep is now [transport-batching] (was a dead []) so enabling it composes the real batching. Not a separate toggle -> reserved (FOUNDATIONAL). P=zenoh batching."
     },
     "link-flow-control": {
-      "status": "reserved",
+      "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "zenoh transport flow control",
-      "reason": "F=backpressure signal; P=zenoh; C=indep, can fail-fast without"
+      "reason": "zenoh PHANTOM (direct-read, zenoh 49c8a53): grep flow-control / backpressure in io/zenoh-transport = 0 hits -- zenoh has NO link-level flow-control / backpressure signal. Its congestion-control is a DROP policy (block/drop when the tx queue fills), a separate concern already active as pubsub-congestion-control -- NOT backpressure. Nothing to mirror -> do NOT build (R311y0); re-openable beyond-zenoh superset candidate."
     },
     "link-fragment": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "sources/codecs/fragment.scxml",
-      "reason": "F=Fragment codec; P=zenoh transport Fragment; C=requires transport-fragmentation"
+      "reason": "FOUNDATIONAL (R311y0): the Fragment envelope codec is delivered by the ACTIVE transport-fragmentation atom (link-fragment = [transport-fragmentation] aliases it; transport-fragmentation carries the real cfg gate + reassembly). link-fragment is the codec-layer view of that already-active capability, not a separate toggle -> reserved (FOUNDATIONAL). P=zenoh transport Fragment."
     },
     "link-frame": {
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "sources/codecs/frame.scxml",
-      "reason": "F=Frame envelope codec; P=zenoh transport Frame; C=indep of fragment path"
+      "reason": "FOUNDATIONAL (R311y0): the Frame envelope codec is transport CORE -- always compiled (sn.rs SN mint, frame_encode, handshake_encode, pubsub, network_message, push_build); no cfg gates it. transport-lowlatency runtime-negotiates SKIPPING the Frame on the wire, but the codec stays compiled. Not a separate toggle -> reserved (FOUNDATIONAL, done + shipped). P=zenoh transport Frame."
     },
     "link-tx-cache": {
-      "status": "reserved",
+      "status": "deprecated",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "zenoh transport tx cache",
-      "reason": "F=retransmit buffer; P=zenoh; C=opt-in reliability layer"
+      "reason": "zenoh PHANTOM (direct-read, zenoh 49c8a53): no transport-level retransmit buffer -- grep retransmit / resend in io/zenoh-transport = 0 hits; reliability.rs is a SN-indexed ReliabilityQueue (RX ordering slots), not a TX retransmit-on-loss store. zenoh reliable-channel loss recovery is delegated to the underlying transport (TCP); best-effort is drop. wz mirrors this (SN ordering + lease, no app-level retransmit). Nothing to mirror -> do NOT build (R311y0); re-openable beyond-zenoh."
     },
     "liveliness-get": {
       "status": "active",
