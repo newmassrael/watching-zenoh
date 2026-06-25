@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-mcu-clock — R311y21, the Cortex-M SysTick monotonic clock SSOT.
+#
+# A `#![no_std]` library owning ONE thing: `SystickClock<CYCLES_PER_US>`
+# — the wrap-tear-safe SysTick read + the monotonic floor (R311y15) +
+# the u64 reload counter (R311y21 overflow-freeze fix). It replaces the
+# three hand-copied SystickClock blocks that had drifted across
+# deploy/mcu-qemu-demo, deploy/mcu-session-acceptor, and
+# deploy/mcu-multicast-e2e (only the demo carried the floor).
+#
+# Deliberately depends on NOTHING from the wz stack: the `ClockSource`
+# trait impl (`SystickClockRef`) stays in each deploy main, since that
+# trait is re-exported through the `wz` facade each binary already
+# names. Keeping this crate at portable-atomic-only makes it a plain
+# host-buildable workspace member (the C2 `cargo clippy --workspace`
+# lane covers it, and the monotonic-floor unit test runs on the host)
+# rather than a no_std island that has to be `--exclude`d like the
+# wz-mcu-* e2e crates.
+
+[package]
+name = "wz-mcu-clock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Cortex-M SysTick monotonic clock SSOT (SystickClock<CYCLES_PER_US>: wrap-tear-safe read + monotonic floor + u64 reload counter) shared by the bare-metal deploy binaries."
+
+[lib]
+name = "wz_mcu_clock"
+path = "src/lib.rs"
+
+[dependencies]
+# portable-atomic so the AtomicU64 reload counter + monotonic floor
+# compile on ARMv6-M (Cortex-M0/M0+, no native CAS): `fallback` +
+# `critical-section` select the critical-section-single-core impl there
+# (supplied by the deploy bin's `cortex-m` dep) and native intrinsics on
+# ARMv7-M+. Mirrors the deploy bins' own portable-atomic configuration so
+# cargo unifies one feature set across the final link.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+[dev-dependencies]
+# critical-section's std impl backs portable-atomic on the host unit-test
+# link (the cross deploy bins supply the cortex-m impl at final-binary
+# link instead). On the host x86-64 target AtomicU64 is native so this is
+# belt-and-suspenders, matching wz-mcu-session-acceptor's dev-dep.
+critical-section = { version = "1", features = ["std"] }
+
+[lints]
+workspace = true

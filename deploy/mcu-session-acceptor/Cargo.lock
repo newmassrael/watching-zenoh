@@ -424,6 +424,7 @@ dependencies = [
  "embedded-alloc",
  "panic-semihosting",
  "portable-atomic",
+ "wz-mcu-clock",
  "wz-mcu-session-acceptor",
 ]
 
@@ -994,6 +995,13 @@ dependencies = [
  "heapless",
  "lwip-sys",
  "wz-codegen-build",
+]
+
+[[package]]
+name = "wz-mcu-clock"
+version = "0.1.0"
+dependencies = [
+ "portable-atomic",
 ]
 
 [[package]]

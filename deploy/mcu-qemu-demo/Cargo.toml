@@ -112,15 +112,21 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 # BSS region the binary initialises in main).
 embedded-alloc = "0.6"
 
-# R311bm-m0 — portable-atomic polyfill so the demo's SystickClock
-# AtomicU32 compiles on Cortex-M0+ (thumbv6m-none-eabi) where
-# native LDREX/STREX are absent. Mirrors the R311bb wz-runtime-
-# lwip adoption pattern: same `fallback` + `critical-section`
-# feature set so portable-atomic uses the cortex-m crate's
-# `critical-section-single-core` impl on no-CAS targets and
-# native intrinsics on M3/M4/M7. ARMv7-M+ targets transparently
-# get LDREX/STREX-backed atomics; ARMv6-M gets critical-section.
+# R311bm-m0 — portable-atomic polyfill, kept for atomic-backend feature
+# unification across wz-runtime-lwip + wz-mcu-clock on Cortex-M0+
+# (thumbv6m-none-eabi) where native LDREX/STREX are absent (R311y21 moved
+# the SystickClock itself into wz-mcu-clock, whose AtomicU64 reload
+# counter + monotonic floor route through this same `fallback` +
+# `critical-section` feature set). Mirrors the R311bb wz-runtime-lwip
+# adoption pattern: portable-atomic uses the cortex-m crate's
+# `critical-section-single-core` impl on no-CAS targets and native
+# intrinsics on M3/M4/M7.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# R311y21 — the Cortex-M SysTick monotonic clock SSOT. SystickClock<25>
+# (mps2) / SystickClock<16> (microbit) backs GLOBAL_CLOCK; this bin wires
+# only the static + #[exception] + sys_now + the ClockSource impl around it.
+wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
 
 # wz facade — the composable-framework entry point. `runtime-lwip`
 # feature pulls wz-runtime-lwip + wz-link-lwip. Cross-workspace

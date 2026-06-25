@@ -94,6 +94,13 @@ members = [
     # QEMU boot (multicast self-loopback is a host-only lwIP affordance —
     # the bin is build + footprint-size only).
     "wz-mcu-multicast-e2e",
+    # R311y21 — the Cortex-M SysTick monotonic clock SSOT (no_std lib;
+    # SystickClock<CYCLES_PER_US> shared by all three deploy/mcu-* bins).
+    # Unlike the wz-mcu-* e2e crates it has NO wz dep (the ClockSource
+    # impl stays in each bin), so it does NOT force wz-session-core/no_std
+    # onto the workspace and needs no C1/C2 --exclude — it builds + host-
+    # tests (the monotonic-floor regression) in the default workspace lanes.
+    "wz-mcu-clock",
     # Stage 5 (R311it) — the no_std SSOT for synthetic session handshake
     # wire bytes (craft_initsyn/opensyn/initack/frame). De-duplicates the
     # copies that were in the three wz-runtime-tokio session-FSM test files

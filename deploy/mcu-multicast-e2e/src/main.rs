@@ -25,15 +25,18 @@
 //! footprint-retention trick) so a developer booting it on real multicast
 //! hardware gets a host-visible PASS.
 //!
-//! ## SysTick IRQ-driven clock (same as deploy/mcu-session-acceptor)
+//! ## SysTick IRQ-driven clock (shared SSOT: `wz_mcu_clock::SystickClock`)
 //!
 //! QEMU's Cortex-M emulation stubs the DWT cycle counter to 0, so monotonic
-//! time comes from SysTick poll mode: `TICKINT` fires the `SysTick` exception
-//! every 1 ms (RELOAD = CYCLES_PER_US * 1000 - 1 = 24999 at the mps2 25 MHz),
-//! the handler bumps a wraparound counter, and `now_us` snaps it either side of
-//! the CVR read (the standard ISR-vs-thread lock-free pattern). The multicast
-//! profile is mps2-class only (M3/M4/M7; the 32 x 1536 multicast rx pool does
-//! not fit nrf51's 16 KB SRAM), so there is no Cortex-M0 / microbit fork.
+//! time comes from SysTick: `TICKINT` fires the `SysTick` exception every 1 ms
+//! (RELOAD = CYCLES_PER_US * 1000 - 1 = 24999 at the mps2 25 MHz), the handler
+//! advances a reload counter, and `now_us` snaps it either side of the CVR read
+//! (the standard ISR-vs-thread lock-free pattern) then applies a monotonic
+//! floor. The clock algorithm lives once in `wz-mcu-clock` (R311y21); this bin
+//! only wires the `static`, the `#[exception]` handler, the `sys_now()` symbol,
+//! and the `ClockSource` impl. The multicast profile is mps2-class only
+//! (M3/M4/M7; the 32 x 1536 multicast rx pool does not fit nrf51's 16 KB SRAM),
+//! so there is no Cortex-M0 / microbit fork.
 
 #![no_std]
 #![no_main]
@@ -46,7 +49,7 @@ use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::{debug, hprintln};
 use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
-use portable_atomic::{AtomicU32, Ordering};
+use wz_mcu_clock::SystickClock;
 
 use wz_mcu_multicast_e2e::{run_multicast_e2e, ClockSource, LwipLink, MulticastOutcome};
 
@@ -61,66 +64,23 @@ static HEAP: Heap = Heap::empty();
 
 /// CPU clock (MHz) — QEMU clocks the mps2 family at 25 MHz. SysTick counts
 /// processor cycles when `CSR.CLKSOURCE = 1`; dividing by this yields
-/// microseconds.
+/// microseconds. Fed to `SystickClock<CYCLES_PER_US>` as the const-generic
+/// frequency; a real deploy substitutes its own silicon frequency.
 const CYCLES_PER_US: u64 = 25;
-/// SysTick reload sized to a 1 ms tick (RELOAD = 24999 cycles at 25 MHz).
-const SYST_RELOAD: u32 = (CYCLES_PER_US as u32 * 1000) - 1;
-const SYST_PERIOD: u64 = SYST_RELOAD as u64 + 1;
 
-// SysTick MMIO registers (System Control Space; same offsets on every M-class
-// core).
-const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
-const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
-const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
-const SYST_CSR_CLKSOURCE: u32 = 1 << 2;
-const SYST_CSR_TICKINT: u32 = 1 << 1;
-const SYST_CSR_ENABLE: u32 = 1 << 0;
+/// The single SysTick clock instance, shared by the `SysTick` exception
+/// handler (via `on_tick`), the lwIP `sys_now()` symbol, and the `ClockSource`
+/// handle (via `now_us`) so reload accounting stays consistent across all
+/// three. The wrap-tear-safe read + monotonic floor + u64 reload counter live
+/// once in `wz_mcu_clock::SystickClock` (R311y21 SSOT).
+static GLOBAL_CLOCK: SystickClock<{ CYCLES_PER_US }> = SystickClock::new();
 
-/// Interrupt-incremented wraparound counter — `wraps` advances once per 1 ms
-/// reload from the `SysTick` exception; `now_us` reconstructs microseconds.
-struct SystickClock {
-    wraps: AtomicU32,
-}
-
-impl SystickClock {
-    const fn new() -> Self {
-        Self {
-            wraps: AtomicU32::new(0),
-        }
-    }
-
-    fn init(&self) {
-        unsafe {
-            SYST_CSR.write_volatile(0);
-            SYST_RVR.write_volatile(SYST_RELOAD);
-            SYST_CVR.write_volatile(0);
-            SYST_CSR.write_volatile(SYST_CSR_CLKSOURCE | SYST_CSR_TICKINT | SYST_CSR_ENABLE);
-        }
-    }
-
-    fn now_us(&self) -> u64 {
-        // Double-snap: if `wraps` advanced during the CVR read, the snapshot
-        // belongs to a different period — retry until `wraps` is stable.
-        loop {
-            let w1 = self.wraps.load(Ordering::Acquire);
-            let cvr = unsafe { SYST_CVR.read_volatile() } & SYST_RELOAD;
-            let w2 = self.wraps.load(Ordering::Acquire);
-            if w1 == w2 {
-                let total_cycles = w1 as u64 * SYST_PERIOD + (SYST_RELOAD - cvr) as u64;
-                return total_cycles / CYCLES_PER_US;
-            }
-        }
-    }
-}
-
+/// `SysTick` exception — fires every 1 ms once `GLOBAL_CLOCK.init()` enables
+/// `TICKINT`; advances the reload counter and nothing else (short ISR).
 #[exception]
 fn SysTick() {
-    GLOBAL_CLOCK.wraps.fetch_add(1, Ordering::Release);
+    GLOBAL_CLOCK.on_tick();
 }
-
-/// The single SysTick instance shared by the `ClockSource` handle and the
-/// lwIP-side `sys_now()` so wrap accounting stays consistent across both.
-static GLOBAL_CLOCK: SystickClock = SystickClock::new();
 
 /// Zero-sized [`ClockSource`] forwarding every `now_us` to [`GLOBAL_CLOCK`].
 #[derive(Clone, Copy, Default)]

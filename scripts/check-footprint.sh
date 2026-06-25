@@ -82,10 +82,23 @@ declare -A BASELINE_TEXT=(
     # .text by ~216 B on CI's arm-none-eabi-gcc (+304 on thumbv7m put it
     # out of the +-256 band). text-only growth (data flat; bss INFO).
     # Was: 19608 / 24548 / 24636 / 25460 (R311iu).
-    ["thumbv6m-none-eabi"]=19764
-    ["thumbv7m-none-eabi"]=24852
-    ["thumbv7em-none-eabihf"]=24920
-    ["thumbv8m.main-none-eabi"]=25744
+    #
+    # R311y21 — rebased after the SystickClock SSOT extraction into
+    # wz-mcu-clock. The reload counter widened AtomicU32 -> AtomicU64 (the
+    # 49.7-day overflow-freeze fix): on ARMv7-M (M3/M4/M7/M33) the 64-bit
+    # atomic has no native instruction, so the ISR fetch_add + the two
+    # now_us snapshot loads route through critical-section, growing mps2
+    # .text by ~456..500 B (local arm-none-eabi-gcc). thumbv6m barely moves
+    # (+8) because ARMv6-M already pays critical-section for every atomic
+    # width, so the u32->u64 widening is free there. text-only growth
+    # (data flat; bss INFO, +4 on thumbv6m for the wider static).
+    # Local-gcc figures; a CI-gcc follow-up rebase may shift them <=256 B
+    # per the footprint-baseline-CI-gcc rule. Was: 19764 / 24852 / 24920 /
+    # 25744 (R311y17).
+    ["thumbv6m-none-eabi"]=19772
+    ["thumbv7m-none-eabi"]=25352
+    ["thumbv7em-none-eabihf"]=25420
+    ["thumbv8m.main-none-eabi"]=26200
 )
 declare -A BASELINE_DATA=(
     ["thumbv6m-none-eabi"]=4
@@ -106,7 +119,9 @@ declare -A BASELINE_BSS=(
     # knowingly stale). +8 B from the R311y15 SystickClock `last_us` AtomicU64
     # static; the larger mps2 delta (270100 -> 272268) is accumulated lwIP/pool
     # drift since R311iu. Was: 12052 / 270100 / 270100 / 270100.
-    ["thumbv6m-none-eabi"]=12060
+    # R311y21 — thumbv6m +4 (12060 -> 12064): the reload counter widened to
+    # AtomicU64 in the wz-mcu-clock SSOT (4 extra static bytes). mps2 flat.
+    ["thumbv6m-none-eabi"]=12064
     ["thumbv7m-none-eabi"]=272268
     ["thumbv7em-none-eabihf"]=272268
     ["thumbv8m.main-none-eabi"]=272268
@@ -141,8 +156,14 @@ declare -A BASELINE_MC_TEXT=(
     # call, so the codec-heavy multicast binary lost duplicated VLE loops.
     # text-only reduction (data/bss flat); a code-size improvement, not a leak.
     # Old: 51260/51320 (R311pr).
-    ["thumbv7m-none-eabi"]=50292
-    ["thumbv7em-none-eabihf"]=50328
+    # R311y21 — GREW after the SystickClock SSOT extraction into wz-mcu-clock:
+    # this bin GAINED the monotonic floor (it carried the pre-R311y15 floorless
+    # copy) AND the AtomicU32 -> AtomicU64 reload-counter widening, both routed
+    # through critical-section on ARMv7-M; +444 (M3) / +560 (M4F) local
+    # arm-none-eabi-gcc. text-only growth (data flat); a CI-gcc follow-up rebase
+    # may shift these <=256 B. Old: 50292/50328 (R311wz).
+    ["thumbv7m-none-eabi"]=50736
+    ["thumbv7em-none-eabihf"]=50888
 )
 declare -A BASELINE_MC_DATA=(
     ["thumbv7m-none-eabi"]=4
@@ -150,8 +171,11 @@ declare -A BASELINE_MC_DATA=(
 )
 declare -A BASELINE_MC_BSS=(
     # 256 KB heap + lwIP/IGMP static pools. INFO-only (HEAP_SIZE-dominated).
-    ["thumbv7m-none-eabi"]=270100
-    ["thumbv7em-none-eabihf"]=270100
+    # R311y21 — rebased 270100 -> 272268 (accumulated lwIP/pool drift, matching
+    # the §6.7 mps2 bss the R311y20 demo rebase recorded; +4 of it is the
+    # wz-mcu-clock AtomicU64 reload counter). INFO axis; co-maintenance rule.
+    ["thumbv7m-none-eabi"]=272268
+    ["thumbv7em-none-eabihf"]=272268
 )
 
 # Per-axis tolerance in bytes. Matches the north-star atomic-feature

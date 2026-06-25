@@ -75,7 +75,12 @@ embedded-alloc = "0.6"
 # declarations so cargo unifies one portable-atomic configuration).
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
-# The SINGLE upstream dep: the MCU multicast e2e SSOT. Re-exports the
+# R311y21 — the Cortex-M SysTick monotonic clock SSOT. SystickClock<25>
+# (mps2 25 MHz) backs GLOBAL_CLOCK; this bin wires only the static +
+# #[exception] + sys_now + the ClockSource impl around it.
+wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
+
+# The MCU multicast e2e SSOT (the wz-facing upstream dep). Re-exports the
 # `ClockSource` trait this bin impls (SysTick) + the `LwipLink` it constructs,
 # so the bin never names the wz facade or wz-session-core directly — the lib is
 # the composition boundary (it enables session-lwip + the multicast profile on
