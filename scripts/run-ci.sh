@@ -3079,6 +3079,21 @@ layer_g_cross_compile_cortex_m() {
                 echo "  G.14 cross-real freertos-sys $t FAIL" >&2
                 fail=1
             fi
+            # G.15 (R311y26) wz-runtime-freertos — the FreeRTOS cooperative
+            # single-task PROFILE: FreertosClock (ClockSource over
+            # xTaskGetTickCount) + FreertosAllocator (heap_4 GlobalAlloc) +
+            # FreertosRuntime = CoopRuntime<FreertosClock> (reuses the
+            # wz-runtime-coop executor SSOT). Cross-compiles against the real
+            # freertos-sys kernel build (WZ_FREERTOS_CONFIG supplied). thumbv7m
+            # only — same ARM_CM3 constraint as G.14.
+            if (cd crates && \
+                WZ_FREERTOS_CONFIG="$(realpath freertos-sys/port/cross-test)" \
+                cargo build -p wz-runtime-freertos --target "$t" --quiet); then
+                echo "  G.15 wz-runtime-freertos $t OK"
+            else
+                echo "  G.15 wz-runtime-freertos $t FAIL" >&2
+                fail=1
+            fi
         fi
     done
     if [[ $any_ran -eq 0 ]]; then

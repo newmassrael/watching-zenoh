@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-freertos — the FreeRTOS COOPERATIVE SINGLE-TASK profile (LAYER-2
+# RTOS, Round 2). It does NOT reimplement the async executor or `impl Runtime`:
+# `FreertosRuntime` is a type alias for `CoopRuntime<FreertosClock>` — the
+# audited wz-runtime-coop cooperative executor (task pool / waker / timer queue,
+# the SSOT) reused verbatim, with only the FreeRTOS-specific SEAMS supplied
+# here: a `ClockSource` over `xTaskGetTickCount` + a heap_4 `GlobalAlloc`.
+# = zenoh-pico Z_FEATURE_MULTI_THREAD=0 single-thread mode (one task runs the
+# executor). Cross-only (no_std MCU); the deploy supplies the critical-section
+# impl + the `#[global_allocator]` static + the FreeRTOSConfig.h.
+
+[package]
+name = "wz-runtime-freertos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "FreeRTOS cooperative single-task runtime profile — reuses the wz-runtime-coop executor + a FreeRTOS ClockSource + heap_4 allocator."
+
+[lib]
+name = "wz_runtime_freertos"
+path = "src/lib.rs"
+
+[dependencies]
+# FFI to the vendored FreeRTOS-Kernel (xTaskGetTickCount + pvPortMalloc/vPortFree).
+freertos-sys = { path = "../freertos-sys" }
+# The cooperative executor SSOT (CoopRuntime + ClockSource), with its task pool
+# (alloc feature) — the FreeRTOS profile reuses it, parameterised by the clock.
+wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc"] }
+
+[lints]
+workspace = true

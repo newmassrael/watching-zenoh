@@ -2571,6 +2571,14 @@ name = "wz-runtime-core"
 version = "0.1.0"
 
 [[package]]
+name = "wz-runtime-freertos"
+version = "0.1.0"
+dependencies = [
+ "freertos-sys",
+ "wz-runtime-coop",
+]
+
+[[package]]
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [
