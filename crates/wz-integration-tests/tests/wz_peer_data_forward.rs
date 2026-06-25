@@ -289,14 +289,20 @@ fn wz_peer_mesh_withdraws_subscription_two_hops() {
     );
 
     // Terminal witness: the publisher first LEARNS C's interest, then — after C
-    // confirms data and retracts — sees that interest WITHDRAWN. Waiting on the
-    // withdrawal is the SYNC that the whole lifecycle ran (subscribe propagate,
-    // data round-trip, undeclare propagate) before shutdown; 20s covers all legs
-    // on localhost. The demo emits this string BOTH in-run (per app-tick) AND
-    // deterministically at its shutdown summary (state-derived: learned-ever AND
-    // interest now empty), so the post-shutdown assertion below holds even if the
-    // in-run app-tick raced SIGTERM (rem-2 — mirrors the data/topology witnesses).
-    let a_withdrawn = wait_for_substring(
+    // confirms data and retracts — sees that interest WITHDRAWN. The demo emits
+    // this string BOTH in-run (per app-tick) AND deterministically at its shutdown
+    // summary (state-derived: announced_interest ever true AND the interest set now
+    // empty, runner.rs:1607). The PASS/FAIL gate is the DETERMINISTIC post-shutdown
+    // capture asserted below — NOT this wait, which is only a NON-FATAL propagation
+    // SYNC: it lets the whole lifecycle run (subscribe propagate, data round-trip,
+    // undeclare propagate) before we snapshot A's terminal state. Gating on the
+    // in-run app-tick log flaked a CORRECT run (R311y22e) because under a rare host-
+    // starvation tail A's app-tick emit can race past 20s while the interest state
+    // is correctly empty; the SIGTERM-driven shutdown summary emits the SAME string
+    // from state regardless of app-tick timing. This mirrors the data/topology
+    // witnesses (R311rj/R311sg) which already assert on the deterministic shutdown
+    // capture rather than the racy in-run log — closing the lone hold-out here.
+    let _withdrawn_sync = wait_for_substring(
         &mut a_reader,
         "publisher subscriber interest withdrawn",
         Duration::from_secs(20),
@@ -312,13 +318,18 @@ fn wz_peer_mesh_withdraws_subscription_two_hops() {
     eprintln!("--- peer-B stderr ---\n{b_captured}");
     eprintln!("--- peer-C stderr ---\n{c_captured}");
 
-    a_withdrawn.unwrap_or_else(|c| {
-        panic!(
-            "peer-A never logged 'publisher subscriber interest withdrawn' within 20s — \
-             C's UndeclareSubscriber did not flood C -> B -> A to retract the learned \
-             interest\n--- peer-A stderr ---\n{c}"
-        )
-    });
+    // PRIMARY witness (deterministic): peer-A's interest in demo/mesh went from
+    // learned to EMPTY, proving C's UndeclareSubscriber flooded C -> B -> A. Read
+    // from the post-shutdown capture, so it is satisfied by EITHER the in-run app-
+    // tick log OR the state-derived shutdown summary (runner.rs:1607) — A is
+    // terminated FIRST (B and C still up), so an empty interest set can only mean
+    // the undeclare propagated, never a face-down side effect.
+    assert!(
+        a_captured.contains("publisher subscriber interest withdrawn"),
+        "peer-A's interest in demo/mesh never went empty — C's UndeclareSubscriber \
+         did not flood C -> B -> A to retract the learned interest\n\
+         --- peer-A stderr ---\n{a_captured}"
+    );
     // Order + both-present: the publisher must have LEARNED the interest before
     // it could be WITHDRAWN — the retraction is meaningful only against an
     // established interest. The demo logs withdrawn ONLY after learned, so this
@@ -333,7 +344,7 @@ fn wz_peer_mesh_withdraws_subscription_two_hops() {
         });
     let withdrawn_at = a_captured
         .find("publisher subscriber interest withdrawn")
-        .expect("withdrawn substring present (waited on above)");
+        .expect("withdrawn substring present (asserted above)");
     assert!(
         learned_at < withdrawn_at,
         "publisher must LEARN interest before WITHDRAWING it\n\
