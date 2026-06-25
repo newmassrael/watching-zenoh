@@ -51566,6 +51566,72 @@
         "LOCAL: R311y22f atop origin/main=24d7305 (R311y22e). 1 commit pending. NOT pushed without explicit consent (urgent: un-breaks the windows CI on main)."
       ]
     },
+    "Round 311y22g": {
+      "decision_summary": "R311y22g -- audit-closure: R311y22f (bae7491) PUSHED + GitHub CI run 28167794881 conclusion=success, 4/4 jobs green (windows libxml2 re-add verified; server-enforced Layer B2 SSOT regen-diff gate green; E6 no-flake). Closes the R311y22 codegen-commit track CI-green. Supersedes the stale y22f 'pending push' carry bullet per frozen-ledger (new entry, no rewrite). Also records a newly-found pre-existing mnemosyne round-order quirk: the y-series sorts before the x-series tail so the CLI mis-reports 'newest'.",
+      "changes_bullets": [
+        "No code/config change. Audit-closure entry only. Records that",
+        "R311y22f (bae7491) was PUSHED to origin/main and the resulting",
+        "GitHub CI run 28167794881 finished conclusion=success, 4/4 jobs",
+        "green: portability(windows-latest) 10m2s [the libxml2 re-add",
+        "verified], cross-compile+QEMU Layer G+Q 7m28s, portability",
+        "(macos-latest) 1m37s, validate+verify+test 24m30s [the",
+        "server-enforced Layer B2 SSOT regen-diff gate green]. E6",
+        "peer-mesh did NOT flake this run (intermittency confirmed; see",
+        "the load-flake feedback memory). Supersedes the now-stale y22f",
+        "carry_forward bullet \"1 commit pending / NOT pushed\"."
+      ],
+      "verification_bullets": [
+        "git: origin/main=bae7491, local HEAD=bae7491, ahead=0 (push",
+        "confirmed by `24d7305..bae7491 main -> main` + `git rev-list",
+        "--count @{u}..HEAD`=0). GitHub: `gh run view 28167794881`",
+        "status=completed conclusion=success; all 4 jobs show the green",
+        "check. Local pre-push FULL run-ci (the push gate) also passed",
+        "every required layer incl Layer Z. validate_workspace orphan",
+        "new=+0 expected (audit-only entry, no section refs added)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "R311y22 codegen-commit track is FULLY CLOSED + CI-GREEN. origin/main=bae7491 (R311y22f), ahead=0. GitHub CI run 28167794881 = success 4/4 (windows libxml2 re-add verified; server-enforced Layer B2 SSOT gate green). The windows red from R311y22d is fully resolved.",
+        "DELIVERED by R311y22a..f: committed all SCE-generated code (72 files under out/**); xtask = unified codegen SSOT (SOURCE_DATE_EPOCH=0 + set_current_dir(repo_root) determinism); Layer B2 regen-diff gate (committed==regenerated) in both pre-push hook AND the GitHub ci job (server-enforced). REAL win: a plain cargo build needs NO wz build-time codegen + NO sce-codegen BINARY. CORRECTED over-claim: libxml2 is STILL needed (sce-forge-runtime build.rs build-deps sce-build->libxml); full removal = SCE-upstream, track via [[feedback-sce-codegen-issue-stop-first]].",
+        "NEXT (user-decided 2026-06-25, pick one): (1) root-cause the E6 peer-mesh load-flake [[feedback-e6-peer-mesh-load-flake]] (passes 3/3 standalone + no flake on bae7491; non-blocking but real per no-flaky-ever); (2) R311y23 coop-rename wz-runtime-lwip->wz-runtime-coop (LAST R311y20-review remediation before FreeRTOS; verified lwip-FREE; big inventory-SSOT round per textbook-over-cost).",
+        "LESSON (compounded): the textbook/SSOT trigger AND a 4-agent review BOTH missed the libxml2 dep -- shared a cache-fooled signal (Compiling-line-grep, absent on Linux-CACHED libxml). Only the FRESH windows CI caught it. So: \"no X build-dep\" => verify with `cargo tree -e build -i X --target all`, never a Compiling-grep; fresh-env CI > adversarial review > session-end self-assessment.",
+        "LEDGER ORDERING QUIRK (newly found, pre-existing): mnemosyne round-order sorts the y-series (y1..y22g) BEFORE the x-series tail (xs..xz), so `query --list-changelog --limit N` reports `Round 311xz` as \"newest\". The y-series suffix (letter+digits) parses below the 2-letter x suffixes. So at /load do NOT trust the CLI \"newest\" -- grep the known latest round id (`query --term 311y22g --scope changelog`) or rely on MEMORY.md > NEXT. See [[mnemosyne-extensions]]."
+      ],
+      "publishable_decision_summary": "R311y22g -- audit-closure: R311y22f (bae7491) PUSHED + GitHub CI run 28167794881 conclusion=success, 4/4 jobs green (windows libxml2 re-add verified; server-enforced Layer B2 SSOT regen-diff gate green; E6 no-flake). Closes the R311y22 codegen-commit track CI-green. Supersedes the stale y22f 'pending push' carry bullet per frozen-ledger (new entry, no rewrite). Also records a newly-found pre-existing mnemosyne round-order quirk: the y-series sorts before the x-series tail so the CLI mis-reports 'newest'.",
+      "publishable_changes_bullets": [
+        "No code/config change. Audit-closure entry only. Records that",
+        "R311y22f (bae7491) was PUSHED to origin/main and the resulting",
+        "GitHub CI run 28167794881 finished conclusion=success, 4/4 jobs",
+        "green: portability(windows-latest) 10m2s [the libxml2 re-add",
+        "verified], cross-compile+QEMU Layer G+Q 7m28s, portability",
+        "(macos-latest) 1m37s, validate+verify+test 24m30s [the",
+        "server-enforced Layer B2 SSOT regen-diff gate green]. E6",
+        "peer-mesh did NOT flake this run (intermittency confirmed; see",
+        "the load-flake feedback memory). Supersedes the now-stale y22f",
+        "carry_forward bullet \"1 commit pending / NOT pushed\"."
+      ],
+      "publishable_verification_bullets": [
+        "git: origin/main=bae7491, local HEAD=bae7491, ahead=0 (push",
+        "confirmed by `24d7305..bae7491 main -> main` + `git rev-list",
+        "--count @{u}..HEAD`=0). GitHub: `gh run view 28167794881`",
+        "status=completed conclusion=success; all 4 jobs show the green",
+        "check. Local pre-push FULL run-ci (the push gate) also passed",
+        "every required layer incl Layer Z. validate_workspace orphan",
+        "new=+0 expected (audit-only entry, no section refs added)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y22 codegen-commit track is FULLY CLOSED + CI-GREEN. origin/main=bae7491 (R311y22f), ahead=0. GitHub CI run 28167794881 = success 4/4 (windows libxml2 re-add verified; server-enforced Layer B2 SSOT gate green). The windows red from R311y22d is fully resolved.",
+        "DELIVERED by R311y22a..f: committed all SCE-generated code (72 files under out/**); xtask = unified codegen SSOT (SOURCE_DATE_EPOCH=0 + set_current_dir(repo_root) determinism); Layer B2 regen-diff gate (committed==regenerated) in both pre-push hook AND the GitHub ci job (server-enforced). REAL win: a plain cargo build needs NO wz build-time codegen + NO sce-codegen BINARY. CORRECTED over-claim: libxml2 is STILL needed (sce-forge-runtime build.rs build-deps sce-build->libxml); full removal = SCE-upstream, track via [[feedback-sce-codegen-issue-stop-first]].",
+        "NEXT (user-decided 2026-06-25, pick one): (1) root-cause the E6 peer-mesh load-flake [[feedback-e6-peer-mesh-load-flake]] (passes 3/3 standalone + no flake on bae7491; non-blocking but real per no-flaky-ever); (2) R311y23 coop-rename wz-runtime-lwip->wz-runtime-coop (LAST R311y20-review remediation before FreeRTOS; verified lwip-FREE; big inventory-SSOT round per textbook-over-cost).",
+        "LESSON (compounded): the textbook/SSOT trigger AND a 4-agent review BOTH missed the libxml2 dep -- shared a cache-fooled signal (Compiling-line-grep, absent on Linux-CACHED libxml). Only the FRESH windows CI caught it. So: \"no X build-dep\" => verify with `cargo tree -e build -i X --target all`, never a Compiling-grep; fresh-env CI > adversarial review > session-end self-assessment.",
+        "LEDGER ORDERING QUIRK (newly found, pre-existing): mnemosyne round-order sorts the y-series (y1..y22g) BEFORE the x-series tail (xs..xz), so `query --list-changelog --limit N` reports `Round 311xz` as \"newest\". The y-series suffix (letter+digits) parses below the 2-letter x suffixes. So at /load do NOT trust the CLI \"newest\" -- grep the known latest round id (`query --term 311y22g --scope changelog`) or rely on MEMORY.md > NEXT. See [[mnemosyne-extensions]]."
+      ]
+    },
     "Round 311y3": {
       "decision_summary": "R311y3 -- attachment-encoding-aware FOUNDATIONAL reclassification (Track 2 of the AP-full sweep; A3 read-first + direct read). attachment-encoding-aware is NOT a buildable cfg toggle -- it is a tag-typed DATA-VIEW on the already-active attachment-bytes codec. wz-session-core/src/attachment.rs is the SSOT for the attachment extension wire shape (ext_id 0x03 PUSH body / 0x05 Query, ExtZbuf ENC_ZBUF, non-mandatory so unknown peers drop silently), gated on attachment-bytes -- the catalog primitive the pubsub-attachment / query-attachment consumers select. 'encoding-aware' = interpreting that opaque payload through an Encoding tag, which is DATA (id + schema string) not a wire toggle, exactly the R311xq encoding-family precedent (encoding identity is DATA -> FOUNDATIONAL-reserved, not active). cfg=0, cargo attachment-encoding-aware=[attachment-bytes] (forwards the active primitive). Status stays reserved; reason corrected reserved-inert -> FOUNDATIONAL. Inventory + ledger only, NO code/Cargo/CI change; validate orphan new=+0; A3 unaffected (reserved->reserved, 0 cfg sites).",
       "changes_bullets": [
