@@ -22,7 +22,12 @@
 #define configCPU_CLOCK_HZ                       ( ( unsigned long ) 25000000 )
 #define configTICK_RATE_HZ                       ( ( TickType_t ) 1000 )
 
-/* ---- Scheduling ---- */
+/* ---- Scheduling ----
+ * NB: "cooperative single-task profile" refers to the wz ASYNC EXECUTOR model
+ * (one FreeRTOS task hosts wz-runtime-coop's run_until_idle, = zenoh-pico
+ * Z_FEATURE_MULTI_THREAD=0) — NOT the FreeRTOS scheduler mode. The scheduler
+ * stays standard preemptive (idle task + the one wz task); with a single
+ * application task preemption/time-slicing are functionally inert. */
 #define configUSE_PREEMPTION                     1
 #define configUSE_TIME_SLICING                   1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION  0
@@ -52,11 +57,16 @@
 #define configUSE_STREAM_BUFFERS                 0
 #define configUSE_QUEUE_SETS                     0
 
-/* ---- Hooks: off ---- */
+/* ---- Hooks + bring-up diagnostics ----
+ * Stack-overflow checking + malloc-failed hook are ON: they are the two
+ * diagnostics that most help bring up a NEW RTOS port (Round 3 QEMU). The deploy
+ * binary provides vApplicationStackOverflowHook + vApplicationMallocFailedHook
+ * (undefined externs in this -sys static lib, resolved at the deploy's final
+ * link). idle/tick hooks stay off (no use in the single-task profile). */
 #define configUSE_IDLE_HOOK                      0
 #define configUSE_TICK_HOOK                      0
-#define configUSE_MALLOC_FAILED_HOOK             0
-#define configCHECK_FOR_STACK_OVERFLOW           0
+#define configUSE_MALLOC_FAILED_HOOK             1
+#define configCHECK_FOR_STACK_OVERFLOW           2
 
 /* ---- Stats: off ---- */
 #define configGENERATE_RUN_TIME_STATS            0

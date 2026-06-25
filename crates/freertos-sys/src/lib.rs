@@ -43,9 +43,12 @@ pub const pdTRUE: BaseType_t = 1;
 pub const pdFALSE: BaseType_t = 0;
 
 extern "C" {
-    /// Create a task. `us_stack_depth` is in WORDS (matches
-    /// `configSTACK_DEPTH_TYPE = uint16_t`), not bytes. Returns [`pdPASS`] or
-    /// [`pdFAIL`].
+    /// Create a task. `us_stack_depth` is in WORDS (not bytes). ABI NOTE: the
+    /// `u16` width is tied to `configSTACK_DEPTH_TYPE = uint16_t` in the
+    /// reference `port/cross-test/FreeRTOSConfig.h`; a `WZ_FREERTOS_CONFIG`
+    /// override MUST keep `configSTACK_DEPTH_TYPE = uint16_t` (the FreeRTOS
+    /// default is `StackType_t` = `uint32_t`), or this signature's ABI silently
+    /// diverges from the compiled kernel. Returns [`pdPASS`] or [`pdFAIL`].
     pub fn xTaskCreate(
         px_task_code: TaskFunction_t,
         pc_name: *const c_char,

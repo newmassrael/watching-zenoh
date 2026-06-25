@@ -3059,6 +3059,27 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.13 session-reconnect MCU $t FAIL" >&2
             fail=1
         fi
+        # G.14 (R311y25) freertos-sys cross-real — compiles the vendored
+        # FreeRTOS-Kernel V11.1.0 ARM_CM3 port + core + heap_4 against the
+        # cooperative-profile reference config, flipping freertos-sys's
+        # `freertos_real_build` path on (= the LAYER-2 RTOS foundation). Runs
+        # ONLY on thumbv7m-none-eabi: the vendored ARM_CM3 port is ARMv7-M /
+        # Cortex-M3-specific (thumbv6m=ARMv6-M needs ARM_CM0, thumbv8m needs
+        # ARM_CM23/33, riscv has no port), and port/cross-test is the mps2-an385
+        # (M3) reference config. Other triples get their own port + config in a
+        # later round. Mirrors G.6's WZ_LWIP_PORT cross-real pattern but with
+        # WZ_FREERTOS_CONFIG supplying the consumer config (the -sys crate bakes
+        # no default — symmetry with lwip-sys).
+        if [[ "$t" == "thumbv7m-none-eabi" ]]; then
+            if (cd crates && \
+                WZ_FREERTOS_CONFIG="$(realpath freertos-sys/port/cross-test)" \
+                cargo build -p freertos-sys --target "$t" --quiet); then
+                echo "  G.14 cross-real freertos-sys $t OK"
+            else
+                echo "  G.14 cross-real freertos-sys $t FAIL" >&2
+                fail=1
+            fi
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"

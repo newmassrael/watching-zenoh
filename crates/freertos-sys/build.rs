@@ -13,10 +13,18 @@
 // hand-written FFI decls in src/lib.rs still compile — they are just unresolved
 // until a final cross binary links the kernel).
 //
-// Config selection (the kernel + port #include "FreeRTOSConfig.h"):
-//   - WZ_FREERTOS_CONFIG set:  that directory (deploy-supplied config).
-//   - else:                    the in-crate reference port/ (mps2-an385 M3),
-//                              so the crate + Layer G cross-compile standalone.
+// Build modes — mirror lwip-sys's WZ_LWIP_PORT contract EXACTLY: the
+// FreeRTOSConfig.h is the CONSUMER's concern (board clock / NVIC prio-bits /
+// heap size), NOT this -sys crate's. The crate never bakes a target-specific
+// config as a silent default.
+//   - host (non-bare-metal):            stub (the ARM_CM3 port is Cortex-M only).
+//   - cross + WZ_FREERTOS_CONFIG set:   real build with that deploy-supplied
+//                                       config dir (must hold FreeRTOSConfig.h).
+//   - cross + WZ_FREERTOS_CONFIG unset: stub (no compile, no static lib).
+// A reference config for cross VERIFICATION lives at `port/cross-test/`
+// (FreeRTOSConfig.h) and is passed EXPLICITLY via WZ_FREERTOS_CONFIG by the
+// Layer G CI lane — exactly as lwip-sys's port/cross-test is passed via
+// WZ_LWIP_PORT — never as an implicit default.
 
 use std::env;
 use std::path::PathBuf;
@@ -24,6 +32,7 @@ use std::path::PathBuf;
 fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
+    let wz_freertos_config = env::var("WZ_FREERTOS_CONFIG").ok();
 
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=WZ_FREERTOS_CONFIG");
@@ -32,11 +41,12 @@ fn main() {
     let is_cross_bare_metal =
         target != host && (target.ends_with("-none-eabi") || target.ends_with("-none-eabihf"));
 
-    if !is_cross_bare_metal {
-        // Host / non-bare-metal: stub. No static lib; the `links="freertos"`
-        // declaration stays metadata-only (no rustc-link-lib directive), so it
-        // does not trigger `-l freertos` at final link. The FFI decls in
-        // src/lib.rs compile regardless; no host consumer links them.
+    // Real build ONLY on bare-metal cross WITH a consumer-supplied config. Host
+    // OR cross-without-config => stub: no static lib; `links="freertos"` stays
+    // metadata-only (no rustc-link-lib), so no `-l freertos` at final link. The
+    // FFI decls in src/lib.rs compile regardless; no consumer links them without
+    // supplying the config.
+    if !(is_cross_bare_metal && wz_freertos_config.is_some()) {
         println!("cargo:freertos_real_build=0");
         return;
     }
@@ -53,21 +63,18 @@ fn main() {
     let port_dir = kernel.join("portable/GCC/ARM_CM3");
     let heap = kernel.join("portable/MemMang/heap_4.c");
 
-    // Config dir: deploy override or the in-crate reference.
-    let config_inc: PathBuf = match env::var("WZ_FREERTOS_CONFIG").ok() {
-        Some(p) => {
-            let p = PathBuf::from(p);
-            if !p.join("FreeRTOSConfig.h").is_file() {
-                panic!(
-                    "WZ_FREERTOS_CONFIG={} is missing FreeRTOSConfig.h",
-                    p.display()
-                );
-            }
-            println!("cargo:rerun-if-changed={}", p.display());
-            p
-        }
-        None => manifest_dir.join("port"),
-    };
+    // Consumer-supplied config dir (presence guaranteed by the guard above).
+    // Must contain FreeRTOSConfig.h — the kernel + ARM_CM3 port #include it.
+    let config_inc = PathBuf::from(
+        wz_freertos_config.expect("guarded: real build implies WZ_FREERTOS_CONFIG is set"),
+    );
+    if !config_inc.join("FreeRTOSConfig.h").is_file() {
+        panic!(
+            "WZ_FREERTOS_CONFIG={} is missing FreeRTOSConfig.h \
+             (e.g. crates/freertos-sys/port/cross-test for cross verification)",
+            config_inc.display()
+        );
+    }
     println!("cargo:rerun-if-changed={}", config_inc.display());
 
     let mut build = cc::Build::new();

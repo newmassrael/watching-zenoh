@@ -4,20 +4,37 @@
 # freertos-sys — statically compiles the vendored FreeRTOS-Kernel V11.1.0
 # (vendor/freertos-kernel, MIT) for the cooperative single-task profile, plus
 # hand-written FFI for the core task API. Mirrors the lwip-sys/zenoh-pico-sys
-# shape: real C build only on a bare-metal cross target (the ARM_CM3 port is
-# Cortex-M-specific and cannot compile on the host); host builds emit no
-# liblibfreertos.a (the FFI decls compile, but no consumer links them on host).
+# shape: real C build only on a bare-metal cross target WITH a consumer-supplied
+# FreeRTOSConfig.h (via WZ_FREERTOS_CONFIG — symmetric with lwip-sys's
+# WZ_LWIP_PORT); the ARM_CM3 port is Cortex-M-specific and cannot compile on the
+# host, and the crate bakes NO target-specific config as a default. host +
+# cross-without-config builds emit no libfreertos.a (the FFI decls compile, but
+# no consumer links them).
 
 [package]
 name = "freertos-sys"
-version = "0.1.0"
-edition = "2021"
-license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "FFI bindings to vendored FreeRTOS-Kernel V11.1.0 (ARM_CM3 cooperative single-task profile; LAYER-2 RTOS)."
+build = "build.rs"
 # `links` exposes the build.rs `cargo:KEY=VALUE` metadata as DEP_FREERTOS_<KEY>
 # in dependents' build scripts (mirrors lwip-sys's links="lwip"), so a consumer
 # can flip a `freertos_real_build` cfg from a single source of truth.
 links = "freertos"
 
+[lib]
+name = "freertos_sys"
+path = "src/lib.rs"
+
 [build-dependencies]
+# cc 1.x compiles the vendored FreeRTOS-Kernel source set into a static
+# libfreertos.a inside $OUT_DIR (same crate lwip-sys uses for its C build).
 cc = "1"
+
+[lints]
+workspace = true
