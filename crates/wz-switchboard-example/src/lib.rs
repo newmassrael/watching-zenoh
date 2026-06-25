@@ -3,11 +3,13 @@
 
 //! gc-3c — the switchboard value path, wired end to end (multi-event).
 //!
-//! `build.rs` runs sce-codegen over `sources/{sensor_monitor,
-//! temp_update_schema, temp_payload, humidity_update_schema,
-//! humidity_payload}.scxml` and then wz-switchboard-codegen over
-//! `wz-switchboard.yaml` + the emitted forge-asts. This crate `include!`s the
-//! generated artifacts:
+//! R311y22c: the switchboard 2-stage codegen (sce-codegen `--emit-ast` over
+//! `sources/{sensor_monitor,temp_update_schema,temp_payload,
+//! humidity_update_schema,humidity_payload}.scxml` + then wz-switchboard-codegen
+//! over `wz-switchboard.yaml` + the forge-asts) is run by the `xtask` codegen
+//! SSOT and its output COMMITTED under `out/wz-switchboard-example/`
+//! (regenerated + gated by the Layer B2 regen-diff lane), so this crate has no
+//! build script. This crate `include!`s the committed artifacts:
 //!  - [`sensor_monitor`] — the SCXML state machine (with the
 //!    `SensorMonitorInject::{raise_temp_update, raise_humidity_update}` typed
 //!    seams SCE generated from the two imported EventSchemas);
@@ -38,8 +40,8 @@
 //! decoded field reaches a guard verbatim.
 
 // The generated state machine carries a budget of `#![allow(...)]` inner
-// attributes the `include!` mid-module strips (build.rs); restore them here as
-// outer attributes on the wrapping module (mirrors wz-runtime-tokio/src/lib.rs).
+// attributes the xtask strips for the mid-module `include!`; restore them here
+// as outer attributes on the wrapping module (mirrors wz-runtime-tokio/src/lib.rs).
 #[allow(non_snake_case)]
 #[allow(unused_imports)]
 #[allow(dead_code)]
@@ -52,7 +54,11 @@
 #[allow(clippy::style)]
 #[allow(clippy::complexity)]
 pub mod sensor_monitor {
-    include!(concat!(env!("OUT_DIR"), "/sensor_monitor_sm.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-switchboard-example",
+        "/sensor_monitor_sm.rs"
+    ));
 }
 
 #[allow(non_snake_case)]
@@ -63,7 +69,11 @@ pub mod sensor_monitor {
 #[allow(clippy::style)]
 #[allow(clippy::complexity)]
 pub mod temp_payload {
-    include!(concat!(env!("OUT_DIR"), "/temp_payload.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-switchboard-example",
+        "/temp_payload.rs"
+    ));
 }
 
 // The SECOND value event's wire codec (multi-event carry): decodes a single
@@ -77,14 +87,22 @@ pub mod temp_payload {
 #[allow(clippy::style)]
 #[allow(clippy::complexity)]
 pub mod humidity_payload {
-    include!(concat!(env!("OUT_DIR"), "/humidity_payload.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-switchboard-example",
+        "/humidity_payload.rs"
+    ));
 }
 
 // The generated dispatch: `use sensor_monitor::SensorMonitorInject;` + a
 // crate-root `pub fn dispatch_switchboard(target, payload, engine)`. Included
 // at crate root so its `sensor_monitor::` / `temp_payload::` references
 // resolve to the sibling modules above.
-include!(concat!(env!("OUT_DIR"), "/dispatch_switchboard.rs"));
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../out/wz-switchboard-example",
+    "/dispatch_switchboard.rs"
+));
 
 #[cfg(test)]
 mod tests {

@@ -326,12 +326,8 @@ dependencies = [
  "portable-atomic",
  "sce-forge-runtime",
  "sce-rust-runtime",
- "serde_yaml_ng",
  "wz-codecs",
- "wz-codegen-build",
  "wz-session-core",
- "wz-switchboard-codegen",
- "wz-switchboard-schema",
 ]
 
 [[package]]
@@ -736,10 +732,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wz-codegen-build"
-version = "0.1.0"
-
-[[package]]
 name = "wz-runtime-core"
 version = "0.1.0"
 
@@ -754,26 +746,8 @@ dependencies = [
  "sce-forge-runtime",
  "sha2",
  "wz-codecs",
- "wz-codegen-build",
  "wz-runtime-core",
  "zeroize",
-]
-
-[[package]]
-name = "wz-switchboard-codegen"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "wz-session-core",
- "wz-switchboard-schema",
-]
-
-[[package]]
-name = "wz-switchboard-schema"
-version = "0.1.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]

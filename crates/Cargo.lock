@@ -2393,13 +2393,9 @@ version = "0.1.0"
 dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
- "serde_yaml_ng",
  "wz-codecs",
- "wz-codegen-build",
  "wz-runtime-tokio",
  "wz-session-core",
- "wz-switchboard-codegen",
- "wz-switchboard-schema",
 ]
 
 [[package]]
@@ -2699,11 +2695,7 @@ version = "0.1.0"
 dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
- "serde_yaml_ng",
- "wz-codegen-build",
  "wz-session-core",
- "wz-switchboard-codegen",
- "wz-switchboard-schema",
 ]
 
 [[package]]

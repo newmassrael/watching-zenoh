@@ -45,15 +45,10 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 # SceCursor / codec runtime for the generated temp_payload decoder + encoder.
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 
-[build-dependencies]
-# The wz-switchboard.yaml model SSOT + the pure generator.
-wz-switchboard-schema = { path = "../wz-switchboard-schema" }
-wz-switchboard-codegen = { path = "../wz-switchboard-codegen" }
-# R311y20 — shared EXE_SUFFIX-aware sce-codegen binary locator (single source).
-wz-codegen-build = { path = "../wz-codegen-build" }
-# YAML backend chosen at this consumer's I/O boundary (the schema crate
-# pins none). serde_yaml_ng is the maintained serde_yaml successor.
-serde_yaml_ng = "0.9"
+# R311y22c — no [build-dependencies]: the switchboard 2-stage codegen
+# (sce-codegen --emit-ast + wz-switchboard-codegen) moved to the committed
+# out/wz-switchboard-example/*.rs via the `xtask` codegen SSOT, so this crate
+# has no build script and pulls no sce-codegen/switchboard toolchain.
 
 [lints]
 workspace = true

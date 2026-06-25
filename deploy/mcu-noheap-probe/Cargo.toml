@@ -100,15 +100,10 @@ sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-
 # decoded payload, all with no global allocator.
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", default-features = false, features = ["no_std"] }
 
-# ⓓ build-time codegen: the wz-switchboard.yaml model + the pure generator that
-# emits the closed `dispatch_switchboard` over the forge-asts. YAML backend
-# (serde_yaml_ng) chosen at this consumer's I/O boundary, mirroring the example.
-[build-dependencies]
-wz-switchboard-schema = { path = "../../crates/wz-switchboard-schema" }
-wz-switchboard-codegen = { path = "../../crates/wz-switchboard-codegen" }
-# R311y20 — shared EXE_SUFFIX-aware sce-codegen binary locator (single source).
-wz-codegen-build = { path = "../../crates/wz-codegen-build" }
-serde_yaml_ng = "0.9"
+# R311y22c — no codegen [build-dependencies]: the switchboard 2-stage codegen
+# moved to the committed out/mcu-noheap-probe/*.rs via the `xtask` codegen SSOT.
+# build.rs is RETAINED but now ONLY places memory.x + the -Tlink.x link-arg (it
+# no longer invokes sce-codegen/switchboard, so this bin pulls no codegen toolchain).
 
 # The generated codec (`temp_reading_codec.rs`) gates its heap-backed
 # `VecSink` / `encode_to_vec` facade on `#[cfg(feature = "alloc")]`. This probe

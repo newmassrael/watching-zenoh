@@ -984,16 +984,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "wz-codegen-build"
-version = "0.1.0"
-
-[[package]]
 name = "wz-link-lwip"
 version = "0.1.0"
 dependencies = [
  "heapless",
  "lwip-sys",
- "wz-codegen-build",
 ]
 
 [[package]]
@@ -1024,7 +1019,6 @@ dependencies = [
  "critical-section",
  "portable-atomic",
  "portable-atomic-util",
- "wz-codegen-build",
  "wz-runtime-core",
  "wz-session-core",
 ]
@@ -1041,7 +1035,6 @@ dependencies = [
  "sce-rust-runtime",
  "tokio",
  "wz-codecs",
- "wz-codegen-build",
  "wz-runtime-core",
  "wz-session-core",
  "zeroize",
@@ -1060,7 +1053,6 @@ dependencies = [
  "sce-rust-runtime",
  "sha2",
  "wz-codecs",
- "wz-codegen-build",
  "wz-runtime-core",
  "zeroize",
 ]

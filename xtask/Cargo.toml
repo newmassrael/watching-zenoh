@@ -41,3 +41,11 @@ sce-build = { path = "../vendor/sce/sce-build" }
 # build-time emit (same binary, same strip). It is libxml-free (it only shells
 # the binary + does string transforms).
 wz-codegen-build = { path = "../crates/wz-codegen-build" }
+# R311y22c — the switchboard 2-stage SSOT (the same crates the switchboard
+# build.rs scripts used): the wz-switchboard.yaml model + the pure dispatch
+# generator + the forge-AST fact parsers. serde_yaml_ng parses the sidecar at
+# this I/O boundary (the schema crate pins no backend). Reproduces the
+# sce-codegen --emit-ast + generate() pipeline byte-faithfully.
+wz-switchboard-schema = { path = "../crates/wz-switchboard-schema" }
+wz-switchboard-codegen = { path = "../crates/wz-switchboard-codegen" }
+serde_yaml_ng = "0.9"

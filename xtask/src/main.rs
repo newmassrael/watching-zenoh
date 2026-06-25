@@ -19,10 +19,15 @@
 //! (or `regen` / no arg = regenerate everything wired so far).
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use sce_build::{
     compile_forge_with_imports, generator::Language, DocumentLabel, ForgeCompileOptions,
 };
+use wz_switchboard_codegen::{
+    generate, parse_codec_facts, parse_event_schema_facts, parse_machine_facts, GenInput,
+};
+use wz_switchboard_schema::SwitchboardSpec;
 
 /// Codec SCXMLs to emit, in dependency order (leaves first, composers last) so
 /// the importer validates each `<sce:import>` target before its composer. The
@@ -149,7 +154,10 @@ fn regen_codecs(root: &Path) {
         written += 1;
     }
 
-    println!("xtask: regenerated {written} codec files into {}", out_dir.display());
+    println!(
+        "xtask: regenerated {written} codec files into {}",
+        out_dir.display()
+    );
 }
 
 /// Regenerate the binary-path statecharts + buffer-pools (R311y22b) via the
@@ -226,6 +234,198 @@ fn mkdir(p: &Path) {
     std::fs::create_dir_all(p).unwrap_or_else(|e| panic!("create {}: {e}", p.display()));
 }
 
+/// One switchboard 2-stage codegen target (R311y22c), mirroring each
+/// switchboard build.rs: stage 1 = sce-codegen `--emit-ast` per source doc
+/// (machine + schemas + codecs); stage 2 = `wz_switchboard_codegen::generate`
+/// over the forge-ASTs + the `wz-switchboard.yaml` sidecar -> dispatch.
+struct Switchboard {
+    /// out/<krate> directory + the consuming crate's identity.
+    krate: &'static str,
+    /// Repo-relative manifest dir (holds sources/ + wz-switchboard.yaml).
+    manifest: &'static str,
+    /// `--no-std` emit (the heap-free mcu-noheap-probe profile).
+    no_std: bool,
+    /// Machine stem; emits the consumed `<machine>_sm.rs` + its forge-AST.
+    machine: &'static str,
+    /// Event-schema stems; contribute only their forge-AST (no consumed .rs).
+    schemas: &'static [&'static str],
+    /// Codec stems; each emits a consumed `<codec>.rs` + its forge-AST, and
+    /// `parse_codec_facts` keys on the same stem.
+    codecs: &'static [&'static str],
+}
+
+const SWITCHBOARDS: &[Switchboard] = &[
+    Switchboard {
+        krate: "wz-ap-demo-app",
+        manifest: "crates/wz-ap-demo-app",
+        no_std: false,
+        machine: "sensor_monitor",
+        schemas: &["temp_update_schema"],
+        codecs: &["temp_payload"],
+    },
+    Switchboard {
+        krate: "wz-switchboard-example",
+        manifest: "crates/wz-switchboard-example",
+        no_std: false,
+        machine: "sensor_monitor",
+        schemas: &["temp_update_schema", "humidity_update_schema"],
+        codecs: &["temp_payload", "humidity_payload"],
+    },
+    Switchboard {
+        krate: "mcu-noheap-probe",
+        manifest: "deploy/mcu-noheap-probe",
+        no_std: true,
+        machine: "thermostat",
+        schemas: &["temp_reading_schema"],
+        codecs: &["temp_reading_codec"],
+    },
+];
+
+/// Regenerate the switchboard 2-stage codegen for all 3 consumers into
+/// out/<krate>/. Intermediates (the `.ast.json`, schema emits, sourcemap) go
+/// to a temp dir; only the consumed `<machine>_sm.rs` + `<codec>.rs` +
+/// `dispatch_switchboard.rs` land under out/. Byte-faithful to the build.rs:
+/// same sce-codegen `--emit-ast` invocation (+ the same `#![...]` strip) and
+/// the same `wz_switchboard_codegen::generate` call. SOURCE_DATE_EPOCH=0 (set
+/// in `main`) keeps the machine/codec emit's `generated-at` byte-stable.
+fn regen_switchboards(root: &Path) {
+    let sce_workspace = root
+        .join("vendor/sce")
+        .canonicalize()
+        .expect("canonicalize vendor/sce");
+    let sce_codegen = wz_codegen_build::locate_sce_codegen(&sce_workspace);
+
+    for sb in SWITCHBOARDS {
+        let manifest = root.join(sb.manifest);
+        let src = manifest.join("sources");
+        let sidecar = manifest.join("wz-switchboard.yaml");
+        // Intermediates land in a temp dir so only the consumed files reach out/.
+        let tmp = std::env::temp_dir().join(format!("wz-xtask-sb-{}", sb.krate));
+        let _ = std::fs::remove_dir_all(&tmp);
+        mkdir(&tmp);
+
+        // Stage 1 — --emit-ast each doc. Machine + codecs also emit a consumed
+        // .rs (stripped for mid-module include!); schemas contribute only AST.
+        let machine_ast = emit_ast(
+            sb.machine,
+            &src,
+            &tmp,
+            &sce_codegen,
+            &sce_workspace,
+            sb.no_std,
+        );
+        strip_inner_attrs(&tmp.join(format!("{}_sm.rs", sb.machine)));
+        let schema_asts: Vec<PathBuf> = sb
+            .schemas
+            .iter()
+            .map(|s| emit_ast(s, &src, &tmp, &sce_codegen, &sce_workspace, sb.no_std))
+            .collect();
+        let codec_asts: Vec<PathBuf> = sb
+            .codecs
+            .iter()
+            .map(|c| {
+                let ast = emit_ast(c, &src, &tmp, &sce_codegen, &sce_workspace, sb.no_std);
+                strip_inner_attrs(&tmp.join(format!("{c}.rs")));
+                ast
+            })
+            .collect();
+
+        // Stage 2 — parse facts + sidecar, run the pure generator.
+        let facts = parse_machine_facts(&read(&machine_ast)).expect("parse machine facts");
+        let schemas: Vec<_> = schema_asts
+            .iter()
+            .map(|a| parse_event_schema_facts(&read(a)).expect("parse event-schema facts"))
+            .collect();
+        let codecs: Vec<_> = sb
+            .codecs
+            .iter()
+            .zip(&codec_asts)
+            // name is &&str from the slice iterator; parse_codec_facts takes &str.
+            .map(|(name, a)| parse_codec_facts(&read(a), *name).expect("parse codec facts"))
+            .collect();
+        let spec: SwitchboardSpec =
+            serde_yaml_ng::from_str(&read(&sidecar)).expect("parse wz-switchboard.yaml");
+        let dispatch = generate(&GenInput {
+            spec: &spec,
+            facts: &facts,
+            schemas: &schemas,
+            codecs: &codecs,
+            machine_module: sb.machine,
+        })
+        .expect("generate switchboard dispatch");
+
+        // Write ONLY the consumed files to out/<krate>.
+        let out = root.join("out").join(sb.krate);
+        mkdir(&out);
+        let machine_rs = format!("{}_sm.rs", sb.machine);
+        std::fs::copy(tmp.join(&machine_rs), out.join(&machine_rs))
+            .unwrap_or_else(|e| panic!("copy {machine_rs}: {e}"));
+        for c in sb.codecs {
+            let cr = format!("{c}.rs");
+            std::fs::copy(tmp.join(&cr), out.join(&cr))
+                .unwrap_or_else(|e| panic!("copy {cr}: {e}"));
+        }
+        std::fs::write(out.join("dispatch_switchboard.rs"), &dispatch)
+            .unwrap_or_else(|e| panic!("write dispatch_switchboard.rs: {e}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    println!("xtask: regenerated 3 switchboards into out/{{wz-ap-demo-app,wz-switchboard-example,mcu-noheap-probe}}");
+}
+
+/// `sce-codegen generate -l rust [--no-std] --emit-ast <ast>` for `<stem>.scxml`
+/// (the SAME invocation the switchboard build.rs used). Returns the AST path.
+fn emit_ast(
+    stem: &str,
+    src: &Path,
+    out_dir: &Path,
+    bin: &Path,
+    workspace: &Path,
+    no_std: bool,
+) -> PathBuf {
+    let scxml = src.join(format!("{stem}.scxml"));
+    let ast = out_dir.join(format!("{stem}.ast.json"));
+    let mut cmd = Command::new(bin);
+    cmd.arg("--workspace-root")
+        .arg(workspace)
+        .arg("generate")
+        .arg("--language")
+        .arg("rust");
+    if no_std {
+        cmd.arg("--no-std");
+    }
+    cmd.arg("--emit-ast")
+        .arg(&ast)
+        .arg("--output-dir")
+        .arg(out_dir)
+        .arg(&scxml);
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("invoke sce-codegen --emit-ast for {stem}: {e}"));
+    if !status.success() {
+        panic!("sce-codegen --emit-ast failed for {stem} (exit {status:?})");
+    }
+    ast
+}
+
+/// Strip `#![...]` inner attributes and `//!` inner doc comments from a
+/// generated file's head so it can be `include!`d inside a `mod` block (the
+/// same transform the switchboard build.rs applied).
+fn strip_inner_attrs(path: &Path) {
+    let stripped = read(path)
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !t.starts_with("#![") && !t.starts_with("//!")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, &stripped).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
 fn main() {
     // Deterministic codegen (R311y22b): sce-codegen's statechart/buffer-pool
     // emit stamps a `// generated-at: <unix secs>` provenance line that honors
@@ -238,16 +438,22 @@ fn main() {
     std::env::set_var("SOURCE_DATE_EPOCH", "0");
 
     let root = repo_root();
-    let what = std::env::args().nth(1).unwrap_or_else(|| "regen".to_string());
+    let what = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "regen".to_string());
     match what.as_str() {
         "codecs" => regen_codecs(&root),
         "statecharts" => regen_statecharts_and_pools(&root),
+        "switchboards" => regen_switchboards(&root),
         "regen" => {
             regen_codecs(&root);
             regen_statecharts_and_pools(&root);
+            regen_switchboards(&root);
         }
         other => {
-            eprintln!("xtask: unknown target '{other}' (expected: codecs | statecharts | regen)");
+            eprintln!(
+                "xtask: unknown target '{other}' (expected: codecs | statecharts | switchboards | regen)"
+            );
             std::process::exit(2);
         }
     }

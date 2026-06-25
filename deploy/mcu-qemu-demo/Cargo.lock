@@ -540,16 +540,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "wz-codegen-build"
-version = "0.1.0"
-
-[[package]]
 name = "wz-link-lwip"
 version = "0.1.0"
 dependencies = [
  "heapless",
  "lwip-sys",
- "wz-codegen-build",
 ]
 
 [[package]]
@@ -570,6 +565,5 @@ dependencies = [
  "critical-section",
  "portable-atomic",
  "portable-atomic-util",
- "wz-codegen-build",
  "wz-runtime-core",
 ]

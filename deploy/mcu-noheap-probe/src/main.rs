@@ -32,9 +32,11 @@
 //! Decision 2 no-heap-emit extension (R311hm/hn).
 //!
 //! ⓓ adds a seventh stage that closes the loop with the switchboard
-//! generator: `build.rs` runs `sce-codegen --no-std` + wz-switchboard-codegen
-//! over the `thermostat` triad (a primitive-only statechart + EventSchema +
-//! codec), and `main` feeds a FOREIGN wire sample through the generated
+//! generator: the `xtask` codegen SSOT runs `sce-codegen --no-std` +
+//! wz-switchboard-codegen over the `thermostat` triad (a primitive-only
+//! statechart + EventSchema + codec) and COMMITS the output under
+//! `out/mcu-noheap-probe/` (R311y22c; gated by the Layer B2 regen-diff lane),
+//! and `main` feeds a FOREIGN wire sample through the generated
 //! `dispatch_switchboard` — keyexpr match -> `SceCursor` codec decode -> typed
 //! `_event.data` inject via the `ThermostatInject::raise_temp_reading` seam ->
 //! native `celsius_centi > 3000` guard -> `Engine<ThermostatPolicy>`
@@ -97,9 +99,10 @@ use sce_forge_runtime::codec::SliceSink;
 
 // ── (ⓓ) generated switchboard value path ────────────────────────────────
 //
-// build.rs ran `sce-codegen --no-std` over the thermostat triad and
-// wz-switchboard-codegen over wz-switchboard.yaml. The three generated
-// artifacts are `include!`d here:
+// The `xtask` codegen SSOT ran `sce-codegen --no-std` over the thermostat triad
+// + wz-switchboard-codegen over wz-switchboard.yaml and COMMITTED the output
+// under out/mcu-noheap-probe/ (R311y22c). The three generated artifacts are
+// `include!`d here from there (build.rs no longer runs codegen):
 //   - `thermostat` — the SCXML state machine (Engine<ThermostatPolicy> + the
 //     ThermostatInject::raise_temp_reading typed seam, allocator-free under
 //     --no-std);
@@ -108,7 +111,7 @@ use sce_forge_runtime::codec::SliceSink;
 //     compiled out — this crate has no `alloc` feature);
 //   - the crate-root `dispatch_switchboard` — the closed keyexpr -> typed
 //     inject dispatch.
-// The machine + codec carry `#![allow(...)]` inner attributes that build.rs
+// The machine + codec carry `#![allow(...)]` inner attributes that the xtask
 // strips for the mid-module `include!`; they are restored here as outer
 // attributes on the wrapping module (mirrors wz-switchboard-example).
 //
@@ -131,7 +134,11 @@ use sce_forge_runtime::codec::SliceSink;
 #[allow(unused_assignments)]
 #[allow(clippy::all)]
 mod thermostat {
-    include!(concat!(env!("OUT_DIR"), "/thermostat_sm.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/mcu-noheap-probe",
+        "/thermostat_sm.rs"
+    ));
 }
 
 #[cfg(target_has_atomic = "32")]
@@ -142,7 +149,11 @@ mod thermostat {
 #[allow(unused_mut)]
 #[allow(clippy::all)]
 mod temp_reading_codec {
-    include!(concat!(env!("OUT_DIR"), "/temp_reading_codec.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/mcu-noheap-probe",
+        "/temp_reading_codec.rs"
+    ));
 }
 
 // `use thermostat::ThermostatInject;` + `pub fn dispatch_switchboard(target,
@@ -150,7 +161,11 @@ mod temp_reading_codec {
 // `thermostat::` / `temp_reading_codec::` references resolve to the sibling
 // modules above (mirrors wz-switchboard-example/src/lib.rs).
 #[cfg(target_has_atomic = "32")]
-include!(concat!(env!("OUT_DIR"), "/dispatch_switchboard.rs"));
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../out/mcu-noheap-probe",
+    "/dispatch_switchboard.rs"
+));
 
 static SAMPLE_HITS: AtomicU32 = AtomicU32::new(0);
 static QUERY_HITS: AtomicU32 = AtomicU32::new(0);
@@ -437,9 +452,10 @@ fn main() -> ! {
     {
         // 7. switchboard wire-decode -> typed inject (ⓓ). The convergence of
         // the two tracks: a FOREIGN wire sample drives a generated SCE
-        // statechart with ZERO global allocator. The build.rs ran
+        // statechart with ZERO global allocator. The xtask codegen SSOT ran
         // `sce-codegen --no-std` + wz-switchboard-codegen over the thermostat
-        // triad; here a `home/<x>/temp` sample's wire bytes are decoded by the
+        // triad (committed under out/mcu-noheap-probe/); here a `home/<x>/temp`
+        // sample's wire bytes are decoded by the
         // generated codec (`SceCursor`, no VecSink) into the typed
         // `ThermostatTempReadingPayload { celsius_centi: u16 }` and injected
         // into a real `Engine<ThermostatPolicy>` via the generated dispatch's
