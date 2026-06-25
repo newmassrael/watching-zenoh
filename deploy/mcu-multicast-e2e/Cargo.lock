@@ -979,7 +979,6 @@ dependencies = [
 name = "wz-codecs"
 version = "0.1.0"
 dependencies = [
- "sce-build",
  "sce-forge-runtime",
  "sce-portable-bytes",
 ]

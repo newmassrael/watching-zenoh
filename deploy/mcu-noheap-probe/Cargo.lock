@@ -731,7 +731,6 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 name = "wz-codecs"
 version = "0.1.0"
 dependencies = [
- "sce-build",
  "sce-forge-runtime",
  "sce-portable-bytes",
 ]

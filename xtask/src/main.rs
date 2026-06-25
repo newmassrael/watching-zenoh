@@ -152,13 +152,102 @@ fn regen_codecs(root: &Path) {
     println!("xtask: regenerated {written} codec files into {}", out_dir.display());
 }
 
+/// Regenerate the binary-path statecharts + buffer-pools (R311y22b) via the
+/// SAME `wz_codegen_build::Codegen` the per-crate build.rs scripts used, so the
+/// committed bytes are byte-identical to the old build-time emit (same
+/// sce-codegen binary, same `emit_statechart` strip_inner_attrs /
+/// `emit_buffer_pool` strip+cut_generated_tests). Requires the vendored
+/// sce-codegen binary (run `scripts/build-sce.sh`); `Codegen::from_manifest`
+/// panics with that directive if absent.
+///
+/// Emits the FULL superset (every feature-gated statechart/pool), one
+/// directory per consuming crate, mirroring each build.rs's emits:
+///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
+///                      session_fsm_multicast, multicast_peer (statecharts)
+///   wz-runtime-tokio : reassembly_pool_ap (buffer-pool)
+///   wz-runtime-lwip  : reassembly_pool_mcu (buffer-pool)
+///   wz-link-lwip     : scout_rx_pool_mcu, session_rx_pool_mcu,
+///                      session_rx_pool_mcu_minimal,
+///                      session_rx_pool_mcu_multicast (buffer-pools)
+fn regen_statecharts_and_pools(root: &Path) {
+    // `Codegen::from_manifest` derives the SCE workspace as
+    // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
+    let codegen = wz_codegen_build::Codegen::from_manifest(&root.join("crates/wz-session-core"));
+    let network = root.join("sources/network");
+    let session = root.join("sources/session");
+
+    // wz-session-core statecharts. reassembly_slot lives under sources/network;
+    // the session FSMs under sources/session (mirrors build.rs resource_dirs).
+    let sc_out = root.join("out/wz-session-core");
+    mkdir(&sc_out);
+    codegen.emit_statechart("reassembly_slot", &network, &sc_out);
+    for stem in [
+        "scouting",
+        "session_fsm_unicast",
+        "session_fsm_multicast",
+        "multicast_peer",
+    ] {
+        codegen.emit_statechart(stem, &session, &sc_out);
+    }
+
+    // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
+    let pools: &[(&str, &str)] = &[
+        ("reassembly_pool_ap", "wz-runtime-tokio"),
+        ("reassembly_pool_mcu", "wz-runtime-lwip"),
+        ("scout_rx_pool_mcu", "wz-link-lwip"),
+        ("session_rx_pool_mcu", "wz-link-lwip"),
+        ("session_rx_pool_mcu_minimal", "wz-link-lwip"),
+        ("session_rx_pool_mcu_multicast", "wz-link-lwip"),
+    ];
+    for (stem, krate) in pools {
+        let out = root.join("out").join(krate);
+        mkdir(&out);
+        codegen.emit_buffer_pool(stem, &network, &out);
+    }
+
+    // sce-codegen drops a `sce_sourcemap.json` side-artifact into the
+    // --output-dir (overwritten per emit, emit-order-dependent, never
+    // include!'d). The old build.rs left it in the ephemeral OUT_DIR
+    // harmlessly; the committed tree must not carry it (it is not a consumed
+    // artifact and its content depends on which stem was emitted last).
+    for krate in [
+        "wz-session-core",
+        "wz-runtime-tokio",
+        "wz-runtime-lwip",
+        "wz-link-lwip",
+    ] {
+        let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
+    }
+
+    println!("xtask: regenerated 5 statecharts + 6 buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-lwip,wz-link-lwip}}");
+}
+
+fn mkdir(p: &Path) {
+    std::fs::create_dir_all(p).unwrap_or_else(|e| panic!("create {}: {e}", p.display()));
+}
+
 fn main() {
+    // Deterministic codegen (R311y22b): sce-codegen's statechart/buffer-pool
+    // emit stamps a `// generated-at: <unix secs>` provenance line that honors
+    // SOURCE_DATE_EPOCH (vendor/sce/sce-build/src/forge/drift.rs:120 — the
+    // reproducible-builds convention; the timestamp is informational and feeds
+    // neither the source-hash nor the template-hash). Pinning it to 0 makes the
+    // committed out/** byte-stable across regenerations so the CI regen-diff
+    // gate (Layer B2) compares equal — this is SCE's intended determinism knob,
+    // not a wz-side strip. The child sce-codegen process inherits this var.
+    std::env::set_var("SOURCE_DATE_EPOCH", "0");
+
     let root = repo_root();
     let what = std::env::args().nth(1).unwrap_or_else(|| "regen".to_string());
     match what.as_str() {
-        "codecs" | "regen" => regen_codecs(&root),
+        "codecs" => regen_codecs(&root),
+        "statecharts" => regen_statecharts_and_pools(&root),
+        "regen" => {
+            regen_codecs(&root);
+            regen_statecharts_and_pools(&root);
+        }
         other => {
-            eprintln!("xtask: unknown target '{other}' (expected: codecs | regen)");
+            eprintln!("xtask: unknown target '{other}' (expected: codecs | statecharts | regen)");
             std::process::exit(2);
         }
     }

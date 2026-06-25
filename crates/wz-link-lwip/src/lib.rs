@@ -78,9 +78,12 @@ use lwip_sys::{
 // capacity (`N`) and rx-queue depth (`Q`) from the SCE-codegen'd
 // buffer-pool SSOTs rather than hand-tuned constants — the link-tier
 // sibling of `wz-runtime-lwip`'s `reassembly_rx` consuming
-// `reassembly_pool_mcu`. build.rs emits each `sce:kind="buffer-pool"`
-// doc into `$OUT_DIR`; `rx_sockets` turns the emitted SLOT_COUNT /
-// SLOT_SIZE into the `ScoutRxSocket` / `SessionRxSocket` typed aliases.
+// `reassembly_pool_mcu`. R311y22b: each `sce:kind="buffer-pool"` doc is
+// codegen'd into the COMMITTED `out/wz-link-lwip/*.rs` by the `xtask` codegen
+// SSOT (Layer B2 regen-diff gate) and `include!`-ed from there — build.rs no
+// longer runs codegen (it only relays the lwip_real_build cfg); `rx_sockets`
+// turns the emitted SLOT_COUNT / SLOT_SIZE into the `ScoutRxSocket` /
+// `SessionRxSocket` typed aliases.
 
 // The lint allows mirror wz-runtime-lwip's reassembly_pool_mcu wrapper:
 // the strip post-process drops the emit's file-head inner attributes, so
@@ -98,14 +101,18 @@ use lwip_sys::{
 #[allow(unused_mut)]
 #[allow(clippy::all)]
 pub mod scout_rx_pool_mcu {
-    include!(concat!(env!("OUT_DIR"), "/scout_rx_pool_mcu.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-link-lwip",
+        "/scout_rx_pool_mcu.rs"
+    ));
 }
 
 /// SCE-codegen'd MCU session-rx buffer-pool SSOT — the default full-rate
 /// profile `sources/network/session_rx_pool_mcu.scxml` (16 x 1536 ~=
 /// 24.6 KB). Replaced by [`session_rx_pool_mcu_minimal`] under the
-/// `buffer-pool-session-rx-slim` feature; build.rs codegens only the
-/// selected variant, so exactly one of the two modules is compiled.
+/// `buffer-pool-session-rx-slim` feature; both variants are committed under
+/// `out/wz-link-lwip/`, and the `#[cfg]` here compiles exactly one.
 #[cfg(not(feature = "buffer-pool-session-rx-slim"))]
 #[allow(non_snake_case)]
 #[allow(unused_imports)]
@@ -114,7 +121,11 @@ pub mod scout_rx_pool_mcu {
 #[allow(unused_mut)]
 #[allow(clippy::all)]
 pub mod session_rx_pool_mcu {
-    include!(concat!(env!("OUT_DIR"), "/session_rx_pool_mcu.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-link-lwip",
+        "/session_rx_pool_mcu.rs"
+    ));
 }
 
 /// SCE-codegen'd SLIM MCU session-rx buffer-pool SSOT — the constrained
@@ -130,7 +141,11 @@ pub mod session_rx_pool_mcu {
 #[allow(unused_mut)]
 #[allow(clippy::all)]
 pub mod session_rx_pool_mcu_minimal {
-    include!(concat!(env!("OUT_DIR"), "/session_rx_pool_mcu_minimal.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-link-lwip",
+        "/session_rx_pool_mcu_minimal.rs"
+    ));
 }
 
 /// SCE-codegen'd MCU MULTICAST-session-rx buffer-pool SSOT
@@ -139,9 +154,9 @@ pub mod session_rx_pool_mcu_minimal {
 /// ([`rx_sockets::SessionMulticastRxSocket`](crate::rx_sockets::SessionMulticastRxSocket)).
 /// A DISTINCT pool from [`session_rx_pool_mcu`] (the unicast session pool):
 /// a node can run a unicast session and a multicast group at once, each
-/// with its own rx-queue, so build.rs always emits this on the real-build
-/// path (independent of the `buffer-pool-session-rx-slim` toggle, which
-/// only selects the unicast profile). 2x the unicast Q for the §3.1
+/// with its own rx-queue, so the xtask always regenerates this committed pool
+/// (independent of the `buffer-pool-session-rx-slim` toggle, which only selects
+/// the unicast profile). 2x the unicast Q for the §3.1
 /// multi-peer RxDispatch fan-in (see the scxml header).
 #[allow(non_snake_case)]
 #[allow(unused_imports)]
@@ -151,7 +166,8 @@ pub mod session_rx_pool_mcu_minimal {
 #[allow(clippy::all)]
 pub mod session_rx_pool_mcu_multicast {
     include!(concat!(
-        env!("OUT_DIR"),
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-link-lwip",
         "/session_rx_pool_mcu_multicast.rs"
     ));
 }

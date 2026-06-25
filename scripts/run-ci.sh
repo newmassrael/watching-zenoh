@@ -658,6 +658,14 @@ layer_b2_regen_diff() {
         echo "Layer B2 SKIP (--skip-codegen)"
         return 0
     fi
+    # The statechart/buffer-pool regen leg shells the vendored sce-codegen
+    # binary (the codec leg uses sce-build in-process). Absent -> SKIP, not
+    # FAIL (mirrors Layer B). In a full run-ci, Layer B builds + freshness-
+    # checks the binary before this lane, so it is present here.
+    if [[ ! -x vendor/sce/target/release/sce-codegen ]]; then
+        echo "Layer B2 SKIP (sce-codegen not built; run scripts/build-sce.sh — needed for the statechart/pool regen)"
+        return 0
+    fi
     # Build the xtask first; a libxml2-absent box fails here -> SKIP, not FAIL
     # (the gate is a maintainer freshness check, not a consumer build step).
     if ! cargo build --manifest-path xtask/Cargo.toml --quiet >/dev/null 2>&1; then

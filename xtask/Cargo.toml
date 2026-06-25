@@ -33,3 +33,11 @@ path = "src/main.rs"
 # pre-R311y22 build-time emit. This is the crate that pulls `libxml` (libxml2);
 # the standalone workspace keeps it out of every consumer build.
 sce-build = { path = "../vendor/sce/sce-build" }
+# R311y22b — the SAME shared codegen helper the binary-path build.rs scripts
+# (wz-session-core / wz-runtime-tokio / wz-runtime-lwip / wz-link-lwip) used:
+# locate the vendored sce-codegen binary + the emit_statechart / emit_buffer_pool
+# post-processing (strip_inner_attrs / cut_generated_tests). Reusing it here
+# makes the regenerated statechart/pool bytes byte-identical to the old
+# build-time emit (same binary, same strip). It is libxml-free (it only shells
+# the binary + does string transforms).
+wz-codegen-build = { path = "../crates/wz-codegen-build" }

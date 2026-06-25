@@ -19,6 +19,13 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# The statechart/buffer-pool regen leg shells the vendored sce-codegen binary
+# (the codec leg uses sce-build in-process). Ensure it is built.
+if [[ ! -x vendor/sce/target/release/sce-codegen ]]; then
+    echo "regen-codegen: building sce-codegen (needed for the statechart/pool regen)"
+    bash scripts/build-sce.sh
+fi
+
 echo "regen-codegen: regenerating out/** via xtask (codegen SSOT)"
 cargo run --manifest-path xtask/Cargo.toml --quiet -- regen
 

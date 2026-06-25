@@ -2510,7 +2510,6 @@ version = "0.1.0"
 dependencies = [
  "heapless",
  "lwip-sys",
- "wz-codegen-build",
 ]
 
 [[package]]
@@ -2564,7 +2563,6 @@ dependencies = [
  "critical-section",
  "portable-atomic",
  "portable-atomic-util",
- "wz-codegen-build",
  "wz-runtime-core",
  "wz-session-core",
 ]
@@ -2600,7 +2598,6 @@ dependencies = [
  "wz-access-control",
  "wz-codecs",
  "wz-codecs-test-support",
- "wz-codegen-build",
  "wz-routing-graph",
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
@@ -2649,7 +2646,6 @@ dependencies = [
  "sha3",
  "wz-codecs",
  "wz-codecs-test-support",
- "wz-codegen-build",
  "wz-runtime-core",
  "wz-session-core-test-support",
  "xxhash-rust",

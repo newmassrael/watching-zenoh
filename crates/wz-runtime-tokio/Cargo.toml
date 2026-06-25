@@ -948,10 +948,9 @@ scouting-active = [
 # simply yields the no_std synth alone (no open path, no build error).
 scouting-static = ["wz-session-core/scouting-static"]
 
-[build-dependencies]
-# R311in — shared sce-codegen invocation + emit post-processing (one
-# source across the three codegen build scripts).
-wz-codegen-build = { path = "../wz-codegen-build" }
+# R311y22b — no [build-dependencies]: the reassembly buffer-pool codegen moved
+# to the committed out/wz-runtime-tokio/reassembly_pool_ap.rs via the `xtask`
+# codegen SSOT, so this crate has no build script and pulls no sce-codegen.
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }

@@ -607,10 +607,9 @@ storage-replication = ["storage-backend", "dep:xxhash-rust"]
 # query driver lands.
 storage-aligner = ["storage-replication"]
 
-[build-dependencies]
-# R311in — shared sce-codegen invocation + emit post-processing (one
-# source across the three codegen build scripts).
-wz-codegen-build = { path = "../wz-codegen-build" }
+# R311y22b — no [build-dependencies]: the statechart codegen moved to the
+# committed out/wz-session-core/*_sm.rs via the `xtask` codegen SSOT, so this
+# crate has no build script and pulls no sce-codegen toolchain.
 
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
