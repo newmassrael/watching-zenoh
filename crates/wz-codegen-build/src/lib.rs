@@ -25,6 +25,34 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Locate the vendored `sce-codegen` binary under `sce_workspace`
+/// (`<sce_workspace>/target/release/sce-codegen[.exe]`), accounting for the
+/// host executable suffix (`std::env::consts::EXE_SUFFIX` = `.exe` on Windows,
+/// empty on Unix). Panics with the `build-sce.sh` directive if absent.
+///
+/// R311y20 — the SINGLE source of the sce-codegen binary path for EVERY wz
+/// build script. The statechart [`Codegen::from_manifest`] AND the switchboard
+/// `--emit-ast` build scripts (`wz-ap-demo-app`, `wz-switchboard-example`,
+/// `deploy/mcu-noheap-probe`) all route through here, so the `EXE_SUFFIX` rule
+/// — and any future path/lookup change — lives in one place rather than five
+/// hand-copied blocks (R311y17 fixed only this crate's copy; the other three
+/// still hardcoded the suffix-less path and would panic on Windows). Callers
+/// emit their own `cargo:rerun-if-changed` on the returned path.
+pub fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
+    let bin = sce_workspace
+        .join("target/release")
+        .join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX));
+    if !bin.exists() {
+        panic!(
+            "sce-codegen binary not found at {}\n\
+             run `scripts/build-sce.sh` from the wz workspace root to build it \
+             (vendor pin: see vendor/sce HEAD).",
+            bin.display()
+        );
+    }
+    bin
+}
+
 /// A located `sce-codegen` binary + its SCE workspace root, ready to
 /// drive one or more emits into `$OUT_DIR`.
 pub struct Codegen {
@@ -44,23 +72,7 @@ impl Codegen {
             .canonicalize()
             .expect("canonicalize vendor/sce");
 
-        // R311y17 — the binary carries the host's executable suffix
-        // (`.exe` on Windows, empty on Unix). build-sce.sh emits
-        // `sce-codegen[.exe]` and this build script runs on the same
-        // host, so `EXE_SUFFIX` is the correct portable name. Without it
-        // the Windows portability CI leg panicked "binary not found"
-        // even though build-sce.sh had produced sce-codegen.exe.
-        let sce_codegen = sce_workspace
-            .join("target/release")
-            .join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX));
-        if !sce_codegen.exists() {
-            panic!(
-                "sce-codegen binary not found at {}\n\
-                 run `scripts/build-sce.sh` from the wz workspace root \
-                 to build it (vendor pin: see vendor/sce HEAD).",
-                sce_codegen.display()
-            );
-        }
+        let sce_codegen = locate_sce_codegen(&sce_workspace);
         println!("cargo:rerun-if-changed={}", sce_codegen.display());
 
         Self {

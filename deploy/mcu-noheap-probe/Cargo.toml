@@ -106,6 +106,8 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", default-feature
 [build-dependencies]
 wz-switchboard-schema = { path = "../../crates/wz-switchboard-schema" }
 wz-switchboard-codegen = { path = "../../crates/wz-switchboard-codegen" }
+# R311y20 — shared EXE_SUFFIX-aware sce-codegen binary locator (single source).
+wz-codegen-build = { path = "../../crates/wz-codegen-build" }
 serde_yaml_ng = "0.9"
 
 # The generated codec (`temp_reading_codec.rs`) gates its heap-backed

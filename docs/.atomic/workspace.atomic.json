@@ -1452,7 +1452,7 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
       "decision_status": "active",
-      "intent": "Kitchen-sink Linux deploy — all transport links, auth methods, encodings, storage, session extensions, attachment, advanced QoS. 131 atomic features.",
+      "intent": "Kitchen-sink Linux deploy — all transport links, auth methods, encodings, storage, session extensions, attachment, advanced QoS. 136 atomic features.",
       "outputs_bullets": [
         "`platform-linux`",
         "`runtime-tokio`",
@@ -1462,7 +1462,9 @@
         "`transport-link-tls`",
         "`transport-link-udp`",
         "`transport-link-quic`",
+        "`transport-link-quic-datagram`",
         "`transport-link-unixsock`",
+        "`transport-link-unixpipe`",
         "`transport-link-vsock`",
         "`transport-link-ws`",
         "`transport-unicast`",
@@ -1473,8 +1475,11 @@
         "`transport-lowlatency`",
         "`transport-compression`",
         "`transport-shm`",
+        "`transport-stats`",
         "`session-unicast-open`",
         "`session-unicast-accept`",
+        "`session-reconnect`",
+        "`session-matching`",
         "`session-multicast`",
         "`session-resumable`",
         "`session-stateless-accept`",
@@ -1587,7 +1592,8 @@
         "`time-hlc`"
       ],
       "caveats_bullets": [
-        "R311bx body transcribed from Cargo preset-ap-full 131 features (line 861-993)"
+        "R311bx body transcribed from Cargo preset-ap-full 131 features (line 861-993)",
+        "R311y20: outputs reconciled to Cargo 131->136 (trio R311y16 + session-matching/-reconnect drift)."
       ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp": {
@@ -1595,7 +1601,7 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
       "decision_status": "active",
-      "intent": "Cross-feature consistency anchor matching zenoh-cpp public API. Functionally equivalent to preset-ap-full at v0.1.0; reserved as distinct preset for future API drift tracking. 119 atomic features.",
+      "intent": "Cross-feature consistency anchor matching zenoh-cpp public API. Functionally equivalent to preset-ap-full minus the 3 wz-superset backends. 121 atomic features.",
       "outputs_bullets": [
         "`platform-linux`",
         "`runtime-tokio`",
@@ -1616,6 +1622,8 @@
         "`transport-shm`",
         "`session-unicast-open`",
         "`session-unicast-accept`",
+        "`session-reconnect`",
+        "`session-matching`",
         "`session-multicast`",
         "`session-extauth`",
         "`session-extqos`",
@@ -1718,7 +1726,8 @@
         "`time-hlc`"
       ],
       "caveats_bullets": [
-        "R311by body transcribed from Cargo preset-zenoh-cpp 119 features (line 999-1119)"
+        "R311by body transcribed from Cargo preset-zenoh-cpp 119 features (line 999-1119)",
+        "R311y20: outputs->Cargo 119->121 (+session-matching/-reconnect; trio excluded, zenoh-cpp mirror)."
       ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default": {
@@ -51113,6 +51122,60 @@
         "NEXT (Track 2): attachment-encoding-aware -> FOUNDATIONAL (tag-typed data-view on the active attachment-bytes codec; wz-session-core/src/attachment.rs is the attachment-ext SSOT gated on attachment-bytes; cfg=0, forwards attachment-bytes). Then Track 3: scouting(4)+locator(9) all reclassify -- locator tcp/udp/tls/ws/quic/serial/unixsock/vsock = FOUNDATIONAL (parse always-on, the transport-link-* forward target is the toggle), locator-iface + scouting-passive = INERT-reserved (unbuilt future), scouting-multicast/gossip/autoconnect = FOUNDATIONAL (always-on under scouting-active / routing-router). Then sweep: runtime(async-std=PHANTOM->deprecate / no-std=FOUNDATIONAL / uring+zero-copy=already INERT-ORTHOGONAL R311xp) + platform(linux=FOUNDATIONAL / macos+windows=target_os-routed-unverified / qnx=beyond-zenoh-OQ-W20 / zephyr+freertos+bare-metal=LAYER-2-deferred). transport-misc 4 (multilink/stats/quic-datagram/unixpipe) are P4 (src=R311xu P4 scoping), OUT of ap-full scope.",
         "GATE PROTOCOL for the remaining reclassify rounds (analytical): validate_workspace is the per-commit gate (= the project pre-commit hook); A3 cannot break (reserved/deprecated keep their [] cargo key + 0 cfg sites, no active-flip), build/clippy/test lanes test byte-identical code -> a full run-ci runs once cumulatively at sweep close (+ y2's full run-ci here). Authoritative full run-ci = the pre-push gate (on explicit user consent).",
         "LOCAL: R311y2 atop origin/main=9aa94c6 (R311y1). 1 commit ahead after this commits. NOT pushed without explicit consent (user authorized autonomous round progression + commits, NOT a push)."
+      ]
+    },
+    "Round 311y20": {
+      "decision_summary": "R311y20 -- adversarial-review remediation (the 교과서/SSOT/북극성/비용무관 trigger surfaced real defects the session-end self-assessment missed; 4 independent reviewers + direct-read). (1) HIGH SSOT drift I introduced in R311y16: the store §6.5 preset-ap-full outputs_bullets stayed 131 while Cargo went to 136 (the trio), and the R311y16 ledger falsely implied §6.5 was reconciled. set-section-outputs §6.5->136 + §6.6->121 (also fixing the pre-existing session-matching/-reconnect drift in BOTH; trio correctly excluded from zenoh-cpp §6.6) + intent counts + caveats. (2) HIGH incomplete EXE_SUFFIX: R311y17 fixed only wz-codegen-build's copy; 3 other build scripts hardcoded the suffix-less sce-codegen path (latent Windows panic + duplication). Extracted wz_codegen_build::locate_sce_codegen (single source) + wired the 3 to it. (3) Cargo count ~126->136; bss baseline rebased (knowingly stale after last_us AtomicU64); bcrypt config marked upstream-remove. validate_workspace orphan new=+0; Layer A3 pass; builds clean. Clock-SSOT (R311y21) + codegen-commit (R311y22) + coop-rename (R311y23) deferred to dedicated rounds before FreeRTOS.",
+      "changes_bullets": [
+        "docs/.atomic/workspace.atomic.json: §6.5 preset-ap-full outputs_bullets 131->136 (set-section-outputs regenerated from the Cargo preset SSOT per R311bs: +transport-link-quic-datagram/-unixpipe/transport-stats [the R311y16 trio] + the pre-existing session-matching/session-reconnect drift), intent count 131->136, + R311y20 reconcile caveat. §6.6 preset-zenoh-cpp outputs 119->121 (+session-matching/-reconnect; the trio EXCLUDED by design = zenoh-cpp API mirror), intent 119->121 + caveat. Closes the R311y16 store-vs-Cargo SSOT drift the adversarial review caught (the R311y16 ledger had wrongly implied §6.5 was reconciled).",
+        "crates/wz-codegen-build/src/lib.rs: new `pub fn locate_sce_codegen(sce_workspace) -> PathBuf` (EXE_SUFFIX-aware path + exists-check) = the SINGLE source of the sce-codegen binary path; Codegen::from_manifest now calls it.",
+        "crates/wz-ap-demo-app/{build.rs,Cargo.toml}, crates/wz-switchboard-example/{build.rs,Cargo.toml}, deploy/mcu-noheap-probe/{build.rs,Cargo.toml}: replaced the hand-copied suffix-less sce-codegen path block (latent Windows panic, missed by R311y17 which fixed only wz-codegen-build's copy) with wz_codegen_build::locate_sce_codegen + added the build-dep. Fulfills R311in's \"one source for the codegen build logic\".",
+        "crates/wz/Cargo.toml: preset-ap-full count comment ~126 -> exact 136.",
+        "scripts/check-footprint.sh: BASELINE_BSS rebased to measured (12060 / 272268; was knowingly stale after the R311y15 last_us AtomicU64). INFO axis, but the script's own table+caveat co-maintenance rule applies.",
+        ".cargo/config.toml: bcrypt section marked as a libxml-crate (vcpkg metadata) workaround to REMOVE when upstream declares the bcrypt link."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (the §6.5/§6.6 set-section-* mutations created no orphans); T3 warn=4 / T4 info=4 unchanged.",
+        "Layer A3 (catalog status truthfulness) PASS with the reconciled presets.",
+        "Direct-read confirms: §6.5 outputs_bullets = 136 incl the trio + session-matching/-reconnect; §6.6 = 121 with the trio ABSENT (zenoh-cpp mirror).",
+        "EXE_SUFFIX SSOT: cargo build of wz-ap-demo-app + wz-switchboard-example (host build.rs via the shared locator) + mcu-noheap-probe (thumbv7m cross) all clean on Linux; the locate_sce_codegen .exe path is the same code already proven on the prior Windows CI runs for the wz-codegen-build copy.",
+        "Provenance: 4 independent adversarial reviewers + orchestrator direct-read verified the §6.5 drift (131 vs Cargo 136), the 3 hand-copied build.rs, and the 3 divergent SystickClock copies (clock-SSOT extraction deferred to R311y21)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp"
+      ],
+      "carry_forward_bullets": [
+        "R311y20 = adversarial-review remediation (the 교과서/SSOT/북극성/비용무관 trigger; self-assessment was over-confident AGAIN, the 4-agent review + direct-read caught real defects the session-end self-review had called \"all green\"). Fixed: (H1) §6.5/§6.6 store-vs-Cargo SSOT drift I introduced in R311y16 -- set-section-outputs §6.5 131->136 / §6.6 119->121 (R311y16 had changed Cargo but not the store, and its ledger falsely implied §6.5 was reconciled -- R311y13-class); (H2) incomplete EXE_SUFFIX -- extracted wz_codegen_build::locate_sce_codegen (single source) + wired the 3 hand-copied build scripts (wz-ap-demo-app/wz-switchboard-example/mcu-noheap-probe) to it; + Cargo count 136, bss baseline rebase, bcrypt upstream-remove marker.",
+        "DEFERRED to dedicated rounds (review's prioritized plan, ALL BEFORE FreeRTOS): R311y21 = clock SSOT -- extract ONE SystickClock (monotonic floor + wraps u64 + optionally COUNTFLAG-accurate read instead of clamp-of-stale) into a shared crate; today it is COPIED in 3 deploy mains and only mcu-qemu-demo got the R311y15 floor (the other 2 = latent: busy-poll, not SleepFuture, so not livelock-prone yet). R311y22 = HIGH architecture -- commit generated code under out/** + build.rs freshness-check + a CI regen-diff lane, so consumer/cross-platform builds need NO libxml2/SCE/libclang toolchain (this is the ROOT CAUSE the 4 Windows fixes R311y15..y19 only treated as a symptom; highest leverage). R311y23 = rename wz-runtime-lwip -> wz-runtime-coop (verified lwip-free; do it BEFORE wz-runtime-freertos so the FreeRTOS port depends on the right name from day one -- cheapest now, monotonically more expensive later).",
+        "Adversarial review CLEAN bill on: the Layer Q clock fix (root-cause-correct, corroborated by the hardfloat-only M4F/M7 pattern), the SCE UPA fix (the other 8 ##any are genuinely lone wildcards -> Windows won't re-break; guard test exists), ledger honesty (no false 'done' beyond the §6.5-implied one now fixed), preset-ap-full overlapping-backend coherence (kitchen-sink + monotone-additive + distinct semantics).",
+        "LOCAL: R311y20 atop R311y19 (78f4b5c=origin/main). 1 commit ahead. Push pending. CI was ALL-GREEN at 78f4b5c; R311y20 should stay green (pre-push full run-ci is the gate)."
+      ],
+      "publishable_decision_summary": "R311y20 -- adversarial-review remediation (the 교과서/SSOT/북극성/비용무관 trigger surfaced real defects the session-end self-assessment missed; 4 independent reviewers + direct-read). (1) HIGH SSOT drift I introduced in R311y16: the store §6.5 preset-ap-full outputs_bullets stayed 131 while Cargo went to 136 (the trio), and the R311y16 ledger falsely implied §6.5 was reconciled. set-section-outputs §6.5->136 + §6.6->121 (also fixing the pre-existing session-matching/-reconnect drift in BOTH; trio correctly excluded from zenoh-cpp §6.6) + intent counts + caveats. (2) HIGH incomplete EXE_SUFFIX: R311y17 fixed only wz-codegen-build's copy; 3 other build scripts hardcoded the suffix-less sce-codegen path (latent Windows panic + duplication). Extracted wz_codegen_build::locate_sce_codegen (single source) + wired the 3 to it. (3) Cargo count ~126->136; bss baseline rebased (knowingly stale after last_us AtomicU64); bcrypt config marked upstream-remove. validate_workspace orphan new=+0; Layer A3 pass; builds clean. Clock-SSOT (R311y21) + codegen-commit (R311y22) + coop-rename (R311y23) deferred to dedicated rounds before FreeRTOS.",
+      "publishable_changes_bullets": [
+        "docs/.atomic/workspace.atomic.json: §6.5 preset-ap-full outputs_bullets 131->136 (set-section-outputs regenerated from the Cargo preset SSOT per R311bs: +transport-link-quic-datagram/-unixpipe/transport-stats [the R311y16 trio] + the pre-existing session-matching/session-reconnect drift), intent count 131->136, + R311y20 reconcile caveat. §6.6 preset-zenoh-cpp outputs 119->121 (+session-matching/-reconnect; the trio EXCLUDED by design = zenoh-cpp API mirror), intent 119->121 + caveat. Closes the R311y16 store-vs-Cargo SSOT drift the adversarial review caught (the R311y16 ledger had wrongly implied §6.5 was reconciled).",
+        "crates/wz-codegen-build/src/lib.rs: new `pub fn locate_sce_codegen(sce_workspace) -> PathBuf` (EXE_SUFFIX-aware path + exists-check) = the SINGLE source of the sce-codegen binary path; Codegen::from_manifest now calls it.",
+        "crates/wz-ap-demo-app/{build.rs,Cargo.toml}, crates/wz-switchboard-example/{build.rs,Cargo.toml}, deploy/mcu-noheap-probe/{build.rs,Cargo.toml}: replaced the hand-copied suffix-less sce-codegen path block (latent Windows panic, missed by R311y17 which fixed only wz-codegen-build's copy) with wz_codegen_build::locate_sce_codegen + added the build-dep. Fulfills R311in's \"one source for the codegen build logic\".",
+        "crates/wz/Cargo.toml: preset-ap-full count comment ~126 -> exact 136.",
+        "scripts/check-footprint.sh: BASELINE_BSS rebased to measured (12060 / 272268; was knowingly stale after the R311y15 last_us AtomicU64). INFO axis, but the script's own table+caveat co-maintenance rule applies.",
+        ".cargo/config.toml: bcrypt section marked as a libxml-crate (vcpkg metadata) workaround to REMOVE when upstream declares the bcrypt link."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (the §6.5/§6.6 set-section-* mutations created no orphans); T3 warn=4 / T4 info=4 unchanged.",
+        "Layer A3 (catalog status truthfulness) PASS with the reconciled presets.",
+        "Direct-read confirms: §6.5 outputs_bullets = 136 incl the trio + session-matching/-reconnect; §6.6 = 121 with the trio ABSENT (zenoh-cpp mirror).",
+        "EXE_SUFFIX SSOT: cargo build of wz-ap-demo-app + wz-switchboard-example (host build.rs via the shared locator) + mcu-noheap-probe (thumbv7m cross) all clean on Linux; the locate_sce_codegen .exe path is the same code already proven on the prior Windows CI runs for the wz-codegen-build copy.",
+        "Provenance: 4 independent adversarial reviewers + orchestrator direct-read verified the §6.5 drift (131 vs Cargo 136), the 3 hand-copied build.rs, and the 3 divergent SystickClock copies (clock-SSOT extraction deferred to R311y21)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y20 = adversarial-review remediation (the 교과서/SSOT/북극성/비용무관 trigger; self-assessment was over-confident AGAIN, the 4-agent review + direct-read caught real defects the session-end self-review had called \"all green\"). Fixed: (H1) §6.5/§6.6 store-vs-Cargo SSOT drift I introduced in R311y16 -- set-section-outputs §6.5 131->136 / §6.6 119->121 (R311y16 had changed Cargo but not the store, and its ledger falsely implied §6.5 was reconciled -- R311y13-class); (H2) incomplete EXE_SUFFIX -- extracted wz_codegen_build::locate_sce_codegen (single source) + wired the 3 hand-copied build scripts (wz-ap-demo-app/wz-switchboard-example/mcu-noheap-probe) to it; + Cargo count 136, bss baseline rebase, bcrypt upstream-remove marker.",
+        "DEFERRED to dedicated rounds (review's prioritized plan, ALL BEFORE FreeRTOS): R311y21 = clock SSOT -- extract ONE SystickClock (monotonic floor + wraps u64 + optionally COUNTFLAG-accurate read instead of clamp-of-stale) into a shared crate; today it is COPIED in 3 deploy mains and only mcu-qemu-demo got the R311y15 floor (the other 2 = latent: busy-poll, not SleepFuture, so not livelock-prone yet). R311y22 = HIGH architecture -- commit generated code under out/** + build.rs freshness-check + a CI regen-diff lane, so consumer/cross-platform builds need NO libxml2/SCE/libclang toolchain (this is the ROOT CAUSE the 4 Windows fixes R311y15..y19 only treated as a symptom; highest leverage). R311y23 = rename wz-runtime-lwip -> wz-runtime-coop (verified lwip-free; do it BEFORE wz-runtime-freertos so the FreeRTOS port depends on the right name from day one -- cheapest now, monotonically more expensive later).",
+        "Adversarial review CLEAN bill on: the Layer Q clock fix (root-cause-correct, corroborated by the hardfloat-only M4F/M7 pattern), the SCE UPA fix (the other 8 ##any are genuinely lone wildcards -> Windows won't re-break; guard test exists), ledger honesty (no false 'done' beyond the §6.5-implied one now fixed), preset-ap-full overlapping-backend coherence (kitchen-sink + monotone-additive + distinct semantics).",
+        "LOCAL: R311y20 atop R311y19 (78f4b5c=origin/main). 1 commit ahead. Push pending. CI was ALL-GREEN at 78f4b5c; R311y20 should stay green (pre-push full run-ci is the gate)."
       ]
     },
     "Round 311y3": {

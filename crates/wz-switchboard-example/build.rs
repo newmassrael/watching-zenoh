@@ -38,14 +38,10 @@ fn main() {
         .join("../../vendor/sce")
         .canonicalize()
         .expect("canonicalize vendor/sce");
-    let sce_codegen = sce_workspace.join("target/release/sce-codegen");
-    if !sce_codegen.exists() {
-        panic!(
-            "sce-codegen binary not found at {}\n\
-             run `scripts/build-sce.sh` from the wz workspace root to build it.",
-            sce_codegen.display()
-        );
-    }
+    // R311y20 — shared EXE_SUFFIX-aware locator (single source of the
+    // sce-codegen binary path; was a hand-copied suffix-less block that would
+    // panic on Windows).
+    let sce_codegen = wz_codegen_build::locate_sce_codegen(&sce_workspace);
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", sources.display());

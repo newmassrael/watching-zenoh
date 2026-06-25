@@ -1349,7 +1349,7 @@ preset-ap-router = [
     "time-timestamp-source",
 ]
 
-# preset-ap-full — kitchen-sink Linux deploy (≈126 atomic features).
+# preset-ap-full — kitchen-sink Linux deploy (136 atomic features).
 # Every active + reserved feature reasonable for an AP host: all
 # transport link kinds (incl. the wz-superset quic-datagram + unixpipe
 # backends + the transport-stats facade), all auth methods, all

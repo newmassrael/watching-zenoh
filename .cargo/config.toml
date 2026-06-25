@@ -17,5 +17,10 @@
 # (it is harmless when unreferenced). The portability leg builds NATIVELY (no
 # `--target`), so host == target == x86_64-pc-windows-msvc and these rustflags
 # reach the failing build scripts too.
+#
+# UPSTREAM (R311y20): this is a workaround for a `libxml` crate (crates.io
+# 0.3.x) deficiency — its vcpkg link metadata omits bcrypt for libxml2 >= 2.13.
+# REMOVE this section once the libxml crate declares the bcrypt link (report it
+# upstream to dcurseen/libxml-rust). Tracked, not permanent.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "link-arg=bcrypt.lib"]

@@ -101,10 +101,15 @@ declare -A BASELINE_BSS=(
     # the slim M0+ <128, 2> socket and the mps2 <1500, 8> default. bss
     # is INFO-only (HEAP_SIZE-dominated, R311bj caveat (c)); rebased for
     # an honest INFO delta. Was: 11868 / 269916 / 269916 / 269916.
-    ["thumbv6m-none-eabi"]=12052
-    ["thumbv7m-none-eabi"]=270100
-    ["thumbv7em-none-eabihf"]=270100
-    ["thumbv8m.main-none-eabi"]=270100
+    # R311y20 — rebased to the measured value (INFO axis, but the script's own
+    # table+caveat co-maintenance rule means a recorded number must not be left
+    # knowingly stale). +8 B from the R311y15 SystickClock `last_us` AtomicU64
+    # static; the larger mps2 delta (270100 -> 272268) is accumulated lwIP/pool
+    # drift since R311iu. Was: 12052 / 270100 / 270100 / 270100.
+    ["thumbv6m-none-eabi"]=12060
+    ["thumbv7m-none-eabi"]=272268
+    ["thumbv7em-none-eabihf"]=272268
+    ["thumbv8m.main-none-eabi"]=272268
 )
 
 # ─── multicast-e2e baseline ─────────────────────────────────────────
