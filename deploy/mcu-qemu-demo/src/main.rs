@@ -91,11 +91,11 @@ use wz_mcu_clock::SystickClock;
 // keeps `cargo clippy -D warnings` clean on the M0 lane (unused-import
 // would otherwise fire).
 #[cfg(target_has_atomic = "32")]
+use wz::runtime_coop::{ClockSource, CoopRuntime, CoopTime};
+#[cfg(target_has_atomic = "32")]
 use wz::runtime_core::Runtime;
 #[cfg(target_has_atomic = "32")]
 use wz::runtime_core::TimeSource;
-#[cfg(target_has_atomic = "32")]
-use wz::runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 
 // Heap sizing fork per target SRAM budget. mps2 family (M3/M4/M7)
 // has 4 MB SRAM so the conservative 256 KB heap fits trivially.
