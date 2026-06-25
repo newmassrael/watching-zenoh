@@ -7,8 +7,8 @@
 //! (monotonic clock + async sleep) backed by `tokio::task::spawn` and
 //! `tokio::time::sleep` respectively. These are the AP-profile half
 //! of the §5.P (runtime-services-tier) dual-target contract; the MCU
-//! half (LwipRuntime + LwipTime) lands when the lwIP integration round
-//! lifts the R63 carry on `wz-runtime-lwip`.
+//! half (CoopRuntime + CoopTime) lands when the lwIP integration round
+//! lifts the R63 carry on `wz-runtime-coop`.
 //!
 //! ## Module shape
 //!

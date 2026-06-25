@@ -4,14 +4,14 @@
 # wz-session-lwip — Stage 4b, the tier-clean MCU session shell.
 #
 # This is the integration tier that sits ABOVE both the §5.P runtime
-# tier (wz-runtime-lwip) and the §5.C link tier (wz-link-lwip), binding
+# tier (wz-runtime-coop) and the §5.C link tier (wz-link-lwip), binding
 # them to the runtime-agnostic session SSOT (wz-session-core). It is the
 # MCU analog of what `wz-runtime-tokio::session_glue` is on the AP side:
 # the `drive_session_until_terminal` loop + the `BoxedLinkDriver` adapter
 # over the concrete socket. The AP side co-locates these in
 # wz-runtime-tokio only because tokio happens to provide both the runtime
 # AND the async socket I/O; the MCU profile deliberately split runtime
-# (wz-runtime-lwip) from link (wz-link-lwip), so the session-drive layer
+# (wz-runtime-coop) from link (wz-link-lwip), so the session-drive layer
 # that depends on both is its own crate here (the tier-clean structure
 # the AP side will eventually mirror as a `wz-session-tokio`).
 #
@@ -40,7 +40,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Phase W MCU session shell — run_session sync drive loop + BoxedLinkDriver over LwipUdpSocket (tier-clean integration of wz-runtime-lwip + wz-link-lwip + wz-session-core)."
+description = "Phase W MCU session shell — run_session sync drive loop + BoxedLinkDriver over LwipUdpSocket (tier-clean integration of wz-runtime-coop + wz-link-lwip + wz-session-core)."
 
 [lib]
 name = "wz_session_lwip"
@@ -49,20 +49,20 @@ path = "src/lib.rs"
 [features]
 default = []
 # Transport reassembly (Tier B) on the MCU session loop. Forwards to the
-# wz-runtime-lwip reassembly seam (the LwipReassembly dispatcher +
+# wz-runtime-coop reassembly seam (the CoopReassembly dispatcher +
 # mcu_reassembly() over the SCE buffer-pool SSOT) AND the wz-session-core
 # reassembly capability (the shared report_outcome_reassembling ingest).
 # Off by default; with it on, `run_session` reassembles inbound
 # T_MID_FRAGMENT chains before dispatch, exactly as the AP loop does.
 reassembly = [
-    "wz-runtime-lwip/reassembly",
+    "wz-runtime-coop/reassembly",
     "wz-session-core/reassembly",
 ]
 
 # R311mf — transport fragmentation (Tier B TX) on the MCU multicast loop.
 # Forwards the wz-session-core transport-fragmentation umbrella (which pulls
 # `reassembly` + `codec-fragment` + `alloc`) and re-uses this crate's own
-# `reassembly` forward so the MCU reassembly Router (wz-runtime-lwip) is built
+# `reassembly` forward so the MCU reassembly Router (wz-runtime-coop) is built
 # too. No drive-loop code change: `run_multicast_session` already frames its TX
 # seam through the shared `multicast_tx_emit` SSOT, which splits an oversize
 # payload via `multicast_frame_or_fragments` once this feature is on — exactly
@@ -137,11 +137,11 @@ liveliness-token = ["wz-session-core/liveliness-token"]
 query-queryable = ["wz-session-core/query-queryable"]
 
 [dependencies]
-# §5.P runtime tier: LwipRuntime<C> + LwipTime<C> + the Runtime /
+# §5.P runtime tier: CoopRuntime<C> + CoopTime<C> + the Runtime /
 # TimeSource trait surface (with_mutex_mut, now_monotonic_ms). alloc +
 # session-unicast pull the SessionRuntime binding (Stage 4a) so
-# SessionLinkActions<LwipRuntime<C>, LwipTime<C>> composes.
-wz-runtime-lwip = { path = "../wz-runtime-lwip", features = ["alloc", "session-unicast"] }
+# SessionLinkActions<CoopRuntime<C>, CoopTime<C>> composes.
+wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc", "session-unicast"] }
 # §5.C link tier: LwipUdpSocket / SessionRxSocket / bind_session_rx /
 # LwipLink. Empty without lwip_real_build (host/WZ_LWIP_PORT only).
 wz-link-lwip = { path = "../wz-link-lwip" }
@@ -157,7 +157,7 @@ wz-runtime-core = { path = "../wz-runtime-core", default-features = false, featu
 lwip-sys = { path = "../lwip-sys" }
 
 [dev-dependencies]
-# critical-section's std impl backs LwipRuntime's critical_section::Mutex
+# critical-section's std impl backs CoopRuntime's critical_section::Mutex
 # + the portable-atomic polyfill on the host test path (the MCU deploy
 # supplies the cortex-m / riscv impl at final-binary link instead).
 critical-section = { version = "1", features = ["std"] }

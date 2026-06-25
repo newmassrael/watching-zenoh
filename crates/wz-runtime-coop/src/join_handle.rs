@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `LwipJoinHandle<T>` — R311av-pre Decision 6 + R311bd abort surface.
+//! `CoopJoinHandle<T>` — R311av-pre Decision 6 + R311bd abort surface.
 //!
 //! Shared `JoinState<T>` between the spawn wrapper (the future
 //! actually running inside the executor) and the handle the caller
@@ -12,9 +12,9 @@
 //!
 //! ## R311bd — abort cancellation
 //!
-//! Each `LwipJoinHandle<T>` carries a `cancel_flag:
+//! Each `CoopJoinHandle<T>` carries a `cancel_flag:
 //! Arc<AtomicBool>` shared with the corresponding executor task
-//! slot (see [`crate::executor`]). `LwipJoinHandle::abort()`:
+//! slot (see [`crate::executor`]). `CoopJoinHandle::abort()`:
 //!
 //! 1. Stores `true` into the shared `cancel_flag` with `Release`
 //!    ordering. The next `run_until_idle` pass sweeps the
@@ -28,7 +28,7 @@
 //!
 //! Race resolution: if the task naturally completes between
 //! abort's flag store and abort's JoinState write, the wrapper's
-//! `is_none()` guard inside `LwipRuntime::spawn` runs first and
+//! `is_none()` guard inside `CoopRuntime::spawn` runs first and
 //! stores `Ok(output)`; abort's `is_none()` guard then sees the
 //! result already populated and is a no-op. Result: natural
 //! completion wins, matching tokio's `JoinHandle::abort` semantic
@@ -90,7 +90,7 @@ impl<T> JoinState<T> {
     }
 }
 
-/// Handle returned by [`crate::LwipRuntime::spawn`]. Implements
+/// Handle returned by [`crate::CoopRuntime::spawn`]. Implements
 /// `Future<Output = Result<T, RuntimeError>>` per the
 /// [`wz_runtime_core::Runtime::JoinHandle`] GAT contract.
 ///
@@ -99,12 +99,12 @@ impl<T> JoinState<T> {
 /// method (not on the [`wz_runtime_core::Runtime`] trait surface
 /// since the trait skeleton R251 scoped abort out). The abort
 /// pathway is documented at the module level above.
-pub struct LwipJoinHandle<T> {
+pub struct CoopJoinHandle<T> {
     state: Arc<Mutex<RefCell<JoinState<T>>>>,
     cancel_flag: Arc<AtomicBool>,
 }
 
-impl<T> LwipJoinHandle<T> {
+impl<T> CoopJoinHandle<T> {
     pub(crate) fn new(
         state: Arc<Mutex<RefCell<JoinState<T>>>>,
         cancel_flag: Arc<AtomicBool>,
@@ -162,7 +162,7 @@ impl<T> LwipJoinHandle<T> {
     }
 }
 
-impl<T> Future for LwipJoinHandle<T>
+impl<T> Future for CoopJoinHandle<T>
 where
     T: Send + 'static,
 {

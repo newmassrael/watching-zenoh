@@ -54,7 +54,7 @@ declare -A BASELINE_TEXT=(
     # R311bq — thumbv6m baseline drops from 23660 -> 18584 (-5076 B)
     # because the microbit deploy now goes through the sync-only main
     # branch (cfg(not(target_has_atomic = "32")) in main.rs). The async
-    # path's LwipRuntime + spawn wrapper + executor + timer queue
+    # path's CoopRuntime + spawn wrapper + executor + timer queue
     # symbols are no longer referenced from .text, so LTO + dead-code
     # elimination drops them. The new figure is the honest "lwIP +
     # cortex-m-rt + portable-atomic + LwipUdpSocket<128, 2> sync
@@ -62,7 +62,7 @@ declare -A BASELINE_TEXT=(
     #
     # R311iu — all four targets rebased upward for the R311ir lwIP IGMP
     # feature (scout multicast RX, udp/224.0.0.224:7446). LWIP_IGMP=1
-    # links igmp.c into every runtime-lwip build via netif_set_up ->
+    # links igmp.c into every runtime-coop build via netif_set_up ->
     # igmp_start, independent of whether the Rust side ever joins a
     # group, so the cost is unconditional on this demo. Symbol-level
     # attribution on the thumbv7m ELF: 761 B of igmp_* .text (igmp_send

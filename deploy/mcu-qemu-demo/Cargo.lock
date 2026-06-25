@@ -535,8 +535,8 @@ version = "0.1.0"
 dependencies = [
  "lwip-sys",
  "wz-link-lwip",
+ "wz-runtime-coop",
  "wz-runtime-core",
- "wz-runtime-lwip",
 ]
 
 [[package]]
@@ -555,11 +555,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wz-runtime-core"
-version = "0.1.0"
-
-[[package]]
-name = "wz-runtime-lwip"
+name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
  "critical-section",
@@ -567,3 +563,7 @@ dependencies = [
  "portable-atomic-util",
  "wz-runtime-core",
 ]
+
+[[package]]
+name = "wz-runtime-core"
+version = "0.1.0"

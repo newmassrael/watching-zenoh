@@ -35,14 +35,14 @@
 //!   which divides [`SystickClock::now_us`] by 1000,
 //! - the deploy's `impl ClockSource` wrapper, which forwards to
 //!   `GLOBAL_CLOCK.now_us()` (the `ClockSource` trait is re-exported by
-//!   `wz::runtime_lwip`, so the impl belongs with the deploy that names
+//!   `wz::runtime_coop`, so the impl belongs with the deploy that names
 //!   that facade — keeping this crate free of any `wz` dependency and
 //!   trivially host-buildable + host-testable).
 //!
 //! ## The monotonic contract (load-bearing)
 //!
-//! `wz_runtime_lwip::time::ClockSource::now_us` is documented monotonic
-//! (non-decreasing). This is not advisory: `LwipRuntime::run_until_idle`
+//! `wz_runtime_coop::time::ClockSource::now_us` is documented monotonic
+//! (non-decreasing). This is not advisory: `CoopRuntime::run_until_idle`
 //! samples `now`, `pop_expired(now)` FIRES + REMOVES the matching timer
 //! entry, then polls the woken task; `SleepFuture::poll` re-reads the
 //! clock and, if it stepped BACKWARD below the deadline, returns

@@ -582,7 +582,7 @@ use crate::reassembly_dispatch::{Fragment as ReassemblyFragment, ReassemblyDispa
 ///
 /// Generic over the pool dims (`SLOTS` / `CAP`) so the AP (32 / 65536) and MCU
 /// (4 / 4096) profiles share one ingest path; the AP host passes its
-/// `TokioReassembly`, the MCU loop its `LwipReassembly`.
+/// `TokioReassembly`, the MCU loop its `CoopReassembly`.
 #[cfg(feature = "reassembly")]
 pub fn report_outcome_reassembling<R, T, const SLOTS: usize, const CAP: usize, F>(
     outcome: &DriverLoopOutcome,

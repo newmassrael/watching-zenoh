@@ -8,7 +8,7 @@
 //! (monotonic clock + async sleep), [`Allocator`] (no_std-friendly heap
 //! provider). The crate has zero behaviour — every item is a trait + a
 //! supporting error type. Concrete impls (TokioRuntime for AP, future
-//! LwipRuntime / EmbassyRuntime for MCU) live in their respective
+//! CoopRuntime / EmbassyRuntime for MCU) live in their respective
 //! runtime crates and are wired in subsequent rounds (R252+ migration
 //! plan, see the R230 §5.P "Site retire migration path" entry).
 //!
@@ -38,14 +38,14 @@
 //!   with `Send + Sync + 'static where T: Send + 'static` bounds.
 //!   wz-runtime-tokio binds both through its `sync` module
 //!   (`std::sync::Mutex<T>` / `std::sync::RwLock<T>`); future
-//!   wz-runtime-lwip / wz-runtime-embassy crates will bind their own
+//!   wz-runtime-coop / wz-runtime-embassy crates will bind their own
 //!   per-profile aliases (`embassy_sync::Mutex<RawMutex, T>` /
 //!   `critical_section::Mutex<T>` per ISR-interleave shape) when they
 //!   land. The trait shape lands *before* MCU callers arrive so the
 //!   R311au+ lwIP runtime can mechanically add its impl rather than
 //!   re-litigate the trait surface.
 //! - **TokioRuntime impl**: lives in `wz-runtime-tokio` from R252+.
-//! - **LwipRuntime / EmbassyRuntime impl**: lives in `wz-runtime-lwip`
+//! - **CoopRuntime / EmbassyRuntime impl**: lives in `wz-runtime-coop`
 //!   (re-introduced when Phase W gets to lwIP integration work, see
 //!   `crates/Cargo.toml` historical comment on the R63 removal).
 //! - **wz upper-layer reparameterisation**: 111 std/tokio call sites
@@ -91,7 +91,7 @@
 //! cross-compile interest free of the lane).
 //!
 //! Out of scope today: `wz-codecs` MCU build (R40 carry — `no_std +
-//! alloc` variant lands with `wz-runtime-lwip` per `wz-codecs/src/
+//! alloc` variant lands with `wz-runtime-coop` per `wz-codecs/src/
 //! lib.rs` line 22-25) and `zenoh-pico-sys` MCU build (`arm-none-
 //! eabi-gcc` install carry, R311ao+). Layer G promotes to a default
 //! lane at the point those carries close.

@@ -68,24 +68,24 @@ workspace = true
 [dependencies]
 wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false }
 wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false, features = ["alloc"] }
-# R311ax — wz-runtime-lwip enters the facade as an optional dep.
-# The `runtime-lwip` feature pulls this crate with its `alloc`
-# feature on; lwIP's runtime-services-tier (LwipRuntime + LwipTime
-# + sync::Mutex aliases) becomes available at `wz::runtime_lwip::*`
+# R311ax — wz-runtime-coop enters the facade as an optional dep.
+# The `runtime-coop` feature pulls this crate with its `alloc`
+# feature on; lwIP's runtime-services-tier (CoopRuntime + CoopTime
+# + sync::Mutex aliases) becomes available at `wz::runtime_coop::*`
 # when the consumer opts in. Mutual exclusion with `runtime-tokio`
 # is enforced via a compile_error! gate in `src/lib.rs`.
-wz-runtime-lwip = { path = "../wz-runtime-lwip", optional = true, default-features = false }
+wz-runtime-coop = { path = "../wz-runtime-coop", optional = true, default-features = false }
 # R311az-3a — wz-link-lwip enters the facade as an optional dep
-# pulled in by the `runtime-lwip` feature. The link tier (§5.C) is
-# coupled to the runtime profile in the wz architecture: `runtime-lwip`
-# on means "MCU profile = LwipRuntime + lwIP-based link". wz-link-lwip
+# pulled in by the `runtime-coop` feature. The link tier (§5.C) is
+# coupled to the runtime profile in the wz architecture: `runtime-coop`
+# on means "MCU profile = CoopRuntime + lwIP-based link". wz-link-lwip
 # has a `#![cfg(not(target_os = "none"))]` crate-level gate so cross-
 # compile to bare-metal targets sees an empty crate (the lwip-sys C
 # build is host-only at R311az-1; R311az-3b extends it to accept
 # deploy-supplied lwipopts.h for cross-compile).
 wz-link-lwip = { path = "../wz-link-lwip", optional = true, default-features = false }
 # Stage 4b — the MCU session shell (tier-clean integration of
-# wz-runtime-lwip + wz-link-lwip + wz-session-core). Optional, pulled by
+# wz-runtime-coop + wz-link-lwip + wz-session-core). Optional, pulled by
 # the `session-lwip` feature. Like wz-link-lwip it carries a crate-level
 # `#![cfg(lwip_real_build)]` gate, so the `wz::session_lwip` re-export is
 # populated on exactly the same condition (host / WZ_LWIP_PORT-cross).
@@ -146,7 +146,7 @@ attachment-encoding-aware = ["attachment-bytes"]
 # Each gate elides the matching SCXML codegen + InboundFrame variant +
 # session_glue parse/handle path; quantitative footprint delta is
 # measured against the wz-ap-demo binary in the R311a4 audit entry.
-codec-close = ["wz-runtime-tokio?/codec-close", "wz-runtime-lwip?/codec-close"]
+codec-close = ["wz-runtime-tokio?/codec-close", "wz-runtime-coop?/codec-close"]
 # R311i — codec-declare forwards wz-runtime-tokio (pulls
 # wz-codecs/codec-declare + codec-frame imply). Feature-off elides
 # the wz-runtime-tokio Declare wire surface + the 9 declare-family
@@ -167,15 +167,15 @@ codec-fragment = ["transport-fragmentation", "wz-runtime-tokio?/codec-fragment"]
 # semantics for the R311g interim state and the eventual closure are
 # spelled out in the wz-runtime-tokio + wz-codecs codec-frame comment
 # blocks and the §5.12 codec atomic caveat.
-codec-frame = ["wz-runtime-tokio?/codec-frame", "wz-runtime-lwip?/codec-frame"]
+codec-frame = ["wz-runtime-tokio?/codec-frame", "wz-runtime-coop?/codec-frame"]
 codec-hello = ["wz-runtime-tokio?/codec-hello"]
-codec-init-body = ["wz-runtime-tokio?/codec-init-body", "wz-runtime-lwip?/codec-init-body"]
+codec-init-body = ["wz-runtime-tokio?/codec-init-body", "wz-runtime-coop?/codec-init-body"]
 codec-join = ["session-multicast", "wz-runtime-tokio?/codec-join"]
 # R311b — codec-keep-alive forwards to wz-runtime-tokio (and through
 # it to wz-codecs); elision drops the peer-driven lease refresh path
 # along with the wire-mid 0x04 decoder. See §5.12 codec atomic caveat.
-codec-keep-alive = ["wz-runtime-tokio?/codec-keep-alive", "wz-runtime-lwip?/codec-keep-alive"]
-codec-open-body = ["wz-runtime-tokio?/codec-open-body", "wz-runtime-lwip?/codec-open-body"]
+codec-keep-alive = ["wz-runtime-tokio?/codec-keep-alive", "wz-runtime-coop?/codec-keep-alive"]
+codec-open-body = ["wz-runtime-tokio?/codec-open-body", "wz-runtime-coop?/codec-open-body"]
 # R311h — codec-push forwards wz-runtime-tokio (which pulls
 # wz-codecs/codec-push + codec-frame imply). Feature-off elides the
 # Push wire emit + parse + 6 send_push_* methods + 8 build_push_*
@@ -238,19 +238,19 @@ encoding-utf8 = []
 # one (e.g. a literal-only MCU preset) strips the corresponding branch.
 keyexpr-wildcard-single = [
     "wz-runtime-tokio?/keyexpr-wildcard-single",
-    "wz-runtime-lwip?/keyexpr-wildcard-single",
+    "wz-runtime-coop?/keyexpr-wildcard-single",
 ]
 keyexpr-wildcard-double = [
     "wz-runtime-tokio?/keyexpr-wildcard-double",
-    "wz-runtime-lwip?/keyexpr-wildcard-double",
+    "wz-runtime-coop?/keyexpr-wildcard-double",
 ]
 keyexpr-dollar-star = [
     "wz-runtime-tokio?/keyexpr-dollar-star",
-    "wz-runtime-lwip?/keyexpr-dollar-star",
+    "wz-runtime-coop?/keyexpr-dollar-star",
 ]
 keyexpr-includes = [
     "wz-runtime-tokio?/keyexpr-includes",
-    "wz-runtime-lwip?/keyexpr-includes",
+    "wz-runtime-coop?/keyexpr-includes",
 ]
 # FOUNDATIONAL (always-on, not user-flippable): every consumer needs
 # them, so they ship ungated and are retained here only as no-op
@@ -434,22 +434,22 @@ routing-static-routes = ["routing-router"]
 
 # ----- domain: runtime (6 atomic, 2 active / 4 reserved) -----
 runtime-async-std = []
-# R311ax — runtime-lwip activates: pulls wz-runtime-lwip + wz-runtime-
-# core (alloc-on) so a consumer enabling `runtime-lwip` gets the
-# §5.P MCU profile end-to-end (LwipRuntime + LwipTime + sync::Mutex
+# R311ax — runtime-coop activates: pulls wz-runtime-coop + wz-runtime-
+# core (alloc-on) so a consumer enabling `runtime-coop` gets the
+# §5.P MCU profile end-to-end (CoopRuntime + CoopTime + sync::Mutex
 # aliases). Mutual exclusion with `runtime-tokio` is enforced in
 # `src/lib.rs` via `compile_error!` — the catalog cannot express
 # mutex relations directly, but cfg(all(...)) attribute fires at
 # build time if both runtimes are co-enabled. The check fails the
 # build with a clear "pick one runtime per deploy" message rather
 # than silently building a bin that links both runtimes.
-runtime-lwip = [
-    "dep:wz-runtime-lwip",
+runtime-coop = [
+    "dep:wz-runtime-coop",
     "dep:wz-runtime-core",
-    "wz-runtime-lwip/alloc",
-    # R311az-3a / R311az-3b-ii — runtime-lwip pulls the §5.C link tier
+    "wz-runtime-coop/alloc",
+    # R311az-3a / R311az-3b-ii — runtime-coop pulls the §5.C link tier
     # sibling. The MCU profile bundles runtime + link as a pair:
-    # `LwipRuntime` (task pool + cooperative poll) + `LwipUdpSocket`
+    # `CoopRuntime` (task pool + cooperative poll) + `LwipUdpSocket`
     # (lwIP raw UDP + heapless mpsc bridge). cross-compile sees an
     # empty wz-link-lwip via its crate-level `#![cfg(lwip_real_build)]`
     # gate until WZ_LWIP_PORT is set (R311az-3b deploy-supplied
@@ -461,26 +461,26 @@ runtime-lwip = [
     # in lockstep with wz-link-lwip.
     "dep:lwip-sys",
 ]
-# Stage 4b — the MCU session shell. Pulls `runtime-lwip` (the §5.P
+# Stage 4b — the MCU session shell. Pulls `runtime-coop` (the §5.P
 # runtime + §5.C link pair + the lwip-sys edge that drives lwip_real_build)
 # and the wz-session-lwip integration crate binding them to the session
 # SSOT. `wz::session_lwip::{run_session, SessionRole, LwipUdpDriver}` light
 # up together with the lwip_real_build cfg, exactly like the link_lwip
 # re-export. The MCU live-session consumer the R311ir carry awaited.
 session-lwip = [
-    "runtime-lwip",
+    "runtime-coop",
     "dep:wz-session-lwip",
 ]
 # Transport reassembly (Tier B) — the composable-framework atomic feature
 # that threads the `ReassemblyDispatcher` ingest + sweep into whichever
 # runtime drive loop is active. Weak-forwards (`?/`) so it only lights up
 # for the runtime the build already selected: the MCU session loop
-# (wz-session-lwip -> wz-runtime-lwip -> wz-session-core) or the AP tokio
+# (wz-session-lwip -> wz-runtime-coop -> wz-session-core) or the AP tokio
 # loop (wz-runtime-tokio). Off by default: a deploy that never receives a
 # `T_MID_FRAGMENT` compiles the reassembly slot pool out entirely.
 reassembly = [
     "wz-session-lwip?/reassembly",
-    "wz-runtime-lwip?/reassembly",
+    "wz-runtime-coop?/reassembly",
     "wz-runtime-tokio?/reassembly",
 ]
 
@@ -537,19 +537,19 @@ scouting-multicast = ["transport-link-udp"]
 scouting-passive = []
 # R311ih — scouting-static wired on BOTH profiles via the uniform
 # facade -> runtime -> core funnel: the AP runtime (wz-runtime-tokio) and
-# the MCU runtime (wz-runtime-lwip) each forward to
+# the MCU runtime (wz-runtime-coop) each forward to
 # wz-session-core/scouting-static (the runtime-agnostic `scout_static`
 # synth). The synth is no-alloc-capable (bounded seam), so the MCU forward
 # needs no alloc; whichever runtime the preset selects pulls the synth.
 scouting-static = [
     "wz-runtime-tokio?/scouting-static",
-    "wz-runtime-lwip?/scouting-static",
+    "wz-runtime-coop?/scouting-static",
 ]
 
 # ----- domain: session (10 atomic) -----
 # session-extauth forwards the §5.4 Z_EXT_AUTH establishment-ext codec into
 # the AP runtime (R1 = codec layer; dispatch + usrpwd/pubkey methods follow).
-# AP-only: no wz-runtime-lwip forward (zenoh-pico has no auth).
+# AP-only: no wz-runtime-coop forward (zenoh-pico has no auth).
 session-extauth = ["wz-runtime-tokio?/session-extauth"]
 session-extcompression = ["transport-compression", "wz-runtime-tokio?/session-extcompression"]
 session-extqos = []
@@ -561,7 +561,7 @@ session-multicast = []
 # Z_FEATURE_AUTO_RECONNECT parity; pico defaults it ON, so the AP presets
 # carry it. AP-only for now — the lwIP Rc link sink is !Send, so the MCU
 # swap seam is a follow-up (same staging as MCU TX fragmentation); no
-# `wz-runtime-lwip?/` forward until it lands.
+# `wz-runtime-coop?/` forward until it lands.
 session-reconnect = ["wz-runtime-tokio?/session-reconnect"]
 # R311kh — session-matching: matching-listener watch machinery
 # (wz-session-core declare::matching, via the runtime forward) + the
@@ -576,11 +576,11 @@ session-stateless-accept = []
 # bind sites for accept-side / open-side SCXML script-actions.
 session-unicast-accept = [
     "wz-runtime-tokio?/session-unicast-accept",
-    "wz-runtime-lwip?/session-unicast-accept",
+    "wz-runtime-coop?/session-unicast-accept",
 ]
 session-unicast-open = [
     "wz-runtime-tokio?/session-unicast-open",
-    "wz-runtime-lwip?/session-unicast-open",
+    "wz-runtime-coop?/session-unicast-open",
 ]
 
 # ----- domain: storage (4 active: storage-backend + storage-history +
@@ -595,7 +595,7 @@ storage-aligner = ["storage-replication", "wz-runtime-tokio?/storage-aligner"]
 # R311uy — storage-backend now forwards the AP StorageService driver
 # (wz-runtime-tokio?/storage-backend = the `storage_service` module + the
 # kernel: StorageBackend seam + StorageState newer-wins gate). AP-only:
-# the MCU runtime (wz-runtime-lwip) has no storage driver — a storage is a
+# the MCU runtime (wz-runtime-coop) has no storage driver — a storage is a
 # server-side role beyond the MCU client profile. A `--no-default-features`
 # build without wz-runtime-tokio gates zero code (the `?` forward is inert).
 storage-backend = ["wz-runtime-tokio?/storage-backend"]
@@ -639,7 +639,7 @@ time-timestamp-source = []
 # too, so R311mg adds the `wz-session-lwip?/` forward below — the lwIP
 # multicast loop now splits oversize TX via the shared multicast_tx_emit
 # SSOT once the feature is on) are wired such cascades.
-transport-batching = ["wz-runtime-tokio?/transport-batching", "wz-runtime-lwip?/transport-batching"]
+transport-batching = ["wz-runtime-tokio?/transport-batching", "wz-runtime-coop?/transport-batching"]
 # transport-compression — lz4 per-batch wrap (zenoh batch.rs); weak-forwards
 # the runtime-tokio gate. AP-only. session-extcompression adds the 0x6 handshake.
 transport-compression = ["wz-runtime-tokio?/transport-compression"]
@@ -658,7 +658,7 @@ transport-fragmentation = ["wz-runtime-tokio?/transport-fragmentation", "wz-sess
 # OWN same-named feature, so without this forward a session-lwip +
 # transport-keepalive build lit the core capability but silently never
 # emitted from the MCU loop (the reassembly atom's forwarding shape).
-transport-keepalive = ["wz-runtime-tokio?/transport-keepalive", "wz-runtime-lwip?/transport-keepalive", "wz-session-lwip?/transport-keepalive"]
+transport-keepalive = ["wz-runtime-tokio?/transport-keepalive", "wz-runtime-coop?/transport-keepalive", "wz-session-lwip?/transport-keepalive"]
 # R311xk — now forwards the host QUIC backend to wz-runtime-tokio (was a
 # declaration-only placeholder while no QUIC backend existed). Keeps
 # transport-link-tcp (QUIC is a byte STREAM reusing the TCP `stream_link`
@@ -720,7 +720,7 @@ transport-lowlatency = ["wz-runtime-tokio?/transport-lowlatency"]
 # + aborts the leaving peer's reassembly chains) is consumed by those crates'
 # drive loops. Mirrors codec-join / codec-frame, which the facade likewise
 # does NOT re-list — the crate forward self-selects them. Adding a facade-level
-# codec-close forward would be redundant AND would perturb wz-runtime-lwip's
+# codec-close forward would be redundant AND would perturb wz-runtime-coop's
 # feature set for the MCU multicast footprint bin (Q.5).
 transport-multicast = ["wz-runtime-tokio?/transport-multicast", "wz-session-lwip?/transport-multicast"]
 # transport-shm — scoped same-host shared-memory data path (memmap2 over
@@ -956,7 +956,7 @@ domain-routing = [
 ]
 domain-runtime = [
     "runtime-async-std",
-    "runtime-lwip",
+    "runtime-coop",
     "runtime-no-std",
     "runtime-tokio",
     "runtime-tokio-uring",
@@ -1029,7 +1029,7 @@ domain-transport = [
 #
 # R311bq aligned this list with atomic store §6.1
 # (feature-inventory--composable-framework-atomic--preset-catalog/
-# 6-presets/6-1-preset-mcu-minimal) by adding `runtime-lwip`. R311bq
+# 6-presets/6-1-preset-mcu-minimal) by adding `runtime-coop`. R311bq
 # also lands the microbit Layer Q lane (thumbv6m-none-eabi) as a
 # spawn-less sync-only deploy that actually runs the preset's lwIP
 # UDP path end-to-end on a non-host target. Other §6.1-vs-Cargo
@@ -1040,7 +1040,7 @@ domain-transport = [
 # lwip gap that was blocking the microbit smoke.
 preset-mcu-minimal = [
     "platform-bare-metal",
-    "runtime-lwip",
+    "runtime-coop",
     "runtime-no-std",
     "transport-link-udp",
     "transport-unicast",
@@ -1090,7 +1090,7 @@ preset-mcu-minimal = [
 # store §6.7-style entry registered R311jc.
 preset-cortex-m0-minimal = [
     "platform-bare-metal",
-    "runtime-lwip",
+    "runtime-coop",
     "runtime-no-std",
     "transport-link-udp",
     "transport-unicast",
@@ -1624,7 +1624,7 @@ preset-zenoh-cpp = [
 # preset-cortex-m4-default — first production-shape MCU preset for
 # Cortex-M4F (thumbv7em-none-eabihf). R311ba lands the cargo-side
 # mirror of the atomic catalog §6.7 R311ay registered (56 atomic
-# features). wz-runtime-lwip + LwipTime + full wz-codecs catalog
+# features). wz-runtime-coop + CoopTime + full wz-codecs catalog
 # under the alloc-enabled MCU profile. Composable-framework first
 # MCU deploy contract.
 #
@@ -1633,7 +1633,7 @@ preset-zenoh-cpp = [
 # This preset uses the cargo-truth name.
 preset-cortex-m4-default = [
     "platform-bare-metal",
-    "runtime-lwip",
+    "runtime-coop",
     "runtime-no-std",
     "transport-unicast",
     "transport-link-udp",

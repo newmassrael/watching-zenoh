@@ -12,7 +12,7 @@
 
 //! wz-session-lwip — Phase W MCU session shell (Stage 4b).
 //!
-//! The integration tier above the §5.P runtime ([`wz_runtime_lwip`]) and
+//! The integration tier above the §5.P runtime ([`wz_runtime_coop`]) and
 //! the §5.C link ([`wz_link_lwip`]) tiers, binding them to the
 //! runtime-agnostic session SSOT ([`wz_session_core`]). The MCU analog of
 //! `wz_runtime_tokio::session_glue`'s drive loop + link-driver adapter:
@@ -27,9 +27,9 @@
 //!   is shared with the AP loop in [`wz_session_core`], so there is no logic
 //!   duplication across the AP / MCU profiles.
 //!
-//! ## Why a dedicated crate (not in wz-runtime-lwip)
+//! ## Why a dedicated crate (not in wz-runtime-coop)
 //!
-//! The §5.P runtime tier ([`wz_runtime_lwip`]) is deliberately link-agnostic
+//! The §5.P runtime tier ([`wz_runtime_coop`]) is deliberately link-agnostic
 //! (its Cargo manifest documents this). Housing the drive loop there would
 //! make the runtime tier depend on the link tier, regressing the MCU
 //! runtime/link split. The AP `wz-runtime-tokio` bundles runtime + link +

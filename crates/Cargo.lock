@@ -2362,8 +2362,8 @@ dependencies = [
  "lwip-sys",
  "sce-rust-runtime",
  "wz-link-lwip",
+ "wz-runtime-coop",
  "wz-runtime-core",
- "wz-runtime-lwip",
  "wz-runtime-tokio",
  "wz-session-lwip",
 ]
@@ -2549,11 +2549,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wz-runtime-core"
-version = "0.1.0"
-
-[[package]]
-name = "wz-runtime-lwip"
+name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
  "critical-section",
@@ -2562,6 +2558,10 @@ dependencies = [
  "wz-runtime-core",
  "wz-session-core",
 ]
+
+[[package]]
+name = "wz-runtime-core"
+version = "0.1.0"
 
 [[package]]
 name = "wz-runtime-tokio"
@@ -2662,8 +2662,8 @@ dependencies = [
  "critical-section",
  "lwip-sys",
  "wz-link-lwip",
+ "wz-runtime-coop",
  "wz-runtime-core",
- "wz-runtime-lwip",
  "wz-session-core",
 ]
 

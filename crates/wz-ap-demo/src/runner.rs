@@ -52,7 +52,7 @@ use std::sync::Arc;
 // `.abort()` + Future shape but yields `Result<T, RuntimeError>` on
 // `.await` (instead of `Result<T, tokio::task::JoinError>`), keeping
 // the ap-demo binary boundary on the trait surface that
-// `wz-runtime-lwip` / `wz-runtime-embassy` will eventually populate
+// `wz-runtime-coop` / `wz-runtime-embassy` will eventually populate
 // — the reference binary therefore models the per-profile swap shape
 // that downstream consumers inherit. R311at also replaces every
 // `tokio::spawn(fut)` call with `TokioRuntime.spawn(fut)`; the

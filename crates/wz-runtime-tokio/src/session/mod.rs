@@ -41,7 +41,7 @@
 //! alias exposed by [`crate::sync`] (R311y option (a) per-runtime
 //! type alias; R311ar trait shape mechanical land). On the AP profile
 //! this resolves to [`std::sync::Mutex`]; the future MCU profiles
-//! (`wz-runtime-lwip` / `wz-runtime-embassy`) will rebind the alias
+//! (`wz-runtime-coop` / `wz-runtime-embassy`) will rebind the alias
 //! to a profile-native synchronous lock with the same
 //! exclusive-access semantic (e.g. `critical_section::Mutex<T>` on
 //! single-core MCU, `embassy_sync::Mutex<RawMutex, T>` on
@@ -441,7 +441,7 @@ where
     /// the Arc-shared clock keeps the same monotonic anchor across
     /// all helper-issued query / get calls. AP-profile T binds to
     /// [`TokioTime`] (Copy), MCU profile will bind to
-    /// `wz_runtime_lwip::LwipTime<C>` once Session moves to a
+    /// `wz_runtime_coop::CoopTime<C>` once Session moves to a
     /// runtime-agnostic crate (post-R311cw architectural step).
     clock: Arc<T>,
 }
@@ -480,8 +480,8 @@ where
 /// the defaulted `R` / `T`). So the bare `Session` name no longer resolves;
 /// call sites name the transport explicitly through this alias (unicast) or
 /// [`TokioMulticastSession`] (multicast). Gated `transport-unicast` because it
-/// names the `Unicast` marker; a future wz-runtime-lwip surfaces its own
-/// `LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>, Unicast>` alias.
+/// names the `Unicast` marker; a future wz-runtime-coop surfaces its own
+/// `CoopSession<C> = Session<CoopRuntime<C>, CoopTime<C>, Unicast>` alias.
 #[cfg(feature = "transport-unicast")]
 pub type TokioSession = Session<TokioRuntime, TokioTime, Unicast>;
 

@@ -13,7 +13,7 @@
 //   - cross + WZ_LWIP_PORT unset:     lwip_real_build NOT set (=0)
 //
 // When unset, the entire crate body collapses to an empty rlib so
-// downstreams (wz facade with `runtime-lwip`) can compile on bare-
+// downstreams (wz facade with `runtime-coop`) can compile on bare-
 // metal targets without a deploy port; the visible link tier on
 // such builds is empty, but `cargo check` / `cargo build` succeed.
 // When set, the real `LwipLink` + `LwipUdpSocket` are exposed and
@@ -77,7 +77,7 @@ use lwip_sys::{
 // The link tier's receive sockets size their per-datagram payload
 // capacity (`N`) and rx-queue depth (`Q`) from the SCE-codegen'd
 // buffer-pool SSOTs rather than hand-tuned constants — the link-tier
-// sibling of `wz-runtime-lwip`'s `reassembly_rx` consuming
+// sibling of `wz-runtime-coop`'s `reassembly_rx` consuming
 // `reassembly_pool_mcu`. R311y22b: each `sce:kind="buffer-pool"` doc is
 // codegen'd into the COMMITTED `out/wz-link-lwip/*.rs` by the `xtask` codegen
 // SSOT (Layer B2 regen-diff gate) and `include!`-ed from there — build.rs no
@@ -85,7 +85,7 @@ use lwip_sys::{
 // turns the emitted SLOT_COUNT / SLOT_SIZE into the `ScoutRxSocket` /
 // `SessionRxSocket` typed aliases.
 
-// The lint allows mirror wz-runtime-lwip's reassembly_pool_mcu wrapper:
+// The lint allows mirror wz-runtime-coop's reassembly_pool_mcu wrapper:
 // the strip post-process drops the emit's file-head inner attributes, so
 // they are restored here as outer attributes over the SCE pool API (the
 // §5.E DMA slot lifecycle is dead code under the wz consumer, and the

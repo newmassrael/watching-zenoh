@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 // R63 — SCE B6 link-kind C11 emitter audit. Replaces the SCE B6
-// validation that the deleted `wz-runtime-lwip` crate's compile-
+// validation that the deleted `wz-runtime-coop` crate's compile-
 // time codegen step performed, but reframes it as a focused Layer 3
 // emit-output check instead of a host-build skeleton crate.
 //
 // R311ah — extends the audit to the session-layer sibling
 // (sources/links/lwip_udp_session.scxml). Phase W landing of
-// wz-runtime-lwip will compile both wrappers; this Layer 3 gate
+// wz-runtime-coop will compile both wrappers; this Layer 3 gate
 // pins the codegen contract for both SCXMLs ahead of that landing.
 //
 // What this test proves:
@@ -26,11 +26,11 @@
 //          round-tripping the SCXML's <sce:link-class> /
 //          <sce:framer ref="..."/> / <sce:backpressure> bodies.
 //
-// What this test does NOT prove (vs. the deleted wz-runtime-lwip
+// What this test does NOT prove (vs. the deleted wz-runtime-coop
 // crate):
 //
 //   - The emit does NOT compile into a real lwIP runtime here.
-//     The host-build skeleton in wz-runtime-lwip was likewise NOP
+//     The host-build skeleton in wz-runtime-coop was likewise NOP
 //     (no actual `udp_recv` / `udp_sendto` wired), so removing
 //     the cc-compile step loses no production-grade behaviour —
 //     only an audit artefact. Phase W's MCU cross-compile will

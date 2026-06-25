@@ -397,7 +397,7 @@ mechanisms. 6 entries.
 - `runtime-tokio` — tokio executor (active, wz)
 - `runtime-tokio-uring` — tokio + io_uring fixed buffers (reserved,
   RFC §9.5 row 3)
-- `runtime-lwip` — lwIP MCU bare-metal (reserved, wz-runtime-lwip
+- `runtime-coop` — lwIP MCU bare-metal (reserved, wz-runtime-coop
   Phase W skeleton)
 - `runtime-async-std` — async-std executor (reserved, zenoh)
 - `runtime-no-std` — `#![no_std]` core lib (reserved, zenoh-pico)
@@ -489,7 +489,7 @@ The smallest viable MCU deployment — zenoh-pico client-mode
 parity at minimum footprint. Targets bare-metal MCU with lwIP +
 UDP + minimal pubsub.
 
-Includes: `platform-bare-metal`, `runtime-lwip`, `runtime-no-std`,
+Includes: `platform-bare-metal`, `runtime-coop`, `runtime-no-std`,
 `transport-unicast`, `transport-link-udp`, `transport-keepalive`,
 `locator-udp`, `scouting-active`, `session-unicast-open`,
 `link-frame`, `link-fragment`, `link-batching`, `keyexpr-literal`,
@@ -591,7 +591,7 @@ preset defines what "full zenoh-cpp parity" means in atomic-
 feature terms; the project's first-milestone target.
 
 Includes: same as preset-ap-full except for the MCU/embedded-
-flavor subset — explicitly excludes `runtime-lwip`,
+flavor subset — explicitly excludes `runtime-coop`,
 `runtime-no-std`, `platform-bare-metal`, `platform-freertos`,
 `platform-zephyr`, `transport-link-serial`, `locator-serial`. All
 other atomic features active.

@@ -7,7 +7,7 @@
 # (strip inner attributes; for buffer-pool kind also strip the trailing
 # SCE-pool-API generated_tests) lived duplicated across three build
 # scripts (wz-session-core for statecharts, wz-runtime-tokio /
-# wz-runtime-lwip for buffer pools). This crate is the single source for
+# wz-runtime-coop for buffer pools). This crate is the single source for
 # that logic; the three build scripts depend on it as a build-dependency
 # and call `Codegen::emit_statechart` / `emit_buffer_pool`.
 

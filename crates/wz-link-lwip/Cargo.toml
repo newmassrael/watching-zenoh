@@ -6,7 +6,7 @@
 # R311az-2 lands the safe Rust surface over lwip-sys (R311az-1) raw
 # FFI: `LwipLink` (top-level lwip_init + netif setup) + `LwipUdpSocket`
 # (per-socket udp_pcb wrap + callback-to-async bounded queue bridge
-# per R311az-pre D4). Host build only at this round; LwipRuntime
+# per R311az-pre D4). Host build only at this round; CoopRuntime
 # integration + cross-compile lane land at R311az-3.
 #
 # Why a per-socket bounded heapless::spsc::Queue (not Box<dyn Stream>):

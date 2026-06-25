@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `LwipRuntime<C>` — `impl wz_runtime_core::Runtime` for the MCU
+//! `CoopRuntime<C>` — `impl wz_runtime_core::Runtime` for the MCU
 //! profile. R311av-pre Decisions 1-6 realised in code; R311bc adds
 //! the deadline-keyed [`crate::timer::TimerQueue`] + clock ownership.
 //!
 //! ## What this module ships
 //!
-//! - [`LwipRuntime<C: ClockSource>`] — `Clone` (`Arc<RuntimeInner<C>>`
+//! - [`CoopRuntime<C: ClockSource>`] — `Clone` (`Arc<RuntimeInner<C>>`
 //!   inside) so spawned task closures can capture a runtime handle
 //!   and call nested `spawn` (R311av-pre Decision 5).
-//! - `impl Runtime for LwipRuntime<C>`:
-//!   - `type JoinHandle<T> = LwipJoinHandle<T>`
+//! - `impl Runtime for CoopRuntime<C>`:
+//!   - `type JoinHandle<T> = CoopJoinHandle<T>`
 //!   - `type Mutex<T> = crate::sync::Mutex<T>`
 //!   - `type RwLock<T> = crate::sync::RwLock<T>`
-//!   - `fn spawn<F>(..) -> LwipJoinHandle<F::Output>`: heap-allocates
+//!   - `fn spawn<F>(..) -> CoopJoinHandle<F::Output>`: heap-allocates
 //!     a wrapper future that drives the user future to completion,
 //!     stores its output into the shared `JoinState<T>`, and wakes
 //!     the join handle's waker; pushes the wrapper into the inner
 //!     `ExecutorState`'s task vector.
-//! - [`LwipRuntime::run_until_idle`] — drives one executor step.
+//! - [`CoopRuntime::run_until_idle`] — drives one executor step.
 //!   R311bc adds a `pop_expired(clock.now_us())` pass *before* the
 //!   task-pool sweep so wake-on-deadline timers fire ahead of the
 //!   tasks they wake. Deploy main loop pattern:
@@ -36,7 +36,7 @@
 //!   actually sleeps now — under R311av the executor was always
 //!   ready and `wfi()` returned immediately on the next pass.
 //!
-//! - [`LwipRuntime::block_on`] — drive a single outer future to
+//! - [`CoopRuntime::block_on`] — drive a single outer future to
 //!   completion. Used by host tests + by deploy code that needs a
 //!   synchronous entry point. Polls the outer future first; if it
 //!   returns `Pending`, calls `run_until_idle` to fan out work to
@@ -44,17 +44,17 @@
 //!   `Pin<Box<F>>` heap allocation matches the spawn discipline —
 //!   one allocation per outer call.
 //!
-//! ## Why `LwipRuntime` is generic over `C: ClockSource`
+//! ## Why `CoopRuntime` is generic over `C: ClockSource`
 //!
 //! R311bc Decision: runtime owns the clock + timer queue, time
 //! source borrows from runtime. The alternatives:
 //!
-//! - **(a) Clock owned by `LwipTime`, runtime stateless**: would
-//!   force `LwipTime::sleep` to register its waker with a queue
+//! - **(a) Clock owned by `CoopTime`, runtime stateless**: would
+//!   force `CoopTime::sleep` to register its waker with a queue
 //!   owned somewhere else — either a global (`once_cell` singleton,
 //!   rejected per R311av-pre Decision 2) or a separately-passed
-//!   handle (every caller of `sleep` would need both `LwipTime` AND
-//!   `LwipRuntime`, defeating the trait abstraction).
+//!   handle (every caller of `sleep` would need both `CoopTime` AND
+//!   `CoopRuntime`, defeating the trait abstraction).
 //! - **(b) Clock as runtime trait method**: would extend the
 //!   §5.P Runtime trait surface beyond the cross-profile contract.
 //!   AP-side `TokioRuntime` does not need a clock parameter (tokio
@@ -62,10 +62,10 @@
 //!   `Runtime` is a leaky MCU-profile detail.
 //! - **(c) Chosen: runtime generic over C, time source borrows
 //!   `Arc<RuntimeInner<C>>` from the runtime**: keeps the §5.P
-//!   trait clean (`impl Runtime for LwipRuntime<C>` where C is the
+//!   trait clean (`impl Runtime for CoopRuntime<C>` where C is the
 //!   MCU profile's free parameter, mirroring tokio's `TokioRuntime`
 //!   single-type shape but with the MCU-specific clock injection at
-//!   construction time). `LwipTime::new(&runtime)` shares the
+//!   construction time). `CoopTime::new(&runtime)` shares the
 //!   `Arc<RuntimeInner<C>>` so the timer queue and clock are the
 //!   same physical instance the runtime polls.
 //!
@@ -86,7 +86,7 @@
 //!   runs *outside* the critical section (`run_until_idle` takes
 //!   the lock only for the take-and-restore window); the nested
 //!   `spawn` call re-acquires the lock and appends.
-//! - `LwipRuntime::spawn` heap-allocates twice — once for the
+//! - `CoopRuntime::spawn` heap-allocates twice — once for the
 //!   `Box<dyn Future>` wrapper and once for the `Arc<Mutex<RefCell<
 //!   JoinState<T>>>>` shared state. Both allocations are required
 //!   by the trait surface (type erasure + cross-task result
@@ -106,12 +106,12 @@ use critical_section::Mutex;
 use wz_runtime_core::Runtime;
 
 use crate::executor::{make_waker, ExecutorState};
-use crate::join_handle::{JoinState, LwipJoinHandle};
+use crate::join_handle::{CoopJoinHandle, JoinState};
 use crate::time::ClockSource;
 use crate::timer::TimerQueue;
 
-/// Shared inner state held inside an `Arc` so `LwipRuntime` clones
-/// and `LwipTime::new(&runtime)` all reference the same executor,
+/// Shared inner state held inside an `Arc` so `CoopRuntime` clones
+/// and `CoopTime::new(&runtime)` all reference the same executor,
 /// timer queue, and clock instance. R311bc consolidation: the three
 /// fields are siblings because they need to be polled / updated
 /// from `run_until_idle` in a single atomic step (timer fire + task
@@ -125,13 +125,13 @@ pub(crate) struct RuntimeInner<C: ClockSource> {
 /// `impl Runtime` for the MCU profile. Cheap to clone — the entire
 /// state lives in `Arc<RuntimeInner<C>>`. Multiple clones share the
 /// same task pool, timer queue, and clock; task closures may capture
-/// a `LwipRuntime` clone and call nested `spawn` (R311av-pre
+/// a `CoopRuntime` clone and call nested `spawn` (R311av-pre
 /// Decision 5).
-pub struct LwipRuntime<C: ClockSource> {
+pub struct CoopRuntime<C: ClockSource> {
     pub(crate) inner: Arc<RuntimeInner<C>>,
 }
 
-impl<C: ClockSource> Clone for LwipRuntime<C> {
+impl<C: ClockSource> Clone for CoopRuntime<C> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -139,9 +139,9 @@ impl<C: ClockSource> Clone for LwipRuntime<C> {
     }
 }
 
-impl<C: ClockSource> LwipRuntime<C> {
+impl<C: ClockSource> CoopRuntime<C> {
     /// Construct a new runtime backed by `clock`. The clock is moved
-    /// into the runtime; `LwipTime::new(&runtime)` then borrows the
+    /// into the runtime; `CoopTime::new(&runtime)` then borrows the
     /// shared `Arc<RuntimeInner<C>>` so time-source ops and runtime
     /// ops see the same instance.
     ///
@@ -160,8 +160,8 @@ impl<C: ClockSource> LwipRuntime<C> {
     }
 
     /// Borrow the runtime's clock source. Used internally by
-    /// [`crate::time::LwipTime::new`] to snapshot the construction
-    /// epoch; deploy code typically reads time via `LwipTime`
+    /// [`crate::time::CoopTime::new`] to snapshot the construction
+    /// epoch; deploy code typically reads time via `CoopTime`
     /// rather than this method.
     pub fn clock(&self) -> &C {
         &self.inner.clock
@@ -255,7 +255,7 @@ impl<C: ClockSource> LwipRuntime<C> {
                 && self.inner.timers.pending_count() == 0
             {
                 panic!(
-                    "LwipRuntime::block_on: outer future Pending with no \
+                    "CoopRuntime::block_on: outer future Pending with no \
                      live tasks, no wakers, and no pending timers — \
                      deadlocked future?"
                 );
@@ -264,15 +264,15 @@ impl<C: ClockSource> LwipRuntime<C> {
     }
 }
 
-impl<C: ClockSource + Default> Default for LwipRuntime<C> {
+impl<C: ClockSource + Default> Default for CoopRuntime<C> {
     fn default() -> Self {
         Self::new(C::default())
     }
 }
 
-impl<C: ClockSource> Runtime for LwipRuntime<C> {
+impl<C: ClockSource> Runtime for CoopRuntime<C> {
     type JoinHandle<T>
-        = LwipJoinHandle<T>
+        = CoopJoinHandle<T>
     where
         T: Send + 'static;
 
@@ -292,14 +292,14 @@ impl<C: ClockSource> Runtime for LwipRuntime<C> {
         F::Output: Send + 'static,
     {
         // Shared JoinState between the spawn wrapper (which stores
-        // the result on completion) and the LwipJoinHandle returned
+        // the result on completion) and the CoopJoinHandle returned
         // here (which reads the result on poll).
         let state: Arc<Mutex<RefCell<JoinState<F::Output>>>> =
             Arc::new(Mutex::new(RefCell::new(JoinState::new())));
         let state_for_wrapper = state.clone();
         // R311bd — cancel_flag shared between the executor task
-        // slot and the LwipJoinHandle returned here. Initial value
-        // = false; set to true by `LwipJoinHandle::abort()`.
+        // slot and the CoopJoinHandle returned here. Initial value
+        // = false; set to true by `CoopJoinHandle::abort()`.
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_flag_for_handle = cancel_flag.clone();
         // Wrapper drives the user future and pushes the result into
@@ -307,7 +307,7 @@ impl<C: ClockSource> Runtime for LwipRuntime<C> {
         // returns () so it fits the type-erased BoxFuture slot.
         //
         // R311bd: the `is_none()` guard preserves the result that
-        // landed first. If `LwipJoinHandle::abort()` raced ahead of
+        // landed first. If `CoopJoinHandle::abort()` raced ahead of
         // this wrapper and stored `Err(JoinCancelled)`, the natural
         // `Ok(output)` write here becomes a no-op; the handle
         // returns the cancellation. Conversely, if the wrapper
@@ -328,7 +328,7 @@ impl<C: ClockSource> Runtime for LwipRuntime<C> {
         };
         let boxed: crate::executor::BoxFuture = Box::pin(wrapper);
         self.inner.executor.spawn(boxed, cancel_flag);
-        LwipJoinHandle::new(state, cancel_flag_for_handle)
+        CoopJoinHandle::new(state, cancel_flag_for_handle)
     }
 
     // R311ct — closure-scoped mutex access. MCU profile binds through
@@ -376,7 +376,7 @@ impl<C: ClockSource> Runtime for LwipRuntime<C> {
 #[cfg(test)]
 mod compile_time_assertions {
     use super::*;
-    use crate::time::{ClockSource, LwipTime};
+    use crate::time::{ClockSource, CoopTime};
     use wz_runtime_core::TimeSource;
 
     // Mirror of wz_runtime_tokio::runtime_impl::compile_time_assertions
@@ -389,21 +389,21 @@ mod compile_time_assertions {
 
     #[allow(dead_code)]
     fn lwip_runtime_trait_bounds_compile() {
-        _assert_send_sync::<LwipRuntime<NopClock>>();
-        // LwipJoinHandle: trait-required Send (Sync is a happy
+        _assert_send_sync::<CoopRuntime<NopClock>>();
+        // CoopJoinHandle: trait-required Send (Sync is a happy
         // accident of the storage chain; not asserted here so a
         // future single-consumer redesign that drops Sync stays
         // valid against the trait contract).
-        _assert_send::<LwipJoinHandle<()>>();
-        _assert_send::<LwipJoinHandle<u64>>();
+        _assert_send::<CoopJoinHandle<()>>();
+        _assert_send::<CoopJoinHandle<u64>>();
     }
 
     #[allow(dead_code)]
     fn lwip_runtime_mutex_rwlock_bounds_compile() {
-        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::Mutex<u32>>();
-        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::Mutex<u64>>();
-        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::RwLock<u32>>();
-        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::RwLock<u64>>();
+        _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::Mutex<u32>>();
+        _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::Mutex<u64>>();
+        _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u32>>();
+        _assert_send_sync::<<CoopRuntime<NopClock> as Runtime>::RwLock<u64>>();
     }
 
     // R258 / R311av — generic-composition smoke fn. Validates
@@ -450,8 +450,8 @@ mod compile_time_assertions {
     // elimination can let bound violations slip).
     #[allow(dead_code)]
     fn instantiate_compose_for_lwip() {
-        let rt: LwipRuntime<NopClock> = LwipRuntime::new(NopClock);
-        let clock = LwipTime::new(&rt);
+        let rt: CoopRuntime<NopClock> = CoopRuntime::new(NopClock);
+        let clock = CoopTime::new(&rt);
         runtime_and_time_compose_in_generic_code(&rt, &clock);
     }
 
@@ -468,7 +468,7 @@ mod compile_time_assertions {
 mod tests {
     use super::*;
     use crate::atomic::AtomicU64;
-    use crate::time::{ClockSource, LwipTime};
+    use crate::time::{ClockSource, CoopTime};
     use core::pin::Pin;
     use wz_runtime_core::TimeSource;
 
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn spawn_resolves_to_future_output() {
-        let rt = LwipRuntime::new(NopClock);
+        let rt = CoopRuntime::new(NopClock);
         let h = rt.spawn(async { 42_u32 });
         let result = rt.block_on(h);
         assert_eq!(result.expect("spawn ok"), 42);
@@ -518,14 +518,14 @@ mod tests {
 
     #[test]
     fn spawn_unit_output_resolves_to_ok_unit() {
-        let rt = LwipRuntime::new(NopClock);
+        let rt = CoopRuntime::new(NopClock);
         let h = rt.spawn(async {});
         rt.block_on(h).expect("spawn returns Ok(())");
     }
 
     #[test]
     fn spawn_string_output_round_trips() {
-        let rt = LwipRuntime::new(NopClock);
+        let rt = CoopRuntime::new(NopClock);
         let h = rt.spawn(async { alloc::string::String::from("payload") });
         let s = rt.block_on(h).expect("spawn ok");
         assert_eq!(s, "payload");
@@ -533,11 +533,11 @@ mod tests {
 
     #[test]
     fn nested_spawn_resolves_inner_first() {
-        // R311av-pre Decision 5 — LwipRuntime.clone() captured into
+        // R311av-pre Decision 5 — CoopRuntime.clone() captured into
         // a task closure can spawn nested tasks. Pin the contract:
         // outer task spawns an inner task, awaits it, and returns
         // inner+1.
-        let rt = LwipRuntime::new(NopClock);
+        let rt = CoopRuntime::new(NopClock);
         let rt2 = rt.clone();
         let h = rt.spawn(async move {
             let inner = rt2.spawn(async { 100_u32 });
@@ -549,8 +549,8 @@ mod tests {
     #[test]
     fn time_now_monotonic_ms_reflects_clock_advance() {
         let clock = TestClock::new();
-        let rt = LwipRuntime::new(clock.clone());
-        let time = LwipTime::new(&rt);
+        let rt = CoopRuntime::new(clock.clone());
+        let time = CoopTime::new(&rt);
         let t0 = time.now_monotonic_ms();
         clock.tick_us(2_500); // 2.5ms
         let t1 = time.now_monotonic_ms();
@@ -566,9 +566,9 @@ mod tests {
         // run_until_idle calls pop_expired(now), and once the
         // clock crosses the 5ms deadline the registered waker
         // fires and the sleep task is polled to Ready.
-        let rt = LwipRuntime::new(TestClock::new());
+        let rt = CoopRuntime::new(TestClock::new());
         let clock = rt.clock().clone();
-        let time = LwipTime::new(&rt);
+        let time = CoopTime::new(&rt);
         let advance_clock = clock.clone();
         rt.spawn(async move {
             loop {
@@ -589,8 +589,8 @@ mod tests {
         // construction-time t=0 the deadline is exactly now and
         // the first poll sees `now_us >= deadline_us` and returns
         // Ready without ever registering on the timer queue.
-        let rt = LwipRuntime::new(TestClock::new());
-        let time = LwipTime::new(&rt);
+        let rt = CoopRuntime::new(TestClock::new());
+        let time = CoopTime::new(&rt);
         let h = rt.spawn(async move {
             time.sleep(0).await;
             123_u32
@@ -604,8 +604,8 @@ mod tests {
         // queue's pending_count() reports >= 1. Drives the runtime
         // through one executor pass (so the sleep registers via
         // its first Pending poll) and then samples the count.
-        let rt = LwipRuntime::new(TestClock::new());
-        let time = LwipTime::new(&rt);
+        let rt = CoopRuntime::new(TestClock::new());
+        let time = CoopTime::new(&rt);
         let _h = rt.spawn(async move {
             time.sleep(100).await;
         });
@@ -649,8 +649,8 @@ mod tests {
         // deadline elapsed → Ok(output). With TestClock not
         // advancing, the deadline never elapses; an immediately-
         // ready inner future resolves Ok.
-        let rt = LwipRuntime::new(TestClock::new());
-        let time = LwipTime::new(&rt);
+        let rt = CoopRuntime::new(TestClock::new());
+        let time = CoopTime::new(&rt);
         let h = rt.spawn(async move { time.timeout(1000, async { 99_u32 }).await });
         let result = rt.block_on(h).expect("spawn ok");
         assert_eq!(result.expect("inner ok"), 99);
@@ -665,9 +665,9 @@ mod tests {
         // outer TimeoutFuture registers its waker on the timer
         // queue exactly once; subsequent polls re-check the inner
         // + the deadline without re-registering.
-        let rt = LwipRuntime::new(TestClock::new());
+        let rt = CoopRuntime::new(TestClock::new());
         let clock = rt.clock().clone();
-        let time = LwipTime::new(&rt);
+        let time = CoopTime::new(&rt);
         let advance_clock = clock.clone();
         rt.spawn(async move {
             loop {
@@ -707,8 +707,8 @@ mod tests {
         // should resolve immediately to Err(JoinCancelled) via
         // the synchronous JoinState write inside abort().
         use wz_runtime_core::RuntimeError;
-        let rt = LwipRuntime::new(TestClock::new());
-        let time = LwipTime::new(&rt);
+        let rt = CoopRuntime::new(TestClock::new());
+        let time = CoopTime::new(&rt);
         let h = rt.spawn(async move {
             time.sleep(u64::MAX / 2).await; // effectively forever
             999_u32
@@ -731,7 +731,7 @@ mod tests {
         // arrives stores its Ok(output) in JoinState; the later
         // abort sees result.is_some() and skips the JoinCancelled
         // write. The handle resolves to Ok(output).
-        let rt = LwipRuntime::new(NopClock);
+        let rt = CoopRuntime::new(NopClock);
         let h = rt.spawn(async { 17_u32 });
         // First drive the task to completion via block_on. We
         // can't await the handle here because we need to keep it
@@ -754,8 +754,8 @@ mod tests {
         // see result.is_some() and skip the write (and the
         // cancel_flag.store(true) is itself idempotent).
         use wz_runtime_core::RuntimeError;
-        let rt = LwipRuntime::new(TestClock::new());
-        let time = LwipTime::new(&rt);
+        let rt = CoopRuntime::new(TestClock::new());
+        let time = CoopTime::new(&rt);
         let h = rt.spawn(async move {
             time.sleep(u64::MAX / 2).await;
             42_u32

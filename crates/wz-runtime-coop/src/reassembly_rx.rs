@@ -21,7 +21,7 @@
 //! and drives it:
 //!
 //! ```ignore
-//! let mut reasm = wz_runtime_lwip::reassembly_rx::mcu_reassembly();
+//! let mut reasm = wz_runtime_coop::reassembly_rx::mcu_reassembly();
 //! // on each decoded inbound fragment (zid from the established session;
 //! // sn_mask = the session's negotiated SN ring, `negotiated_sn_mask()`):
 //! reasm.ingest(frag, sn_mask, now_ms, |msg| { /* re-parse + dispatch */ });
@@ -69,7 +69,7 @@ pub const MCU_REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_mcu::SLOT_SIZ
 /// each chain's staging buffer inline (`BoundedVec<u8, SLOT_SIZE>`);
 /// `MCU_REASSEMBLY_SLOT_SIZE` is the per-chain cap the dispatcher
 /// enforces, so reassembly is genuinely bounded on the MCU profile.
-pub type LwipReassembly = ReassemblyDispatcher<MCU_REASSEMBLY_SLOTS, MCU_REASSEMBLY_SLOT_SIZE>;
+pub type CoopReassembly = ReassemblyDispatcher<MCU_REASSEMBLY_SLOTS, MCU_REASSEMBLY_SLOT_SIZE>;
 
 /// Reassembly config (`per_peer_quota` / `reassembly_timeout_ms`) from
 /// the MCU buffer-pool SSOT. The emit types them as `u32`;
@@ -86,8 +86,8 @@ pub fn mcu_reassembly_config() -> ReassemblyConfig {
 /// dims + config. The MCU main loop owns the returned dispatcher and
 /// drives it via [`ReassemblyDispatcher::ingest`] /
 /// [`ReassemblyDispatcher::sweep`] (see the module docs).
-pub fn mcu_reassembly() -> LwipReassembly {
-    LwipReassembly::new(mcu_reassembly_config())
+pub fn mcu_reassembly() -> CoopReassembly {
+    CoopReassembly::new(mcu_reassembly_config())
 }
 
 #[cfg(test)]

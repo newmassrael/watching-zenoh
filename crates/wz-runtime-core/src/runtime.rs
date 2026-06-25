@@ -46,7 +46,7 @@ use crate::error::RuntimeError;
 /// [`RwLock<T>`](Self::RwLock) as GAT associated types; the tokio
 /// profile binds them to `std::sync::Mutex<T>` /
 /// `std::sync::RwLock<T>` via the `wz_runtime_tokio::sync` module, and
-/// future MCU profiles (`wz-runtime-lwip` / `wz-runtime-embassy`) will
+/// future MCU profiles (`wz-runtime-coop` / `wz-runtime-embassy`) will
 /// bind their own per-profile aliases (`embassy_sync::Mutex<RawMutex,
 /// T>` or `critical_section::Mutex<T>` per ISR-interleave shape) when
 /// they land.
@@ -69,7 +69,7 @@ pub trait Runtime: Send + Sync + 'static {
     /// `std::sync::Mutex<T>` through `wz_runtime_tokio::sync::Mutex`;
     /// MCU profile will bind to `embassy_sync::Mutex<RawMutex, T>` or
     /// `critical_section::Mutex<T>` per ISR-interleave shape when
-    /// `wz-runtime-lwip` / `wz-runtime-embassy` land.
+    /// `wz-runtime-coop` / `wz-runtime-embassy` land.
     ///
     /// The `Send + Sync + 'static` bound is the minimum cross-runtime
     /// contract: AP `std::sync::Mutex<T>` satisfies it automatically

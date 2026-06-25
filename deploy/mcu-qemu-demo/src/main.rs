@@ -20,8 +20,8 @@
 //! catalog truthfulness" — i.e. the cargo feature graph + crate
 //! cross-compile correctly resolves an MCU preset. R311az-1..3c
 //! lifted that into "lwip-sys cross-real builds + wz facade
-//! `runtime-lwip` re-exports the link tier". R311bc + R311bd
-//! made `LwipRuntime` honest (real timer queue + abort).
+//! `runtime-coop` re-exports the link tier". R311bc + R311bd
+//! made `CoopRuntime` honest (real timer queue + abort).
 //!
 //! What was still missing: proof that all of the above actually
 //! RUNS on a non-host target. R311be closes that — every
@@ -32,7 +32,7 @@
 //!   `#![no_std]` (R311am Layer G.2 + R311ax G.5).
 //! - critical_section + portable-atomic polyfill paths → lwip-sys
 //!   FFI invocations → lwIP NO_SYS=1 loopback netif.
-//! - LwipRuntime task pool → spawned `async` closure → `LwipTime::
+//! - CoopRuntime task pool → spawned `async` closure → `CoopTime::
 //!   sleep` registering on the R311bc TimerQueue → wake on the
 //!   next `run_until_idle` pass after the loopback callback
 //!   enqueues the datagram.
@@ -45,7 +45,7 @@
 //! providing a `SysTick` exception handler so the wraparound count
 //! advances from the ISR, the CPU can `wfi()` between ticks
 //! (genuine power-down between IRQs — proving the R311bc
-//! TimerQueue + LwipTime::sleep path uses the runtime services
+//! TimerQueue + CoopTime::sleep path uses the runtime services
 //! tier the way a real MCU deploy would), and the demo's tight
 //! poll loop becomes interrupt-driven.
 //!
@@ -82,12 +82,12 @@ use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 // R311y21 — the Cortex-M SysTick monotonic clock SSOT (shared by all three
 // deploy/mcu-* bins). Unconditional: GLOBAL_CLOCK backs both the lwIP
 // `sys_now()` symbol and the `SysTick` exception handler on every target,
-// including the thumbv6m sync-only path that has no `LwipRuntime`.
+// including the thumbv6m sync-only path that has no `CoopRuntime`.
 use wz_mcu_clock::SystickClock;
 
 // R311bq — runtime + time imports gated on native-atomic targets only.
 // thumbv6m (Cortex-M0/M0+) follows the sync-only main path below and
-// does not instantiate `LwipRuntime` / `LwipTime`; gating the imports
+// does not instantiate `CoopRuntime` / `CoopTime`; gating the imports
 // keeps `cargo clippy -D warnings` clean on the M0 lane (unused-import
 // would otherwise fire).
 #[cfg(target_has_atomic = "32")]
@@ -95,7 +95,7 @@ use wz::runtime_core::Runtime;
 #[cfg(target_has_atomic = "32")]
 use wz::runtime_core::TimeSource;
 #[cfg(target_has_atomic = "32")]
-use wz::runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
+use wz::runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 
 // Heap sizing fork per target SRAM budget. mps2 family (M3/M4/M7)
 // has 4 MB SRAM so the conservative 256 KB heap fits trivially.
@@ -103,7 +103,7 @@ use wz::runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
 // stack + .data + .bss must share that budget, so the M0 lane
 // gets a 4 KB heap with .bss pruned by feature-graph slimming at
 // the wz facade layer. R311bm-m0 honest disclosure: if the wz
-// runtime-lwip + alloc surface does not fit 16 KB with this
+// runtime-coop + alloc surface does not fit 16 KB with this
 // heap, the microbit Q.2 run will exit FAIL and the lane records
 // that the composable framework currently lacks a slim-enough
 // preset for nrf51-class devices — exactly the kind of catalog
@@ -140,7 +140,7 @@ fn SysTick() {
 }
 
 /// Single global SysTick instance — both the `ClockSource` handle
-/// passed to `LwipRuntime::new` and the lwIP-side `sys_now()` extern
+/// passed to `CoopRuntime::new` and the lwIP-side `sys_now()` extern
 /// share this so reload accounting stays consistent across both call
 /// surfaces. The wrap-tear-safe read, the R311y15 monotonic floor, and
 /// the R311y21 u64 reload counter live once in `wz_mcu_clock::SystickClock`
@@ -152,7 +152,7 @@ static GLOBAL_CLOCK: SystickClock<{ CYCLES_PER_US }> = SystickClock::new();
 /// the shared [`GLOBAL_CLOCK`]. Cheap to clone (unit struct).
 ///
 /// R311bq — only used by the async main path (which constructs
-/// `LwipRuntime::new(SystickClockRef)` + `LwipTime::new(&runtime)`).
+/// `CoopRuntime::new(SystickClockRef)` + `CoopTime::new(&runtime)`).
 /// The sync-only thumbv6m path reads `GLOBAL_CLOCK.now_us()` directly
 /// for any timing it needs (currently none — `wfi()` + the SysTick
 /// interrupt drive cadence), so the impl is gated on native-atomic
@@ -195,7 +195,7 @@ const PAYLOAD: &[u8] = b"R311be lwIP UDP loopback echo";
 
 /// Number of poll iterations the demo waits for the echo before
 /// declaring failure. Each iteration sleeps 1 ms (via
-/// `LwipTime::sleep(1).await` which registers on the R311bc
+/// `CoopTime::sleep(1).await` which registers on the R311bc
 /// timer queue) so the total budget is 100 ms wall-clock — far
 /// beyond what a working loopback path needs.
 const POLL_BUDGET: u32 = 100;
@@ -209,7 +209,7 @@ fn main() -> ! {
 }
 
 /// Async main path — mps2 family (Cortex-M3/M4/M7/M33). Constructs
-/// `LwipRuntime` + `LwipTime`, spawns an async echo task, drives the
+/// `CoopRuntime` + `CoopTime`, spawns an async echo task, drives the
 /// cooperative loop with `wfi()` between SysTick ticks.
 ///
 /// R311bq made this branch native-atomic-only because spawn-mode pulls
@@ -223,8 +223,8 @@ fn main() -> ! {
 fn run(link: LwipLink) -> ! {
     hprintln!("R311bi: lwIP UDP loopback e2e demo starting");
 
-    let runtime = LwipRuntime::new(SystickClockRef);
-    let time = LwipTime::new(&runtime);
+    let runtime = CoopRuntime::new(SystickClockRef);
+    let time = CoopTime::new(&runtime);
 
     let sock: LwipUdpSocket =
         LwipUdpSocket::bind(&link, ECHO_PORT).expect("bind UDP socket on ANY:5555");
@@ -256,13 +256,13 @@ fn run(link: LwipLink) -> ! {
 }
 
 /// Sync-only main path — thumbv6m (Cortex-M0/M0+ / microbit). No
-/// `LwipRuntime`, no `spawn`, no async/await — exercises the same
+/// `CoopRuntime`, no `spawn`, no async/await — exercises the same
 /// lwIP UDP loopback path as the async branch but inline so the
 /// 4 KB heap budget fits.
 ///
 /// R311bq the heap budget on microbit (nrf51822, 16 KB SRAM total) is
 /// shared with cortex-m-rt + portable-atomic + lwIP MEM_SIZE +
-/// .data/.bss; the wz facade `runtime-lwip` feature would have spawn
+/// .data/.bss; the wz facade `runtime-coop` feature would have spawn
 /// allocate a wrapper future + 12 KB `Inner<1500, 8>` rx queue (R311bm
 /// "12 KB BoxFuture" carry, traced to the rx queue rather than the
 /// future state machine). Slim socket `<128, 2>` ≈ 280-byte rx queue
@@ -325,7 +325,7 @@ fn run(link: LwipLink) -> ! {
 /// R311bq native-atomic-only — the sync-path thumbv6m branch does the
 /// same work inline in `run` without going through the executor.
 #[cfg(target_has_atomic = "32")]
-async fn echo_task(mut sock: LwipUdpSocket, time: LwipTime<SystickClockRef>) {
+async fn echo_task(mut sock: LwipUdpSocket, time: CoopTime<SystickClockRef>) {
     if let Err(e) = sock.send_to(ipv4_addr_loopback(), ECHO_PORT, PAYLOAD) {
         hprintln!("R311bi FAIL: send_to error {:?}", e);
         debug::exit(debug::EXIT_FAILURE);
@@ -354,7 +354,7 @@ async fn echo_task(mut sock: LwipUdpSocket, time: LwipTime<SystickClockRef>) {
 }
 
 /// Initialise the heap allocator backing `alloc::*`. The wz upper
-/// stack (`alloc` feature on `wz-runtime-core` / `wz-runtime-lwip`)
+/// stack (`alloc` feature on `wz-runtime-core` / `wz-runtime-coop`)
 /// requires a `#[global_allocator]`; embedded-alloc's `Heap` is
 /// the conventional Cortex-M choice (linked-list allocator backed
 /// by a static BSS region the binary initialises here).

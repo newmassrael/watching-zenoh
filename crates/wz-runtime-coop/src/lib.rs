@@ -3,7 +3,7 @@
 
 #![no_std]
 
-//! wz-runtime-lwip — Phase W MCU profile.
+//! wz-runtime-coop — Phase W MCU profile.
 //!
 //! This crate is the MCU sibling of [`wz-runtime-tokio`] for the §5.P
 //! runtime-services-tier contract. The R311au scope (C) entry landed
@@ -11,7 +11,7 @@
 //! under `#![no_std]` without `alloc`. R311av lands the `Runtime`
 //! trait impl behind the `alloc` feature: a self-rolled cooperative
 //! task pool ([`executor`]) + [`join_handle`] handle type + own
-//! [`ClockSource`] / [`LwipTime`] in [`time`], satisfying the
+//! [`ClockSource`] / [`CoopTime`] in [`time`], satisfying the
 //! `wz_runtime_core::Runtime` and `wz_runtime_core::TimeSource`
 //! contracts so generic code over `R: Runtime, T: TimeSource`
 //! composes against this profile identically to the AP one.
@@ -26,7 +26,7 @@
 //! - **`alloc`**: adds the [`executor`] + [`join_handle`] +
 //!   [`runtime_impl`] + [`time`] modules. The `wz-runtime-core` dep
 //!   activates (with its own `alloc` feature) and the
-//!   [`LwipRuntime`] + [`LwipJoinHandle`] + [`LwipTime`] surface
+//!   [`CoopRuntime`] + [`CoopJoinHandle`] + [`CoopTime`] surface
 //!   becomes available. Layer G.4-alloc covers the cross-compile.
 //!
 //! ## Why this scope shape (R63 anti-stub honesty)
@@ -34,24 +34,24 @@
 //! Every item exported under the `alloc` feature is a real
 //! implementation:
 //!
-//! - [`LwipRuntime::spawn`] heap-allocates a `Pin<Box<dyn Future +
+//! - [`CoopRuntime::spawn`] heap-allocates a `Pin<Box<dyn Future +
 //!   Send>>` wrapper that captures the user future + a JoinState
 //!   handle, pushes it into the executor's task vector, and returns
-//!   a real `LwipJoinHandle<T>` whose `poll` checks the shared
+//!   a real `CoopJoinHandle<T>` whose `poll` checks the shared
 //!   `JoinState<T>` and registers a waker if the task has not yet
 //!   completed.
-//! - [`LwipRuntime::run_until_idle`] is a real polling loop: it
+//! - [`CoopRuntime::run_until_idle`] is a real polling loop: it
 //!   atomic-swaps each task's `wake_flag` to false, polls every
 //!   task that was ready, and re-stores Pending futures. Tasks that
 //!   self-wake (e.g. `SleepFuture::poll` returning Pending +
 //!   `cx.waker().wake_by_ref()`) become ready for the *next*
 //!   `run_until_idle` call; this round does not busy-spin inside
 //!   one call.
-//! - [`LwipTime::now_monotonic_ms`] reads the user-supplied
+//! - [`CoopTime::now_monotonic_ms`] reads the user-supplied
 //!   `ClockSource::now_us(&self)` and divides by 1000 against the
 //!   per-instance epoch — no fake constant, no `unimplemented!()`.
 //!
-//! The R53/R58/R63 retrospect (NOP `LwipRuntime::spawn` doc-around-
+//! The R53/R58/R63 retrospect (NOP `CoopRuntime::spawn` doc-around-
 //! the-hack pattern) is honoured by *only* shipping real code: a
 //! reader who builds with `--features alloc` and calls
 //! `runtime.spawn(future).await` receives that future's output,
@@ -70,9 +70,9 @@
 //! - **Real timer queue**: [`timer::TimerQueue`] lands as a
 //!   deadline-keyed `BinaryHeap<Reverse<TimerEntry>>`; sleep /
 //!   timeout futures register `(deadline_us, Waker)` on first
-//!   Pending poll instead of self-waking. [`LwipRuntime::new`]
+//!   Pending poll instead of self-waking. [`CoopRuntime::new`]
 //!   takes a [`ClockSource`] (breaking sig from R311av's
-//!   `LwipRuntime::new()`); [`LwipRuntime::run_until_idle`] calls
+//!   `CoopRuntime::new()`); [`CoopRuntime::run_until_idle`] calls
 //!   `timers.pop_expired(clock.now_us())` before polling the task
 //!   pool so wake-on-deadline becomes the natural shape. The
 //!   deploy main loop can now `wfi()`-sleep between IRQs because
@@ -82,10 +82,10 @@
 //!
 //! ## What R311bd closes
 //!
-//! - **`LwipJoinHandle::abort()`**: AP/MCU parity with
+//! - **`CoopJoinHandle::abort()`**: AP/MCU parity with
 //!   `wz_runtime_tokio::TokioJoinHandle::abort`. Each spawned task
 //!   slot carries a `cancel_flag: Arc<AtomicBool>` shared with the
-//!   returned `LwipJoinHandle`. `abort()` writes the flag (the
+//!   returned `CoopJoinHandle`. `abort()` writes the flag (the
 //!   next `run_until_idle` sweeps the cancelled slots and drops
 //!   their futures) AND synchronously writes
 //!   `Err(RuntimeError::JoinCancelled)` into the shared
@@ -99,11 +99,11 @@
 //!
 //! `scripts/run-ci.sh` Layer G exercises both lanes:
 //!
-//! - **G.4** (R311au): `cargo build -p wz-runtime-lwip` (no
+//! - **G.4** (R311au): `cargo build -p wz-runtime-coop` (no
 //!   features) on every Phase W target. Sync-only path; no
 //!   wz-runtime-core dep pulled in. Covers all 7 targets including
 //!   `thumbv6m-none-eabi` (Cortex-M0+ / ARMv6-M).
-//! - **G.4-alloc** (R311av): `cargo build -p wz-runtime-lwip
+//! - **G.4-alloc** (R311av): `cargo build -p wz-runtime-coop
 //!   --features alloc` on the 6-target subset that supports atomic
 //!   pointer CAS. Pulls in wz-runtime-core (its own `alloc` feature
 //!   on) and exercises the executor + Runtime impl modules.
@@ -134,9 +134,9 @@
 //! [`wz-runtime-tokio`]: ../wz_runtime_tokio/index.html
 //! [`Runtime`]: wz_runtime_core::Runtime
 //! [`ClockSource`]: time::ClockSource
-//! [`LwipRuntime`]: runtime_impl::LwipRuntime
-//! [`LwipJoinHandle`]: join_handle::LwipJoinHandle
-//! [`LwipTime`]: time::LwipTime
+//! [`CoopRuntime`]: runtime_impl::CoopRuntime
+//! [`CoopJoinHandle`]: join_handle::CoopJoinHandle
+//! [`CoopTime`]: time::CoopTime
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -162,18 +162,18 @@ pub mod time;
 pub mod timer;
 
 #[cfg(feature = "alloc")]
-pub use join_handle::LwipJoinHandle;
+pub use join_handle::CoopJoinHandle;
 #[cfg(feature = "alloc")]
-pub use runtime_impl::LwipRuntime;
+pub use runtime_impl::CoopRuntime;
 #[cfg(feature = "alloc")]
-pub use time::{ClockSource, LwipTime};
+pub use time::{ClockSource, CoopTime};
 
 // Stage 4a — session-tier `SessionRuntime` binding (the per-profile
 // `BoxedLinkDriver` link-sink storage) for the MCU profile. Gated on
 // `session-unicast` (which pulls wz-session-core + implies `alloc`, so
-// `LwipRuntime` / `LwipTime` are present). The MCU mirror of the AP-side
+// `CoopRuntime` / `CoopTime` are present). The MCU mirror of the AP-side
 // `impl SessionRuntime for TokioRuntime` in `wz_runtime_tokio`; lands the
-// type-check that `SessionLinkActions<LwipRuntime<C>, LwipTime<C>>`
+// type-check that `SessionLinkActions<CoopRuntime<C>, CoopTime<C>>`
 // composes before the sync drive-loop consumer (`session_drive`) wires it
 // to live lwIP sockets.
 #[cfg(feature = "session-unicast")]
@@ -190,7 +190,7 @@ pub use wz_session_core::scout_static;
 /// SCE-generated MCU reassembly buffer-pool config. The emit comes from
 /// `sources/network/reassembly_pool_mcu.scxml` (an `sce:kind="buffer-pool"`
 /// document, the SSOT). R311y22b: COMMITTED at
-/// `out/wz-runtime-lwip/reassembly_pool_mcu.rs` and `include!`-ed from there
+/// `out/wz-runtime-coop/reassembly_pool_mcu.rs` and `include!`-ed from there
 /// (regenerated by the `xtask` codegen SSOT + the Layer B2 regen-diff gate, so
 /// this crate has no build script); compiled only under the `reassembly`
 /// feature via the `#[cfg]` on the wrapping module below.
@@ -216,7 +216,7 @@ pub use wz_session_core::scout_static;
 pub mod reassembly_pool_mcu {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../out/wz-runtime-lwip",
+        "/../../out/wz-runtime-coop",
         "/reassembly_pool_mcu.rs"
     ));
 }

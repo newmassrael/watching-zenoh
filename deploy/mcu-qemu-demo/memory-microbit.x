@@ -22,7 +22,7 @@
  * the remaining 12 KB. If that does not fit, the link step
  * surfaces an overflow region error — honest catalog feedback
  * that the current composable-framework preset surface is too
- * heavy for nrf51-class devices and a slim-only-runtime-lwip
+ * heavy for nrf51-class devices and a slim-only-runtime-coop
  * preset is needed.
  *
  * cortex-m-rt's bundled `link.x` INCLUDEs this file; the

@@ -1057,7 +1057,7 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["h
 #     impossible; `FuturesUnordered` is the textbook single-task poll-many for a
 #     dynamic non-`Send` set. `std` unlocks `FuturesUnordered` (it needs `alloc`).
 #   - `transport-link-ws` — `StreamExt::split` + `SinkExt::send` for the WS sink.
-# wz-runtime-tokio is AP/std-only (the MCU profile is wz-runtime-lwip), so the
+# wz-runtime-tokio is AP/std-only (the MCU profile is wz-runtime-coop), so the
 # `std` feature adds no no_std exposure.
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
 # R311qw — the linkstate-peer topology graph kernel (the wz mirror of
@@ -1087,7 +1087,7 @@ wz-access-control = { path = "../wz-access-control", optional = true }
 wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
 # R252 — Runtime / TimeSource / Allocator trait surface. The AP profile
 # (this crate) bridges tokio + std into the trait contract authored in
-# R251; the MCU profile (future wz-runtime-lwip) will provide the same
+# R251; the MCU profile (future wz-runtime-coop) will provide the same
 # trait implementations against lwIP + an embedded async executor. The
 # `alloc` feature is on because tokio + this crate are AP-only by design
 # and need the R266 `RuntimeError::JoinFailed { payload: Box<...> }`
@@ -1116,7 +1116,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # R69 — AP-side entropy source for signing_key_from_os_entropy. RustCrypto
 # ecosystem chooses `getrandom` for OS-syscall-backed (Linux: getrandom(2)
 # fallback to /dev/urandom; macOS: getentropy) cryptographic random bytes.
-# MCU sibling (wz-runtime-lwip Phase W) does NOT pull this dep — it
+# MCU sibling (wz-runtime-coop Phase W) does NOT pull this dep — it
 # routes through `sce_intrinsics_runtime::rng` per §5.I architectural-
 # tier registry (intrinsics §2.5). Keeping the dep AP-only preserves
 # the no_std contract on the MCU build.
@@ -1147,7 +1147,7 @@ hashbrown = "0.15"
 # R311di-pre-a — no_std-compatible atomic ints. `portable-atomic`
 # provides AtomicU64 with the same API as std::sync::atomic::AtomicU64;
 # on AP (this crate, has native u64 atomics) it forwards directly to
-# core::sync::atomic, on MCU (wz-runtime-lwip pulls the same crate with
+# core::sync::atomic, on MCU (wz-runtime-coop pulls the same crate with
 # the critical-section feature per R311bb) it falls back via interrupt-
 # disable. Migration target: every wz-runtime-tokio AtomicU64 call site
 # routes through this crate so the eventual extraction to wz-session-core

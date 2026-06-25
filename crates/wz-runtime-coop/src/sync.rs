@@ -11,7 +11,7 @@
 //! `wz_runtime_tokio::sync` (`std::sync::Mutex<T>` /
 //! `std::sync::RwLock<T>`); this module is the matching MCU-profile
 //! binding so future cross-runtime code reading `use
-//! wz_runtime_lwip::sync::Mutex` lands on a real per-arch primitive.
+//! wz_runtime_coop::sync::Mutex` lands on a real per-arch primitive.
 //!
 //! ## Why `critical_section::Mutex<RefCell<T>>`
 //!
@@ -82,7 +82,7 @@ use core::cell::RefCell;
 /// `std::sync::Mutex`, single-core IRQ-safe semantics).
 ///
 /// Use this alias for new MCU-side code that wants to migrate
-/// cleanly when the future `LwipRuntime` impl lands and `R::Mutex<T>`
+/// cleanly when the future `CoopRuntime` impl lands and `R::Mutex<T>`
 /// generic dispatch becomes available. Direct
 /// `critical_section::Mutex<RefCell<T>>` references should be
 /// avoided in favour of this alias so a future

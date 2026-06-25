@@ -92,8 +92,8 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_link_lwip::rx_sockets::{SessionMulticastRxSocket, SESSION_MULTICAST_RX_SLOT_SIZE};
 use wz_link_lwip::{Datagram, LwipLink};
+use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_runtime_core::TimeSource;
-use wz_runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::multicast_dispatch::MulticastDispatcher;
 use wz_session_core::multicast_join::encode_join;
@@ -108,7 +108,7 @@ use wz_session_core::multicast_params::{MulticastDriveConfig, MulticastOutcome};
 // classify + sweep. transport-fragmentation implies reassembly, so a
 // fragmenting-TX node auto-reassembles inbound.
 #[cfg(feature = "reassembly")]
-use wz_runtime_lwip::reassembly_rx::mcu_reassembly;
+use wz_runtime_coop::reassembly_rx::mcu_reassembly;
 #[cfg(not(feature = "reassembly"))]
 use wz_session_core::multicast_rx::{dispatch_multicast_inbound, MulticastRxNext};
 #[cfg(feature = "reassembly")]
@@ -308,7 +308,7 @@ fn peer_key(src_addr: u32, src_port: u16) -> SocketAddr {
 ///   external clock so its epoch matches the R263 actions clock-clone), the
 ///   multicast loop has no actions bundle, so the runtime is its only time
 ///   source and a separate `clock` parameter would just be a redundant
-///   re-derivation of `LwipTime::new(runtime)`.
+///   re-derivation of `CoopTime::new(runtime)`.
 /// - `driver` — the [`LwipMulticastDriver`] (group socket: JOIN/data TX +
 ///   inbound `try_recv`).
 /// - `on_event` — the per-iteration observer (`Poll` with the decoded
@@ -325,7 +325,7 @@ fn peer_key(src_addr: u32, src_port: u16) -> SocketAddr {
 pub fn run_multicast_session<C, F, G, const MAX_PEERS: usize>(
     dispatcher: &mut MulticastDispatcher<MAX_PEERS>,
     cfg: MulticastDriveConfig<'_>,
-    runtime: &LwipRuntime<C>,
+    runtime: &CoopRuntime<C>,
     link: &LwipLink,
     driver: &mut LwipMulticastDriver,
     mut on_event: F,
@@ -347,7 +347,7 @@ where
     // The loop's monotonic clock, derived from the runtime it pumps (R311ly):
     // the dispatcher's stamps all come from this one source, so there is no
     // external epoch to match (contrast the unicast run_session's R263 clock).
-    let clock = LwipTime::new(runtime);
+    let clock = CoopTime::new(runtime);
 
     // Idle -> LinkOpening -> Running.
     dispatcher.create();
@@ -567,7 +567,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = LwipRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::new(FrozenClock);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         let outcome = run_multicast_session(
@@ -632,7 +632,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = LwipRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::new(FrozenClock);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // One queued Put on the reliable channel (pico Z_RELIABILITY_DEFAULT);
@@ -713,7 +713,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = LwipRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::new(FrozenClock);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // One queued DeclFinal reply for interest id 9 — the trivial terminal of a
@@ -824,7 +824,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = LwipRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::new(FrozenClock);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // A held local liveliness token at the queried keyexpr — the declarer
@@ -933,7 +933,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = LwipRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::new(FrozenClock);
         let self_params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
 
         // A registered queryable at the queried keyexpr — its handler stages one
@@ -1040,7 +1040,7 @@ mod tests {
 
         let mut driver = LwipMulticastDriver::new(socket, group, port);
         let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
-        let runtime = LwipRuntime::new(FrozenClock);
+        let runtime = CoopRuntime::new(FrozenClock);
         // A 64-byte batch budget forces the 200-byte payload to fragment (the
         // owned-push codec caps payloads, so 200 stays under the cap while
         // exceeding the batch — the AP fragmentation test's sizing).

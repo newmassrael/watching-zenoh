@@ -54,7 +54,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Cortex-M runtime + entry point. `critical-section-single-core` provides
-# the critical_section impl that wz-runtime-lwip::sync + the session-core
+# the critical_section impl that wz-runtime-coop::sync + the session-core
 # no_std portable-atomic backend require on Cortex-M.
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
@@ -70,7 +70,7 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 embedded-alloc = "0.6"
 
 # Atomic backend parity with the wz session stack (M3/M4/M7 get native
-# LDREX/STREX; the feature set mirrors the wz-runtime-lwip / session-core
+# LDREX/STREX; the feature set mirrors the wz-runtime-coop / session-core
 # declarations so cargo unifies one portable-atomic configuration).
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 

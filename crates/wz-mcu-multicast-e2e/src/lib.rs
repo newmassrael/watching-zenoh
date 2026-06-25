@@ -56,13 +56,13 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use wz::link_lwip::rx_sockets::{bind_session_multicast_rx, SESSION_MULTICAST_GROUP_DEFAULT};
-use wz::runtime_lwip::LwipRuntime;
+use wz::runtime_coop::CoopRuntime;
 use wz::session_lwip::multicast_drive::{run_multicast_session, LwipMulticastDriver};
 
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the bin depend only on THIS crate (single-dep facade
 // boundary) rather than reaching into the wz facade themselves.
-pub use wz::runtime_lwip::ClockSource;
+pub use wz::runtime_coop::ClockSource;
 // Re-export the link handle so the deploy bin constructs the `&LwipLink` this
 // function takes (a plain `LwipLink::init()`) without naming the wz facade —
 // the same single-dep boundary. (The host test instead builds a routed link
@@ -154,7 +154,7 @@ pub struct MulticastE2eReport {
 /// routing — `join_ok` comes back false on a QEMU loopback environment, true
 /// on real hardware with an IGMP netif).
 ///
-/// `clock_source` is the monotonic time the [`LwipRuntime`] reads. The host
+/// `clock_source` is the monotonic time the [`CoopRuntime`] reads. The host
 /// test passes a frozen clock (no JOIN-interval / lease deadline ever
 /// elapses, so the run is fully deterministic — the fragment chain is
 /// delivered FIFO over loopback and reassembles in order); the deploy bin
@@ -196,7 +196,7 @@ pub fn run_multicast_e2e<C: ClockSource>(link: &LwipLink, clock_source: C) -> Mu
 
     let mut driver = LwipMulticastDriver::new(socket, group, PORT);
     let mut dispatcher = MulticastDispatcher::<MAX_PEERS>::new(MulticastConfig::new(5_000));
-    let runtime = LwipRuntime::new(clock_source);
+    let runtime = CoopRuntime::new(clock_source);
     let mut self_params = params(SELF_ZID);
     self_params.batch_size = BATCH_SIZE;
 

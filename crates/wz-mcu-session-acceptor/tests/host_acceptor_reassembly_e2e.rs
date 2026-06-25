@@ -9,7 +9,7 @@
 //! reactive peer sends a two-fragment `T_MID_FRAGMENT` chain instead of one
 //! whole `T_MID_FRAME`. The acceptor decodes each fragment through the
 //! production `parse_inbound`, feeds it to the `ReassemblyDispatcher` ingest
-//! (the const-generic MCU `LwipReassembly<4, 4096>`) wired into the swept
+//! (the const-generic MCU `CoopReassembly<4, 4096>`) wired into the swept
 //! `wz_session_lwip::run_session` loop, and on chain completion re-parses the
 //! reassembled bytes through `parse_frame_payload` + dispatches the result as
 //! one `FramePayload` — exactly the steady-state data path

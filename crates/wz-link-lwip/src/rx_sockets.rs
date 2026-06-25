@@ -3,7 +3,7 @@
 
 //! R311ip — the MCU link tier's pool-sized receive sockets.
 //!
-//! This is the link-tier sibling of `wz-runtime-lwip::reassembly_rx`. Just
+//! This is the link-tier sibling of `wz-runtime-coop::reassembly_rx`. Just
 //! as that seam parameterizes the `ReassemblyDispatcher` const generics
 //! from the `reassembly_pool_mcu` buffer-pool SSOT, this module
 //! parameterizes the [`LwipUdpSocket`] const generics from the

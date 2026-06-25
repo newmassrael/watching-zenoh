@@ -17,7 +17,7 @@ target-agnostic.
 | File | Target | Runtime | Phase |
 |---|---|---|---|
 | ap_standalone.yaml | AP-only (x86_64 Linux) | `wz-runtime-tokio` (mio epoll, io_uring opt-in) | D.1 (pending Phase C closure) |
-| mcu_target.yaml | MCU-only (STM32H747 Cortex-M7) | `wz-runtime-lwip` (cooperative scheduler) | A–C track (zenoh-pico parity) |
+| mcu_target.yaml | MCU-only (STM32H747 Cortex-M7) | `wz-runtime-coop` (cooperative scheduler) | A–C track (zenoh-pico parity) |
 | ap_mcu_pair.yaml | Hybrid AP + MCU | Both runtimes paired | D.1 + A–C |
 
 Each skeleton's header comment lists the resolved

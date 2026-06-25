@@ -20,7 +20,7 @@
 #
 # Subsequent rounds will add:
 #   - wz-runtime-tokio       (R42+, sce_link_runtime_tokio impl)
-#   - wz-runtime-lwip        (R42+, sce_link_runtime_lwip C11 sibling)
+#   - wz-runtime-coop        (R42+, sce_link_runtime_lwip C11 sibling)
 #   - zenoh-pico-sys         (R41, FFI bindings to vendored zenoh-pico)
 #   - wz-integration-tests   (R41+, Layer 3 wire-interop test harness)
 #   - wz                     (R302a, top-level facade crate hosting the
@@ -72,7 +72,7 @@ members = [
     "wz-e2e-liveliness",
     "wz-e2e-liveliness-token",
     "wz-e2e-declare-observer",
-    "wz-runtime-lwip",
+    "wz-runtime-coop",
     "lwip-sys",
     "wz-link-lwip",
     "wz-session-lwip",
@@ -116,18 +116,18 @@ members = [
     # crate's responsibility (R311az-pre D7); lwip-sys ships only the
     # host build at R311az-1.
     #
-    # wz-runtime-lwip — R311au scope C reintroduction (Phase W).
+    # wz-runtime-coop — R311au scope C reintroduction (Phase W).
     # R53 NOP-stub skeleton was removed at R63 as a
     # document-around-the-hack pattern (NOP spawn + multi-paragraph
     # "intentionally NOP" justification). R311au lands a deliberately
     # narrower scope: sync primitive aliases ONLY
     # (`critical_section::Mutex<RefCell<T>>` per-runtime alias for the
-    # MCU profile half of the R311w decision). LwipRuntime + the
+    # MCU profile half of the R311w decision). CoopRuntime + the
     # `impl Runtime` half + the lwIP-sys FFI bridge stay deferred to
     # subsequent rounds; this reintroduction is production-honest
     # because every item shipped is a real working primitive (no NOP
     # spawn, no stubbed Runtime impl). See
-    # crates/wz-runtime-lwip/{Cargo.toml,src/lib.rs} for the full
+    # crates/wz-runtime-coop/{Cargo.toml,src/lib.rs} for the full
     # scope statement.
     #
     # The SCE B6 link C11 emitter end-to-end validation that the

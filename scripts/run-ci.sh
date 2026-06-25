@@ -138,7 +138,7 @@
 #              the workspace-mode unified resolver can mask). R311cx
 #              expansion: wz-ap-demo (R311cv original) + wz facade
 #              under preset-ap-client + wz-runtime-tokio default +
-#              wz-runtime-lwip default sync-only + wz-runtime-lwip
+#              wz-runtime-coop default sync-only + wz-runtime-coop
 #              with `--features alloc`. Five sub-lanes total; any
 #              failure short-circuits the whole layer.
 #   Layer C4b — wz facade arbitrary-incomplete-subset matrix (R311ek;
@@ -217,13 +217,13 @@
 #                  G.1 (R311ak) wz-runtime-core — §5.P trait skeleton
 #                  G.2 (R311am) wz facade no_std cfg_attr toggle
 #                  G.3 (R311aq) wz-codecs no_std + alloc — codec wire
-#                  G.4 (R311au) wz-runtime-lwip — sync alias #![no_std]
-#                  G.4-alloc (R311av) wz-runtime-lwip --features alloc
-#                                 (LwipRuntime + impl Runtime + LwipTime)
+#                  G.4 (R311au) wz-runtime-coop — sync alias #![no_std]
+#                  G.4-alloc (R311av) wz-runtime-coop --features alloc
+#                                 (CoopRuntime + impl Runtime + CoopTime)
 #                                 R311bb closed M0+ via portable-atomic
 #                                 polyfill — thumbv6m now lands.
-#                  G.5 (R311ax) wz facade --features runtime-lwip
-#                                 (composes wz-runtime-lwip through the
+#                  G.5 (R311ax) wz facade --features runtime-coop
+#                                 (composes wz-runtime-coop through the
 #                                 public facade surface; M0+ lands too
 #                                 post-R311bb).
 #                  G.6 (R311az-3c) WZ_LWIP_PORT cross-real lane —
@@ -244,7 +244,7 @@
 #              Per-target SKIP if the rustup target is not installed
 #              (no auto-install — keeps a developer machine without
 #              cross-compile interest free of the lane). Promoted to
-#              default in R311pt: the wz-runtime-lwip caller landed in
+#              default in R311pt: the wz-runtime-coop caller landed in
 #              R311av+, satisfying the promotion condition stated here.
 #              Out of scope today: zenoh-pico-sys (arm-none-eabi-gcc
 #              install carry, R311ao+). R40 wz-codecs carry resolved
@@ -279,8 +279,8 @@
 #              Each sub-lane SKIPs gracefully on toolchain absence.
 #              Phase W ladder FULL closure mantissa: composable-
 #              framework MCU stack RUNS on a non-host target end-to-
-#              end (wz facade + runtime-lwip + LwipRuntime timer
-#              queue + LwipJoinHandle::abort + wz-link-lwip UDP raw
+#              end (wz facade + runtime-coop + CoopRuntime timer
+#              queue + CoopJoinHandle::abort + wz-link-lwip UDP raw
 #              API + lwip-sys cross-real C build, all in one
 #              binary).
 #   Layer M  — active-scouting multicast loopback e2e (R311ep). Opt-in
@@ -1702,15 +1702,15 @@ layer_c1i_cargo_test_scouting() {
 # transport-link-tcp/udp + transport-unicast the open path needs stay on.
 # R311ih: also build-gates the no-alloc backing (scout_static on the
 # bounded seam composes without alloc) and the MCU runtime edge
-# (wz-runtime-lwip scouting-static = the facade -> runtime -> core funnel,
+# (wz-runtime-coop scouting-static = the facade -> runtime -> core funnel,
 # no-alloc + alloc). The thumb cross-compile of the same is Layer G.5.
 layer_c1k_cargo_test_scouting_static() {
     (cd crates \
         && cargo test -p wz-session-core --features scouting-static --lib scout_static --quiet \
         && cargo test -p wz-runtime-tokio --features scouting-static --test static_scout_open --quiet \
         && cargo build -p wz-session-core --no-default-features --features scouting-static --quiet \
-        && cargo build -p wz-runtime-lwip --features scouting-static --quiet \
-        && cargo build -p wz-runtime-lwip --features alloc,scouting-static --quiet)
+        && cargo build -p wz-runtime-coop --features scouting-static --quiet \
+        && cargo build -p wz-runtime-coop --features alloc,scouting-static --quiet)
 }
 
 # ─── Layer C1o — keyexpr matching composition gating BEHAVIOUR ───────
@@ -2094,7 +2094,7 @@ layer_c2_cargo_clippy() {
 # preset wiring regressions surface even if no consumer-binary catches
 # them yet), wz-runtime-tokio on its default feature bundle (the
 # largest single source of cfg combinations in the workspace), and
-# both wz-runtime-lwip lanes (default sync-only + `--features alloc`)
+# both wz-runtime-coop lanes (default sync-only + `--features alloc`)
 # so Phase W MCU profile feature combinations are caught the same way
 # the AP-tokio lane catches them.
 #
@@ -2117,8 +2117,8 @@ layer_c3_per_pkg_isolated_lint() {
             --all-targets --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --features transport-multicast,transport-fragmentation \
             --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-lwip --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-lwip --features alloc \
+        && cargo clippy -p wz-runtime-coop --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-coop --features alloc \
             --all-targets --quiet -- -D warnings)
 }
 
@@ -2127,7 +2127,7 @@ layer_c3_per_pkg_isolated_lint() {
 # R311eb: the wz facade exposes 7 named presets (the user-facing
 # composition surface — `mnemosyne.toml` north-star "compose a profile,
 # not a feature soup"). C3 builds only `preset-ap-client`; Layer G
-# cross-compiles the facade under its default / runtime-lwip bundles.
+# cross-compiles the facade under its default / runtime-coop bundles.
 # Neither guards the OTHER presets' feature lists from drift — a preset
 # that references a renamed/removed feature, or selects an incoherent
 # combo that no longer type-checks, would pass CI invisibly. This lane
@@ -2748,15 +2748,15 @@ layer_f_codec_footprint() {
 # first gate (R311ak) — wz-runtime-core is the §5.P
 # runtime-services-tier entry crate (R251) and must build for an
 # MCU target so the no_std/MCU half of the composable framework
-# stays mechanically truthful as concrete impls (wz-runtime-lwip +
+# stays mechanically truthful as concrete impls (wz-runtime-coop +
 # extern lwIP symbols) land in R311al+. SKIPs gracefully if the
 # rustup target is not installed so a host-only developer machine
 # is not forced to install a cross-compile toolchain just to run
-# the default lanes. Promoted to default once the wz-runtime-lwip
+# the default lanes. Promoted to default once the wz-runtime-coop
 # caller lands and the cross-compile path has a real consumer
 # (concrete-impls-land-alongside-real-callers, R63 lesson).
 layer_g_cross_compile_cortex_m() {
-    # Default gate (R311pt — opt-in axis retired; the wz-runtime-lwip
+    # Default gate (R311pt — opt-in axis retired; the wz-runtime-coop
     # caller landed in R311av+, satisfying the "promote to default once a
     # real cross-compile consumer exists" condition stated below). The
     # per-target + no-targets-installed graceful SKIPs further down keep a
@@ -2808,44 +2808,44 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.3 wz-codecs $t FAIL" >&2
             fail=1
         fi
-        # G.4 (R311au scope C) wz-runtime-lwip — Phase W MCU profile
+        # G.4 (R311au scope C) wz-runtime-coop — Phase W MCU profile
         # sync primitive aliases (critical_section::Mutex<RefCell<T>>
         # binding). #![no_std] sync surface, no alloc; covers every
         # Phase W rustup target including Cortex-M0+ (thumbv6m).
-        if (cd crates && cargo build -p wz-runtime-lwip \
+        if (cd crates && cargo build -p wz-runtime-coop \
             --target "$t" --quiet); then
-            echo "  G.4 wz-runtime-lwip $t OK"
+            echo "  G.4 wz-runtime-coop $t OK"
         else
-            echo "  G.4 wz-runtime-lwip $t FAIL" >&2
+            echo "  G.4 wz-runtime-coop $t FAIL" >&2
             fail=1
         fi
-        # G.4-alloc (R311av + R311bb) wz-runtime-lwip --features alloc.
-        # LwipRuntime self-rolled cooperative task pool + impl Runtime
-        # + LwipTime impl TimeSource. R311bb closed the M0+ gap via
+        # G.4-alloc (R311av + R311bb) wz-runtime-coop --features alloc.
+        # CoopRuntime self-rolled cooperative task pool + impl Runtime
+        # + CoopTime impl TimeSource. R311bb closed the M0+ gap via
         # portable-atomic{,-util}: thumbv6m no longer SKIPs because
         # the crate::atomic alias module substitutes
         # portable_atomic_util::Arc + portable_atomic::Atomic* on
         # targets without native CAS. The polyfill rides on the same
         # critical_section impl the deploy crate supplies for
         # sync::Mutex, so no extra runtime mechanism is layered on.
-        if (cd crates && cargo build -p wz-runtime-lwip \
+        if (cd crates && cargo build -p wz-runtime-coop \
             --target "$t" --features alloc --quiet); then
-            echo "  G.4-alloc wz-runtime-lwip $t OK"
+            echo "  G.4-alloc wz-runtime-coop $t OK"
         else
-            echo "  G.4-alloc wz-runtime-lwip $t FAIL" >&2
+            echo "  G.4-alloc wz-runtime-coop $t FAIL" >&2
             fail=1
         fi
-        # G.5 (R311ax + R311bb) wz facade --features runtime-lwip.
-        # Composes wz-runtime-lwip via the public facade surface so a
-        # consumer enabling `runtime-lwip` finds `wz::runtime_lwip::*`
+        # G.5 (R311ax + R311bb) wz facade --features runtime-coop.
+        # Composes wz-runtime-coop via the public facade surface so a
+        # consumer enabling `runtime-coop` finds `wz::runtime_coop::*`
         # cross-compiled on every Phase W target. R311bb removed the
         # M0+ SKIP that inherited from G.4-alloc.
         if (cd crates && cargo build -p wz \
             --target "$t" --no-default-features \
-            --features runtime-lwip --quiet); then
-            echo "  G.5 wz facade runtime-lwip $t OK"
+            --features runtime-coop --quiet); then
+            echo "  G.5 wz facade runtime-coop $t OK"
         else
-            echo "  G.5 wz facade runtime-lwip $t FAIL" >&2
+            echo "  G.5 wz facade runtime-coop $t FAIL" >&2
             fail=1
         fi
         # G.6 (R311az-3c) WZ_LWIP_PORT cross-real lane — verifies the
@@ -2873,7 +2873,7 @@ layer_g_cross_compile_cortex_m() {
                 WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
                 cargo build -p wz \
                     --target "$t" --no-default-features \
-                    --features runtime-lwip --quiet); then
+                    --features runtime-coop --quiet); then
             echo "  G.6 cross-real lwip-sys $t OK"
         else
             echo "  G.6 cross-real lwip-sys $t FAIL" >&2
@@ -2882,7 +2882,7 @@ layer_g_cross_compile_cortex_m() {
         # G.7 (R311ih) static-scouting synth on the MCU profile. Proves
         # the scout_static bounded-seam synth composes no-alloc on every
         # Phase W target (the §2.4.3 reason #2 claim — static mode is for
-        # tiny static-only deploys), and that the facade -> wz-runtime-lwip
+        # tiny static-only deploys), and that the facade -> wz-runtime-coop
         # -> wz-session-core funnel cross-compiles with scouting-static on.
         # No-alloc: the synth builds onto BoundedVec/BoundedString, so it
         # rides every target including thumbv6m (Cortex-M0+). (Since R311ja
@@ -2892,7 +2892,7 @@ layer_g_cross_compile_cortex_m() {
             --target "$t" --no-default-features --features scouting-static --quiet) \
            && (cd crates && cargo build -p wz \
             --target "$t" --no-default-features \
-            --features runtime-lwip,scouting-static --quiet); then
+            --features runtime-coop,scouting-static --quiet); then
             echo "  G.7 scouting-static MCU synth $t OK"
         else
             echo "  G.7 scouting-static MCU synth $t FAIL" >&2
@@ -2915,9 +2915,9 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.8 reassembly MCU $t FAIL" >&2
             fail=1
         fi
-        # G.9 (R311in carry[3]) wz-runtime-lwip reassembly seam on the MCU
+        # G.9 (R311in carry[3]) wz-runtime-coop reassembly seam on the MCU
         # profile. Proves the live MCU reassembly consumer (reassembly_rx:
-        # LwipReassembly + mcu_reassembly() over the SCE buffer-pool SSOT
+        # CoopReassembly + mcu_reassembly() over the SCE buffer-pool SSOT
         # reassembly_pool_mcu.scxml) cross-compiles no_std + no-alloc on
         # every Phase W target. The bottom-up MCU consumer of the
         # ReassemblyDispatcher that G.8 only build-checked at the
@@ -2925,17 +2925,17 @@ layer_g_cross_compile_cortex_m() {
         # 4ec1aa642 metadata elision + fragment.chunk payload-field
         # removal) is SRAM-resident. No alloc: the seam stages into inline
         # BoundedVec, so it rides every target including thumbv6m (M0+).
-        if (cd crates && cargo build -p wz-runtime-lwip \
+        if (cd crates && cargo build -p wz-runtime-coop \
             --target "$t" --features reassembly --quiet); then
             echo "  G.9 reassembly seam MCU $t OK"
         else
             echo "  G.9 reassembly seam MCU $t FAIL" >&2
             fail=1
         fi
-        # G.10 (Stage 4a) wz-runtime-lwip --features session-unicast.
-        # Proves the session-tier `impl SessionRuntime for LwipRuntime`
-        # link-sink binding + the `SessionLinkActions<LwipRuntime<C>,
-        # LwipTime<C>>` type-check (the precondition the MCU sync drive
+        # G.10 (Stage 4a) wz-runtime-coop --features session-unicast.
+        # Proves the session-tier `impl SessionRuntime for CoopRuntime`
+        # link-sink binding + the `SessionLinkActions<CoopRuntime<C>,
+        # CoopTime<C>>` type-check (the precondition the MCU sync drive
         # loop consumer depends on) cross-compile on the alloc-capable
         # MCU targets — INCLUDING thumbv6m (Cortex-M0/M0+) since R311ja. The
         # session_actions bundle handle was lifted from a hard-coded
@@ -2945,7 +2945,7 @@ layer_g_cross_compile_cortex_m() {
         # so session-unicast no longer needs `target_has_atomic = "ptr"` and
         # cross-compiles on ARMv6-M. This IS the no-alloc M0 session reach the
         # prior rounds deferred; M3/M4/M7/M33 + RISC-V IMAC keep building too.
-        if (cd crates && cargo build -p wz-runtime-lwip \
+        if (cd crates && cargo build -p wz-runtime-coop \
             --target "$t" --features session-unicast --quiet); then
             echo "  G.10 session-unicast MCU $t OK"
         else
@@ -3089,7 +3089,7 @@ layer_g_cross_compile_cortex_m() {
 # by cortex-m-rt 0.7's default reset path; microbit / Cortex-M0
 # deferred until the demo migrates from `core::sync::atomic::*` to
 # portable-atomic AtomicU32, since ARMv6-M has no native LDREX/STREX
-# and the polyfill is at the wz-runtime-lwip layer, not main.rs.)
+# and the polyfill is at the wz-runtime-coop layer, not main.rs.)
 #
 # Sub-lane shape:
 #
@@ -3108,8 +3108,8 @@ layer_g_cross_compile_cortex_m() {
 #
 # Phase W ladder FULL closure mantissa: composable-framework MCU
 # stack runs end-to-end on three M-class cores (wz facade +
-# runtime-lwip + LwipRuntime timer queue (R311bc) +
-# LwipJoinHandle::abort surface (R311bd) + wz-link-lwip UDP raw API
+# runtime-coop + CoopRuntime timer queue (R311bc) +
+# CoopJoinHandle::abort surface (R311bd) + wz-link-lwip UDP raw API
 # (R311az-2) + lwip-sys cross-real build (R311az-1) + R311bf's
 # SystickClock ClockSource composed in one binary per target).
 layer_q_qemu_mcu_e2e() {
@@ -3207,7 +3207,7 @@ layer_q_qemu_mcu_e2e() {
     # `LwipUdpSocket<128, 2>` (~280 B rx queue versus 12 KB at
     # default `<1500, 8>`). The change closed the
     # north-star phase 1 anchor (preset-mcu-minimal truthfulness)
-    # while keeping the wz facade `runtime-lwip` surface intact —
+    # while keeping the wz facade `runtime-coop` surface intact —
     # mps2 lanes still build + run the async + spawn path.
     local sub_lanes=(
         "microbit:cortex-m0:thumbv6m-none-eabi:run"

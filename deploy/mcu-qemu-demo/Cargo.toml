@@ -11,17 +11,17 @@
 # target. Brings together every Phase W primitive that landed
 # R311au → R311bd:
 #
-#   - wz facade (`runtime-lwip` feature) — composable framework
-#     surface; pulls `wz-runtime-lwip` + `wz-link-lwip` via the
+#   - wz facade (`runtime-coop` feature) — composable framework
+#     surface; pulls `wz-runtime-coop` + `wz-link-lwip` via the
 #     `lwip_real_build` cfg propagated from `lwip-sys`.
-#   - `LwipRuntime<SystickClockRef>` (R311av + R311bc; R311bf
+#   - `CoopRuntime<SystickClockRef>` (R311av + R311bc; R311bf
 #     migrated DwtClock → SystickClockRef) — cooperative task
 #     pool with deadline-keyed timer queue; SysTick supplies
 #     monotonic time on every M-class core including QEMU's
 #     Cortex-M3 emulation (which lacks DWT CYCCNT).
-#   - `LwipTime::new(&runtime)` (R311bc breaking sig) — time
+#   - `CoopTime::new(&runtime)` (R311bc breaking sig) — time
 #     source sharing the runtime's Arc<RuntimeInner<C>>.
-#   - `LwipJoinHandle::abort` (R311bd) — exposed but not exercised
+#   - `CoopJoinHandle::abort` (R311bd) — exposed but not exercised
 #     by the smoke (success path completes naturally).
 #   - `wz-link-lwip` `LwipLink::init` + `LwipUdpSocket::bind/
 #     send_to/try_recv` (R311az-2) — UDP raw API wrap.
@@ -38,7 +38,7 @@
 # # Smoke shape
 #
 # `main()` initialises a 256 KB heap from BSS, enables the DWT
-# cycle counter, constructs `LwipRuntime::new(DwtClock)` +
+# cycle counter, constructs `CoopRuntime::new(DwtClock)` +
 # `LwipLink::init()`, binds a UDP socket on port 5555, spawns a
 # task that sends a payload to 127.0.0.1:5555 and polls
 # `try_recv()` for the echo. On success the task writes
@@ -82,7 +82,7 @@ edition = "2021"
 rust-version = "1.81"
 license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
-description = "R311be QEMU mps2-an385 UDP loopback e2e demo (Cortex-M3 + wz facade + wz-link-lwip + wz-runtime-lwip; R311bf SysTick-clock fix)."
+description = "R311be QEMU mps2-an385 UDP loopback e2e demo (Cortex-M3 + wz facade + wz-link-lwip + wz-runtime-coop; R311bf SysTick-clock fix)."
 
 [[bin]]
 name = "mcu-qemu-demo"
@@ -91,7 +91,7 @@ path = "src/main.rs"
 [dependencies]
 # Cortex-M runtime + entry point. cortex-m's
 # `critical-section-single-core` feature provides the
-# critical-section impl that `wz-runtime-lwip::sync` + the
+# critical-section impl that `wz-runtime-coop::sync` + the
 # `portable-atomic` polyfill (R311bb) require on Cortex-M.
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
@@ -113,11 +113,11 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 embedded-alloc = "0.6"
 
 # R311bm-m0 — portable-atomic polyfill, kept for atomic-backend feature
-# unification across wz-runtime-lwip + wz-mcu-clock on Cortex-M0+
+# unification across wz-runtime-coop + wz-mcu-clock on Cortex-M0+
 # (thumbv6m-none-eabi) where native LDREX/STREX are absent (R311y21 moved
 # the SystickClock itself into wz-mcu-clock, whose AtomicU64 reload
 # counter + monotonic floor route through this same `fallback` +
-# `critical-section` feature set). Mirrors the R311bb wz-runtime-lwip
+# `critical-section` feature set). Mirrors the R311bb wz-runtime-coop
 # adoption pattern: portable-atomic uses the cortex-m crate's
 # `critical-section-single-core` impl on no-CAS targets and native
 # intrinsics on M3/M4/M7.
@@ -128,11 +128,11 @@ portable-atomic = { version = "1", default-features = false, features = ["fallba
 # only the static + #[exception] + sys_now + the ClockSource impl around it.
 wz-mcu-clock = { path = "../../crates/wz-mcu-clock" }
 
-# wz facade — the composable-framework entry point. `runtime-lwip`
-# feature pulls wz-runtime-lwip + wz-link-lwip. Cross-workspace
+# wz facade — the composable-framework entry point. `runtime-coop`
+# feature pulls wz-runtime-coop + wz-link-lwip. Cross-workspace
 # path dep into `crates/wz`; cargo resolves wz's workspace
 # inheritance against `crates/Cargo.toml` independently.
-wz = { path = "../../crates/wz", default-features = false, features = ["runtime-lwip"] }
+wz = { path = "../../crates/wz", default-features = false, features = ["runtime-coop"] }
 
 [profile.release]
 # LTO + abort-on-panic shrink the binary so it fits the mps2-an386

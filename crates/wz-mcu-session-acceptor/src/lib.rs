@@ -57,7 +57,7 @@ use core::cell::RefCell;
 
 use wz::link_lwip::rx_sockets::{bind_session_rx, SESSION_RX_SLOT_SIZE};
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
-use wz::runtime_lwip::{LwipRuntime, LwipTime};
+use wz::runtime_coop::{CoopRuntime, CoopTime};
 use wz::session_lwip::driver::SharedSessionSocket;
 use wz::session_lwip::{run_session, LwipUdpDriver, SessionDriveConfig, SessionRole};
 #[cfg(feature = "reassembly")]
@@ -67,7 +67,7 @@ use wz_session_wire_fixtures::{craft_frame_wire, craft_initsyn_wire, craft_opens
 // Re-export the trait a consumer must impl to supply monotonic time, so the
 // host test and the QEMU bin depend only on THIS crate (single-dep facade
 // boundary) rather than reaching into the wz facade themselves.
-pub use wz::runtime_lwip::ClockSource;
+pub use wz::runtime_coop::ClockSource;
 // Re-export the drop-reason enum so a host test can assert the SPECIFIC
 // reason (e.g. OutOfOrder) carried on a `ReassemblyDropped` event, not just
 // that some drop happened.
@@ -246,7 +246,7 @@ enum PeerPhase {
 
 /// Drive the acceptor session e2e to a verdict.
 ///
-/// `clock_source` is the monotonic time the [`LwipRuntime`] and the lease
+/// `clock_source` is the monotonic time the [`CoopRuntime`] and the lease
 /// comparator read. The host test passes a frozen clock (no deadline ever
 /// fires, so the run is fully deterministic); the QEMU bin passes its
 /// SysTick clock (real ms, but the handshake completes in a few iterations,
@@ -303,16 +303,16 @@ pub fn run_acceptor_e2e<C: ClockSource, H: FnMut()>(
         LwipUdpSocket::bind(&link, PEER_PORT).expect("bind peer socket");
 
     // ── The session machinery (shared SSOT). The actions' clock MUST share
-    //    an epoch with the loop clock (R263): build one LwipTime, clone it
+    //    an epoch with the loop clock (R263): build one CoopTime, clone it
     //    into the actions, pass the original to run_session.
-    let runtime = LwipRuntime::new(clock_source);
-    let clock = LwipTime::new(&runtime);
+    let runtime = CoopRuntime::new(clock_source);
+    let clock = CoopTime::new(&runtime);
     let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
-    // R311ja — annotate `R = LwipRuntime<C>` explicitly: `new_generic` now
+    // R311ja — annotate `R = CoopRuntime<C>` explicitly: `new_generic` now
     // returns the non-injective `R::ActionsHandle<T>` (this profile's `Rc` —
     // the no-alloc M0 handle), so the `Rc<dyn _>` driver arg cannot back-infer
     // `R`. The `Rc` (not `Arc`) is exactly what lets this stack reach ARMv6-M.
-    let actions = SessionLinkActions::<LwipRuntime<C>, LwipTime<C>>::new_generic(
+    let actions = SessionLinkActions::<CoopRuntime<C>, CoopTime<C>>::new_generic(
         driver_sink,
         acceptor_params(),
         clock.clone(),

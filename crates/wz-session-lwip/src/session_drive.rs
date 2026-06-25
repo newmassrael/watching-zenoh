@@ -21,8 +21,8 @@
 //!   `link_driver().send_blocking` -> [`LwipUdpDriver`]'s `socket.send_to`.
 
 use wz_link_lwip::LwipLink;
+use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_runtime_core::TimeSource;
-use wz_runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
 #[cfg(feature = "transport-keepalive")]
 use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
 use wz_session_core::drive::{
@@ -35,7 +35,7 @@ use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::{HandshakeDeadlineTracker, SessionTimeouts};
 
 #[cfg(feature = "reassembly")]
-use wz_runtime_lwip::reassembly_rx::mcu_reassembly;
+use wz_runtime_coop::reassembly_rx::mcu_reassembly;
 #[cfg(feature = "reassembly")]
 use wz_session_core::drive::report_outcome_reassembling;
 // R311mh — sweep_reporting moved drive -> reassembly_dispatch (pure reassembly
@@ -97,7 +97,7 @@ pub struct SessionDriveConfig {
 /// `engine.is_in_final_state()`.
 ///
 /// Parameters:
-/// - `runtime` — the [`LwipRuntime`] whose `run_until_idle` is pumped each
+/// - `runtime` — the [`CoopRuntime`] whose `run_until_idle` is pumped each
 ///   tick (spawned keepalive workers + deadline-keyed timers).
 /// - `link` — the [`LwipLink`]; `poll_loopback` + `check_timeouts` drive the
 ///   lwIP input path each tick. This is the loopback / QEMU shape — a real
@@ -107,7 +107,7 @@ pub struct SessionDriveConfig {
 ///   the outbound send seam.
 /// - `actions` — the session action bundle; its `clock` MUST share an epoch
 ///   with `clock` (R263) so the lease comparator's `now_ms` and the recorded
-///   keepalive / established stamps agree. Build one [`LwipTime`], clone it
+///   keepalive / established stamps agree. Build one [`CoopTime`], clone it
 ///   into `new_generic`, pass the original here.
 /// - `config` — the static run parameterization ([`SessionDriveConfig`]:
 ///   handshake-deadline budget, FSM activation role, test iteration cap),
@@ -115,11 +115,11 @@ pub struct SessionDriveConfig {
 /// - `on_event` — the per-iteration observer (`Poll` with the decoded
 ///   `FramePayload` batch the application dispatches, or `Lease`).
 pub fn run_session<C, F>(
-    runtime: &LwipRuntime<C>,
+    runtime: &CoopRuntime<C>,
     link: &LwipLink,
     driver: &alloc::rc::Rc<LwipUdpDriver>,
-    actions: &alloc::rc::Rc<SessionLinkActions<LwipRuntime<C>, LwipTime<C>>>,
-    clock: &LwipTime<C>,
+    actions: &alloc::rc::Rc<SessionLinkActions<CoopRuntime<C>, CoopTime<C>>>,
+    clock: &CoopTime<C>,
     config: SessionDriveConfig,
     mut on_event: F,
 ) -> DriverOutcome
@@ -316,7 +316,7 @@ mod tests {
             std::assert_eq!(dg.src_port, port);
         }
 
-        // (2) The full loop machinery composes over the live LwipRuntime +
+        // (2) The full loop machinery composes over the live CoopRuntime +
         // the real SessionLinkActions + the LwipUdpDriver: an acceptor with
         // no inbound peer and a frozen clock ticks the sync loop and returns
         // IterationLimit (no deadline fires, no final state reached). The
@@ -329,14 +329,14 @@ mod tests {
             ));
             let driver = Rc::new(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
 
-            let runtime = LwipRuntime::new(FrozenClock);
-            let clock = LwipTime::new(&runtime);
+            let runtime = CoopRuntime::new(FrozenClock);
+            let clock = CoopTime::new(&runtime);
             let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
-            // R311ja — `R = LwipRuntime<FrozenClock>` annotated: `new_generic`
+            // R311ja — `R = CoopRuntime<FrozenClock>` annotated: `new_generic`
             // returns the non-injective `R::ActionsHandle<T>` (lwIP `Rc`), so
             // the `Rc<dyn _>` driver arg cannot back-infer `R`.
             let actions =
-                SessionLinkActions::<LwipRuntime<FrozenClock>, LwipTime<FrozenClock>>::new_generic(
+                SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                     driver_sink,
                     test_params(),
                     clock.clone(),

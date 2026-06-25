@@ -29,7 +29,7 @@
 # facade dep (`codec-init-body` / `codec-open-body` / `codec-frame` /
 # `session-unicast-accept` / ...). That is the composable-framework
 # north star: the e2e proves the MCU session handshake composes through
-# the same facade -> runtime-lwip -> session-core funnel a real deploy
+# the same facade -> runtime-coop -> session-core funnel a real deploy
 # uses (Stage 5 wired that funnel; the AP side has always used the
 # mirror funnel through wz-runtime-tokio). The low-level session types
 # the facade does not re-export (SessionLinkActions / SessionInitParams /
@@ -63,9 +63,9 @@ path = "src/lib.rs"
 
 [dependencies]
 # The composable-framework boundary. `session-lwip` lights up
-# `wz::{session_lwip, link_lwip, runtime_lwip}` together with the
+# `wz::{session_lwip, link_lwip, runtime_coop}` together with the
 # lwip_real_build cfg; the codec + role atomic features wire the session
-# handshake through the Stage-5 facade -> runtime-lwip -> session-core
+# handshake through the Stage-5 facade -> runtime-coop -> session-core
 # funnel. transport-keepalive is intentionally omitted: the e2e proves
 # handshake + Frame dispatch, not the Established keepalive cadence, so
 # no keepalive worker is spawned onto the cooperative loop.
@@ -102,7 +102,7 @@ wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
 [features]
 # Tier B transport reassembly. Threads `wz/reassembly` (the facade atomic
-# feature -> wz-session-lwip/reassembly -> wz-runtime-lwip + wz-session-core)
+# feature -> wz-session-lwip/reassembly -> wz-runtime-coop + wz-session-core)
 # so `run_acceptor_e2e(.., DataMode::FragmentChain)` exercises the
 # `ReassemblyDispatcher` ingest + sweep on the MCU session loop. Off by
 # default: the Stage 5 whole-frame e2e (host_acceptor_e2e + the default QEMU
@@ -118,7 +118,7 @@ reassembly = ["wz/reassembly", "wz-session-core/reassembly"]
 buffer-pool-session-rx-slim = ["wz/buffer-pool-session-rx-slim"]
 
 [dev-dependencies]
-# critical-section's std impl backs LwipRuntime's critical_section::Mutex
+# critical-section's std impl backs CoopRuntime's critical_section::Mutex
 # on the host integration-test path (the QEMU bin supplies the cortex-m
 # impl at final-binary link instead).
 critical-section = { version = "1", features = ["std"] }

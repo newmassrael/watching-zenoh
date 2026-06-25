@@ -45,7 +45,7 @@
 # (`session-lwip` / `transport-multicast` / `transport-fragmentation` /
 # `codec-push`) — the composable-framework north star: the e2e proves the
 # MCU multicast profile composes through the same facade -> session-lwip ->
-# runtime-lwip -> session-core funnel a real deploy uses (the R311mg lesson:
+# runtime-coop -> session-core funnel a real deploy uses (the R311mg lesson:
 # the facade is the composition surface, not the crate). The low-level
 # multicast types the facade does not re-export (MulticastParams /
 # MulticastDispatcher / multicast_tx_emit / encode_join) come from a direct
@@ -80,10 +80,10 @@ path = "src/lib.rs"
 
 [dependencies]
 # The composable-framework boundary. `session-lwip` lights up
-# `wz::{session_lwip, link_lwip, runtime_lwip}` together with the
+# `wz::{session_lwip, link_lwip, runtime_coop}` together with the
 # lwip_real_build cfg; transport-multicast / transport-fragmentation /
 # codec-push wire the full multicast profile through the facade ->
-# session-lwip -> runtime-lwip -> session-core funnel. transport-
+# session-lwip -> runtime-coop -> session-core funnel. transport-
 # fragmentation implies reassembly, so the inbound Fragment RX arm + the
 # outbound fragment split both light up.
 wz = { path = "../wz", default-features = false, features = [
@@ -116,7 +116,7 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 lwip-sys = { path = "../lwip-sys" }
 
 [dev-dependencies]
-# critical-section's std impl backs LwipRuntime's critical_section::Mutex on
+# critical-section's std impl backs CoopRuntime's critical_section::Mutex on
 # the host integration-test path (the deploy bin supplies the cortex-m impl
 # at final-binary link instead).
 critical-section = { version = "1", features = ["std"] }

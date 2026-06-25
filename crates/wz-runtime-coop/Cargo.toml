@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# wz-runtime-lwip — Phase W MCU profile entry.
+# wz-runtime-coop — Phase W MCU profile entry.
 #
 # R311au scope (C) shipped the sync primitive aliases
 # (`critical_section::Mutex<RefCell<T>>`). R311av builds on top by
-# landing the `impl Runtime for LwipRuntime` surface behind the
+# landing the `impl Runtime for CoopRuntime` surface behind the
 # `alloc` feature gate: a self-rolled cooperative task pool (see
-# `src/executor.rs`) + `LwipJoinHandle` (`src/join_handle.rs`) + an
-# own `ClockSource` trait + `LwipTime` (`src/time.rs`) that satisfy
+# `src/executor.rs`) + `CoopJoinHandle` (`src/join_handle.rs`) + an
+# own `ClockSource` trait + `CoopTime` (`src/time.rs`) that satisfy
 # the §5.P runtime-services-tier contract authored in
 # `wz-runtime-core`. The R311av-pre ledger records the 8 design
 # decisions that the executor obeys (Pin<Box<dyn Future + Send>>;
-# per-LwipRuntime `Arc<ExecutorState>`; `Vec<Option<TaskSlot>>`
-# storage; custom RawWaker + per-task atomic wake_flag; LwipRuntime:
+# per-CoopRuntime `Arc<ExecutorState>`; `Vec<Option<TaskSlot>>`
+# storage; custom RawWaker + per-task atomic wake_flag; CoopRuntime:
 # Clone for nested spawn; JoinHandle = Arc<sync::Mutex<RefCell<
 # JoinState<T>>>>; own ClockSource only with embedded-time rejected;
 # abort deferred to R311az+).
@@ -31,21 +31,21 @@
 #     + slot configuration, no compile-time hard cap from a static
 #     slot array).
 #   - C-side lwIP integration is a link-tier (§5.C) concern, not a
-#     runtime-services-tier (§5.P) concern; `LwipRuntime` is
+#     runtime-services-tier (§5.P) concern; `CoopRuntime` is
 #     link/transport agnostic and a future `wz-link-lwip` crate
 #     will bridge the lwIP TCP/UDP API to the async wire surface.
 #
 # Why this differs from the R53/R58 NOP-stub history (R63 retrospect):
 #
-#   - R53 shipped LwipRuntime::spawn as a NOP that discarded the
+#   - R53 shipped CoopRuntime::spawn as a NOP that discarded the
 #     future; R58 reframed it as a "Phase W deferred skeleton" with a
 #     multi-paragraph "intentionally NOP" doc-comment. R63 reverted
 #     both as document-around-the-hack patterns.
-#   - R311av ships only real impls. `LwipRuntime::spawn` actually
+#   - R311av ships only real impls. `CoopRuntime::spawn` actually
 #     queues the future into a `Vec<Option<TaskSlot>>` and polls it
-#     on `run_until_idle`; `LwipJoinHandle::poll` actually checks
+#     on `run_until_idle`; `CoopJoinHandle::poll` actually checks
 #     the shared `JoinState<T>` for a result and registers a waker;
-#     `LwipTime::now_monotonic_ms` reads the user-supplied
+#     `CoopTime::now_monotonic_ms` reads the user-supplied
 #     `ClockSource` and divides by 1000. No `unimplemented!()`, no
 #     silently-dropped futures, no doc-only "intentionally NOP".
 #
@@ -55,7 +55,7 @@
 # executor + Runtime impl surface.
 
 [package]
-name = "wz-runtime-lwip"
+name = "wz-runtime-coop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -63,19 +63,19 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Phase W MCU profile runtime (R311av cooperative task pool; LwipRuntime + LwipTime impl Runtime + TimeSource via own ClockSource trait)."
+description = "Phase W MCU profile runtime (R311av cooperative task pool; CoopRuntime + CoopTime impl Runtime + TimeSource via own ClockSource trait)."
 
 [lib]
-name = "wz_runtime_lwip"
+name = "wz_runtime_coop"
 path = "src/lib.rs"
 
-# R311av — `alloc` feature gates the LwipRuntime + LwipTime + executor
+# R311av — `alloc` feature gates the CoopRuntime + CoopTime + executor
 # + JoinHandle modules. Default-off keeps the R311au scope (C) sync-
 # alias build path (no_std, no alloc) intact: a `cargo build -p
-# wz-runtime-lwip` with default features still pulls only the sync
+# wz-runtime-coop` with default features still pulls only the sync
 # primitives + critical-section, matching the R311au Layer G.4 lane.
 # `--features alloc` adds the cooperative task pool executor and the
-# `impl Runtime for LwipRuntime` surface that R311av lands; the
+# `impl Runtime for CoopRuntime` surface that R311av lands; the
 # wz-runtime-core dep is feature-gated so the no-alloc build stays
 # trait-skeleton-free.
 [features]
@@ -96,7 +96,7 @@ alloc = [
 # runtime reaches the runtime-agnostic core (wz-session-core) the same way
 # the AP runtime (wz-runtime-tokio) does: facade -> runtime -> core. This
 # is the first capability across that edge, chosen because the static
-# locator synth (`scout_static`) is runtime-agnostic (no LwipRuntime
+# locator synth (`scout_static`) is runtime-agnostic (no CoopRuntime
 # binding needed) and no-alloc-capable (bounded seam), so it composes on
 # the no-alloc MCU profile where static mode is most valuable
 # (docs/scouting-fsm.md §2.4.3 reason #2 SRAM elision). Pulls the optional
@@ -107,7 +107,7 @@ scouting-static = ["dep:wz-session-core", "wz-session-core/scouting-static"]
 # R311in carry[3] — transport reassembly (Tier B) on the MCU profile.
 # The MCU mirror of wz-runtime-tokio's `reassembly` feature: forwards to
 # wz-session-core's `reassembly` capability AND its `no_std` profile
-# selector (the heapless sce-rust-runtime — wz-runtime-lwip is always
+# selector (the heapless sce-rust-runtime — wz-runtime-coop is always
 # #![no_std]). No `alloc` requirement: the ReassemblyDispatcher stages
 # into inline BoundedVec buffers, so the live MCU reassembly seam
 # (`reassembly_rx`) composes on the no-alloc profile. The no_std
@@ -129,9 +129,9 @@ reassembly = [
 # Vec/String/HashMap fields + the `Arc<SessionLinkActions>` handle).
 # Requires the crate's own `alloc` feature: the `SessionRuntime` binding
 # stores the link sink as `alloc::rc::Rc<dyn BoxedLinkDriver>` and the
-# `impl SessionRuntime for LwipRuntime` sits atop the alloc-gated
-# `impl Runtime for LwipRuntime`. First lands the `SessionRuntime`
-# binding so `SessionLinkActions<LwipRuntime<C>, LwipTime<C>>`
+# `impl SessionRuntime for CoopRuntime` sits atop the alloc-gated
+# `impl Runtime for CoopRuntime`. First lands the `SessionRuntime`
+# binding so `SessionLinkActions<CoopRuntime<C>, CoopTime<C>>`
 # type-checks; the sync drive-loop consumer (`session_drive`) reading
 # real lwIP UDP follows.
 session-unicast = [
@@ -146,7 +146,7 @@ session-unicast = [
 # These are the MCU mirror of wz-runtime-tokio's same-named forwarders: the
 # AP facade routes `codec-init-body` etc. through `wz-runtime-tokio?/<f>` to
 # `wz-session-core/<f>`; the MCU facade routes the same atomic feature
-# through `wz-runtime-lwip?/<f>` here, the uniform facade -> runtime -> core
+# through `wz-runtime-coop?/<f>` here, the uniform facade -> runtime -> core
 # funnel already established for `scouting-static` / `reassembly` /
 # `session-unicast`. Without these, the `session-unicast` FSM compiles on the
 # MCU profile but `dispatch_link_event` carries no Init/Open/Frame/KeepAlive/
@@ -179,7 +179,7 @@ keyexpr-dollar-star = ["dep:wz-session-core", "wz-session-core/keyexpr-dollar-st
 keyexpr-includes = ["dep:wz-session-core", "wz-session-core/keyexpr-includes"]
 
 # R311y22b — no [build-dependencies]: the reassembly buffer-pool codegen moved
-# to the committed out/wz-runtime-lwip/reassembly_pool_mcu.rs via the `xtask`
+# to the committed out/wz-runtime-coop/reassembly_pool_mcu.rs via the `xtask`
 # codegen SSOT, so this crate has no build script and pulls no sce-codegen.
 
 [dependencies]
@@ -207,7 +207,7 @@ portable-atomic-util = { version = "0.2", default-features = false, features = [
 # so the no-alloc sync-only build path stays trait-skeleton-free.
 # `wz-runtime-core/alloc` is required because RuntimeError under
 # alloc carries the `JoinFailed { payload: Box<dyn Any + Send> }`
-# variant shape; LwipRuntime never constructs JoinFailed itself
+# variant shape; CoopRuntime never constructs JoinFailed itself
 # (success arm only — no catch_unwind on no_std), but the dep's
 # alloc gate governs the whole error enum and aligns with the AP
 # profile (wz-runtime-tokio also pulls `wz-runtime-core/alloc`).
@@ -217,7 +217,7 @@ wz-runtime-core = { path = "../wz-runtime-core", default-features = false, optio
 # false: only the `scouting-static` feature pulls it today (the
 # `scout_static` synth), so a scouting-static-free MCU build keeps it out
 # of the dep graph entirely. As the MCU session runtime grows (FSM,
-# registries bound to LwipRuntime), more capabilities flow across this
+# registries bound to CoopRuntime), more capabilities flow across this
 # same edge.
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
 

@@ -12,7 +12,7 @@
   rationale: SCE codegen emits the spec-anchored SLOT_COUNT / SLOT_SIZE /
   MAX_FRAGMENTS_PER_MESSAGE / REASSEMBLY_TIMEOUT_MS / PER_PEER_QUOTA
   constants that the MCU host's `ReassemblyDispatcher` consumes via the
-  no-alloc `wz-runtime-lwip::reassembly_rx` seam (carry [3]). Both
+  no-alloc `wz-runtime-coop::reassembly_rx` seam (carry [3]). Both
   profiles source their pool from one SCE-owned scxml each, selecting
   their own machine — the kconfig composable-framework structure.
 

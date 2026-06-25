@@ -3,7 +3,7 @@
 //
 // wz facade build.rs — R311az-3b-ii cfg propagation.
 //
-// The `runtime-lwip` feature pulls lwip-sys as a direct optional dep
+// The `runtime-coop` feature pulls lwip-sys as a direct optional dep
 // so `DEP_LWIP_LWIP_REAL_BUILD` (re-exposed by lwip-sys's `links =
 // "lwip"` metadata) lands here. Mirror the same conversion logic that
 // wz-link-lwip uses: when lwip-sys emits `=1`, the facade flips
@@ -11,9 +11,9 @@
 // gated on the exact same condition as the wz-link-lwip body — no
 // drift between "namespace re-exported" and "namespace populated".
 //
-// Without the `runtime-lwip` feature the env var is empty (no lwip-
+// Without the `runtime-coop` feature the env var is empty (no lwip-
 // sys edge) and `lwip_real_build` stays off, which the link_lwip
-// re-export's `cfg(feature = "runtime-lwip", lwip_real_build)` short-
+// re-export's `cfg(feature = "runtime-coop", lwip_real_build)` short-
 // circuits via the feature half. So the cfg is harmless on AP-only
 // builds; it costs a single `#[cfg]` check at type-resolution time.
 

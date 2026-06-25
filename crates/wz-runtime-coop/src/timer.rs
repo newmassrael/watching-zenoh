@@ -8,7 +8,7 @@
 //! [`crate::time::TimeoutFuture`] that has not yet elapsed registers
 //! its waker with the queue along with the absolute deadline (in
 //! microseconds, as reported by [`crate::time::ClockSource::now_us`]).
-//! On every [`crate::LwipRuntime::run_until_idle`] pass the runtime
+//! On every [`crate::CoopRuntime::run_until_idle`] pass the runtime
 //! calls [`TimerQueue::pop_expired`] first; entries whose deadline has
 //! elapsed have their waker invoked and are removed from the queue.
 //! Pending entries stay in the heap until their deadline elapses.
@@ -100,7 +100,7 @@ struct TimerQueueInner {
 }
 
 /// Deadline-keyed wake registry. Held inside `Arc<RuntimeInner<C>>`
-/// (see [`crate::runtime_impl`]) so [`crate::time::LwipTime`] and
+/// (see [`crate::runtime_impl`]) so [`crate::time::CoopTime`] and
 /// the spawned-task layer share the same queue.
 pub struct TimerQueue {
     inner: Mutex<RefCell<TimerQueueInner>>,
@@ -157,7 +157,7 @@ impl TimerQueue {
     }
 
     /// Diagnostic: number of entries currently registered. Used by
-    /// [`crate::LwipRuntime::block_on`] to distinguish "deadlocked
+    /// [`crate::CoopRuntime::block_on`] to distinguish "deadlocked
     /// future, no wake source" (panic) from "pending timer, clock
     /// will eventually advance" (legitimate wait state).
     pub fn pending_count(&self) -> usize {

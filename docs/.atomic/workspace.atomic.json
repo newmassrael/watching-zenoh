@@ -695,18 +695,18 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
       "decision_status": "active",
-      "intent": "Runtime domain catalog: 6 atomic features (2 active runtime-tokio + runtime-lwip via dep: gates, 4 reserved alternative impls).",
+      "intent": "Runtime domain catalog: 6 atomic features (2 active runtime-tokio + runtime-coop via dep: gates, 4 reserved alternative impls).",
       "rationale_bullets": [
         "Runtime axis is mutually exclusive: pick exactly one runtime per binary deploy.",
-        "runtime-tokio + runtime-lwip enforce exclusion via compile_error at the facade.",
-        "runtime-tokio pulls AP std-tokio path; runtime-lwip pulls MCU no-std lwIP path.",
+        "runtime-tokio + runtime-coop enforce exclusion via compile_error at the facade.",
+        "runtime-tokio pulls AP std-tokio path; runtime-coop pulls MCU no-std lwIP path.",
         "Reserved alternative runtimes have no impl crate yet.",
         "R311ck ratifies audit confirming 2/4 split."
       ],
       "outputs_bullets": [
-        "Active set (2): runtime-tokio (AP), runtime-lwip (MCU).",
+        "Active set (2): runtime-tokio (AP), runtime-coop (MCU).",
         "runtime-tokio gates dep:wz-runtime-tokio + sce-rust-runtime/lua pair + wz-runtime-core.",
-        "runtime-lwip gates dep:wz-runtime-lwip + dep:wz-link-lwip + dep:lwip-sys (R311ax/az).",
+        "runtime-coop gates dep:wz-runtime-coop + dep:wz-link-lwip + dep:lwip-sys (R311ax/az).",
         "Reserved (4): runtime-async-std, runtime-no-std, runtime-tokio-uring, runtime-zero-copy.",
         "Reserved features stay declaration-only — no impl crate yet."
       ],
@@ -728,7 +728,7 @@
         "Platform identity is governed by Rust `target_os` cfg axis, not Cargo `[features]`.",
         "platform-* features serve as preset-composition labels (preset-cortex-m4 pulls platform-bare-metal).",
         "Cfg-gating source on these would duplicate target_os — 0 source cfg sites by design.",
-        "wz-runtime-tokio targets AP (linux/macos/windows); wz-runtime-lwip targets MCU.",
+        "wz-runtime-tokio targets AP (linux/macos/windows); wz-runtime-coop targets MCU.",
         "R311ch corrects estimate 1/6 -> honest 0/7."
       ],
       "outputs_bullets": [
@@ -1167,7 +1167,7 @@
       "intent": "Smallest viable MCU deployment — zenoh-pico client-mode parity at minimum footprint (bare-metal + lwIP + UDP + minimal pubsub). 35 atomic features.",
       "outputs_bullets": [
         "`platform-bare-metal`",
-        "`runtime-lwip`",
+        "`runtime-coop`",
         "`runtime-no-std`",
         "`transport-link-udp`",
         "`transport-unicast`",
@@ -1735,10 +1735,10 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
       "decision_status": "active",
-      "intent": "First production-shape MCU preset for Cortex-M4F (thumbv7em-none-eabihf): wz-runtime-lwip + LwipTime + full wz-codecs catalog. Composable-framework first MCU deploy contract.",
+      "intent": "First production-shape MCU preset for Cortex-M4F (thumbv7em-none-eabihf): wz-runtime-coop + CoopTime + full wz-codecs catalog. Composable-framework first MCU deploy contract.",
       "rationale_bullets": [
         "platform-bare-metal",
-        "runtime-lwip",
+        "runtime-coop",
         "runtime-no-std",
         "transport-unicast",
         "transport-link-udp",
@@ -1796,7 +1796,7 @@
       ],
       "outputs_bullets": [
         "`platform-bare-metal`",
-        "`runtime-lwip`",
+        "`runtime-coop`",
         "`runtime-no-std`",
         "`transport-unicast`",
         "`transport-link-udp`",
@@ -1888,7 +1888,7 @@
       "intent": "Ultra-constrained Cortex-M0 / nrf51 (16 KB SRAM) session node = preset-mcu-minimal 35 atoms + buffer-pool-session-rx-slim; first cortex-m0 preset, boots the acceptor e2e on microbit.",
       "rationale_bullets": [
         "`platform-bare-metal`",
-        "`runtime-lwip`",
+        "`runtime-coop`",
         "`runtime-no-std`",
         "`transport-link-udp`",
         "`transport-unicast`",
@@ -1937,7 +1937,7 @@
       "intent": "Minimal MCU multicast publisher preset (mps2-class): wz-session-lwip multicast loop - peer admit + oversize z_put framed as a fragment chain; footprint-tracked composition of deploy/mcu-multicast-e2e.",
       "outputs_bullets": [
         "platform-bare-metal",
-        "runtime-lwip",
+        "runtime-coop",
         "runtime-no-std",
         "transport-multicast",
         "transport-link-udp",
@@ -3228,7 +3228,7 @@
         "TimeSource trait shape: now_monotonic_ms + sleep (deterministic time provider)."
       ],
       "outputs_bullets": [
-        "Per-profile concrete impl binding (TokioRuntime / LwipRuntime / EmbassyRuntime).",
+        "Per-profile concrete impl binding (TokioRuntime / CoopRuntime / EmbassyRuntime).",
         "wz upper layers (Session, SubscriberRegistry) reparameterized over R: Runtime.",
         "Cargo profile.full / profile.ap / profile.mcu feature gates wired to crate selection.",
         "Site retire migration path: 111 sites → trait-mediated calls (R231+ rounds)."
@@ -3399,7 +3399,7 @@
       ]
     },
     "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding": {
-      "intent": "R63 reverted R53 NOP-stub skeleton (doc-around-hack). Phase W lands wz-runtime-lwip with real lwIP API + MCU cross-compile; emitter audit kept as link_emitter_b6 Layer 3 test.",
+      "intent": "R63 reverted R53 NOP-stub skeleton (doc-around-hack). Phase W lands wz-runtime-coop with real lwIP API + MCU cross-compile; emitter audit kept as link_emitter_b6 Layer 3 test.",
       "impact_scope": [
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape"
       ]
@@ -4223,7 +4223,7 @@
         "sources/ — SCE Forge input SCXML (codecs + algorithms + session FSM)",
         "crates/wz-codecs — generated codec types from sources/codecs/*.scxml",
         "crates/wz-runtime-tokio — Tokio-based AP runtime + session glue + builders",
-        "crates/wz-runtime-lwip — lwIP/MCU runtime (Phase W, not yet a workspace member)",
+        "crates/wz-runtime-coop — lwIP/MCU runtime (Phase W, not yet a workspace member)",
         "crates/wz-ap-demo — AP demo binary (initiator + acceptor)",
         "crates/wz-integration-tests — Layer 3 wire-interop + round-trip suites",
         "crates/wz-runtime-tokio-test-support — shared test harness for runtime tests",
@@ -51680,6 +51680,64 @@
         "LOCAL: R311y22h atop origin/main=bae7491 (R311y22f). 1 commit ahead after this. NOT pushed without explicit consent."
       ]
     },
+    "Round 311y23": {
+      "decision_summary": "R311y23 -- wz-runtime-lwip -> wz-runtime-coop crate rename (LAST R311y20-review remediation before FreeRTOS). The runtime/executor crate is lwip-FREE (cargo tree: no lwip-sys/wz-link-lwip deps), generic over ClockSource; the -lwip name was historical; the actual lwip net link is the separate wz-link-lwip crate (KEPT). Renamed so wz-runtime-freertos is born depending on wz-runtime-coop. Scope ~3x the carry's ~180 estimate: crate dir+package+lib, 5 executor type idents -> Coop*, runtime-lwip feature -> runtime-coop + wz::runtime_coop namespace, codegen out/+xtask map, 3 scxml source-hash bumps (code byte-identical), 61 files + 4 Cargo.lock (deploy locks minimal-rename no version bumps), inventory atom runtime-lwip->runtime-coop (A3 atom<->cfg mapping) + 13 set-able section fields. KEEP-set verified disjoint+intact: sce_link_runtime_lwip (incl non-vendor ARCHITECTURE.md/Cargo.toml), wz-link-lwip/wz-session-lwip/lwip-sys, lwip_real_build, WZ_LWIP_PORT, LwipLink/UdpSocket/UdpDriver/MulticastDriver. Verified: host builds + Layer G cross-compile (G.4/G.5 coop + G.11 session-lwip cross-real) + A3 (active=95) + B2 regen-deterministic + validate orphan new=+0.",
+      "changes_bullets": [
+        "Crate rename: crates/wz-runtime-lwip -> crates/wz-runtime-coop (git mv); package name wz-runtime-lwip -> wz-runtime-coop; lib name wz_runtime_lwip -> wz_runtime_coop. Dependents updated: wz-session-lwip + wz facade dep paths.",
+        "5 executor type idents renamed (exact word-boundary, disjoint from the lwip-net keep-set): LwipRuntime->CoopRuntime, LwipTime->CoopTime, LwipJoinHandle->CoopJoinHandle, LwipReassembly->CoopReassembly, LwipSession->CoopSession (~200 sites).",
+        "Facade: the runtime-lwip feature -> runtime-coop (wz/Cargo.toml + all wz-runtime-lwip?/<f> forwards); the public namespace wz::runtime_lwip -> wz::runtime_coop (pub use wz_runtime_coop as runtime_coop); the runtime-tokio<->runtime-coop mutual-exclusion compile_error + the #[cfg(all(feature=runtime-coop, lwip_real_build))] link_lwip gate.",
+        "Committed codegen: out/wz-runtime-lwip/ -> out/wz-runtime-coop/ (git mv) + xtask/src/main.rs map (\"reassembly_pool_mcu\",\"wz-runtime-coop\") + the crate's include! path. 3 SCXML source comments (lwip_udp_scout/session, reassembly_pool_mcu) had wz-runtime-lwip references renamed -> the shared source-hash bumped in 6 generated out/ files (generated CODE byte-identical; regen-deterministic, generated-at:0).",
+        "61 code/doc/CI/scxml files renamed via 8 verified-safe substitutions; excluded vendor/sce/** (3rd-party), **/Cargo.lock, docs/.atomic/**. crates/Cargo.lock regenerated by build; 3 deploy Cargo.lock minimally renamed (cargo check resolution, NO dep version bumps).",
+        "Atomic store (typed primitives): inventory atom runtime-lwip removed + runtime-coop added (active, §5.13-runtime, A3 atom<->cfg(feature) mapping requires the atom id == feature name). 13 set-able section fields updated (intent/rationale/outputs of 5-13-runtime, 5-14-platform, 5-3 N/A, 6-1/6-7/6-8/6-9 presets, 5.P runtime-services-tier, 6-next-step-scaffolding, directory-layout). 6 append-only caveat refs left as-is (historical, frozen-ledger spirit); 137 frozen changelog entries left untouched.",
+        "KEEP-set verified intact (disjoint from the rename): sce_link_runtime_lwip (the SCE link-runtime concept, incl 145 store + ARCHITECTURE.md/docs/scxml occurrences), wz-link-lwip + wz-session-lwip crate names, lwip-sys, lwip_real_build cfg, WZ_LWIP_PORT, LwipLink/LwipUdpSocket/LwipUdpDriver/LwipMulticastDriver, the link_lwip namespace."
+      ],
+      "verification_bullets": [
+        "Rationale (direct read, the arbiter): cargo tree -p wz-runtime-lwip -e normal,build shows NO lwip-sys / wz-link-lwip deps -> the runtime/executor crate is lwip-FREE; the -lwip name was historical. The genuine lwip net link is the separate wz-link-lwip crate (kept). So renaming the runtime crate to -coop is faithful; cheapest before wz-runtime-freertos depends on it (R311y20 review).",
+        "Corruption de-risk: confirmed no hyphenated sce-link-runtime-lwip variant; the underscore SCE form sce_link_runtime_lwip is excluded by word-boundary (\\bruntime_lwip\\b skips it, preceding _ blocks the boundary) and by anchoring wz_runtime_lwip. Completeness check post-rename: 0 remaining wz-runtime-lwip/wz_runtime_lwip/executor-type tokens outside vendor/Cargo.lock/atomic-store. KEEP-set intact check: sce_link_runtime_lwip + lwip-net types + lwip_real_build all survive.",
+        "Host builds: cargo build -p wz-runtime-coop (default sync-only) + --features alloc + wz facade (default runtime-tokio) all EXIT=0. include! path resolves to out/wz-runtime-coop/reassembly_pool_mcu.rs. Cross-compile sanity: wz-runtime-coop on thumbv7m-none-eabi EXIT=0.",
+        "Layer G (cross-compile) pass: G.4 + G.4-alloc wz-runtime-coop + G.5 wz facade runtime-coop on every triple; G.11 session-lwip cross-real (the lwip_real_build context) OK on thumbv8m; all MCU lanes OK. (The host `cargo check` E0432 on 2 deploy crates was a configured-out wz::link_lwip without lwip_real_build -- a host-check artifact, not a rename regression; Layer G builds them in the cross+lwip context.)",
+        "Layer A3 pass: catalog status truthfulness OK, atoms=209 active=95 -- runtime-coop active <-> >=1 cfg(feature=\"runtime-coop\") site (the facade namespace + mutual-exclusion gates), atom-id renamed to match the renamed cargo feature (else A3 #1 declared + #3 active<->gated fail). Active count stable (removed runtime-lwip, added runtime-coop).",
+        "Layer B2 (regen-diff): the codegen rename is regen-deterministic -- a fresh `xtask regen` produces NO unstaged drift vs the committed out/ (the 6 source-hash bumps + the moved reassembly file). B2 passes post-commit (it gates committed==regenerated).",
+        "validate_workspace EXIT=0: T1 orphan new=+0 (ledger=13), T3 warn=4 / T4 info=4 unchanged, atomic ledger sections=266; the inventory atom rename + 13 section-field updates introduced no orphans. Deploy lock churn = minimal rename + entry re-sort, no dep version bumps."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "R311y23 = wz-runtime-lwip -> wz-runtime-coop crate rename, the LAST R311y20-review remediation before FreeRTOS. The runtime/executor crate is lwip-FREE (cargo tree verified); -lwip was historical; the lwip net link stays wz-link-lwip. Renamed so wz-runtime-freertos is born depending on wz-runtime-coop. Scope was ~3x the carry's ~180 estimate (codegen out/+xtask, 3 deploy locks, scxml source-hash, atomic store inventory+13 sections). KEEP-set (sce_link_runtime_lwip / wz-link-lwip / lwip-sys / lwip_real_build / LwipLink|UdpSocket|UdpDriver|MulticastDriver) verified disjoint and intact.",
+        "DURABLE LESSON: distinguishing rename-in-name from genuinely-lwip was the whole risk -- sce_link_runtime_lwip lives in NON-vendor files too (ARCHITECTURE.md/crates/Cargo.toml/wz-runtime-core), so a blind s/runtime_lwip/.../ would corrupt the SCE concept; word-boundary + wz_ anchor are mandatory. Verify rename completeness AND keep-set integrity with git grep both ways.",
+        "NEXT (per project_rtos_port_plan + north star): the THREE R311y20 remediation rounds (y21 clock-SSOT, y22 codegen-commit, y23 coop-rename) are now ALL DONE -> proceed to FreeRTOS integration (the big LAYER-2 build): vendor FreeRTOS-Kernel + freertos-sys FFI + wz-runtime-freertos (impl Runtime reusing the wz-runtime-coop cooperative executor SSOT, generic over ClockSource) + boot (xTaskCreate+vTaskStartScheduler) + deploy/mcu-freertos-demo + QEMU mps2 e2e + CI lane + platform-freertos ACTIVE flip. MUST label \"cooperative single-task profile\" (= zenoh-pico Z_FEATURE_MULTI_THREAD=0 ST mode); native-MT = re-openable future. THEN Zephyr (SDK install pending: pip install tqdm + west sdk install).",
+        "LOCAL: R311y23 atop origin/main=be681ca (R311y22h). 1 commit ahead after this commits. NOT pushed without explicit consent."
+      ],
+      "publishable_decision_summary": "R311y23 -- wz-runtime-lwip -> wz-runtime-coop crate rename (LAST R311y20-review remediation before FreeRTOS). The runtime/executor crate is lwip-FREE (cargo tree: no lwip-sys/wz-link-lwip deps), generic over ClockSource; the -lwip name was historical; the actual lwip net link is the separate wz-link-lwip crate (KEPT). Renamed so wz-runtime-freertos is born depending on wz-runtime-coop. Scope ~3x the carry's ~180 estimate: crate dir+package+lib, 5 executor type idents -> Coop*, runtime-lwip feature -> runtime-coop + wz::runtime_coop namespace, codegen out/+xtask map, 3 scxml source-hash bumps (code byte-identical), 61 files + 4 Cargo.lock (deploy locks minimal-rename no version bumps), inventory atom runtime-lwip->runtime-coop (A3 atom<->cfg mapping) + 13 set-able section fields. KEEP-set verified disjoint+intact: sce_link_runtime_lwip (incl non-vendor ARCHITECTURE.md/Cargo.toml), wz-link-lwip/wz-session-lwip/lwip-sys, lwip_real_build, WZ_LWIP_PORT, LwipLink/UdpSocket/UdpDriver/MulticastDriver. Verified: host builds + Layer G cross-compile (G.4/G.5 coop + G.11 session-lwip cross-real) + A3 (active=95) + B2 regen-deterministic + validate orphan new=+0.",
+      "publishable_changes_bullets": [
+        "Crate rename: crates/wz-runtime-lwip -> crates/wz-runtime-coop (git mv); package name wz-runtime-lwip -> wz-runtime-coop; lib name wz_runtime_lwip -> wz_runtime_coop. Dependents updated: wz-session-lwip + wz facade dep paths.",
+        "5 executor type idents renamed (exact word-boundary, disjoint from the lwip-net keep-set): LwipRuntime->CoopRuntime, LwipTime->CoopTime, LwipJoinHandle->CoopJoinHandle, LwipReassembly->CoopReassembly, LwipSession->CoopSession (~200 sites).",
+        "Facade: the runtime-lwip feature -> runtime-coop (wz/Cargo.toml + all wz-runtime-lwip?/<f> forwards); the public namespace wz::runtime_lwip -> wz::runtime_coop (pub use wz_runtime_coop as runtime_coop); the runtime-tokio<->runtime-coop mutual-exclusion compile_error + the #[cfg(all(feature=runtime-coop, lwip_real_build))] link_lwip gate.",
+        "Committed codegen: out/wz-runtime-lwip/ -> out/wz-runtime-coop/ (git mv) + xtask/src/main.rs map (\"reassembly_pool_mcu\",\"wz-runtime-coop\") + the crate's include! path. 3 SCXML source comments (lwip_udp_scout/session, reassembly_pool_mcu) had wz-runtime-lwip references renamed -> the shared source-hash bumped in 6 generated out/ files (generated CODE byte-identical; regen-deterministic, generated-at:0).",
+        "61 code/doc/CI/scxml files renamed via 8 verified-safe substitutions; excluded vendor/sce/** (3rd-party), **/Cargo.lock, docs/.atomic/**. crates/Cargo.lock regenerated by build; 3 deploy Cargo.lock minimally renamed (cargo check resolution, NO dep version bumps).",
+        "Atomic store (typed primitives): inventory atom runtime-lwip removed + runtime-coop added (active, §5.13-runtime, A3 atom<->cfg(feature) mapping requires the atom id == feature name). 13 set-able section fields updated (intent/rationale/outputs of 5-13-runtime, 5-14-platform, 5-3 N/A, 6-1/6-7/6-8/6-9 presets, 5.P runtime-services-tier, 6-next-step-scaffolding, directory-layout). 6 append-only caveat refs left as-is (historical, frozen-ledger spirit); 137 frozen changelog entries left untouched.",
+        "KEEP-set verified intact (disjoint from the rename): sce_link_runtime_lwip (the SCE link-runtime concept, incl 145 store + ARCHITECTURE.md/docs/scxml occurrences), wz-link-lwip + wz-session-lwip crate names, lwip-sys, lwip_real_build cfg, WZ_LWIP_PORT, LwipLink/LwipUdpSocket/LwipUdpDriver/LwipMulticastDriver, the link_lwip namespace."
+      ],
+      "publishable_verification_bullets": [
+        "Rationale (direct read, the arbiter): cargo tree -p wz-runtime-lwip -e normal,build shows NO lwip-sys / wz-link-lwip deps -> the runtime/executor crate is lwip-FREE; the -lwip name was historical. The genuine lwip net link is the separate wz-link-lwip crate (kept). So renaming the runtime crate to -coop is faithful; cheapest before wz-runtime-freertos depends on it (R311y20 review).",
+        "Corruption de-risk: confirmed no hyphenated sce-link-runtime-lwip variant; the underscore SCE form sce_link_runtime_lwip is excluded by word-boundary (\\bruntime_lwip\\b skips it, preceding _ blocks the boundary) and by anchoring wz_runtime_lwip. Completeness check post-rename: 0 remaining wz-runtime-lwip/wz_runtime_lwip/executor-type tokens outside vendor/Cargo.lock/atomic-store. KEEP-set intact check: sce_link_runtime_lwip + lwip-net types + lwip_real_build all survive.",
+        "Host builds: cargo build -p wz-runtime-coop (default sync-only) + --features alloc + wz facade (default runtime-tokio) all EXIT=0. include! path resolves to out/wz-runtime-coop/reassembly_pool_mcu.rs. Cross-compile sanity: wz-runtime-coop on thumbv7m-none-eabi EXIT=0.",
+        "Layer G (cross-compile) pass: G.4 + G.4-alloc wz-runtime-coop + G.5 wz facade runtime-coop on every triple; G.11 session-lwip cross-real (the lwip_real_build context) OK on thumbv8m; all MCU lanes OK. (The host `cargo check` E0432 on 2 deploy crates was a configured-out wz::link_lwip without lwip_real_build -- a host-check artifact, not a rename regression; Layer G builds them in the cross+lwip context.)",
+        "Layer A3 pass: catalog status truthfulness OK, atoms=209 active=95 -- runtime-coop active <-> >=1 cfg(feature=\"runtime-coop\") site (the facade namespace + mutual-exclusion gates), atom-id renamed to match the renamed cargo feature (else A3 #1 declared + #3 active<->gated fail). Active count stable (removed runtime-lwip, added runtime-coop).",
+        "Layer B2 (regen-diff): the codegen rename is regen-deterministic -- a fresh `xtask regen` produces NO unstaged drift vs the committed out/ (the 6 source-hash bumps + the moved reassembly file). B2 passes post-commit (it gates committed==regenerated).",
+        "validate_workspace EXIT=0: T1 orphan new=+0 (ledger=13), T3 warn=4 / T4 info=4 unchanged, atomic ledger sections=266; the inventory atom rename + 13 section-field updates introduced no orphans. Deploy lock churn = minimal rename + entry re-sort, no dep version bumps."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y23 = wz-runtime-lwip -> wz-runtime-coop crate rename, the LAST R311y20-review remediation before FreeRTOS. The runtime/executor crate is lwip-FREE (cargo tree verified); -lwip was historical; the lwip net link stays wz-link-lwip. Renamed so wz-runtime-freertos is born depending on wz-runtime-coop. Scope was ~3x the carry's ~180 estimate (codegen out/+xtask, 3 deploy locks, scxml source-hash, atomic store inventory+13 sections). KEEP-set (sce_link_runtime_lwip / wz-link-lwip / lwip-sys / lwip_real_build / LwipLink|UdpSocket|UdpDriver|MulticastDriver) verified disjoint and intact.",
+        "DURABLE LESSON: distinguishing rename-in-name from genuinely-lwip was the whole risk -- sce_link_runtime_lwip lives in NON-vendor files too (ARCHITECTURE.md/crates/Cargo.toml/wz-runtime-core), so a blind s/runtime_lwip/.../ would corrupt the SCE concept; word-boundary + wz_ anchor are mandatory. Verify rename completeness AND keep-set integrity with git grep both ways.",
+        "NEXT (per project_rtos_port_plan + north star): the THREE R311y20 remediation rounds (y21 clock-SSOT, y22 codegen-commit, y23 coop-rename) are now ALL DONE -> proceed to FreeRTOS integration (the big LAYER-2 build): vendor FreeRTOS-Kernel + freertos-sys FFI + wz-runtime-freertos (impl Runtime reusing the wz-runtime-coop cooperative executor SSOT, generic over ClockSource) + boot (xTaskCreate+vTaskStartScheduler) + deploy/mcu-freertos-demo + QEMU mps2 e2e + CI lane + platform-freertos ACTIVE flip. MUST label \"cooperative single-task profile\" (= zenoh-pico Z_FEATURE_MULTI_THREAD=0 ST mode); native-MT = re-openable future. THEN Zephyr (SDK install pending: pip install tqdm + west sdk install).",
+        "LOCAL: R311y23 atop origin/main=be681ca (R311y22h). 1 commit ahead after this commits. NOT pushed without explicit consent."
+      ]
+    },
     "Round 311y3": {
       "decision_summary": "R311y3 -- attachment-encoding-aware FOUNDATIONAL reclassification (Track 2 of the AP-full sweep; A3 read-first + direct read). attachment-encoding-aware is NOT a buildable cfg toggle -- it is a tag-typed DATA-VIEW on the already-active attachment-bytes codec. wz-session-core/src/attachment.rs is the SSOT for the attachment extension wire shape (ext_id 0x03 PUSH body / 0x05 Query, ExtZbuf ENC_ZBUF, non-mandatory so unknown peers drop silently), gated on attachment-bytes -- the catalog primitive the pubsub-attachment / query-attachment consumers select. 'encoding-aware' = interpreting that opaque payload through an Encoding tag, which is DATA (id + schema string) not a wire toggle, exactly the R311xq encoding-family precedent (encoding identity is DATA -> FOUNDATIONAL-reserved, not active). cfg=0, cargo attachment-encoding-aware=[attachment-bytes] (forwards the active primitive). Status stays reserved; reason corrected reserved-inert -> FOUNDATIONAL. Inventory + ledger only, NO code/Cargo/CI change; validate orphan new=+0; A3 unaffected (reserved->reserved, 0 cfg sites).",
       "changes_bullets": [
@@ -57760,11 +57818,11 @@
       "source": "zenoh async-std backend",
       "reason": "zenoh PHANTOM: zenoh moved to tokio-only; async-std appears only in the rest-plugin ignored-features list, no core executor; wz has no async-std code. tokio-only; re-openable beyond-zenoh"
     },
-    "runtime-lwip": {
+    "runtime-coop": {
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
-      "source": "crates/wz-runtime-lwip/ Phase W skeleton",
-      "reason": "F=lwIP MCU adapter; P=docs/runtime-crate-lwip.md; C=alternative runtime, mutually exclusive with runtime-tokio"
+      "source": "crates/wz-runtime-coop/ Phase W skeleton (renamed from wz-runtime-lwip, R311y23)",
+      "reason": "F=cooperative single-task executor (MCU profile; the executor core is lwip-FREE, generic over ClockSource — lwip net link stays wz-link-lwip); P=docs/runtime-crate-lwip.md; C=alternative runtime, mutually exclusive with runtime-tokio. R311y23 rename from runtime-lwip (the -lwip name was historical; cheapest to rename before wz-runtime-freertos depends on it)."
     },
     "runtime-no-std": {
       "status": "reserved",

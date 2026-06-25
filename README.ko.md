@@ -88,7 +88,7 @@ E binary-dep e2e fixture 가 로컬 10-lane CI (scripts/run-ci.sh
 | sources/ | SCE Forge 입력 SCXML (codec + algorithm + session FSM) |
 | crates/wz-codecs | sources/codecs/*.scxml 에서 생성된 codec 타입 |
 | crates/wz-runtime-tokio | Tokio 기반 AP 런타임 + session glue + builder |
-| crates/wz-runtime-lwip | lwIP / MCU 런타임 헤더 + 테스트 (Phase W, 아직 workspace member 아님) |
+| crates/wz-runtime-coop | lwIP / MCU 런타임 헤더 + 테스트 (Phase W, 아직 workspace member 아님) |
 | crates/wz-ap-demo | AP demo binary (initiator + acceptor) |
 | crates/wz-integration-tests | Layer 3 wire-interop + round-trip suite |
 | crates/wz-runtime-tokio-test-support | 런타임 테스트용 shared harness |

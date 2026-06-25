@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `LwipTime<C>` — `impl wz_runtime_core::TimeSource` for the MCU
+//! `CoopTime<C>` — `impl wz_runtime_core::TimeSource` for the MCU
 //! profile. R311av-pre Decision 7 finalize: own [`ClockSource`]
 //! trait only; the `embedded-time` v0.13 crate has been stalled
 //! since 2024 and an external ecosystem dep would surface as a
@@ -14,16 +14,16 @@
 //!
 //! Construction sig changed from R311av:
 //!
-//! - R311av: `LwipTime::new(source: C)` — owned the ClockSource;
+//! - R311av: `CoopTime::new(source: C)` — owned the ClockSource;
 //!   `SleepFuture<'a, C>` borrowed `&'a C` directly.
-//! - R311bc: `LwipTime::new(rt: &LwipRuntime<C>)` — clones the
+//! - R311bc: `CoopTime::new(rt: &CoopRuntime<C>)` — clones the
 //!   shared `Arc<RuntimeInner<C>>`; `SleepFuture<C>` is `'static`
 //!   (owns the Arc) and registers its waker with the runtime's
 //!   timer queue on first Pending poll.
 //!
 //! The breaking change is intentional. Under R311av the clock and
 //! the timer source were two different physical objects (clock
-//! owned by `LwipTime`, no timer source at all — sleep futures
+//! owned by `CoopTime`, no timer source at all — sleep futures
 //! self-waked). Under R311bc both live in the same
 //! `Arc<RuntimeInner<C>>` so a deadline registered by one sleep
 //! and a `now_us()` sample taken by `run_until_idle` necessarily
@@ -43,7 +43,7 @@
 //!   `runtime_impl.rs` test module).
 //!
 //! The deploy passes its `ClockSource` instance to
-//! [`crate::LwipRuntime::new`]; both `LwipTime` and the timer
+//! [`crate::CoopRuntime::new`]; both `CoopTime` and the timer
 //! queue read from that one instance via the shared `Arc`.
 //!
 //! ## Wake-on-deadline (R311bc) vs self-wake (R311av retired)
@@ -63,7 +63,7 @@
 //! kept every pass active.
 
 use crate::atomic::Arc;
-use crate::runtime_impl::{LwipRuntime, RuntimeInner};
+use crate::runtime_impl::{CoopRuntime, RuntimeInner};
 use alloc::boxed::Box;
 use core::future::Future;
 use core::pin::Pin;
@@ -89,25 +89,25 @@ pub trait ClockSource: Send + Sync + 'static {
 
 /// `impl TimeSource` backed by the runtime's shared [`ClockSource`].
 ///
-/// R311bc: construction borrows from [`LwipRuntime`] so the time
+/// R311bc: construction borrows from [`CoopRuntime`] so the time
 /// source, the runtime's timer queue, and the runtime's task pool
 /// all reference the same `Arc<RuntimeInner<C>>`. The construction
 /// snapshot captures the source's current `now_us` as the epoch;
 /// subsequent `now_monotonic_ms` calls subtract the epoch and
-/// divide by 1000. Two independently-constructed `LwipTime`
+/// divide by 1000. Two independently-constructed `CoopTime`
 /// instances on the same runtime will report different epochs,
 /// mirroring [`wz_runtime_tokio::TokioTime`] per-instance epoch
 /// semantics.
-pub struct LwipTime<C: ClockSource> {
+pub struct CoopTime<C: ClockSource> {
     inner: Arc<RuntimeInner<C>>,
     epoch_us: u64,
 }
 
-impl<C: ClockSource> LwipTime<C> {
-    /// Build a new `LwipTime` sharing the runtime's clock + timer
+impl<C: ClockSource> CoopTime<C> {
+    /// Build a new `CoopTime` sharing the runtime's clock + timer
     /// queue. Snapshots the clock's current `now_us()` as the
     /// epoch for this instance.
-    pub fn new(rt: &LwipRuntime<C>) -> Self {
+    pub fn new(rt: &CoopRuntime<C>) -> Self {
         let epoch_us = rt.clock().now_us();
         Self {
             inner: rt.inner.clone(),
@@ -116,7 +116,7 @@ impl<C: ClockSource> LwipTime<C> {
     }
 }
 
-impl<C: ClockSource> Clone for LwipTime<C> {
+impl<C: ClockSource> Clone for CoopTime<C> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -125,7 +125,7 @@ impl<C: ClockSource> Clone for LwipTime<C> {
     }
 }
 
-impl<C: ClockSource> TimeSource for LwipTime<C> {
+impl<C: ClockSource> TimeSource for CoopTime<C> {
     fn now_monotonic_ms(&self) -> u64 {
         // Saturating subtraction so a buggy ClockSource that
         // momentarily reports a past time does not wrap into a
@@ -167,7 +167,7 @@ impl<C: ClockSource> TimeSource for LwipTime<C> {
     }
 }
 
-/// Future returned by [`LwipTime::sleep`]. R311bc: registers its
+/// Future returned by [`CoopTime::sleep`]. R311bc: registers its
 /// waker with the runtime's [`crate::timer::TimerQueue`] on first
 /// Pending poll instead of self-waking. Resolves to `()` once the
 /// clock crosses the deadline.
@@ -208,7 +208,7 @@ impl<C: ClockSource> Future for SleepFuture<C> {
     }
 }
 
-/// Future returned by [`LwipTime::timeout`]. Polls the inner
+/// Future returned by [`CoopTime::timeout`]. Polls the inner
 /// future first on every pass; if the inner future resolves before
 /// the deadline elapses, returns `Ok(inner_output)`. If the
 /// deadline elapses first, returns `Err(TimeoutElapsed)`.

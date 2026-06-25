@@ -18,10 +18,10 @@
 //!   slot; alloc-based heap; `Send` so spawned tasks may cross
 //!   future-multi-core boundaries (the AP-profile mirror requires
 //!   `Send` and R311av keeps the contract uniform).
-//! - **D2**: per-`LwipRuntime` `Arc<ExecutorState>`. Static singleton
+//! - **D2**: per-`CoopRuntime` `Arc<ExecutorState>`. Static singleton
 //!   (`StaticCell` / `once_cell` global) was rejected because every
 //!   composable preset wants the freedom to construct multiple
-//!   `LwipRuntime` instances (test isolation; future multi-core
+//!   `CoopRuntime` instances (test isolation; future multi-core
 //!   per-CPU executor); the trait-level `Runtime: Clone` shape is
 //!   naturally satisfied by `Arc<ExecutorState>`.
 //! - **D3**: `Vec<Option<TaskSlot>>` storage with slot reuse. Fixed-
@@ -42,7 +42,7 @@
 //!   self-wake busy-poll pattern is retired.
 //! - **Cancellation** (R311bd): each [`TaskSlot`] carries a
 //!   `cancel_flag: Arc<AtomicBool>` shared with
-//!   [`crate::LwipJoinHandle`]. `LwipJoinHandle::abort()` sets the
+//!   [`crate::CoopJoinHandle`]. `CoopJoinHandle::abort()` sets the
 //!   flag and synchronously writes `Err(RuntimeError::JoinCancelled)`
 //!   into the shared `JoinState`; the next `run_until_idle` pass
 //!   sweeps the cancel-flag set, drops the corresponding task
@@ -81,7 +81,7 @@ struct TaskSlot {
     fut: BoxFuture,
     wake_flag: Arc<AtomicBool>,
     // R311bd — abort propagation. Shared with the corresponding
-    // `LwipJoinHandle`'s `cancel_flag`; the handle's `abort()`
+    // `CoopJoinHandle`'s `cancel_flag`; the handle's `abort()`
     // method sets it and the next `run_until_idle` pass drops the
     // task future (vacating the slot). The handle has already
     // written `RuntimeError::JoinCancelled` into its `JoinState`
@@ -95,7 +95,7 @@ struct Inner {
     tasks: Vec<Option<TaskSlot>>,
 }
 
-/// Per-runtime cooperative task pool. The `LwipRuntime` wraps this
+/// Per-runtime cooperative task pool. The `CoopRuntime` wraps this
 /// in an `Arc` so cloned runtime handles share the same task slots.
 pub struct ExecutorState {
     inner: Mutex<RefCell<Inner>>,
@@ -114,7 +114,7 @@ impl ExecutorState {
     /// ready so the first `run_until_idle` call polls it.
     ///
     /// `cancel_flag` is the shared abort signal between the spawned
-    /// task slot and the [`crate::LwipJoinHandle`] that the caller
+    /// task slot and the [`crate::CoopJoinHandle`] that the caller
     /// holds (R311bd). The handle's `abort()` sets the flag; the
     /// next `run_until_idle` sweep drops the corresponding task's
     /// future. The caller owns the `Arc<AtomicBool>` and holds a
@@ -163,7 +163,7 @@ impl ExecutorState {
             // R311bd — cancel-first sweep. If a slot's
             // cancel_flag is set, take the slot (dropping the
             // future to release any resources it held) and
-            // continue. The matching `LwipJoinHandle::abort`
+            // continue. The matching `CoopJoinHandle::abort`
             // call has already written
             // `RuntimeError::JoinCancelled` into the JoinState
             // synchronously, so the awaiting handle has already
@@ -244,7 +244,7 @@ impl ExecutorState {
     }
 
     /// Diagnostic + test helper: true if any task slot has its
-    /// wake_flag set. Used by `LwipRuntime::block_on` to decide
+    /// wake_flag set. Used by `CoopRuntime::block_on` to decide
     /// whether spinning makes progress.
     pub(crate) fn any_ready(&self) -> bool {
         critical_section::with(|cs| {

@@ -8,7 +8,7 @@
      sibling of lwip_udp_scout.scxml (scouting link), completing the
      two-link MCU profile required by session-fsm §6 (six inbound +
      three outbound link interactions are realized over this byte
-     channel via session_glue once wz-runtime-lwip lands in Phase W).
+     channel via session_glue once wz-runtime-coop lands in Phase W).
 
      Authoring note. Follows SCE B6-α happy-path schema
      (vendor/sce/sce-build/src/lib.rs::link_rust_happy_path_emits_wrapper_struct):

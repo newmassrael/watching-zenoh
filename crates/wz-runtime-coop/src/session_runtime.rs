@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `impl SessionRuntime for LwipRuntime<C>` — the session-tier link-sink
+//! `impl SessionRuntime for CoopRuntime<C>` — the session-tier link-sink
 //! binding for the MCU profile (Stage 4a precondition).
 //!
 //! [`wz_session_core::link::SessionRuntime`] extends
@@ -30,7 +30,7 @@
 //! single-task concurrency model actually needs (see the
 //! [`wz_session_core::link::BoxedLinkDriver`] / [`SessionRuntime`] docs).
 //!
-//! `SessionLinkActions<LwipRuntime<C>, LwipTime<C>>` is consequently
+//! `SessionLinkActions<CoopRuntime<C>, CoopTime<C>>` is consequently
 //! `!Send`; that is correct, not a limitation — the bundle lives on the
 //! drive loop's stack and is never spawned. `new_generic` wraps it in the
 //! profile [`SessionRuntime::ActionsHandle`] — `Rc` here (R311ja), not
@@ -48,14 +48,14 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
 use wz_session_core::session_actions::SessionLinkActions;
 
-use crate::runtime_impl::LwipRuntime;
-use crate::time::{ClockSource, LwipTime};
+use crate::runtime_impl::CoopRuntime;
+use crate::time::{ClockSource, CoopTime};
 
 /// MCU-profile [`SessionRuntime`] binding. The link sink is a
 /// `Rc<dyn BoxedLinkDriver>` shared by the single-task drive loop and
 /// its synchronous `LwipUdpSocket` driver; `!Send` is the intended
 /// shape (see module doc).
-impl<C: ClockSource> SessionRuntime for LwipRuntime<C> {
+impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
     type LinkSink = Rc<dyn BoxedLinkDriver>;
 
     // R311ja — the MCU action handle is `Rc`, not `Arc`: the single-task
@@ -82,13 +82,13 @@ impl<C: ClockSource> SessionRuntime for LwipRuntime<C> {
 // ───────────────────── compile-time preconditions ─────────────────────
 //
 // These live in the (non-test) lib body — NOT a `#[cfg(test)]` module —
-// so the Layer G cross-compile of `wz-runtime-lwip --features
+// so the Layer G cross-compile of `wz-runtime-coop --features
 // session-unicast` type-checks them on every MCU target, proving the
 // binding holds on bare metal and not merely on the host test build.
 
-/// Stage 4a precondition: `SessionLinkActions<LwipRuntime<C>,
-/// LwipTime<C>>` is well-formed — i.e. `LwipRuntime<C>: SessionRuntime`
-/// and `LwipTime<C>: TimeSource` both hold, so the runtime-agnostic
+/// Stage 4a precondition: `SessionLinkActions<CoopRuntime<C>,
+/// CoopTime<C>>` is well-formed — i.e. `CoopRuntime<C>: SessionRuntime`
+/// and `CoopTime<C>: TimeSource` both hold, so the runtime-agnostic
 /// session action bundle composes on the MCU profile. Naming the type in
 /// a reference position forces the struct's declared bounds to be
 /// satisfied at compile time. The sync drive loop consumer
@@ -96,7 +96,7 @@ impl<C: ClockSource> SessionRuntime for LwipRuntime<C> {
 /// follow-up; this gate is the type-check that unblocks it.
 #[allow(dead_code)]
 fn _session_link_actions_composes_on_lwip<C: ClockSource>(
-    _actions: &wz_session_core::session_actions::SessionLinkActions<LwipRuntime<C>, LwipTime<C>>,
+    _actions: &wz_session_core::session_actions::SessionLinkActions<CoopRuntime<C>, CoopTime<C>>,
 ) {
 }
 
@@ -113,5 +113,5 @@ fn _session_link_actions_composes_on_lwip<C: ClockSource>(
 #[allow(dead_code)]
 fn _lwip_session_runtime_link_sink_is_clone<C: ClockSource>() {
     fn _assert_clone<T: Clone>() {}
-    _assert_clone::<<LwipRuntime<C> as SessionRuntime>::LinkSink>();
+    _assert_clone::<<CoopRuntime<C> as SessionRuntime>::LinkSink>();
 }

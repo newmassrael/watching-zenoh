@@ -8,7 +8,7 @@
 # spread across `wz-runtime-tokio::{session, session_glue, observer,
 # declare, pubsub, query, reply, sample, locality, keyexpr_canon}`.
 # This crate hosts the generic `impl<R: Runtime, T: TimeSource>` bodies
-# so MCU profiles (`R = LwipRuntime<C>`, `T = LwipTime<C>`) compose
+# so MCU profiles (`R = CoopRuntime<C>`, `T = CoopTime<C>`) compose
 # the same session machinery without dragging in std / tokio / Lua.
 #
 # Phase W placement: §5.P runtime-services-tier consumer (wz-runtime-core
@@ -190,7 +190,7 @@ session-extshm = ["transport-shm", "session-unicast"]
 # Per the portable-atomic contract a LIBRARY (sce-rust-runtime) must NOT
 # force `critical-section` (it would pin a global atomic backend on every
 # consumer); the CONSUMER/deploy enables it and links the impl. This is
-# the same consumer responsibility wz-runtime-lwip discharges for its own
+# the same consumer responsibility wz-runtime-coop discharges for its own
 # atomics; wz-session-core is the first to cross-compile the no_std Engine
 # host on bare metal, so it enables the backend here. The rlib compiles
 # with the feature alone; the `critical_section` impl is a link-time
@@ -627,7 +627,7 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true
 # emulated `AtomicU64` through `critical_section::with` so the rlib
 # cross-compiles (the impl is linked by the MCU deploy). `fallback` keeps
 # native 64-bit atomics on targets that have them (thumbv7em LDREXD etc.).
-# Mirrors wz-runtime-lwip's portable-atomic declaration.
+# Mirrors wz-runtime-coop's portable-atomic declaration.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"], optional = true }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`
 # projection helpers (extract_qos / extract_attachment / extract_source_info).
