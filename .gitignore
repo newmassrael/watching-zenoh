@@ -21,6 +21,9 @@ deploy/mcu-session-acceptor/target/
 # R311mi — deploy/mcu-multicast-e2e is the fifth standalone workspace
 # (multicast footprint bin; Layer Q.5). Same target/ policy.
 deploy/mcu-multicast-e2e/target/
+# R311y27 — deploy/mcu-freertos-demo is the standalone FreeRTOS-profile
+# workspace (boot e2e; Layer Q.frt). Same target/ policy.
+deploy/mcu-freertos-demo/target/
 # R311y22 — xtask is the sixth standalone workspace (the codegen SSOT
 # that regenerates out/**; pulls sce-build/libxml2, kept out of the main
 # build). Same target/ policy. Its Cargo.lock IS committed (reproducible

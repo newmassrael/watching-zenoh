@@ -3331,6 +3331,42 @@ layer_q_qemu_mcu_e2e() {
         fi
     done
 
+    # ── Q.frt — FreeRTOS profile e2e (deploy/mcu-freertos-demo) — R311y27 ──
+    #
+    # Boots the LAYER-2 FreeRTOS cooperative single-task profile on mps2-an385
+    # (Cortex-M3 only — the vendored ARM_CM3 port): cortex-m-rt #[entry] ->
+    # xTaskCreate(wz_task) -> vTaskStartScheduler; the wz task hosts
+    # CoopRuntime<FreertosClock> (the REUSED wz-runtime-coop executor) + the
+    # wz-link-lwip UDP loopback echo, yielding with vTaskDelay. SYS_EXIT=0 =>
+    # the FreeRTOS scheduler booted (SysTick/PendSV/SVCall vector wiring via the
+    # FreeRTOSConfig.h handler #defines works) AND the cooperative echo
+    # round-tripped. Build needs BOTH WZ_FREERTOS_CONFIG (the deploy's
+    # FreeRTOSConfig.h, with the cortex-m-rt direct-routing #defines) AND
+    # WZ_LWIP_PORT (the lwIP cross-test port). Reaches here only with
+    # arm-none-eabi-gcc present (the Q.1-3 toolchain gate returned early else).
+    if grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
+        local frt_cfg frt_lwip
+        frt_cfg="$(realpath deploy/mcu-freertos-demo)"
+        frt_lwip="$(realpath crates/lwip-sys/port/cross-test)"
+        if WZ_FREERTOS_CONFIG="$frt_cfg" WZ_LWIP_PORT="$frt_lwip" cargo build --release \
+            --manifest-path deploy/mcu-freertos-demo/Cargo.toml \
+            --target thumbv7m-none-eabi --bin mcu-freertos-demo --quiet; then
+            echo "  Q.frt build mcu-freertos-demo thumbv7m-none-eabi OK"
+            any_built=1
+            if [[ "$has_qemu" -ne 1 ]]; then
+                echo "  Q.frt run SKIP (qemu-system-arm not on PATH)"
+            elif ! run_qemu_case \
+                "Q.frt run mcu-freertos-demo via qemu-system-arm mps2-an385" \
+                cortex-m3 mps2-an385 \
+                "deploy/mcu-freertos-demo/target/thumbv7m-none-eabi/release/mcu-freertos-demo"; then
+                fail=1
+            fi
+        else
+            echo "  Q.frt build mcu-freertos-demo thumbv7m-none-eabi FAIL" >&2
+            fail=1
+        fi
+    fi
+
     # ── Q.4 — Stage 5 acceptor session e2e (deploy/mcu-session-acceptor) ──
     #
     # Boots wz_mcu_session_acceptor::run_acceptor_e2e on the native-atomic

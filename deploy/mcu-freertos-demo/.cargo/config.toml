@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-freertos-demo .cargo/config.toml — pins the standalone crate to the
+# Cortex-M3 target + wires cortex-m-rt's link script + the QEMU mps2-an385
+# runner (semihosting on so the demo's SYS_EXIT propagates PASS/FAIL into the
+# qemu process exit code). Mirrors deploy/mcu-qemu-demo.
+
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+rustflags = ["-C", "link-arg=-Tlink.x"]
+runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"

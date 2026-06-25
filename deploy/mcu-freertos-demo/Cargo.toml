@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-freertos-demo — QEMU mps2-an385 (Cortex-M3) e2e proving the LAYER-2
+# FreeRTOS cooperative single-task profile end-to-end: the FreeRTOS scheduler
+# boots, ONE task hosts the wz-runtime-coop cooperative executor
+# (wz_runtime_freertos::FreertosRuntime = CoopRuntime<FreertosClock>), and that
+# task runs the same wz-link-lwip UDP loopback echo as the bare-metal sibling
+# deploy/mcu-qemu-demo — but driven by vTaskDelay + the FreeRTOS tick instead of
+# the bare-metal SysTick + wfi() loop. Standalone workspace (not a crates/
+# member); build with WZ_FREERTOS_CONFIG=<this dir> + WZ_LWIP_PORT=<cross-test>.
+
+[package]
+name = "mcu-freertos-demo"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[[bin]]
+name = "mcu-freertos-demo"
+path = "src/main.rs"
+
+[dependencies]
+# Cortex-M runtime + entry. critical-section-single-core provides the
+# critical-section impl wz-runtime-coop::sync + portable-atomic need.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# FreeRTOS kernel FFI (xTaskCreate / vTaskStartScheduler / vTaskDelay) + the
+# cooperative-profile runtime (FreertosClock + FreertosAllocator +
+# FreertosRuntime). freertos-sys's real C build is enabled by WZ_FREERTOS_CONFIG
+# pointing at this crate's FreeRTOSConfig.h.
+freertos-sys = { path = "../../crates/freertos-sys" }
+wz-runtime-freertos = { path = "../../crates/wz-runtime-freertos" }
+
+# wz facade — runtime-coop pulls CoopRuntime + wz-link-lwip (lwIP UDP).
+wz = { path = "../../crates/wz", default-features = false, features = ["runtime-coop"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
