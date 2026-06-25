@@ -482,7 +482,7 @@ watching-zenoh/
 │   ├── watching_zenoh_api/            # optional: thin zenoh-c-like API
 │   │                                  #   shim on top of generated library
 │   └── watching_zenoh_bin/            # default AP binary (uses library)
-├── out/                               # codegen products (gitignored)
+├── out/                               # codegen products (COMMITTED + Layer B2 regen-diff-gated; R311y22)
 │   ├── ap/                            # generated Rust LIBRARY crate
 │   │   ├── Cargo.toml                 #   crate-type = ["rlib", "cdylib"]
 │   │   ├── src/lib.rs                 #   public API
@@ -503,6 +503,20 @@ watching-zenoh/
     ├── hello_sub/                     # MCU subscribes and blinks LED
     └── mixed_pair/                    # AP peer + MCU peer interop demo
 ```
+
+> **R311y22 — committed codegen (current reality vs this vision).** As of
+> R311y22 the SCE-generated Rust is COMMITTED under `out/<crate>/*.rs` (one dir
+> per consuming crate — `out/wz-codecs/`, `out/wz-session-core/`,
+> `out/wz-ap-demo-app/`, …) and `include!`-ed by each hand-written crate — NOT
+> yet the `out/ap/` standalone generated-library-crate shape this section
+> envisions. The `xtask` codegen SSOT regenerates `out/**` and the run-ci
+> **Layer B2** regen-diff gate enforces `committed == regenerated`, so `out/**`
+> is a verified cache of the SCXML SSOT (manual edits still forbidden, per
+> §2.4 point 6 / §11.5). This replaced the prior build-time codegen, so a plain
+> `cargo build` of the wz stack needs NO libxml2/SCE toolchain. The
+> `out/ap` + `out/mcu` generated-library-crate restructure below stays the
+> longer-term vision (it needs SCE emitting standalone crates); R311y22 is a
+> STEP toward it, not its completion.
 
 **Key structural point.** `out/ap/` is a **library crate**
 (`crate-type = ["rlib", "cdylib"]`), not an executable. Binaries
