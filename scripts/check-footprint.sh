@@ -72,10 +72,20 @@ declare -A BASELINE_TEXT=(
     # netif IGMP wrappers. thumbv6m grows more (+1024 vs +896) because
     # ARMv6-M lacks Thumb-2 so the same IGMP C compiles to more
     # instructions. Was: 18584 / 23652 / 23724 / 24548.
-    ["thumbv6m-none-eabi"]=19608
-    ["thumbv7m-none-eabi"]=24548
-    ["thumbv7em-none-eabihf"]=24636
-    ["thumbv8m.main-none-eabi"]=25460
+    #
+    # R311y17 — rebased after the R311y15 monotonic-clock fix in
+    # deploy/mcu-qemu-demo/src/main.rs. SystickClock gained a `last_us`
+    # AtomicU64 monotonic floor (now_us() clamps its raw wraps-based
+    # reading up to the max previously returned) to honour the
+    # ClockSource monotonic contract; that 64-bit CAS clamp is emitted at
+    # both now_us call sites (sys_now + SystickClockRef), growing demo
+    # .text by ~216 B on CI's arm-none-eabi-gcc (+304 on thumbv7m put it
+    # out of the +-256 band). text-only growth (data flat; bss INFO).
+    # Was: 19608 / 24548 / 24636 / 25460 (R311iu).
+    ["thumbv6m-none-eabi"]=19764
+    ["thumbv7m-none-eabi"]=24852
+    ["thumbv7em-none-eabihf"]=24920
+    ["thumbv8m.main-none-eabi"]=25744
 )
 declare -A BASELINE_DATA=(
     ["thumbv6m-none-eabi"]=4

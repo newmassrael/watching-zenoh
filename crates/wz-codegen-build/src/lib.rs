@@ -44,7 +44,15 @@ impl Codegen {
             .canonicalize()
             .expect("canonicalize vendor/sce");
 
-        let sce_codegen = sce_workspace.join("target/release/sce-codegen");
+        // R311y17 — the binary carries the host's executable suffix
+        // (`.exe` on Windows, empty on Unix). build-sce.sh emits
+        // `sce-codegen[.exe]` and this build script runs on the same
+        // host, so `EXE_SUFFIX` is the correct portable name. Without it
+        // the Windows portability CI leg panicked "binary not found"
+        // even though build-sce.sh had produced sce-codegen.exe.
+        let sce_codegen = sce_workspace
+            .join("target/release")
+            .join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX));
         if !sce_codegen.exists() {
             panic!(
                 "sce-codegen binary not found at {}\n\
