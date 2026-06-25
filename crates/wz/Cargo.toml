@@ -1349,10 +1349,11 @@ preset-ap-router = [
     "time-timestamp-source",
 ]
 
-# preset-ap-full — kitchen-sink Linux deploy (≈123 atomic features).
+# preset-ap-full — kitchen-sink Linux deploy (≈126 atomic features).
 # Every active + reserved feature reasonable for an AP host: all
-# transport link kinds, all auth methods, all encodings, all storage,
-# all session extensions, attachment, advanced QoS.
+# transport link kinds (incl. the wz-superset quic-datagram + unixpipe
+# backends + the transport-stats facade), all auth methods, all
+# encodings, all storage, all session extensions, attachment, advanced QoS.
 preset-ap-full = [
     "platform-linux",
     "runtime-tokio",
@@ -1362,7 +1363,9 @@ preset-ap-full = [
     "transport-link-tls",
     "transport-link-udp",
     "transport-link-quic",
+    "transport-link-quic-datagram",
     "transport-link-unixsock",
+    "transport-link-unixpipe",
     "transport-link-vsock",
     "transport-link-ws",
     "transport-unicast",
@@ -1373,6 +1376,7 @@ preset-ap-full = [
     "transport-lowlatency",
     "transport-compression",
     "transport-shm",
+    "transport-stats",
     "session-unicast-open",
     "session-unicast-accept",
     "session-reconnect",
