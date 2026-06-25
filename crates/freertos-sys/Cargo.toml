@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# freertos-sys — statically compiles the vendored FreeRTOS-Kernel V11.1.0
+# (vendor/freertos-kernel, MIT) for the cooperative single-task profile, plus
+# hand-written FFI for the core task API. Mirrors the lwip-sys/zenoh-pico-sys
+# shape: real C build only on a bare-metal cross target (the ARM_CM3 port is
+# Cortex-M-specific and cannot compile on the host); host builds emit no
+# liblibfreertos.a (the FFI decls compile, but no consumer links them on host).
+
+[package]
+name = "freertos-sys"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+# `links` exposes the build.rs `cargo:KEY=VALUE` metadata as DEP_FREERTOS_<KEY>
+# in dependents' build scripts (mirrors lwip-sys's links="lwip"), so a consumer
+# can flip a `freertos_real_build` cfg from a single source of truth.
+links = "freertos"
+
+[build-dependencies]
+cc = "1"

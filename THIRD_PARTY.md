@@ -93,6 +93,29 @@ changelog that authorized the bump.
 - **Upstream-tracking**: pin set at R311az-1 lands. Bumps follow
   lwIP `STABLE-*_RELEASE` tags rather than master branch HEAD.
 
+## vendor/freertos-kernel — FreeRTOS real-time kernel
+
+- **Origin**: https://github.com/FreeRTOS/FreeRTOS-Kernel
+- **Commit pin**: `dbf70559b` (tag `V11.1.0`)
+- **License**: MIT. Full text in `vendor/freertos-kernel/LICENSE.md`.
+  Permissive; no copyleft.
+- **Scope of use**: LAYER-2 RTOS port (track 3). `crates/freertos-sys`
+  statically compiles the kernel core (`tasks.c` + `list.c` + `queue.c`)
+  + the `portable/GCC/ARM_CM3` (ARMv7-M / Cortex-M3) port + `heap_4.c`
+  for the **cooperative single-task profile** (configUSE_TIMERS=0 /
+  event-groups / stream-buffers / co-routines off; one task hosts the
+  wz cooperative async executor — the FreeRTOS analogue of zenoh-pico's
+  Z_FEATURE_MULTI_THREAD=0 single-thread mode). Real C build only on a
+  bare-metal Cortex-M cross target (the ARM_CM3 port is hardware-specific
+  and cannot compile on a host x86 toolchain); host builds emit no
+  static lib. `crates/wz-runtime-freertos` (the `impl Runtime`) wraps the
+  hand-written FFI surface (xTaskCreate / vTaskStartScheduler / vTaskDelay
+  / xTaskGetTickCount / pvPortMalloc + the ARMv7-M port exception
+  handlers). FreeRTOS is redistributed in source form via the submodule;
+  the compiled kernel links into the MCU deploy binary only.
+- **Upstream-tracking**: pin set when the freertos-sys foundation lands.
+  Bumps follow FreeRTOS-Kernel `V*` release tags rather than main HEAD.
+
 ## Generated output
 
 Source files under `out/<crate>/` (e.g. `out/wz-codecs/`,
