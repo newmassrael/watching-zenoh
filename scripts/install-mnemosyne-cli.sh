@@ -24,9 +24,14 @@
 
 set -euo pipefail
 
-# github.com/newmassrael/mnemosyne @ R415 (Severity-enum config refactor),
-# the rev the R408 docs-optional config parser ships in.
-MNEMOSYNE_REV="48117d24545c220bba4fa74c0295b1b14491eeae"
+# github.com/newmassrael/mnemosyne @ R584 (validate: exempt append-only
+# caveats from prose lint) — the rev whose CLI reads the current atomic-store
+# schema_version (23). The prior pin (R415, 48117d24) only handled schema <= 9,
+# so Layer A hard-failed `schema version mismatch: store=23 expected <= 9` on
+# every push after the store schema bumped past 9. Kept in step with the
+# locally-installed `--path` binary (mnemosyne-cli 0.1.0 bb01cc6b) so local
+# pre-push and CI validate against the same mnemosyne version.
+MNEMOSYNE_REV="bb01cc6b9fca5f4e7a65b50a565deb5dda938413"
 
 cargo install --git https://github.com/newmassrael/mnemosyne \
   --rev "$MNEMOSYNE_REV" --bin mnemosyne-cli --force mnemosyne-cli

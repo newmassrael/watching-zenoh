@@ -461,6 +461,27 @@ jobs:
             crates -> target
             vendor/sce -> target
 
+      - name: Install libxml2 (Windows, sce-codegen libxml C dep)
+        # R311y15 — sce-codegen (vendor/sce) pulls the `libxml` crate, whose
+        # build.rs links the native libxml2 C library. On Linux/macOS that is
+        # discovered via pkg-config (the macOS leg + the Linux `ci` job both
+        # find it in the SDK / system), but the Windows-MSVC build.rs branch
+        # resolves it through vcpkg and HARD-PANICS ("Could not find libxml2")
+        # on a bare runner. Provision it so the Windows portability gate can
+        # actually run codegen. `x64-windows-static-md` = static libxml2 against
+        # the DYNAMIC CRT, matching rustc-msvc's default /MD, so the linkage is
+        # consistent. VCPKG_ROOT is what the `vcpkg` crate (vcpkg-rs) reads;
+        # the GitHub image only exports VCPKG_INSTALLATION_ROOT, and
+        # VCPKGRS_TRIPLET pins the triplet vcpkg-rs probes to the one installed.
+        # bindgen's libclang dep is satisfied by the LLVM the windows-latest
+        # image already carries.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install libxml2:x64-windows-static-md
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+          echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> "$GITHUB_ENV"
+
       - name: Build sce-codegen (vendor/sce)
         # bash so the script runs on the Windows runner (git-bash) too; the
         # binary lands at vendor/sce/target/release/sce-codegen[.exe], located

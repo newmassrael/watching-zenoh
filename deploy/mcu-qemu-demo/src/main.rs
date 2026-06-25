@@ -78,7 +78,7 @@ use core::mem::MaybeUninit;
 // compatible with `core::sync::atomic::Ordering`; semantics
 // unchanged on the M3/M4/M7 sub-lanes that already PASSed under
 // R311bg.
-use portable_atomic::{AtomicU32, Ordering};
+use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 
 use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::{debug, hprintln};
@@ -160,12 +160,18 @@ const SYST_CSR_ENABLE: u32 = 1 << 0;
 /// counter that decrements independently.
 struct SystickClock {
     wraps: AtomicU32,
+    /// Monotonic floor (R311y15). `now_us` clamps its raw computation
+    /// up to the maximum value any prior call returned. Required
+    /// because the raw `wraps`-based reading can momentarily step
+    /// BACKWARD — see [`SystickClock::now_us`].
+    last_us: AtomicU64,
 }
 
 impl SystickClock {
     const fn new() -> Self {
         Self {
             wraps: AtomicU32::new(0),
+            last_us: AtomicU64::new(0),
         }
     }
 
@@ -189,13 +195,50 @@ impl SystickClock {
         // advanced during the CVR read, the CVR snapshot belongs to
         // a different period than the snapped `wraps` value — retry
         // once `wraps` is stable across the read.
-        loop {
+        let raw = loop {
             let w1 = self.wraps.load(Ordering::Acquire);
             let cvr = unsafe { SYST_CVR.read_volatile() } & SYST_RELOAD;
             let w2 = self.wraps.load(Ordering::Acquire);
             if w1 == w2 {
                 let total_cycles = w1 as u64 * SYST_PERIOD + (SYST_RELOAD - cvr) as u64;
-                return total_cycles / CYCLES_PER_US;
+                break total_cycles / CYCLES_PER_US;
+            }
+        };
+
+        // R311y15 — monotonic floor. The double-snap above is wrap-tear
+        // safe but NOT monotonic: `wraps` is advanced by the SysTick
+        // exception, and when that exception is delayed past a reload
+        // boundary (lazy FP-context stacking on Cortex-M4F/M7 plus the
+        // cooperative executor's interrupt-disabling critical sections
+        // stretch the ISR latency) `wraps` lags the hardware for a few
+        // instructions. During that window the raw reading steps
+        // BACKWARD by up to one period. The `ClockSource` contract
+        // (wz_runtime_lwip::time::ClockSource) REQUIRES `now_us` be
+        // non-decreasing; a backward step makes a `SleepFuture` observe
+        // `now < deadline` AFTER `run_until_idle`'s `pop_expired` has
+        // already consumed its timer-queue entry, so the wake is lost
+        // and the cooperative loop livelocks (the QEMU mps2-an386/an500
+        // Layer Q hang — reproducible under `-icount`; the M3 softfloat
+        // lane never delays the ISR far enough to surface it).
+        //
+        // The raw value is always <= true elapsed time (`wraps` can lag
+        // but never leads), so clamping up to the max previously
+        // returned is provably safe: it filters the backward glitch
+        // without ever sticking high. Single-core, ISR-free on this
+        // field, so a relaxed CAS loop suffices.
+        let mut last = self.last_us.load(Ordering::Relaxed);
+        loop {
+            if raw <= last {
+                return last;
+            }
+            match self.last_us.compare_exchange_weak(
+                last,
+                raw,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return raw,
+                Err(observed) => last = observed,
             }
         }
     }

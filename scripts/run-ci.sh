@@ -380,15 +380,20 @@ run_qemu_case() {
     local label="$1" cpu="$2" machine="$3" kernel="$4"
     local qlog rc
     qlog="$(mktemp)"
-    # R311y14 — wall-clock bound on the qemu run. 10s was too tight: under
-    # full-CI concurrent load (parallel cargo builds + several qemu instances)
-    # the emulator's wall-clock slows enough that a ~2s-standalone e2e exceeded
-    # 10s and the lane flaked (the Layer-Q-qemu-load-flake — passed standalone /
-    # retry, never a real regression). 30s (~15x the standalone runtime) absorbs
-    # that load slowdown while still bounding a GENUINE runaway loop: a real hang
-    # runs the full 30s vs the ~2s normal, clearly distinguishable in the
-    # captured log. [[feedback-no-flaky-ever]] — root-cause the flake (the
-    # timeout ignored CI-load slowdown), not retry-until-green / --no-verify.
+    # Wall-clock bound on the qemu run — a backstop against a GENUINE
+    # runaway / livelock, not a flake-suppressant. R311y14 misdiagnosed
+    # the mps2-an386/an500 Layer-Q failure as a load-slowdown and bumped
+    # 10s -> 30s; that was wrong (a 30s bound never fixes a hang). R311y15
+    # root-caused it: the mcu-qemu-demo SystickClock::now_us() was
+    # non-monotonic when the SysTick exception was delayed past a wrap
+    # boundary on the Cortex-M4F/M7 (FPU) lanes, which lost a SleepFuture
+    # wakeup and livelocked the cooperative loop — the demo carried the
+    # bug, the timeout only masked how long it ran. With the clock now
+    # monotonic the demo completes in ~2s standalone on every M-class
+    # lane (verified 60/60 under deterministic `-icount`, which previously
+    # reproduced the hang ~1/3). The 30s bound stays as a generous runaway
+    # backstop. [[feedback-no-flaky-ever]] — the fix is the clock, not the
+    # timeout / retry-until-green / --no-verify.
     local timeout_s=30
     # `else rc=$?` (not a post-`fi` capture): after a false `if cond; then …;
     # fi` bash resets $? to 0, so the timeout exit code is only readable inside
