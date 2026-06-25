@@ -21,6 +21,11 @@ deploy/mcu-session-acceptor/target/
 # R311mi — deploy/mcu-multicast-e2e is the fifth standalone workspace
 # (multicast footprint bin; Layer Q.5). Same target/ policy.
 deploy/mcu-multicast-e2e/target/
+# R311y22 — xtask is the sixth standalone workspace (the codegen SSOT
+# that regenerates out/**; pulls sce-build/libxml2, kept out of the main
+# build). Same target/ policy. Its Cargo.lock IS committed (reproducible
+# regen), same as the deploy bins.
+xtask/target/
 **/*.rs.bk
 
 # Cargo.lock policy: COMMITTED for the wz Rust workspace

@@ -5,11 +5,15 @@
 # Phase B5 codec SCXMLs.
 #
 # This crate hosts the sce-codegen Rust output for the codec-kind
-# SCXMLs under `sources/codecs/`. build.rs invokes sce-build's
-# `compile_forge_with_imports` in-process at compile time so the
-# generated code lands in `$OUT_DIR/<stem>.rs` and is `include!()`-ed
-# from `src/lib.rs`. No committed Rust codec code exists — the single
-# source of truth is the SCXML set.
+# SCXMLs under `sources/codecs/`. R311y22: the generated code is
+# COMMITTED under `out/wz-codecs/<stem>.rs` and `include!()`-ed from
+# `src/lib.rs` (via `env!("CARGO_MANIFEST_DIR")`), so this crate builds
+# with NO build script and NO libxml2/SCE toolchain. The SCXML set under
+# `sources/codecs/` stays the single source of truth; the committed Rust
+# is a verified cache of it — `xtask` (scripts/regen-codegen.sh)
+# regenerates it and the CI regen-diff lane enforces committed ==
+# regenerated, so the two cannot drift. Manual edits to `out/**` are
+# forbidden (SSoT-downstream).
 #
 # The Phase 2 walking skeleton (R40) wires only the §6 payload trio
 # (msg_put / msg_del) and their dependency chain (timestamp /
@@ -29,7 +33,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Generated wire codecs from watching-zenoh sources/codecs/ SCXMLs (Phase B5)."
-build = "build.rs"
 
 [lib]
 name = "wz_codecs"
@@ -221,13 +224,9 @@ sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-
 # so the owned bytes form is unbounded Vec on AP and heapless<N> on MCU.
 sce-portable-bytes = { path = "../../vendor/sce/sce-portable-bytes", default-features = false }
 
-[build-dependencies]
-# Build-time codegen via SCE's in-process compile entry point. The
-# same `compile_forge_with_imports` symbol that
-# `vendor/sce/sce-forge-runtime/rust/build.rs` uses for SCE's own
-# numerical conformance harness — no subprocess overhead, no stale-
-# binary issues.
-sce-build = { path = "../../vendor/sce/sce-build" }
+# R311y22 — no [build-dependencies]. Codegen moved to `xtask` (the codegen
+# SSOT); the committed `out/wz-codecs/*.rs` is `include!`-ed directly, so this
+# crate no longer pulls `sce-build` (hence libxml2) into the build graph.
 
 [lints]
 workspace = true

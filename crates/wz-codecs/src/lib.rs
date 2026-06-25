@@ -3,10 +3,14 @@
 
 //! Generated wire codecs for the watching-zenoh Phase B5 codec set.
 //!
-//! Each `mod <stem>` block includes the sce-codegen Rust output for
-//! the matching `sources/codecs/<stem>.scxml` file; `build.rs`
-//! emits those files into `$OUT_DIR` at compile time via SCE's
-//! in-process `compile_forge_with_imports` entry point.
+//! Each `mod <stem>` block `include!`s the sce-codegen Rust output for
+//! the matching `sources/codecs/<stem>.scxml` file. R311y22: that output
+//! is COMMITTED under `out/wz-codecs/<stem>.rs` (resolved via
+//! `env!("CARGO_MANIFEST_DIR")`), so this crate has no build script and
+//! pulls no libxml2/SCE toolchain. `xtask` (scripts/regen-codegen.sh)
+//! regenerates the committed files from the SCXML SSOT and the CI
+//! regen-diff lane enforces committed == regenerated. Manual edits to
+//! `out/**` are forbidden.
 //!
 //! The codegen output references sibling modules with
 //! `use super::X::Y;`, so all stems are declared at the same level in
@@ -99,7 +103,7 @@ macro_rules! codec_group {
             #[cfg(feature = $feature)]
             pub mod $name {
                 codec_alloc_prelude!();
-                include!(concat!(env!("OUT_DIR"), "/", $file));
+                include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/wz-codecs/", $file));
             }
         )+
     };
@@ -107,27 +111,42 @@ macro_rules! codec_group {
 
 pub mod timestamp {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/timestamp.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/timestamp.rs"
+    ));
 }
 
 pub mod encoding {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/encoding.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/encoding.rs"
+    ));
 }
 
 pub mod ext_unit {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/ext_unit.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/ext_unit.rs"
+    ));
 }
 
 pub mod ext_zint {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/ext_zint.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/ext_zint.rs"
+    ));
 }
 
 pub mod ext_zbuf {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/ext_zbuf.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/ext_zbuf.rs"
+    ));
 }
 
 // R311ns — zenoh-pico SERIAL-link frame CRC32 (algorithm kind). The
@@ -136,7 +155,10 @@ pub mod ext_zbuf {
 #[cfg(feature = "codec-serial")]
 pub mod crc32 {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/crc32.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/crc32.rs"
+    ));
 }
 
 // R311ns — serial-link pre-COBS frame envelope (codec kind):
@@ -146,7 +168,10 @@ pub mod crc32 {
 #[cfg(feature = "codec-serial")]
 pub mod serial_envelope {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/serial_envelope.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/serial_envelope.rs"
+    ));
 }
 
 // R311ns — serial-link COBS stuffing/destuffing (algorithm kind,
@@ -156,65 +181,98 @@ pub mod serial_envelope {
 #[cfg(feature = "codec-serial")]
 pub mod cobs_encode {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/cobs_encode.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/cobs_encode.rs"
+    ));
 }
 
 #[cfg(feature = "codec-serial")]
 pub mod cobs_decode {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/cobs_decode.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/cobs_decode.rs"
+    ));
 }
 
 pub mod stream_envelope {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/stream_envelope.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/stream_envelope.rs"
+    ));
 }
 
 #[cfg(feature = "codec-close")]
 pub mod close {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/close.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/close.rs"
+    ));
 }
 
 #[cfg(feature = "codec-frame")]
 pub mod frame {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/frame.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/frame.rs"
+    ));
 }
 
 #[cfg(feature = "codec-fragment")]
 pub mod fragment {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/fragment.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/fragment.rs"
+    ));
 }
 
 #[cfg(feature = "codec-scout")]
 pub mod scout {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/scout.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/scout.rs"
+    ));
 }
 
 #[cfg(feature = "codec-init-body")]
 pub mod init_body {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/init_body.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/init_body.rs"
+    ));
 }
 
 #[cfg(feature = "codec-open-body")]
 pub mod open_body {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/open_body.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/open_body.rs"
+    ));
 }
 
 #[cfg(feature = "codec-join")]
 pub mod join {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/join.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/join.rs"
+    ));
 }
 
 pub mod locator {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/locator.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/locator.rs"
+    ));
 
     /// The wire width of one locator string — the `LocatorOwned::locator`
     /// field's `SceString<N>` capacity (`sources/codecs/locator.scxml`
@@ -236,48 +294,75 @@ pub mod locator {
 #[cfg(feature = "codec-hello")]
 pub mod hello {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/hello.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/hello.rs"
+    ));
 }
 
 pub mod ext_entry {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/ext_entry.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/ext_entry.rs"
+    ));
 }
 
 pub mod ext_envelope {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/ext_envelope.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/ext_envelope.rs"
+    ));
 }
 
 pub mod msg_put {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/msg_put.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/msg_put.rs"
+    ));
 }
 
 pub mod msg_del {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/msg_del.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/msg_del.rs"
+    ));
 }
 
 #[cfg(feature = "codec-keep-alive")]
 pub mod keep_alive {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/keep_alive.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/keep_alive.rs"
+    ));
 }
 
 pub mod wireexpr_local {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/wireexpr_local.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/wireexpr_local.rs"
+    ));
 }
 
 pub mod wireexpr_nonlocal {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/wireexpr_nonlocal.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/wireexpr_nonlocal.rs"
+    ));
 }
 
 pub mod wireexpr {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/wireexpr.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/wireexpr.rs"
+    ));
 }
 
 codec_group!(
@@ -288,28 +373,43 @@ codec_group!(
 #[cfg(feature = "codec-push")]
 pub mod push {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/push.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/push.rs"
+    ));
 }
 
 #[cfg(feature = "codec-response-final")]
 pub mod response_final {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/response_final.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/response_final.rs"
+    ));
 }
 
 pub mod oam {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/oam.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/oam.rs"
+    ));
 }
 
 pub mod interest_body {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/interest_body.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/interest_body.rs"
+    ));
 }
 
 pub mod interest {
     codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/interest.rs"));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-codecs/interest.rs"
+    ));
 }
 
 codec_group!(

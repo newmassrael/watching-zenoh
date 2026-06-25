@@ -638,6 +638,48 @@ layer_b_verify_codegen() {
     return $fail
 }
 
+# ─── Layer B2 — committed-codegen regen-diff gate (R311y22) ─────────
+#
+# R311y22 moved the SCXML->Rust codegen out of the per-crate build.rs
+# scripts and into committed files under out/** (so a plain `cargo build`
+# of the wz stack needs no libxml2/SCE toolchain). This gate keeps the
+# committed tree honest: regenerate it via the xtask codegen SSOT, then
+# fail if it differs from what is committed. With this gate, the committed
+# out/** is a VERIFIED CACHE of the SCXML SSOT (committed == regenerated),
+# never a second source of truth — the standard discipline for committed
+# generated code behind a heavy generator.
+#
+# Skips gracefully (like Layer B) when the codegen toolchain is absent:
+# the xtask pulls sce-build -> libxml (native libxml2), so a dev box
+# without libxml2 cannot regenerate. CI Linux has libxml2 (it builds
+# sce-codegen for Layer B), so the gate runs there.
+layer_b2_regen_diff() {
+    if [[ $SKIP_CODEGEN -eq 1 ]]; then
+        echo "Layer B2 SKIP (--skip-codegen)"
+        return 0
+    fi
+    # Build the xtask first; a libxml2-absent box fails here -> SKIP, not FAIL
+    # (the gate is a maintainer freshness check, not a consumer build step).
+    if ! cargo build --manifest-path xtask/Cargo.toml --quiet >/dev/null 2>&1; then
+        echo "Layer B2 SKIP (xtask build failed — libxml2/sce-build toolchain absent?)"
+        return 0
+    fi
+    if ! cargo run --manifest-path xtask/Cargo.toml --quiet -- regen >/dev/null 2>&1; then
+        echo "Layer B2 FAIL: xtask regen errored" >&2
+        return 1
+    fi
+    local dirty
+    dirty="$(git status --porcelain -- out/ 2>/dev/null)"
+    if [[ -n "$dirty" ]]; then
+        echo "Layer B2 FAIL: committed out/** is stale vs regenerated —" >&2
+        echo "  run scripts/regen-codegen.sh and commit out/:" >&2
+        echo "$dirty" >&2
+        return 1
+    fi
+    echo "Layer B2 pass (committed out/** == regenerated)"
+    return 0
+}
+
 # ─── Layer C0 — binary-dep test discipline pre-flight ───────────────
 # R235-hotfix: Layer C1 runs `cargo test --workspace` which fans
 # every `#[test]` fn in `crates/wz-integration-tests/tests/`. Tests
@@ -3629,6 +3671,7 @@ run_layer A layer_a_mnemosyne || overall=1
 run_layer A2 layer_a2_audit_mid_values || overall=1
 run_layer A3 layer_a3_audit_catalog_status || overall=1
 run_layer B layer_b_verify_codegen || overall=1
+run_layer B2 layer_b2_regen_diff || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
