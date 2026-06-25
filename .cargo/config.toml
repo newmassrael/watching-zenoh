@@ -1,0 +1,21 @@
+# Cargo configuration for watching-zenoh.
+#
+# This file is intentionally minimal: a single platform link fix. It does NOT
+# set a default target, registry, or build flags that would affect the Linux /
+# macOS / MCU cross-compile builds — the one section below only applies when the
+# build target is windows-msvc (the `portability (windows-latest)` CI leg), and
+# is completely inert on every other target.
+
+# R311y19 — link bcrypt on windows-msvc.
+#
+# sce-codegen's SCXML toolchain pulls the `libxml` crate (transitively via SCE's
+# sce-build), which links vcpkg's libxml2. libxml2 >= 2.13 calls BCryptGenRandom
+# in xmlInitRandom, but the libxml crate's vcpkg link metadata omits bcrypt, so
+# the build-script links (sce-forge-runtime, wz-codecs) fail with
+# `LNK2019: unresolved external symbol BCryptGenRandom`. bcrypt is a Windows
+# system library; linking it unconditionally on windows-msvc is the standard fix
+# (it is harmless when unreferenced). The portability leg builds NATIVELY (no
+# `--target`), so host == target == x86_64-pc-windows-msvc and these rustflags
+# reach the failing build scripts too.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=bcrypt.lib"]
