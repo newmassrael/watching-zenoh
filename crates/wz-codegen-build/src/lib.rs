@@ -150,6 +150,19 @@ fn cut_generated_tests(lines: &[&str]) -> usize {
     }
 }
 
+/// Read a generated file, strip its file-head `#![...]` inner attributes +
+/// `//!` inner doc comments (illegal once `include!`'d mid-module), and write
+/// it back in place. R311y22e — the SINGLE shared strip for both the
+/// statechart/pool emits in this crate AND the `xtask` switchboard `--emit-ast`
+/// leg (the strip was duplicated in the xtask; the byte-faithfulness the
+/// regen-diff gate relies on requires ONE strip predicate, not two that can
+/// drift — the very shape R311y21 eliminated for the clock).
+pub fn strip_inner_attrs_file(path: &Path) {
+    let original = read(path);
+    let stripped = strip_inner_attrs(original.lines());
+    write(path, &stripped);
+}
+
 /// Strip file-head `#![...]` inner attributes and `//!` inner doc
 /// comments — illegal once the emit is `include!`'d mid-module.
 fn strip_inner_attrs<'a>(lines: impl Iterator<Item = &'a str>) -> String {

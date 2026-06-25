@@ -175,6 +175,16 @@ jobs:
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
+      - name: Layer B2 — regen-diff (committed out/** == regenerated)
+        # R311y22e — server-enforce the committed-codegen freshness gate. It
+        # regenerates out/** via the `xtask` codegen SSOT and FAILs on any diff,
+        # so a hand-edited or stale committed artifact cannot land. R311y22a-d
+        # left this gate in the pre-push hook ONLY (bypassable via --no-verify /
+        # an uninstalled hook); R311y22e promotes it to a real CI step. The
+        # Linux `ci` job already has libxml2 + builds sce-codegen above (the Build
+        # sce-codegen step + Layer B), so the xtask's codegen toolchain is present.
+        run: bash scripts/run-ci.sh --layer B2
+
       - name: Layer C0 — binary-dep test #[ignore] discipline
         # R235-hotfix — pre-flight scan: any wz-integration-tests
         # `tests/*.rs` that calls wz_ap_demo_binary() or

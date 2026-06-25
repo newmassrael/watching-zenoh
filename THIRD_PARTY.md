@@ -19,13 +19,16 @@ changelog that authorized the bump.
 - **License**: dual-licensed — LGPL-2.1 WITH SCE Static Linking
   Exception OR LicenseRef-SCE-Commercial. See
   `vendor/sce/LICENSE` for the full text.
-- **Scope of use**: build-time codegen toolchain. The
-  `sce-codegen` binary built from this submodule emits Rust /
-  C11 / C++ / Kotlin / Go / Python wire-codec source into
-  `crates/wz-codecs/out/`. SCE itself is not redistributed in
-  binary form by watching-zenoh; the generated output carries
-  SCE's own MIT header per the `sce-codegen` generation-time
-  policy (see `LICENSE-GENERATED.md`).
+- **Scope of use**: codegen toolchain, run out-of-band by the
+  `xtask` codegen SSOT (R311y22), not at consumer build time. The
+  `sce-codegen` binary built from this submodule emits Rust
+  wire-codec / statechart / buffer-pool source into the COMMITTED
+  `out/<crate>/` tree (R311y22 committed it in-repo; it is therefore
+  redistributed with this repo). SCE itself is not redistributed in
+  binary form by watching-zenoh. The generated output carries SCE's
+  own MIT header where SCE emits one (statechart `*_sm.rs`) and no
+  SPDX header on the codec / pool emits — per the `sce-codegen`
+  generation-time policy (see `LICENSE-GENERATED.md` in the SCE repo).
 - **Upstream-tracking**: Round 209 bumped from `27accb35` to
   `ebf3b3ff` (+9 commits drift; Rust camelCase codegen fixes +
   schema/validator refactors; 8-lane CI regression-zero).
@@ -92,11 +95,15 @@ changelog that authorized the bump.
 
 ## Generated output
 
-Source files under `crates/wz-codecs/out/` are emitted by
-`sce-codegen` at build time and carry SCE's MIT header. They are
-not authored by watching-zenoh and are not tracked under the
-LGPL-3.0 / Commercial license that covers the rest of this
-repo. See `LICENSE-GENERATED.md` for the generation-time policy.
+Source files under `out/<crate>/` (e.g. `out/wz-codecs/`,
+`out/wz-session-core/`) are emitted by `sce-codegen` / the `xtask`
+codegen SSOT and, as of R311y22, are COMMITTED in-repo (regenerated
+out-of-band, not at consumer build time; gated by run-ci Layer B2).
+They carry SCE's MIT header where SCE emits one (statechart `*_sm.rs`)
+and no SPDX header on the codec / pool emits. They are not authored by
+watching-zenoh and are not tracked under the LGPL-3.0 / Commercial
+license that covers the rest of this repo. See `LICENSE-GENERATED.md`
+in the SCE repo for the generation-time policy.
 
 ## How this ledger is maintained
 

@@ -35,8 +35,11 @@ use wz_switchboard_schema::SwitchboardSpec;
 /// feature gate lives at the `#[cfg(feature = ...)]` on the `pub mod` in
 /// `wz-codecs/src/lib.rs`, so a feature-off build still compiles zero of the
 /// disabled codec (footprint honesty preserved) even though `out/` holds all.
-/// Kept in sync with `wz-codecs/build.rs::CODECS` (the regen-diff lane catches
-/// any drift between this list and what lib.rs `include!`s).
+/// This const IS the SSOT for the codec set (the former
+/// `wz-codecs/build.rs::CODECS` it mirrored is deleted as of R311y22a); the
+/// Layer B2 regen-diff lane catches drift between it and the committed out/,
+/// and a `wz-codecs/src/lib.rs` include! of a stem absent here is a compile
+/// error — so the two stay consistent.
 const CODECS: &[&str] = &[
     // Leaf codecs (no imports).
     "timestamp",
@@ -140,8 +143,13 @@ fn regen_codecs(root: &Path) {
         // `#![doc = "SCE-MAP: stem:line"]` inner attribute (R40 carry) that is
         // illegal once the file is `include!`'d mid-module; the same SCE-MAP
         // info is on the next line as a regular `// SCE-MAP:` comment, so the
-        // strip loses zero information. (The proper fix is SCE-upstream emitting
-        // a regular comment; tracked separately.)
+        // strip loses zero information. SCE itself tracks this as its
+        // `traceability/sce-map-attribute-stripped` diagnostic and emits the
+        // SCE-MAP info redundantly as both the inner attr AND the line comment
+        // precisely so a mid-module `include!` consumer can drop the former
+        // losslessly — so this strip consumes SCE's documented dual-marker
+        // fallback, not a wz workaround. (Proper end-state: SCE emits only the
+        // regular comment; then this strip becomes a no-op.)
         let stripped = code
             .lines()
             .filter(|line| !line.starts_with("#![doc = \"SCE-MAP:"))
@@ -314,7 +322,7 @@ fn regen_switchboards(root: &Path) {
             &sce_workspace,
             sb.no_std,
         );
-        strip_inner_attrs(&tmp.join(format!("{}_sm.rs", sb.machine)));
+        wz_codegen_build::strip_inner_attrs_file(&tmp.join(format!("{}_sm.rs", sb.machine)));
         let schema_asts: Vec<PathBuf> = sb
             .schemas
             .iter()
@@ -325,7 +333,7 @@ fn regen_switchboards(root: &Path) {
             .iter()
             .map(|c| {
                 let ast = emit_ast(c, &src, &tmp, &sce_codegen, &sce_workspace, sb.no_std);
-                strip_inner_attrs(&tmp.join(format!("{c}.rs")));
+                wz_codegen_build::strip_inner_attrs_file(&tmp.join(format!("{c}.rs")));
                 ast
             })
             .collect();
@@ -407,21 +415,6 @@ fn emit_ast(
     ast
 }
 
-/// Strip `#![...]` inner attributes and `//!` inner doc comments from a
-/// generated file's head so it can be `include!`d inside a `mod` block (the
-/// same transform the switchboard build.rs applied).
-fn strip_inner_attrs(path: &Path) {
-    let stripped = read(path)
-        .lines()
-        .filter(|line| {
-            let t = line.trim_start();
-            !t.starts_with("#![") && !t.starts_with("//!")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(path, &stripped).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-}
-
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
@@ -438,6 +431,20 @@ fn main() {
     std::env::set_var("SOURCE_DATE_EPOCH", "0");
 
     let root = repo_root();
+
+    // R311y22e — anchor the process CWD to the repo root before any codegen.
+    // sce-codegen derives the `// From: <path>` provenance line by stripping the
+    // current working directory from the (absolute) SCXML path
+    // (vendor/sce/sce-build/src/lib.rs `resolve_source_path`). Pinning CWD to the
+    // repo root makes that From-line a stable repo-relative path
+    // (`sources/...`, `crates/...`, `deploy/...`) regardless of where the xtask
+    // was launched — so the committed out/** regenerates byte-identically on any
+    // contributor's machine + CI (the Layer B2 regen-diff gate cannot
+    // false-positive), and no absolute checkout path leaks into committed source.
+    // The child sce-codegen processes inherit this CWD.
+    std::env::set_current_dir(&root)
+        .unwrap_or_else(|e| panic!("set cwd to repo root {}: {e}", root.display()));
+
     let what = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "regen".to_string());
