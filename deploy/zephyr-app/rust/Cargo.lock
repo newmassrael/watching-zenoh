@@ -313,6 +313,7 @@ dependencies = [
  "wz-link-lwip",
  "wz-runtime-coop",
  "wz-runtime-core",
+ "wz-runtime-zephyr",
 ]
 
 [[package]]
@@ -352,7 +353,6 @@ dependencies = [
  "critical-section",
  "portable-atomic",
  "wz",
- "wz-runtime-zephyr",
  "zephyr-sys",
 ]
 

@@ -44,22 +44,19 @@ critical-section = { version = "1", features = ["restore-state-u32"] }
 # the wz-runtime-coop / wz-mcu-clock atomic-backend unification.
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
-# The Zephyr cooperative single-task profile seams: ZephyrClock (ClockSource
-# over sys_clock_tick_get) + ZephyrAllocator (k_malloc/k_free GlobalAlloc) +
-# ZephyrRuntime = CoopRuntime<ZephyrClock>. Direct path dep here (Z2); the Z3
-# active flip will route it through the wz facade's `platform-zephyr` gate, the
-# way mcu-freertos-demo consumes wz::runtime_freertos after R311y28.
-wz-runtime-zephyr = { path = "../../../crates/wz-runtime-zephyr" }
-
 # Direct edge for the lwIP NO_SYS `sys_now()` shim, which reads the kernel tick
 # counter (sys_clock_tick_get) — the same source ZephyrClock uses.
 zephyr-sys = { path = "../../../crates/zephyr-sys" }
 
-# wz facade — `runtime-coop` pulls the CoopRuntime executor SSOT + CoopTime
-# (+ wz-link-lwip, which stays an EMPTY crate until WZ_LWIP_PORT is set; the
-# Stage-1 boot deliberately leaves it unset to isolate the Path-B link + the
-# executor from the lwIP cross-compile, which Stage 2 adds).
-wz = { path = "../../../crates/wz", default-features = false, features = ["runtime-coop"] }
+# wz facade — `runtime-coop` pulls the CoopRuntime executor SSOT + CoopTime +
+# wz-link-lwip (the lwIP cross-build lights up once WZ_LWIP_PORT is set), and
+# `platform-zephyr` pulls the Zephyr profile seams under `wz::runtime_zephyr`
+# (ZephyrClock over sys_clock_tick_get + the k_malloc ZephyrAllocator +
+# ZephyrRuntime = CoopRuntime<ZephyrClock>). R311y32 routes the seams through the
+# facade gate — the direct wz-runtime-zephyr dep is gone — exactly as
+# mcu-freertos-demo consumes wz::runtime_freertos via `platform-freertos`. The
+# two axes compose here: the coop executor + the Zephyr clock/allocator.
+wz = { path = "../../../crates/wz", default-features = false, features = ["runtime-coop", "platform-zephyr"] }
 
 [profile.release]
 codegen-units = 1

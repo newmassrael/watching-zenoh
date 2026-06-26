@@ -2373,6 +2373,7 @@ dependencies = [
  "wz-runtime-core",
  "wz-runtime-freertos",
  "wz-runtime-tokio",
+ "wz-runtime-zephyr",
  "wz-session-lwip",
 ]
 

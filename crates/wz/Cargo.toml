@@ -85,6 +85,15 @@ wz-runtime-coop = { path = "../wz-runtime-coop", optional = true, default-featur
 # or cross-without-WZ_FREERTOS_CONFIG freertos-sys stubs, so a host build with
 # the feature off never touches it.
 wz-runtime-freertos = { path = "../wz-runtime-freertos", optional = true, default-features = false }
+# R311y32 — wz-runtime-zephyr enters the facade as an optional dep, pulled in by
+# the `platform-zephyr` feature (the Zephyr cooperative single-task profile
+# seams: ZephyrClock over sys_clock_tick_get + ZephyrAllocator over k_malloc +
+# ZephyrRuntime = CoopRuntime<ZephyrClock>). Identical shape to
+# wz-runtime-freertos: the runtime axis stays orthogonal (the deploy composes it
+# with `runtime-coop`), and it is a cross-only no_std crate (zephyr-sys is pure
+# extern decls resolved at the Zephyr image link, so a host build with the
+# feature off never needs the kernel symbols).
+wz-runtime-zephyr = { path = "../wz-runtime-zephyr", optional = true, default-features = false }
 # R311az-3a — wz-link-lwip enters the facade as an optional dep
 # pulled in by the `runtime-coop` feature. The link tier (§5.C) is
 # coupled to the runtime profile in the wz architecture: `runtime-coop`
@@ -365,7 +374,7 @@ platform-linux = []
 platform-macos = []
 platform-qnx = []
 platform-windows = []
-platform-zephyr = []
+platform-zephyr = ["dep:wz-runtime-zephyr"]
 
 # ----- domain: pubsub (11 atomic, 10 active / 1 reserved) -----
 # R311cc — active features forward to wz-runtime-tokio (-put/-delete

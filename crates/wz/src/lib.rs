@@ -58,12 +58,25 @@ compile_error!(
 // above does not catch `runtime-tokio + platform-freertos`. Make that illegal
 // combination unrepresentable with its own gate rather than letting two
 // incompatible runtime profiles silently co-link. (platform-zephyr gets the
-// analogous guard when it flips active.)
+// analogous guard below — R311y32 — now that it flips active.)
 #[cfg(all(feature = "runtime-tokio", feature = "platform-freertos"))]
 compile_error!(
     "wz: `platform-freertos` (the MCU FreeRTOS cooperative profile) is \
      incompatible with `runtime-tokio` (the AP profile) — enable exactly one \
      runtime profile per deploy. The FreeRTOS profile composes with \
+     `runtime-coop` (no_std + the cooperative task pool), not tokio."
+);
+
+// R311y32 — the platform-zephyr analogue of the guard above. Same rationale:
+// the Zephyr cooperative single-task profile (ZephyrRuntime = CoopRuntime<
+// ZephyrClock>) is an MCU profile incompatible with the AP tokio profile, and
+// the runtime/platform axes are orthogonal (platform-zephyr does NOT imply
+// runtime-coop), so the §5.13 XOR guard does not catch this pair.
+#[cfg(all(feature = "runtime-tokio", feature = "platform-zephyr"))]
+compile_error!(
+    "wz: `platform-zephyr` (the MCU Zephyr cooperative profile) is \
+     incompatible with `runtime-tokio` (the AP profile) — enable exactly one \
+     runtime profile per deploy. The Zephyr profile composes with \
      `runtime-coop` (no_std + the cooperative task pool), not tokio."
 );
 
@@ -96,6 +109,24 @@ pub use wz_runtime_coop as runtime_coop;
 // deliberate re-openable FUTURE profile, not what this ships.
 #[cfg(feature = "platform-freertos")]
 pub use wz_runtime_freertos as runtime_freertos;
+
+// R311y32 — platform-zephyr: the Zephyr COOPERATIVE SINGLE-TASK profile
+// re-export, the exact analogue of platform-freertos. Same target_os rationale:
+// a bare-metal deploy and a Zephyr deploy are BOTH `target_os = "none"` on
+// thumbv7m-none-eabi, so target_os cannot distinguish them — the RTOS is an
+// opt-in cfg(feature) knob, making platform-zephyr an A3 ACTIVE atom.
+//
+// ON pulls wz-runtime-zephyr under `wz::runtime_zephyr`: ZephyrClock (a
+// ClockSource over sys_clock_tick_get), the k_malloc ZephyrAllocator, and
+// ZephyrRuntime = CoopRuntime<ZephyrClock> — the runtime axis stays orthogonal
+// (the deploy composes this with `runtime-coop`, which supplies the reused
+// wz-runtime-coop executor). The profile runs that executor inside ONE Zephyr
+// thread = zenoh-pico's Z_FEATURE_MULTI_THREAD=0 single-thread mode; native
+// multi-task is a deliberate re-openable FUTURE profile, not what this ships.
+// The kernel-symbol link + QEMU qemu_cortex_m3 boot is deploy/zephyr-app (Z2,
+// run-ci Layer Qz + the GitHub zephyr-mcu job).
+#[cfg(feature = "platform-zephyr")]
+pub use wz_runtime_zephyr as runtime_zephyr;
 
 // R311az-3a / R311az-3b-ii — §5.C link tier re-export under the MCU
 // profile. The `link_lwip` namespace is symmetric with `runtime_coop`:

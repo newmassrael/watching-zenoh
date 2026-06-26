@@ -40,7 +40,10 @@ use critical_section::RawRestoreState;
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 use wz::runtime_coop::{CoopRuntime, CoopTime};
 use wz::runtime_core::{Runtime, TimeSource};
-use wz_runtime_zephyr::{ZephyrAllocator, ZephyrClock};
+// R311y32 — the Zephyr profile seams now arrive through the wz facade's
+// `platform-zephyr` gate (this deploy is the consumer that proves it), not a
+// direct wz-runtime-zephyr dep — mirroring mcu-freertos-demo's wz::runtime_freertos.
+use wz::runtime_zephyr::{ZephyrAllocator, ZephyrClock};
 
 /// Every Rust allocation (the executor task pool + future boxes) routes through
 /// the Zephyr kernel heap. The deploy's prj.conf sets `CONFIG_HEAP_MEM_POOL_SIZE`
