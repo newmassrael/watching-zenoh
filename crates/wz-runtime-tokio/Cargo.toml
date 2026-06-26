@@ -213,6 +213,11 @@ query-queryable = ["codec-request", "codec-response", "wz-session-core/query-que
 # reply machinery) with `wz-session-core/adminspace-core` (the `AdminLocalData`
 # view + JSON emitter). The wz mirror of zenoh `net/runtime/adminspace.rs`.
 adminspace-core = ["query-queryable", "wz-session-core/adminspace-core"]
+# adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics admin GET: a second
+# dispatch branch in declare_adminspace's handler replying the OpenMetrics
+# build-info body (text/plain). Composes adminspace-core (the dispatch + the
+# metrics_text builder).
+adminspace-metrics = ["adminspace-core", "wz-session-core/adminspace-metrics"]
 query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]

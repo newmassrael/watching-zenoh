@@ -1937,10 +1937,12 @@ fn declare_adminspace_answers_root_get_with_local_data_json() {
 ))]
 #[test]
 fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
-    // Core answers `local_data` ONLY for a GET intersecting the root key. A
-    // `.../metrics` sub-path GET reaches the `/**` queryable but the root-key
-    // gate returns without replying — the sub-path is the layered §5.23 handler
-    // atoms' concern, not core's.
+    // A sub-path GET with NO matching handler gets no reply. `.../subscriber/foo`
+    // (the introspection-handlers atom is not built) reaches the `/**` queryable
+    // but intersects neither the root nor any built handler key, so the dispatch
+    // emits nothing — left for the layered §5.23 handler atoms. (A `.../metrics`
+    // GET, by contrast, DOES reply once adminspace-metrics is built — see
+    // declare_adminspace_metrics_get_returns_openmetrics_text.)
     let (session, _driver) = build_session();
     let zid_hex = wz_session_core::zid_hex::zid_to_zenoh_hex(&session.actions().params.zid);
     let whatami = session.actions().params.whatami.to_str();
@@ -1955,7 +1957,7 @@ fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
     let f = finals.clone();
     session
         .query(
-            &format!("@/{zid_hex}/{whatami}/metrics"),
+            &format!("@/{zid_hex}/{whatami}/subscriber/foo"),
             QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
             move |_| {
                 r.fetch_add(1, Ordering::SeqCst);
@@ -1969,13 +1971,101 @@ fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
     assert_eq!(
         replies.load(Ordering::SeqCst),
         0,
-        "core must not answer a sub-path admin GET with local_data"
+        "core must not answer a sub-path admin GET with no handler"
     );
     assert_eq!(
         finals.load(Ordering::SeqCst),
         1,
         "loopback Final still fires"
     );
+}
+
+#[cfg(all(feature = "query-get", feature = "adminspace-metrics"))]
+#[test]
+fn declare_adminspace_metrics_get_returns_openmetrics_text() {
+    // §5.23 adminspace-metrics: a GET on @/<zid>/<whatami>/metrics fires the
+    // metrics dispatch branch and replies the OpenMetrics build-info body as
+    // text/plain (the wz mirror of zenoh's metrics handler, adminspace.rs:706).
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let metrics_ke = format!("@/{zid_hex}/{whatami}/metrics");
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    let payload = Arc::new(Mutex::new(Option::<Vec<u8>>::None));
+    let enc = Arc::new(Mutex::new(Option::<(u32, Option<String>)>::None));
+    let p = payload.clone();
+    let e = enc.clone();
+    session
+        .query(
+            &metrics_ke,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                *p.lock().unwrap() = Some(reply.payload().to_vec());
+                *e.lock().unwrap() = reply
+                    .put_encoding()
+                    .map(|(id, s)| (id, s.map(str::to_string)));
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let got = String::from_utf8(payload.lock().unwrap().clone().expect("metrics replied")).unwrap();
+    assert_eq!(
+        got,
+        "# HELP zenoh_build Information about zenoh.\n\
+         # TYPE zenoh_build gauge\n\
+         zenoh_build{version=\"0.9.9\"} 1\n"
+    );
+    // text/plain = zenoh encoding id 4 -> wz packed_id 8 (id << 1), no schema.
+    assert_eq!(*enc.lock().unwrap(), Some((8, None)));
+}
+
+#[cfg(all(feature = "query-get", feature = "adminspace-metrics"))]
+#[test]
+fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
+    // A @/<zid>/<whatami>/** wildcard GET intersects BOTH the root key and the
+    // metrics key -> two replies, the faithful zenoh multi-handler fan-out
+    // (adminspace.rs:499-503 fires every handler whose key intersects).
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let wild = format!("@/{zid_hex}/{whatami}/**");
+    let root = format!("@/{zid_hex}/{whatami}");
+    let metrics = format!("@/{zid_hex}/{whatami}/metrics");
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    let replies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let r = replies.clone();
+    session
+        .query(
+            &wild,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                r.lock().unwrap().push(reply.keyexpr().to_string());
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let keys = replies.lock().unwrap().clone();
+    assert_eq!(
+        keys.len(),
+        2,
+        "wildcard admin GET fires local_data + metrics"
+    );
+    assert!(keys.contains(&root), "local_data reply present");
+    assert!(keys.contains(&metrics), "metrics reply present");
 }
 
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]

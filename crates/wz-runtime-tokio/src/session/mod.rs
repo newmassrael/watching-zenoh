@@ -2413,51 +2413,69 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let whatami = self.actions().params.whatami.to_str();
             let queryable_key = admin_queryable_key(&zid_hex, whatami);
             let root_key = admin_root_key(&zid_hex, whatami);
+            #[cfg(feature = "adminspace-metrics")]
+            let metrics_key = wz_session_core::adminspace::admin_metrics_key(&zid_hex, whatami);
             let version = version.into();
             let actions = self.actions().clone();
 
             let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                // Core serves `local_data` ONLY for a GET that intersects the
-                // root key `@/<zid>/<whatami>` — zenoh dispatches admin GETs to
-                // handlers by `key_expr.intersects(handler_key)`
-                // (adminspace.rs:500) and `local_data`'s key IS the root
-                // (`:162`). A sub-path GET (`.../metrics`, `.../subscriber/**`)
-                // does not intersect the root and is left for the layered §5.23
-                // handler atoms; without this gate the `/**` queryable would
-                // answer every admin GET with `local_data`.
+                // Faithful zenoh dispatch: every handler whose key INTERSECTS the
+                // GET keyexpr fires (zenoh's `for (key, handler) in handlers { if
+                // key_expr.intersects(key) { handler(..) } }`, adminspace.rs:499-503).
+                // A root GET fires local_data; a `.../metrics` GET fires metrics; a
+                // `@/<zid>/<whatami>/**` wildcard GET fires BOTH. A sub-path with no
+                // matching handler (e.g. `.../subscriber/**` before that atom lands)
+                // gets no reply.
+                let ke = view.keyexpr();
+
+                // `local_data` handler (key = the root `@/<zid>/<whatami>`,
+                // adminspace.rs:162). The connected peer is the session-centric
+                // `sessions[]` entry, resolved live per query off the captured
+                // bundle so a reconnect / peer change is reflected.
                 let root_chunks: Vec<&str> = root_key.split('/').collect();
-                if !wz_session_core::keyexpr_match::keyexpr_intersects_target(
-                    view.keyexpr(),
-                    &root_chunks,
-                ) {
-                    return;
+                if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &root_chunks) {
+                    let mut sessions = Vec::new();
+                    if let Some(peer) = actions.peer_zid() {
+                        let peer_whatami = actions
+                            .peer_whatami_wire()
+                            .and_then(WhatAmI::from_wire)
+                            .map(|w| String::from(w.to_str()));
+                        sessions.push(AdminSession {
+                            peer_zid_hex: zid_to_zenoh_hex(&peer),
+                            whatami: peer_whatami,
+                            links: Vec::new(),
+                        });
+                    }
+                    let data = AdminLocalData {
+                        zid_hex: zid_hex.clone(),
+                        version: version.clone(),
+                        locators: locators.clone(),
+                        sessions,
+                    };
+                    out.reply_keyed_encoded(
+                        &root_key,
+                        data.to_json().as_bytes(),
+                        Some(&EncodingHint::APPLICATION_JSON),
+                    );
                 }
-                // The connected peer is the session-centric `sessions[]` entry,
-                // resolved live per query off the captured bundle so a reconnect
-                // / peer change is reflected without re-declaring.
-                let mut sessions = Vec::new();
-                if let Some(peer) = actions.peer_zid() {
-                    let peer_whatami = actions
-                        .peer_whatami_wire()
-                        .and_then(WhatAmI::from_wire)
-                        .map(|w| String::from(w.to_str()));
-                    sessions.push(AdminSession {
-                        peer_zid_hex: zid_to_zenoh_hex(&peer),
-                        whatami: peer_whatami,
-                        links: Vec::new(),
-                    });
+
+                // `metrics` handler (key = `@/<zid>/<whatami>/metrics`,
+                // adminspace.rs:164,706): the OpenMetrics build-info body as
+                // text/plain.
+                #[cfg(feature = "adminspace-metrics")]
+                {
+                    let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
+                    if wz_session_core::keyexpr_match::keyexpr_intersects_target(
+                        ke,
+                        &metrics_chunks,
+                    ) {
+                        out.reply_keyed_encoded(
+                            &metrics_key,
+                            wz_session_core::adminspace::metrics_text(&version).as_bytes(),
+                            Some(&EncodingHint::TEXT_PLAIN),
+                        );
+                    }
                 }
-                let data = AdminLocalData {
-                    zid_hex: zid_hex.clone(),
-                    version: version.clone(),
-                    locators: locators.clone(),
-                    sessions,
-                };
-                out.reply_keyed_encoded(
-                    &root_key,
-                    data.to_json().as_bytes(),
-                    Some(&EncodingHint::APPLICATION_JSON),
-                );
             };
 
             self.declare_queryable(queryable_key, QueryableOptions::default(), handler)

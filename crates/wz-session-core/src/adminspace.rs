@@ -153,6 +153,49 @@ pub fn admin_queryable_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// The admin metrics keyexpr `@/<zid>/<whatami>/metrics` — zenoh's `metrics`
+/// handler key (`adminspace.rs:164`).
+#[cfg(feature = "adminspace-metrics")]
+pub fn admin_metrics_key(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/metrics");
+    s
+}
+
+/// The OpenMetrics body the admin `@/<zid>/<whatami>/metrics` GET replies with
+/// (`text/plain`). Byte-faithful to zenoh's UNCONDITIONAL build-info block
+/// (`adminspace.rs:714-720`): a `zenoh_build` gauge carrying the node version.
+/// zenoh additionally appends `manager().get_stats().report().openmetrics_text()`
+/// under its `stats` feature (`:722-730`); the wz transport-stats OpenMetrics
+/// composition is a documented follow-up, so this v1 emits exactly the build-info
+/// block a zenoh built without `stats` emits.
+#[cfg(feature = "adminspace-metrics")]
+pub fn metrics_text(version: &str) -> String {
+    let mut out = String::new();
+    out.push_str("# HELP zenoh_build Information about zenoh.\n");
+    out.push_str("# TYPE zenoh_build gauge\n");
+    out.push_str("zenoh_build{version=\"");
+    push_openmetrics_label(version, &mut out);
+    out.push_str("\"} 1\n");
+    out
+}
+
+/// Append `s` as an OpenMetrics label value (escape `\`, `"`, newline per the
+/// OpenMetrics text format). A normal version contains none of these, so the
+/// output is byte-identical to zenoh's unescaped `format!`; the escape only
+/// guards a pathological version string.
+#[cfg(feature = "adminspace-metrics")]
+fn push_openmetrics_label(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+}
+
 /// Append `s` to `out` as a quoted, escaped JSON string. Covers the RFC 8259
 /// mandatory escapes (`"`, `\`, and the C0 control range); the admin payload's
 /// strings (hex zids, socket-address locators, a version) do not contain them in
@@ -266,5 +309,25 @@ mod tests {
             sessions: vec![],
         };
         assert!(data.to_json().contains(r#""version":"v\"1\\0\n""#));
+    }
+
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn metrics_key_and_build_info_match_zenoh() {
+        assert_eq!(admin_metrics_key("a1b2", "peer"), "@/a1b2/peer/metrics");
+        // Byte-faithful to zenoh's unconditional build-info block
+        // (adminspace.rs:714-720): HELP + TYPE gauge + the zenoh_build sample.
+        assert_eq!(
+            metrics_text("0.1.0"),
+            "# HELP zenoh_build Information about zenoh.\n\
+             # TYPE zenoh_build gauge\n\
+             zenoh_build{version=\"0.1.0\"} 1\n"
+        );
+    }
+
+    #[cfg(feature = "adminspace-metrics")]
+    #[test]
+    fn metrics_label_escapes_pathological_version() {
+        assert!(metrics_text("v\"x").contains(r#"version="v\"x""#));
     }
 }

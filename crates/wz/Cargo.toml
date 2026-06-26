@@ -800,7 +800,9 @@ adminspace-config-hotreload = []
 # dead-stub trap); mirrors the liveliness-history R311xy treatment above.
 adminspace-core = ["wz-runtime-tokio?/adminspace-core"]
 adminspace-introspection-handlers = []
-adminspace-metrics = []
+# R311y35 — adminspace-metrics is now a real cfg gate (the @/<zid>/<whatami>/metrics
+# OpenMetrics endpoint); forward to the runtime cfg site, not a no-op `= []`.
+adminspace-metrics = ["wz-runtime-tokio?/adminspace-metrics"]
 adminspace-plugins-handlers = []
 adminspace-read = []
 adminspace-write = []

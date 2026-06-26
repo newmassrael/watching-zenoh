@@ -78,6 +78,13 @@ alloc = ["wz-codecs/alloc"]
 # this with `query-queryable`.
 adminspace-core = ["alloc"]
 
+# adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics OpenMetrics body
+# (the build-info `zenoh_build` gauge; the transport-stats OpenMetrics
+# composition is a documented follow-up). Pure data-view (the metrics_text
+# builder + the metrics keyexpr helper); composes adminspace-core. The wiring
+# (the metrics dispatch branch) lives in wz-runtime-tokio's adminspace-metrics.
+adminspace-metrics = ["adminspace-core"]
+
 # Transport reassembly subsystem (Tier B). Gates the SCE-generated
 # reassembly slot statechart module (build.rs codegens
 # sources/network/reassembly_slot.scxml only under this feature) and the
