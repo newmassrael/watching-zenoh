@@ -486,22 +486,29 @@ jobs:
             ~/zephyrproject
             ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
             ~/.cmake/packages/Zephyr-sdk
-          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-v1
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-v2
 
       - name: Provision Zephyr (west + pinned source + SDK)
         if: steps.zephyr-cache.outputs.cache-hit != 'true'
         # Mirrors the dev-host setup 1:1 so the Qz lane's default paths
         # (~/zephyrproject/.venv + ~/zephyrproject/zephyr) resolve with no env
-        # override. --narrow -o=--depth=1 keeps the west update shallow; the
-        # zephyr tree's SDK_VERSION (1.0.1) auto-selects the SDK, installed to
-        # ~/zephyr-sdk-1.0.1 (HOME default) and CMake-registered.
+        # override. `west init --mr` only accepts a branch/tag (it runs
+        # `git clone --branch`, which rejects a raw commit SHA → exit 128), so we
+        # clone the manifest repo ourselves (blobless = fast, full history so the
+        # pinned commit is reachable), fetch+checkout the pinned SHA, then
+        # `west init -l` adopts the local repo. --narrow -o=--depth=1 keeps the
+        # module update shallow; the zephyr tree's SDK_VERSION (1.0.1)
+        # auto-selects the SDK, installed to ~/zephyr-sdk-1.0.1 (HOME default).
         run: |
           python3.12 -m venv ~/zephyrproject/.venv
           . ~/zephyrproject/.venv/bin/activate
           python -m pip install --upgrade pip
           pip install west tqdm
+          git clone --filter=blob:none https://github.com/zephyrproject-rtos/zephyr ~/zephyrproject/zephyr
+          git -C ~/zephyrproject/zephyr fetch --filter=blob:none origin "$ZEPHYR_REF"
+          git -C ~/zephyrproject/zephyr checkout "$ZEPHYR_REF"
           cd ~/zephyrproject
-          west init -m https://github.com/zephyrproject-rtos/zephyr --mr "$ZEPHYR_REF"
+          west init -l zephyr
           west update --narrow -o=--depth=1
           west zephyr-export
           pip install -r zephyr/scripts/requirements-base.txt
