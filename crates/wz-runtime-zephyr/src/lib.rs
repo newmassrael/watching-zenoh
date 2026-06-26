@@ -65,9 +65,19 @@ impl<const TICK_HZ: u32> ClockSource for ZephyrClock<TICK_HZ> {
 /// Zephyr-specific.
 pub type ZephyrRuntime<const TICK_HZ: u32> = CoopRuntime<ZephyrClock<TICK_HZ>>;
 
-/// Zephyr kernel-heap alignment guarantee — `k_malloc` returns blocks suitably
-/// aligned for any standard scalar (8 on this 32-bit ABI).
-const HEAP_ALIGN: usize = 8;
+/// Zephyr kernel-heap alignment guarantee for the **direct** `k_malloc` path.
+///
+/// `k_malloc` calls `sys_heap_noalign_alloc` (kernel/mempool.c) — it does NOT
+/// over-align — so the only guarantee is the sys_heap base alignment, which for
+/// a SMALL heap (the MCU default, `CONFIG_SYS_HEAP_SMALL_ONLY`) is just
+/// `sizeof(void*)` = 4 bytes (heap.c asserts `ret & (big_heap ? 7 : 3) == 0`).
+/// So 4, NOT 8 — unlike FreeRTOS's heap_4, which guarantees `portBYTE_ALIGNMENT`
+/// = 8 (and is asserted), so `FreertosAllocator` correctly uses 8. Any request
+/// with `align > 4` (e.g. a `u64`-bearing struct — including wz-runtime-coop's
+/// own timer-queue entries) takes the over-aligned branch below, which aligns
+/// up regardless of the `k_malloc` base alignment. Setting this to 8 would hand
+/// align-8 allocations a 4-aligned pointer on the default heap = UB.
+const HEAP_ALIGN: usize = 4;
 
 /// A [`GlobalAlloc`] bridging Rust's allocator to the Zephyr kernel heap
 /// (`k_malloc`/`k_free`, sized by `CONFIG_HEAP_MEM_POOL_SIZE`).

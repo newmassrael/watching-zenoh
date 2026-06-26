@@ -49,6 +49,24 @@ compile_error!(
      + critical_section + cooperative task pool)."
 );
 
+// R311y30 — `platform-freertos` brings the FreeRTOS cooperative runtime profile
+// (FreertosRuntime = CoopRuntime<FreertosClock>), an MCU profile just as
+// incompatible with the AP tokio profile as `runtime-coop` is. The runtime axis
+// (§5.13) is kept orthogonal to the platform axis (§5.14) — `platform-freertos`
+// does NOT imply `runtime-coop` (deploys compose both explicitly, as the MCU
+// presets do for platform-bare-metal + runtime-coop), so the existing XOR guard
+// above does not catch `runtime-tokio + platform-freertos`. Make that illegal
+// combination unrepresentable with its own gate rather than letting two
+// incompatible runtime profiles silently co-link. (platform-zephyr gets the
+// analogous guard when it flips active.)
+#[cfg(all(feature = "runtime-tokio", feature = "platform-freertos"))]
+compile_error!(
+    "wz: `platform-freertos` (the MCU FreeRTOS cooperative profile) is \
+     incompatible with `runtime-tokio` (the AP profile) — enable exactly one \
+     runtime profile per deploy. The FreeRTOS profile composes with \
+     `runtime-coop` (no_std + the cooperative task pool), not tokio."
+);
+
 #[cfg(feature = "runtime-tokio")]
 pub use wz_runtime_tokio as runtime_tokio;
 
