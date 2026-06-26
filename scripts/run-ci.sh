@@ -3095,6 +3095,30 @@ layer_g_cross_compile_cortex_m() {
                 fail=1
             fi
         fi
+        # G.16 (R311y29) zephyr-sys — the Zephyr cooperative profile's hand-FFI
+        # crate. PURE extern declarations (no build.rs, no vendored kernel, NO
+        # bindgen); the symbols resolve at the Z2 deploy's Zephyr image link, so
+        # a standalone cross build is a clean lib-check. Runs on EVERY Phase W
+        # triple (unlike G.14/G.15's thumbv7m-only ARM_CM3 kernel build) because
+        # it compiles no C — proving the FFI crate is no_std-portable.
+        if (cd crates && cargo build -p zephyr-sys --target "$t" --quiet); then
+            echo "  G.16 zephyr-sys $t OK"
+        else
+            echo "  G.16 zephyr-sys $t FAIL" >&2
+            fail=1
+        fi
+        # G.17 (R311y29) wz-runtime-zephyr — the Zephyr cooperative single-task
+        # PROFILE: ZephyrClock (ClockSource over sys_clock_tick_get) +
+        # ZephyrAllocator (k_malloc/k_free GlobalAlloc) + ZephyrRuntime =
+        # CoopRuntime<ZephyrClock> (reuses the wz-runtime-coop executor SSOT,
+        # exactly like wz-runtime-freertos). Pure-cargo cross-build on every
+        # Phase W triple; the kernel-symbol link is the Z2 deploy's job.
+        if (cd crates && cargo build -p wz-runtime-zephyr --target "$t" --quiet); then
+            echo "  G.17 wz-runtime-zephyr $t OK"
+        else
+            echo "  G.17 wz-runtime-zephyr $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"

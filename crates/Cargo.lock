@@ -2641,6 +2641,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-runtime-zephyr"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-coop",
+ "zephyr-sys",
+]
+
+[[package]]
 name = "wz-session-core"
 version = "0.1.0"
 dependencies = [
@@ -2744,6 +2752,10 @@ dependencies = [
  "bindgen 0.71.1",
  "cmake",
 ]
+
+[[package]]
+name = "zephyr-sys"
+version = "0.1.0"
 
 [[package]]
 name = "zerocopy"

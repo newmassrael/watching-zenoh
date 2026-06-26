@@ -76,6 +76,8 @@ members = [
     "lwip-sys",
     "freertos-sys",
     "wz-runtime-freertos",
+    "zephyr-sys",
+    "wz-runtime-zephyr",
     "wz-link-lwip",
     "wz-session-lwip",
     # Stage 5 — the MCU acceptor session e2e scenario SSOT (no_std lib;

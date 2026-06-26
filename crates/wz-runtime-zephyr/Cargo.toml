@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-zephyr — the Zephyr COOPERATIVE SINGLE-TASK profile (LAYER-2 RTOS).
+# Thin, exactly like wz-runtime-freertos: it does NOT reimplement the async
+# executor or `impl Runtime`. `ZephyrRuntime` is a type alias for
+# `CoopRuntime<ZephyrClock>` — the audited wz-runtime-coop cooperative executor
+# (task pool / waker / timer queue, the SSOT) reused verbatim, with only the
+# Zephyr-specific SEAMS supplied here: a `ClockSource` over sys_clock_tick_get +
+# a `GlobalAlloc` over the Zephyr kernel heap (k_malloc/k_free). One Zephyr
+# thread runs the executor = zenoh-pico Z_FEATURE_MULTI_THREAD=0. Cross-only
+# (no_std MCU); the Z2 deploy supplies the critical-section impl + the
+# `#[global_allocator]` static + the Zephyr build wiring. Pure-cargo
+# cross-buildable (the kernel-symbol link is the deploy's job).
+
+[package]
+name = "wz-runtime-zephyr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Zephyr cooperative single-task runtime profile — reuses the wz-runtime-coop executor + a Zephyr ClockSource (sys_clock_tick_get) + k_malloc allocator."
+
+[lib]
+name = "wz_runtime_zephyr"
+path = "src/lib.rs"
+
+[dependencies]
+# Hand-FFI to the Zephyr kernel (sys_clock_tick_get + k_malloc/k_free).
+zephyr-sys = { path = "../zephyr-sys" }
+# The cooperative executor SSOT (CoopRuntime + ClockSource), with its task pool
+# (alloc feature) — the Zephyr profile reuses it, parameterised by the clock.
+wz-runtime-coop = { path = "../wz-runtime-coop", features = ["alloc"] }
+
+[lints]
+workspace = true
