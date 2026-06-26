@@ -128,6 +128,19 @@ pub use wz_runtime_freertos as runtime_freertos;
 #[cfg(feature = "platform-zephyr")]
 pub use wz_runtime_zephyr as runtime_zephyr;
 
+// R311y33 — the two RTOS cooperative profiles are themselves mutually exclusive:
+// a single deploy links exactly ONE kernel (and ONE #[global_allocator] bridging
+// that kernel's heap). platform-freertos + platform-zephyr co-enabled would pull
+// two ZephyrAllocator/FreertosAllocator + two kernel-symbol sets that only clash
+// at the final image link — make the nonsensical combo unrepresentable at
+// cargo-check time instead (the same treatment as the runtime-tokio guards).
+#[cfg(all(feature = "platform-freertos", feature = "platform-zephyr"))]
+compile_error!(
+    "wz: `platform-freertos` and `platform-zephyr` are mutually exclusive — a \
+     deploy links exactly one RTOS kernel + one #[global_allocator]. Enable the \
+     one MCU platform profile this deploy targets."
+);
+
 // R311az-3a / R311az-3b-ii — §5.C link tier re-export under the MCU
 // profile. The `link_lwip` namespace is symmetric with `runtime_coop`:
 // consumers get `wz::link_lwip::LwipLink` + `wz::link_lwip::LwipUdpSocket`

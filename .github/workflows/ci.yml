@@ -478,9 +478,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cache Zephyr workspace + SDK
+      # R311y33 — restore/save SPLIT (not the combined actions/cache@v4 whose
+      # post-step saves unconditionally): the save below is gated on success() so
+      # a partial / failed provision can never poison the cache key (a poisoned
+      # cache would cache-hit on the next run, skip provision, and build against a
+      # half-tree). The Verify step catches a partial RESTORE the same way.
+      - name: Restore Zephyr workspace + SDK cache
         id: zephyr-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/zephyrproject
@@ -513,6 +518,36 @@ jobs:
           west zephyr-export
           pip install -r zephyr/scripts/requirements-base.txt
           west sdk install -t arm-zephyr-eabi
+          # Forensics: the manifest @ ZEPHYR_REF pins every module to an immutable
+          # SHA (verified: west.yml has 0 branch-name revisions), so this snapshot
+          # is reproducible; logging the resolved set makes it auditable post-hoc.
+          west list
+
+      - name: Verify Zephyr provisioning (catch a partial cache / failed provision)
+        # Assert the toolchain is WHOLE before caching or building — a partial
+        # cache-restore or an incomplete provision is caught loudly here instead
+        # of silently SKIPping Layer Qz or building a half-tree. Runs on both the
+        # cache-hit and freshly-provisioned paths.
+        run: |
+          set -e
+          test -x ~/zephyrproject/.venv/bin/west
+          test -d ~/zephyrproject/zephyr/boards
+          test -d ~/.cmake/packages/Zephyr-sdk
+          find ~/zephyr-sdk-${ZEPHYR_SDK_VERSION} -name arm-zephyr-eabi-gcc -type f \
+            | grep -q . || { echo "arm-zephyr-eabi toolchain missing in SDK"; exit 1; }
+          echo "Zephyr provisioning verified (venv + zephyr tree + SDK arm toolchain)."
+
+      - name: Save Zephyr workspace + SDK cache
+        # Save ONLY on a cache miss AND only after provision+verify succeeded
+        # (success()) — a failed/partial provision never writes the cache key.
+        if: success() && steps.zephyr-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/zephyrproject
+            ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+            ~/.cmake/packages/Zephyr-sdk
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-v2
 
       - name: Cache Cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -523,6 +558,11 @@ jobs:
       - name: Layer Qz — Zephyr west build + QEMU boot e2e
         # The lane sources ~/zephyrproject/.venv itself for the west build; the
         # explicit activate here also puts west on PATH for the pre-build gate.
+        # WZ_QZ_REQUIRE=1 makes a prerequisite SKIP FATAL on THIS dedicated job
+        # (the provisioning steps guarantee every prerequisite, so a SKIP here is
+        # a provisioning regression that must fail red, not pass green).
+        env:
+          WZ_QZ_REQUIRE: "1"
         run: |
           . ~/zephyrproject/.venv/bin/activate
           bash scripts/run-ci.sh --layer Qz

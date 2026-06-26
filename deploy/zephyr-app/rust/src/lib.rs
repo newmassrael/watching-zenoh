@@ -20,10 +20,13 @@
 //! critical-section seams swapped to Zephyr's. One task sends a payload to
 //! `127.0.0.1:ECHO_PORT` and polls for it back; the Zephyr main thread drives
 //! the cooperative loop (poll lwIP loopback + timer wheel, run the executor,
-//! yield one tick). This exercises every seam end-to-end: [`ZephyrAllocator`]
-//! (`k_malloc`, the executor + socket allocations), [`ZephyrClock`] +
-//! `sys_now` (`sys_clock_tick_get`, the timer + lwIP timeouts), and the
-//! Zephyr-native `critical_section` impl. The build sets `WZ_LWIP_PORT` (the
+//! yield one tick). This exercises the four Zephyr-profile SEAMS (not a full
+//! networked end-to-end — it is a single-socket self-loopback, no second peer /
+//! NIC / transport session): [`ZephyrAllocator`] (`k_malloc`, the executor +
+//! socket allocations), [`ZephyrClock`] + `sys_now` (`sys_clock_tick_get`, the
+//! timer + lwIP timeouts), and the Zephyr-native `critical_section` impl. The
+//! identity check on receive (payload + src addr/port) keeps it a real
+//! round-trip, not a self-receive no-op. The build sets `WZ_LWIP_PORT` (the
 //! lwip-sys cross-test port) so wz-link-lwip's `lwip_real_build` cfg lights up;
 //! without it `wz::link_lwip` is absent and this crate does not compile (it is
 //! only ever built through the deploy's west/CI build, which supplies the env).

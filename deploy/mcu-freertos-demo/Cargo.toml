@@ -10,6 +10,13 @@
 # the bare-metal SysTick + wfi() loop. Standalone workspace (not a crates/
 # member); build with WZ_FREERTOS_CONFIG=<this dir> + WZ_LWIP_PORT=<cross-test>.
 
+# R311y33 — empty [workspace] table marks this as its OWN standalone workspace
+# (so cargo does not search upward into crates/) AND makes it discoverable by
+# the run-ci Layer 0 fmt-gate auto-discovery, which keys on a `[workspace]`
+# table (scripts/run-ci.sh). Without this, the comment above claimed standalone
+# but the fmt gate silently skipped this crate (a R311y27 omission).
+[workspace]
+
 [package]
 name = "mcu-freertos-demo"
 version = "0.1.0"

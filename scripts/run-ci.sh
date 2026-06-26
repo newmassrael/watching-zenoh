@@ -3793,6 +3793,21 @@ layer_e6_peer_mesh() {
 # when absent — host-only dev boxes and non-Zephyr CI legs stay green, exactly
 # like Q.frt SKIPs without qemu. Override the default ~/zephyrproject paths with
 # WZ_ZEPHYR_VENV / WZ_ZEPHYR_BASE.
+# Qz prerequisite outcome: SKIP (green) on a dev host / non-Zephyr CI leg where
+# the toolchain is absent, but FAIL (red) on the dedicated GitHub `zephyr-mcu`
+# job, which sets WZ_QZ_REQUIRE=1. On that job the provisioning steps GUARANTEE
+# every prerequisite, so a SKIP there is a provisioning regression masquerading
+# as success — the project's anti-masked-failure stance (R311y25: a should-run
+# lane that SKIPs is the burn). Returns 0 = skip-green, 1 = required-but-absent.
+_qz_unavailable() {
+    if [[ -n "${WZ_QZ_REQUIRE:-}" ]]; then
+        echo "  Qz FAIL — required (WZ_QZ_REQUIRE set) but $1" >&2
+        return 1
+    fi
+    echo "  Qz SKIP ($1)"
+    return 0
+}
+
 layer_qz_zephyr_boot() {
     local venv="${WZ_ZEPHYR_VENV:-$HOME/zephyrproject/.venv}"
     local zbase="${WZ_ZEPHYR_BASE:-$HOME/zephyrproject/zephyr}"
@@ -3800,28 +3815,22 @@ layer_qz_zephyr_boot() {
     installed="$(rustup target list --installed 2>/dev/null)"
 
     if ! grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
-        echo "  Qz SKIP (rustup target thumbv7m-none-eabi absent)"
-        return 0
+        _qz_unavailable "rustup target thumbv7m-none-eabi absent"; return $?
     fi
     if ! command -v qemu-system-arm >/dev/null 2>&1; then
-        echo "  Qz SKIP (qemu-system-arm not on PATH)"
-        return 0
+        _qz_unavailable "qemu-system-arm not on PATH"; return $?
     fi
     if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
-        echo "  Qz SKIP (arm-none-eabi-gcc not on PATH — lwip-sys cross cc)"
-        return 0
+        _qz_unavailable "arm-none-eabi-gcc not on PATH — lwip-sys cross cc"; return $?
     fi
     if [[ ! -f "$venv/bin/activate" ]]; then
-        echo "  Qz SKIP (Zephyr venv absent: $venv — set WZ_ZEPHYR_VENV)"
-        return 0
+        _qz_unavailable "Zephyr venv absent: $venv — set WZ_ZEPHYR_VENV"; return $?
     fi
     if [[ ! -d "$zbase" ]]; then
-        echo "  Qz SKIP (ZEPHYR_BASE absent: $zbase — set WZ_ZEPHYR_BASE)"
-        return 0
+        _qz_unavailable "ZEPHYR_BASE absent: $zbase — set WZ_ZEPHYR_BASE"; return $?
     fi
     if ! command -v west >/dev/null 2>&1 && [[ ! -x "$venv/bin/west" ]]; then
-        echo "  Qz SKIP (west not on PATH nor in the venv)"
-        return 0
+        _qz_unavailable "west not on PATH nor in the venv"; return $?
     fi
 
     local build_dir elf qlog qpid i fail=0
@@ -3847,20 +3856,33 @@ layer_qz_zephyr_boot() {
     # Boot + console-sentinel verdict. The -icount/-rtc flags mirror west's own
     # run invocation; kill qemu as soon as the verdict line appears (the image
     # idles after, no semihosting exit) with a 40s wall-clock backstop.
+    #
+    # The early-break pattern `^ZEPHYR-WZ ` is a deliberate line-anchored PREFIX
+    # of BOTH the C main's outcome lines (`ZEPHYR-WZ PASS` / `ZEPHYR-WZ FAIL …`,
+    # main.c) — it only ENDS the wait once either verdict is fully printed; the
+    # narrow anchored grep below is what DECIDES. Both greps are `-E '^…'`
+    # start-anchored so a mid-write partial line or an interleaved log line cannot
+    # produce a false verdict; the verdict grep ends with `[[:space:]]*$` (NOT a
+    # bare `$`) because the QEMU serial console emits CRLF — the line is
+    # `ZEPHYR-WZ PASS\r`, so a bare `$` would FALSE-FAIL on the trailing \r. If
+    # the C sentinel prefix is ever renamed, update BOTH patterns in lockstep.
+    # The 350×0.1s (35s) poll stays inside the 40s
+    # qemu backstop; the loopback echo completes in well under a second of guest
+    # time, so the margin is large even on a slow/loaded runner.
     qlog="$(mktemp)"
     timeout 40 qemu-system-arm -cpu cortex-m3 -machine lm3s6965evb -nographic \
         -icount shift=6,align=off,sleep=off -rtc clock=vm -net none \
         -kernel "$elf" >"$qlog" 2>&1 &
     qpid=$!
     for i in $(seq 1 350); do
-        grep -q "ZEPHYR-WZ " "$qlog" 2>/dev/null && break
+        grep -qE '^ZEPHYR-WZ ' "$qlog" 2>/dev/null && break
         kill -0 "$qpid" 2>/dev/null || break
         sleep 0.1
     done
     kill "$qpid" 2>/dev/null
     wait "$qpid" 2>/dev/null
 
-    if grep -q "ZEPHYR-WZ PASS" "$qlog"; then
+    if grep -qE '^ZEPHYR-WZ PASS[[:space:]]*$' "$qlog"; then
         echo "  Qz run deploy/zephyr-app via qemu_cortex_m3 (lm3s6965evb) PASS"
     else
         echo "  Qz run deploy/zephyr-app FAIL (no 'ZEPHYR-WZ PASS' console sentinel)" >&2
