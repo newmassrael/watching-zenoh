@@ -206,6 +206,13 @@ query-get = ["query-reply", "codec-request"]
 # Response surface compiles whenever the high-level query reply
 # capability is on.
 query-queryable = ["codec-request", "codec-response", "wz-session-core/query-queryable"]
+# adminspace-core (§5.23) — the built-in `@/<zid>/<whatami>/**` admin queryable:
+# `Session::declare_adminspace(version, locators)` registers it through the
+# existing `query-queryable` declare path and answers a GET under the node
+# prefix with the `local_data` JSON. Composes `query-queryable` (the declare /
+# reply machinery) with `wz-session-core/adminspace-core` (the `AdminLocalData`
+# view + JSON emitter). The wz mirror of zenoh `net/runtime/adminspace.rs`.
+adminspace-core = ["query-queryable", "wz-session-core/adminspace-core"]
 query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]

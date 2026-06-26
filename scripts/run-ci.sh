@@ -1278,6 +1278,34 @@ layer_c1al_cargo_test_unixpipe() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-link-unixpipe --quiet -- -D warnings)
 }
 
+# ─── Layer C1am — adminspace-core: §5.23 @/<zid>/<whatami> built-in admin queryable ─
+#
+# R311y34: adminspace-core is the §5.23 keystone -- Session::declare_adminspace
+# registers the `@/<zid>/<whatami>/**` built-in queryable (through the existing
+# query-queryable declare path) and answers a GET intersecting the root key with
+# the `local_data` JSON as application/json. The default Layer C1 does NOT carry
+# adminspace-core, so this lane is its sole coverage:
+#   1. the wz-session-core data-view + JSON emitter unit tests (adminspace) + the
+#      relocated zid<->ZenohId-hex SSOT (zid_hex), plus a storage-replication
+#      build proving the re-export keeps the old call site intact (no regression);
+#   2. the wz-runtime-tokio e2e (declare_adminspace): a local GET on the root
+#      returns the JSON + application/json, and a sub-path GET is left for the
+#      layered handler atoms (the root-key gate);
+#   3. clippy the ON build (-D warnings, --all-targets) so the gate + the new
+#      reply_keyed_encoded seam stay warning-clean.
+# The bare --no-default-features query-queryable combo is a PRE-EXISTING build
+# quirk (an unused ResponseSink import surfaces without the full default codec
+# set -- reproduced on the clean tree, unrelated to adminspace), so this lane
+# composes adminspace-core ON the default set rather than --no-default-features.
+layer_c1am_cargo_test_adminspace_core() {
+    (cd crates \
+        && cargo test -p wz-session-core --features adminspace-core --lib adminspace --quiet \
+        && cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet \
+        && cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3922,6 +3950,7 @@ run_layer C1ai layer_c1ai_cargo_test_liveliness_history || overall=1
 run_layer C1aj layer_c1aj_cargo_test_quic_datagram || overall=1
 run_layer C1ak layer_c1ak_cargo_test_transport_stats || overall=1
 run_layer C1al layer_c1al_cargo_test_unixpipe || overall=1
+run_layer C1am layer_c1am_cargo_test_adminspace_core || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

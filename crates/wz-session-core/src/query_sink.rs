@@ -148,6 +148,29 @@ pub trait ReplyOut {
         let _ = (encoding, timestamp);
         self.reply_keyed(keyexpr, payload);
     }
+    /// Emit a Put-form reply under an explicit concrete `keyexpr` carrying a
+    /// value `encoding` (the inner `MsgPut` E-flag) but NO timestamp and NO
+    /// attachment — the faithful shape a content-typed introspection reply
+    /// needs: the admin space replies `local_data` under `@/<zid>/<whatami>`
+    /// as `application/json` with no version stamp (zenoh
+    /// `q.reply(key, payload).encoding(APPLICATION_JSON)`,
+    /// `net/runtime/adminspace.rs:697-700`). The querier learns the content
+    /// type without a timestamp the value does not carry.
+    ///
+    /// Default impl falls back to [`Self::reply_keyed`] (dropping the
+    /// encoding), so impls that predate this seam stay valid. `alloc`-gated
+    /// (the [`crate::sample::EncodingHint`] lives in the `alloc`-gated
+    /// `sample` module), mirroring [`Self::reply_keyed_stamped`].
+    #[cfg(feature = "alloc")]
+    fn reply_keyed_encoded(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&crate::sample::EncodingHint>,
+    ) {
+        let _ = encoding;
+        self.reply_keyed(keyexpr, payload);
+    }
     /// Emit a Put-form reply carrying an opaque `attachment` side-band (and
     /// an optional value `encoding`) under an explicit concrete `keyexpr`.
     /// The faithful shape a storage **aligner** answers a query with: the

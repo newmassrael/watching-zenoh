@@ -68,6 +68,16 @@ default = [
 # allocator-free and keeps the alloc profile unchanged.
 alloc = ["wz-codecs/alloc"]
 
+# adminspace-core (§5.23) — the built-in `@/<zid>/<whatami>/**` admin queryable
+# keyexpr helpers + the `local_data` JSON body (the wz mirror of zenoh
+# `net/runtime/adminspace.rs` `local_data` + `AdminSpace::start`). Pure
+# data-view: the `AdminLocalData` struct + its manual (no `serde_json`) JSON
+# emitter, so it needs only `alloc` (no_std-feasible per the R311xu P4 scoping).
+# The queryable WIRING (registering the built-in queryable, snapshotting peer
+# state) lives in wz-runtime-tokio's `adminspace-core` feature, which composes
+# this with `query-queryable`.
+adminspace-core = ["alloc"]
+
 # Transport reassembly subsystem (Tier B). Gates the SCE-generated
 # reassembly slot statechart module (build.rs codegens
 # sources/network/reassembly_slot.scxml only under this feature) and the

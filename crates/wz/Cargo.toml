@@ -791,9 +791,14 @@ plugin-lifecycle = []
 plugin-manager = []
 plugin-static-registration = []
 
-# ----- §5.23 adminspace + config (11 atomic, all reserved) -----
+# ----- §5.23 adminspace + config (11 atomic: 1 active + 10 reserved) -----
 adminspace-config-hotreload = []
-adminspace-core = []
+# R311y34 — adminspace-core is now a real cfg gate (the built-in
+# @/<zid>/<whatami>/** admin queryable + local_data JSON, via
+# Session::declare_adminspace). The facade forward must light up the runtime
+# cfg site, not stay a no-op `= []` (the [[feedback-facade-forward-separate-edit]]
+# dead-stub trap); mirrors the liveliness-history R311xy treatment above.
+adminspace-core = ["wz-runtime-tokio?/adminspace-core"]
 adminspace-introspection-handlers = []
 adminspace-metrics = []
 adminspace-plugins-handlers = []

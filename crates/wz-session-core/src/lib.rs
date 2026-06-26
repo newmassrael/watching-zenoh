@@ -427,6 +427,21 @@ pub mod sample;
 #[cfg(feature = "alloc")]
 pub mod encoding;
 
+/// zid <-> zenoh `ZenohId` Display hex — the SSOT recipe for rendering a
+/// length-trimmed wire zid as the string zenoh prints (and parsing it back).
+/// FOUNDATIONAL (always-on under `alloc`); `storage_replication` re-exports it,
+/// and the admin space (§5.23) reads it without the storage gate. Gated on
+/// `alloc` (it builds a `String`).
+#[cfg(feature = "alloc")]
+pub mod zid_hex;
+
+/// §5.23 — admin space `local_data` view: the `@/<zid>/<whatami>/**` built-in
+/// queryable keyexpr helpers + the `local_data` JSON body, the wz mirror of
+/// zenoh `net/runtime/adminspace.rs`. Pure data-view (the queryable wiring lives
+/// in wz-runtime-tokio); `alloc`-only / no_std-feasible.
+#[cfg(feature = "adminspace-core")]
+pub mod adminspace;
+
 /// Shared slice-based VLE decoder (the `SceCursor::read_vle_u64` borrowed-slice
 /// twin) — the SSOT for parsing a varint out of an already-buffered ext body.
 /// `pub` for the `read_zbuf` / `write_zbuf` "one zenoh ZBuf" framing primitive,

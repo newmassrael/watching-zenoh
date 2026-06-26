@@ -1879,6 +1879,105 @@ fn query_session_local_with_session_local_queryable_fires() {
     assert_eq!(reply_count.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-core"
+))]
+#[test]
+fn declare_adminspace_answers_root_get_with_local_data_json() {
+    // §5.23 adminspace-core e2e: declare_adminspace registers the
+    // `@/<zid>/<whatami>/**` built-in queryable; a local GET on the root key
+    // returns the `local_data` JSON as `application/json`. The wz mirror of a
+    // zenoh admin GET against `local_data` (adminspace.rs:561).
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let root = format!("@/{zid_hex}/{whatami}");
+
+    let _admin = session
+        .declare_adminspace("0.9.9", vec!["tcp/127.0.0.1:7447".to_string()])
+        .expect("adminspace-core ON in this build");
+
+    let payload = Arc::new(Mutex::new(Option::<Vec<u8>>::None));
+    let enc = Arc::new(Mutex::new(Option::<(u32, Option<String>)>::None));
+    let p = payload.clone();
+    let e = enc.clone();
+    session
+        .query(
+            &root,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                *p.lock().unwrap() = Some(reply.payload().to_vec());
+                *e.lock().unwrap() = reply
+                    .put_encoding()
+                    .map(|(id, s)| (id, s.map(str::to_string)));
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let got = payload.lock().unwrap().clone().expect("admin GET replied");
+    // build_session has no connected peer -> sessions:[]; the embedder-supplied
+    // version + locator are reflected verbatim.
+    let expected = format!(
+        r#"{{"locators":["tcp/127.0.0.1:7447"],"metadata":null,"plugins":null,"sessions":[],"version":"0.9.9","zid":"{zid_hex}"}}"#
+    );
+    assert_eq!(String::from_utf8(got).unwrap(), expected);
+    // application/json: zenoh encoding id 5 -> wz packed_id 10 (id << 1), no schema.
+    assert_eq!(*enc.lock().unwrap(), Some((10, None)));
+}
+
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-core"
+))]
+#[test]
+fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
+    // Core answers `local_data` ONLY for a GET intersecting the root key. A
+    // `.../metrics` sub-path GET reaches the `/**` queryable but the root-key
+    // gate returns without replying — the sub-path is the layered §5.23 handler
+    // atoms' concern, not core's.
+    let (session, _driver) = build_session();
+    let zid_hex = wz_session_core::zid_hex::zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    let replies = Arc::new(AtomicUsize::new(0));
+    let finals = Arc::new(AtomicUsize::new(0));
+    let r = replies.clone();
+    let f = finals.clone();
+    session
+        .query(
+            &format!("@/{zid_hex}/{whatami}/metrics"),
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get ON in this build");
+
+    assert_eq!(
+        replies.load(Ordering::SeqCst),
+        0,
+        "core must not answer a sub-path admin GET with local_data"
+    );
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "loopback Final still fires"
+    );
+}
+
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 #[test]
 fn query_locality_remote_alone_skips_local_queryable() {

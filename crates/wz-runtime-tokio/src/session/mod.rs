@@ -2368,6 +2368,107 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
     }
 
+    /// §5.23 `adminspace-core` — register the built-in admin queryable on
+    /// `@/<zid>/<whatami>/**` and answer a GET under it with the node's
+    /// `local_data` JSON (`{zid, version, locators, sessions, ...}`,
+    /// `application/json`). The wz mirror of zenoh `AdminSpace::start`
+    /// (`net/runtime/adminspace.rs:155`) + `local_data` (`:561`).
+    ///
+    /// zenoh's `AdminSpace` is owned by the `Runtime`, which supplies the node
+    /// `version` and reads the listening `locators` off
+    /// `transport_mgr.get_locators()` (`AdminSpace::start(runtime, version)`).
+    /// wz is session-centric, so the embedder that opens this session — the
+    /// analogue of zenoh's `Runtime` — passes both in here rather than the
+    /// `Session` reading them off transport state it does not own. The
+    /// `sessions` array is this session's connected peer
+    /// (`SessionLinkActions::peer_zid` + `peer_whatami_wire`), resolved live per
+    /// query — the session-centric mirror of zenoh's `get_transports_unicast()`
+    /// enumeration (`adminspace.rs:664`). The `read` GET-permission gate
+    /// (`:457`), the `config/**` write path (`:392`), the per-entity
+    /// (subscriber/publisher/queryable) + `metrics` + router `linkstate`
+    /// handlers, and the per-link `{src,dst}` detail are SEPARATE §5.23 catalog
+    /// atoms layered on this core.
+    ///
+    /// Returns the [`Queryable`] handle; dropping it undeclares the admin
+    /// queryable (RAII). Without the `adminspace-core` feature this is a
+    /// signature-stable `Err(QueryableError::FeatureDisabled)`.
+    pub fn declare_adminspace(
+        &self,
+        version: impl Into<String>,
+        locators: Vec<String>,
+    ) -> Result<Queryable<R, T>, QueryableError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        #[cfg(feature = "adminspace-core")]
+        {
+            use wz_codecs::whatami::WhatAmI;
+            use wz_session_core::adminspace::{
+                admin_queryable_key, admin_root_key, AdminLocalData, AdminSession,
+            };
+            use wz_session_core::sample::EncodingHint;
+            use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+            let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
+            let whatami = self.actions().params.whatami.to_str();
+            let queryable_key = admin_queryable_key(&zid_hex, whatami);
+            let root_key = admin_root_key(&zid_hex, whatami);
+            let version = version.into();
+            let actions = self.actions().clone();
+
+            let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                // Core serves `local_data` ONLY for a GET that intersects the
+                // root key `@/<zid>/<whatami>` — zenoh dispatches admin GETs to
+                // handlers by `key_expr.intersects(handler_key)`
+                // (adminspace.rs:500) and `local_data`'s key IS the root
+                // (`:162`). A sub-path GET (`.../metrics`, `.../subscriber/**`)
+                // does not intersect the root and is left for the layered §5.23
+                // handler atoms; without this gate the `/**` queryable would
+                // answer every admin GET with `local_data`.
+                let root_chunks: Vec<&str> = root_key.split('/').collect();
+                if !wz_session_core::keyexpr_match::keyexpr_intersects_target(
+                    view.keyexpr(),
+                    &root_chunks,
+                ) {
+                    return;
+                }
+                // The connected peer is the session-centric `sessions[]` entry,
+                // resolved live per query off the captured bundle so a reconnect
+                // / peer change is reflected without re-declaring.
+                let mut sessions = Vec::new();
+                if let Some(peer) = actions.peer_zid() {
+                    let peer_whatami = actions
+                        .peer_whatami_wire()
+                        .and_then(WhatAmI::from_wire)
+                        .map(|w| String::from(w.to_str()));
+                    sessions.push(AdminSession {
+                        peer_zid_hex: zid_to_zenoh_hex(&peer),
+                        whatami: peer_whatami,
+                        links: Vec::new(),
+                    });
+                }
+                let data = AdminLocalData {
+                    zid_hex: zid_hex.clone(),
+                    version: version.clone(),
+                    locators: locators.clone(),
+                    sessions,
+                };
+                out.reply_keyed_encoded(
+                    &root_key,
+                    data.to_json().as_bytes(),
+                    Some(&EncodingHint::APPLICATION_JSON),
+                );
+            };
+
+            self.declare_queryable(queryable_key, QueryableOptions::default(), handler)
+        }
+        #[cfg(not(feature = "adminspace-core"))]
+        {
+            let _ = (version, locators);
+            Err(QueryableError::FeatureDisabled)
+        }
+    }
+
     /// R246 — aliased-keyexpr counterpart of
     /// [`Self::declare_queryable`]. Resolves the
     /// `(mapping_id, inline_suffix)` pair through the outbound

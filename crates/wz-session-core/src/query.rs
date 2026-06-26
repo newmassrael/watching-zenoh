@@ -645,6 +645,32 @@ impl<'a> QueryResponder<'a> {
         });
     }
 
+    /// Emit a Put-form reply under an explicit `keyexpr` carrying a value
+    /// `encoding` (the `MsgPut` E-flag) but NO timestamp and NO attachment —
+    /// the content-typed introspection reply the admin space needs
+    /// (`@/<zid>/<whatami>` `local_data` as `application/json`, zenoh
+    /// `adminspace.rs:697-700`). Distinct from
+    /// [`Self::send_reply_keyed_stamped`] (which always stamps a T-flag) and
+    /// [`Self::send_reply_keyed_attached`] (which always carries an attachment
+    /// ext): a queryable that types its value without versioning it gets the
+    /// E-flag alone.
+    pub fn send_reply_keyed_encoded(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+    ) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: keyexpr.to_string(),
+            body: ReplyBody::Put(payload.to_vec()),
+            encoding: encoding.cloned(),
+            timestamp: None,
+            responder: self.responder.clone(),
+            attachment: None,
+        });
+    }
+
     /// Emit a Del-form reply — the queryable signals that the value
     /// at this keyexpr is being deleted / cleared. No payload bytes
     /// (the inner `MsgDel` body carries only a header + optional
@@ -778,6 +804,14 @@ impl ReplyOut for QueryResponder<'_> {
         timestamp: &TimestampHint,
     ) {
         self.send_reply_keyed_stamped(keyexpr, payload, encoding, timestamp);
+    }
+    fn reply_keyed_encoded(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+    ) {
+        self.send_reply_keyed_encoded(keyexpr, payload, encoding);
     }
     fn reply_keyed_attached(
         &mut self,

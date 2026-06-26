@@ -414,38 +414,13 @@ pub(crate) fn event_fingerprint(key: &str, timestamp: &TimestampHint) -> Fingerp
     Fingerprint::from(hasher.digest())
 }
 
-/// A zid rendered as the lowercase hex string zenoh prints a `ZenohId` as —
-/// the SSOT for the zid component of every replication keyexpr (the digest
-/// `@-digest/<zid-hex>/<fp>` and the aligner `@zid/<zid-hex>/<fp>/aligner`) and
-/// the `AlignmentReply::Discovery` body.
-///
-/// zenoh fills those keyexprs via `keformat`'s `set<S: Display>` (key_expr
-/// `format/mod.rs:487-493`), so the zid is rendered through its
-/// [`Display`](core::fmt::Display): `ZenohId` → `ZenohIdProto`
-/// (`zenoh-protocol` `core/mod.rs:191-192`) → uhlc `ID` Display
-/// (`uhlc-0.8.1/src/id.rs:281-291`) = the **16-byte little-endian id read as a
-/// `u128`, printed big-endian hex, with a single leading zero stripped**. So
-/// the printed string is the zid bytes *reversed* (LE→`u128`→BE hex), NOT a
-/// naive per-byte hex of the wire order. This single function is the only place
-/// that recipe lives, shared by the digest publisher and the aligner.
-pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
-    let id = u128::from_le_bytes(zid_to_le_array(zid));
-    let s = alloc::format!("{id:02x}");
-    let stripped = s.strip_prefix('0').unwrap_or(s.as_str());
-    stripped.into()
-}
-
-/// The inverse of [`zid_to_zenoh_hex`]: parse the lowercase hex back to the
-/// length-trimmed zid bytes ([`TimestampHint::zid`] form), or `None` if it is
-/// not a `<= 16`-byte id. zenoh `ZenohIdProto::from_str`
-/// (`core/mod.rs:168-183`). The aligner uses this to read the zid a digest /
-/// aligner keyexpr or an `AlignmentReply::Discovery` carries.
-pub fn zenoh_hex_to_zid(hex: &str) -> Option<alloc::vec::Vec<u8>> {
-    let id = u128::from_str_radix(hex, 16).ok()?;
-    let bytes = id.to_le_bytes();
-    let trimmed_len = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    Some(bytes[..trimmed_len].to_vec())
-}
+/// The zid <-> zenoh `ZenohId` Display hex SSOT now lives in the foundational
+/// [`crate::zid_hex`] module (the admin space `@/<zid>/<whatami>`, §5.23, needs
+/// the identical recipe without the `storage-replication` gate). Re-exported
+/// here so every replication keyexpr builder + cross-impl test reads unchanged:
+/// the digest `@-digest/<zid-hex>/<fp>`, the aligner
+/// `@zid/<zid-hex>/<fp>/aligner`, and the `AlignmentReply::Discovery` body.
+pub use crate::zid_hex::{zenoh_hex_to_zid, zid_to_zenoh_hex};
 
 /// A concise, comparable summary of a replica's stored set — XOR-rolled
 /// [`Fingerprint`]s bucketed by event time, grouped into three eras of
