@@ -425,6 +425,101 @@ jobs:
       - name: Layer Q — QEMU mps2/microbit e2e + footprint gate
         run: bash scripts/run-ci.sh --layer Q
 
+  # R311y31 — REAL Zephyr cooperative-profile boot e2e (Layer Qz). UNLIKE the
+  # pure-cargo G/Q lanes (cargo IS the build), the Zephyr port is
+  # west/cmake/kconfig-driven, so this dedicated job provisions the Zephyr
+  # toolchain the dev host carries — Python 3.12 + west + a PINNED Zephyr source
+  # tree + the Zephyr SDK 1.0.1 arm toolchain — then runs `--layer Qz`, which
+  # `west build`s deploy/zephyr-app for qemu_cortex_m3 (linking the wz cargo
+  # staticlib via the CMakeLists.txt --undefined kernel-symbol contract) and
+  # boots it on QEMU, asserting the `ZEPHYR-WZ PASS` console sentinel. This ends
+  # the G.16/G.17 pure-cargo lib-check staging with an EXECUTED boot on CI (the
+  # R311y25 "a new artifact must get a CI lane in the same round — local-only is
+  # the burn" rule applied to the Zephyr deploy). Lane logic stays in
+  # scripts/run-ci.sh (R65b SSOT); this job only provisions + invokes --layer Qz.
+  # The Zephyr ref + SDK version are pinned to the dev host's verified pair
+  # (4.4.0-6201-gdaad7c59 / SDK 1.0.1) and the workspace + SDK are cached so the
+  # ~GB west-update + SDK download is a one-time cost.
+  zephyr-mcu:
+    name: Zephyr cooperative profile boot (Layer Qz)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      # Pinned to the exact pair the dev host booted (boot banner
+      # v4.4.0-6201-gdaad7c59b8e); the zephyr tree's SDK_VERSION = 1.0.1.
+      ZEPHYR_REF: daad7c59b8ebd8db8d08c2749802ac74f971eb2a
+      ZEPHYR_SDK_VERSION: "1.0.1"
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        # arm-none-eabi-gcc = the lwip-sys cross cc (CC_thumbv7m_none_eabi) +
+        # libnewlib its bare-metal C headers; qemu-system-arm boots the image;
+        # cmake/ninja/dtc are the Zephyr build system; libclang/clang for the
+        # wz *-sys build scripts; xz-utils extracts the SDK tarballs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build device-tree-compiler \
+            libclang-dev clang \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            qemu-system-arm xz-utils
+
+      - name: Install Rust toolchain + thumbv7m
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+
+      - name: Set up Python 3.12 (Zephyr main requires >= 3.12)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Zephyr workspace + SDK
+        id: zephyr-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/zephyrproject
+            ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+            ~/.cmake/packages/Zephyr-sdk
+          key: zephyr-${{ env.ZEPHYR_REF }}-sdk-${{ env.ZEPHYR_SDK_VERSION }}-v1
+
+      - name: Provision Zephyr (west + pinned source + SDK)
+        if: steps.zephyr-cache.outputs.cache-hit != 'true'
+        # Mirrors the dev-host setup 1:1 so the Qz lane's default paths
+        # (~/zephyrproject/.venv + ~/zephyrproject/zephyr) resolve with no env
+        # override. --narrow -o=--depth=1 keeps the west update shallow; the
+        # zephyr tree's SDK_VERSION (1.0.1) auto-selects the SDK, installed to
+        # ~/zephyr-sdk-1.0.1 (HOME default) and CMake-registered.
+        run: |
+          python3.12 -m venv ~/zephyrproject/.venv
+          . ~/zephyrproject/.venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install west tqdm
+          cd ~/zephyrproject
+          west init -m https://github.com/zephyrproject-rtos/zephyr --mr "$ZEPHYR_REF"
+          west update --narrow -o=--depth=1
+          west zephyr-export
+          pip install -r zephyr/scripts/requirements-base.txt
+          west sdk install -t arm-zephyr-eabi
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            deploy/zephyr-app/rust -> target
+
+      - name: Layer Qz — Zephyr west build + QEMU boot e2e
+        # The lane sources ~/zephyrproject/.venv itself for the west build; the
+        # explicit activate here also puts west on PATH for the pre-build gate.
+        run: |
+          . ~/zephyrproject/.venv/bin/activate
+          bash scripts/run-ci.sh --layer Qz
+
   # R311y11 — macOS + Windows NATIVE portability check of the wz AP stack.
   # The Linux `ci` job above cannot catch target_os-routed regressions: the
   # default AP stack must compile clean off-Linux, the quinn/rustls datagram

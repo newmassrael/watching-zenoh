@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Pin the wz Zephyr staticlib to the Cortex-M3 target. UNLIKE the bare-metal /
+# FreeRTOS deploys this sets NO link args (-Tlink.x) and NO runner: cargo emits
+# only `libwz_zephyr_app.a` (crate-type staticlib) — the final image link + QEMU
+# launch are Zephyr's west/cmake job. qemu_cortex_m3 = ti_lm3s6965 = ARMv7-M
+# soft-float = thumbv7m-none-eabi (ABI-compatible with arm-zephyr-eabi-gcc).
+
+[build]
+target = "thumbv7m-none-eabi"

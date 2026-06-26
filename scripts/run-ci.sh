@@ -451,9 +451,14 @@ layer_0_preflight_lints() {
     # FAIL on a full run). Auto-discovery replaces the manual list so a NEW
     # standalone deploy workspace is fmt-gated the moment it exists — no
     # manual gate edit, no recurrence of the forgotten-enumeration gap.
+    # R311y31 — also scan one level deeper (`deploy/*/*/`): the Zephyr deploy is
+    # west/cmake-driven at deploy/zephyr-app/, with its Rust staticlib workspace
+    # nested at deploy/zephyr-app/rust/. The extra glob keeps the auto-discovery
+    # invariant ("any standalone deploy workspace is fmt-gated") for nested
+    # layouts; it still only matches a dir that carries its OWN `[workspace]`.
     local fmt_dirs=(crates)
     local dpath
-    for dpath in deploy/*/; do
+    for dpath in deploy/*/ deploy/*/*/; do
         [[ -f "${dpath}Cargo.toml" ]] || continue
         grep -q '^\[workspace\]' "${dpath}Cargo.toml" || continue
         fmt_dirs+=("${dpath%/}")
@@ -3768,6 +3773,106 @@ layer_e6_peer_mesh() {
         --test wz_peer_data_forward -- --ignored --quiet) || return 1
 }
 
+# ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
+#
+# The REAL Zephyr link + boot proof (R311y31 / Z2). UNLIKE the FreeRTOS lane
+# (Q.frt, pure-cargo: cargo IS the build + link), the Zephyr port is
+# west/cmake/kconfig-driven: this lane drives `west build -b qemu_cortex_m3
+# deploy/zephyr-app`, which compiles the Zephyr kernel AND links the wz cargo
+# staticlib into the image via the CMakeLists.txt `--undefined` kernel-symbol
+# contract (libkernel.a is scanned before librustlib.a). It then boots the image
+# on qemu_cortex_m3 (= ti_lm3s6965 = machine lm3s6965evb, per the board.cmake)
+# and asserts the `ZEPHYR-WZ PASS` CONSOLE sentinel — Zephyr's idiomatic
+# console-regex verdict (twister-style), since this board's qemu launch has no
+# semihosting SYS_EXIT channel (so run_qemu_case's exit-code verdict does not
+# apply here). This is the executed boot that ends the G.16/G.17 pure-cargo
+# lib-check staging.
+#
+# The Zephyr toolchain (Python 3.12 venv + ZEPHYR_BASE + SDK + west) is
+# host/CI-provisioned, NOT vendored, so every prerequisite SKIPs (does not FAIL)
+# when absent — host-only dev boxes and non-Zephyr CI legs stay green, exactly
+# like Q.frt SKIPs without qemu. Override the default ~/zephyrproject paths with
+# WZ_ZEPHYR_VENV / WZ_ZEPHYR_BASE.
+layer_qz_zephyr_boot() {
+    local venv="${WZ_ZEPHYR_VENV:-$HOME/zephyrproject/.venv}"
+    local zbase="${WZ_ZEPHYR_BASE:-$HOME/zephyrproject/zephyr}"
+    local installed
+    installed="$(rustup target list --installed 2>/dev/null)"
+
+    if ! grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
+        echo "  Qz SKIP (rustup target thumbv7m-none-eabi absent)"
+        return 0
+    fi
+    if ! command -v qemu-system-arm >/dev/null 2>&1; then
+        echo "  Qz SKIP (qemu-system-arm not on PATH)"
+        return 0
+    fi
+    if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+        echo "  Qz SKIP (arm-none-eabi-gcc not on PATH — lwip-sys cross cc)"
+        return 0
+    fi
+    if [[ ! -f "$venv/bin/activate" ]]; then
+        echo "  Qz SKIP (Zephyr venv absent: $venv — set WZ_ZEPHYR_VENV)"
+        return 0
+    fi
+    if [[ ! -d "$zbase" ]]; then
+        echo "  Qz SKIP (ZEPHYR_BASE absent: $zbase — set WZ_ZEPHYR_BASE)"
+        return 0
+    fi
+    if ! command -v west >/dev/null 2>&1 && [[ ! -x "$venv/bin/west" ]]; then
+        echo "  Qz SKIP (west not on PATH nor in the venv)"
+        return 0
+    fi
+
+    local build_dir elf qlog qpid i fail=0
+    build_dir="$(mktemp -d)/zbuild"
+    elf="$build_dir/zephyr/zephyr.elf"
+
+    # west build in a subshell so the venv activate + ZEPHYR_BASE export do not
+    # leak into the rest of run-ci. cargo (invoked by the CMakeLists.txt) pins
+    # CC_thumbv7m_none_eabi=arm-none-eabi-gcc + WZ_LWIP_PORT itself.
+    if (
+        # shellcheck disable=SC1091
+        source "$venv/bin/activate" 2>/dev/null
+        export ZEPHYR_BASE="$zbase"
+        west build -b qemu_cortex_m3 -d "$build_dir" deploy/zephyr-app >/dev/null 2>&1
+    ); then
+        echo "  Qz build deploy/zephyr-app (west, qemu_cortex_m3) OK"
+    else
+        echo "  Qz build deploy/zephyr-app (west) FAIL" >&2
+        rm -rf "$(dirname "$build_dir")"
+        return 1
+    fi
+
+    # Boot + console-sentinel verdict. The -icount/-rtc flags mirror west's own
+    # run invocation; kill qemu as soon as the verdict line appears (the image
+    # idles after, no semihosting exit) with a 40s wall-clock backstop.
+    qlog="$(mktemp)"
+    timeout 40 qemu-system-arm -cpu cortex-m3 -machine lm3s6965evb -nographic \
+        -icount shift=6,align=off,sleep=off -rtc clock=vm -net none \
+        -kernel "$elf" >"$qlog" 2>&1 &
+    qpid=$!
+    for i in $(seq 1 350); do
+        grep -q "ZEPHYR-WZ " "$qlog" 2>/dev/null && break
+        kill -0 "$qpid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill "$qpid" 2>/dev/null
+    wait "$qpid" 2>/dev/null
+
+    if grep -q "ZEPHYR-WZ PASS" "$qlog"; then
+        echo "  Qz run deploy/zephyr-app via qemu_cortex_m3 (lm3s6965evb) PASS"
+    else
+        echo "  Qz run deploy/zephyr-app FAIL (no 'ZEPHYR-WZ PASS' console sentinel)" >&2
+        echo "  ── Qz: captured qemu output ──" >&2
+        sed 's/^/    | /' "$qlog" >&2
+        fail=1
+    fi
+    rm -f "$qlog"
+    rm -rf "$(dirname "$build_dir")"
+    return $fail
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -3832,6 +3937,7 @@ run_layer E6 layer_e6_peer_mesh || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
+run_layer Qz layer_qz_zephyr_boot || overall=1
 run_layer M layer_m_scouting_multicast || overall=1
 run_layer Z layer_z_zenohd_interop || overall=1
 

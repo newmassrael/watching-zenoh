@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zephyr-app/rust — the wz Rust STATICLIB linked into the Zephyr image by the
+# parent CMakeLists.txt (Path B: Zephyr as kernel only; ONE Zephyr thread hosts
+# the wz cooperative executor). UNLIKE the cargo-driven FreeRTOS deploy
+# (deploy/mcu-freertos-demo is a `bin` built + linked by cargo), here cargo only
+# emits `libwz_zephyr_app.a` with the kernel symbols undefined; Zephyr's
+# west/cmake build compiles the kernel and performs the final image link. So
+# crate-type = ["staticlib"], no cortex-m-rt (Zephyr boots + owns the vector
+# table), no semihosting (Zephyr printk via the C `wz_log` seam).
+#
+# Standalone workspace (the empty `[workspace]` table) so cargo does not pull it
+# into crates/Cargo.toml's member build (where thumbv7m is not the host triple).
+
+[workspace]
+
+[package]
+name = "wz-zephyr-app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+publish = false
+description = "wz Rust staticlib for the Zephyr cooperative single-task profile e2e (Path B) — CoopRuntime<ZephyrClock> hosted in one Zephyr thread, linked into the qemu_cortex_m3 image."
+
+[lib]
+name = "wz_zephyr_app"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+# critical-section IMPL provider. wz-runtime-coop::sync + portable-atomic's
+# AtomicU64 fallback need a global `critical_section` impl; this crate defines
+# one over Zephyr's irq_lock/irq_unlock in src/lib.rs (NOT cortex-m's
+# single-core impl — in a staticlib rustc drops cortex-m's impl object because
+# it is reached only via the extern `_critical_section_1_0_*` symbols, not the
+# Rust call graph; a root-crate impl is always bundled). restore-state-u32 sets
+# RawRestoreState = the kernel IRQ key (`unsigned int`).
+critical-section = { version = "1", features = ["restore-state-u32"] }
+# portable-atomic polyfill: AtomicU64 (the coop timer queue / clock) is not
+# native on thumbv7m, so route it through fallback + critical-section, matching
+# the wz-runtime-coop / wz-mcu-clock atomic-backend unification.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The Zephyr cooperative single-task profile seams: ZephyrClock (ClockSource
+# over sys_clock_tick_get) + ZephyrAllocator (k_malloc/k_free GlobalAlloc) +
+# ZephyrRuntime = CoopRuntime<ZephyrClock>. Direct path dep here (Z2); the Z3
+# active flip will route it through the wz facade's `platform-zephyr` gate, the
+# way mcu-freertos-demo consumes wz::runtime_freertos after R311y28.
+wz-runtime-zephyr = { path = "../../../crates/wz-runtime-zephyr" }
+
+# Direct edge for the lwIP NO_SYS `sys_now()` shim, which reads the kernel tick
+# counter (sys_clock_tick_get) — the same source ZephyrClock uses.
+zephyr-sys = { path = "../../../crates/zephyr-sys" }
+
+# wz facade — `runtime-coop` pulls the CoopRuntime executor SSOT + CoopTime
+# (+ wz-link-lwip, which stays an EMPTY crate until WZ_LWIP_PORT is set; the
+# Stage-1 boot deliberately leaves it unset to isolate the Path-B link + the
+# executor from the lwIP cross-compile, which Stage 2 adds).
+wz = { path = "../../../crates/wz", default-features = false, features = ["runtime-coop"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
