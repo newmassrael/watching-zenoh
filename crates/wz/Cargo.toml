@@ -75,6 +75,16 @@ wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-featur
 # when the consumer opts in. Mutual exclusion with `runtime-tokio`
 # is enforced via a compile_error! gate in `src/lib.rs`.
 wz-runtime-coop = { path = "../wz-runtime-coop", optional = true, default-features = false }
+# R311y28 — wz-runtime-freertos enters the facade as an optional dep,
+# pulled in by the `platform-freertos` feature (the FreeRTOS cooperative
+# single-task profile seams: FreertosClock over xTaskGetTickCount +
+# FreertosAllocator over heap_4 + FreertosRuntime = CoopRuntime<FreertosClock>).
+# Unlike wz-runtime-coop the runtime axis is orthogonal: this crate brings
+# only the FreeRTOS-specific seams, the deploy composes it with `runtime-coop`.
+# It is a cross-only no_std crate (freertos-sys + wz-runtime-coop); on host
+# or cross-without-WZ_FREERTOS_CONFIG freertos-sys stubs, so a host build with
+# the feature off never touches it.
+wz-runtime-freertos = { path = "../wz-runtime-freertos", optional = true, default-features = false }
 # R311az-3a — wz-link-lwip enters the facade as an optional dep
 # pulled in by the `runtime-coop` feature. The link tier (§5.C) is
 # coupled to the runtime profile in the wz architecture: `runtime-coop`
@@ -333,17 +343,24 @@ locator-unixsock = ["transport-link-unixsock"]
 locator-vsock = ["transport-link-vsock"]
 locator-ws = ["transport-link-ws"]
 
-# ----- domain: platform (7 atomic, 0 active / 7 reserved) -----
+# ----- domain: platform (7 atomic, 1 active / 6 reserved) -----
 # R311ch — audit-only ratify. Platform identity flows through Rust's
 # `target_os` cfg axis (a Cargo `[target.'cfg(target_os = "linux")']`
 # dep is the standard mechanism), not through Cargo `[features]`.
-# These `platform-*` features are presentation-layer labels for
-# preset compositions (e.g. preset-cortex-m4-default pulls
-# platform-bare-metal). Cfg-gating source on them would duplicate
-# what `target_os` already handles. 0 source cfg sites, by design.
-# Prior comment "1 active / 6 reserved" corrected to "0 active / 7".
+# Most `platform-*` features are presentation-layer labels for preset
+# compositions (e.g. preset-cortex-m4-default pulls platform-bare-metal);
+# cfg-gating those would duplicate what `target_os` already handles.
+#
+# R311y28 EXCEPTION — `platform-freertos` is the ONE platform-* that gates
+# real code, because `target_os` CANNOT distinguish it: a bare-metal deploy
+# and a FreeRTOS deploy are BOTH `target_os = "none"` on thumbv7m-none-eabi.
+# The RTOS is an opt-in selected by the runtime+link adapter, not the target
+# triple, so it is a genuine cfg(feature) knob (the cooperative single-task
+# profile re-export `wz::runtime_freertos` in src/lib.rs). The other six stay
+# 0-cfg-site labels (linux/macos/windows = target_os-routed; bare-metal =
+# target-triple+no_std-selected, FOUNDATIONAL; zephyr/qnx = deferred).
 platform-bare-metal = []
-platform-freertos = []
+platform-freertos = ["dep:wz-runtime-freertos"]
 platform-linux = []
 platform-macos = []
 platform-qnx = []

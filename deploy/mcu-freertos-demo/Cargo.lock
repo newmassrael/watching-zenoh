@@ -246,7 +246,6 @@ dependencies = [
  "panic-semihosting",
  "portable-atomic",
  "wz",
- "wz-runtime-freertos",
 ]
 
 [[package]]
@@ -471,6 +470,7 @@ dependencies = [
  "wz-link-lwip",
  "wz-runtime-coop",
  "wz-runtime-core",
+ "wz-runtime-freertos",
 ]
 
 [[package]]

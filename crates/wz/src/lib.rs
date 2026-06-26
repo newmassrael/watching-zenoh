@@ -59,6 +59,26 @@ pub use wz_runtime_tokio as runtime_tokio;
 #[cfg(feature = "runtime-coop")]
 pub use wz_runtime_coop as runtime_coop;
 
+// R311y28 — platform-freertos: the FreeRTOS COOPERATIVE SINGLE-TASK profile
+// re-export. This is the ONE platform-* feature that gates real code, and the
+// reason is a target_os limitation: a bare-metal deploy and a FreeRTOS deploy
+// are BOTH `target_os = "none"` on thumbv7m-none-eabi, so `target_os` (which
+// routes platform-linux/macos/windows) CANNOT distinguish them. The RTOS is an
+// opt-in chosen by the runtime+link adapter, so it is a genuine cfg(feature)
+// knob — making platform-freertos an A3 ACTIVE atom (unlike platform-bare-metal,
+// which the target-triple + no_std select with no toggle = FOUNDATIONAL).
+//
+// ON pulls wz-runtime-freertos under `wz::runtime_freertos`: FreertosClock
+// (a ClockSource over xTaskGetTickCount), the heap_4 FreertosAllocator, and
+// FreertosRuntime = CoopRuntime<FreertosClock> — the runtime axis stays
+// orthogonal (the deploy composes this with `runtime-coop`, which supplies the
+// reused wz-runtime-coop executor). The profile runs that executor inside ONE
+// FreeRTOS task = zenoh-pico's Z_FEATURE_MULTI_THREAD=0 single-thread mode;
+// native multi-task (xTaskCreate per read/lease thread, pico's default) is a
+// deliberate re-openable FUTURE profile, not what this ships.
+#[cfg(feature = "platform-freertos")]
+pub use wz_runtime_freertos as runtime_freertos;
+
 // R311az-3a / R311az-3b-ii — §5.C link tier re-export under the MCU
 // profile. The `link_lwip` namespace is symmetric with `runtime_coop`:
 // consumers get `wz::link_lwip::LwipLink` + `wz::link_lwip::LwipUdpSocket`

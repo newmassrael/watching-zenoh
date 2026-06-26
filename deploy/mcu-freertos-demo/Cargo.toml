@@ -30,15 +30,18 @@ cortex-m-semihosting = "0.5"
 panic-semihosting = { version = "0.6", features = ["exit"] }
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
-# FreeRTOS kernel FFI (xTaskCreate / vTaskStartScheduler / vTaskDelay) + the
-# cooperative-profile runtime (FreertosClock + FreertosAllocator +
-# FreertosRuntime). freertos-sys's real C build is enabled by WZ_FREERTOS_CONFIG
+# FreeRTOS kernel FFI for the boot path (xTaskCreate / vTaskStartScheduler /
+# vTaskDelay). freertos-sys's real C build is enabled by WZ_FREERTOS_CONFIG
 # pointing at this crate's FreeRTOSConfig.h.
 freertos-sys = { path = "../../crates/freertos-sys" }
-wz-runtime-freertos = { path = "../../crates/wz-runtime-freertos" }
 
-# wz facade — runtime-coop pulls CoopRuntime + wz-link-lwip (lwIP UDP).
-wz = { path = "../../crates/wz", default-features = false, features = ["runtime-coop"] }
+# wz facade — runtime-coop pulls CoopRuntime + wz-link-lwip (lwIP UDP);
+# platform-freertos (R311y28) pulls the FreeRTOS cooperative single-task
+# profile seams (FreertosClock + FreertosAllocator + FreertosRuntime) under
+# `wz::runtime_freertos`. The two are orthogonal axes composed here: the
+# coop executor + the FreeRTOS clock/allocator. This makes the demo the real
+# consumer of the platform-freertos cfg gate (the Q.frt CI lane exercises it).
+wz = { path = "../../crates/wz", default-features = false, features = ["runtime-coop", "platform-freertos"] }
 
 [profile.release]
 codegen-units = 1

@@ -2371,6 +2371,7 @@ dependencies = [
  "wz-link-lwip",
  "wz-runtime-coop",
  "wz-runtime-core",
+ "wz-runtime-freertos",
  "wz-runtime-tokio",
  "wz-session-lwip",
 ]

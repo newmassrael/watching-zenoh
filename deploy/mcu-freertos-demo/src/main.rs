@@ -33,7 +33,10 @@ use freertos_sys::{pdPASS, vTaskDelay, vTaskStartScheduler, xTaskCreate, xTaskGe
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
 use wz::runtime_coop::{CoopRuntime, CoopTime};
 use wz::runtime_core::{Runtime, TimeSource};
-use wz_runtime_freertos::{FreertosAllocator, FreertosClock};
+// R311y28 — the FreeRTOS seams now come through the wz facade's
+// `platform-freertos` gate (`wz::runtime_freertos`), not a direct
+// wz-runtime-freertos dep: this demo is the consumer that proves the gate.
+use wz::runtime_freertos::{FreertosAllocator, FreertosClock};
 
 /// FreeRTOS heap_4 backs every Rust allocation (the executor + the lwIP socket
 /// Inner). Sized by `configTOTAL_HEAP_SIZE` in FreeRTOSConfig.h.
