@@ -98,7 +98,7 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
-use wz_session_core::keyexpr_match::keyexpr_includes_target;
+use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
@@ -108,12 +108,14 @@ use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
 use wz_session_core::query_mode::QueryTarget;
+use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::queryable_info::QueryableInfo;
 use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, set_request_source,
 };
-use wz_session_core::response_build::set_response_keyexpr_literal;
+use wz_session_core::response_build::{set_response_keyexpr_literal, ResponseReplyBuilder};
+use wz_session_core::sample::EncodingHint;
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
@@ -276,6 +278,16 @@ pub struct LinkstateForwarder {
     /// (frees) it; `deregister` drops a departed face's entries. `RefCell` by the
     /// same single-task contract as the interest tables.
     pending: RefCell<PendingQueries>,
+    /// R311y44 (§5.23 Phase 2a) — queryables HOSTED BY THIS NODE with a
+    /// reply-producing handler (distinct from [`qabls`](Self#structfield.qabls),
+    /// which only tracks remote interest for ROUTING). A routed Query whose only
+    /// match is one of these reaches the empty-route branch of
+    /// [`forward_request`](Self::forward_request) (self is excluded from query
+    /// routing) and is dispatched to the matching handler, whose replies unwind
+    /// back to the querier via the existing return path. `RefCell` (the handler is
+    /// `FnMut`) by the same single-task contract; no `Send` (the handler may
+    /// capture an `Rc` — the §5.23 combined node's shared `WzConfig` in Phase 2b).
+    local_queryables: RefCell<Vec<LocalQueryable>>,
     /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
     /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
     /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
@@ -368,6 +380,156 @@ pub struct LinkstateForwarder {
     clock: Box<dyn Fn() -> Instant>,
 }
 
+/// R311y44 (§5.23 Phase 2a) — the heap handler backing a [`LocalQueryable`]: the
+/// SAME `FnMut(&dyn QueryView, &mut dyn ReplyOut)` shape the Session-level
+/// `declare_queryable` uses (`query_sink::BoxedQueryFn`), MINUS the `Send +
+/// 'static` bound — the forwarder is single-task, so a handler may capture an
+/// `Rc` (Phase 2b's shared `WzConfig`). Factored to a `type` per
+/// `clippy::type_complexity` (the two nested trait-object args), as `query_sink`
+/// does for its `Send` variant.
+type LocalQueryHandler = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut)>;
+
+/// R311y44 (§5.23 Phase 2a) — a queryable HOSTED BY THIS NODE: its declared
+/// keyexpr + completeness + the reply-producing handler. A self-targeted Query is
+/// dispatched to the matching handler(s).
+struct LocalQueryable {
+    keyexpr: String,
+    complete: bool,
+    handler: LocalQueryHandler,
+}
+
+/// A minimal [`QueryView`] over a routed Request's resolved fields, for
+/// dispatching to a local queryable handler. Parameters / attachment are not
+/// threaded in Phase 2a (the §5.23 admin handler reads only the keyexpr); a
+/// future handler that needs them adds the plumbing. `is_local` / `source_info`
+/// fall through to the trait defaults (wire origin, no source info).
+struct LocalQueryView<'a> {
+    keyexpr: &'a str,
+    rid: u64,
+}
+
+impl QueryView for LocalQueryView<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        None
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        None
+    }
+    fn rid(&self) -> u64 {
+        self.rid
+    }
+}
+
+/// A [`ReplyOut`] that ACCUMULATES each emitted reply as a built
+/// [`ResponseOwned`] rather than sending inline, so the self-dispatch in
+/// [`LinkstateForwarder::forward_request`] can run the handler under a borrow of
+/// `local_queryables` and THEN emit on the inbound face (no overlapping borrow of
+/// `faces`). Mirrors the Session-side `QueryResponder` accumulate-then-emit shape
+/// using the same pure `wz_session_core::response_build` builders. The
+/// put / keyed / encoded reply arms mirror the Session path faithfully;
+/// `reply_err` and the `reply_keyed_stamped` / `reply_keyed_attached` trait
+/// defaults drop their side-band fields (encoding_id/schema, timestamp,
+/// attachment) — a Phase-2a deferral, since the §5.23 admin/local handlers emit
+/// only put / encoded replies.
+struct ForwarderReplyOut {
+    rid: u64,
+    /// The query keyexpr — the default reply key when a handler calls the bare
+    /// `reply` (the responder's bound keyexpr, zenoh's `q.reply(payload)`).
+    query_keyexpr: String,
+    out: Vec<ResponseOwned>,
+    responder: Option<(Vec<u8>, u32)>,
+}
+
+impl ForwarderReplyOut {
+    fn new(rid: u64, query_keyexpr: String) -> Self {
+        Self {
+            rid,
+            query_keyexpr,
+            out: Vec::new(),
+            responder: None,
+        }
+    }
+
+    /// Build one Put-form Reply (under `key`, optional `encoding`) via the shared
+    /// pure builder, stamping the responder identity if set, and accumulate it. A
+    /// build error drops that reply (the `Result` guards a codec capacity overflow;
+    /// the builder's empty-suffix assert is unreachable here — `key` is a non-empty
+    /// resolved keyexpr).
+    fn push_reply(&mut self, key: &str, payload: &[u8], encoding: Option<&EncodingHint>) {
+        let mut b = ResponseReplyBuilder::new(self.rid, 0, Some(key), payload);
+        if let Some(enc) = encoding {
+            b = b.encoding(enc);
+        }
+        if let Some((zid, eid)) = &self.responder {
+            b = b.responder(zid, *eid);
+        }
+        if let Ok(resp) = b.build() {
+            self.out.push(resp);
+        }
+    }
+
+    /// Take the accumulated replies — the dispatch emits them after the handler
+    /// returns and the `local_queryables` borrow is released.
+    fn take_responses(self) -> Vec<ResponseOwned> {
+        self.out
+    }
+}
+
+impl ReplyOut for ForwarderReplyOut {
+    fn reply(&mut self, payload: &[u8]) {
+        // The bound query keyexpr (zenoh `q.reply(payload)`). Clone the key out
+        // first so the field borrow does not overlap `push_reply`'s `&mut self`.
+        let key = self.query_keyexpr.clone();
+        self.push_reply(&key, payload, None);
+    }
+    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+        self.push_reply(keyexpr, payload, None);
+    }
+    fn reply_keyed_encoded(
+        &mut self,
+        keyexpr: &str,
+        payload: &[u8],
+        encoding: Option<&EncodingHint>,
+    ) {
+        self.push_reply(keyexpr, payload, encoding);
+    }
+    fn reply_del(&mut self) {
+        // A Del-form reply under the bound query keyexpr.
+        let key = self.query_keyexpr.clone();
+        let mut b = ResponseReplyBuilder::new(self.rid, 0, Some(&key), &[]).reply_del();
+        if let Some((zid, eid)) = &self.responder {
+            b = b.responder(zid, *eid);
+        }
+        if let Ok(resp) = b.build() {
+            self.out.push(resp);
+        }
+    }
+    fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, payload: &[u8]) {
+        // Minimal Err reply (empty keyexpr, the timeout-Err shape). The §5.23
+        // admin/local handlers do not emit Err; full encoding/schema threading is
+        // deferred until a handler needs it.
+        if let Ok(resp) =
+            wz_session_core::response_build::build_response_err_empty(self.rid, payload)
+        {
+            self.out.push(resp);
+        }
+    }
+    fn with_responder(&mut self, zid: &[u8], eid: u32) {
+        self.responder = Some((zid.to_vec(), eid));
+    }
+    fn clear_responder(&mut self) {
+        self.responder = None;
+    }
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.responder
+            .as_ref()
+            .map(|(zid, eid)| (zid.as_slice(), *eid))
+    }
+}
+
 impl LinkstateForwarder {
     /// The default coalescing window — zenoh's `TREES_COMPUTATION_DELAY_MS`
     /// (`hat/mod.rs:56`). The SPF-throttle delay a [`new`](Self::new) forwarder
@@ -425,6 +587,7 @@ impl LinkstateForwarder {
             subs: RefCell::new(LinkstatepeerInterest::new()),
             qabls: RefCell::new(LinkstatepeerInterest::new()),
             pending: RefCell::new(PendingQueries::new()),
+            local_queryables: RefCell::new(Vec::new()),
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
@@ -1191,6 +1354,23 @@ impl LinkstateForwarder {
         // is recorded (nothing is awaited). Routed via send_to_face so egress ACL
         // applies, exactly as the timeout final does.
         if children.is_empty() {
+            // R311y44 (§5.23 Phase 2a) — self-dispatch: a routed Query whose only
+            // match is a queryable HOSTED BY THIS NODE lands here (self is excluded
+            // from query routing, so `children` is empty). Each node's admin keyexpr
+            // `@/<zid>/<whatami>/**` is unique to its own zid, so an admin GET always
+            // reaches this branch. On a local match the handler has emitted its
+            // replies + the closing final, so we are done.
+            if self.dispatch_local_queryables(
+                inbound,
+                reliable,
+                request,
+                &keyexpr,
+                read_request_target(request),
+            ) {
+                return;
+            }
+            // No local queryable matched: the prompt empty-route ResponseFinal so
+            // the querier's get() terminates immediately (unchanged behaviour).
             let final_msg =
                 wz_session_core::response_final_build::build_response_final(request.rid);
             self.send_to_face(inbound, reliable, || {
@@ -1509,6 +1689,89 @@ impl LinkstateForwarder {
         self.flood_to_tree_children(&self_zid, || {
             NetworkMessage::Declare(Box::new(declare.clone()))
         })
+    }
+
+    /// R311y44 (§5.23 Phase 2a) — host a LOCAL queryable WITH a reply-producing
+    /// `handler` on this node. Reuses [`declare_queryable`](Self::declare_queryable)
+    /// for the interest-registration + flood (so upstream peers route Queries
+    /// toward this node), then stores the handler. A routed Query whose only match
+    /// is this node is dispatched to the handler in
+    /// [`forward_request`](Self::forward_request)'s empty-route branch. Returns the
+    /// declare flood reach (tree-child faces), like `declare_queryable`.
+    pub fn register_local_queryable(
+        &self,
+        keyexpr: &str,
+        complete: bool,
+        handler: LocalQueryHandler,
+    ) -> Result<usize, CodecError> {
+        let reached = self.declare_queryable(keyexpr, complete)?;
+        self.local_queryables.borrow_mut().push(LocalQueryable {
+            keyexpr: keyexpr.to_string(),
+            complete,
+            handler,
+        });
+        Ok(reached)
+    }
+
+    /// R311y44 — dispatch a routed Query to any LOCAL queryable hosting a matching
+    /// keyexpr, emitting the handler's replies + a closing `ResponseFinal` back on
+    /// the inbound face (`rid` = the querier's inbound rid; the existing per-hop
+    /// return path unwinds it). Returns `true` iff at least one local queryable
+    /// matched (so the caller skips the bare empty-route `ResponseFinal`).
+    ///
+    /// Borrow discipline: the handlers run under a `borrow_mut` of
+    /// `local_queryables`, accumulating into a [`ForwarderReplyOut`]; the actual
+    /// `send_to_face` (which borrows `faces`) runs AFTER that borrow is released.
+    /// (A handler that re-entrantly registered a local queryable would panic the
+    /// `RefCell` — the §5.23 admin handler does not.)
+    fn dispatch_local_queryables(
+        &self,
+        inbound: FaceId,
+        reliable: bool,
+        request: &RequestOwned,
+        keyexpr: &str,
+        target: Option<QueryTarget>,
+    ) -> bool {
+        let query_chunks: Vec<&str> = keyexpr.split('/').collect();
+        let view = LocalQueryView {
+            keyexpr,
+            rid: request.rid,
+        };
+        let mut out = ForwarderReplyOut::new(request.rid, keyexpr.to_string());
+        let mut matched = false;
+        {
+            let mut locals = self.local_queryables.borrow_mut();
+            for lq in locals.iter_mut() {
+                // A queryable answers a query whose keyexpr its declaration
+                // INTERSECTS (zenoh's `decl.intersects(query)`); under AllComplete
+                // only COMPLETE queryables answer.
+                if !keyexpr_intersects_target(&lq.keyexpr, &query_chunks) {
+                    continue;
+                }
+                if matches!(target, Some(QueryTarget::AllComplete)) && !lq.complete {
+                    continue;
+                }
+                matched = true;
+                (lq.handler)(&view, &mut out);
+            }
+        }
+        if !matched {
+            return false;
+        }
+        // Emit the accumulated replies, then the closing ResponseFinal, on the
+        // inbound face — the querier is one hop away (rid = its own inbound rid);
+        // any upstream hops unwind via the existing forward_response path. Routed
+        // through send_to_face so egress ACL applies, as the bare final does.
+        for resp in out.take_responses() {
+            self.send_to_face(inbound, reliable, || {
+                NetworkMessage::Response(Box::new(resp.clone()))
+            });
+        }
+        let final_msg = wz_session_core::response_final_build::build_response_final(request.rid);
+        self.send_to_face(inbound, reliable, || {
+            NetworkMessage::ResponseFinal(final_msg.clone())
+        });
+        true
     }
 
     /// Originate a LOCAL subscription RETRACTION into the mesh: this node is no
@@ -6354,6 +6617,176 @@ mod tests {
         assert_eq!(sink_b.frame_count(), 1, "relayed to queryable B");
         assert_eq!(sink_c.frame_count(), 1, "relayed to queryable C");
         assert_eq!(sink_a.frame_count(), 0, "not back to the source A");
+    }
+
+    #[test]
+    fn forward_request_dispatches_self_hosted_local_queryable() {
+        // §5.23 Phase 2a: S hosts a LOCAL queryable for demo/q with a reply
+        // handler. A routed Query for demo/q from face A finds NO remote queryable
+        // (self is excluded from query routing), reaches forward_request's
+        // empty-route branch, and is dispatched to the local handler — whose Reply
+        // + closing ResponseFinal unwind back to the querier on face A. (The reply
+        // PAYLOAD content is exercised end-to-end by the Phase-2b admin GET.)
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05); // edge S-A (querier)
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(|_view: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"local-reply")),
+        )
+        .expect("register local queryable");
+        sink_a.reset(); // drop the declare flood to A
+
+        let request = wz_session_core::request_build::build_request_query(99, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        // The querier face received the Reply + the closing final (no other face).
+        assert_eq!(
+            sink_a.frame_count(),
+            2,
+            "self-dispatch sent a Reply + a ResponseFinal back to the querier"
+        );
+        // Frame 0 — the Reply, carrying the querier's rid (a DIRECT self-reply uses
+        // the inbound rid, no qid remap) under the queryable's keyexpr.
+        let resp = forwarded_response(&sink_a.frame_bytes(0));
+        assert_eq!(resp.request_id, 99, "reply carries the querier's rid");
+        match &resp.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => {
+                assert_eq!(w.suffix.as_deref(), Some("demo/q"), "reply keyed to demo/q");
+            }
+            _ => panic!("expected a literal-keyexpr Reply"),
+        }
+        // Frame 1 — the closing ResponseFinal, same rid.
+        let final_msg = forwarded_response_final(&sink_a.frame_bytes(1));
+        assert_eq!(final_msg.request_id, 99, "final carries the querier's rid");
+        // A direct self-reply awaits nothing — no pending return entry recorded.
+        assert_eq!(
+            fwd.pending_len(),
+            0,
+            "self-dispatch records no pending return entry"
+        );
+    }
+
+    #[test]
+    fn forward_request_no_local_queryable_match_sends_only_the_bare_final() {
+        // The negative: with a local queryable for demo/q registered, a Query for a
+        // DIFFERENT key (other/q) does NOT match it — so the empty-route branch
+        // falls through to the prompt bare ResponseFinal (no spurious Reply),
+        // preserving the prior empty-route behaviour.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.register_local_queryable(
+            "demo/q",
+            true,
+            Box::new(|_v: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"x")),
+        )
+        .expect("register local queryable");
+        sink_a.reset();
+
+        let request = wz_session_core::request_build::build_request_query(7, 0, Some("other/q"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "no local match: only the bare empty-route ResponseFinal"
+        );
+        let final_msg = forwarded_response_final(&sink_a.frame_bytes(0));
+        assert_eq!(
+            final_msg.request_id, 7,
+            "the bare final carries the querier's rid"
+        );
+    }
+
+    #[test]
+    fn forward_request_self_dispatch_replies_under_the_handler_keyexpr_with_encoding() {
+        // The Phase-2b PRODUCTION path: a handler that answers a WILDCARD query by
+        // replying under a CONCRETE keyexpr DIFFERENT from the query keyexpr,
+        // carrying an encoding — exactly what the §5.23 admin handler does (it
+        // answers an `@/<zid>/**` GET via `reply_keyed_encoded(config_key, json,
+        // APPLICATION_JSON)`). Proves the keyed + encoded reply arm routes the
+        // reply under the HANDLER's own key (not the query wildcard) back to the
+        // querier — so the handler's chosen reply data reaches the querier.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.register_local_queryable(
+            "admin/**",
+            true,
+            Box::new(|_v: &dyn QueryView, out: &mut dyn ReplyOut| {
+                out.reply_keyed_encoded(
+                    "admin/config",
+                    b"{\"k\":1}",
+                    Some(&EncodingHint::APPLICATION_JSON),
+                )
+            }),
+        )
+        .expect("register local queryable");
+        sink_a.reset();
+
+        let request = wz_session_core::request_build::build_request_query(5, 0, Some("admin/**"))
+            .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        assert_eq!(sink_a.frame_count(), 2, "a keyed reply + the closing final");
+        let resp = forwarded_response(&sink_a.frame_bytes(0));
+        assert_eq!(resp.request_id, 5, "reply carries the querier's rid");
+        // The reply is keyed to the handler's OWN concrete key, NOT the wildcard
+        // query keyexpr — the reply_keyed_encoded path.
+        match &resp.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) if w.id == 0 => {
+                assert_eq!(
+                    w.suffix.as_deref(),
+                    Some("admin/config"),
+                    "reply keyed to the handler's concrete key, not the query wildcard"
+                );
+            }
+            _ => panic!("expected a literal-keyexpr Reply"),
+        }
+    }
+
+    #[test]
+    fn forward_request_allcomplete_skips_an_incomplete_local_queryable() {
+        // The AllComplete filter: a local queryable registered INCOMPLETE
+        // (complete=false) is NOT dispatched for a QueryTarget::AllComplete query
+        // (only complete queryables answer AllComplete), so the empty-route branch
+        // falls through to the bare ResponseFinal — no spurious reply.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        fwd.register_local_queryable(
+            "demo/q",
+            false, // INCOMPLETE
+            Box::new(|_v: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"x")),
+        )
+        .expect("register local queryable");
+        sink_a.reset();
+
+        let request =
+            wz_session_core::request_build::RequestQueryBuilder::new(8, 0, Some("demo/q"))
+                .request_target(QueryTarget::AllComplete)
+                .build()
+                .expect("build request");
+        fwd.forward_request(FaceId(0), true, &request);
+
+        assert_eq!(
+            sink_a.frame_count(),
+            1,
+            "AllComplete skips the incomplete local queryable: only the bare final"
+        );
+        let final_msg = forwarded_response_final(&sink_a.frame_bytes(0));
+        assert_eq!(
+            final_msg.request_id, 8,
+            "the bare final carries the querier's rid"
+        );
     }
 
     #[test]
