@@ -86,7 +86,7 @@ use sce_forge_runtime::codec::CodecError;
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::linkstate_list::LinkstateListOwned;
 use wz_codecs::oam::OamOwned;
-use wz_codecs::push::PushOwned;
+use wz_codecs::push::{PushOwned, PushOwnedVariant};
 use wz_codecs::request::RequestOwned;
 use wz_codecs::response::ResponseOwned;
 use wz_codecs::response_final::ResponseFinalOwned;
@@ -98,7 +98,9 @@ use wz_session_core::declare_build::{
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
 use wz_session_core::declare_routing_context::{read_declare_source, set_declare_source};
 use wz_session_core::driver_loop::DriverLoopOutcome;
-use wz_session_core::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_target};
+use wz_session_core::keyexpr_match::{
+    keyexpr_includes_target, keyexpr_intersects_target, keyexpr_pattern_matches,
+};
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
 };
@@ -110,12 +112,15 @@ use wz_session_core::push_routing_context::{
 use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::queryable_info::QueryableInfo;
+use wz_session_core::reliability::Reliability;
 use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, set_request_source,
 };
 use wz_session_core::response_build::{set_response_keyexpr_literal, ResponseReplyBuilder};
 use wz_session_core::sample::EncodingHint;
+use wz_session_core::sample_kind::SampleKind;
+use wz_session_core::sink::{BorrowedSample, SampleView};
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 use wz_routing_graph::{Changes, LinkId, LinkstateNetwork};
@@ -288,6 +293,14 @@ pub struct LinkstateForwarder {
     /// `FnMut`) by the same single-task contract; no `Send` (the handler may
     /// capture an `Rc` — the §5.23 combined node's shared `WzConfig` in Phase 2b).
     local_queryables: RefCell<Vec<LocalQueryable>>,
+    /// R311y46 (§5.23 Phase 3a) — subscribers HOSTED BY THIS NODE with a handler:
+    /// the Push-plane twin of [`local_queryables`](Self#structfield.local_queryables).
+    /// A Put matching one is delivered to its handler at the Push ingress (in
+    /// ADDITION to the remote fan-out — [`forward_push`](Self::forward_push) excludes
+    /// self, so this is the local-delivery seam). `RefCell` (the handler is `FnMut`)
+    /// by the same single-task contract; no `Send` (a handler may capture an `Rc` —
+    /// the §5.23 config-write handler's shared `WzConfig` in Phase 3b).
+    local_subscribers: RefCell<Vec<LocalSubscriber>>,
     /// D2c — a spanning-tree recompute is pending (the coalescing flag). The
     /// topology-change handlers ([`forward`](FaceForwarder::forward)'s inbound
     /// link-state, [`deregister`](FaceForwarder::deregister)'s face loss) SET this
@@ -396,6 +409,21 @@ struct LocalQueryable {
     keyexpr: String,
     complete: bool,
     handler: LocalQueryHandler,
+}
+
+/// R311y46 (§5.23 Phase 3a) — the heap handler backing a [`LocalSubscriber`]:
+/// `FnMut(&dyn SampleView)` (the SAME view a Session subscriber callback reads),
+/// MINUS `Send` — the forwarder is single-task, so a handler may capture an `Rc`
+/// (Phase 3b's shared `WzConfig`). Factored to a `type` per
+/// `clippy::type_complexity`, as `LocalQueryHandler` is.
+type LocalSubscriberHandler = Box<dyn FnMut(&dyn SampleView)>;
+
+/// R311y46 (§5.23 Phase 3a) — a subscriber HOSTED BY THIS NODE: its declared
+/// keyexpr (a PATTERN) + the handler. A Put whose concrete key the pattern matches
+/// is delivered to the handler (the Push-plane twin of [`LocalQueryable`]).
+struct LocalSubscriber {
+    keyexpr: String,
+    handler: LocalSubscriberHandler,
 }
 
 /// A minimal [`QueryView`] over a routed Request's resolved fields, for
@@ -588,6 +616,7 @@ impl LinkstateForwarder {
             qabls: RefCell::new(LinkstatepeerInterest::new()),
             pending: RefCell::new(PendingQueries::new()),
             local_queryables: RefCell::new(Vec::new()),
+            local_subscribers: RefCell::new(Vec::new()),
             trees_dirty: Cell::new(false),
             trees_delay,
             recomputes: Cell::new(0),
@@ -1713,6 +1742,26 @@ impl LinkstateForwarder {
         Ok(reached)
     }
 
+    /// R311y46 (§5.23 Phase 3a) — host a LOCAL subscriber WITH a `handler` on this
+    /// node. Reuses [`declare_subscription`](Self::declare_subscription) for the
+    /// interest flood (so upstream peers route matching Puts toward this node),
+    /// then stores the handler. A Put whose concrete key matches the declared
+    /// pattern is delivered to the handler at the Push ingress
+    /// ([`dispatch_local_subscribers`](Self::dispatch_local_subscribers)), in
+    /// ADDITION to the remote fan-out. Returns the declare flood reach.
+    pub fn register_local_subscriber(
+        &self,
+        keyexpr: &str,
+        handler: LocalSubscriberHandler,
+    ) -> Result<usize, CodecError> {
+        let reached = self.declare_subscription(keyexpr)?;
+        self.local_subscribers.borrow_mut().push(LocalSubscriber {
+            keyexpr: keyexpr.to_string(),
+            handler,
+        });
+        Ok(reached)
+    }
+
     /// R311y44 — dispatch a routed Query to any LOCAL queryable hosting a matching
     /// keyexpr, emitting the handler's replies + a closing `ResponseFinal` back on
     /// the inbound face (`rid` = the querier's inbound rid; the existing per-hop
@@ -1772,6 +1821,60 @@ impl LinkstateForwarder {
             NetworkMessage::ResponseFinal(final_msg.clone())
         });
         true
+    }
+
+    /// R311y46 (§5.23 Phase 3a) — deliver a Put to any LOCAL subscriber whose
+    /// declared keyexpr PATTERN matches the Put's concrete key, firing each handler
+    /// with a [`SampleView`]. Called UNCONDITIONALLY after
+    /// [`forward_push`](Self::forward_push) at the Push ingress: a Put delivers to
+    /// BOTH the remote interested subtrees (`forward_push`, which excludes self) AND
+    /// any locally-hosted subscriber (here) — no double-delivery, since forward_push
+    /// excludes self. A Del body (the non-`MsgPut` variant) is NOT delivered this
+    /// round; a `MsgPut` payload is delivered RAW — a body-level SHM descriptor, if
+    /// present, is delivered un-decoded (descriptor decoding is a deferred layer;
+    /// the §5.23 config-write is a plain Put).
+    ///
+    /// Borrow discipline: handlers run under a `borrow_mut` of `local_subscribers`;
+    /// a handler that re-entrantly registered a local subscriber would panic the
+    /// `RefCell` (the §5.23 config-write handler does not).
+    fn dispatch_local_subscribers(&self, inbound: FaceId, reliable: bool, push: &PushOwned) {
+        // Resolve the Put keyexpr against the inbound face's alias table (as
+        // forward_push does); an unresolvable alias is dropped.
+        let keyexpr = {
+            let faces = self.faces.borrow();
+            let Some(s) = faces.get(&inbound) else {
+                return;
+            };
+            match resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table) {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        // The MsgPut payload, delivered raw. A non-Put body (MsgDel) is skipped;
+        // a body-level SHM descriptor is delivered un-decoded (a deferred layer).
+        let payload: &[u8] = match &push.body {
+            PushOwnedVariant::CodecZenohMsgPut(put) => put.payload.as_slice(),
+            _ => return,
+        };
+        let sample = BorrowedSample {
+            keyexpr: &keyexpr,
+            payload,
+            kind: SampleKind::Put,
+            reliability: if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            },
+        };
+        // Fire every LOCAL subscriber whose declared keyexpr (a PATTERN) matches the
+        // concrete Put key (the R227 subscriber-side match).
+        let mut locals = self.local_subscribers.borrow_mut();
+        for sub in locals.iter_mut() {
+            let pattern_chunks: Vec<&str> = sub.keyexpr.split('/').collect();
+            if keyexpr_pattern_matches(&pattern_chunks, &keyexpr) {
+                (sub.handler)(&sample);
+            }
+        }
     }
 
     /// Originate a LOCAL subscription RETRACTION into the mesh: this node is no
@@ -2678,6 +2781,11 @@ impl FaceForwarder for LinkstateForwarder {
                 NetworkMessage::Push(push) => {
                     self.data_seen.set(self.data_seen.get() + 1);
                     self.forward_push(id, *reliable, push);
+                    // R311y46 (§5.23 Phase 3a) — local-delivery: a Put matching a
+                    // LOCALLY-hosted subscriber fires its handler. forward_push
+                    // excludes self, so this is the self/local-delivery seam (in
+                    // addition to the remote fan-out), not a double-delivery.
+                    self.dispatch_local_subscribers(id, *reliable, push);
                 }
                 // c3c-3 — a sourced subscription declaration: a
                 // DeclareSubscriber registers the source peer's interest, an
@@ -6787,6 +6895,143 @@ mod tests {
             final_msg.request_id, 8,
             "the bare final carries the querier's rid"
         );
+    }
+
+    // R311y46 (§5.23 Phase 3a) — drive a Put into the forwarder and capture what a
+    // LOCALLY-hosted subscriber's handler received.
+    fn push_outcome(keyexpr: &str, payload: &[u8]) -> DriverLoopOutcome {
+        let push =
+            wz_session_core::push_build::build_push_literal(keyexpr, payload).expect("build push");
+        DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(push))],
+            has_ext: false,
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn forward_push_dispatches_self_hosted_local_subscriber() {
+        // §5.23 Phase 3a: S hosts a LOCAL subscriber for demo/data with a handler.
+        // A Put for demo/data arriving on face A is delivered to the handler (the
+        // self/local-delivery seam — forward_push excludes self).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let recorded = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, Vec<u8>)>::new()));
+        let rec = recorded.clone();
+        fwd.register_local_subscriber(
+            "demo/data",
+            Box::new(move |s: &dyn SampleView| {
+                rec.borrow_mut()
+                    .push((s.keyexpr().to_string(), s.payload().to_vec()));
+            }),
+        )
+        .expect("register local subscriber");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"payload")),
+        );
+
+        let got = recorded.borrow();
+        assert_eq!(got.len(), 1, "the local subscriber handler fired once");
+        assert_eq!(got[0].0, "demo/data", "handler saw the resolved keyexpr");
+        assert_eq!(got[0].1, b"payload", "handler saw the Put payload");
+    }
+
+    #[test]
+    fn forward_push_no_local_subscriber_match_does_not_fire() {
+        // The negative: a Put for a key the local subscriber does NOT cover does
+        // not fire its handler.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f = fired.clone();
+        fwd.register_local_subscriber(
+            "demo/data",
+            Box::new(move |_s: &dyn SampleView| f.set(true)),
+        )
+        .expect("register local subscriber");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("other/data", b"x")),
+        );
+
+        assert!(
+            !fired.get(),
+            "a non-matching Put does not fire the local handler"
+        );
+    }
+
+    #[test]
+    fn forward_push_local_subscriber_pattern_matches() {
+        // A PATTERN subscriber (demo/**) is delivered a concrete Put (demo/data) —
+        // the subscriber keyexpr is the pattern, the Put key concrete.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, _sink_a) = peer_face(zid(0x0A));
+        fwd.register(FaceId(0), &face_a);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        let recorded = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let rec = recorded.clone();
+        fwd.register_local_subscriber(
+            "demo/**",
+            Box::new(move |s: &dyn SampleView| rec.borrow_mut().push(s.keyexpr().to_string())),
+        )
+        .expect("register local subscriber");
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"p")),
+        );
+
+        let got = recorded.borrow();
+        assert_eq!(
+            got.len(),
+            1,
+            "the demo/** subscriber matched the demo/data Put"
+        );
+        assert_eq!(got[0], "demo/data");
+    }
+
+    #[test]
+    fn forward_push_delivers_to_remote_and_local_subscriber_without_double() {
+        // The no-double-delivery invariant: a key BOTH a REMOTE peer (B) and SELF
+        // subscribe to. A Put from A fans out to B ONCE (forward_push, which excludes
+        // self) AND fires the LOCAL handler ONCE (dispatch_local_subscribers, a
+        // separate registry) — disjoint recipients, no double-delivery.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A)); // source
+        let (face_b, sink_b) = peer_face(zid(0x0B)); // REMOTE subscriber
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data"); // B subscribes (remote)
+        let fired = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let f = fired.clone();
+        fwd.register_local_subscriber("demo/data", Box::new(move |_s| f.set(f.get() + 1)))
+            .expect("register local subscriber"); // self subscribes (local)
+        sink_a.reset();
+        sink_b.reset(); // drop the declare floods
+
+        fwd.forward(
+            FaceId(0),
+            IterationEvent::Poll(&push_outcome("demo/data", b"payload")),
+        );
+
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "remote subscriber B got the Put exactly once"
+        );
+        assert_eq!(fired.get(), 1, "the local handler fired exactly once");
+        assert_eq!(sink_a.frame_count(), 0, "not echoed back to the source A");
     }
 
     #[test]
