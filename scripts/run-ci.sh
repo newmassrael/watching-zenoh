@@ -1296,10 +1296,10 @@ layer_c1al_cargo_test_unixpipe() {
 #      -> OpenMetrics text/plain; a `/**` wildcard fires BOTH handlers);
 #   3. clippy both ON builds (-D warnings, --all-targets) so the dispatch + the
 #      reply_keyed_encoded seam stay warning-clean.
-# The bare --no-default-features query-queryable combo is a PRE-EXISTING build
-# quirk (an unused ResponseSink import surfaces without the full default codec
-# set -- reproduced on the clean tree, unrelated to adminspace), so this lane
-# composes the features ON the default set rather than --no-default-features.
+# This lane composes the features ON the default set; the --no-default-features
+# standalone coverage is the sibling Layer C1an (R311y38), which also locks the
+# two self-sufficiency fixes that the slim build surfaced (the session/mod.rs
+# unused-ResponseSink import + the test-module dead-code re-gating).
 layer_c1am_cargo_test_adminspace() {
     (cd crates \
         && cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet \
@@ -1311,6 +1311,44 @@ layer_c1am_cargo_test_adminspace() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings)
+}
+
+# ─── Layer C1an — adminspace §5.23 SELF-SUFFICIENCY under --no-default-features ─
+#
+# R311y38: C1am proves adminspace works on the DEFAULT feature set; this lane is
+# the standalone twin — it proves adminspace-core/metrics/read COMPOSE AND WORK
+# under --no-default-features, i.e. the feature genuinely declares its OWN deps
+# rather than free-riding the default set. Two real deps surfaced on the slim
+# build and are now pulled by adminspace-core (wz-session-core/Cargo.toml):
+#   * keyexpr-wildcard-double — the `@/<zid>/<whatami>/**` queryable's wire-path
+#     match (keyexpr_intersects_target); without it `**` degrades to a literal
+#     chunk and a remote admin GET never reaches the handler. Locked by the unit
+#     `admin_queryable_double_wildcard_routes_root_and_subpath_gets`.
+#   * pubsub-encoding — the reply EncodingHint (application/json / text/plain);
+#     without it gated_reply_encoding drops the content-type. Locked by the
+#     runtime root e2e's encoding assertion.
+# This lane:
+#   1. wz-session-core adminspace unit tests under --no-default-features
+#      --features adminspace-core (the `**` matcher lock + the JSON emitters);
+#   2. wz-runtime-tokio declare_adminspace e2e under --no-default-features for the
+#      core / metrics / read+metrics combos (each loopback GET replies correctly,
+#      proving the deps compose without the default set);
+#   3. clippy --all-targets -D warnings on each --no-default-features combo — the
+#      lane that would have caught the session/mod.rs unused-ResponseSink import
+#      (R311y38 removed it; redundant with the always-present inherent
+#      send_response_final) and the make_request_query/query_frame_outcome
+#      test-module dead-code (R311y38 re-gated them to their codec-response-final
+#      consumers), both of which only surface WITHOUT the full default codec set.
+layer_c1an_cargo_test_adminspace_nodefault() {
+    (cd crates \
+        && cargo test -p wz-session-core --no-default-features --features adminspace-core --lib adminspace --quiet \
+        && cargo clippy -p wz-session-core --no-default-features --features adminspace-core --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-metrics,query-get --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --all-targets --quiet -- -D warnings)
 }
 
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
@@ -3958,6 +3996,7 @@ run_layer C1aj layer_c1aj_cargo_test_quic_datagram || overall=1
 run_layer C1ak layer_c1ak_cargo_test_transport_stats || overall=1
 run_layer C1al layer_c1al_cargo_test_unixpipe || overall=1
 run_layer C1am layer_c1am_cargo_test_adminspace || overall=1
+run_layer C1an layer_c1an_cargo_test_adminspace_nodefault || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

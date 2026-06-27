@@ -1222,7 +1222,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 for rid in obs.take_pending_final_rids() {
                     let actions = actions.clone();
                     self.fires.stage(Box::new(move || {
-                        use wz_session_core::response_sink::ResponseSink as _;
+                        // `actions` is the concrete `Arc<SessionLinkActions>`,
+                        // so call its inherent `send_response_final` directly —
+                        // the `ResponseSink` trait method (session_actions.rs)
+                        // is a pure forward to this same inherent fn, so the
+                        // `use ResponseSink as _` seam added nothing here and
+                        // went unused under feature-unification builds where
+                        // the trait method's `codec-response-final` arm is
+                        // absent (the `--all-targets` deny-warnings break).
                         actions.send_response_final(rid);
                     }));
                 }

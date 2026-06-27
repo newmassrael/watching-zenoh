@@ -261,6 +261,44 @@ mod tests {
     }
 
     #[test]
+    fn admin_queryable_double_wildcard_routes_root_and_subpath_gets() {
+        // The `@/<zid>/<whatami>/**` built-in queryable must INTERSECT both the
+        // bare root admin GET and any sub-path GET (`.../metrics`, deeper) so a
+        // remote peer's Query reaches the handler — the wire-path match
+        // (`QueryableRegistry::has_matching` → `keyexpr_intersects_target`). The
+        // trailing `**` is honored ONLY when `keyexpr-wildcard-double` is on;
+        // `adminspace-core` pulls it, so a slim `--no-default-features`
+        // adminspace build still routes remote admin GETs. The local loopback
+        // GET does not exercise `**`, so THIS matcher assertion — not the e2e —
+        // is what locks the dep: drop `keyexpr-wildcard-double` from
+        // `adminspace-core` and the `**` degrades to a literal chunk, flipping
+        // every positive assertion below to a non-match.
+        use crate::keyexpr_match::keyexpr_intersects_target;
+        use alloc::vec::Vec;
+        let qk = admin_queryable_key("a1b2", "peer"); // "@/a1b2/peer/**"
+        let root: Vec<&str> = "@/a1b2/peer".split('/').collect();
+        let metrics: Vec<&str> = "@/a1b2/peer/metrics".split('/').collect();
+        let deep: Vec<&str> = "@/a1b2/peer/subscriber/foo".split('/').collect();
+        let foreign: Vec<&str> = "@/ffff/peer".split('/').collect();
+        assert!(
+            keyexpr_intersects_target(&qk, &root),
+            "bare root admin GET reaches the /** queryable (trailing ** matches zero chunks)"
+        );
+        assert!(
+            keyexpr_intersects_target(&qk, &metrics),
+            "a /metrics sub-path GET reaches the /** queryable"
+        );
+        assert!(
+            keyexpr_intersects_target(&qk, &deep),
+            "a deep sub-path GET reaches the /** queryable"
+        );
+        assert!(
+            !keyexpr_intersects_target(&qk, &foreign),
+            "a foreign zid does NOT match (negative control)"
+        );
+    }
+
+    #[test]
     fn empty_local_data_emits_the_full_key_set() {
         let data = AdminLocalData {
             zid_hex: "a1b2".to_string(),

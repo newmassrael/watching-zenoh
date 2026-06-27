@@ -76,7 +76,7 @@ alloc = ["wz-codecs/alloc"]
 # The queryable WIRING (registering the built-in queryable, snapshotting peer
 # state) lives in wz-runtime-tokio's `adminspace-core` feature, which composes
 # this with `query-queryable`.
-adminspace-core = ["alloc"]
+adminspace-core = ["alloc", "keyexpr-wildcard-double", "pubsub-encoding"]
 
 # adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics OpenMetrics body
 # (the build-info `zenoh_build` gauge; the transport-stats OpenMetrics

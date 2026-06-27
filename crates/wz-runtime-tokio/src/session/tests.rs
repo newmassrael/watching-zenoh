@@ -6429,7 +6429,7 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
 /// R290-style local Request(Query) constructor for the R311li
 /// queryable-plane tests (mirror of `make_decl_token` — the
 /// wz-session-core test builders are not a dev-dep here per R311ds).
-#[cfg(feature = "query-queryable")]
+#[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
 fn make_request_query(rid: u64, keyexpr_literal: &str) -> wz_codecs::request::RequestOwned {
     use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
@@ -6452,7 +6452,7 @@ fn make_request_query(rid: u64, keyexpr_literal: &str) -> wz_codecs::request::Re
     .unwrap()
 }
 
-#[cfg(feature = "query-queryable")]
+#[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
 fn query_frame_outcome(
     request: wz_codecs::request::RequestOwned,
 ) -> wz_session_core::driver_loop::DriverLoopOutcome {
