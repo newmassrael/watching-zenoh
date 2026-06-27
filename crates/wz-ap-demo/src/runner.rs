@@ -1422,9 +1422,22 @@ pub(crate) async fn run_peer(
         }
     }
 
-    // Install the assembled pipeline ONCE (replaces, never appends — idempotent,
-    // unlike the three former per-feature setters).
-    forwarder.set_interceptors(interceptor_config);
+    // R311y41 — route the interceptor install through the typed WzConfig SSOT:
+    // the production config now flows deploy-opts -> WzConfig -> forwarder (the
+    // FIRST production caller of the y39 `install_interceptors` seam), not a bare
+    // `InterceptorConfig`. The peer holds the typed config for its life (the SSOT
+    // a future adminspace-write PUT mutates + re-drives) and logs the read-at-open
+    // view at startup. (Install still REPLACES the chain ONCE — idempotent — via
+    // the same set_interceptors seam underneath. The live interceptor summary in
+    // to_admin_json is a deferred §5.23 layer, so the log shows the handshake
+    // mirror.)
+    let wz_config = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
+        .with_interceptors(interceptor_config);
+    log::info!(
+        "wz-ap-demo peer config (read-at-open): {}",
+        wz_config.to_admin_json()
+    );
+    wz_config.install_interceptors(&forwarder);
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
     // the per-local-whatami SSOT default (a Peer dials discovered routers/peers);
