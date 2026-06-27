@@ -615,6 +615,18 @@ impl InterceptorContext for FaceContext<'_> {
     }
 }
 
+/// R311y43 — the production [`InterceptorSink`] impl: the typed `WzConfig` SSOT
+/// drives the live forwarder through this seam (decoupled from the concrete
+/// type, for the §5.23 combined node). Delegates to the inherent
+/// [`set_interceptors`](LinkstateForwarder::set_interceptors) — the path form
+/// resolves to the inherent method (inherent shadows trait), so this is plain
+/// delegation, not recursion.
+impl crate::interceptor::InterceptorSink for LinkstateForwarder {
+    fn set_interceptors(&self, config: crate::interceptor::InterceptorConfig) {
+        LinkstateForwarder::set_interceptors(self, config)
+    }
+}
+
 impl LinkstateForwarder {
     /// A decoded topology `LinkStateList` arrived on `face`: ingest it against
     /// that face's graph link. Returns the ingest `Changes` the caller re-floods
@@ -3988,6 +4000,87 @@ mod tests {
             sink_b.frame_count(),
             0,
             "phase 2: not relayed after the live reconfigure"
+        );
+    }
+
+    // R311y43 — §5.23 combined-node FOUNDATION proof (binding level): ONE WzConfig
+    // BINDING both DRIVES the live forwarder (the deny verdict flips, as in the
+    // test above) AND serves the admin read-at-open view (`to_admin_json`) — the
+    // same `config` value backs both surfaces. This is the in-process foundation for
+    // the §5.23 combined node; the NODE-level / wire composition (a routing peer
+    // answering its own admin GET off this instance) is the deferred Phase-2 step
+    // (the forwarder self-query dispatch bridge). The read assertion checks the
+    // CONCRETE JSON (falsifiable on the serialization contract), not a
+    // from_init_params self-comparison; the live interceptor config is NOT in
+    // `to_admin_json` (the documented deferred §5.23 layer), so the read-at-open
+    // view is invariant under the reconfigure, as a handshake-fixed mirror must be.
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_one_instance_drives_forwarder_and_serves_admin_read() {
+        use crate::config::WzConfig;
+        use wz_runtime_tokio_test_support::fixture_session_init_params;
+
+        // Line A - S(self) - B; B subscribes demo/data (same topology as above).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        // ONE typed config, populated from the handshake params (so to_admin_json
+        // carries real read-at-open values) + an empty admit-all interceptor set.
+        let params = fixture_session_init_params();
+        let mut config =
+            WzConfig::from_init_params(&params).with_interceptors(InterceptorConfig::default());
+        config.install_interceptors(&fwd);
+        sink_a.reset();
+        sink_b.reset();
+
+        let put = || DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+
+        // DRIVE surface — admit, then (after a deny reconfigure on the SAME
+        // instance) drop: the live verdict flips.
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(fwd.data_seen(), 1, "admitted before any rule");
+        config.reconfigure_interceptors(
+            InterceptorConfig {
+                acl: Some(deny_put_policy("demo/**")),
+                ..Default::default()
+            },
+            &fwd,
+        );
+        sink_b.reset();
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "denied after the live reconfigure"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "not relayed after the live reconfigure"
+        );
+
+        // READ surface — the SAME `config` binding that just drove the forwarder
+        // serves the admin read-at-open JSON. Assert the CONCRETE expected string
+        // (falsifiable: catches key-order / whatami-string / numeric-format drift),
+        // NOT a from_init_params self-comparison. The fixture params resolve to
+        // batch_size 0 -> effective 65535, lease_ms 10000, whatami Peer -> "peer".
+        assert_eq!(
+            config.to_admin_json(),
+            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
+            "one binding: the config that drove the forwarder serves the correct \
+             read-at-open JSON"
         );
     }
 

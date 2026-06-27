@@ -218,3 +218,18 @@ impl InterceptorConfig {
         chain
     }
 }
+
+/// R311y43 — the sink an [`InterceptorConfig`] is installed onto: the seam the
+/// typed [`crate::config::WzConfig`] SSOT drives, decoupled from the concrete
+/// forwarder type. `WzConfig::install_interceptors` / `reconfigure_interceptors`
+/// take `&dyn InterceptorSink`, so the §5.23 combined node composes the
+/// config-drive surface against this abstraction rather than the concrete
+/// [`crate::linkstate_forward::LinkstateForwarder`] (which is the production
+/// impl). One method — re-install both flow chains from the given config — so a
+/// reconfigure re-drives the live verdict through the same path setup uses.
+pub trait InterceptorSink {
+    /// Re-install the ingress + egress interceptor chains built from `config`
+    /// (replaces, not appends — idempotent), exactly as a one-shot deploy setup
+    /// does. See [`InterceptorConfig::build_chain`] for the fixed factory order.
+    fn set_interceptors(&self, config: InterceptorConfig);
+}

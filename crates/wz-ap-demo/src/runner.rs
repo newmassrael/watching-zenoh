@@ -1422,21 +1422,21 @@ pub(crate) async fn run_peer(
         }
     }
 
-    // R311y41 — route the interceptor install through the typed WzConfig SSOT:
-    // the production config now flows deploy-opts -> WzConfig -> forwarder (the
-    // FIRST production caller of the y39 `install_interceptors` seam), not a bare
-    // `InterceptorConfig`, and logs the read-at-open view at startup. (Install
-    // still REPLACES the chain ONCE — idempotent — via the same set_interceptors
-    // seam underneath; the live interceptor summary in to_admin_json is a deferred
-    // §5.23 layer, so the log shows the handshake mirror.)
+    // R311y41/y43 — the interceptor install routes deploy-opts -> WzConfig ->
+    // forwarder through the typed config, now via the `InterceptorSink` TRAIT SEAM
+    // (R311y43: WzConfig drives an abstract sink, decoupled from the concrete
+    // LinkstateForwarder — the same seam a runtime reconfigure re-uses, so setup
+    // and runtime share ONE code path). The startup log shows the read-at-open
+    // mirror.
     //
-    // R311y42 honesty correction: `wz_config` here is a TRANSIENT typed view
-    // (built -> logged -> installed), NOT yet a retained mutate target. This peer
-    // does not host an adminspace (peer_loop owns the session; declare_adminspace
-    // is a Session method), so the config-GET surface and this forwarder-drive
-    // surface live in two disjoint node topologies — no node yet reads + mutates
-    // ONE held WzConfig. A future adminspace-write PUT needs the combined
-    // Session+forwarder node mode FIRST (the §5.23 composition caveat).
+    // §5.23 status (honest scope): this `wz_config` is a build-time view used to
+    // install + log. It is NOT yet a live-mutate target wired to an adminspace —
+    // a routing peer hosts no adminspace today (peer_loop owns the per-face
+    // sessions; declare_adminspace is a Session method, and the forwarder excludes
+    // self from query routing). The §5.23 combined node — one WzConfig the admin
+    // GET reads AND the live half drives, over a forwarder self-query dispatch
+    // bridge — is the deferred next step; the foundation (the trait seam above +
+    // the linkstate_forward composition test) lands this round.
     let wz_config = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
         .with_interceptors(interceptor_config);
     log::info!(

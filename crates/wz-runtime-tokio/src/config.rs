@@ -25,7 +25,10 @@
 //!   interceptor factories on a config diff). wz drives it the same way:
 //!   [`WzConfig::reconfigure_interceptors`] mutates the typed config and,
 //!   under `config-mutate-runtime`, re-installs the chain on the live
-//!   [`LinkstateForwarder`] so the change takes effect at runtime.
+//!   forwarder via the [`InterceptorSink`](crate::interceptor::InterceptorSink)
+//!   seam (the production impl is
+//!   [`LinkstateForwarder`](crate::linkstate_forward::LinkstateForwarder)) so
+//!   the change takes effect at runtime.
 //!
 //! `config-mutate-runtime` is the inert-vs-driven toggle: OFF, a config
 //! mutation is stored but never re-applied (an inert mirror — the thing
@@ -41,9 +44,7 @@
 //! read-at-open fields beyond the three mirrored here.
 
 #[cfg(feature = "routing-peer")]
-use crate::interceptor::InterceptorConfig;
-#[cfg(feature = "routing-peer")]
-use crate::linkstate_forward::LinkstateForwarder;
+use crate::interceptor::{InterceptorConfig, InterceptorSink};
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::session_init_params::SessionInitParams;
 
@@ -117,18 +118,21 @@ impl WzConfig {
         self
     }
 
-    /// The config-DRIVEN initial install: drive `fwd` from this config's
+    /// The config-DRIVEN initial install: drive `sink` from this config's
     /// interceptor settings. Called once at routing setup — the same
-    /// `set_interceptors` seam the live reconfigure re-uses, so setup and
-    /// runtime go through ONE code path.
+    /// [`InterceptorSink::set_interceptors`] seam the live reconfigure re-uses,
+    /// so setup and runtime go through ONE code path. `sink` is the abstract
+    /// interceptor target (the production impl is the `LinkstateForwarder`); the
+    /// trait seam is what lets the §5.23 combined node compose the config-drive
+    /// surface without depending on the concrete forwarder type.
     #[cfg(feature = "routing-peer")]
-    pub fn install_interceptors(&self, fwd: &LinkstateForwarder) {
-        fwd.set_interceptors(self.interceptors.clone());
+    pub fn install_interceptors(&self, sink: &dyn InterceptorSink) {
+        sink.set_interceptors(self.interceptors.clone());
     }
 
     /// Runtime reconfigure of the live interceptor config: store the new
     /// typed value and, under `config-mutate-runtime`, RE-INSTALL it on the
-    /// live `fwd` so the change takes effect immediately (the forwarder's
+    /// live `sink` so the change takes effect immediately (the forwarder's
     /// admit/deny verdict flips on the next message). This is the
     /// config-DRIVEN leg the §5.23 design demands.
     ///
@@ -140,13 +144,13 @@ impl WzConfig {
     pub fn reconfigure_interceptors(
         &mut self,
         interceptors: InterceptorConfig,
-        fwd: &LinkstateForwarder,
+        sink: &dyn InterceptorSink,
     ) {
         self.interceptors = interceptors;
         #[cfg(feature = "config-mutate-runtime")]
-        fwd.set_interceptors(self.interceptors.clone());
+        sink.set_interceptors(self.interceptors.clone());
         #[cfg(not(feature = "config-mutate-runtime"))]
-        let _ = fwd;
+        let _ = sink;
     }
 }
 
