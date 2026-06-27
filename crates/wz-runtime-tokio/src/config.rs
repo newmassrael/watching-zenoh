@@ -92,6 +92,23 @@ impl WzConfig {
         }
     }
 
+    /// R311y40 — the admin-GET JSON view of the read-at-open config mirror
+    /// (the `@/<zid>/<whatami>/config` reply, the §5.23 "admin surface READS
+    /// config" leg; zenoh exposes config at `@/<zid>/<whatami>/config/**`).
+    /// Alphabetical keys (`batch_size` / `lease_ms` / `whatami`), matching the
+    /// serde_json-BTreeMap order the other §5.23 emitters (`AdminLocalData`)
+    /// use. The LIVE interceptor config is a deferred layer — it is not in
+    /// this view until the production WzConfig-holds-the-forwarder wiring
+    /// lands (registered as a §5.23 caveat).
+    pub fn to_admin_json(&self) -> String {
+        format!(
+            r#"{{"batch_size":{},"lease_ms":{},"whatami":"{}"}}"#,
+            self.batch_size,
+            self.lease_ms,
+            self.whatami.to_str()
+        )
+    }
+
     /// The current live interceptor / access-control config.
     #[cfg(feature = "routing-peer")]
     pub fn interceptors(&self) -> &InterceptorConfig {
@@ -135,5 +152,28 @@ impl WzConfig {
         fwd.set_interceptors(self.interceptors.clone());
         #[cfg(not(feature = "config-mutate-runtime"))]
         let _ = fwd;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_admin_json_is_typed_alphabetical() {
+        // R311y40 — the config GET reply shape: TYPED fields, serde_json-BTreeMap
+        // alphabetical key order (batch_size / lease_ms / whatami), whatami as the
+        // zenoh role string. The read-at-open mirror; the live interceptor config
+        // is a deferred layer not in this view.
+        let c = WzConfig {
+            whatami: WhatAmI::Router,
+            batch_size: 65535,
+            lease_ms: 10_000,
+            ..WzConfig::new()
+        };
+        assert_eq!(
+            c.to_admin_json(),
+            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
+        );
     }
 }

@@ -187,6 +187,16 @@ pub fn admin_metrics_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// R311y40 — the admin config keyexpr `@/<zid>/<whatami>/config`, the typed
+/// config READ view (zenoh exposes config at `@/<zid>/<whatami>/config/**`,
+/// adminspace.rs:353). Ungated (part of adminspace-core): a config GET is core
+/// admin introspection, not a metrics-gated handler.
+pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_root_key(zid_hex, whatami);
+    s.push_str("/config");
+    s
+}
+
 /// The OpenMetrics body the admin `@/<zid>/<whatami>/metrics` GET replies with
 /// (`text/plain`). Byte-faithful to zenoh's UNCONDITIONAL build-info block
 /// (`adminspace.rs:714-720`): a `zenoh_build` gauge carrying the node version.
@@ -257,6 +267,7 @@ mod tests {
         // is declared on `[root_key, "/**"].concat()` (:341).
         assert_eq!(admin_root_key("a1b2", "peer"), "@/a1b2/peer");
         assert_eq!(admin_queryable_key("a1b2", "peer"), "@/a1b2/peer/**");
+        assert_eq!(admin_config_key("a1b2", "peer"), "@/a1b2/peer/config");
         assert_eq!(admin_root_key("0", "router"), "@/0/router");
     }
 

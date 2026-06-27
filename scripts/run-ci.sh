@@ -1284,16 +1284,18 @@ layer_c1al_cargo_test_unixpipe() {
 # Session::declare_adminspace
 # registers the `@/<zid>/<whatami>/**` built-in queryable and dispatches a GET to
 # every handler whose key intersects it -- the root key -> `local_data` JSON
-# (application/json), and (adminspace-metrics) `/metrics` -> the OpenMetrics
-# build-info body (text/plain). The default Layer C1 carries neither, so this lane
-# is the sole coverage:
+# (application/json), `/config` -> the typed WzConfig read-at-open mirror JSON
+# (R311y40, application/json), and (adminspace-metrics) `/metrics` -> the
+# OpenMetrics build-info body (text/plain). The default Layer C1 carries none of
+# these, so this lane is the sole coverage:
 #   1. wz-session-core data-view unit tests (adminspace: JSON emitter + metrics
 #      builder) + the relocated zid<->ZenohId-hex SSOT (zid_hex), plus a
 #      storage-replication build proving the re-export keeps the old call site
 #      intact (no regression);
-#   2. wz-runtime-tokio e2e (declare_adminspace) on BOTH the core build (root GET
-#      -> JSON; no-handler sub-path -> no reply) AND the metrics build (/metrics
-#      -> OpenMetrics text/plain; a `/**` wildcard fires BOTH handlers);
+#   2. wz-runtime-tokio e2e (declare_adminspace, --lib filter) on BOTH the core
+#      build (root GET -> JSON; `/config` GET -> typed WzConfig JSON [R311y40];
+#      no-handler sub-path -> no reply) AND the metrics build (/metrics ->
+#      OpenMetrics text/plain; a `/**` wildcard fires BOTH handlers);
 #   3. clippy both ON builds (-D warnings, --all-targets) so the dispatch + the
 #      reply_keyed_encoded seam stay warning-clean.
 # This lane composes the features ON the default set; the --no-default-features

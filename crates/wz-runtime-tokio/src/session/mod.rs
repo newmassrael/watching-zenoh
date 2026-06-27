@@ -2445,7 +2445,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     {
         use wz_codecs::whatami::WhatAmI;
         use wz_session_core::adminspace::{
-            admin_queryable_key, admin_root_key, AdminLocalData, AdminSession,
+            admin_config_key, admin_queryable_key, admin_root_key, AdminLocalData, AdminSession,
         };
         use wz_session_core::sample::EncodingHint;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
@@ -2463,6 +2463,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let whatami = self.actions().params.whatami.to_str();
         let queryable_key = admin_queryable_key(&zid_hex, whatami);
         let root_key = admin_root_key(&zid_hex, whatami);
+        let config_key = admin_config_key(&zid_hex, whatami);
+        // R311y40 — the typed WzConfig read-at-open mirror, serialized once at
+        // declare time (the handshake params are fixed for the session's life).
+        let config_json =
+            crate::config::WzConfig::from_init_params(&self.actions().params).to_admin_json();
         #[cfg(feature = "adminspace-metrics")]
         let metrics_key = wz_session_core::adminspace::admin_metrics_key(&zid_hex, whatami);
         let version = version.into();
@@ -2530,6 +2535,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         Some(&EncodingHint::TEXT_PLAIN),
                     );
                 }
+            }
+
+            // `config` handler (key = `@/<zid>/<whatami>/config`): the typed
+            // WzConfig read-at-open mirror as JSON — the §5.23 "admin surface
+            // READS config" leg (zenoh's config GET, adminspace.rs:353). The
+            // live interceptor config is a deferred layer (needs the production
+            // WzConfig-holds-the-forwarder wiring).
+            let config_chunks: Vec<&str> = config_key.split('/').collect();
+            if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &config_chunks) {
+                out.reply_keyed_encoded(
+                    &config_key,
+                    config_json.as_bytes(),
+                    Some(&EncodingHint::APPLICATION_JSON),
+                );
             }
         };
 

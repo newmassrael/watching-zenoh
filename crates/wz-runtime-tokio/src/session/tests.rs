@@ -1980,6 +1980,55 @@ fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
     );
 }
 
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "adminspace-core"
+))]
+#[test]
+fn declare_adminspace_config_get_returns_typed_config_json() {
+    // R311y40 §5.23 config-read: a GET on @/<zid>/<whatami>/config returns the
+    // typed WzConfig read-at-open mirror as application/json -- the "admin surface
+    // READS config" leg (zenoh's config GET, adminspace.rs:353). build_session's
+    // default SessionInitParams drive the values, so `expected` is computed the
+    // same way the handler serializes them: the assertion proves the GET ->
+    // handler -> typed-config-JSON wiring + the application/json content-type.
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let config_key = format!("@/{zid_hex}/{whatami}/config");
+    let expected =
+        crate::config::WzConfig::from_init_params(&session.actions().params).to_admin_json();
+
+    let _admin = session
+        .declare_adminspace("0.9.9", Vec::new())
+        .expect("adminspace-core ON in this build");
+
+    let payload = Arc::new(Mutex::new(Option::<Vec<u8>>::None));
+    let enc = Arc::new(Mutex::new(Option::<(u32, Option<String>)>::None));
+    let p = payload.clone();
+    let e = enc.clone();
+    session
+        .query(
+            &config_key,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                *p.lock().unwrap() = Some(reply.payload().to_vec());
+                *e.lock().unwrap() = reply
+                    .put_encoding()
+                    .map(|(id, s)| (id, s.map(str::to_string)));
+            },
+            |_| {},
+        )
+        .expect("query-get ON in this build");
+
+    let got = payload.lock().unwrap().clone().expect("config GET replied");
+    assert_eq!(String::from_utf8(got).unwrap(), expected);
+    // application/json: zenoh encoding id 5 -> wz packed_id 10 (id << 1), no schema.
+    assert_eq!(*enc.lock().unwrap(), Some((10, None)));
+}
+
 #[cfg(all(feature = "query-get", feature = "adminspace-metrics"))]
 #[test]
 fn declare_adminspace_metrics_get_returns_openmetrics_text() {
@@ -2029,9 +2078,10 @@ fn declare_adminspace_metrics_get_returns_openmetrics_text() {
 #[cfg(all(feature = "query-get", feature = "adminspace-metrics"))]
 #[test]
 fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
-    // A @/<zid>/<whatami>/** wildcard GET intersects BOTH the root key and the
-    // metrics key -> two replies, the faithful zenoh multi-handler fan-out
-    // (adminspace.rs:499-503 fires every handler whose key intersects).
+    // A @/<zid>/<whatami>/** wildcard GET intersects the root key, the `/config`
+    // key (R311y40), AND the metrics key -> three replies, the faithful zenoh
+    // multi-handler fan-out (adminspace.rs:499-503 fires every handler whose key
+    // intersects).
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
     let (session, _driver) = build_session();
@@ -2039,6 +2089,7 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     let whatami = session.actions().params.whatami.to_str();
     let wild = format!("@/{zid_hex}/{whatami}/**");
     let root = format!("@/{zid_hex}/{whatami}");
+    let config = format!("@/{zid_hex}/{whatami}/config");
     let metrics = format!("@/{zid_hex}/{whatami}/metrics");
 
     let _admin = session
@@ -2061,10 +2112,11 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     let keys = replies.lock().unwrap().clone();
     assert_eq!(
         keys.len(),
-        2,
-        "wildcard admin GET fires local_data + metrics"
+        3,
+        "wildcard admin GET fires local_data + config + metrics"
     );
     assert!(keys.contains(&root), "local_data reply present");
+    assert!(keys.contains(&config), "config reply present");
     assert!(keys.contains(&metrics), "metrics reply present");
 }
 
