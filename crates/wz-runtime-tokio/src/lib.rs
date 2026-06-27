@@ -247,6 +247,11 @@ pub mod pubsub;
 /// subset.
 pub mod query;
 
+/// R311y39 — the typed [`config::WzConfig`] runtime config SSOT (§5.23):
+/// read-at-open handshake mirror + the live interceptor/access-control
+/// subset, re-applied to the forwarder under `config-mutate-runtime`.
+pub mod config;
+
 /// R121k-2 — application-layer remote-declaration registries. Route
 /// decoded `Declare(Decl*|Undecl*)` records to user-registered
 /// callbacks. This round lands `RemoteSubscriberRegistry`

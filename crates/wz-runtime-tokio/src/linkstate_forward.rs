@@ -3922,6 +3922,124 @@ mod tests {
         );
     }
 
+    // R311y39 — config-DRIVEN proof: a typed `WzConfig` mutation re-installs the
+    // interceptor chain on the LIVE forwarder, so the admit/deny verdict flips at
+    // runtime. The ON arm proves the drive; the inert arm (below) proves the
+    // `config-mutate-runtime` toggle is load-bearing (OFF = stored-but-not-applied).
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_reconfigure_drives_the_live_forwarder() {
+        use crate::config::WzConfig;
+        // Line A - S(self) - B; B subscribes demo/data.
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        // An empty (admit-all) typed config installed at setup — same seam the
+        // runtime reconfigure re-uses.
+        let mut config = WzConfig::new();
+        config.install_interceptors(&fwd);
+        sink_a.reset();
+        sink_b.reset();
+
+        let put = || DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+
+        // Phase 1 — no rule yet: the Put is admitted + relayed to B.
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(fwd.data_seen(), 1, "phase 1: admitted before any rule");
+        assert_eq!(fwd.interceptor_dropped(), 0, "phase 1: nothing dropped");
+        assert_eq!(sink_b.frame_count(), 1, "phase 1: relayed to the child");
+
+        // RUNTIME RECONFIGURE — mutate the typed config to DENY demo/**; under
+        // config-mutate-runtime the live forwarder is re-driven.
+        config.reconfigure_interceptors(
+            InterceptorConfig {
+                acl: Some(deny_put_policy("demo/**")),
+                ..Default::default()
+            },
+            &fwd,
+        );
+
+        // Phase 2 — the SAME Put is now DROPPED (the live verdict flipped).
+        sink_b.reset();
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "phase 2: denied after the LIVE reconfigure"
+        );
+        assert_eq!(
+            fwd.data_seen(),
+            1,
+            "phase 2: a denied Put is not counted as received data"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "phase 2: not relayed after the live reconfigure"
+        );
+    }
+
+    #[cfg(all(not(feature = "config-mutate-runtime"), feature = "access-acl"))]
+    #[test]
+    fn wzconfig_reconfigure_is_inert_without_config_mutate_runtime() {
+        use crate::config::WzConfig;
+        // Same topology; WITHOUT config-mutate-runtime the reconfigure stores the
+        // new typed value (the introspection SSOT updates) but does NOT re-drive
+        // the forwarder — the deny never takes effect (the inert-mirror arm).
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        let mut config = WzConfig::new();
+        config.install_interceptors(&fwd);
+        sink_a.reset();
+        sink_b.reset();
+
+        let put = || DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        // Store a DENY rule, but with the feature OFF it is not re-applied.
+        config.reconfigure_interceptors(
+            InterceptorConfig {
+                acl: Some(deny_put_policy("demo/**")),
+                ..Default::default()
+            },
+            &fwd,
+        );
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            0,
+            "inert: the deny never takes effect without config-mutate-runtime"
+        );
+        assert_eq!(fwd.data_seen(), 2, "inert: both Puts admitted");
+        assert_eq!(sink_b.frame_count(), 2, "inert: both Puts relayed");
+    }
+
     #[cfg(feature = "access-acl")]
     #[test]
     fn an_acl_deny_drops_an_inbound_declare_subscriber() {

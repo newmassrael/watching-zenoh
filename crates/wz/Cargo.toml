@@ -810,7 +810,7 @@ adminspace-read = ["wz-runtime-tokio?/adminspace-read"]
 adminspace-write = []
 config-change-notifier = []
 config-json-pointer-access = []
-config-mutate-runtime = []
+config-mutate-runtime = ["wz-runtime-tokio?/config-mutate-runtime"]
 config-plugin-validator = []
 
 # ----- §5.24 storage-backend + manager (13 atomic, all reserved) -----

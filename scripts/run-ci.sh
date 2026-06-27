@@ -1351,6 +1351,34 @@ layer_c1an_cargo_test_adminspace_nodefault() {
         && cargo clippy -p wz-runtime-tokio --no-default-features --features adminspace-read,adminspace-metrics,query-get --all-targets --quiet -- -D warnings)
 }
 
+# ─── Layer C1ao — §5.23 config-mutate-runtime: typed WzConfig live reconfigure ─
+#
+# R311y39: the typed WzConfig SSOT (config.rs) + the LIVE interceptor reconfigure.
+# config-mutate-runtime gates the re-apply: ON re-drives the live forwarder
+# (config-DRIVEN), OFF stores-but-inert (read-at-open mirror — the inert mirror the
+# §5.23 design rejects). The toggle existing IS the proof the config is load-bearing.
+# The default Layer C1 carries neither the feature nor the access-acl combo, so this
+# lane is the sole coverage:
+#   1. ON arm: wzconfig_reconfigure_drives_the_live_forwarder — a config mutation
+#      flips the live admit->deny verdict (config-mutate-runtime,access-acl);
+#   2. OFF arm: wzconfig_reconfigure_is_inert_without_config_mutate_runtime — the
+#      mutation is stored but never applied (access-acl alone);
+#   3. clippy the config.rs LIB on the ON combo + the routing-peer-OFF universal
+#      WzConfig base (--no-default-features) — proving config.rs composes standalone.
+# LIB-scope clippy (not --all-targets): the access-acl-only test module tickles a
+# pre-existing clippy::needless_update in the SHARED `InterceptorConfig { acl: ..,
+# ..Default::default() }` fixture pattern (the downsampling/low_pass fields are
+# cfg-elided when only access-acl is on, so the spread is redundant) — an issue of
+# the an_acl_* test fixtures, not config.rs; the default C1 runs the richer access-*
+# set where the spread is needed.
+layer_c1ao_cargo_test_config_mutate_runtime() {
+    (cd crates \
+        && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib wzconfig_reconfigure_drives --quiet \
+        && cargo test -p wz-runtime-tokio --features access-acl --lib wzconfig_reconfigure_is_inert --quiet \
+        && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)
+}
+
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─
 #
 # R311qa: the multi-peer `accept_loop` (the `routing-router` foundation) is gated
@@ -3997,6 +4025,7 @@ run_layer C1ak layer_c1ak_cargo_test_transport_stats || overall=1
 run_layer C1al layer_c1al_cargo_test_unixpipe || overall=1
 run_layer C1am layer_c1am_cargo_test_adminspace || overall=1
 run_layer C1an layer_c1an_cargo_test_adminspace_nodefault || overall=1
+run_layer C1ao layer_c1ao_cargo_test_config_mutate_runtime || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1x layer_c1x_cargo_test_routing_routes || overall=1
 run_layer C1y layer_c1y_cargo_test_routing_peer || overall=1

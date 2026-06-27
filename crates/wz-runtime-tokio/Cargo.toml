@@ -686,6 +686,16 @@ routing-peer = [
 access-acl = ["routing-peer", "dep:wz-access-control"]
 access-downsampling = ["routing-peer"]
 access-quota = ["routing-peer"]
+# R311y39 — §5.23 config-mutate-runtime: the LIVE leg of the typed WzConfig.
+# Gates the re-apply in `WzConfig::reconfigure_interceptors` so a config
+# mutation RE-DRIVES the live forwarder (config-driven), vs OFF where the
+# mutation is stored but inert (read-at-open mirror). Composes `routing-peer`
+# because the first realized live target is the router interceptor chain (the
+# only runtime-mutable surface so far); revisit the implication when a
+# non-router live setting lands. The json-pointer tree + change-notifier +
+# list-key-id merge (the full engine) and the admin PUT wire (adminspace-write)
+# are deferred §5.23 layers.
+config-mutate-runtime = ["routing-peer"]
 # R311il — FOUNDATIONAL session gate. Forwards to wz-session-core's
 # `session-unicast`, which codegens the engine-free unicast session FSM
 # (sources/session/session_fsm_unicast.scxml, `--no-std`) into the

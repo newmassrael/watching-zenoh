@@ -161,7 +161,11 @@ impl From<InterceptorFlow> for AclFlow {
 /// duplicated an interceptor, and the cross-setter order was unspecified). Each
 /// field is present only when its `access-*` feature is enabled; an all-elided
 /// config is the empty struct (access control disabled).
-#[derive(Default)]
+///
+/// R311y39 — `Debug + Clone` so the typed [`crate::config::WzConfig`] SSOT
+/// can hold + re-apply it (the config keeps its copy as the introspection
+/// source while driving the forwarder from a clone).
+#[derive(Debug, Clone, Default)]
 pub struct InterceptorConfig {
     /// The access-control policy, or `None` for no ACL enforcer (zenoh
     /// `AclConfig.enabled = false`). Present only under `access-acl`.
