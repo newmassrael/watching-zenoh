@@ -218,6 +218,13 @@ adminspace-core = ["query-queryable", "wz-session-core/adminspace-core"]
 # build-info body (text/plain). Composes adminspace-core (the dispatch + the
 # metrics_text builder).
 adminspace-metrics = ["adminspace-core", "wz-session-core/adminspace-metrics"]
+# adminspace-read (§5.23) — the permissions.read GET gate: declare_adminspace's
+# handler answers nothing when AdminSpacePermissions.read=false (the querier gets
+# only the terminating Final), the wz mirror of zenoh's read-permission check
+# (adminspace.rs:457). The AdminSpacePermissions struct is adminspace-core (always
+# present for signature stability); this feature is the GATE that consults it, so
+# it composes only adminspace-core (no wz-session-core forward needed).
+adminspace-read = ["adminspace-core"]
 query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]

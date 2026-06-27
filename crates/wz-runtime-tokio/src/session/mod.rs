@@ -2402,89 +2402,131 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     {
         #[cfg(feature = "adminspace-core")]
         {
-            use wz_codecs::whatami::WhatAmI;
-            use wz_session_core::adminspace::{
-                admin_queryable_key, admin_root_key, AdminLocalData, AdminSession,
-            };
-            use wz_session_core::sample::EncodingHint;
-            use wz_session_core::zid_hex::zid_to_zenoh_hex;
-
-            let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
-            let whatami = self.actions().params.whatami.to_str();
-            let queryable_key = admin_queryable_key(&zid_hex, whatami);
-            let root_key = admin_root_key(&zid_hex, whatami);
-            #[cfg(feature = "adminspace-metrics")]
-            let metrics_key = wz_session_core::adminspace::admin_metrics_key(&zid_hex, whatami);
-            let version = version.into();
-            let actions = self.actions().clone();
-
-            let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                // Faithful zenoh dispatch: every handler whose key INTERSECTS the
-                // GET keyexpr fires (zenoh's `for (key, handler) in handlers { if
-                // key_expr.intersects(key) { handler(..) } }`, adminspace.rs:499-503).
-                // A root GET fires local_data; a `.../metrics` GET fires metrics; a
-                // `@/<zid>/<whatami>/**` wildcard GET fires BOTH. A sub-path with no
-                // matching handler (e.g. `.../subscriber/**` before that atom lands)
-                // gets no reply.
-                let ke = view.keyexpr();
-
-                // `local_data` handler (key = the root `@/<zid>/<whatami>`,
-                // adminspace.rs:162). The connected peer is the session-centric
-                // `sessions[]` entry, resolved live per query off the captured
-                // bundle so a reconnect / peer change is reflected.
-                let root_chunks: Vec<&str> = root_key.split('/').collect();
-                if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &root_chunks) {
-                    let mut sessions = Vec::new();
-                    if let Some(peer) = actions.peer_zid() {
-                        let peer_whatami = actions
-                            .peer_whatami_wire()
-                            .and_then(WhatAmI::from_wire)
-                            .map(|w| String::from(w.to_str()));
-                        sessions.push(AdminSession {
-                            peer_zid_hex: zid_to_zenoh_hex(&peer),
-                            whatami: peer_whatami,
-                            links: Vec::new(),
-                        });
-                    }
-                    let data = AdminLocalData {
-                        zid_hex: zid_hex.clone(),
-                        version: version.clone(),
-                        locators: locators.clone(),
-                        sessions,
-                    };
-                    out.reply_keyed_encoded(
-                        &root_key,
-                        data.to_json().as_bytes(),
-                        Some(&EncodingHint::APPLICATION_JSON),
-                    );
-                }
-
-                // `metrics` handler (key = `@/<zid>/<whatami>/metrics`,
-                // adminspace.rs:164,706): the OpenMetrics build-info body as
-                // text/plain.
-                #[cfg(feature = "adminspace-metrics")]
-                {
-                    let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
-                    if wz_session_core::keyexpr_match::keyexpr_intersects_target(
-                        ke,
-                        &metrics_chunks,
-                    ) {
-                        out.reply_keyed_encoded(
-                            &metrics_key,
-                            wz_session_core::adminspace::metrics_text(&version).as_bytes(),
-                            Some(&EncodingHint::TEXT_PLAIN),
-                        );
-                    }
-                }
-            };
-
-            self.declare_queryable(queryable_key, QueryableOptions::default(), handler)
+            // Permissive default = zenoh's `PermissionsConf` default (read=true).
+            self.declare_adminspace_with_permissions(
+                version,
+                locators,
+                wz_session_core::adminspace::AdminSpacePermissions::default(),
+            )
         }
         #[cfg(not(feature = "adminspace-core"))]
         {
             let _ = (version, locators);
             Err(QueryableError::FeatureDisabled)
         }
+    }
+
+    /// §5.23 `adminspace-read` — the permission-gated form of
+    /// [`Self::declare_adminspace`]: `permissions.read` gates the admin GET
+    /// (zenoh `if !conf.adminspace.permissions().read { send ResponseFinal }`,
+    /// `adminspace.rs:457-467`). With `read = false` (and the `adminspace-read`
+    /// feature on) the admin queryable answers nothing — the querier receives
+    /// only the terminating Final. Without `adminspace-read` the `read` field is
+    /// a signature-stable no-op (the gate is compiled out, the queryable always
+    /// serves). [`Self::declare_adminspace`] delegates here with the permissive
+    /// default. This method exists only under `adminspace-core` (its parameter
+    /// type does), so it carries no `FeatureDisabled` arm.
+    #[cfg(feature = "adminspace-core")]
+    pub fn declare_adminspace_with_permissions(
+        &self,
+        version: impl Into<String>,
+        locators: Vec<String>,
+        permissions: wz_session_core::adminspace::AdminSpacePermissions,
+    ) -> Result<Queryable<R, T>, QueryableError>
+    where
+        SessionLinkActions<R, T>: Send + Sync + 'static,
+    {
+        use wz_codecs::whatami::WhatAmI;
+        use wz_session_core::adminspace::{
+            admin_queryable_key, admin_root_key, AdminLocalData, AdminSession,
+        };
+        use wz_session_core::sample::EncodingHint;
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        // R311xy idiom — the read permission is a PER-CALL cfg gate: with
+        // adminspace-read OFF the `read` field is ignored (the gate compiles
+        // out, the queryable always serves) so the signature stays
+        // feature-toggle-independent.
+        #[cfg(feature = "adminspace-read")]
+        let read = permissions.read;
+        #[cfg(not(feature = "adminspace-read"))]
+        let _ = permissions;
+
+        let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
+        let whatami = self.actions().params.whatami.to_str();
+        let queryable_key = admin_queryable_key(&zid_hex, whatami);
+        let root_key = admin_root_key(&zid_hex, whatami);
+        #[cfg(feature = "adminspace-metrics")]
+        let metrics_key = wz_session_core::adminspace::admin_metrics_key(&zid_hex, whatami);
+        let version = version.into();
+        let actions = self.actions().clone();
+
+        let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            // `adminspace-read` GET-permission gate (adminspace.rs:457): a
+            // read=false deny answers NOTHING — the dispatch SSOT still emits the
+            // terminating Final, mirroring zenoh's bare ResponseFinal on deny
+            // (adminspace.rs:462-467).
+            #[cfg(feature = "adminspace-read")]
+            if !read {
+                return;
+            }
+            // Faithful zenoh dispatch: every handler whose key INTERSECTS the
+            // GET keyexpr fires (zenoh's `for (key, handler) in handlers { if
+            // key_expr.intersects(key) { handler(..) } }`, adminspace.rs:499-503).
+            // A root GET fires local_data; a `.../metrics` GET fires metrics; a
+            // `@/<zid>/<whatami>/**` wildcard GET fires BOTH. A sub-path with no
+            // matching handler (e.g. `.../subscriber/**` before that atom lands)
+            // gets no reply.
+            let ke = view.keyexpr();
+
+            // `local_data` handler (key = the root `@/<zid>/<whatami>`,
+            // adminspace.rs:162). The connected peer is the session-centric
+            // `sessions[]` entry, resolved live per query off the captured
+            // bundle so a reconnect / peer change is reflected.
+            let root_chunks: Vec<&str> = root_key.split('/').collect();
+            if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &root_chunks) {
+                let mut sessions = Vec::new();
+                if let Some(peer) = actions.peer_zid() {
+                    let peer_whatami = actions
+                        .peer_whatami_wire()
+                        .and_then(WhatAmI::from_wire)
+                        .map(|w| String::from(w.to_str()));
+                    sessions.push(AdminSession {
+                        peer_zid_hex: zid_to_zenoh_hex(&peer),
+                        whatami: peer_whatami,
+                        links: Vec::new(),
+                    });
+                }
+                let data = AdminLocalData {
+                    zid_hex: zid_hex.clone(),
+                    version: version.clone(),
+                    locators: locators.clone(),
+                    sessions,
+                };
+                out.reply_keyed_encoded(
+                    &root_key,
+                    data.to_json().as_bytes(),
+                    Some(&EncodingHint::APPLICATION_JSON),
+                );
+            }
+
+            // `metrics` handler (key = `@/<zid>/<whatami>/metrics`,
+            // adminspace.rs:164,706): the OpenMetrics build-info body as
+            // text/plain.
+            #[cfg(feature = "adminspace-metrics")]
+            {
+                let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
+                if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &metrics_chunks) {
+                    out.reply_keyed_encoded(
+                        &metrics_key,
+                        wz_session_core::adminspace::metrics_text(&version).as_bytes(),
+                        Some(&EncodingHint::TEXT_PLAIN),
+                    );
+                }
+            }
+        };
+
+        self.declare_queryable(queryable_key, QueryableOptions::default(), handler)
     }
 
     /// R246 — aliased-keyexpr counterpart of

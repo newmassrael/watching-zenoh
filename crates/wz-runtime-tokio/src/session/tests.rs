@@ -2068,6 +2068,58 @@ fn declare_adminspace_wildcard_get_fires_local_data_and_metrics() {
     assert!(keys.contains(&metrics), "metrics reply present");
 }
 
+#[cfg(all(feature = "query-get", feature = "adminspace-read"))]
+#[test]
+fn declare_adminspace_read_false_denies_get_with_final_only() {
+    // §5.23 adminspace-read: with permissions.read=false the admin queryable
+    // answers NOTHING — the querier receives only the terminating Final, the wz
+    // mirror of zenoh's bare ResponseFinal on a read-permission deny
+    // (adminspace.rs:457-467).
+    use wz_session_core::adminspace::AdminSpacePermissions;
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let (session, _driver) = build_session();
+    let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);
+    let whatami = session.actions().params.whatami.to_str();
+    let root = format!("@/{zid_hex}/{whatami}");
+
+    let _admin = session
+        .declare_adminspace_with_permissions(
+            "0.9.9",
+            Vec::new(),
+            AdminSpacePermissions { read: false },
+        )
+        .expect("adminspace-core ON in this build");
+
+    let replies = Arc::new(AtomicUsize::new(0));
+    let finals = Arc::new(AtomicUsize::new(0));
+    let r = replies.clone();
+    let f = finals.clone();
+    session
+        .query(
+            &root,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get ON in this build");
+
+    assert_eq!(
+        replies.load(Ordering::SeqCst),
+        0,
+        "read=false denies the admin GET (no local_data, no metrics)"
+    );
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "the terminating Final still fires on a denied GET"
+    );
+}
+
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 #[test]
 fn query_locality_remote_alone_skips_local_queryable() {

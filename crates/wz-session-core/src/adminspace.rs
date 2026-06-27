@@ -78,6 +78,31 @@ pub struct AdminLocalData {
     pub sessions: Vec<AdminSession>,
 }
 
+/// Admin-space access permissions — the embedder-supplied gate values for the
+/// `@/<zid>/<whatami>` admin queryable, the wz mirror of zenoh's
+/// `config.adminspace.permissions` (`zenoh-config` `PermissionsConf`, read by
+/// `send_request`, `adminspace.rs:457`). The `read` field is always present so
+/// `Session::declare_adminspace`'s signature is feature-toggle-independent; the
+/// GET gate that consults it is the `adminspace-read` atom (a separate cfg).
+/// (zenoh's `PermissionsConf` also carries `write` — that joins this struct when
+/// the `adminspace-write` atom lands, the gate that would consult it.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminSpacePermissions {
+    /// Allow admin GETs. zenoh `permissions.read` (`adminspace.rs:457`),
+    /// default `true` (`zenoh-config` `PermissionsConf::default`, lib.rs:889).
+    /// When `false` the admin queryable answers nothing — the querier receives
+    /// only the terminating Final (zenoh replies a bare `ResponseFinal`,
+    /// `adminspace.rs:462-467`).
+    pub read: bool,
+}
+
+impl Default for AdminSpacePermissions {
+    /// zenoh's `PermissionsConf` default is `read: true` (permissive GET).
+    fn default() -> Self {
+        Self { read: true }
+    }
+}
+
 impl AdminLocalData {
     /// Serialize to the faithful zenoh `local_data` JSON object. zenoh builds
     /// it with the `json!` macro then `serde_json::to_vec`
@@ -309,6 +334,12 @@ mod tests {
             sessions: vec![],
         };
         assert!(data.to_json().contains(r#""version":"v\"1\\0\n""#));
+    }
+
+    #[test]
+    fn permissions_default_matches_zenoh_read_true() {
+        // zenoh PermissionsConf::default() = read:true (lib.rs:889).
+        assert!(AdminSpacePermissions::default().read);
     }
 
     #[cfg(feature = "adminspace-metrics")]

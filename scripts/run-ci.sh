@@ -1280,7 +1280,8 @@ layer_c1al_cargo_test_unixpipe() {
 
 # ─── Layer C1am — adminspace §5.23: @/<zid>/<whatami> built-in admin queryable ─
 #
-# R311y34 (adminspace-core) + R311y35 (adminspace-metrics): Session::declare_adminspace
+# R311y34 (adminspace-core) + R311y35 (adminspace-metrics) + R311y36 (adminspace-read):
+# Session::declare_adminspace
 # registers the `@/<zid>/<whatami>/**` built-in queryable and dispatches a GET to
 # every handler whose key intersects it -- the root key -> `local_data` JSON
 # (application/json), and (adminspace-metrics) `/metrics` -> the OpenMetrics
@@ -1306,8 +1307,10 @@ layer_c1am_cargo_test_adminspace() {
         && cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet \
         && cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet \
         && cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings)
 }
 
 # ─── Layer C1w — routing-accept: multi-peer accept_loop unit + clippy ─

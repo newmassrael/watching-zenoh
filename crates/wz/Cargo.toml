@@ -804,7 +804,9 @@ adminspace-introspection-handlers = []
 # OpenMetrics endpoint); forward to the runtime cfg site, not a no-op `= []`.
 adminspace-metrics = ["wz-runtime-tokio?/adminspace-metrics"]
 adminspace-plugins-handlers = []
-adminspace-read = []
+# R311y36 — adminspace-read is now a real cfg gate (the permissions.read GET
+# gate); forward to the runtime cfg site, not a no-op `= []`.
+adminspace-read = ["wz-runtime-tokio?/adminspace-read"]
 adminspace-write = []
 config-change-notifier = []
 config-json-pointer-access = []
