@@ -173,6 +173,10 @@ routing-peer = [
     "wz/access-acl",
     "wz/access-downsampling",
     "wz/access-quota",
+    # R311y45 (§5.23 Phase 2b) — a routing peer can host its OWN adminspace
+    # (the `--config-queryable` opt-in registers a forwarder-local admin
+    # queryable reading the node's live shared WzConfig); pull the admin SSOT.
+    "wz/adminspace-core",
 ]
 
 [lints]

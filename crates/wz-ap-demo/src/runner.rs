@@ -1234,6 +1234,9 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 /// for a peer (unlike the router, whose 0x02 is a documented stand-in for a true
 /// WhatAmI::Router); the well-tested accept / initiate directions drive it.
 #[cfg(feature = "routing-peer")]
+// Distinct CLI-derived knobs threaded once into the peer entry point; bundling
+// into a pass-through struct adds indirection without behavioural benefit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_peer(
     listen: &str,
     dial_targets: &[String],
@@ -1241,6 +1244,7 @@ pub(crate) async fn run_peer(
     subscribe_key: Option<&str>,
     unsubscribe_after_data: bool,
     autoconnect: bool,
+    config_queryable: bool,
     interceptors: &crate::InterceptorOpts,
 ) -> io::Result<()> {
     use crate::args::NodeKind;
@@ -1343,7 +1347,9 @@ pub(crate) async fn run_peer(
     } else {
         vec![format!("tcp/{local}")]
     };
-    forwarder.set_self_locators(self_locators);
+    // Clone so `self_locators` survives for the §5.23 admin handler below (the
+    // forwarder-hosted admin's `local_data` advertises the same dial locators).
+    forwarder.set_self_locators(self_locators.clone());
 
     // §5.16 interceptor pipeline — assemble ONE InterceptorConfig from the
     // opt-in flags and install it via the single config seam (the wz mirror of
@@ -1429,21 +1435,72 @@ pub(crate) async fn run_peer(
     // and runtime share ONE code path). The startup log shows the read-at-open
     // mirror.
     //
-    // §5.23 status (honest scope): this `wz_config` is a build-time view used to
-    // install + log. It is NOT yet a live-mutate target wired to an adminspace —
-    // a routing peer hosts no adminspace today (peer_loop owns the per-face
-    // sessions; declare_adminspace is a Session method, and the forwarder excludes
-    // self from query routing). The §5.23 combined node — one WzConfig the admin
-    // GET reads AND the live half drives, over a forwarder self-query dispatch
-    // bridge — is the deferred next step; the foundation (the trait seam above +
-    // the linkstate_forward composition test) lands this round.
-    let wz_config = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
-        .with_interceptors(interceptor_config);
-    log::info!(
-        "wz-ap-demo peer config (read-at-open): {}",
-        wz_config.to_admin_json()
-    );
-    wz_config.install_interceptors(&forwarder);
+    // R311y45 (§5.23 Phase 2b) — the node's config SSOT is now a SHARED
+    // `Rc<RefCell<WzConfig>>` (single-task node, so Rc/RefCell not Arc/Mutex). The
+    // forwarder-drive installs from it; under `--config-queryable` the
+    // forwarder-hosted admin handler reads the SAME instance per query. ONE
+    // WzConfig both drives the forwarder AND answers the admin GET — the runtime
+    // composition the y42 finding asked for, now STRUCTURALLY closed (one Rc, two
+    // surfaces; the Phase-1 deferred sharing primitive lands here with the admin
+    // handler as its genuine 2nd holder). CAVEAT: `to_admin_json` serves only the
+    // READ-AT-OPEN fields (batch/lease/whatami), handshake-fixed — so a GET cannot
+    // OBSERVE a runtime change and the single-instance-ness is a structural
+    // property, not a wire-observable one. Live-reconfigure-over-wire visibility
+    // (interceptor config in the JSON) is a deferred §5.23 layer.
+    let wz_config = std::rc::Rc::new(std::cell::RefCell::new(
+        wz::runtime_tokio::config::WzConfig::from_init_params(&params)
+            .with_interceptors(interceptor_config),
+    ));
+    {
+        let cfg = wz_config.borrow();
+        log::info!(
+            "wz-ap-demo peer config (read-at-open): {}",
+            cfg.to_admin_json()
+        );
+        cfg.install_interceptors(&forwarder);
+    }
+
+    // `--config-queryable`: §5.23 Phase 2b — host this peer's adminspace on the
+    // forwarder. A querier's GET for `@/<zid>/peer/config` routes to A's
+    // forward_request, finds no remote queryable (the admin key is self-unique),
+    // self-dispatches (R311y44) to this handler, which reads the shared WzConfig
+    // (its read-at-open mirror) per query and replies via the `answer_admin_query`
+    // SSOT (the SAME answerer `Session::declare_adminspace` uses). The reply unwinds
+    // to the querier. `sessions[]` is empty — the live forwarder-faces enumeration
+    // is a documented deferral; the config GET (the §5.23 headline) does not need it.
+    if config_queryable {
+        use wz::runtime_tokio::adminspace::{
+            admin_config_key, admin_queryable_key, answer_admin_query, AdminAnswerCtx,
+        };
+        use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
+        use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
+        let zid_hex = zid_to_zenoh_hex(&params.zid);
+        let whatami_str = "peer";
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        let locators = self_locators;
+        let queryable_key = admin_queryable_key(&zid_hex, whatami_str);
+        let config_key = admin_config_key(&zid_hex, whatami_str);
+        let shared = wz_config.clone();
+        let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            let config_json = shared.borrow().to_admin_json();
+            let ctx = AdminAnswerCtx {
+                zid_hex: &zid_hex,
+                whatami: whatami_str,
+                version: &version,
+                locators: &locators,
+                read: true,
+            };
+            answer_admin_query(view, out, &ctx, &[], &config_json);
+        };
+        match forwarder.register_local_queryable(&queryable_key, true, Box::new(handler)) {
+            Ok(_) => {
+                log::info!("wz-ap-demo peer: adminspace config GET at {config_key}");
+            }
+            Err(e) => {
+                log::warn!("wz-ap-demo peer: adminspace registration failed: {e:?}");
+            }
+        }
+    }
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
     // the per-local-whatami SSOT default (a Peer dials discovered routers/peers);

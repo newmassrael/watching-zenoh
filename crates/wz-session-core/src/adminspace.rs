@@ -200,6 +200,94 @@ pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// R311y45 (§5.23 Phase 2b) — the node-identity + version + locators + GET
+/// permission an [`answer_admin_query`] call needs. The caller (a Session, or a
+/// routing peer's forwarder-hosted admin) supplies these; `sessions[]` and
+/// `config_json` are passed separately because each host reads them differently
+/// (a Session from its one peer + its read-at-open snapshot; a routing peer from
+/// its faces + its LIVE shared `WzConfig`).
+pub struct AdminAnswerCtx<'a> {
+    /// This node's zid in zenoh hex form.
+    pub zid_hex: &'a str,
+    /// This node's role string (`WhatAmI::to_str`).
+    pub whatami: &'a str,
+    /// The embedder-supplied version string.
+    pub version: &'a str,
+    /// The node's listening locators.
+    pub locators: &'a [String],
+    /// The admin GET permission (zenoh `permissions.read`, `adminspace.rs:457`):
+    /// the caller passes `permissions.read` under `adminspace-read`, else `true`,
+    /// so the answerer stays feature-toggle-independent (the gate is the value,
+    /// not a cfg).
+    pub read: bool,
+}
+
+/// R311y45 (§5.23 Phase 2b) — the Session-INDEPENDENT admin-query answerer: the
+/// match+reply SSOT BOTH the Session-level adminspace queryable AND the
+/// forwarder-hosted routing-peer admin call, so both emit byte-identical replies.
+/// Fires every admin handler whose key INTERSECTS the GET keyexpr (zenoh's
+/// `for (key, handler) in handlers { if key_expr.intersects(key) { .. } }`,
+/// `adminspace.rs:499-503`): root `local_data`, `metrics` (under
+/// `adminspace-metrics`), and `config`. `read=false` answers NOTHING (the
+/// dispatch SSOT still emits the terminating Final — zenoh's bare ResponseFinal
+/// on deny, `:462-467`). The reply path is the same `reply_keyed_encoded` the
+/// Session queryable uses.
+pub fn answer_admin_query(
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    ctx: &AdminAnswerCtx,
+    sessions: &[AdminSession],
+    config_json: &str,
+) {
+    if !ctx.read {
+        return;
+    }
+    let ke = view.keyexpr();
+
+    // `local_data` (root key `@/<zid>/<whatami>`).
+    let root_key = admin_root_key(ctx.zid_hex, ctx.whatami);
+    let root_chunks: Vec<&str> = root_key.split('/').collect();
+    if crate::keyexpr_match::keyexpr_intersects_target(ke, &root_chunks) {
+        let data = AdminLocalData {
+            zid_hex: String::from(ctx.zid_hex),
+            version: String::from(ctx.version),
+            locators: ctx.locators.to_vec(),
+            sessions: sessions.to_vec(),
+        };
+        out.reply_keyed_encoded(
+            &root_key,
+            data.to_json().as_bytes(),
+            Some(&crate::sample::EncodingHint::APPLICATION_JSON),
+        );
+    }
+
+    // `metrics` (`@/<zid>/<whatami>/metrics`, text/plain) — under adminspace-metrics.
+    #[cfg(feature = "adminspace-metrics")]
+    {
+        let metrics_key = admin_metrics_key(ctx.zid_hex, ctx.whatami);
+        let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
+        if crate::keyexpr_match::keyexpr_intersects_target(ke, &metrics_chunks) {
+            out.reply_keyed_encoded(
+                &metrics_key,
+                metrics_text(ctx.version).as_bytes(),
+                Some(&crate::sample::EncodingHint::TEXT_PLAIN),
+            );
+        }
+    }
+
+    // `config` (`@/<zid>/<whatami>/config`): the typed WzConfig read-at-open JSON
+    // the caller supplies (a routing peer reads its LIVE shared instance per query).
+    let config_key = admin_config_key(ctx.zid_hex, ctx.whatami);
+    let config_chunks: Vec<&str> = config_key.split('/').collect();
+    if crate::keyexpr_match::keyexpr_intersects_target(ke, &config_chunks) {
+        out.reply_keyed_encoded(
+            &config_key,
+            config_json.as_bytes(),
+            Some(&crate::sample::EncodingHint::APPLICATION_JSON),
+        );
+    }
+}
+
 /// The OpenMetrics body the admin `@/<zid>/<whatami>/metrics` GET replies with
 /// (`text/plain`). Byte-faithful to zenoh's UNCONDITIONAL build-info block
 /// (`adminspace.rs:714-720`): a `zenoh_build` gauge carrying the node version.
@@ -412,5 +500,100 @@ mod tests {
     #[test]
     fn metrics_label_escapes_pathological_version() {
         assert!(metrics_text("v\"x").contains(r#"version="v\"x""#));
+    }
+
+    // R311y45 — a recording ReplyOut for the answer_admin_query unit tests:
+    // captures each emitted (keyexpr, payload).
+    #[derive(Default)]
+    struct RecordingReply {
+        replies: Vec<(String, Vec<u8>)>,
+    }
+    impl crate::query_sink::ReplyOut for RecordingReply {
+        fn reply(&mut self, payload: &[u8]) {
+            self.replies.push((String::new(), payload.to_vec()));
+        }
+        fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
+            self.replies.push((keyexpr.to_string(), payload.to_vec()));
+        }
+        fn reply_keyed_encoded(
+            &mut self,
+            keyexpr: &str,
+            payload: &[u8],
+            _encoding: Option<&crate::sample::EncodingHint>,
+        ) {
+            self.replies.push((keyexpr.to_string(), payload.to_vec()));
+        }
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _: Option<u32>, _: Option<&str>, _: &[u8]) {}
+        fn with_responder(&mut self, _: &[u8], _: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+    }
+
+    fn admin_ctx<'a>(read: bool) -> AdminAnswerCtx<'a> {
+        AdminAnswerCtx {
+            zid_hex: "a1b2",
+            whatami: "peer",
+            version: "0.1.0",
+            locators: &[],
+            read,
+        }
+    }
+
+    fn admin_view(keyexpr: &str) -> crate::query_sink::BorrowedQuery<'_> {
+        crate::query_sink::BorrowedQuery {
+            keyexpr,
+            parameters: None,
+            attachment: None,
+            source_info: None,
+            rid: 1,
+            is_local: false,
+        }
+    }
+
+    #[test]
+    fn answer_admin_query_config_get_replies_only_the_config_json() {
+        // A GET on `@/a1b2/peer/config` fires ONLY the config handler (root is 3
+        // chunks, the query 4 — no intersect without a wildcard).
+        let view = admin_view("@/a1b2/peer/config");
+        let mut out = RecordingReply::default();
+        answer_admin_query(
+            &view,
+            &mut out,
+            &admin_ctx(true),
+            &[],
+            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
+        );
+        assert_eq!(out.replies.len(), 1, "only the config handler fires");
+        assert_eq!(out.replies[0].0, "@/a1b2/peer/config");
+        assert_eq!(
+            String::from_utf8(out.replies[0].1.clone()).unwrap(),
+            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#
+        );
+    }
+
+    #[test]
+    fn answer_admin_query_root_get_replies_local_data() {
+        // A GET on the bare root fires ONLY local_data (config is 4 chunks).
+        let view = admin_view("@/a1b2/peer");
+        let mut out = RecordingReply::default();
+        answer_admin_query(&view, &mut out, &admin_ctx(true), &[], "{}");
+        assert_eq!(out.replies.len(), 1, "only local_data fires");
+        assert_eq!(out.replies[0].0, "@/a1b2/peer");
+        assert_eq!(
+            String::from_utf8(out.replies[0].1.clone()).unwrap(),
+            r#"{"locators":[],"metadata":null,"plugins":null,"sessions":[],"version":"0.1.0","zid":"a1b2"}"#
+        );
+    }
+
+    #[test]
+    fn answer_admin_query_read_false_answers_nothing() {
+        // read=false: a deny answers NOTHING (the dispatch SSOT emits the Final).
+        let view = admin_view("@/a1b2/peer/config");
+        let mut out = RecordingReply::default();
+        answer_admin_query(&view, &mut out, &admin_ctx(false), &[], "{}");
+        assert!(out.replies.is_empty(), "read=false yields no replies");
     }
 }

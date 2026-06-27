@@ -2445,113 +2445,61 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     {
         use wz_codecs::whatami::WhatAmI;
         use wz_session_core::adminspace::{
-            admin_config_key, admin_queryable_key, admin_root_key, AdminLocalData, AdminSession,
+            admin_queryable_key, answer_admin_query, AdminAnswerCtx, AdminSession,
         };
-        use wz_session_core::sample::EncodingHint;
         use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
-        // R311xy idiom — the read permission is a PER-CALL cfg gate: with
-        // adminspace-read OFF the `read` field is ignored (the gate compiles
-        // out, the queryable always serves) so the signature stays
-        // feature-toggle-independent.
+        // R311xy idiom — the read permission is a PER-CALL gate carried in the
+        // AdminAnswerCtx: with adminspace-read OFF `read` is `true` (the queryable
+        // always serves), so the signature stays feature-toggle-independent.
         #[cfg(feature = "adminspace-read")]
         let read = permissions.read;
         #[cfg(not(feature = "adminspace-read"))]
-        let _ = permissions;
+        let read = {
+            let _ = permissions;
+            true
+        };
 
         let zid_hex = zid_to_zenoh_hex(&self.actions().params.zid);
         let whatami = self.actions().params.whatami.to_str();
         let queryable_key = admin_queryable_key(&zid_hex, whatami);
-        let root_key = admin_root_key(&zid_hex, whatami);
-        let config_key = admin_config_key(&zid_hex, whatami);
-        // R311y40 — the typed WzConfig read-at-open mirror, serialized once at
+        // R311y40/y45 — the typed WzConfig read-at-open mirror, serialized once at
         // declare time (the handshake params are fixed for the session's life).
         let config_json =
             crate::config::WzConfig::from_init_params(&self.actions().params).to_admin_json();
-        #[cfg(feature = "adminspace-metrics")]
-        let metrics_key = wz_session_core::adminspace::admin_metrics_key(&zid_hex, whatami);
-        let version = version.into();
+        let version: String = version.into();
         let actions = self.actions().clone();
 
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-            // `adminspace-read` GET-permission gate (adminspace.rs:457): a
-            // read=false deny answers NOTHING — the dispatch SSOT still emits the
-            // terminating Final, mirroring zenoh's bare ResponseFinal on deny
-            // (adminspace.rs:462-467).
-            #[cfg(feature = "adminspace-read")]
-            if !read {
-                return;
+            // The connected peer is the session-centric `sessions[]` entry,
+            // resolved LIVE per query off the captured bundle so a reconnect / peer
+            // change is reflected (zenoh's `get_transports_unicast`,
+            // adminspace.rs:664). A routing peer would enumerate its faces instead —
+            // the forwarder-hosted §5.23 admin (R311y45) currently passes an EMPTY
+            // `sessions[]` (the live forwarder-faces enumeration is a deferral).
+            let mut sessions = Vec::new();
+            if let Some(peer) = actions.peer_zid() {
+                let peer_whatami = actions
+                    .peer_whatami_wire()
+                    .and_then(WhatAmI::from_wire)
+                    .map(|w| String::from(w.to_str()));
+                sessions.push(AdminSession {
+                    peer_zid_hex: zid_to_zenoh_hex(&peer),
+                    whatami: peer_whatami,
+                    links: Vec::new(),
+                });
             }
-            // Faithful zenoh dispatch: every handler whose key INTERSECTS the
-            // GET keyexpr fires (zenoh's `for (key, handler) in handlers { if
-            // key_expr.intersects(key) { handler(..) } }`, adminspace.rs:499-503).
-            // A root GET fires local_data; a `.../metrics` GET fires metrics; a
-            // `@/<zid>/<whatami>/**` wildcard GET fires BOTH. A sub-path with no
-            // matching handler (e.g. `.../subscriber/**` before that atom lands)
-            // gets no reply.
-            let ke = view.keyexpr();
-
-            // `local_data` handler (key = the root `@/<zid>/<whatami>`,
-            // adminspace.rs:162). The connected peer is the session-centric
-            // `sessions[]` entry, resolved live per query off the captured
-            // bundle so a reconnect / peer change is reflected.
-            let root_chunks: Vec<&str> = root_key.split('/').collect();
-            if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &root_chunks) {
-                let mut sessions = Vec::new();
-                if let Some(peer) = actions.peer_zid() {
-                    let peer_whatami = actions
-                        .peer_whatami_wire()
-                        .and_then(WhatAmI::from_wire)
-                        .map(|w| String::from(w.to_str()));
-                    sessions.push(AdminSession {
-                        peer_zid_hex: zid_to_zenoh_hex(&peer),
-                        whatami: peer_whatami,
-                        links: Vec::new(),
-                    });
-                }
-                let data = AdminLocalData {
-                    zid_hex: zid_hex.clone(),
-                    version: version.clone(),
-                    locators: locators.clone(),
-                    sessions,
-                };
-                out.reply_keyed_encoded(
-                    &root_key,
-                    data.to_json().as_bytes(),
-                    Some(&EncodingHint::APPLICATION_JSON),
-                );
-            }
-
-            // `metrics` handler (key = `@/<zid>/<whatami>/metrics`,
-            // adminspace.rs:164,706): the OpenMetrics build-info body as
-            // text/plain.
-            #[cfg(feature = "adminspace-metrics")]
-            {
-                let metrics_chunks: Vec<&str> = metrics_key.split('/').collect();
-                if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &metrics_chunks) {
-                    out.reply_keyed_encoded(
-                        &metrics_key,
-                        wz_session_core::adminspace::metrics_text(&version).as_bytes(),
-                        Some(&EncodingHint::TEXT_PLAIN),
-                    );
-                }
-            }
-
-            // `config` handler (key = `@/<zid>/<whatami>/config`): the typed
-            // WzConfig read-at-open mirror as JSON — the §5.23 "admin surface
-            // READS config" leg. BEYOND-ZENOH (R311y42 correction): zenoh's
-            // `config/**` is a write-only subscriber (PUT -> insert_json5,
-            // adminspace.rs:350-353), NOT a read GET; wz ADDS this typed read. The
-            // live interceptor config is a deferred layer (needs a node that holds
-            // the forwarder-bound WzConfig — the §5.23 composition caveat).
-            let config_chunks: Vec<&str> = config_key.split('/').collect();
-            if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &config_chunks) {
-                out.reply_keyed_encoded(
-                    &config_key,
-                    config_json.as_bytes(),
-                    Some(&EncodingHint::APPLICATION_JSON),
-                );
-            }
+            // The match+reply SSOT (root local_data / metrics / config + the read
+            // gate) — the SAME answerer the §5.23 routing-peer forwarder host calls
+            // (R311y45), so both emit byte-identical admin replies.
+            let ctx = AdminAnswerCtx {
+                zid_hex: &zid_hex,
+                whatami,
+                version: &version,
+                locators: &locators,
+                read,
+            };
+            answer_admin_query(view, out, &ctx, &sessions, &config_json);
         };
 
         self.declare_queryable(queryable_key, QueryableOptions::default(), handler)

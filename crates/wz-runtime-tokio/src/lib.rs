@@ -206,6 +206,19 @@ pub use wz_session_core::reply_sink;
 /// gets the bare `id`).
 pub use wz_session_core::decl_sink;
 
+/// R311y45 (§5.23 Phase 2b) — the admin-space `local_data` / config / metrics
+/// helpers + the Session-independent `answer_admin_query` SSOT. Re-exported (under
+/// `adminspace-core`) so a routing-peer host names
+/// `crate::adminspace::answer_admin_query` for its forwarder-hosted admin
+/// queryable, the same answerer `Session::declare_adminspace` uses.
+#[cfg(feature = "adminspace-core")]
+pub use wz_session_core::adminspace;
+
+/// The zenoh-hex zid rendering (`zid_to_zenoh_hex`) — re-exported so a consumer
+/// builds admin keyexprs (`@/<zid>/<whatami>/...`) without depending on
+/// `wz-session-core` directly.
+pub use wz_session_core::zid_hex;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`

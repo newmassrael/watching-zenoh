@@ -178,6 +178,11 @@ fn main() -> ExitCode {
             // keyexpr's Put payload size (zenoh low_pass); a larger Put is dropped
             // on egress. Off by default.
             let max_payload = parse_pair(rest, "--max-payload");
+            // R311y45 (§5.23 Phase 2b) — `--config-queryable` opts this peer into
+            // hosting its adminspace on the forwarder: a GET for
+            // `@/<zid>/peer/config` is answered with the node's LIVE shared WzConfig
+            // (the forwarder self-dispatch, R311y44). Off by default.
+            let config_queryable = rest.iter().any(|a| a == "--config-queryable");
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -185,6 +190,7 @@ fn main() -> ExitCode {
                 subscribe_key,
                 unsubscribe_after_data,
                 autoconnect,
+                config_queryable,
                 InterceptorOpts {
                     acl_deny,
                     downsample,
@@ -679,6 +685,8 @@ pub(crate) struct InterceptorOpts {
 /// Mirrors [`run_router_mode`] — a router has no per-face application behaviour,
 /// and neither does a hold-only mesh peer.
 #[cfg(feature = "routing-peer")]
+// Mirrors `run_peer`'s CLI-knob argument list (the demo's peer entry point).
+#[allow(clippy::too_many_arguments)]
 fn run_peer_mode(
     listen: String,
     dial_targets: Vec<String>,
@@ -686,6 +694,7 @@ fn run_peer_mode(
     subscribe_key: Option<String>,
     unsubscribe_after_data: bool,
     autoconnect: bool,
+    config_queryable: bool,
     interceptors: InterceptorOpts,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
@@ -703,6 +712,7 @@ fn run_peer_mode(
         subscribe_key.as_deref(),
         unsubscribe_after_data,
         autoconnect,
+        config_queryable,
         &interceptors,
     )) {
         Ok(()) => ExitCode::SUCCESS,

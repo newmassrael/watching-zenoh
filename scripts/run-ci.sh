@@ -3874,6 +3874,13 @@ layer_e6_peer_mesh() {
     # Layer E `--skip wz_peer` excludes it and E6 ran only wz_peer_mesh.)
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_data_forward -- --ignored --quiet) || return 1
+    # R311y45 (§5.23 Phase 2b) — the routing-peer adminspace config GET e2e:
+    # peer A (--config-queryable) hosts its adminspace on the forwarder; client B
+    # z_gets @/<A_zid>/peer/config and receives A's LIVE shared WzConfig JSON over
+    # the wire. Rides the SAME routing-peer demo binary (which now pulls
+    # adminspace-core), so no extra build.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_config -- --ignored --quiet) || return 1
 }
 
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───
