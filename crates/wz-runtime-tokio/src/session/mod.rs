@@ -2539,9 +2539,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
 
             // `config` handler (key = `@/<zid>/<whatami>/config`): the typed
             // WzConfig read-at-open mirror as JSON — the §5.23 "admin surface
-            // READS config" leg (zenoh's config GET, adminspace.rs:353). The
-            // live interceptor config is a deferred layer (needs the production
-            // WzConfig-holds-the-forwarder wiring).
+            // READS config" leg. BEYOND-ZENOH (R311y42 correction): zenoh's
+            // `config/**` is a write-only subscriber (PUT -> insert_json5,
+            // adminspace.rs:350-353), NOT a read GET; wz ADDS this typed read. The
+            // live interceptor config is a deferred layer (needs a node that holds
+            // the forwarder-bound WzConfig — the §5.23 composition caveat).
             let config_chunks: Vec<&str> = config_key.split('/').collect();
             if wz_session_core::keyexpr_match::keyexpr_intersects_target(ke, &config_chunks) {
                 out.reply_keyed_encoded(

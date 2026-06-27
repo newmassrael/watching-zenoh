@@ -1425,12 +1425,18 @@ pub(crate) async fn run_peer(
     // R311y41 — route the interceptor install through the typed WzConfig SSOT:
     // the production config now flows deploy-opts -> WzConfig -> forwarder (the
     // FIRST production caller of the y39 `install_interceptors` seam), not a bare
-    // `InterceptorConfig`. The peer holds the typed config for its life (the SSOT
-    // a future adminspace-write PUT mutates + re-drives) and logs the read-at-open
-    // view at startup. (Install still REPLACES the chain ONCE — idempotent — via
-    // the same set_interceptors seam underneath. The live interceptor summary in
-    // to_admin_json is a deferred §5.23 layer, so the log shows the handshake
-    // mirror.)
+    // `InterceptorConfig`, and logs the read-at-open view at startup. (Install
+    // still REPLACES the chain ONCE — idempotent — via the same set_interceptors
+    // seam underneath; the live interceptor summary in to_admin_json is a deferred
+    // §5.23 layer, so the log shows the handshake mirror.)
+    //
+    // R311y42 honesty correction: `wz_config` here is a TRANSIENT typed view
+    // (built -> logged -> installed), NOT yet a retained mutate target. This peer
+    // does not host an adminspace (peer_loop owns the session; declare_adminspace
+    // is a Session method), so the config-GET surface and this forwarder-drive
+    // surface live in two disjoint node topologies — no node yet reads + mutates
+    // ONE held WzConfig. A future adminspace-write PUT needs the combined
+    // Session+forwarder node mode FIRST (the §5.23 composition caveat).
     let wz_config = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
         .with_interceptors(interceptor_config);
     log::info!(

@@ -93,13 +93,14 @@ impl WzConfig {
     }
 
     /// R311y40 — the admin-GET JSON view of the read-at-open config mirror
-    /// (the `@/<zid>/<whatami>/config` reply, the §5.23 "admin surface READS
-    /// config" leg; zenoh exposes config at `@/<zid>/<whatami>/config/**`).
-    /// Alphabetical keys (`batch_size` / `lease_ms` / `whatami`), matching the
-    /// serde_json-BTreeMap order the other §5.23 emitters (`AdminLocalData`)
-    /// use. The LIVE interceptor config is a deferred layer — it is not in
-    /// this view until the production WzConfig-holds-the-forwarder wiring
-    /// lands (registered as a §5.23 caveat).
+    /// (the `@/<zid>/<whatami>/config` reply). BEYOND-ZENOH (R311y42 correction):
+    /// zenoh's `@/<zid>/<whatami>/config/**` is a write-only subscriber (PUT ->
+    /// `insert_json5`); zenoh has NO admin config-READ, so this typed read is a wz
+    /// superset, not a mirror. Alphabetical keys (`batch_size` / `lease_ms` /
+    /// `whatami`), matching the serde_json-BTreeMap order the other §5.23 emitters
+    /// (`AdminLocalData`) use. The LIVE interceptor config is a deferred layer —
+    /// not in this view until a node holds the forwarder-bound WzConfig (a §5.23
+    /// caveat).
     pub fn to_admin_json(&self) -> String {
         format!(
             r#"{{"batch_size":{},"lease_ms":{},"whatami":"{}"}}"#,
@@ -107,12 +108,6 @@ impl WzConfig {
             self.lease_ms,
             self.whatami.to_str()
         )
-    }
-
-    /// The current live interceptor / access-control config.
-    #[cfg(feature = "routing-peer")]
-    pub fn interceptors(&self) -> &InterceptorConfig {
-        &self.interceptors
     }
 
     /// Builder-style initial interceptor config (consumed at setup).

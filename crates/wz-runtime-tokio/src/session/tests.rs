@@ -1989,10 +1989,11 @@ fn declare_adminspace_leaves_sub_path_get_for_layered_handlers() {
 fn declare_adminspace_config_get_returns_typed_config_json() {
     // R311y40 §5.23 config-read: a GET on @/<zid>/<whatami>/config returns the
     // typed WzConfig read-at-open mirror as application/json -- the "admin surface
-    // READS config" leg (zenoh's config GET, adminspace.rs:353). build_session's
-    // default SessionInitParams drive the values, so `expected` is computed the
-    // same way the handler serializes them: the assertion proves the GET ->
-    // handler -> typed-config-JSON wiring + the application/json content-type.
+    // READS config" leg. BEYOND-ZENOH (R311y42): zenoh's config/** is a write-only
+    // subscriber (no read GET); wz ADDS this typed read. build_session's default
+    // SessionInitParams drive the values, so `expected` is computed the same way
+    // the handler serializes them: the assertion proves the GET -> handler ->
+    // typed-config-JSON wiring + the application/json content-type.
     use wz_session_core::zid_hex::zid_to_zenoh_hex;
     let (session, _driver) = build_session();
     let zid_hex = zid_to_zenoh_hex(&session.actions().params.zid);

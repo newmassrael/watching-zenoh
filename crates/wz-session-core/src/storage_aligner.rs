@@ -495,9 +495,9 @@ pub mod wire {
         IntervalIdx, SubIntervalIdx,
     };
     use crate::sample::TimestampHint;
-    // The zid <-> zenoh-hex SSOT lives with the other zid encodings in
-    // storage_replication (shared with the digest keyexpr); the Discovery arm
-    // is one consumer.
+    // The zid <-> zenoh-hex SSOT lives in `crate::zid_hex` (relocated there
+    // R311y34); `storage_replication` re-exports it for back-compat and this
+    // import rides that re-export. The Discovery arm is one consumer.
     use crate::storage_replication::{zenoh_hex_to_zid, zid_to_zenoh_hex};
     use crate::storage_state::zid_to_le_array;
     // The genuinely-shared bincode-1.3 cursor core + length guard (the digest

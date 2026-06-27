@@ -188,9 +188,12 @@ pub fn admin_metrics_key(zid_hex: &str, whatami: &str) -> String {
 }
 
 /// R311y40 — the admin config keyexpr `@/<zid>/<whatami>/config`, the typed
-/// config READ view (zenoh exposes config at `@/<zid>/<whatami>/config/**`,
-/// adminspace.rs:353). Ungated (part of adminspace-core): a config GET is core
-/// admin introspection, not a metrics-gated handler.
+/// config READ view. BEYOND-ZENOH (R311y42 correction): zenoh declares
+/// `@/<zid>/<whatami>/config/**` ONLY as a write-only `DeclareSubscriber` (the
+/// PUT path -> `insert_json5`, adminspace.rs:350-353) and has NO admin
+/// config-READ GET at all; wz ADDS this typed read surface (a superset, not a
+/// mirror of a zenoh read path). Ungated (part of adminspace-core): a config GET
+/// is core admin introspection, not a metrics-gated handler.
 pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = admin_root_key(zid_hex, whatami);
     s.push_str("/config");
