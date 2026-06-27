@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 /// `ZenohId` Display hex below — so "which is newer", "is this the same event",
 /// and "what string names this zid" all agree on the id bytes. A `zid` longer
 /// than 16 (malformed input) is truncated to 16, matching uhlc's fixed id width.
-pub fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
+pub(crate) fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
     let mut zid16 = [0u8; 16];
     let n = zid.len().min(16);
     zid16[..n].copy_from_slice(&zid[..n]);

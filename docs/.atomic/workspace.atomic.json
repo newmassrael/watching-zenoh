@@ -924,7 +924,36 @@
       "title": "Admin space + config introspection",
       "parent_doc": "feature-inventory--composable-framework-atomic--preset-catalog",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
-      "decision_status": "active"
+      "decision_status": "active",
+      "intent": "Admin space (@/<zid>/<whatami>) built-in introspection queryable + a TYPED, config-driven config tree (beyond zenoh's stringly runtime JSON blob) the admin surface reads and mutates.",
+      "rationale_bullets": [
+        "adminspace = built-in @/<zid>/<whatami>/** queryable; per-handler intersect dispatch",
+        "config TYPED (union of wz settings, not stringly JSON) -- illegal config states unrepresentable",
+        "config CONFIG-DRIVEN: the session reads it + reconfigures on change; never an inert mirror",
+        "JSON-pointer tree + change notifier = the dynamic admin mutate/observe layer over the typed config",
+        "beyond-zenoh via typing + composition + genuine drive; a superset, not a faithful hollow mirror"
+      ],
+      "caveats_bullets": [
+        "DEBT: local_data lists one connected peer, not a router's full transport table (router-mode atom)",
+        "DEBT: local_data sessions[].links empty -- no session-level link src/dst accessor yet",
+        "DEBT: local_data metadata+plugins null -- wz has no config-metadata surface or plugin framework",
+        "DEBT: metrics emits build-info only; transport-stats OpenMetrics export deferred (counters exist)",
+        "DEBT: adminspace-introspection-handlers reserved -- sub/pub/qabl enum needs the 5.21 router HAT",
+        "DEBT: adminspace-write reserved -- admin config PUT not built (needs config-mutate-runtime)",
+        "DEBT: adminspace e2e loopback-only -- no wire-level wz<->wz / wz<->zenohd admin GET interop test",
+        "DEBT: config must be wz-fit + beyond-zenoh (typed, config-driven), not an inert JSON mirror",
+        "DEBT: adminspace /** queryable needs keyexpr-wildcard-double (via defaults; no-default-features gap)"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "port zenoh's serde_json blob config verbatim",
+          "reason": "inert in wz + stringly-typed, below the bar"
+        },
+        {
+          "alternative": "ship the inert JSON config tree as-is",
+          "reason": "faithful but not config-driven; held as the dynamic layer"
+        }
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-24-storage-backend": {
       "title": "Storage manager + pluggable backend/volume abstraction",
@@ -52455,6 +52484,52 @@
         "DURABLE: 3rd consecutive adminspace round, 2nd consecutive CLEAN adversarial review (y35 + y36). The facade-forward checklist [[feedback-facade-forward-separate-edit]] applied PROACTIVELY again (forwarded + -v-verified pre-review). The keystone + established patterns (per-call cfg gate R311xy idiom, dispatch-map, signature-stable delegation) make incremental §5.23 atoms low-risk -- but the textbook/SSOT/north-star trigger review stays mandatory (it confirms cheaply; 6x-proven it catches real defects when present).",
         "PRE-EXISTING (carried from y35, NOT fixed -- hygiene follow-ups): adminspace `/**` queryable needs keyexpr-wildcard-double (supplied via wz-runtime-tokio defaults; --no-default-features fragility); wz-runtime-tokio bare `transport-unicast,query-queryable` combo fails on an unused ResponseSink import (no preset/lane uses it).",
         "LOCAL: R311y36 atop R311y35 (4ceca55) atop R311y34 (9ecb4aa) atop origin/main=54b4a52 (R311y33). ahead=3 after this commits. NOT pushed without explicit consent."
+      ]
+    },
+    "Round 311y37": {
+      "decision_summary": "R311y37 -- §5.23 config DESIGN round (NOT a code ship): the user raised the bar to wz-fit + lifetime-grade + beyond-zenoh (a superset, not a faithful hollow mirror). The R311y37 inert config_tree (a serde_json JSON-pointer ConfigStore + Notifier + RuntimeConfig, faithful to zenoh's config primitive) was built + 9-unit-test-passed but is config-driven-LESS in wz (nothing reads it to reconfigure) = below the bar, so it was REVERTED (held as a reference for the future dynamic layer, NOT shipped; config-mutate-runtime stays reserved, A3-consistent). Instead §5.23 now records the beyond-zenoh wz-fit config DESIGN: config is TYPED (a union of wz's typed settings, illegal states unrepresentable, vs zenoh's stringly JSON), CONFIG-DRIVEN (the session reads it + reconfigures on change), and COMPOSABLE (a superset); the JSON-pointer tree + notifier become the dynamic admin mutate/observe layer over the typed config. ALL adminspace+config functionality gaps were registered as debt -- 9 §5.23 caveats. NO code change (design + debt only); validate orphan new=+0.",
+      "changes_bullets": [
+        "docs/.atomic (§5.23 section): set intent (typed, config-driven adminspace + config introspection) + 5 rationale pillars (built-in queryable dispatch; config TYPED/illegal-states-unrepresentable; config CONFIG-DRIVEN/non-inert; JSON-pointer tree + notifier = the dynamic admin layer; beyond-zenoh = typing+composition+drive, a superset not a hollow mirror) + 2 alternatives_rejected (port zenoh's serde_json blob; ship the inert JSON mirror as-is).",
+        "docs/.atomic (§5.23 caveats): 9 DEBT caveats registering EVERY adminspace+config gap -- local_data single-peer / empty-links / null-metadata+plugins, metrics build-info-only, adminspace-introspection-handlers + adminspace-write reserved, loopback-only e2e, config-must-be-wz-fit-beyond-zenoh, the /** keyexpr-wildcard-double build gap.",
+        "crates: the R311y37 inert config_tree (config_tree.rs ConfigStore + ConfigNotifier + RuntimeConfig + serde_json dep + config-mutate-runtime feature + lib.rs decl) was BUILT + 9-unit-test-passed, then REVERTED -- NOT shipped/active-flipped (it is config-driven-LESS in wz = below the bar). config-mutate-runtime stays reserved (A3-consistent: 0 cfg sites in the tree). The JSON-pointer get/set/keys/remove + key=id list-upsert + callback-notifier logic is preserved in the session record as the dynamic-layer reference for the typed-config build."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), T3 warn=4 / T4 info=4 unchanged; §5.23 now carries intent + 5 rationale + 2 alternatives + 9 DEBT caveats. atomic ledger entries +1 (R311y37).",
+        "No code change this round (design + debt registration only); working tree clean of code (only docs/.atomic modified), so Layer A3 stays consistent (config-mutate-runtime reserved, 0 cfg sites).",
+        "The reverted inert config_tree had passed 9 unit tests before revert (JSON-pointer nested set/get, leading/trailing-slash trim, non-object-descent reject, bad-json + empty-path reject, remove + keys enumeration, empty-store no-keys, notify-on-insert, key=id list-upsert insert+replace+id-mismatch) + clippy -D warnings clean -- evidence the JSON-pointer + notifier logic is sound and reusable as the future dynamic layer."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "R311y37 = §5.23 config DESIGN round (the user raised the bar to wz-fit + lifetime-grade + beyond-zenoh, a superset not a faithful hollow mirror). The inert serde_json config mirror (JSON-pointer ConfigStore + Notifier + RuntimeConfig) was built+tested then REVERTED -- held as the dynamic-layer reference, NOT shipped; config-mutate-runtime stays reserved. §5.23 now records the typed/config-driven/composable design (intent + rationale + alternatives).",
+        "ALL adminspace+config gaps are registered as 9 §5.23 DEBT caveats -- query_section §5.23 to read them (local_data reductions, metrics build-info-only, introspection-handlers + adminspace-write reserved, loopback-only e2e, the inert-config bar debt, the keyexpr-wildcard-double build gap).",
+        "BUILD PLAN (next rounds, design-first): (1) typed config schema = a union of wz's typed settings (SessionInitParams batch_size/lease/whatami + scout params + ...), illegal states unrepresentable; (2) config<->session bridge -- the session reads the typed config at open + reconfigures the live-tunable subset on change (the config-driven integration that makes config NON-inert; the hard, wz-architecture-touching part); (3) re-author the JSON-pointer tree + notifier as the dynamic admin mutate/observe layer OVER the typed config (the reverted config_tree logic, reframed); (4) adminspace-write/read on top. beyond-zenoh = typed + unrepresentable-illegal + genuine-drive + composable-superset.",
+        "OPEN (the hard design Q for the build): WHICH wz settings are live-reconfigurable at runtime? Most session params are handshake-fixed; the config-driven value hinges on identifying the live-tunable subset (a first slice could pair one genuinely-tunable setting with read-at-open for the rest).",
+        "PRE-EXISTING (carried, NOT fixed): adminspace /** needs keyexpr-wildcard-double (via defaults); wz-runtime-tokio bare query-queryable combo unused-ResponseSink import.",
+        "LOCAL: R311y37 (design + debt, docs/.atomic only -- NO code) atop R311y36 (b43d66d) atop origin/main=54b4a52 (R311y33). adminspace track committed = y34/y35/y36 (ahead=3); y37 docs/.atomic uncommitted. NOT committed/pushed without consent."
+      ],
+      "publishable_decision_summary": "R311y37 -- §5.23 config DESIGN round (NOT a code ship): the user raised the bar to wz-fit + lifetime-grade + beyond-zenoh (a superset, not a faithful hollow mirror). The R311y37 inert config_tree (a serde_json JSON-pointer ConfigStore + Notifier + RuntimeConfig, faithful to zenoh's config primitive) was built + 9-unit-test-passed but is config-driven-LESS in wz (nothing reads it to reconfigure) = below the bar, so it was REVERTED (held as a reference for the future dynamic layer, NOT shipped; config-mutate-runtime stays reserved, A3-consistent). Instead §5.23 now records the beyond-zenoh wz-fit config DESIGN: config is TYPED (a union of wz's typed settings, illegal states unrepresentable, vs zenoh's stringly JSON), CONFIG-DRIVEN (the session reads it + reconfigures on change), and COMPOSABLE (a superset); the JSON-pointer tree + notifier become the dynamic admin mutate/observe layer over the typed config. ALL adminspace+config functionality gaps were registered as debt -- 9 §5.23 caveats. NO code change (design + debt only); validate orphan new=+0.",
+      "publishable_changes_bullets": [
+        "docs/.atomic (§5.23 section): set intent (typed, config-driven adminspace + config introspection) + 5 rationale pillars (built-in queryable dispatch; config TYPED/illegal-states-unrepresentable; config CONFIG-DRIVEN/non-inert; JSON-pointer tree + notifier = the dynamic admin layer; beyond-zenoh = typing+composition+drive, a superset not a hollow mirror) + 2 alternatives_rejected (port zenoh's serde_json blob; ship the inert JSON mirror as-is).",
+        "docs/.atomic (§5.23 caveats): 9 DEBT caveats registering EVERY adminspace+config gap -- local_data single-peer / empty-links / null-metadata+plugins, metrics build-info-only, adminspace-introspection-handlers + adminspace-write reserved, loopback-only e2e, config-must-be-wz-fit-beyond-zenoh, the /** keyexpr-wildcard-double build gap.",
+        "crates: the R311y37 inert config_tree (config_tree.rs ConfigStore + ConfigNotifier + RuntimeConfig + serde_json dep + config-mutate-runtime feature + lib.rs decl) was BUILT + 9-unit-test-passed, then REVERTED -- NOT shipped/active-flipped (it is config-driven-LESS in wz = below the bar). config-mutate-runtime stays reserved (A3-consistent: 0 cfg sites in the tree). The JSON-pointer get/set/keys/remove + key=id list-upsert + callback-notifier logic is preserved in the session record as the dynamic-layer reference for the typed-config build."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1 orphan new=+0 (ledger=13 unchanged), T3 warn=4 / T4 info=4 unchanged; §5.23 now carries intent + 5 rationale + 2 alternatives + 9 DEBT caveats. atomic ledger entries +1 (R311y37).",
+        "No code change this round (design + debt registration only); working tree clean of code (only docs/.atomic modified), so Layer A3 stays consistent (config-mutate-runtime reserved, 0 cfg sites).",
+        "The reverted inert config_tree had passed 9 unit tests before revert (JSON-pointer nested set/get, leading/trailing-slash trim, non-object-descent reject, bad-json + empty-path reject, remove + keys enumeration, empty-store no-keys, notify-on-insert, key=id list-upsert insert+replace+id-mismatch) + clippy -D warnings clean -- evidence the JSON-pointer + notifier logic is sound and reusable as the future dynamic layer."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y37 = §5.23 config DESIGN round (the user raised the bar to wz-fit + lifetime-grade + beyond-zenoh, a superset not a faithful hollow mirror). The inert serde_json config mirror (JSON-pointer ConfigStore + Notifier + RuntimeConfig) was built+tested then REVERTED -- held as the dynamic-layer reference, NOT shipped; config-mutate-runtime stays reserved. §5.23 now records the typed/config-driven/composable design (intent + rationale + alternatives).",
+        "ALL adminspace+config gaps are registered as 9 §5.23 DEBT caveats -- query_section §5.23 to read them (local_data reductions, metrics build-info-only, introspection-handlers + adminspace-write reserved, loopback-only e2e, the inert-config bar debt, the keyexpr-wildcard-double build gap).",
+        "BUILD PLAN (next rounds, design-first): (1) typed config schema = a union of wz's typed settings (SessionInitParams batch_size/lease/whatami + scout params + ...), illegal states unrepresentable; (2) config<->session bridge -- the session reads the typed config at open + reconfigures the live-tunable subset on change (the config-driven integration that makes config NON-inert; the hard, wz-architecture-touching part); (3) re-author the JSON-pointer tree + notifier as the dynamic admin mutate/observe layer OVER the typed config (the reverted config_tree logic, reframed); (4) adminspace-write/read on top. beyond-zenoh = typed + unrepresentable-illegal + genuine-drive + composable-superset.",
+        "OPEN (the hard design Q for the build): WHICH wz settings are live-reconfigurable at runtime? Most session params are handshake-fixed; the config-driven value hinges on identifying the live-tunable subset (a first slice could pair one genuinely-tunable setting with read-at-open for the rest).",
+        "PRE-EXISTING (carried, NOT fixed): adminspace /** needs keyexpr-wildcard-double (via defaults); wz-runtime-tokio bare query-queryable combo unused-ResponseSink import.",
+        "LOCAL: R311y37 (design + debt, docs/.atomic only -- NO code) atop R311y36 (b43d66d) atop origin/main=54b4a52 (R311y33). adminspace track committed = y34/y35/y36 (ahead=3); y37 docs/.atomic uncommitted. NOT committed/pushed without consent."
       ]
     },
     "Round 311y4": {
