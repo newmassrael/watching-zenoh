@@ -71,6 +71,17 @@ pub enum Permission {
     Deny,
 }
 
+impl Permission {
+    /// The lowercase wire/admin string (zenoh-config `Permission` rendering) — the
+    /// SSOT for the admin config-GET view (`acl_default` / `acl_rules.permission`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Permission::Allow => "allow",
+            Permission::Deny => "deny",
+        }
+    }
+}
+
 /// The flow a rule (and a request) applies to — zenoh `InterceptorFlow`.
 /// Ingress is a message arriving INTO this node across a face; egress is a
 /// message this node SENDS out a face. The first atom enforces
@@ -81,6 +92,16 @@ pub enum AclFlow {
     Ingress,
     /// A message sent to a face.
     Egress,
+}
+
+impl AclFlow {
+    /// The lowercase wire/admin string for the config-GET `acl_rules.flow` view.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AclFlow::Ingress => "ingress",
+            AclFlow::Egress => "egress",
+        }
+    }
 }
 
 /// The action a rule restricts — zenoh `AclMessage`. Covers the actions a
@@ -111,6 +132,21 @@ pub enum AclMessage {
     /// A query reply (a `Response`, Reply or Err) — denying it stops a peer from
     /// answering a query on the keyexpr (zenoh `AclMessage::Reply`).
     Reply,
+}
+
+impl AclMessage {
+    /// The lowercase wire/admin string (mirrors zenoh `AclMessage` names) for the
+    /// config-GET `acl_rules.messages` view.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AclMessage::Put => "put",
+            AclMessage::Delete => "delete",
+            AclMessage::DeclareSubscriber => "declare_subscriber",
+            AclMessage::Query => "query",
+            AclMessage::DeclareQueryable => "declare_queryable",
+            AclMessage::Reply => "reply",
+        }
+    }
 }
 
 /// Which subject a rule applies to — the auth-free subset of zenoh's
@@ -212,6 +248,14 @@ impl AclPolicy {
     /// configured-but-default-allow policy from "no policy".
     pub fn default_permission(&self) -> Permission {
         self.config.default_permission
+    }
+
+    /// R311y54 — the ordered rule set, for the admin config-GET FULL per-rule dump
+    /// (`acl_rules`): each rule's subject / flow / messages / permission / key_exprs.
+    /// The detail complement to [`Self::deny_key_exprs`] (the denied-keyexpr
+    /// summary); allow rules + the subject/flow/message detail appear only here.
+    pub fn rules(&self) -> &[AclRule] {
+        &self.config.rules
     }
 
     /// R311y49 — the keyexprs appearing in at least one DENY rule, sorted and
@@ -336,6 +380,40 @@ mod tests {
         assert!(AclPolicy::new(AclConfig::allow_all())
             .deny_key_exprs()
             .is_empty());
+    }
+
+    #[test]
+    fn enum_as_str_maps_match_zenoh_names() {
+        // R311y54 — the wire/admin-string SSOT used by the config-GET acl_rules dump.
+        assert_eq!(Permission::Allow.as_str(), "allow");
+        assert_eq!(Permission::Deny.as_str(), "deny");
+        assert_eq!(AclFlow::Ingress.as_str(), "ingress");
+        assert_eq!(AclFlow::Egress.as_str(), "egress");
+        assert_eq!(AclMessage::Put.as_str(), "put");
+        assert_eq!(AclMessage::Delete.as_str(), "delete");
+        assert_eq!(AclMessage::DeclareSubscriber.as_str(), "declare_subscriber");
+        assert_eq!(AclMessage::Query.as_str(), "query");
+        assert_eq!(AclMessage::DeclareQueryable.as_str(), "declare_queryable");
+        assert_eq!(AclMessage::Reply.as_str(), "reply");
+    }
+
+    #[test]
+    fn rules_accessor_returns_the_ordered_rule_set() {
+        // R311y54 — the full per-rule dump source (the detail complement to
+        // deny_key_exprs): preserves order, includes allow rules + every field.
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![
+                deny_rule(SubjectSelector::Any, "mesh/data"),
+                allow_rule(SubjectSelector::Zid(zid(&[1, 2])), "metrics/**"),
+            ],
+        });
+        let rules = policy.rules();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].permission, Permission::Deny);
+        assert_eq!(rules[1].permission, Permission::Allow);
+        assert_eq!(rules[1].subject, SubjectSelector::Zid(zid(&[1, 2])));
+        assert!(AclPolicy::new(AclConfig::allow_all()).rules().is_empty());
     }
 
     #[test]

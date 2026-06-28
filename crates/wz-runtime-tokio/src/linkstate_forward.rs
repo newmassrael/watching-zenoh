@@ -4449,16 +4449,18 @@ mod tests {
         // READ surface — the SAME `config` binding that just drove the forwarder
         // serves the admin JSON. Assert the CONCRETE expected string (falsifiable:
         // catches key-order / whatami-string / numeric-format drift), NOT a
-        // from_init_params self-comparison. R311y49 — the JSON now leads with
+        // from_init_params self-comparison. R311y49 — the JSON leads with
         // `acl_deny:["demo/**"]`, the SAME deny the reconfigure above drove into
-        // the forwarder: one binding, both surfaces, mutually consistent. The
-        // fixture params resolve to batch_size 0 -> effective 65535, lease_ms
-        // 10000, whatami Peer -> "peer".
+        // the forwarder. R311y54 — `acl_rules` now carries the FULL rule (the
+        // `deny_put_policy` single Ingress Put deny on `demo/**`, subject any), the
+        // detail complement to the deny summary: one binding, both surfaces,
+        // mutually consistent. The fixture params resolve to batch_size 0 ->
+        // effective 65535, lease_ms 10000, whatami Peer -> "peer".
         assert_eq!(
             config.to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":["demo/**"],"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
+            r#"{"acl_default":"allow","acl_deny":["demo/**"],"acl_rules":[{"flow":"ingress","key_exprs":["demo/**"],"messages":["put"],"permission":"deny","subject":"any"}],"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
             "one binding: the config that drove the forwarder's deny also SHOWS it \
-             in the admin read view (acl_default=allow base + acl_deny=the denied key)"
+             in the admin read view (acl_default + acl_deny summary + acl_rules detail)"
         );
     }
 

@@ -39,9 +39,10 @@
 //! Deferred §5.23 layers (this slice is the typed-config foundation, not
 //! the whole admin-mutate stack): the JSON-pointer config tree + change
 //! `Notifier` + list-key-by-id merge semantics (the full
-//! `config-mutate-runtime` engine), the admin `PUT config/<key>` wire
-//! exposure (`adminspace-write`), and the universal (non-router)
-//! read-at-open fields beyond the three mirrored here.
+//! `config-mutate-runtime` engine), and the universal (non-router)
+//! read-at-open fields beyond the three mirrored here. (The admin
+//! `PUT config/<key>` wire — `adminspace-write` — landed in R311y51, gated
+//! by `permissions.write`; the config-GET read view is complete as of R311y54.)
 
 #[cfg(feature = "routing-peer")]
 use crate::interceptor::{InterceptorConfig, InterceptorSink};
@@ -111,13 +112,17 @@ impl WzConfig {
     /// opposite of the truth); the pair disambiguates. `batch_size` / `lease_ms` /
     /// `whatami` remain the handshake-fixed read-at-open mirror.
     ///
-    /// R311y53 — the interceptor view is now complete on the rate/size axes:
+    /// R311y53 — the interceptor view is complete on the rate/size axes:
     /// `downsampling` (under `access-downsampling`) and `low_pass` (under
     /// `access-quota`) emit the LIVE rule arrays (`{key_exprs, min_interval_ms}` /
     /// `{key_exprs, max_payload_size}`). These are startup-config introspection
-    /// (only `acl-deny` is runtime-reconfigurable via config-write so far). Still
-    /// deferred: the full per-rule ACL dump (subject / message / flow) — `acl_deny`
-    /// stays the denied-keyexpr summary.
+    /// (only `acl-deny` is runtime-reconfigurable via config-write so far).
+    ///
+    /// R311y54 — the ACL view is now complete too: `acl_rules` is the FULL per-rule
+    /// dump (each `{flow, key_exprs, messages, permission, subject}`), the detail
+    /// complement to the `acl_deny` summary (which stays the quick-glance denied-
+    /// keyexpr list). The §5.23 config-GET view now mirrors the entire live
+    /// interceptor config; no introspection axis remains deferred.
     ///
     /// R311y50 — built from an ordered (alphabetical) (key, value-json) list rather
     /// than a hand-spliced `format!`, so a new field is "push a pair where it
@@ -134,19 +139,17 @@ impl WzConfig {
         // base verdict is "allow" and the deny list is empty.
         #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
         {
-            use wz_access_control::Permission;
+            use wz_access_control::{Permission, SubjectSelector};
+            use wz_session_core::zid_hex::zid_to_zenoh_hex;
             let default_perm = self
                 .interceptors
                 .acl
                 .as_ref()
                 .map(|a| a.default_permission())
                 .unwrap_or(Permission::Allow);
-            let default_str = match default_perm {
-                Permission::Allow => "allow",
-                Permission::Deny => "deny",
-            };
+            // R311y54 — via the Permission::as_str SSOT (shared with acl_rules).
             let mut v = String::new();
-            wz_session_core::json::escape_into(default_str, &mut v);
+            wz_session_core::json::escape_into(default_perm.as_str(), &mut v);
             fields.push(("acl_default", v));
 
             let mut deny = String::from("[");
@@ -160,6 +163,46 @@ impl WzConfig {
             }
             deny.push(']');
             fields.push(("acl_deny", deny));
+
+            // R311y54 — acl_rules: the FULL per-rule dump (the detail complement to
+            // the acl_deny summary), one object per rule with keys ALPHABETICAL
+            // (flow, key_exprs, messages, permission, subject). subject is "any" or
+            // the peer's zid hex; enums via the wz-access-control as_str SSOTs.
+            let mut rules_json = String::from("[");
+            if let Some(acl) = &self.interceptors.acl {
+                for (i, rule) in acl.rules().iter().enumerate() {
+                    if i > 0 {
+                        rules_json.push(',');
+                    }
+                    rules_json.push_str("{\"flow\":");
+                    wz_session_core::json::escape_into(rule.flow.as_str(), &mut rules_json);
+                    rules_json.push_str(",\"key_exprs\":[");
+                    for (j, ke) in rule.key_exprs.iter().enumerate() {
+                        if j > 0 {
+                            rules_json.push(',');
+                        }
+                        wz_session_core::json::escape_into(ke, &mut rules_json);
+                    }
+                    rules_json.push_str("],\"messages\":[");
+                    for (j, m) in rule.messages.iter().enumerate() {
+                        if j > 0 {
+                            rules_json.push(',');
+                        }
+                        wz_session_core::json::escape_into(m.as_str(), &mut rules_json);
+                    }
+                    rules_json.push_str("],\"permission\":");
+                    wz_session_core::json::escape_into(rule.permission.as_str(), &mut rules_json);
+                    rules_json.push_str(",\"subject\":");
+                    let subject = match &rule.subject {
+                        SubjectSelector::Any => String::from("any"),
+                        SubjectSelector::Zid(z) => zid_to_zenoh_hex(z.as_slice()),
+                    };
+                    wz_session_core::json::escape_into(&subject, &mut rules_json);
+                    rules_json.push('}');
+                }
+            }
+            rules_json.push(']');
+            fields.push(("acl_rules", rules_json));
         }
 
         // downsampling — the LIVE rate-limit rules (each `{key_exprs, min_interval_ms}`),
@@ -336,10 +379,11 @@ mod tests {
     ))]
     #[test]
     fn to_admin_json_acl_only_alphabetical() {
-        // access-acl only: acl_default/acl_deny lead (both sort before batch_size).
+        // access-acl only: acl_default/acl_deny/acl_rules lead (all sort before
+        // batch_size). Empty policy -> empty deny + empty rules arrays.
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":[],"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
         );
     }
 
@@ -351,11 +395,12 @@ mod tests {
     ))]
     #[test]
     fn to_admin_json_full_access_alphabetical() {
-        // The full routing-peer access set (the wz-ap-demo build): downsampling sorts
-        // between batch_size and lease_ms; low_pass between lease_ms and whatami.
+        // The full routing-peer access set (the wz-ap-demo build): acl_rules sorts
+        // after acl_deny; downsampling between batch_size and lease_ms; low_pass
+        // between lease_ms and whatami.
         assert_eq!(
             router_config().to_admin_json(),
-            r#"{"acl_default":"allow","acl_deny":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+            r#"{"acl_default":"allow","acl_deny":[],"acl_rules":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
         );
     }
 
@@ -385,6 +430,39 @@ mod tests {
         assert!(
             json.contains(r#""low_pass":[{"key_exprs":["mesh/bulk"],"max_payload_size":1024}]"#),
             "low_pass rule not rendered: {json}"
+        );
+    }
+
+    #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+    #[test]
+    fn to_admin_json_renders_full_acl_rules() {
+        // R311y54 — the full per-rule dump: subject/flow/messages/permission +
+        // key_exprs, keys alphabetical within each rule object. The acl_deny summary
+        // still reflects the deny keyexpr (the two views coexist: detail + summary).
+        use wz_access_control::{
+            AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+        };
+        let mut c = router_config();
+        c.interceptors.acl = Some(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["mesh/data".to_string()],
+                messages: vec![AclMessage::Put, AclMessage::Delete],
+                flow: AclFlow::Ingress,
+                permission: Permission::Deny,
+            }],
+        }));
+        let json = c.to_admin_json();
+        assert!(
+            json.contains(
+                r#""acl_rules":[{"flow":"ingress","key_exprs":["mesh/data"],"messages":["put","delete"],"permission":"deny","subject":"any"}]"#
+            ),
+            "acl_rules not rendered: {json}"
+        );
+        assert!(
+            json.contains(r#""acl_deny":["mesh/data"]"#),
+            "acl_deny summary not rendered: {json}"
         );
     }
 }
