@@ -4277,6 +4277,70 @@ mod tests {
         );
     }
 
+    // R311y48 (§5.23 Phase 3b) — the config-WRITE merge pattern the demo's
+    // adminspace handler drives: a partial write (set only the ACL slice) reads the
+    // LIVE interceptor config via `WzConfig::interceptors()`, clones it, swaps the
+    // one slice, and reconfigures the WHOLE — so the getter is the read leg of a
+    // read-modify-write that never drops the unrelated interceptors. Here the
+    // pre-write config already denies an UNRELATED key (`other/**`); the
+    // config-write swaps the ACL to deny `demo/**`; the forwarder's verdict flips
+    // to drop demo/data, proving the getter + clone-merge-reapply round-trips.
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_interceptors_getter_backs_the_config_write_merge() {
+        use crate::config::WzConfig;
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let (face_a, sink_a) = peer_face(zid(0x0A));
+        let (face_b, sink_b) = peer_face(zid(0x0B));
+        fwd.register(FaceId(0), &face_a);
+        fwd.register(FaceId(1), &face_b);
+        advertise_link_back(&fwd, FaceId(0), 0x0A, 0x05);
+        advertise_link_back(&fwd, FaceId(1), 0x0B, 0x05);
+        declare_interest(&fwd, FaceId(1), "demo/data");
+
+        // Pre-write config denies an UNRELATED key; demo/data is admitted.
+        let mut config = WzConfig::new().with_interceptors(InterceptorConfig {
+            acl: Some(deny_put_policy("other/**")),
+            ..Default::default()
+        });
+        config.install_interceptors(&fwd);
+        sink_a.reset();
+        sink_b.reset();
+
+        let put = || DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(data_push()))], // demo/data
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.data_seen(),
+            1,
+            "pre-write: demo/data admitted (only other/** denied)"
+        );
+
+        // CONFIG-WRITE merge: read the live config via the getter, clone, swap
+        // ONLY the ACL slice, reconfigure the whole — the demo handler's pattern.
+        let mut merged = config.interceptors().clone();
+        merged.acl = Some(deny_put_policy("demo/**"));
+        config.reconfigure_interceptors(merged, &fwd);
+
+        sink_b.reset();
+        fwd.forward(FaceId(0), IterationEvent::Poll(&put()));
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "post-write: demo/data denied after the getter-clone-merge-reapply"
+        );
+        assert_eq!(
+            sink_b.frame_count(),
+            0,
+            "post-write: not relayed after the config-write merge"
+        );
+    }
+
     // R311y43 — §5.23 combined-node FOUNDATION proof (binding level): ONE WzConfig
     // BINDING both DRIVES the live forwarder (the deny verdict flips, as in the
     // test above) AND serves the admin read-at-open view (`to_admin_json`) — the

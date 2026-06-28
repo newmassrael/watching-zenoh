@@ -118,6 +118,19 @@ impl WzConfig {
         self
     }
 
+    /// R311y48 (§5.23 Phase 3b) — read the live interceptor config. The
+    /// read accessor symmetric with the private `interceptors` field's write
+    /// path ([`Self::reconfigure_interceptors`]): a partial config-write (e.g.
+    /// `config/acl-deny`, which sets only the ACL slice) clones THIS to preserve
+    /// the unrelated interceptors (downsampling, low-pass), mutates the one slice,
+    /// and re-applies the merged whole — so a write to one config key never
+    /// silently drops the others. Borrowing, not cloning: the caller clones only
+    /// when it intends to mutate-and-reapply.
+    #[cfg(feature = "routing-peer")]
+    pub fn interceptors(&self) -> &InterceptorConfig {
+        &self.interceptors
+    }
+
     /// The config-DRIVEN initial install: drive `sink` from this config's
     /// interceptor settings. Called once at routing setup — the same
     /// [`InterceptorSink::set_interceptors`] seam the live reconfigure re-uses,

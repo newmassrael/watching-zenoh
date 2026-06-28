@@ -177,6 +177,12 @@ routing-peer = [
     # (the `--config-queryable` opt-in registers a forwarder-local admin
     # queryable reading the node's live shared WzConfig); pull the admin SSOT.
     "wz/adminspace-core",
+    # R311y48 (§5.23 Phase 3b) — the LIVE leg of the config write: a
+    # `--config-writable` peer reconfigures its forwarder from a remote PUT, so
+    # the typed WzConfig mutation must actually re-drive the interceptor chain
+    # (config-mutate-runtime ON). Without it the reconfigure stores but never
+    # applies (the inert mirror), and the wire-observable ACL flip cannot happen.
+    "wz/config-mutate-runtime",
 ]
 
 [lints]

@@ -183,6 +183,20 @@ fn main() -> ExitCode {
             // `@/<zid>/peer/config` is answered with the node's LIVE shared WzConfig
             // (the forwarder self-dispatch, R311y44). Off by default.
             let config_queryable = rest.iter().any(|a| a == "--config-queryable");
+            // R311y48 (§5.23 Phase 3b) — `--config-writable` opts this peer into
+            // hosting its config-WRITE subscriber on `@/<zid>/peer/config/**`: a
+            // remote PUT to a config sub-key (`.../config/acl-deny <keyexpr>`)
+            // reconfigures the LIVE forwarder (the R311y46 Push-plane self-dispatch
+            // + the Phase-1 reconfigure drive). Off by default.
+            let config_writable = rest.iter().any(|a| a == "--config-writable");
+            // R311y48 — `--put-key <keyexpr> --put-payload <text>`: originate a Put
+            // carrying a SPECIFIC payload each app tick (vs `--publish`, which sends
+            // a fixed marker). The wire driver a remote node uses to PUT another
+            // peer's config-write key (`--put-key @/<A>/peer/config/acl-deny
+            // --put-payload <denied-keyexpr>`). Both off by default; meaningful only
+            // when both are set.
+            let put_key = parse_pair(rest, "--put-key");
+            let put_payload = parse_pair(rest, "--put-payload");
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
@@ -192,6 +206,9 @@ fn main() -> ExitCode {
                     unsubscribe_after_data,
                     autoconnect,
                     config_queryable,
+                    config_writable,
+                    put_key,
+                    put_payload,
                 },
                 InterceptorOpts {
                     acl_deny,

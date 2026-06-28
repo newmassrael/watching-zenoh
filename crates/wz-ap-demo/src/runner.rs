@@ -1244,6 +1244,16 @@ pub(crate) struct PeerOpts {
     pub unsubscribe_after_data: bool,
     pub autoconnect: bool,
     pub config_queryable: bool,
+    /// R311y48 (§5.23 Phase 3b) — host a config-WRITE subscriber on
+    /// `@/<zid>/peer/config/**` so a remote PUT reconfigures this peer's live
+    /// forwarder (the `--config-writable` opt-in).
+    pub config_writable: bool,
+    /// R311y48 — originate a Put to this key each app tick carrying
+    /// [`put_payload`](Self::put_payload) (the wire driver for a config-write
+    /// PUT). Inert unless both are set.
+    pub put_key: Option<String>,
+    /// R311y48 — the payload bytes the [`put_key`](Self::put_key) Put carries.
+    pub put_payload: Option<String>,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -1260,6 +1270,9 @@ pub(crate) async fn run_peer(
     let unsubscribe_after_data = opts.unsubscribe_after_data;
     let autoconnect = opts.autoconnect;
     let config_queryable = opts.config_queryable;
+    let config_writable = opts.config_writable;
+    let put_key = opts.put_key.as_deref();
+    let put_payload = opts.put_payload.as_deref();
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
@@ -1371,20 +1384,16 @@ pub(crate) async fn run_peer(
     // control disabled, every message admitted).
     let mut interceptor_config = InterceptorConfig::default();
 
-    // `--acl-deny <keyexpr>`: opt this peer into §5.16 access control. An
-    // allow-default policy with one deny rule per flow on the keyexpr, for every
-    // peer subject — the smallest real ACL. It governs the data plane (Put /
-    // Delete) AND the control plane (DeclareSubscriber), so a neighbour can
-    // neither publish to nor subscribe on the denied keyexpr through this node;
-    // both are dropped (not relayed onward), the wz analogue of a router carrying
-    // an IngressAclEnforcer.
-    if let Some(deny_keyexpr) = interceptors.acl_deny.as_deref() {
-        log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
-        // A rule per FLOW (a rule carries a single flow): the keyexpr is denied
-        // BOTH on ingress (a neighbour cannot push/subscribe/query/declare-a-
-        // queryable/reply on it through us) and on egress (we never relay it out,
-        // nor originate it toward a peer), so `--acl-deny K` blocks K completely
-        // across the data AND query planes in both directions.
+    // R311y48 — the deny-policy SSOT: build the allow-default ACL that denies one
+    // keyexpr across the data AND query planes, both flows, for every subject (the
+    // smallest real ACL). BOTH the startup `--acl-deny` flag AND the runtime
+    // config-write drain (`@/<zid>/peer/config/acl-deny`) build their policy here,
+    // so the two paths produce byte-identical rules from one definition (the
+    // §5.16 rule set is not duplicated across setup and reconfigure). A rule per
+    // FLOW (a rule carries a single flow): the keyexpr is denied BOTH on ingress (a
+    // neighbour cannot push/subscribe/query/declare-a-queryable/reply on it through
+    // us) and on egress (we never relay it out, nor originate it toward a peer).
+    let acl_deny_policy = |deny_keyexpr: &str| -> AclPolicy {
         let deny_rule = |flow| AclRule {
             subject: SubjectSelector::Any,
             key_exprs: vec![deny_keyexpr.to_owned()],
@@ -1393,8 +1402,7 @@ pub(crate) async fn run_peer(
                 AclMessage::Delete,
                 AclMessage::DeclareSubscriber,
                 // The query plane (R311ud): denying K also blocks querying it,
-                // declaring a queryable for it, and replying on it — `--acl-deny K`
-                // closes K across the data AND query planes.
+                // declaring a queryable for it, and replying on it.
                 AclMessage::Query,
                 AclMessage::DeclareQueryable,
                 AclMessage::Reply,
@@ -1402,10 +1410,19 @@ pub(crate) async fn run_peer(
             flow,
             permission: Permission::Deny,
         };
-        interceptor_config.acl = Some(AclPolicy::new(AclConfig {
+        AclPolicy::new(AclConfig {
             default_permission: Permission::Allow,
             rules: vec![deny_rule(AclFlow::Ingress), deny_rule(AclFlow::Egress)],
-        }));
+        })
+    };
+
+    // `--acl-deny <keyexpr>`: opt this peer into §5.16 access control at STARTUP —
+    // both dropped (not relayed onward), the wz analogue of a router carrying an
+    // IngressAclEnforcer. (The same deny is also reachable at RUNTIME via a remote
+    // config-write under `--config-writable`, below.)
+    if let Some(deny_keyexpr) = interceptors.acl_deny.as_deref() {
+        log::info!("wz-ap-demo peer: access control enabled (--acl-deny {deny_keyexpr})");
+        interceptor_config.acl = Some(acl_deny_policy(deny_keyexpr));
     }
 
     // `--downsample <keyexpr>`: opt this peer into §5.16 downsampling (QoS) — the
@@ -1473,6 +1490,20 @@ pub(crate) async fn run_peer(
         cfg.install_interceptors(&forwarder);
     }
 
+    // R311y48 (§5.23 Phase 3b) — the config-write INTENT slot. A remote PUT to
+    // `.../config/acl-deny` parses to a deny keyexpr that the config-write
+    // subscriber handler stashes HERE (wire -> intent); the app-tick loop DRAINS
+    // and applies it (intent -> reconfigure). The split is structural: the handler
+    // is stored INSIDE the forwarder, so it cannot also hold `&forwarder` to drive
+    // the reconfigure (an Rc cycle / borrow conflict); the apply therefore happens
+    // at the composition root (run_peer), which owns BOTH the shared WzConfig and
+    // `&forwarder`. This keeps the forwarder decoupled from WzConfig — the whole
+    // point of the R311y43 `InterceptorSink` seam — and the subscriber handler
+    // signature unchanged (`FnMut(&dyn SampleView)`, no interceptor-sink param a
+    // plain data subscriber would never use).
+    let pending_acl_deny: std::rc::Rc<std::cell::RefCell<Option<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+
     // `--config-queryable`: §5.23 Phase 2b — host this peer's adminspace on the
     // forwarder. A querier's GET for `@/<zid>/peer/config` routes to A's
     // forward_request, finds no remote queryable (the admin key is self-unique),
@@ -1514,6 +1545,69 @@ pub(crate) async fn run_peer(
             }
             Err(e) => {
                 log::warn!("wz-ap-demo peer: adminspace registration failed: {e:?}");
+            }
+        }
+    }
+
+    // `--config-writable`: §5.23 Phase 3b — host this peer's config-WRITE
+    // subscriber on `@/<zid>/peer/config/**` (zenoh's write-only config subscriber
+    // pattern, adminspace.rs:350-353). A remote PUT to a config sub-key floods to
+    // this node (the subscriber interest routes it here), and the R311y46
+    // dispatch_local_subscribers fires this handler — the Push-plane twin of the
+    // y44 self-query dispatch the config GET uses. The handler does wire->intent
+    // ONLY (parse + stash the deny keyexpr into `pending_acl_deny`); the app-tick
+    // loop applies it (intent->reconfigure), where `&forwarder` is reachable.
+    if config_writable {
+        use wz::runtime_tokio::adminspace::{admin_config_key, admin_config_write_key};
+        use wz::runtime_tokio::sink::SampleView;
+        use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
+        let zid_hex = zid_to_zenoh_hex(&params.zid);
+        let whatami_str = params.whatami.to_str();
+        let write_key = admin_config_write_key(&zid_hex, whatami_str);
+        // The `@/<zid>/peer/config/` prefix a PUT key's config sub-key hangs under
+        // (`admin_config_key` + the separating slash) — stripped to recover the
+        // sub-key the handler routes on.
+        let write_prefix = {
+            let mut p = admin_config_key(&zid_hex, whatami_str);
+            p.push('/');
+            p
+        };
+        let pending = pending_acl_deny.clone();
+        let handler = move |sample: &dyn SampleView| {
+            let ke = sample.keyexpr();
+            // Only PUTs UNDER the config prefix carry a sub-key; the bare
+            // `.../config` GET key (no trailing sub-key) is not a write.
+            let Some(subkey) = ke.strip_prefix(&write_prefix) else {
+                return;
+            };
+            match subkey {
+                // `.../config/acl-deny <keyexpr>`: deny the keyexpr in the payload.
+                "acl-deny" => {
+                    let deny_kx = String::from_utf8_lossy(sample.payload()).trim().to_string();
+                    if deny_kx.is_empty() {
+                        log::warn!(
+                            "wz-ap-demo peer: config-write acl-deny with empty payload; ignored"
+                        );
+                        return;
+                    }
+                    log::info!("wz-ap-demo peer: config-write received acl-deny {deny_kx}");
+                    *pending.borrow_mut() = Some(deny_kx);
+                }
+                // Any other sub-key: the full json5/json-pointer config engine is a
+                // deferred §5.23 layer; recognize only `acl-deny` for now.
+                other => log::warn!(
+                    "wz-ap-demo peer: config-write unknown key '{other}' (only 'acl-deny' \
+                     is recognized; the full json5 config engine is a deferred §5.23 \
+                     layer); ignored"
+                ),
+            }
+        };
+        match forwarder.register_local_subscriber(&write_key, Box::new(handler)) {
+            Ok(_) => {
+                log::info!("wz-ap-demo peer: adminspace config WRITE at {write_key}");
+            }
+            Err(e) => {
+                log::warn!("wz-ap-demo peer: adminspace config-write registration failed: {e:?}");
             }
         }
     }
@@ -1594,6 +1688,12 @@ pub(crate) async fn run_peer(
     // is what the e2e asserts on (it must read the converged size, not the
     // mid-teardown remnant).
     let mut peak_nodes = 0usize;
+    // R311y48 (§5.23 Phase 3b) — config-write apply state: the deny keyexpr last
+    // applied (so a repeated PUT of the same value reconfigures + logs ONCE, not
+    // per tick — idempotent), and the high-water interceptor-drop count for the
+    // in-run drop witness.
+    let mut last_applied_deny: Option<String> = None;
+    let mut last_dropped = 0usize;
     let summary = loop {
         tokio::select! {
             done = &mut loop_fut => break done,
@@ -1644,10 +1744,47 @@ pub(crate) async fn run_peer(
                         );
                     }
                 }
+                // R311y48 — the wire driver for a config-write PUT: originate a Put
+                // to `--put-key` carrying the `--put-payload` bytes each tick (vs
+                // `--publish`'s fixed marker). A remote node uses this to PUT another
+                // peer's `@/<A>/peer/config/acl-deny` with the keyexpr to deny.
+                if let (Some(k), Some(v)) = (put_key, put_payload) {
+                    let _ = forwarder.publish(k, v.as_bytes());
+                }
+                // R311y48 — apply a pending config-write: a remote PUT to
+                // `.../config/acl-deny` stashed a deny keyexpr; drain it and
+                // reconfigure the LIVE forwarder (the Phase-1 InterceptorSink drive),
+                // MERGING it into the current interceptor config so the write changes
+                // only the ACL slice (the `interceptors()` getter is the read leg).
+                // Idempotent: re-applied only when the deny keyexpr CHANGES, so a
+                // per-tick PUT of the same value is a no-op and the witness logs once.
+                if let Some(deny_kx) = pending_acl_deny.borrow_mut().take() {
+                    if last_applied_deny.as_deref() != Some(deny_kx.as_str()) {
+                        let mut merged = wz_config.borrow().interceptors().clone();
+                        merged.acl = Some(acl_deny_policy(&deny_kx));
+                        wz_config
+                            .borrow_mut()
+                            .reconfigure_interceptors(merged, &forwarder);
+                        log::info!(
+                            "wz-ap-demo peer: config reconfigured — now denying {deny_kx}"
+                        );
+                        last_applied_deny = Some(deny_kx);
+                    }
+                }
                 let seen = forwarder.data_seen();
                 if seen > last_data_seen {
                     last_data_seen = seen;
                     log::info!("wz-ap-demo peer: received mesh data ({seen} push(es))");
+                }
+                // R311y48 — the interceptor-drop witness: a positive-edge log when
+                // the forwarder's drop count rises (an ACL/downsample/low-pass drop).
+                // After a config-write deny takes effect, the next denied message
+                // bumps this — the in-run proof the runtime reconfigure flipped the
+                // live verdict.
+                let dropped = forwarder.interceptor_dropped();
+                if dropped > last_dropped {
+                    last_dropped = dropped;
+                    log::info!("wz-ap-demo peer: interceptor dropped ({dropped} message(s))");
                 }
             }
         }
@@ -1698,6 +1835,18 @@ pub(crate) async fn run_peer(
         if announced_interest && forwarder.interested(key).is_empty() {
             log::info!("wz-ap-demo peer: publisher subscriber interest withdrawn");
         }
+    }
+    // R311y48 (§5.23 Phase 3b) — the interceptor-drop witness, DETERMINISTIC
+    // shutdown counterpart to the in-run app-tick log: a peer whose forwarder
+    // dropped any message (the wire-observable proof a runtime config-write deny
+    // took effect on the LIVE forwarder) emits this unconditionally at shutdown, so
+    // a test need not race the 250 ms app-tick. A non-zero count on a peer that was
+    // admitting data BEFORE the PUT is the "forwarded, then DROPPED" flip.
+    if forwarder.interceptor_dropped() > 0 {
+        log::info!(
+            "wz-ap-demo peer: interceptor dropped ({} message(s))",
+            forwarder.interceptor_dropped()
+        );
     }
     Ok(())
 }

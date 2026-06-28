@@ -1361,8 +1361,13 @@ layer_c1an_cargo_test_adminspace_nodefault() {
 # §5.23 design rejects). The toggle existing IS the proof the config is load-bearing.
 # The default Layer C1 carries neither the feature nor the access-acl combo, so this
 # lane is the sole coverage:
-#   1. ON arm: wzconfig_reconfigure_drives_the_live_forwarder — a config mutation
-#      flips the live admit->deny verdict (config-mutate-runtime,access-acl);
+#   1. ON arm: the `wzconfig_` live-drive family (config-mutate-runtime,access-acl)
+#      — a config mutation flips the live admit->deny verdict
+#      (wzconfig_reconfigure_drives_the_live_forwarder), the same instance also
+#      serves the admin read (wzconfig_one_instance_drives_forwarder_and_serves_
+#      admin_read), and the R311y48 config-WRITE merge reads via the
+#      `interceptors()` getter then reapplies
+#      (wzconfig_interceptors_getter_backs_the_config_write_merge);
 #   2. OFF arm: wzconfig_reconfigure_is_inert_without_config_mutate_runtime — the
 #      mutation is stored but never applied (access-acl alone);
 #   3. clippy the config.rs LIB on the ON combo + the routing-peer-OFF universal
@@ -1375,7 +1380,7 @@ layer_c1an_cargo_test_adminspace_nodefault() {
 # set where the spread is needed.
 layer_c1ao_cargo_test_config_mutate_runtime() {
     (cd crates \
-        && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib wzconfig_reconfigure_drives --quiet \
+        && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib wzconfig_ --quiet \
         && cargo test -p wz-runtime-tokio --features access-acl --lib wzconfig_reconfigure_is_inert --quiet \
         && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)
@@ -3881,6 +3886,14 @@ layer_e6_peer_mesh() {
     # adminspace-core), so no extra build.
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_adminspace_config -- --ignored --quiet) || return 1
+    # R311y48 (§5.23 Phase 3b) — the adminspace config-WRITE e2e: peer B PUTs A's
+    # @/<A_zid>/peer/config/acl-deny carrying a keyexpr; A's --config-writable
+    # subscriber reconfigures A's LIVE forwarder to deny it, and the data plane
+    # FLIPS admit -> drop over the wire (closing the y45 read-at-open caveat). Rides
+    # the SAME routing-peer demo binary (which now pulls config-mutate-runtime so
+    # the reconfigure actually drives), so no extra build.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_peer_adminspace_config_write -- --ignored --quiet) || return 1
 }
 
 # ─── Layer Qz — Zephyr cooperative profile west build + QEMU boot e2e ───

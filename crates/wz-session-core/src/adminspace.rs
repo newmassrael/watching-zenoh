@@ -200,6 +200,22 @@ pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
     s
 }
 
+/// R311y48 (§5.23 Phase 3b) — the admin config-WRITE keyexpr PATTERN
+/// `@/<zid>/<whatami>/config/**`. This is the key zenoh's adminspace declares its
+/// write-only config `DeclareSubscriber` on (`adminspace.rs:350-353`): a PUT to a
+/// sub-key under it (e.g. `.../config/acl-deny`) routes the new value to the node,
+/// which applies it (zenoh `insert_json5`; wz reconfigures the typed `WzConfig`).
+/// A routing peer registers a LOCAL subscriber on this pattern so a remote PUT
+/// self-dispatches to its config-write handler (the R311y46 Push-plane twin of the
+/// y44 self-query dispatch the config GET uses). The pattern is the sibling of
+/// [`admin_config_key`] (the typed READ key, beyond-zenoh): the read is a single
+/// key, the write is the `/**` subtree a json-pointer path hangs under.
+pub fn admin_config_write_key(zid_hex: &str, whatami: &str) -> String {
+    let mut s = admin_config_key(zid_hex, whatami);
+    s.push_str("/**");
+    s
+}
+
 /// R311y45 (§5.23 Phase 2b) — the node-identity + version + locators + GET
 /// permission an [`answer_admin_query`] call needs. The caller (a Session, or a
 /// routing peer's forwarder-hosted admin) supplies these; `sessions[]` and
@@ -359,6 +375,12 @@ mod tests {
         assert_eq!(admin_root_key("a1b2", "peer"), "@/a1b2/peer");
         assert_eq!(admin_queryable_key("a1b2", "peer"), "@/a1b2/peer/**");
         assert_eq!(admin_config_key("a1b2", "peer"), "@/a1b2/peer/config");
+        // R311y48 — the config-WRITE pattern hangs `/**` under the config key
+        // (zenoh's write-only config subscriber, adminspace.rs:350-353).
+        assert_eq!(
+            admin_config_write_key("a1b2", "peer"),
+            "@/a1b2/peer/config/**"
+        );
         assert_eq!(admin_root_key("0", "router"), "@/0/router");
     }
 
