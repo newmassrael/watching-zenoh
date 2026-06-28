@@ -39,6 +39,13 @@
 //! `wz/config-mutate-runtime` so the reconfigure actually re-drives the forwarder;
 //! without it the write would store but never apply). run-ci's Layer E6 builds it,
 //! so this rides the same `--ignored` lane as the other binary-dep e2es.
+//!
+//! R311y51 — Layer E6 now builds the binary with `adminspace-write` too, so the
+//! `permissions.write` GATE (default-deny, zenoh `PermissionsConf` write:false) is
+//! compiled in. The two APPLY tests above grant it with `--config-write-permit`;
+//! [`wz_peer_config_write_denied_without_permit_holds_the_verdict`] omits it to
+//! witness the gate REJECTING a write (the live verdict does NOT flip) — the
+//! negative twin proving the permit is the control.
 
 use std::fs::File;
 use std::process::{Command, Stdio};
@@ -116,6 +123,10 @@ fn wz_peer_config_write_acl_deny_flips_the_live_verdict_over_the_wire() {
             "--subscribe",
             DATA_KEY,
             "--config-writable",
+            // R311y51 — the E6 binary is built with `adminspace-write`, so the
+            // permissions.write gate is default-deny; GRANT it here (this test
+            // proves the APPLY path). The deny path is the dedicated test below.
+            "--config-write-permit",
         ],
     );
     let addr_a = format!("127.0.0.1:{p_a}");
@@ -281,6 +292,9 @@ fn wz_peer_config_write_acl_deny_is_get_observable_over_the_wire() {
             "127.0.0.1:0",
             "--config-queryable",
             "--config-writable",
+            // R311y51 — grant the default-deny permissions.write gate (the E6
+            // binary is built with `adminspace-write`); this test proves APPLY.
+            "--config-write-permit",
         ],
     );
     let addr_a = format!("127.0.0.1:{p_a}");
@@ -399,5 +413,132 @@ fn wz_peer_config_write_acl_deny_is_get_observable_over_the_wire() {
     assert!(
         reply.contains(r#"\"acl_default\":\"allow\""#),
         "client-C's GET reply lacks acl_default=allow (the base verdict).\n--- C ---\n{reply}"
+    );
+}
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,adminspace-write); Layer E runs via --ignored"]
+fn wz_peer_config_write_denied_without_permit_holds_the_verdict() {
+    // R311y51 — the §5.23 adminspace-write GATE proof, the negative twin of
+    // `..flips_the_live_verdict..`. A HOSTS the config-write subscriber
+    // (`--config-writable`) but does NOT grant the write permission (no
+    // `--config-write-permit`). The E6 binary is built with `adminspace-write`, so
+    // A's `permissions.write` gate is default-deny and B's config-write PUT is
+    // REJECTED: A logs `config-write DENIED`, NEVER reconfigures, NEVER drops, and
+    // keeps admitting B's mesh/data. The verdict does NOT flip — the permit is the
+    // control.
+    //
+    // Determinism: `config-write DENIED` is the positive witness the PUT routed AND
+    // the gate engaged (a non-denied write would log `config reconfigured` instead;
+    // for a fixed write=false the two are mutually exclusive). The absence asserts
+    // on the post-shutdown capture are belt-and-suspenders, not the primary gate.
+
+    let (mut a_guard, mut a_reader, p_a, a_listen_log) = spawn_peer(
+        "peer-A",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--subscribe",
+            DATA_KEY,
+            "--config-writable",
+            // NB: no `--config-write-permit` — the gate must DENY.
+        ],
+    );
+    let addr_a = format!("127.0.0.1:{p_a}");
+
+    let write_log = if a_listen_log.contains("adminspace config WRITE at ") {
+        a_listen_log
+    } else {
+        wait_for_substring(
+            &mut a_reader,
+            "adminspace config WRITE at ",
+            Duration::from_secs(5),
+        )
+        .unwrap_or_else(|c| {
+            let _ = a_guard.child_mut().kill();
+            let _ = a_guard.child_mut().wait();
+            panic!(
+                "peer-A did not register --config-writable within 5s.\n\
+                 --- peer-A stderr ---\n{c}"
+            );
+        })
+    };
+    let write_key = write_log
+        .lines()
+        .find_map(|l| {
+            l.split_once("adminspace config WRITE at ")
+                .map(|(_, rest)| rest.trim().to_string())
+        })
+        .expect("peer-A logged the admin config-write keyexpr");
+    let config_base = write_key
+        .strip_suffix("/**")
+        .unwrap_or_else(|| panic!("config-write key lacks the /** pattern suffix: {write_key}"));
+    let put_key = format!("{config_base}/acl-deny");
+
+    // B dials A, publishes mesh/data each tick AND PUTs A's config/acl-deny=mesh/data.
+    let (mut b_guard, mut b_reader, _p_b, _b_listen_log) = spawn_peer(
+        "peer-B",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_a,
+            "--publish",
+            DATA_KEY,
+            "--put-key",
+            &put_key,
+            "--put-payload",
+            DATA_KEY,
+        ],
+    );
+
+    // Primary sync: A must have RECEIVED + DENIED the config-write PUT (the gate
+    // engaged). This proves the PUT routed all the way to A's handler and was
+    // rejected — a non-denied write would have logged `config reconfigured`.
+    let denied_sync = wait_for_substring(
+        &mut a_reader,
+        "config-write DENIED",
+        Duration::from_secs(20),
+    );
+
+    graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    let a_captured = read_captured(&mut a_reader);
+    let b_captured = read_captured(&mut b_reader);
+    eprintln!("--- peer-A stderr ---\n{a_captured}");
+    eprintln!("--- peer-B stderr ---\n{b_captured}");
+
+    denied_sync.unwrap_or_else(|c| {
+        panic!(
+            "peer-A never logged 'config-write DENIED' within 20s — B's config-write \
+             PUT to {put_key} did not reach A's gated handler (or the gate did not \
+             engage).\n--- peer-A stderr at deadline ---\n{c}\n\
+             --- peer-B stderr ---\n{b_captured}"
+        )
+    });
+
+    // (1) The gate ENGAGED: the PUT was received and rejected by permissions.write.
+    assert!(
+        a_captured.contains("config-write DENIED"),
+        "peer-A did not log the permission deny.\n--- peer-A stderr ---\n{a_captured}"
+    );
+    // (2) NO reconfigure: a denied write never reaches reconfigure_interceptors.
+    assert!(
+        !a_captured.contains("config reconfigured"),
+        "peer-A RECONFIGURED despite the deny — the adminspace-write gate did not \
+         hold (a config-write PUT applied without --config-write-permit).\n\
+         --- peer-A stderr ---\n{a_captured}"
+    );
+    // (3) NO drop: the live verdict never flipped, so no mesh/data was dropped.
+    assert!(
+        !a_captured.contains("interceptor dropped"),
+        "peer-A DROPPED a message — the verdict flipped despite the deny (the gate \
+         failed to block the reconfigure).\n--- peer-A stderr ---\n{a_captured}"
+    );
+    // (4) Data kept flowing: A admitted B's mesh/data (the verdict stayed allow).
+    assert!(
+        a_captured.contains("received mesh data"),
+        "peer-A never admitted any mesh/data — cannot show the verdict stayed at \
+         allow under the deny.\n--- peer-A stderr ---\n{a_captured}"
     );
 }

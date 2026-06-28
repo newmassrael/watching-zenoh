@@ -1498,6 +1498,7 @@ layer_c1y_cargo_test_routing_peer() {
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings \
+        && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,adminspace-write --quiet -- -D warnings \
         && cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet \
         && cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features "$access" --quiet -- -D warnings \
@@ -3876,7 +3877,12 @@ layer_e5_router_forward() {
 # single-session path is unchanged), so building it does not invalidate other
 # Layer E assertions.
 layer_e6_peer_mesh() {
-    (cd crates && cargo build -p wz-ap-demo --features routing-peer --quiet) || return 1
+    # R311y51 — the E6 binary is built with `adminspace-write` so the §5.23
+    # config-write GATE (permissions.write) is compiled in: the config-write e2es
+    # grant it with `--config-write-permit`, and the deny e2e omits it to witness
+    # the gate rejecting a write. The gate-OFF arm stays covered by C1y clippy
+    # (`--features routing-peer`, no adminspace-write).
+    (cd crates && cargo build -p wz-ap-demo --features routing-peer,adminspace-write --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the

@@ -189,6 +189,12 @@ fn main() -> ExitCode {
             // reconfigures the LIVE forwarder (the R311y46 Push-plane self-dispatch
             // + the Phase-1 reconfigure drive). Off by default.
             let config_writable = rest.iter().any(|a| a == "--config-writable");
+            // R311y51 (§5.23 adminspace-write) — `--config-write-permit` grants the
+            // permissions.write gate (default-deny, zenoh PermissionsConf write:false).
+            // Under `adminspace-write` a config-write PUT is APPLIED only with this
+            // flag; without it the write is DENIED. Off by default. Orthogonal to
+            // `--config-writable` (which HOSTS the write subscriber): host vs permit.
+            let config_write_permit = rest.iter().any(|a| a == "--config-write-permit");
             // R311y48 — `--put-key <keyexpr> --put-payload <text>`: originate a Put
             // carrying a SPECIFIC payload each app tick (vs `--publish`, which sends
             // a fixed marker). The wire driver a remote node uses to PUT another
@@ -207,6 +213,7 @@ fn main() -> ExitCode {
                     autoconnect,
                     config_queryable,
                     config_writable,
+                    config_write_permit,
                     put_key,
                     put_payload,
                 },

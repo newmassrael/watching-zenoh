@@ -79,27 +79,37 @@ pub struct AdminLocalData {
 }
 
 /// Admin-space access permissions — the embedder-supplied gate values for the
-/// `@/<zid>/<whatami>` admin queryable, the wz mirror of zenoh's
-/// `config.adminspace.permissions` (`zenoh-config` `PermissionsConf`, read by
-/// `send_request`, `adminspace.rs:457`). The `read` field is always present so
-/// `Session::declare_adminspace`'s signature is feature-toggle-independent; the
-/// GET gate that consults it is the `adminspace-read` atom (a separate cfg).
-/// (zenoh's `PermissionsConf` also carries `write` — that joins this struct when
-/// the `adminspace-write` atom lands, the gate that would consult it.)
+/// `@/<zid>/<whatami>` admin queryable + config-WRITE subscriber, the wz mirror
+/// of zenoh's `config.adminspace.permissions` (`zenoh-config` `PermissionsConf`).
+/// Both fields are always present so the declare signatures stay
+/// feature-toggle-independent; the GATES that consult them are separate atoms
+/// (`adminspace-read` for `read`, `adminspace-write` for `write`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdminSpacePermissions {
     /// Allow admin GETs. zenoh `permissions.read` (`adminspace.rs:457`),
-    /// default `true` (`zenoh-config` `PermissionsConf::default`, lib.rs:889).
+    /// default `true` (`zenoh-config` `PermissionsConf::default`, lib.rs:892).
     /// When `false` the admin queryable answers nothing — the querier receives
     /// only the terminating Final (zenoh replies a bare `ResponseFinal`,
     /// `adminspace.rs:462-467`).
     pub read: bool,
+    /// Allow admin config WRITEs (a PUT under `@/<zid>/<whatami>/config/**`).
+    /// zenoh `permissions.write`, checked at the top of the admin `send_push`
+    /// handler (`if !permissions().write { error!; return }`, `adminspace.rs:396`),
+    /// default `false` (`PermissionsConf::default`, lib.rs:893) — the asymmetry:
+    /// GET is permissive, config-WRITE is denied unless explicitly granted. The
+    /// gate that consults this value is the `adminspace-write` atom (a separate
+    /// cfg); [`parse_admin_config_write`] is where the check lives.
+    pub write: bool,
 }
 
 impl Default for AdminSpacePermissions {
-    /// zenoh's `PermissionsConf` default is `read: true` (permissive GET).
+    /// zenoh's `PermissionsConf` default is `read: true, write: false` (lib.rs:892-893)
+    /// — permissive GET, default-deny config-WRITE.
     fn default() -> Self {
-        Self { read: true }
+        Self {
+            read: true,
+            write: false,
+        }
     }
 }
 
@@ -312,6 +322,75 @@ pub fn answer_admin_query(
     }
 }
 
+/// R311y51 (§5.23 `adminspace-write`) — the typed intent a recognized admin
+/// config-WRITE PUT decodes to. MVP affordance (NOT zenoh — see the
+/// [`admin_config_write_key`] fidelity caveat): only the bespoke `acl-deny`
+/// sub-key; the full json5/json-pointer config engine is a deferred §5.23 layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminConfigWrite {
+    /// `.../config/acl-deny <keyexpr>` — deny the keyexpr carried in the payload.
+    AclDeny(String),
+}
+
+/// R311y51 (§5.23 `adminspace-write`) — the outcome of gating + decoding an admin
+/// config-WRITE PUT, so the caller logs each case as zenoh does (a permission
+/// deny is an `error`, `adminspace.rs:397`; a malformed / unknown write is benign).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminConfigWriteOutcome {
+    /// Permitted + recognized: the caller applies this intent.
+    Apply(AdminConfigWrite),
+    /// `permissions.write == false`: rejected before decode, the wz mirror of
+    /// zenoh's `if !permissions().write { error!; return }` (`adminspace.rs:396`).
+    Denied,
+    /// The PUT key is not under the `@/<zid>/<whatami>/config/` write prefix
+    /// (e.g. the bare `.../config` GET key the `/**` subscriber also matches) —
+    /// silently ignored, not a write.
+    NotAWrite,
+    /// A recognized sub-key with an unusable payload (an empty `acl-deny`).
+    Malformed,
+    /// An unrecognized sub-key — only `acl-deny` is decoded (the full json5
+    /// engine is deferred); the caller logs + ignores it.
+    UnknownKey(String),
+}
+
+/// R311y51 (§5.23 `adminspace-write`) — the Session-independent config-WRITE
+/// permission gate + decoder, the write-side SSOT mirror of [`answer_admin_query`]
+/// (the read SSOT). Gates on `permissions_write` FIRST — the wz mirror of zenoh's
+/// `if !conf.adminspace.permissions().write { return }` at the top of the admin
+/// `send_push` handler (`adminspace.rs:396`) — and only then strips `write_prefix`
+/// (the `@/<zid>/<whatami>/config/` prefix) and decodes the recognized sub-key.
+///
+/// The caller supplies `permissions_write`: under the `adminspace-write` cfg it is
+/// [`AdminSpacePermissions::write`] (default `false`, the zenoh asymmetry), else
+/// `true` (the gate compiled out — the pre-gate behavior), so this decoder stays
+/// feature-toggle-independent (the gate is the value, not a cfg here). The payload
+/// is decoded lossily then trimmed, byte-for-byte the demo's prior inline parse.
+pub fn parse_admin_config_write(
+    write_prefix: &str,
+    keyexpr: &str,
+    payload: &[u8],
+    permissions_write: bool,
+) -> AdminConfigWriteOutcome {
+    if !permissions_write {
+        return AdminConfigWriteOutcome::Denied;
+    }
+    let Some(subkey) = keyexpr.strip_prefix(write_prefix) else {
+        return AdminConfigWriteOutcome::NotAWrite;
+    };
+    match subkey {
+        "acl-deny" => {
+            let deny = String::from_utf8_lossy(payload);
+            let deny = deny.trim();
+            if deny.is_empty() {
+                AdminConfigWriteOutcome::Malformed
+            } else {
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(String::from(deny)))
+            }
+        }
+        other => AdminConfigWriteOutcome::UnknownKey(String::from(other)),
+    }
+}
+
 /// The OpenMetrics body the admin `@/<zid>/<whatami>/metrics` GET replies with
 /// (`text/plain`). Byte-faithful to zenoh's UNCONDITIONAL build-info block
 /// (`adminspace.rs:714-720`): a `zenoh_build` gauge carrying the node version.
@@ -491,9 +570,79 @@ mod tests {
     }
 
     #[test]
-    fn permissions_default_matches_zenoh_read_true() {
-        // zenoh PermissionsConf::default() = read:true (lib.rs:889).
+    fn permissions_default_matches_zenoh_read_true_write_false() {
+        // zenoh PermissionsConf::default() = read:true, write:false (lib.rs:892-893)
+        // — permissive GET, default-deny config-WRITE (the asymmetry).
         assert!(AdminSpacePermissions::default().read);
+        assert!(!AdminSpacePermissions::default().write);
+    }
+
+    // R311y51 — the config-WRITE gate + decoder (the write-side SSOT). The prefix
+    // a config sub-key hangs under: `admin_config_key` + the separating slash.
+    const WRITE_PREFIX: &str = "@/a1b2/peer/config/";
+
+    #[test]
+    fn parse_config_write_acl_deny_when_permitted() {
+        // permissions.write=true + a recognized acl-deny -> Apply, payload trimmed
+        // (byte-for-byte the demo's prior from_utf8_lossy().trim() parse).
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/acl-deny",
+            b"  mesh/data  ",
+            true,
+        );
+        assert_eq!(
+            out,
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(String::from("mesh/data")))
+        );
+    }
+
+    #[test]
+    fn parse_config_write_denied_when_permission_off() {
+        // permissions.write=false -> Denied, the adminspace-write gate (zenoh
+        // `if !permissions().write { return }`, adminspace.rs:396).
+        let out = parse_admin_config_write(
+            WRITE_PREFIX,
+            "@/a1b2/peer/config/acl-deny",
+            b"mesh/data",
+            false,
+        );
+        assert_eq!(out, AdminConfigWriteOutcome::Denied);
+    }
+
+    #[test]
+    fn parse_config_write_gate_precedes_decode() {
+        // The gate is checked BEFORE strip/decode (zenoh order): even a well-formed
+        // acl-deny is Denied when the permission is off — the deny does not depend
+        // on the payload being valid.
+        let out = parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config/acl-deny", b"", false);
+        assert_eq!(out, AdminConfigWriteOutcome::Denied);
+    }
+
+    #[test]
+    fn parse_config_write_empty_acl_deny_is_malformed() {
+        let out =
+            parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config/acl-deny", b"   ", true);
+        assert_eq!(out, AdminConfigWriteOutcome::Malformed);
+    }
+
+    #[test]
+    fn parse_config_write_unknown_subkey() {
+        // Only acl-deny is decoded; the full json5 engine is deferred §5.23.
+        let out =
+            parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config/batch-size", b"100", true);
+        assert_eq!(
+            out,
+            AdminConfigWriteOutcome::UnknownKey(String::from("batch-size"))
+        );
+    }
+
+    #[test]
+    fn parse_config_write_bare_config_key_is_not_a_write() {
+        // The bare `.../config` GET key the `/**` write subscriber also matches has
+        // no trailing sub-key -> NotAWrite (the demo's prior `else { return }`).
+        let out = parse_admin_config_write(WRITE_PREFIX, "@/a1b2/peer/config", b"x", true);
+        assert_eq!(out, AdminConfigWriteOutcome::NotAWrite);
     }
 
     #[cfg(feature = "adminspace-metrics")]

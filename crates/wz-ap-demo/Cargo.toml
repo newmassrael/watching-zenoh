@@ -184,6 +184,13 @@ routing-peer = [
     # applies (the inert mirror), and the wire-observable ACL flip cannot happen.
     "wz/config-mutate-runtime",
 ]
+# R311y51 (§5.23 adminspace-write) — the permissions.write GATE on the config-write
+# host. SEPARATE from routing-peer (a distinct toggle) so both gate arms stay
+# compiled: `--features routing-peer,adminspace-write` = gate ON (run_peer consults
+# --config-write-permit, default-deny), `--features routing-peer` = gate OFF (every
+# write applies, the pre-y51 path). The run_peer config-write handler holds the
+# cfg(feature="adminspace-write") site. Layer E6 builds the gate-ON binary.
+adminspace-write = ["wz/adminspace-write"]
 
 [lints]
 workspace = true

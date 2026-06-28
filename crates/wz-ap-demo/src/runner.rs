@@ -1246,8 +1246,15 @@ pub(crate) struct PeerOpts {
     pub config_queryable: bool,
     /// R311y48 (§5.23 Phase 3b) — host a config-WRITE subscriber on
     /// `@/<zid>/peer/config/**` so a remote PUT reconfigures this peer's live
-    /// forwarder (the `--config-writable` opt-in).
+    /// forwarder (the `--config-writable` opt-in). HOSTS the surface; whether an
+    /// arriving write is applied is [`config_write_permit`](Self::config_write_permit).
     pub config_writable: bool,
+    /// R311y51 (§5.23 `adminspace-write`) — grant the `permissions.write` gate so
+    /// a received config-WRITE is APPLIED. Default-deny (zenoh `PermissionsConf`
+    /// `write:false`): under the `adminspace-write` cfg a PUT is DENIED without
+    /// this; with the gate compiled out every PUT applies. Orthogonal to
+    /// [`config_writable`](Self::config_writable) — host vs permit.
+    pub config_write_permit: bool,
     /// R311y48 — originate a Put to this key each app tick carrying
     /// [`put_payload`](Self::put_payload) (the wire driver for a config-write
     /// PUT). Inert unless both are set.
@@ -1271,6 +1278,7 @@ pub(crate) async fn run_peer(
     let autoconnect = opts.autoconnect;
     let config_queryable = opts.config_queryable;
     let config_writable = opts.config_writable;
+    let config_write_permit = opts.config_write_permit;
     let put_key = opts.put_key.as_deref();
     let put_payload = opts.put_payload.as_deref();
     use crate::args::NodeKind;
@@ -1558,7 +1566,10 @@ pub(crate) async fn run_peer(
     // ONLY (parse + stash the deny keyexpr into `pending_acl_deny`); the app-tick
     // loop applies it (intent->reconfigure), where `&forwarder` is reachable.
     if config_writable {
-        use wz::runtime_tokio::adminspace::{admin_config_key, admin_config_write_key};
+        use wz::runtime_tokio::adminspace::{
+            admin_config_key, admin_config_write_key, parse_admin_config_write, AdminConfigWrite,
+            AdminConfigWriteOutcome,
+        };
         use wz::runtime_tokio::sink::SampleView;
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
         let zid_hex = zid_to_zenoh_hex(&params.zid);
@@ -1572,34 +1583,53 @@ pub(crate) async fn run_peer(
             p.push('/');
             p
         };
+        // R311y51 (§5.23 adminspace-write) — the `permissions.write` gate, the
+        // write-side mirror of the adminspace-read GET gate. `--config-writable`
+        // HOSTS the write subscriber; `--config-write-permit` PERMITS the writes it
+        // receives (two orthogonal controls — the write analogue of
+        // declare_adminspace vs declare_adminspace_with_permissions). Under the
+        // `adminspace-write` cfg the gate consults the permit (default-deny, zenoh
+        // PermissionsConf write:false); with the gate compiled out every write
+        // applies (the pre-y51 behavior). The flag is parsed either way
+        // (signature-stable), inert when the gate is elided.
+        #[cfg(feature = "adminspace-write")]
+        let write_permitted = config_write_permit;
+        #[cfg(not(feature = "adminspace-write"))]
+        let write_permitted = {
+            let _ = config_write_permit;
+            true
+        };
         let pending = pending_acl_deny.clone();
         let handler = move |sample: &dyn SampleView| {
-            let ke = sample.keyexpr();
-            // Only PUTs UNDER the config prefix carry a sub-key; the bare
-            // `.../config` GET key (no trailing sub-key) is not a write.
-            let Some(subkey) = ke.strip_prefix(&write_prefix) else {
-                return;
-            };
-            match subkey {
-                // `.../config/acl-deny <keyexpr>`: deny the keyexpr in the payload.
-                "acl-deny" => {
-                    let deny_kx = String::from_utf8_lossy(sample.payload()).trim().to_string();
-                    if deny_kx.is_empty() {
-                        log::warn!(
-                            "wz-ap-demo peer: config-write acl-deny with empty payload; ignored"
-                        );
-                        return;
-                    }
+            // Gate (permissions.write) + decode via the wz-session-core SSOT, the
+            // write-side counterpart of answer_admin_query.
+            match parse_admin_config_write(
+                &write_prefix,
+                sample.keyexpr(),
+                sample.payload(),
+                write_permitted,
+            ) {
+                AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(deny_kx)) => {
                     log::info!("wz-ap-demo peer: config-write received acl-deny {deny_kx}");
                     *pending.borrow_mut() = Some(deny_kx);
                 }
-                // Any other sub-key: the full json5/json-pointer config engine is a
-                // deferred §5.23 layer; recognize only `acl-deny` for now.
-                other => log::warn!(
-                    "wz-ap-demo peer: config-write unknown key '{other}' (only 'acl-deny' \
-                     is recognized; the full json5 config engine is a deferred §5.23 \
-                     layer); ignored"
+                // permissions.write=false — zenoh logs this at error (adminspace.rs:397).
+                AdminConfigWriteOutcome::Denied => log::error!(
+                    "wz-ap-demo peer: config-write DENIED \
+                     (adminspace.permissions.write=false; grant with --config-write-permit); \
+                     ignored {}",
+                    sample.keyexpr()
                 ),
+                AdminConfigWriteOutcome::Malformed => {
+                    log::warn!("wz-ap-demo peer: config-write acl-deny with empty payload; ignored")
+                }
+                // The full json5/json-pointer config engine is a deferred §5.23 layer.
+                AdminConfigWriteOutcome::UnknownKey(key) => log::warn!(
+                    "wz-ap-demo peer: config-write unknown key '{key}' (only 'acl-deny' is \
+                     recognized; the full json5 config engine is a deferred §5.23 layer); ignored"
+                ),
+                // The bare `.../config` GET key the `/**` subscriber also matches.
+                AdminConfigWriteOutcome::NotAWrite => {}
             }
         };
         match forwarder.register_local_subscriber(&write_key, Box::new(handler)) {

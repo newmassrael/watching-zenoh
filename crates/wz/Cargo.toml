@@ -807,7 +807,12 @@ adminspace-plugins-handlers = []
 # R311y36 — adminspace-read is now a real cfg gate (the permissions.read GET
 # gate); forward to the runtime cfg site, not a no-op `= []`.
 adminspace-read = ["wz-runtime-tokio?/adminspace-read"]
-adminspace-write = []
+# R311y51 — adminspace-write is now a real cfg gate (the permissions.write gate
+# on the admin config-WRITE PUT path); forward to the runtime cfg site, not a
+# no-op `= []` (the [[feedback-facade-forward-separate-edit]] dead-stub trap).
+# The active cfg site is the wz-ap-demo config-write host; this facade composes
+# the runtime feature for a future library write host.
+adminspace-write = ["wz-runtime-tokio?/adminspace-write"]
 config-change-notifier = []
 config-json-pointer-access = []
 config-mutate-runtime = ["wz-runtime-tokio?/config-mutate-runtime"]

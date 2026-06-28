@@ -2140,7 +2140,10 @@ fn declare_adminspace_read_false_denies_get_with_final_only() {
         .declare_adminspace_with_permissions(
             "0.9.9",
             Vec::new(),
-            AdminSpacePermissions { read: false },
+            AdminSpacePermissions {
+                read: false,
+                ..Default::default()
+            },
         )
         .expect("adminspace-core ON in this build");
 
