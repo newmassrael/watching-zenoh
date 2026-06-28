@@ -1531,6 +1531,12 @@ layer_c1y_cargo_test_routing_peer() {
 # before this lane. storage-aligner is the maximal replication-side feature (it
 # implies storage-replication -> storage-backend), so two configs exercise every
 # storage driver module:
+#   0. R311y55 — the wz-session-core storage KERNEL modules (storage_backend /
+#      storage_state / storage_volume) are gated on `storage-backend` (off-default),
+#      so `cargo test --workspace` never compiled their unit tests either; this lane
+#      now runs `-p wz-session-core --features storage-backend --lib storage` to
+#      cover them — the §5.24 Volume/Capability/MemoryVolume (storage_volume) AND
+#      the previously-uncovered storage_backend/storage_state kernel tests;
 #   1. runs the storage_* lib tests (storage_service / storage_replication_service
 #      / storage_aligner_service) under `--features storage-aligner`, and the
 #      History::All tests under `--features storage-history`;
@@ -1552,6 +1558,7 @@ layer_c1y_cargo_test_routing_peer() {
 # excludes integration tests, so the e2e needs its own `--test` invocation.
 layer_c1z_cargo_test_storage_driver() {
     (cd crates \
+        && cargo test -p wz-session-core --features storage-backend --lib storage --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet \

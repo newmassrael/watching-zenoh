@@ -839,6 +839,19 @@ pub mod storage_backend;
 #[cfg(feature = "storage-backend")]
 pub mod storage_state;
 
+/// R311y55 — the §5.24 storage *Volume* layer: the FACTORY
+/// ([`storage_volume::Volume`]) above the §5.11 per-store
+/// [`storage_backend::StorageBackend`], plus the [`storage_volume::Capability`] /
+/// [`storage_volume::Persistence`] guarantees and the base in-memory
+/// [`storage_volume::MemoryVolume`]. The wz mirror of zenoh
+/// `zenoh-backend-traits` `Volume` + `MemoryBackend` — the keystone a storage
+/// MANAGER drives to host N named storages. FOUNDATIONAL: always compiled under
+/// `storage-backend` (no own cfg toggle); the toggleable manager atoms
+/// (multi-storage-host / strip-prefix / GC) compose ON it once
+/// `storage-mgr-config` lands.
+#[cfg(feature = "storage-backend")]
+pub mod storage_volume;
+
 /// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
 /// `History::All` backend ([`storage_history::HistoryStorage`]) that keeps
 /// every version per key, the multi-version counterpart of
