@@ -97,6 +97,23 @@ use crate::session_glue::SessionLinkActions;
 /// from different worker threads.
 type SharedState<B> = Arc<Mutex<StorageState<B>>>;
 
+/// R311y59 (§5.24 `storage-mgr-complete-flag`) — resolve the storage queryable's
+/// COMPLETE bit. Under the cfg the configured value drives it (a storage may be
+/// declared partial / non-authoritative); with the gate compiled out the queryable
+/// is always COMPLETE (the pre-y59 behavior — a storage is the authoritative
+/// answerer for its keyexpr). The library-resident per-call gate, the storage twin
+/// of the adminspace `admin_write_permit` idiom; [`StorageService::declare_with_backend`]
+/// feeds the result to [`QueryableOptions::with_complete`].
+#[cfg(feature = "storage-mgr-complete-flag")]
+fn storage_queryable_complete(configured: bool) -> bool {
+    configured
+}
+#[cfg(not(feature = "storage-mgr-complete-flag"))]
+fn storage_queryable_complete(configured: bool) -> bool {
+    let _ = configured;
+    true
+}
+
 /// A live storage service bound to a [`Session`]: owns the capture
 /// [`Subscriber`], the answering [`Queryable`], and the shared
 /// [`StorageState`] over a backend `B` (defaulting to the in-memory
@@ -128,14 +145,19 @@ where
     /// module-level fallback note) — must be non-empty.
     ///
     /// The queryable is declared COMPLETE
-    /// ([`QueryableOptions::with_complete`]): a storage is an authoritative
-    /// answerer for its keyexpr, the BestMatching producer signal a router
-    /// routes a get to (the query-routing track).
+    /// ([`QueryableOptions::with_complete`]) when `complete` is `true`: a storage
+    /// is then an authoritative answerer for its keyexpr, the BestMatching producer
+    /// signal a router routes a get to (the query-routing track). R311y59 — under
+    /// `storage-mgr-complete-flag` a `false` declares a PARTIAL storage (zenoh
+    /// `StorageConfig.complete`); with that gate off the value is ignored and the
+    /// queryable is always complete (the pre-y59 behavior). The
+    /// [`declare`](StorageService::declare) shorthand passes `true`.
     pub fn declare_with_backend(
         session: &Session<R, T, Unicast>,
         keyexpr: impl Into<String>,
         local_zid: Vec<u8>,
         backend: B,
+        complete: bool,
     ) -> Result<Self, StorageServiceError> {
         if local_zid.is_empty() {
             return Err(StorageServiceError::InvalidZid);
@@ -168,7 +190,7 @@ where
         let query_state = Arc::clone(&state);
         let queryable = session.declare_queryable(
             keyexpr,
-            QueryableOptions::default().with_complete(true),
+            QueryableOptions::default().with_complete(storage_queryable_complete(complete)),
             move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
                 let guard = query_state.lock().expect("storage state mutex poisoned");
                 guard.answer_into(view, out);
@@ -221,7 +243,10 @@ where
         keyexpr: impl Into<String>,
         local_zid: Vec<u8>,
     ) -> Result<Self, StorageServiceError> {
-        Self::declare_with_backend(session, keyexpr, local_zid, MemoryStorage::new())
+        // The shorthand declares a COMPLETE (authoritative) storage; a partial
+        // storage uses declare_with_backend with `complete: false` (under
+        // storage-mgr-complete-flag).
+        Self::declare_with_backend(session, keyexpr, local_zid, MemoryStorage::new(), true)
     }
 }
 
@@ -269,6 +294,30 @@ mod tests {
 
     fn fresh() -> StorageState<MemoryStorage> {
         StorageState::new(MemoryStorage::new())
+    }
+
+    #[test]
+    fn queryable_complete_resolves_per_gate() {
+        // R311y59 — the storage-mgr-complete-flag gate (the storage twin of the
+        // adminspace admin_write_permit idiom): under the cfg the configured value
+        // drives the queryable's COMPLETE bit; with the gate compiled out the
+        // queryable is always complete (the pre-y59 authoritative behavior).
+        #[cfg(feature = "storage-mgr-complete-flag")]
+        {
+            assert!(storage_queryable_complete(true));
+            assert!(
+                !storage_queryable_complete(false),
+                "a PARTIAL storage is declarable under the gate"
+            );
+        }
+        #[cfg(not(feature = "storage-mgr-complete-flag"))]
+        {
+            assert!(storage_queryable_complete(true));
+            assert!(
+                storage_queryable_complete(false),
+                "gate elided -> always complete"
+            );
+        }
     }
 
     // A recording ReplyOut: captures (keyexpr, payload) per reply so a

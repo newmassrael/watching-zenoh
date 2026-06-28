@@ -825,7 +825,9 @@ storage-backend-filesystem = []
 storage-backend-memory-volume = []
 storage-backend-rocksdb = []
 storage-backend-volume-trait = []
-storage-mgr-complete-flag = []
+# R311y59 — storage-mgr-complete-flag is now a real cfg gate (the config-driven
+# queryable COMPLETE bit); forward to the wz-runtime-tokio cfg site, not `= []`.
+storage-mgr-complete-flag = ["wz-runtime-tokio?/storage-mgr-complete-flag"]
 storage-mgr-config = []
 storage-mgr-dynamic-volume-loading = []
 storage-mgr-garbage-collection = []
