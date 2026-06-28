@@ -328,6 +328,8 @@ storage-aligner = [
 # module); the runtime's own `storage-backend` driver is orthogonal, so this does
 # not pull it.
 storage-mgr-multi-storage-host = ["wz-session-core/storage-mgr-multi-storage-host"]
+# R311y58 — forward the wz-session-core strip_prefix/restore key-transform logic.
+storage-mgr-strip-prefix = ["wz-session-core/storage-mgr-strip-prefix"]
 codec-init-body = ["wz-codecs/codec-init-body", "wz-session-core/codec-init-body"]
 codec-open-body = ["wz-codecs/codec-open-body", "wz-session-core/codec-open-body"]
 # R311b — codec-keep-alive forwards the wz-codecs gate. Session lease

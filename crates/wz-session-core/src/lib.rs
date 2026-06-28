@@ -873,6 +873,16 @@ pub mod storage_config;
 #[cfg(feature = "storage-mgr-multi-storage-host")]
 pub mod storage_manager;
 
+/// R311y58 — the §5.24 `storage-mgr-strip-prefix` atom: the
+/// [`storage_strip_prefix::strip_prefix`] / [`storage_strip_prefix::restore_prefix`]
+/// key transforms a storage manager applies so a storage holds keys RELATIVE to a
+/// mount point (the wz mirror of zenoh's `strip_prefix` / `prefix`). Closes the
+/// R311wt aligner strip_prefix gap at the LOGIC level; the live manager/backend
+/// application (which needs a §5.11 backend Option-key change for the exact-match
+/// none-key) is a documented follow-up.
+#[cfg(feature = "storage-mgr-strip-prefix")]
+pub mod storage_strip_prefix;
+
 /// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
 /// `History::All` backend ([`storage_history::HistoryStorage`]) that keeps
 /// every version per key, the multi-version counterpart of

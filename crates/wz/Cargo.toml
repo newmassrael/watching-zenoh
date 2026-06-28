@@ -834,7 +834,10 @@ storage-mgr-garbage-collection = []
 # site (via wz-runtime-tokio), not a no-op `= []` (the
 # [[feedback-facade-forward-separate-edit]] trap).
 storage-mgr-multi-storage-host = ["wz-runtime-tokio?/storage-mgr-multi-storage-host"]
-storage-mgr-strip-prefix = []
+# R311y58 — storage-mgr-strip-prefix is now a real cfg gate (the strip_prefix /
+# restore_prefix key transforms); forward through wz-runtime-tokio to the
+# wz-session-core cfg site, not a no-op `= []`.
+storage-mgr-strip-prefix = ["wz-runtime-tokio?/storage-mgr-strip-prefix"]
 storage-mgr-wildcard-updates = []
 
 # ----- §5.25 ext-pubsub (10 atomic, all reserved) -----

@@ -1540,7 +1540,10 @@ layer_c1y_cargo_test_routing_peer() {
 #      R311y57 — a SECOND wz-session-core line runs `--features
 #      storage-mgr-multi-storage-host --lib storage` (the storage_manager module is
 #      gated on that feature, NOT storage-backend, so the line above does not
-#      compile it) + clippy + a `wz` facade build, covering the cfg-ACTIVE manager;
+#      compile it) + clippy + a `wz` facade build, covering the cfg-ACTIVE manager.
+#      R311y58 — likewise a `--features storage-mgr-strip-prefix --lib
+#      storage_strip_prefix` line (+ clippy + facade) covers the cfg-ACTIVE
+#      strip_prefix/restore key transforms (gated on their own feature);
 #   1. runs the storage_* lib tests (storage_service / storage_replication_service
 #      / storage_aligner_service) under `--features storage-aligner`, and the
 #      History::All tests under `--features storage-history`;
@@ -1566,6 +1569,9 @@ layer_c1z_cargo_test_storage_driver() {
         && cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-multi-storage-host --quiet \
+        && cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet \
+        && cargo clippy -p wz-session-core --features storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
+        && cargo build -p wz --features storage-mgr-strip-prefix --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet \
