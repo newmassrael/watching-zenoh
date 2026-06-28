@@ -1536,7 +1536,11 @@ layer_c1y_cargo_test_routing_peer() {
 #      so `cargo test --workspace` never compiled their unit tests either; this lane
 #      now runs `-p wz-session-core --features storage-backend --lib storage` to
 #      cover them — the §5.24 Volume/Capability/MemoryVolume (storage_volume) AND
-#      the previously-uncovered storage_backend/storage_state kernel tests;
+#      the previously-uncovered storage_backend/storage_state kernel tests.
+#      R311y57 — a SECOND wz-session-core line runs `--features
+#      storage-mgr-multi-storage-host --lib storage` (the storage_manager module is
+#      gated on that feature, NOT storage-backend, so the line above does not
+#      compile it) + clippy + a `wz` facade build, covering the cfg-ACTIVE manager;
 #   1. runs the storage_* lib tests (storage_service / storage_replication_service
 #      / storage_aligner_service) under `--features storage-aligner`, and the
 #      History::All tests under `--features storage-history`;
@@ -1559,6 +1563,9 @@ layer_c1y_cargo_test_routing_peer() {
 layer_c1z_cargo_test_storage_driver() {
     (cd crates \
         && cargo test -p wz-session-core --features storage-backend --lib storage --quiet \
+        && cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet \
+        && cargo clippy -p wz-session-core --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
+        && cargo build -p wz --features storage-mgr-multi-storage-host --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --lib storage --quiet \
         && cargo test -p wz-runtime-tokio --features storage-aligner --test storage_aligner_convergence_e2e --quiet \
         && cargo test -p wz-runtime-tokio --features storage-history --lib storage --quiet \

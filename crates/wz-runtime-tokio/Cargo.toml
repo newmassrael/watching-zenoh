@@ -323,6 +323,11 @@ storage-aligner = [
     "query-consolidation",
     "query-timeout",
 ]
+# R311y57 — storage-mgr-multi-storage-host (§5.24): forward the wz-session-core
+# kernel StorageManager atom. Kernel-only (the manager is a sync wz-session-core
+# module); the runtime's own `storage-backend` driver is orthogonal, so this does
+# not pull it.
+storage-mgr-multi-storage-host = ["wz-session-core/storage-mgr-multi-storage-host"]
 codec-init-body = ["wz-codecs/codec-init-body", "wz-session-core/codec-init-body"]
 codec-open-body = ["wz-codecs/codec-open-body", "wz-session-core/codec-open-body"]
 # R311b — codec-keep-alive forwards the wz-codecs gate. Session lease

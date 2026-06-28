@@ -863,6 +863,16 @@ pub mod storage_volume;
 #[cfg(feature = "storage-backend")]
 pub mod storage_config;
 
+/// R311y57 — the §5.24 `storage-mgr-multi-storage-host` atom: the
+/// [`storage_manager::StorageManager`] that hosts N named storages over a registry
+/// of named [`storage_volume::Volume`]s, creating each backend from its
+/// [`storage_config::StorageConfig`] via the volume (the wz mirror of zenoh's
+/// plugin-storage-manager `spawn_storage`). The first cfg-ACTIVE storage-manager
+/// atom (the data-model + volume keystones are FOUNDATIONAL); composes
+/// `storage-backend`.
+#[cfg(feature = "storage-mgr-multi-storage-host")]
+pub mod storage_manager;
+
 /// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
 /// `History::All` backend ([`storage_history::HistoryStorage`]) that keeps
 /// every version per key, the multi-version counterpart of

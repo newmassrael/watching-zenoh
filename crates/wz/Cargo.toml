@@ -829,7 +829,11 @@ storage-mgr-complete-flag = []
 storage-mgr-config = []
 storage-mgr-dynamic-volume-loading = []
 storage-mgr-garbage-collection = []
-storage-mgr-multi-storage-host = []
+# R311y57 — storage-mgr-multi-storage-host is now a real cfg gate (the
+# StorageManager hosting N named storages); forward to the wz-session-core cfg
+# site (via wz-runtime-tokio), not a no-op `= []` (the
+# [[feedback-facade-forward-separate-edit]] trap).
+storage-mgr-multi-storage-host = ["wz-runtime-tokio?/storage-mgr-multi-storage-host"]
 storage-mgr-strip-prefix = []
 storage-mgr-wildcard-updates = []
 

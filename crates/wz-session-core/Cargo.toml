@@ -623,6 +623,13 @@ storage-replication = ["storage-backend", "dep:xxhash-rust"]
 # wz facade forward this same-named feature once the aligner queryable +
 # query driver lands.
 storage-aligner = ["storage-replication"]
+# R311y57 — storage-mgr-multi-storage-host (§5.24): the StorageManager that hosts
+# N named storages over a volume registry, creating each backend from its
+# StorageConfig via the volume (the `storage_manager` module). The first
+# cfg-ACTIVE storage-manager atom; composes storage-backend (it consumes the
+# Volume factory + StorageConfig + StorageBackend, all gated there). The async
+# per-storage service driver is the SEPARATE wz-runtime-tokio §5.11 storage track.
+storage-mgr-multi-storage-host = ["storage-backend"]
 
 # R311y22b — no [build-dependencies]: the statechart codegen moved to the
 # committed out/wz-session-core/*_sm.rs via the `xtask` codegen SSOT, so this

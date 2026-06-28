@@ -15,15 +15,19 @@
 //! strip-prefix, GC, wildcard-updates) compose ON this once `storage-mgr-config`
 //! lands.
 //!
-//! MVP DIVERGENCE (documented, the §5.23 acl-deny-affordance precedent): zenoh's
-//! `Volume::create_storage(props: StorageConfig)` is async + config-driven and
-//! returns `Box<dyn Storage>`; wz's [`Volume::create_storage`] is sync +
-//! config-free for now — the declarative `StorageConfig` is the SEPARATE
-//! `storage-mgr-config` atom, and zenoh's `get_admin_status` (admin JSON) belongs
-//! to the adminspace layer, not this runtime-agnostic kernel seam. Both arrive
-//! when those atoms land; the factory shape (capability + create) is the keystone.
+//! R311y57 — [`Volume::create_storage`] now takes the declarative
+//! [`StorageConfig`] (the storage-mgr-config data model), closing the R311y55
+//! config-free MVP: the manager passes each storage's config to its volume to
+//! create the backend. Remaining divergence from zenoh: wz's `create_storage` is
+//! SYNC (zenoh's is `async` + returns `Box<dyn Storage>`), and `get_admin_status`
+//! (admin JSON) belongs to the adminspace layer, not this runtime-agnostic kernel
+//! seam. The in-memory backend is config-agnostic (the config's key_expr /
+//! strip_prefix / complete are the MANAGER's concern, applied above the backend —
+//! exactly as zenoh's MemoryBackend ignores most of the config), so MemoryVolume
+//! accepts the config but does not consult it.
 
 use crate::storage_backend::{History, MemoryStorage, StorageBackend};
+use crate::storage_config::StorageConfig;
 use alloc::boxed::Box;
 
 /// The crash-persistence guarantee of a volume's storages — zenoh `Persistence`
@@ -57,17 +61,18 @@ pub struct Capability {
 /// The storage-backend FACTORY seam — zenoh `Volume`
 /// (`backend-traits/lib.rs:184`). A volume advertises its [`Capability`] and
 /// creates per-storage [`StorageBackend`] instances; ONE volume backs N named
-/// storages in the manager. (MVP: [`create_storage`](Volume::create_storage) is
-/// config-free — see the module doc on the deferred `StorageConfig`.)
+/// storages in the manager.
 pub trait Volume {
     /// This volume's guarantees (zenoh `Volume::get_capability`). The manager
     /// consults it before routing a storage's data through the newer-wins gate.
     fn capability(&self) -> Capability;
 
-    /// Create a fresh per-storage backend instance (zenoh
-    /// `Volume::create_storage`). Boxed so the manager holds heterogeneous
-    /// storages behind the [`StorageBackend`] seam.
-    fn create_storage(&self) -> Box<dyn StorageBackend>;
+    /// Create a per-storage backend instance for `config` (zenoh
+    /// `Volume::create_storage(props)`). Boxed so the manager holds heterogeneous
+    /// storages behind the [`StorageBackend`] seam. A config-agnostic backend
+    /// (e.g. in-memory) may ignore `config` — the manager applies the config's
+    /// key_expr / strip_prefix / complete above the backend.
+    fn create_storage(&self, config: &StorageConfig) -> Box<dyn StorageBackend>;
 }
 
 /// The built-in in-memory volume — zenoh `MemoryBackend`
@@ -87,7 +92,10 @@ impl Volume for MemoryVolume {
         }
     }
 
-    fn create_storage(&self) -> Box<dyn StorageBackend> {
+    fn create_storage(&self, _config: &StorageConfig) -> Box<dyn StorageBackend> {
+        // Config-agnostic: a fresh in-memory store. The config's key_expr /
+        // strip_prefix / complete are applied by the manager above the backend
+        // (faithful to zenoh's MemoryBackend, which likewise just makes a store).
         Box::new(MemoryStorage::new())
     }
 }
@@ -130,7 +138,8 @@ mod tests {
         // round-trip), and two create_storage() calls are INDEPENDENT stores
         // (the manager hosts each named storage separately).
         let vol = MemoryVolume;
-        let mut s1 = vol.create_storage();
+        let cfg = StorageConfig::new("demo", "demo/**", "mem");
+        let mut s1 = vol.create_storage(&cfg);
         assert_eq!(
             s1.put("demo/a", vec![1, 2, 3], None, ts(10)),
             StorageInsertionResult::Inserted
@@ -140,7 +149,7 @@ mod tests {
             vec![1, 2, 3]
         );
 
-        let s2 = vol.create_storage();
+        let s2 = vol.create_storage(&cfg);
         assert!(
             s2.get("demo/a").is_none(),
             "a second storage from the same volume is an independent instance"
