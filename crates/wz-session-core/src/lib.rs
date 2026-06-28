@@ -852,6 +852,17 @@ pub mod storage_state;
 #[cfg(feature = "storage-backend")]
 pub mod storage_volume;
 
+/// R311y56 — the §5.24 storage manager *config* data model
+/// ([`storage_config::StorageConfig`] + [`storage_config::GarbageCollectionConfig`]):
+/// the declarative description of one named storage (name / key_expr / volume_id /
+/// complete / strip_prefix / GC) a storage MANAGER reads to create + drive it. The
+/// wz mirror of zenoh `zenoh-backend-traits` `StorageConfig`. FOUNDATIONAL: the
+/// typed model only; the behaviors that read each field (complete-flag /
+/// strip-prefix / garbage-collection) + the consumer (multi-storage-host) are
+/// their own atoms.
+#[cfg(feature = "storage-backend")]
+pub mod storage_config;
+
 /// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
 /// `History::All` backend ([`storage_history::HistoryStorage`]) that keeps
 /// every version per key, the multi-version counterpart of
