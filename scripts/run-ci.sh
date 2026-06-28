@@ -1558,7 +1558,16 @@ layer_c1y_cargo_test_routing_peer() {
 #      Volume-created backend + a strip-configured StorageConfig drive a live
 #      StorageService end to end. Both close never-run gaps the existing combos
 #      missed (the e2e needs strip + declare-subscriber + pubsub-allow-loop, which
-#      no prior storage lane enabled together);
+#      no prior storage lane enabled together). R311y62 — the runtime-side
+#      storage MANAGER (storage_manager_service): a
+#      `--features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service`
+#      line (+ clippy) runs the RuntimeStorageManager tests incl the
+#      hosts-N-strip-storages e2e, and a bare
+#      `clippy --features storage-mgr-multi-storage-host` line proves the
+#      cfg(not(strip)) arm + the module compile standalone (the feature now
+#      also pulls the runtime storage-backend driver). The kernel
+#      create_backend rides the storage-mgr-multi-storage-host `--lib storage`
+#      line above;
 #   1. runs the storage_* lib tests (storage_service / storage_replication_service
 #      / storage_aligner_service) under `--features storage-aligner`, and the
 #      History::All tests under `--features storage-history`;
@@ -1584,6 +1593,9 @@ layer_c1z_cargo_test_storage_driver() {
         && cargo test -p wz-session-core --features storage-mgr-multi-storage-host --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-multi-storage-host --quiet \
+        && cargo test -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --lib storage_manager_service --quiet \
+        && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host,declare-subscriber,pubsub-allow-loop,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --features storage-mgr-multi-storage-host --all-targets --quiet -- -D warnings \
         && cargo test -p wz-session-core --features storage-mgr-strip-prefix --lib storage_strip_prefix --quiet \
         && cargo clippy -p wz-session-core --features storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet \

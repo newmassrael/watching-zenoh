@@ -748,6 +748,20 @@ pub mod storage_replication_service;
 #[cfg(feature = "storage-aligner")]
 pub mod storage_aligner_service;
 
+/// R311y62 — the storage MANAGER DRIVER (§5.24): the AP tokio binding that
+/// hosts N live [`storage_service::StorageService`]s over a volume registry.
+/// A [`storage_manager_service::RuntimeStorageManager`] reuses the kernel
+/// [`wz_session_core::storage_manager::StorageManager`] for volume
+/// registration + backend creation, then declares one live StorageService per
+/// [`StorageConfig`](wz_session_core::storage_config::StorageConfig) and holds
+/// it by name — the live-service counterpart of the sync kernel manager (which
+/// holds bare backends). Dropping the manager undeclares every hosted storage
+/// (each StorageService's RAII Drop). Gated on `storage-mgr-multi-storage-host`
+/// (which forwards the kernel manager + pulls `storage-backend` for the
+/// service).
+#[cfg(feature = "storage-mgr-multi-storage-host")]
+pub mod storage_manager_service;
+
 /// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
 /// foundation. Binds once and holds N concurrent peer faces (bind -> accept
 /// loop -> per-face open + drive), the increment zenoh's role-agnostic

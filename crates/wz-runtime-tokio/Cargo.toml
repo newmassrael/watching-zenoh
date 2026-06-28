@@ -324,10 +324,14 @@ storage-aligner = [
     "query-timeout",
 ]
 # R311y57 — storage-mgr-multi-storage-host (§5.24): forward the wz-session-core
-# kernel StorageManager atom. Kernel-only (the manager is a sync wz-session-core
-# module); the runtime's own `storage-backend` driver is orthogonal, so this does
-# not pull it.
-storage-mgr-multi-storage-host = ["wz-session-core/storage-mgr-multi-storage-host"]
+# kernel StorageManager atom. R311y62 — also pulls the runtime `storage-backend`
+# driver: the runtime-side RuntimeStorageManager (storage_manager_service) hosts
+# N live StorageServices over the kernel manager's volume registry, so it needs
+# the StorageService driver (previously this was kernel-only).
+storage-mgr-multi-storage-host = [
+    "wz-session-core/storage-mgr-multi-storage-host",
+    "storage-backend",
+]
 # R311y58 — forward the wz-session-core strip_prefix/restore key-transform logic.
 storage-mgr-strip-prefix = ["wz-session-core/storage-mgr-strip-prefix"]
 # R311y59 — storage-mgr-complete-flag (§5.24): the storage queryable's COMPLETE bit

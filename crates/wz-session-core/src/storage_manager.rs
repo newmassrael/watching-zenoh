@@ -86,15 +86,34 @@ impl StorageManager {
         if self.storages.contains_key(&config.name) {
             return Err(StorageManagerError::DuplicateStorage(config.name.clone()));
         }
+        let backend = self.create_backend(config)?;
+        self.storages.insert(config.name.clone(), backend);
+        Ok(())
+    }
+
+    /// Resolve `config.volume_id` to a registered volume and have it create a
+    /// backend, WITHOUT holding it — for an external owner that drives the
+    /// backend itself (the R311y62 wz-runtime-tokio `RuntimeStorageManager`
+    /// hands the backend to a live `StorageService`, which owns it for the
+    /// session lifetime). The hold-it counterpart is
+    /// [`add_storage`](Self::add_storage); both share this resolve+create step,
+    /// mirroring how zenoh resolves the volume before spawning the storage task
+    /// (`spawn_storage`, lib.rs:263). Errors if the volume is unregistered
+    /// ([`VolumeNotFound`](StorageManagerError::VolumeNotFound)) or the volume
+    /// fails to create the backend
+    /// ([`VolumeCreate`](StorageManagerError::VolumeCreate)); the duplicate-name
+    /// check is the caller's (this does not consult the `storages` map).
+    pub fn create_backend(
+        &self,
+        config: &StorageConfig,
+    ) -> Result<Box<dyn StorageBackend + Send>, StorageManagerError> {
         let volume = self
             .volumes
             .get(&config.volume_id)
             .ok_or_else(|| StorageManagerError::VolumeNotFound(config.volume_id.clone()))?;
-        let backend = volume
+        volume
             .create_storage(config)
-            .map_err(StorageManagerError::VolumeCreate)?;
-        self.storages.insert(config.name.clone(), backend);
-        Ok(())
+            .map_err(StorageManagerError::VolumeCreate)
     }
 
     /// The hosted storage named `name`, if any (shared — the query/read path).
@@ -211,6 +230,34 @@ mod tests {
             Err(StorageManagerError::VolumeNotFound("nope".into()))
         );
         assert!(m.storage("s1").is_none());
+    }
+
+    #[test]
+    fn create_backend_resolves_a_volume_without_holding() {
+        // create_backend resolves the volume + makes a USABLE backend but does
+        // NOT host it in the manager (the R311y62 live-service owner holds it).
+        let m = mgr_with_mem();
+        let mut backend = m
+            .create_backend(&StorageConfig::new("s1", "demo/**", "mem"))
+            .expect("the mem volume creates a backend");
+        assert_eq!(
+            backend.put(Some("demo/a"), vec![1], None, ts(10)),
+            StorageInsertionResult::Inserted
+        );
+        assert!(
+            m.storage("s1").is_none(),
+            "create_backend does not host the storage in the manager"
+        );
+    }
+
+    #[test]
+    fn create_backend_unknown_volume_errs() {
+        let m = StorageManager::new();
+        assert_eq!(
+            m.create_backend(&StorageConfig::new("s1", "demo/**", "nope"))
+                .err(),
+            Some(StorageManagerError::VolumeNotFound("nope".into()))
+        );
     }
 
     #[test]
