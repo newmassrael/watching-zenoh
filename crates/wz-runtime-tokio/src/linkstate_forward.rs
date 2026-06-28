@@ -4456,9 +4456,9 @@ mod tests {
         // 10000, whatami Peer -> "peer".
         assert_eq!(
             config.to_admin_json(),
-            r#"{"acl_deny":["demo/**"],"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
+            r#"{"acl_default":"allow","acl_deny":["demo/**"],"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
             "one binding: the config that drove the forwarder's deny also SHOWS it \
-             in the admin read view"
+             in the admin read view (acl_default=allow base + acl_deny=the denied key)"
         );
     }
 

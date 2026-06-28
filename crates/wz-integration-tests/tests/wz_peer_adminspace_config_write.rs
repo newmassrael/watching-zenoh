@@ -256,3 +256,148 @@ fn wz_peer_config_write_acl_deny_flips_the_live_verdict_over_the_wire() {
          --- peer-A stderr ---\n{a_captured}"
     );
 }
+
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer); Layer E runs via --ignored"]
+fn wz_peer_config_write_acl_deny_is_get_observable_over_the_wire() {
+    // R311y50 — the READ-path twin of the test above: a remote PUT reconfigures A's
+    // ACL, and a remote GET of A's `@/<A>/peer/config` then OBSERVES the new
+    // `acl_deny` over the wire (the y49 GET-observable claim, end-to-end rather than
+    // by composition). A hosts BOTH surfaces off ONE shared WzConfig, so this also
+    // proves the §5.23 combined node directly — closing the y42 two-instance gap
+    // against any future Rc-decoupling regression.
+    //
+    // Topology: A (peer, `--config-queryable --config-writable`) hosts the config
+    // GET + the config-write subscriber. B (peer, `--connect A`) PUTs A's
+    // `config/acl-deny=mesh/data`. C (connect client) GETs A's config AFTER A has
+    // reconfigured. Deterministic: C is spawned only once A logs `config
+    // reconfigured`, so C's single GET sees the post-reconfigure state; the FLIP is
+    // witnessed against A's startup `acl_deny:[]` baseline.
+
+    let (mut a_guard, mut a_reader, p_a, _a_listen_log) = spawn_peer(
+        "peer-A",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--config-queryable",
+            "--config-writable",
+        ],
+    );
+    let addr_a = format!("127.0.0.1:{p_a}");
+
+    // Wait until A registers the config-write subscriber (logged AFTER the config
+    // GET registration in run_peer, so this guarantees both surfaces are up). The
+    // capture also carries A's startup `config (read-at-open)` line = the baseline.
+    let a_write_log = wait_for_substring(
+        &mut a_reader,
+        "adminspace config WRITE at ",
+        Duration::from_secs(5),
+    )
+    .unwrap_or_else(|c| {
+        let _ = a_guard.child_mut().kill();
+        let _ = a_guard.child_mut().wait();
+        panic!("peer-A did not register --config-writable within 5s.\n--- peer-A ---\n{c}");
+    });
+    // The open BASELINE (before any PUT): A's read-at-open config log shows an
+    // empty deny list. This is the "before" half of the observable flip.
+    assert!(
+        a_write_log.contains(r#""acl_deny":[]"#),
+        "peer-A's startup config did not show the empty acl_deny baseline.\n\
+         --- peer-A ---\n{a_write_log}"
+    );
+    let write_key = a_write_log
+        .lines()
+        .find_map(|l| {
+            l.split_once("adminspace config WRITE at ")
+                .map(|(_, rest)| rest.trim().to_string())
+        })
+        .expect("peer-A logged the config-write keyexpr");
+    let config_key = write_key
+        .strip_suffix("/**")
+        .unwrap_or_else(|| panic!("config-write key lacks /**: {write_key}"))
+        .to_string();
+    let put_key = format!("{config_key}/acl-deny");
+
+    // B (peer): dials A and PUTs A's config/acl-deny carrying mesh/data each tick.
+    let (mut b_guard, mut b_reader, _p_b, _b_log) = spawn_peer(
+        "peer-B",
+        &[
+            "--peer",
+            "127.0.0.1:0",
+            "--connect",
+            &addr_a,
+            "--put-key",
+            &put_key,
+            "--put-payload",
+            DATA_KEY,
+        ],
+    );
+
+    // Gate: A must have reconfigured from B's PUT before C queries — so C's GET sees
+    // the FLIPPED state, deterministically (not racing the reconfigure).
+    let reconfigured = wait_for_substring(
+        &mut a_reader,
+        &format!("config reconfigured — now denying {DATA_KEY}"),
+        Duration::from_secs(20),
+    );
+    if let Err(c) = &reconfigured {
+        let a = read_captured(&mut a_reader);
+        let b = read_captured(&mut b_reader);
+        graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+        graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+        panic!(
+            "peer-A never reconfigured from B's config-write PUT within 20s.\n\
+             --- A at deadline ---\n{c}\n--- A ---\n{a}\n--- B ---\n{b}"
+        );
+    }
+
+    // C (connect client): GET A's config AFTER the reconfigure; the reply must carry
+    // the FLIPPED acl_deny.
+    let c_stderr = tempfile::tempfile().expect("tempfile for client C stderr");
+    let c_writer = c_stderr.try_clone().expect("dup client C stderr handle");
+    let mut c_reader = c_stderr;
+    let mut c_guard = ChildGuard::wrap(
+        "client-C (--connect --query --on-query-reply-log)".to_string(),
+        Command::new(wz_ap_demo_binary())
+            .arg("--connect")
+            .arg(&addr_a)
+            .arg("--query")
+            .arg(&config_key)
+            .arg("--on-query-reply-log")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(c_writer))
+            .spawn()
+            .expect("spawn client-C"),
+    );
+    let reply = wait_for_substring(&mut c_reader, "REPLY RECEIVED", Duration::from_secs(10));
+
+    graceful_terminate(a_guard.child_mut(), Duration::from_secs(5));
+    graceful_terminate(b_guard.child_mut(), Duration::from_secs(5));
+    let _ = c_guard.child_mut().kill();
+    let _ = c_guard.child_mut().wait();
+    let a_final = read_captured(&mut a_reader);
+    let c_final = read_captured(&mut c_reader);
+    eprintln!("--- peer-A stderr ---\n{a_final}");
+    eprintln!("--- client-C stderr ---\n{c_final}");
+
+    let reply = reply.unwrap_or_else(|c| {
+        panic!(
+            "client-C did not log 'REPLY RECEIVED' within 10s — the config GET after the \
+             reconfigure did not answer over the wire.\n--- C at deadline ---\n{c}\n\
+             --- A ---\n{a_final}"
+        )
+    });
+    // The AFTER half of the flip: A's GET now serves acl_deny=[mesh/data] — the same
+    // deny the remote PUT drove, observed over the wire on the read path. The demo's
+    // reply log debug-escapes the JSON (e.g. \"acl_deny\":[\"mesh/data\"]).
+    assert!(
+        reply.contains(r#"\"acl_deny\":[\"mesh/data\"]"#),
+        "client-C's GET reply did not carry the FLIPPED acl_deny=[mesh/data] — the \
+         remote PUT's reconfigure is not GET-observable over the wire.\n--- C ---\n{reply}"
+    );
+    assert!(
+        reply.contains(r#"\"acl_default\":\"allow\""#),
+        "client-C's GET reply lacks acl_default=allow (the base verdict).\n--- C ---\n{reply}"
+    );
+}

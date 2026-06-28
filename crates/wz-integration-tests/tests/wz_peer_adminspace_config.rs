@@ -170,11 +170,17 @@ fn wz_peer_admin_config_get_over_the_wire() {
          0-sentinel resolves to the effective 65535) is not in the served config.\n\
          --- B stderr ---\n{reply}"
     );
-    // R311y49 — the served JSON now carries the LIVE ACL deny-list (acl_deny). A
-    // has no startup --acl-deny, so it is empty here; its mere PRESENCE proves the
-    // GET-observable interceptor view crosses the wire (a runtime config-write
-    // would change it from [] to populated — proven at the unit level + by the
-    // data-plane flip e2e wz_peer_adminspace_config_write).
+    // R311y49/y50 — the served JSON now carries the LIVE ACL view: `acl_default`
+    // (the base verdict) + `acl_deny` (the denied-keyexpr list). A has no startup
+    // --acl-deny, so it is the open baseline ("allow" + []); the PRESENCE of both
+    // proves the GET-observable interceptor view crosses the wire (a runtime
+    // config-write flips acl_deny [] -> populated — proven by the unit flip + the
+    // 3-process GET-flip e2e in wz_peer_adminspace_config_write).
+    assert!(
+        reply.contains(r#"\"acl_default\":\"allow\""#),
+        "REPLY RECEIVED lacks acl_default=allow — the GET-observable ACL base verdict \
+         (R311y50) is not in the served config.\n--- B stderr ---\n{reply}"
+    );
     assert!(
         reply.contains(r#"\"acl_deny\":[]"#),
         "REPLY RECEIVED lacks the acl_deny array — the GET-observable interceptor \

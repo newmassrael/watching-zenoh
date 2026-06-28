@@ -201,15 +201,23 @@ pub fn admin_config_key(zid_hex: &str, whatami: &str) -> String {
 }
 
 /// R311y48 (§5.23 Phase 3b) — the admin config-WRITE keyexpr PATTERN
-/// `@/<zid>/<whatami>/config/**`. This is the key zenoh's adminspace declares its
-/// write-only config `DeclareSubscriber` on (`adminspace.rs:350-353`): a PUT to a
-/// sub-key under it (e.g. `.../config/acl-deny`) routes the new value to the node,
-/// which applies it (zenoh `insert_json5`; wz reconfigures the typed `WzConfig`).
-/// A routing peer registers a LOCAL subscriber on this pattern so a remote PUT
-/// self-dispatches to its config-write handler (the R311y46 Push-plane twin of the
-/// y44 self-query dispatch the config GET uses). The pattern is the sibling of
-/// [`admin_config_key`] (the typed READ key, beyond-zenoh): the read is a single
-/// key, the write is the `/**` subtree a json-pointer path hangs under.
+/// `@/<zid>/<whatami>/config/**`. The PATTERN is faithful to zenoh, which declares
+/// its write-only config `DeclareSubscriber` on exactly this key
+/// (`adminspace.rs:350-353`); a routing peer registers a LOCAL subscriber on it so
+/// a remote PUT self-dispatches to its config-write handler (the R311y46 Push-plane
+/// twin of the y44 self-query dispatch the config GET uses).
+///
+/// FIDELITY CAVEAT (R311y50) — only the KEY PATTERN matches zenoh; the SUB-KEY +
+/// PAYLOAD shape does NOT (yet). zenoh strips the `@/<zid>/<whatami>/config/`
+/// prefix and feeds the remaining JSON-POINTER path + a JSON5 body to
+/// `insert_json5` (its ACL lives under `config/access_control`). wz's current
+/// handler instead recognizes a single bespoke sub-key `acl-deny` with a BARE
+/// keyexpr payload — a deliberate MVP affordance, NOT a json-pointer subset, so it
+/// is NOT subsumed by the eventual full json5/json-pointer engine (that engine
+/// would parse `config/access_control` + json5, and `acl-deny` would retire or
+/// become an explicit non-zenoh alias). The read sibling [`admin_config_key`]
+/// (`@/<zid>/<whatami>/config`, single key) is itself beyond-zenoh (zenoh has no
+/// config READ).
 pub fn admin_config_write_key(zid_hex: &str, whatami: &str) -> String {
     let mut s = admin_config_key(zid_hex, whatami);
     s.push_str("/**");
@@ -338,28 +346,12 @@ fn push_openmetrics_label(s: &str, out: &mut String) {
     }
 }
 
-/// Append `s` to `out` as a quoted, escaped JSON string. Covers the RFC 8259
-/// mandatory escapes (`"`, `\`, and the C0 control range); the admin payload's
-/// strings (hex zids, socket-address locators, a version) do not contain them in
-/// practice, but the escape keeps the emitter a correct JSON string serializer
-/// rather than a `format!` a stray byte could corrupt.
+/// Append `s` to `out` as a quoted, escaped JSON string. R311y50 — delegates to
+/// the [`crate::json::escape_into`] SSOT escaper (hoisted so it is not duplicated
+/// by the `config`-side admin-JSON emitter); the thin local name is kept because
+/// the `local_data` builder above calls it at ~8 sites.
 fn push_json_str(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                use core::fmt::Write as _;
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+    crate::json::escape_into(s, out);
 }
 
 #[cfg(test)]

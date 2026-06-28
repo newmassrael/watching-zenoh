@@ -435,6 +435,12 @@ pub mod encoding;
 #[cfg(feature = "alloc")]
 pub mod zid_hex;
 
+/// R311y50 — the SSOT JSON string-literal escaper shared by the hand-rolled
+/// (no `serde_json`) admin / config JSON emitters (`adminspace`, `config`).
+/// `alloc`-only; ungated by any admin/routing cfg so every emitter reaches it.
+#[cfg(feature = "alloc")]
+pub mod json;
+
 /// §5.23 — admin space `local_data` view: the `@/<zid>/<whatami>/**` built-in
 /// queryable keyexpr helpers + the `local_data` JSON body, the wz mirror of
 /// zenoh `net/runtime/adminspace.rs`. Pure data-view (the queryable wiring lives

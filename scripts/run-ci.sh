@@ -1368,6 +1368,11 @@ layer_c1an_cargo_test_adminspace_nodefault() {
 #      admin_read), and the R311y48 config-WRITE merge reads via the
 #      `interceptors()` getter then reapplies
 #      (wzconfig_interceptors_getter_backs_the_config_write_merge);
+#   1b. R311y50 — the `to_admin_json` named tests on the SAME ON combo, so the
+#      `#[cfg(all(routing-peer, access-acl))]` `acl_default`/`acl_deny` branch of
+#      `to_admin_json_is_typed_alphabetical` actually runs in CI (the unfiltered
+#      full-lib lanes all build routing-peer OFF, so without this the acl branch
+#      was never-executed — the R311y25 class);
 #   2. OFF arm: wzconfig_reconfigure_is_inert_without_config_mutate_runtime — the
 #      mutation is stored but never applied (access-acl alone);
 #   3. clippy the config.rs LIB on the ON combo + the routing-peer-OFF universal
@@ -1381,6 +1386,7 @@ layer_c1an_cargo_test_adminspace_nodefault() {
 layer_c1ao_cargo_test_config_mutate_runtime() {
     (cd crates \
         && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib wzconfig_ --quiet \
+        && cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib to_admin_json --quiet \
         && cargo test -p wz-runtime-tokio --features access-acl --lib wzconfig_reconfigure_is_inert --quiet \
         && cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast --quiet -- -D warnings)
