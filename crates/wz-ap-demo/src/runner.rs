@@ -1233,20 +1233,33 @@ pub(crate) async fn run_router(listen: &str) -> io::Result<()> {
 /// is whatami Peer (`NodeKind::Peer` maps to 0x02) — which is genuinely correct
 /// for a peer (unlike the router, whose 0x02 is a documented stand-in for a true
 /// WhatAmI::Router); the well-tested accept / initiate directions drive it.
+/// R311y47 — the per-peer behaviour knobs (CLI-derived), bundled into one
+/// parameter so the peer entry points stay within the argument-count limit
+/// (Introduce-Parameter-Object; the repo's `SessionDriveConfig` retired the same
+/// `clippy::too_many_arguments` allow). Consistent with [`crate::InterceptorOpts`].
 #[cfg(feature = "routing-peer")]
-// Distinct CLI-derived knobs threaded once into the peer entry point; bundling
-// into a pass-through struct adds indirection without behavioural benefit.
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct PeerOpts {
+    pub publish_key: Option<String>,
+    pub subscribe_key: Option<String>,
+    pub unsubscribe_after_data: bool,
+    pub autoconnect: bool,
+    pub config_queryable: bool,
+}
+
+#[cfg(feature = "routing-peer")]
 pub(crate) async fn run_peer(
     listen: &str,
     dial_targets: &[String],
-    publish_key: Option<&str>,
-    subscribe_key: Option<&str>,
-    unsubscribe_after_data: bool,
-    autoconnect: bool,
-    config_queryable: bool,
+    opts: &PeerOpts,
     interceptors: &crate::InterceptorOpts,
 ) -> io::Result<()> {
+    // Destructure into the same local names + types the body uses (the Options as
+    // `Option<&str>`), so the bundle is purely a signature change.
+    let publish_key = opts.publish_key.as_deref();
+    let subscribe_key = opts.subscribe_key.as_deref();
+    let unsubscribe_after_data = opts.unsubscribe_after_data;
+    let autoconnect = opts.autoconnect;
+    let config_queryable = opts.config_queryable;
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
@@ -1475,7 +1488,10 @@ pub(crate) async fn run_peer(
         use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
         let zid_hex = zid_to_zenoh_hex(&params.zid);
-        let whatami_str = "peer";
+        // SSOT-derive the role from the same `params.whatami` the config body's
+        // `to_admin_json` serializes — a literal would risk the admin keyexpr /
+        // reply-key role diverging from the served `"whatami"` if the role changed.
+        let whatami_str = params.whatami.to_str();
         let version = env!("CARGO_PKG_VERSION").to_string();
         let locators = self_locators;
         let queryable_key = admin_queryable_key(&zid_hex, whatami_str);

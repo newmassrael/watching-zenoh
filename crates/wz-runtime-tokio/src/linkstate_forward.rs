@@ -109,6 +109,7 @@ use wz_session_core::push_build::{build_push_literal, set_push_keyexpr_literal};
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
+use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::query_mode::QueryTarget;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::queryable_info::QueryableInfo;
@@ -117,8 +118,7 @@ use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, set_request_source,
 };
-use wz_session_core::response_build::{set_response_keyexpr_literal, ResponseReplyBuilder};
-use wz_session_core::sample::EncodingHint;
+use wz_session_core::response_build::set_response_keyexpr_literal;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BorrowedSample, SampleView};
 use wz_session_core::wireexpr_resolve::resolve_wireexpr;
@@ -448,113 +448,6 @@ impl QueryView for LocalQueryView<'_> {
     }
     fn rid(&self) -> u64 {
         self.rid
-    }
-}
-
-/// A [`ReplyOut`] that ACCUMULATES each emitted reply as a built
-/// [`ResponseOwned`] rather than sending inline, so the self-dispatch in
-/// [`LinkstateForwarder::forward_request`] can run the handler under a borrow of
-/// `local_queryables` and THEN emit on the inbound face (no overlapping borrow of
-/// `faces`). Mirrors the Session-side `QueryResponder` accumulate-then-emit shape
-/// using the same pure `wz_session_core::response_build` builders. The
-/// put / keyed / encoded reply arms mirror the Session path faithfully;
-/// `reply_err` and the `reply_keyed_stamped` / `reply_keyed_attached` trait
-/// defaults drop their side-band fields (encoding_id/schema, timestamp,
-/// attachment) — a Phase-2a deferral, since the §5.23 admin/local handlers emit
-/// only put / encoded replies.
-struct ForwarderReplyOut {
-    rid: u64,
-    /// The query keyexpr — the default reply key when a handler calls the bare
-    /// `reply` (the responder's bound keyexpr, zenoh's `q.reply(payload)`).
-    query_keyexpr: String,
-    out: Vec<ResponseOwned>,
-    responder: Option<(Vec<u8>, u32)>,
-}
-
-impl ForwarderReplyOut {
-    fn new(rid: u64, query_keyexpr: String) -> Self {
-        Self {
-            rid,
-            query_keyexpr,
-            out: Vec::new(),
-            responder: None,
-        }
-    }
-
-    /// Build one Put-form Reply (under `key`, optional `encoding`) via the shared
-    /// pure builder, stamping the responder identity if set, and accumulate it. A
-    /// build error drops that reply (the `Result` guards a codec capacity overflow;
-    /// the builder's empty-suffix assert is unreachable here — `key` is a non-empty
-    /// resolved keyexpr).
-    fn push_reply(&mut self, key: &str, payload: &[u8], encoding: Option<&EncodingHint>) {
-        let mut b = ResponseReplyBuilder::new(self.rid, 0, Some(key), payload);
-        if let Some(enc) = encoding {
-            b = b.encoding(enc);
-        }
-        if let Some((zid, eid)) = &self.responder {
-            b = b.responder(zid, *eid);
-        }
-        if let Ok(resp) = b.build() {
-            self.out.push(resp);
-        }
-    }
-
-    /// Take the accumulated replies — the dispatch emits them after the handler
-    /// returns and the `local_queryables` borrow is released.
-    fn take_responses(self) -> Vec<ResponseOwned> {
-        self.out
-    }
-}
-
-impl ReplyOut for ForwarderReplyOut {
-    fn reply(&mut self, payload: &[u8]) {
-        // The bound query keyexpr (zenoh `q.reply(payload)`). Clone the key out
-        // first so the field borrow does not overlap `push_reply`'s `&mut self`.
-        let key = self.query_keyexpr.clone();
-        self.push_reply(&key, payload, None);
-    }
-    fn reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) {
-        self.push_reply(keyexpr, payload, None);
-    }
-    fn reply_keyed_encoded(
-        &mut self,
-        keyexpr: &str,
-        payload: &[u8],
-        encoding: Option<&EncodingHint>,
-    ) {
-        self.push_reply(keyexpr, payload, encoding);
-    }
-    fn reply_del(&mut self) {
-        // A Del-form reply under the bound query keyexpr.
-        let key = self.query_keyexpr.clone();
-        let mut b = ResponseReplyBuilder::new(self.rid, 0, Some(&key), &[]).reply_del();
-        if let Some((zid, eid)) = &self.responder {
-            b = b.responder(zid, *eid);
-        }
-        if let Ok(resp) = b.build() {
-            self.out.push(resp);
-        }
-    }
-    fn reply_err(&mut self, _encoding_id: Option<u32>, _schema: Option<&str>, payload: &[u8]) {
-        // Minimal Err reply (empty keyexpr, the timeout-Err shape). The §5.23
-        // admin/local handlers do not emit Err; full encoding/schema threading is
-        // deferred until a handler needs it.
-        if let Ok(resp) =
-            wz_session_core::response_build::build_response_err_empty(self.rid, payload)
-        {
-            self.out.push(resp);
-        }
-    }
-    fn with_responder(&mut self, zid: &[u8], eid: u32) {
-        self.responder = Some((zid.to_vec(), eid));
-    }
-    fn clear_responder(&mut self) {
-        self.responder = None;
-    }
-    fn responder(&self) -> Option<(&[u8], u32)> {
-        self.responder
-            .as_ref()
-            .map(|(zid, eid)| (zid.as_slice(), *eid))
     }
 }
 
@@ -1769,8 +1662,9 @@ impl LinkstateForwarder {
     /// matched (so the caller skips the bare empty-route `ResponseFinal`).
     ///
     /// Borrow discipline: the handlers run under a `borrow_mut` of
-    /// `local_queryables`, accumulating into a [`ForwarderReplyOut`]; the actual
-    /// `send_to_face` (which borrows `faces`) runs AFTER that borrow is released.
+    /// `local_queryables`, accumulating into a `Vec<QueryReply>` via the Session's
+    /// `QueryResponder`; the actual `send_to_face` (which borrows `faces`) runs
+    /// AFTER that borrow is released.
     /// (A handler that re-entrantly registered a local queryable would panic the
     /// `RefCell` — the §5.23 admin handler does not.)
     fn dispatch_local_queryables(
@@ -1786,9 +1680,15 @@ impl LinkstateForwarder {
             keyexpr,
             rid: request.rid,
         };
-        let mut out = ForwarderReplyOut::new(request.rid, keyexpr.to_string());
+        // Accumulate via the SAME Session-side `QueryResponder` + `QueryReply`
+        // currency the wire queryable path uses, and map each reply to a Response
+        // through the ONE `QueryReply::into_response` builder — so Put / keyed /
+        // encoded / stamped / attached / Err replies are all handled identically,
+        // with no parallel reply accumulator (SSOT).
+        let mut replies: Vec<QueryReply> = Vec::new();
         let mut matched = false;
         {
+            let mut responder = QueryResponder::new(request.rid, keyexpr.to_string(), &mut replies);
             let mut locals = self.local_queryables.borrow_mut();
             for lq in locals.iter_mut() {
                 // A queryable answers a query whose keyexpr its declaration
@@ -1801,7 +1701,7 @@ impl LinkstateForwarder {
                     continue;
                 }
                 matched = true;
-                (lq.handler)(&view, &mut out);
+                (lq.handler)(&view, &mut responder);
             }
         }
         if !matched {
@@ -1811,7 +1711,10 @@ impl LinkstateForwarder {
         // inbound face — the querier is one hop away (rid = its own inbound rid);
         // any upstream hops unwind via the existing forward_response path. Routed
         // through send_to_face so egress ACL applies, as the bare final does.
-        for resp in out.take_responses() {
+        for reply in replies {
+            let Ok(resp) = reply.into_response() else {
+                continue;
+            };
             self.send_to_face(inbound, reliable, || {
                 NetworkMessage::Response(Box::new(resp.clone()))
             });
@@ -6821,6 +6724,7 @@ mod tests {
         // APPLICATION_JSON)`). Proves the keyed + encoded reply arm routes the
         // reply under the HANDLER's own key (not the query wildcard) back to the
         // querier — so the handler's chosen reply data reaches the querier.
+        use wz_session_core::sample::EncodingHint;
         let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
         let (face_a, sink_a) = peer_face(zid(0x0A));
         fwd.register(FaceId(0), &face_a);

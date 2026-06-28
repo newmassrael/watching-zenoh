@@ -186,11 +186,13 @@ fn main() -> ExitCode {
             return run_peer_mode(
                 peer_listen,
                 dial_targets,
-                publish_key,
-                subscribe_key,
-                unsubscribe_after_data,
-                autoconnect,
-                config_queryable,
+                crate::runner::PeerOpts {
+                    publish_key,
+                    subscribe_key,
+                    unsubscribe_after_data,
+                    autoconnect,
+                    config_queryable,
+                },
                 InterceptorOpts {
                     acl_deny,
                     downsample,
@@ -685,16 +687,10 @@ pub(crate) struct InterceptorOpts {
 /// Mirrors [`run_router_mode`] — a router has no per-face application behaviour,
 /// and neither does a hold-only mesh peer.
 #[cfg(feature = "routing-peer")]
-// Mirrors `run_peer`'s CLI-knob argument list (the demo's peer entry point).
-#[allow(clippy::too_many_arguments)]
 fn run_peer_mode(
     listen: String,
     dial_targets: Vec<String>,
-    publish_key: Option<String>,
-    subscribe_key: Option<String>,
-    unsubscribe_after_data: bool,
-    autoconnect: bool,
-    config_queryable: bool,
+    opts: crate::runner::PeerOpts,
     interceptors: InterceptorOpts,
 ) -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
@@ -708,11 +704,7 @@ fn run_peer_mode(
     match runtime.block_on(crate::runner::run_peer(
         &listen,
         &dial_targets,
-        publish_key.as_deref(),
-        subscribe_key.as_deref(),
-        unsubscribe_after_data,
-        autoconnect,
-        config_queryable,
+        &opts,
         &interceptors,
     )) {
         Ok(()) => ExitCode::SUCCESS,
