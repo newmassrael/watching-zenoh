@@ -10,9 +10,9 @@
 //! [`Volume`](wz_session_core::storage_volume::Volume), creates a backend, and
 //! holds the bare [`StorageBackend`] by name. It has no Session — it cannot
 //! capture Put/Delete samples or answer queries. [`RuntimeStorageManager`] here
-//! is its LIVE counterpart: per [`StorageConfig`] it reuses the kernel manager
-//! to resolve+create the backend
-//! ([`StorageManager::create_backend`](wz_session_core::storage_manager::StorageManager::create_backend)),
+//! is its LIVE counterpart: per [`StorageConfig`] it resolves+creates the
+//! backend via a shared
+//! [`VolumeRegistry`](wz_session_core::storage_manager::VolumeRegistry::create_backend),
 //! then declares a live [`StorageService`] on a [`Session`] (a capture
 //! subscriber + a queryable, with the config's `strip_prefix` / `complete`
 //! applied) and holds it by name. Dropping the manager undeclares every hosted
@@ -25,22 +25,25 @@
 //! `spawn_storage` resolves the volume then `create_and_start_storage` spawns
 //! the async StorageService task and the runtime holds a stopper handle. wz's
 //! [`RuntimeStorageManager::add_storage`] is the same shape — resolve (via the
-//! kernel manager) then declare a live [`StorageService`] — but the service is
-//! its own RAII lifetime owner (no separate stopper / task handle), and wz keys
-//! storages FLATLY by name (zenoh's outer `volume->name` double-map is for
-//! plugin grouping; storage names are unique per manager).
+//! shared [`VolumeRegistry`]) then declare a live [`StorageService`] — but the
+//! service is its own RAII lifetime owner (no separate stopper / task handle),
+//! and wz keys storages FLATLY by name (zenoh's outer `volume->name` double-map
+//! is for plugin grouping; storage names are unique per manager).
 //!
-//! ## Why reuse the kernel manager
+//! ## Why a shared volume registry
 //!
-//! [`RuntimeStorageManager`] embeds a kernel [`StorageManager`] purely as its
-//! VOLUME REGISTRY + the resolve/create step
+//! [`RuntimeStorageManager`] holds a [`VolumeRegistry`] directly — the SAME
+//! registry the kernel [`StorageManager`] composes — for volume registration,
+//! `volume_id` resolution, and the resolve+create step
 //! ([`register_volume`](RuntimeStorageManager::register_volume) +
-//! `create_backend`), so volume registration, `volume_id` resolution, and the
-//! [`VolumeNotFound`](wz_session_core::storage_manager::StorageManagerError::VolumeNotFound)
+//! [`VolumeRegistry::create_backend`](wz_session_core::storage_manager::VolumeRegistry::create_backend)),
+//! so the registry and its
+//! [`VolumeNotFound`](wz_session_core::storage_manager::VolumeRegistryError::VolumeNotFound)
 //! /
-//! [`VolumeCreate`](wz_session_core::storage_manager::StorageManagerError::VolumeCreate)
-//! errors are the kernel's single source of truth (no duplicated registry). The
-//! embedded manager's own `storages` map stays empty — its hold-the-backend
+//! [`VolumeCreate`](wz_session_core::storage_manager::VolumeRegistryError::VolumeCreate)
+//! errors are a single source of truth shared by both managers (no duplicated
+//! registry). There is no embedded kernel [`StorageManager`] and so no dead
+//! `storages` map: the kernel manager's hold-the-backend
 //! [`add_storage`](wz_session_core::storage_manager::StorageManager::add_storage)
 //! is the no_std / MCU sync hosting path; here the LIVE services hold their
 //! backends instead.
@@ -51,7 +54,7 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::link::SessionRuntime;
 use wz_session_core::storage_backend::StorageBackend;
 use wz_session_core::storage_config::StorageConfig;
-use wz_session_core::storage_manager::{StorageManager, StorageManagerError};
+use wz_session_core::storage_manager::{VolumeRegistry, VolumeRegistryError};
 use wz_session_core::storage_volume::Volume;
 
 use crate::session::{Session, Unicast};
@@ -71,11 +74,11 @@ pub enum RuntimeStorageManagerError {
     /// manager) — the live-service counterpart of the kernel manager's
     /// [`DuplicateStorage`](wz_session_core::storage_manager::StorageManagerError::DuplicateStorage).
     DuplicateStorage(String),
-    /// The kernel manager could not resolve the volume or create the backend
-    /// (the propagated
-    /// [`StorageManagerError`](wz_session_core::storage_manager::StorageManagerError):
+    /// The shared [`VolumeRegistry`] could not resolve the volume or create the
+    /// backend (the propagated
+    /// [`VolumeRegistryError`](wz_session_core::storage_manager::VolumeRegistryError):
     /// `VolumeNotFound` / `VolumeCreate`). Nothing is hosted.
-    Volume(StorageManagerError),
+    Volume(VolumeRegistryError),
     /// The live [`StorageService`] declaration was rejected (a bad keyexpr, a
     /// disabled queryable, an empty `local_zid`, …). Nothing is hosted.
     Service(StorageServiceError),
@@ -101,9 +104,9 @@ impl core::fmt::Display for RuntimeStorageManagerError {
 /// counterpart of the sync kernel [`StorageManager`]. Empty by default;
 /// register volumes, then add storages from their [`StorageConfig`]s.
 pub struct RuntimeStorageManager<R: SessionRuntime, T: TimeSource> {
-    /// The kernel manager, reused as the volume registry + resolve/create step
-    /// (its own `storages` map stays empty — see the module note).
-    volumes: StorageManager,
+    /// The shared volume registry — registration + the resolve/create step. No
+    /// dead host map (see the module note).
+    registry: VolumeRegistry,
     /// The live services, keyed by storage name (sorted, BTreeMap order).
     services: BTreeMap<String, HostedStorage<R, T>>,
 }
@@ -112,17 +115,17 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     /// An empty manager — no volumes, no storages.
     pub fn new() -> Self {
         Self {
-            volumes: StorageManager::new(),
+            registry: VolumeRegistry::new(),
             services: BTreeMap::new(),
         }
     }
 
     /// Register `volume` under `volume_id` so a [`StorageConfig`] naming it can
     /// be hosted. Re-registering an id replaces the prior volume for FUTURE
-    /// [`add_storage`](Self::add_storage) calls (delegates to the kernel
-    /// manager's registry).
+    /// [`add_storage`](Self::add_storage) calls (delegates to the shared
+    /// [`VolumeRegistry`]).
     pub fn register_volume(&mut self, volume_id: impl Into<String>, volume: Box<dyn Volume>) {
-        self.volumes.register_volume(volume_id, volume);
+        self.registry.register_volume(volume_id, volume);
     }
 
     /// The live storage named `name`, if any — the inspection / query handle
@@ -172,7 +175,7 @@ where
 {
     /// Host a new live storage from `config` on `session`: resolve
     /// `config.volume_id` to a registered volume + create its backend (via the
-    /// kernel manager), then declare a live [`StorageService`] (capture
+    /// shared [`VolumeRegistry`]), then declare a live [`StorageService`] (capture
     /// subscriber + queryable, with the config's `key_expr` / `complete` /
     /// `strip_prefix` applied) and hold it by `config.name`. The live-service
     /// shape of zenoh `spawn_storage`. Errors — and hosts nothing — if the name
@@ -193,10 +196,10 @@ where
                 config.name.clone(),
             ));
         }
-        // Resolve + create via the kernel manager (the volume registry SSOT);
-        // the backend is NOT held there — the live service owns it.
+        // Resolve + create via the shared volume registry (the SSOT); the
+        // backend is NOT held there — the live service owns it.
         let backend = self
-            .volumes
+            .registry
             .create_backend(config)
             .map_err(RuntimeStorageManagerError::Volume)?;
         let service = StorageService::declare_with_backend(session, config, local_zid, backend)
@@ -242,7 +245,7 @@ mod tests {
         assert!(matches!(
             r,
             Err(RuntimeStorageManagerError::Volume(
-                StorageManagerError::VolumeNotFound(_)
+                VolumeRegistryError::VolumeNotFound(_)
             ))
         ));
         assert!(
