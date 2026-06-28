@@ -145,6 +145,16 @@ impl<R: SessionRuntime, T: TimeSource> RuntimeStorageManager<R, T> {
     pub fn is_empty(&self) -> bool {
         self.services.is_empty()
     }
+
+    /// Remove and tear down the live storage named `name`, returning whether
+    /// one was hosted. Dropping the held [`StorageService`] undeclares its
+    /// capture subscriber + queryable (RAII) — the live-service analogue of
+    /// zenoh's `StorageMessage::Stop` (`kill_storage`,
+    /// `plugin-storage-manager/src/lib.rs:248`). After removal the name is free
+    /// to re-add; the add-it counterpart is [`add_storage`](Self::add_storage).
+    pub fn remove_storage(&mut self, name: &str) -> bool {
+        self.services.remove(name).is_some()
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource> Default for RuntimeStorageManager<R, T> {
@@ -264,6 +274,38 @@ mod tests {
             Err(RuntimeStorageManagerError::DuplicateStorage(n)) if n == "s1"
         ));
         assert_eq!(mgr.len(), 1, "the duplicate did not replace the original");
+    }
+
+    #[test]
+    fn remove_storage_undeclares_and_frees_the_name() {
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+
+        mgr.add_storage(
+            &session,
+            &StorageConfig::new("s1", "a/**", "mem"),
+            vec![0x01],
+        )
+        .expect("first add hosts the storage");
+        assert_eq!(mgr.len(), 1);
+
+        assert!(mgr.remove_storage("s1"), "a hosted storage is removed");
+        assert!(mgr.storage("s1").is_none(), "gone after remove");
+        assert!(mgr.is_empty());
+        assert!(
+            !mgr.remove_storage("s1"),
+            "an absent storage removes to false"
+        );
+
+        // The name is freed: re-adding it no longer hits DuplicateStorage.
+        mgr.add_storage(
+            &session,
+            &StorageConfig::new("s1", "b/**", "mem"),
+            vec![0x01],
+        )
+        .expect("the name is free to re-add after removal");
+        assert_eq!(mgr.len(), 1);
     }
 
     // The COMPOSITION proof through the manager: it hosts N live

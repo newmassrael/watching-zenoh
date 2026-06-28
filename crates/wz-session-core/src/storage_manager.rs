@@ -116,6 +116,16 @@ impl StorageManager {
             .map_err(StorageManagerError::VolumeCreate)
     }
 
+    /// Remove and tear down the hosted storage named `name`, returning whether
+    /// one was present. The bare backend is dropped (an in-memory store has no
+    /// persistence, so its data is gone), and `name` is freed to re-add. The
+    /// add-it counterpart is [`add_storage`](Self::add_storage); zenoh tears a
+    /// storage down on reconfigure via `StorageMessage::Stop` (`kill_storage`,
+    /// `plugin-storage-manager/src/lib.rs:248`).
+    pub fn remove_storage(&mut self, name: &str) -> bool {
+        self.storages.remove(name).is_some()
+    }
+
     /// The hosted storage named `name`, if any (shared — the query/read path).
     pub fn storage(&self, name: &str) -> Option<&dyn StorageBackend> {
         self.storages.get(name).map(|b| b.as_ref())
@@ -269,6 +279,23 @@ mod tests {
             m.add_storage(&StorageConfig::new("s1", "b/**", "mem")),
             Err(StorageManagerError::DuplicateStorage("s1".into()))
         );
+    }
+
+    #[test]
+    fn remove_storage_tears_down_and_frees_the_name() {
+        let mut m = mgr_with_mem();
+        m.add_storage(&StorageConfig::new("s1", "a/**", "mem"))
+            .unwrap();
+        assert!(m.remove_storage("s1"), "a hosted storage is removed");
+        assert!(m.storage("s1").is_none(), "gone after remove");
+        assert!(
+            !m.remove_storage("s1"),
+            "an absent storage removes to false"
+        );
+        // The name is freed: a re-add with the same name no longer collides.
+        m.add_storage(&StorageConfig::new("s1", "b/**", "mem"))
+            .expect("the name is free to re-add after removal");
+        assert!(m.storage("s1").is_some());
     }
 
     #[test]
