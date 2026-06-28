@@ -1566,9 +1566,10 @@ pub(crate) async fn run_peer(
     // ONLY (parse + stash the deny keyexpr into `pending_acl_deny`); the app-tick
     // loop applies it (intent->reconfigure), where `&forwarder` is reachable.
     if config_writable {
+        use wz::runtime_tokio::admin_write_permit;
         use wz::runtime_tokio::adminspace::{
             admin_config_key, admin_config_write_key, parse_admin_config_write, AdminConfigWrite,
-            AdminConfigWriteOutcome,
+            AdminConfigWriteOutcome, AdminSpacePermissions,
         };
         use wz::runtime_tokio::sink::SampleView;
         use wz::runtime_tokio::zid_hex::zid_to_zenoh_hex;
@@ -1583,22 +1584,22 @@ pub(crate) async fn run_peer(
             p.push('/');
             p
         };
-        // R311y51 (§5.23 adminspace-write) — the `permissions.write` gate, the
+        // R311y51/y52 (§5.23 adminspace-write) — the `permissions.write` gate, the
         // write-side mirror of the adminspace-read GET gate. `--config-writable`
         // HOSTS the write subscriber; `--config-write-permit` PERMITS the writes it
         // receives (two orthogonal controls — the write analogue of
-        // declare_adminspace vs declare_adminspace_with_permissions). Under the
-        // `adminspace-write` cfg the gate consults the permit (default-deny, zenoh
-        // PermissionsConf write:false); with the gate compiled out every write
-        // applies (the pre-y51 behavior). The flag is parsed either way
-        // (signature-stable), inert when the gate is elided.
-        #[cfg(feature = "adminspace-write")]
-        let write_permitted = config_write_permit;
-        #[cfg(not(feature = "adminspace-write"))]
-        let write_permitted = {
-            let _ = config_write_permit;
-            true
+        // declare_adminspace vs declare_adminspace_with_permissions). The embedder's
+        // permission struct is built from the flag (read stays permissive); the
+        // library `admin_write_permit` (the adminspace-write cfg site) resolves the
+        // effective permit — under the gate it reads `permissions.write` (default-deny,
+        // zenoh PermissionsConf write:false), with the gate compiled out it is `true`
+        // (apply-all, the pre-y51 behavior). The resolved value then flows through the
+        // feature-independent parse_admin_config_write SSOT.
+        let permissions = AdminSpacePermissions {
+            write: config_write_permit,
+            ..Default::default()
         };
+        let write_permitted = admin_write_permit(&permissions);
         let pending = pending_acl_deny.clone();
         let handler = move |sample: &dyn SampleView| {
             // Gate (permissions.write) + decode via the wz-session-core SSOT, the
@@ -1788,7 +1789,10 @@ pub(crate) async fn run_peer(
                 // only the ACL slice (the `interceptors()` getter is the read leg).
                 // Idempotent: re-applied only when the deny keyexpr CHANGES, so a
                 // per-tick PUT of the same value is a no-op and the witness logs once.
-                if let Some(deny_kx) = pending_acl_deny.borrow_mut().take() {
+                // Drain on its own line so the `RefCell` borrow is released BEFORE the
+                // apply body (which re-borrows wz_config) — no nested-borrow fragility.
+                let drained = pending_acl_deny.borrow_mut().take();
+                if let Some(deny_kx) = drained {
                     if last_applied_deny.as_deref() != Some(deny_kx.as_str()) {
                         let mut merged = wz_config.borrow().interceptors().clone();
                         merged.acl = Some(acl_deny_policy(&deny_kx));

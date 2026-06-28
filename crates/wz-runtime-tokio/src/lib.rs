@@ -214,6 +214,61 @@ pub use wz_session_core::decl_sink;
 #[cfg(feature = "adminspace-core")]
 pub use wz_session_core::adminspace;
 
+/// R311y52 (§5.23 `adminspace-write`) — resolve the effective config-WRITE permit
+/// from the embedder's [`adminspace::AdminSpacePermissions`]. This is the
+/// library-resident write-side mirror of the `adminspace-read` GET gate's per-call
+/// `let read = permissions.read` idiom (`Session::declare_adminspace_with_permissions`,
+/// `session/mod.rs`). Under the `adminspace-write` cfg it returns
+/// `permissions.write` (default `false` — zenoh's `PermissionsConf` asymmetry,
+/// lib.rs:893); with the gate compiled out it returns `true` (the gate elided —
+/// the pre-y51 apply-all behavior). This is THE `adminspace-write` cfg site, so the
+/// `wz` / `wz-runtime-tokio` facade chain gates real library code: a config-write
+/// host calls this, then feeds the resolved bool to
+/// [`adminspace::parse_admin_config_write`] (the feature-independent gate+decode
+/// SSOT — "the gate is the value, not a cfg" once past this resolver).
+#[cfg(feature = "adminspace-core")]
+pub fn admin_write_permit(permissions: &adminspace::AdminSpacePermissions) -> bool {
+    #[cfg(feature = "adminspace-write")]
+    {
+        permissions.write
+    }
+    #[cfg(not(feature = "adminspace-write"))]
+    {
+        let _ = permissions;
+        true
+    }
+}
+
+#[cfg(all(test, feature = "adminspace-core"))]
+mod admin_write_permit_tests {
+    use super::admin_write_permit;
+    use super::adminspace::AdminSpacePermissions;
+
+    #[test]
+    fn permit_resolves_per_gate() {
+        let granted = AdminSpacePermissions {
+            read: true,
+            write: true,
+        };
+        let denied = AdminSpacePermissions {
+            read: true,
+            write: false,
+        };
+        #[cfg(feature = "adminspace-write")]
+        {
+            // Gated: the resolver reads permissions.write (default-deny).
+            assert!(admin_write_permit(&granted));
+            assert!(!admin_write_permit(&denied));
+        }
+        #[cfg(not(feature = "adminspace-write"))]
+        {
+            // Gate elided (pre-y51 apply-all): the value is ignored, always permit.
+            assert!(admin_write_permit(&granted));
+            assert!(admin_write_permit(&denied));
+        }
+    }
+}
+
 /// The zenoh-hex zid rendering (`zid_to_zenoh_hex`) — re-exported so a consumer
 /// builds admin keyexprs (`@/<zid>/<whatami>/...`) without depending on
 /// `wz-session-core` directly.

@@ -1308,11 +1308,14 @@ layer_c1am_cargo_test_adminspace() {
         && cargo test -p wz-session-core --features adminspace-core --lib zid_hex --quiet \
         && cargo test -p wz-session-core --features storage-replication --lib zid_to_zenoh_hex --quiet \
         && cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib declare_adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-core,query-get --lib admin_write_permit --quiet \
         && cargo test -p wz-runtime-tokio --features adminspace-metrics,query-get --lib declare_adminspace --quiet \
         && cargo test -p wz-runtime-tokio --features adminspace-read,adminspace-metrics,query-get --lib declare_adminspace --quiet \
+        && cargo test -p wz-runtime-tokio --features adminspace-write,query-get --lib admin_write_permit --quiet \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings)
+        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-write,query-get --quiet -- -D warnings)
 }
 
 # ─── Layer C1an — adminspace §5.23 SELF-SUFFICIENCY under --no-default-features ─

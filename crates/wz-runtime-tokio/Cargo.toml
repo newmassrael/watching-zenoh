@@ -226,14 +226,14 @@ adminspace-metrics = ["adminspace-core", "wz-session-core/adminspace-metrics"]
 # it composes only adminspace-core (no wz-session-core forward needed).
 adminspace-read = ["adminspace-core"]
 # adminspace-write (§5.23) — the permissions.write gate on the admin config-WRITE
-# PUT path: the handler consults AdminSpacePermissions.write (default false, the
-# zenoh PermissionsConf asymmetry) before applying a `@/<zid>/<whatami>/config/**`
-# write, the wz mirror of zenoh's `if !permissions().write { error; return }`
-# (adminspace.rs:396). The AdminSpacePermissions.write field + the
-# parse_admin_config_write gate/decoder are adminspace-core (always present for
-# signature stability); this feature is the GATE that consults the permit (its
-# cfg site is the wz-ap-demo run_peer config-write host, the only config-write
-# handler so far), so it composes only adminspace-core.
+# PUT path: `admin_write_permit` (this crate, R311y52) consults
+# AdminSpacePermissions.write (default false, the zenoh PermissionsConf asymmetry)
+# before a `@/<zid>/<whatami>/config/**` write is applied, the wz mirror of zenoh's
+# `if !permissions().write { error; return }` (adminspace.rs:396) and the write-side
+# twin of the adminspace-read GET gate. The AdminSpacePermissions.write field + the
+# parse_admin_config_write gate/decoder SSOT are adminspace-core (always present for
+# signature stability); THIS feature is the cfg that flips admin_write_permit between
+# `permissions.write` (gated) and `true` (elided), so it composes only adminspace-core.
 adminspace-write = ["adminspace-core"]
 query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]
