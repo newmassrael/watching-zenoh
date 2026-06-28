@@ -126,14 +126,10 @@ impl AdminLocalData {
     /// emit (no `serde_json`) keeps the builder `alloc`-only and no_std-feasible.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
-        out.push_str("{\"locators\":[");
-        for (i, loc) in self.locators.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            push_json_str(loc, &mut out);
-        }
-        out.push_str("],\"metadata\":null,\"plugins\":null,\"sessions\":[");
+        // R311y60 — the locators string array via the json::push_str_array SSOT.
+        out.push_str("{\"locators\":");
+        crate::json::push_str_array(&self.locators, &mut out);
+        out.push_str(",\"metadata\":null,\"plugins\":null,\"sessions\":[");
         for (i, session) in self.sessions.iter().enumerate() {
             if i > 0 {
                 out.push(',');

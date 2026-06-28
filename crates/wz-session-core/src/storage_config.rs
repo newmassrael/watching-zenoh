@@ -70,14 +70,18 @@ pub struct StorageConfig {
     /// manager resolves it to a [`crate::storage_volume::Volume`].
     pub volume_id: String,
     /// Whether this storage is AUTHORITATIVE for its keyexpr (a "complete"
-    /// queryable that fully owns the space) vs partial. zenoh `complete`; the
-    /// `storage-mgr-complete-flag` behavior atom wires it into the queryable's
-    /// completeness advertisement (wz hardcodes complete today).
+    /// queryable that fully owns the space) vs partial. zenoh `complete`. NOTE
+    /// (honest status): nothing reads this field yet — the `storage-mgr-complete-flag`
+    /// behavior (R311y59) currently drives the queryable from a `declare_with_backend`
+    /// param, NOT from here; threading this field into the service is the
+    /// composition follow-up.
     pub complete: bool,
-    /// An optional keyexpr prefix STRIPPED from a key before it is stored (and
-    /// re-prepended on read), so a storage can hold keys relative to a mount
-    /// point. zenoh `strip_prefix`; the `storage-mgr-strip-prefix` behavior atom
-    /// applies it (closing the R311wt aligner strip_prefix gap).
+    /// An optional keyexpr prefix to STRIP from a key before storing (and
+    /// re-prepend on read), so a storage can hold keys relative to a mount point.
+    /// zenoh `strip_prefix`. NOTE (honest status): the `storage-mgr-strip-prefix`
+    /// LOGIC exists (R311y58 `storage_strip_prefix`) but is NOT yet applied to a
+    /// live key path from this field — wiring it (and the §5.11 backend Option-key
+    /// for the exact-prefix case) is the follow-up that closes the R311wt gap e2e.
     pub strip_prefix: Option<String>,
     /// The stale-metadata GC schedule (the `storage-mgr-garbage-collection` atom).
     pub garbage_collection: GarbageCollectionConfig,

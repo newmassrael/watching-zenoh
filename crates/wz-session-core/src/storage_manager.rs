@@ -18,7 +18,7 @@
 
 use crate::storage_backend::StorageBackend;
 use crate::storage_config::StorageConfig;
-use crate::storage_volume::Volume;
+use crate::storage_volume::{Volume, VolumeError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -31,6 +31,10 @@ pub enum StorageManagerError {
     VolumeNotFound(String),
     /// A storage with this name is already hosted (names are unique per manager).
     DuplicateStorage(String),
+    /// The resolved volume failed to create the storage — the propagated
+    /// [`VolumeError`] (zenoh's `spawn_storage` propagates the backend's create
+    /// error). The storage is not hosted.
+    VolumeCreate(VolumeError),
 }
 
 impl core::fmt::Display for StorageManagerError {
@@ -42,6 +46,7 @@ impl core::fmt::Display for StorageManagerError {
             StorageManagerError::DuplicateStorage(n) => {
                 write!(f, "a storage named '{n}' is already hosted")
             }
+            StorageManagerError::VolumeCreate(e) => write!(f, "{e}"),
         }
     }
 }
@@ -85,7 +90,9 @@ impl StorageManager {
             .volumes
             .get(&config.volume_id)
             .ok_or_else(|| StorageManagerError::VolumeNotFound(config.volume_id.clone()))?;
-        let backend = volume.create_storage(config);
+        let backend = volume
+            .create_storage(config)
+            .map_err(StorageManagerError::VolumeCreate)?;
         self.storages.insert(config.name.clone(), backend);
         Ok(())
     }
@@ -95,7 +102,10 @@ impl StorageManager {
         self.storages.get(name).map(|b| b.as_ref())
     }
 
-    /// The hosted storage named `name`, mutable (the put/delete path).
+    /// The hosted storage named `name`, mutable (the put/delete path). Spelled as
+    /// a `match` rather than `.map(|b| b.as_mut())` (the shape `storage` uses):
+    /// the `&mut` reborrow through the closure trips closure-lifetime inference,
+    /// so the explicit match is required, not a stylistic asymmetry.
     pub fn storage_mut(&mut self, name: &str) -> Option<&mut dyn StorageBackend> {
         match self.storages.get_mut(name) {
             Some(b) => Some(b.as_mut()),
@@ -129,6 +139,44 @@ mod tests {
         let mut m = StorageManager::new();
         m.register_volume("mem", Box::new(MemoryVolume));
         m
+    }
+
+    // A volume whose create_storage always fails — exercises the VolumeCreate
+    // error seam (the in-memory volume never fails, so without this the fallible
+    // path would be untested).
+    struct FailingVolume;
+    impl Volume for FailingVolume {
+        fn capability(&self) -> crate::storage_volume::Capability {
+            crate::storage_volume::Capability {
+                persistence: crate::storage_volume::Persistence::Volatile,
+                history: crate::storage_backend::History::Latest,
+            }
+        }
+        fn create_storage(
+            &self,
+            _config: &StorageConfig,
+        ) -> Result<Box<dyn StorageBackend>, VolumeError> {
+            Err(VolumeError::CreateFailed(alloc::string::String::from(
+                "test backend open failed",
+            )))
+        }
+    }
+
+    #[test]
+    fn add_storage_propagates_a_volume_create_failure() {
+        let mut m = StorageManager::new();
+        m.register_volume("failing", Box::new(FailingVolume));
+        let r = m.add_storage(&StorageConfig::new("s1", "a/**", "failing"));
+        assert!(matches!(
+            r,
+            Err(StorageManagerError::VolumeCreate(
+                VolumeError::CreateFailed(_)
+            ))
+        ));
+        assert!(
+            m.storage("s1").is_none(),
+            "nothing hosted on create failure"
+        );
     }
 
     #[test]

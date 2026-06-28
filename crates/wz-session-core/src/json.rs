@@ -38,9 +38,49 @@ pub fn escape_into(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// Push a JSON array of escaped strings — `["a","b",...]` — onto `out`. The SSOT
+/// for the admin/config JSON string-array idiom: the bracket + comma-separator
+/// bookkeeping is correctness-bearing (a missed comma/bracket corrupts the JSON)
+/// exactly as [`escape_into`] is, so it lives in ONE place rather than being
+/// hand-rolled per emit site (R311y60 — the `to_admin_json` / `local_data`
+/// emitters re-derived this 5×; consolidated here). Each item is escaped via
+/// [`escape_into`]. An empty iterator yields `[]`.
+pub fn push_str_array<I, S>(items: I, out: &mut String)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    out.push('[');
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        escape_into(item.as_ref(), out);
+    }
+    out.push(']');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn str_array_emits_escaped_comma_joined_brackets() {
+        let mut out = String::new();
+        push_str_array(["a/b", "c\"d"], &mut out);
+        assert_eq!(out, r#"["a/b","c\"d"]"#);
+    }
+
+    #[test]
+    fn str_array_empty_is_brackets() {
+        let mut out = String::new();
+        push_str_array(core::iter::empty::<&str>(), &mut out);
+        assert_eq!(out, "[]");
+        // Works over owned String items too (the deny_key_exprs / config shape).
+        let mut owned = String::new();
+        push_str_array([String::from("x")], &mut owned);
+        assert_eq!(owned, r#"["x"]"#);
+    }
 
     #[test]
     fn escapes_quote_backslash_newline_and_control_chars() {

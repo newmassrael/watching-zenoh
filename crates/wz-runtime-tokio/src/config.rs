@@ -152,22 +152,24 @@ impl WzConfig {
             wz_session_core::json::escape_into(default_perm.as_str(), &mut v);
             fields.push(("acl_default", v));
 
-            let mut deny = String::from("[");
-            if let Some(acl) = &self.interceptors.acl {
-                for (i, ke) in acl.deny_key_exprs().iter().enumerate() {
-                    if i > 0 {
-                        deny.push(',');
-                    }
-                    wz_session_core::json::escape_into(ke, &mut deny);
-                }
-            }
-            deny.push(']');
+            // R311y60 — the denied-keyexpr summary via the json::push_str_array
+            // SSOT (the array bracket/comma bookkeeping lives in one place beside
+            // escape_into); empty when no ACL.
+            let deny_keys = self
+                .interceptors
+                .acl
+                .as_ref()
+                .map(|a| a.deny_key_exprs())
+                .unwrap_or_default();
+            let mut deny = String::new();
+            wz_session_core::json::push_str_array(deny_keys, &mut deny);
             fields.push(("acl_deny", deny));
 
             // R311y54 — acl_rules: the FULL per-rule dump (the detail complement to
             // the acl_deny summary), one object per rule with keys ALPHABETICAL
             // (flow, key_exprs, messages, permission, subject). subject is "any" or
-            // the peer's zid hex; enums via the wz-access-control as_str SSOTs.
+            // the peer's zid hex; enums via the wz-access-control as_str SSOTs; the
+            // key_exprs / messages string arrays via the json::push_str_array SSOT.
             let mut rules_json = String::from("[");
             if let Some(acl) = &self.interceptors.acl {
                 for (i, rule) in acl.rules().iter().enumerate() {
@@ -176,21 +178,14 @@ impl WzConfig {
                     }
                     rules_json.push_str("{\"flow\":");
                     wz_session_core::json::escape_into(rule.flow.as_str(), &mut rules_json);
-                    rules_json.push_str(",\"key_exprs\":[");
-                    for (j, ke) in rule.key_exprs.iter().enumerate() {
-                        if j > 0 {
-                            rules_json.push(',');
-                        }
-                        wz_session_core::json::escape_into(ke, &mut rules_json);
-                    }
-                    rules_json.push_str("],\"messages\":[");
-                    for (j, m) in rule.messages.iter().enumerate() {
-                        if j > 0 {
-                            rules_json.push(',');
-                        }
-                        wz_session_core::json::escape_into(m.as_str(), &mut rules_json);
-                    }
-                    rules_json.push_str("],\"permission\":");
+                    rules_json.push_str(",\"key_exprs\":");
+                    wz_session_core::json::push_str_array(&rule.key_exprs, &mut rules_json);
+                    rules_json.push_str(",\"messages\":");
+                    wz_session_core::json::push_str_array(
+                        rule.messages.iter().map(|m| m.as_str()),
+                        &mut rules_json,
+                    );
+                    rules_json.push_str(",\"permission\":");
                     wz_session_core::json::escape_into(rule.permission.as_str(), &mut rules_json);
                     rules_json.push_str(",\"subject\":");
                     let subject = match &rule.subject {
@@ -215,14 +210,9 @@ impl WzConfig {
                 if i > 0 {
                     ds.push(',');
                 }
-                ds.push_str("{\"key_exprs\":[");
-                for (j, ke) in rule.key_exprs.iter().enumerate() {
-                    if j > 0 {
-                        ds.push(',');
-                    }
-                    wz_session_core::json::escape_into(ke, &mut ds);
-                }
-                ds.push_str("],\"min_interval_ms\":");
+                ds.push_str("{\"key_exprs\":");
+                wz_session_core::json::push_str_array(&rule.key_exprs, &mut ds);
+                ds.push_str(",\"min_interval_ms\":");
                 ds.push_str(&rule.min_interval.as_millis().to_string());
                 ds.push('}');
             }
@@ -240,14 +230,9 @@ impl WzConfig {
                 if i > 0 {
                     lp.push(',');
                 }
-                lp.push_str("{\"key_exprs\":[");
-                for (j, ke) in rule.key_exprs.iter().enumerate() {
-                    if j > 0 {
-                        lp.push(',');
-                    }
-                    wz_session_core::json::escape_into(ke, &mut lp);
-                }
-                lp.push_str("],\"max_payload_size\":");
+                lp.push_str("{\"key_exprs\":");
+                wz_session_core::json::push_str_array(&rule.key_exprs, &mut lp);
+                lp.push_str(",\"max_payload_size\":");
                 lp.push_str(&rule.max_payload_size.to_string());
                 lp.push('}');
             }
