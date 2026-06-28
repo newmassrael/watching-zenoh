@@ -51,11 +51,13 @@
 //!   updates it always equals `timestamp` and carries no information, so wz
 //!   omits the redundant field (the wire-interop atom re-supplies it as
 //!   `Some(timestamp)` when emitting zenoh-compatible bytes).
-//! - **`key: String`, not `Option<OwnedKeyExpr>`.** wz carries no
-//!   `strip_prefix` (the [`crate::storage_replication`] divergence note), so
-//!   the stored key is always the full keyexpr and always present. zenoh's
-//!   `stripped_key` is an `Option` because a strip that matches the prefix
-//!   exactly yields `None`; with no strip the key is always `Some(full_key)`.
+//! - **`key: Option<String>`, mirroring `stripped_key: Option<OwnedKeyExpr>`
+//!   (R311y61/y64).** zenoh's `stripped_key` is an `Option` because a strip
+//!   that matches the prefix exactly yields `None` (the mount-root slot); with
+//!   a configured `strip_prefix` wz stores the stripped key, the exact-prefix
+//!   value landing under the `None` mount-root slot, and an [`EventMetadata`]
+//!   carries that `Option<String>` faithfully through the digest, the aligner,
+//!   and the bincode wire. With no `strip_prefix` every key is `Some(full_key)`.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
@@ -94,34 +96,37 @@ pub enum Action {
 /// the digest and the aligner agree on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventMetadata {
-    key: String,
+    key: Option<String>,
     timestamp: TimestampHint,
     action: Action,
 }
 
 impl EventMetadata {
-    /// The metadata of a `Put` at `key` accepted at `timestamp`.
-    pub fn put(key: impl Into<String>, timestamp: TimestampHint) -> Self {
+    /// The metadata of a `Put` at `key` accepted at `timestamp`. `key` is
+    /// `Option<String>` mirroring zenoh's `stripped_key`: `None` is the
+    /// exact-prefix mount-root slot of a strip-configured storage.
+    pub fn put(key: Option<String>, timestamp: TimestampHint) -> Self {
         Self {
-            key: key.into(),
+            key,
             timestamp,
             action: Action::Put,
         }
     }
 
     /// The metadata of a `Delete` (tombstone) at `key` accepted at
-    /// `timestamp`.
-    pub fn delete(key: impl Into<String>, timestamp: TimestampHint) -> Self {
+    /// `timestamp`. `key` is `Option<String>` (`None` = the mount-root slot).
+    pub fn delete(key: Option<String>, timestamp: TimestampHint) -> Self {
         Self {
-            key: key.into(),
+            key,
             timestamp,
             action: Action::Delete,
         }
     }
 
-    /// The stored key this event is for.
-    pub fn key(&self) -> &str {
-        &self.key
+    /// The stored key this event is for — `None` for a strip-configured
+    /// storage's exact-prefix mount-root value (zenoh `stripped_key == None`).
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
     }
 
     /// The timestamp the event was accepted at — the newer-wins ordering key
@@ -148,7 +153,7 @@ impl EventMetadata {
     /// which is exactly what makes the digest buckets — and therefore the
     /// alignment drill-down — compare.
     pub fn fingerprint(&self) -> Fingerprint {
-        event_fingerprint(&self.key, &self.timestamp)
+        event_fingerprint(self.key.as_deref(), &self.timestamp)
     }
 }
 
@@ -477,14 +482,16 @@ pub enum AlignmentFollowup {
 ///
 /// ## wz emission vs zenoh
 ///
-/// wz emits `stripped_key = Some(key)` (no strip_prefix, so the key is always
-/// present) and `timestamp_last_non_wildcard_update = Some(timestamp)`
-/// (re-supplying the field wz's kernel type omits — with no wildcard updates it
-/// always equals `timestamp`). wz emits only `action` 0/1 (Put/Delete). On
-/// decode it discards `timestamp_last_non_wildcard_update` (wildcard-only) and
-/// rejects an inbound wildcard action (2/3) or a `None` stripped_key with a
-/// typed error — the named non-converging residual until wz storage gains
-/// wildcard updates / strip_prefix.
+/// wz emits `stripped_key` faithfully as an `Option` (R311y64): `Some(key)`
+/// for an ordinary key, `None` for a strip-configured storage's exact-prefix
+/// mount-root value — the single `0` Option tag, no key bytes. It emits
+/// `timestamp_last_non_wildcard_update = Some(timestamp)` (re-supplying the
+/// field wz's kernel type omits — with no wildcard updates it always equals
+/// `timestamp`) and only `action` 0/1 (Put/Delete). On decode it discards
+/// `timestamp_last_non_wildcard_update` (wildcard-only), accepts a `None`
+/// stripped_key (round-tripping to `EventMetadata::key() == None`), and rejects
+/// an inbound wildcard action (2/3) with a typed error — the named
+/// non-converging residual until wz storage gains wildcard updates.
 pub mod wire {
     use alloc::collections::{BTreeMap, BTreeSet};
     use alloc::string::String;
@@ -522,9 +529,6 @@ pub mod wire {
         /// unknown index. The named non-converging residual for a real zenoh
         /// wildcard event.
         UnsupportedAction(u32),
-        /// A `None` stripped_key (a zenoh strip-prefix-exact match); wz carries
-        /// no strip_prefix, so its key is always present.
-        MissingKey,
         /// A stripped_key whose bytes are not valid UTF-8.
         BadUtf8,
         /// An [`AlignmentQuery`] / [`AlignmentReply`] enum tag with no known
@@ -548,10 +552,15 @@ pub mod wire {
     /// byte-width arithmetic is self-documenting.
     const U64_BYTES: usize = 8; // one IntervalIdx / SubIntervalIdx / Fingerprint
     const PAIR_BYTES: usize = 16; // an (idx, value) or (idx, sub-len) pair = two u64s
-    /// Smallest a valid `EventMetadata` can encode to: Some-tag(1), key-len(8),
-    /// Timestamp(24), tlnwu-tag(1), action(4); the key bytes and an optional
-    /// tlnwu Timestamp only add to it.
-    const MIN_EVENT_BYTES: usize = 1 + 8 + 24 + 1 + 4;
+    /// Smallest a valid `EventMetadata` can decode from: a `None` stripped_key
+    /// tag(1) — no key-len, no key bytes — Timestamp(24), a `None`
+    /// tlnwu tag(1), action(4). A `Some` key (key-len + bytes) or a `Some`
+    /// tlnwu (a 24-byte Timestamp) only ADD to this. Because the `None`-key
+    /// event omits the 8-byte key length the previous `Some`-only minimum
+    /// carried, the floor shrinks (R311y64). This is the `check_len` fast-reject
+    /// lower bound, so it MUST stay a true lower bound or a valid run of minimal
+    /// events would be wrongly rejected.
+    const MIN_EVENT_BYTES: usize = 1 + 24 + 1 + 4;
 
     /// Append a `u32` as 4 little-endian bytes (a bincode enum-variant index /
     /// `Action` tag — an aligner-only width the digest codec never emits).
@@ -574,8 +583,16 @@ pub mod wire {
     }
 
     fn push_event_metadata(out: &mut Vec<u8>, e: &EventMetadata) {
-        out.push(1); // stripped_key: Some
-        push_string(out, e.key());
+        // stripped_key: Option<OwnedKeyExpr> — a `0`/`1` Option tag, then the
+        // String only for Some. `None` (a strip-configured mount-root value) is
+        // the single `0` byte, mirroring zenoh's bincode `Option` (R311y64).
+        match e.key() {
+            Some(k) => {
+                out.push(1);
+                push_string(out, k);
+            }
+            None => out.push(0),
+        }
         push_timestamp(out, e.timestamp());
         out.push(1); // timestamp_last_non_wildcard_update: Some(timestamp)
         push_timestamp(out, e.timestamp());
@@ -654,12 +671,13 @@ pub mod wire {
         }
 
         fn read_event_metadata(&mut self) -> Result<EventMetadata, AlignmentDecodeError> {
-            // stripped_key: Option<OwnedKeyExpr>. wz has no strip_prefix, so a
-            // `None` key cannot be represented.
+            // stripped_key: Option<OwnedKeyExpr> — `Some(key)` for an ordinary
+            // key, `None` for a strip-configured storage's exact-prefix
+            // mount-root value (R311y64). Both round-trip faithfully.
             let key = if self.read_option_tag()? {
-                self.read_string()?
+                Some(self.read_string()?)
             } else {
-                return Err(AlignmentDecodeError::MissingKey);
+                None
             };
             let timestamp = self.read_timestamp()?;
             // timestamp_last_non_wildcard_update: discarded (wildcard-only).
@@ -837,7 +855,7 @@ pub mod wire {
 
         fn read_events(&mut self) -> Result<Vec<EventMetadata>, AlignmentDecodeError> {
             let len = self.read_u64()?;
-            // min EventMetadata: Some-tag(1)+keylen(8)+ts(24)+tlnwu-tag(1)+action(4).
+            // min EventMetadata: None-key-tag(1)+ts(24)+None-tlnwu-tag(1)+action(4).
             check_len(len, MIN_EVENT_BYTES, self)?;
             let mut events = Vec::new();
             for _ in 0..len {
@@ -991,7 +1009,7 @@ pub mod wire {
 
         fn mirror_of(e: &EventMetadata) -> MEventMetadata {
             MEventMetadata {
-                stripped_key: Some(e.key().into()),
+                stripped_key: e.key().map(|k| k.into()),
                 timestamp: mts(e.timestamp()),
                 timestamp_last_non_wildcard_update: Some(mts(e.timestamp())),
                 action: match e.action() {
@@ -1011,7 +1029,7 @@ pub mod wire {
         #[test]
         fn encode_event_metadata_is_byte_identical_to_bincode_1_3() {
             let put = EventMetadata::put(
-                "demo/long/key",
+                Some("demo/long/key".into()),
                 ts(0x1122_3344_5566_7788, vec![0x01, 0x02, 0x03]),
             );
             assert_eq!(
@@ -1019,11 +1037,23 @@ pub mod wire {
                 bincode::serialize(&mirror_of(&put)).unwrap()
             );
 
-            let del = EventMetadata::delete("x", ts(7, vec![0xff; 16]));
+            let del = EventMetadata::delete(Some("x".into()), ts(7, vec![0xff; 16]));
             assert_eq!(
                 encode_event_metadata(&del),
                 bincode::serialize(&mirror_of(&del)).unwrap()
             );
+
+            // R311y64: a `None` stripped_key (a strip-configured mount-root
+            // value) encodes byte-identically to bincode's `Option::None` — a
+            // single `0` Option tag, then timestamp + tlnwu + action, no key.
+            let none_key = EventMetadata::put(None, ts(9, vec![0x07]));
+            assert_eq!(
+                encode_event_metadata(&none_key),
+                bincode::serialize(&mirror_of(&none_key)).unwrap(),
+                "a None stripped_key matches bincode Option::None"
+            );
+            // The encoding starts with the `0` None tag (not the `1` Some tag).
+            assert_eq!(encode_event_metadata(&none_key)[0], 0);
         }
 
         /// Cross-impl interop: wz's bytes are readable by the exact bincode 1.3
@@ -1031,7 +1061,7 @@ pub mod wire {
         /// by wz — both directions.
         #[test]
         fn wz_and_bincode_1_3_read_each_others_event_metadata() {
-            let e = EventMetadata::put("demo/a", ts(42, vec![0x09, 0x08]));
+            let e = EventMetadata::put(Some("demo/a".into()), ts(42, vec![0x09, 0x08]));
             let mirror = mirror_of(&e);
 
             let wz = encode_event_metadata(&e);
@@ -1045,14 +1075,15 @@ pub mod wire {
 
         #[test]
         fn event_metadata_round_trips() {
-            let e = EventMetadata::delete("k", ts(99, vec![0x01]));
+            let e = EventMetadata::delete(Some("k".into()), ts(99, vec![0x01]));
             assert_eq!(decode_event_metadata(&encode_event_metadata(&e)), Ok(e));
         }
 
         #[test]
         fn decode_rejects_a_wildcard_action_as_unsupported() {
             // A real zenoh WildcardPut(=2) event: wz cannot represent it.
-            let mut wz = encode_event_metadata(&EventMetadata::put("k", ts(1, vec![0x01])));
+            let mut wz =
+                encode_event_metadata(&EventMetadata::put(Some("k".into()), ts(1, vec![0x01])));
             let n = wz.len();
             wz[n - 4..].copy_from_slice(&2u32.to_le_bytes());
             assert_eq!(
@@ -1063,24 +1094,28 @@ pub mod wire {
 
         #[test]
         fn decode_rejects_trailing_bytes_and_truncation() {
-            let mut wz = encode_event_metadata(&EventMetadata::put("k", ts(1, vec![0x01])));
+            let mut wz =
+                encode_event_metadata(&EventMetadata::put(Some("k".into()), ts(1, vec![0x01])));
             wz.push(0x00);
             assert_eq!(
                 decode_event_metadata(&wz),
                 Err(AlignmentDecodeError::TrailingBytes)
             );
 
-            let wz2 = encode_event_metadata(&EventMetadata::put("k", ts(1, vec![0x01])));
+            let wz2 =
+                encode_event_metadata(&EventMetadata::put(Some("k".into()), ts(1, vec![0x01])));
             assert!(decode_event_metadata(&wz2[..3]).is_err());
         }
 
         #[test]
-        fn decode_rejects_a_none_stripped_key() {
-            // Option tag 0 (None) for stripped_key -> wz has no strip_prefix.
-            assert_eq!(
-                decode_event_metadata(&[0u8]),
-                Err(AlignmentDecodeError::MissingKey)
-            );
+        fn decode_accepts_a_none_stripped_key() {
+            // R311y64: Option tag 0 (None) for stripped_key is a strip-configured
+            // mount-root value; it round-trips to an EventMetadata with no key.
+            let none_key = EventMetadata::put(None, ts(9, vec![0x07]));
+            let bytes = encode_event_metadata(&none_key);
+            let decoded = decode_event_metadata(&bytes).expect("a None stripped_key decodes");
+            assert_eq!(decoded, none_key);
+            assert_eq!(decoded.key(), None, "the mount-root key decodes to None");
         }
 
         // ---- AlignmentQuery / AlignmentReply envelope cross-checks ----
@@ -1144,8 +1179,12 @@ pub mod wire {
             let cfg = ReplicationConfig::new("demo/**", None, 1000, 2, 2, 2, 250);
             let a = ts(9u64 << 32, vec![0x01]);
             let b = ts((9u64 << 32) | (1u64 << 31), vec![0x01]);
-            let local = build_digest(&cfg, [("k/a", &a)], IntervalIdx::from(10));
-            let peer = build_digest(&cfg, [("k/a", &a), ("k/b", &b)], IntervalIdx::from(10));
+            let local = build_digest(&cfg, [(Some("k/a"), &a)], IntervalIdx::from(10));
+            let peer = build_digest(
+                &cfg,
+                [(Some("k/a"), &a), (Some("k/b"), &b)],
+                IntervalIdx::from(10),
+            );
             local.diff(peer).expect("the peer's extra key -> a diff")
         }
 
@@ -1192,8 +1231,8 @@ pub mod wire {
             );
 
             let events = vec![
-                EventMetadata::put("k/a", ts(42, vec![1, 2])),
-                EventMetadata::delete("k/b", ts(43, vec![3])),
+                EventMetadata::put(Some("k/a".into()), ts(42, vec![1, 2])),
+                EventMetadata::delete(Some("k/b".into()), ts(43, vec![3])),
             ];
             let mevents: Vec<MEventMetadata> = events.iter().map(mirror_of).collect();
             assert_eq!(
@@ -1246,13 +1285,13 @@ pub mod wire {
                 bincode::serialize(&MAlignmentReply::SubIntervals(msubs)).unwrap()
             );
 
-            let meta = EventMetadata::put("k/r", ts(7, vec![0x05]));
+            let meta = EventMetadata::put(Some("k/r".into()), ts(7, vec![0x05]));
             assert_eq!(
                 encode_alignment_reply(&AlignmentReply::Retrieval(meta.clone())),
                 bincode::serialize(&MAlignmentReply::Retrieval(mirror_of(&meta))).unwrap()
             );
 
-            let events = vec![EventMetadata::delete("k/x", ts(1, vec![0x01]))];
+            let events = vec![EventMetadata::delete(Some("k/x".into()), ts(1, vec![0x01]))];
             let mevents: Vec<MEventMetadata> = events.iter().map(mirror_of).collect();
             assert_eq!(
                 encode_alignment_reply(&AlignmentReply::EventsMetadata(events)),
@@ -1319,7 +1358,10 @@ pub mod wire {
                 AlignmentQuery::Diff(diff),
                 AlignmentQuery::Intervals([IntervalIdx::from(3)].into_iter().collect()),
                 AlignmentQuery::SubIntervals(sub),
-                AlignmentQuery::Events(vec![EventMetadata::put("k", ts(5, vec![0x01]))]),
+                AlignmentQuery::Events(vec![EventMetadata::put(
+                    Some("k".into()),
+                    ts(5, vec![0x01]),
+                )]),
             ] {
                 assert_eq!(decode_alignment_query(&encode_alignment_query(&q)), Ok(q));
             }
@@ -1337,8 +1379,11 @@ pub mod wire {
                 AlignmentReply::Discovery(vec![0x1a, 0x2b, 0x3c]),
                 AlignmentReply::Intervals(ivl),
                 AlignmentReply::SubIntervals(subs),
-                AlignmentReply::EventsMetadata(vec![EventMetadata::delete("k", ts(5, vec![0x01]))]),
-                AlignmentReply::Retrieval(EventMetadata::put("k", ts(6, vec![0x02]))),
+                AlignmentReply::EventsMetadata(vec![EventMetadata::delete(
+                    Some("k".into()),
+                    ts(5, vec![0x01]),
+                )]),
+                AlignmentReply::Retrieval(EventMetadata::put(Some("k".into()), ts(6, vec![0x02]))),
             ] {
                 assert_eq!(decode_alignment_reply(&encode_alignment_reply(&r)), Ok(r));
             }
@@ -1383,13 +1428,13 @@ mod tests {
 
     #[test]
     fn put_and_delete_carry_their_fields() {
-        let p = EventMetadata::put("demo/a", ts(100, 1));
-        assert_eq!(p.key(), "demo/a");
+        let p = EventMetadata::put(Some("demo/a".into()), ts(100, 1));
+        assert_eq!(p.key(), Some("demo/a"));
         assert_eq!(p.timestamp(), &ts(100, 1));
         assert_eq!(p.action(), Action::Put);
 
-        let d = EventMetadata::delete("demo/a", ts(101, 1));
-        assert_eq!(d.key(), "demo/a");
+        let d = EventMetadata::delete(Some("demo/a".into()), ts(101, 1));
+        assert_eq!(d.key(), Some("demo/a"));
         assert_eq!(d.timestamp(), &ts(101, 1));
         assert_eq!(d.action(), Action::Delete);
     }
@@ -1398,16 +1443,19 @@ mod tests {
     fn fingerprint_is_the_digest_event_fingerprint_ssot() {
         // The aligner identity is byte-identical to the digest's per-event
         // fingerprint, so an event and a peer's copy of it agree.
-        let meta = EventMetadata::put("demo/a", ts(100, 1));
-        assert_eq!(meta.fingerprint(), event_fingerprint("demo/a", &ts(100, 1)));
+        let meta = EventMetadata::put(Some("demo/a".into()), ts(100, 1));
+        assert_eq!(
+            meta.fingerprint(),
+            event_fingerprint(Some("demo/a"), &ts(100, 1))
+        );
     }
 
     #[test]
     fn fingerprint_ignores_the_action() {
         // A Put and a Delete at the same (key, timestamp) hash identically —
         // the action is not part of the fingerprint (log.rs:226-231).
-        let put = EventMetadata::put("demo/a", ts(100, 1));
-        let del = EventMetadata::delete("demo/a", ts(100, 1));
+        let put = EventMetadata::put(Some("demo/a".into()), ts(100, 1));
+        let del = EventMetadata::delete(Some("demo/a".into()), ts(100, 1));
         assert_eq!(put.fingerprint(), del.fingerprint());
         // ...yet they are distinct events: equality keeps the action.
         assert_ne!(put, del);
@@ -1415,19 +1463,31 @@ mod tests {
 
     #[test]
     fn fingerprint_is_field_sensitive_in_key_and_timestamp() {
-        let base = EventMetadata::put("demo/a", ts(100, 1)).fingerprint();
-        assert_ne!(base, EventMetadata::put("demo/b", ts(100, 1)).fingerprint());
-        assert_ne!(base, EventMetadata::put("demo/a", ts(101, 1)).fingerprint());
-        assert_ne!(base, EventMetadata::put("demo/a", ts(100, 2)).fingerprint());
+        let base = EventMetadata::put(Some("demo/a".into()), ts(100, 1)).fingerprint();
+        assert_ne!(
+            base,
+            EventMetadata::put(Some("demo/b".into()), ts(100, 1)).fingerprint()
+        );
+        assert_ne!(
+            base,
+            EventMetadata::put(Some("demo/a".into()), ts(101, 1)).fingerprint()
+        );
+        assert_ne!(
+            base,
+            EventMetadata::put(Some("demo/a".into()), ts(100, 2)).fingerprint()
+        );
     }
 
     #[test]
     fn equality_distinguishes_every_field() {
-        let base = EventMetadata::put("demo/a", ts(100, 1));
-        assert_eq!(base, EventMetadata::put("demo/a", ts(100, 1)));
-        assert_ne!(base, EventMetadata::put("demo/b", ts(100, 1)));
-        assert_ne!(base, EventMetadata::put("demo/a", ts(101, 1)));
-        assert_ne!(base, EventMetadata::delete("demo/a", ts(100, 1)));
+        let base = EventMetadata::put(Some("demo/a".into()), ts(100, 1));
+        assert_eq!(base, EventMetadata::put(Some("demo/a".into()), ts(100, 1)));
+        assert_ne!(base, EventMetadata::put(Some("demo/b".into()), ts(100, 1)));
+        assert_ne!(base, EventMetadata::put(Some("demo/a".into()), ts(101, 1)));
+        assert_ne!(
+            base,
+            EventMetadata::delete(Some("demo/a".into()), ts(100, 1))
+        );
     }
 
     // --- EventBuckets (the snapshot answer primitives) ---
@@ -1461,13 +1521,13 @@ mod tests {
     // hot_lower=9): cold {2,3}, warm {7}, hot {9,10}.
     fn spanning_snapshot() -> Vec<EventMetadata> {
         vec![
-            EventMetadata::put("k/cold2", at(2, 0)),
-            EventMetadata::put("k/cold3", at(3, 1)),
-            EventMetadata::put("k/warm7", at(7, 0)),
-            EventMetadata::put("k/hot9a", at(9, 0)),
-            EventMetadata::put("k/hot9b", at(9, 1)),
+            EventMetadata::put(Some("k/cold2".into()), at(2, 0)),
+            EventMetadata::put(Some("k/cold3".into()), at(3, 1)),
+            EventMetadata::put(Some("k/warm7".into()), at(7, 0)),
+            EventMetadata::put(Some("k/hot9a".into()), at(9, 0)),
+            EventMetadata::put(Some("k/hot9b".into()), at(9, 1)),
             // A tombstone is a first-class aligner event too.
-            EventMetadata::delete("k/hot10", at(10, 0)),
+            EventMetadata::delete(Some("k/hot10".into()), at(10, 0)),
         ]
     }
 
@@ -1501,8 +1561,8 @@ mod tests {
 
         let got = buckets.events_in(&req);
         assert_eq!(got.len(), 2);
-        assert!(got.contains(&EventMetadata::put("k/hot9a", at(9, 0))));
-        assert!(got.contains(&EventMetadata::put("k/hot9b", at(9, 1))));
+        assert!(got.contains(&EventMetadata::put(Some("k/hot9a".into()), at(9, 0))));
+        assert!(got.contains(&EventMetadata::put(Some("k/hot9b".into()), at(9, 1))));
     }
 
     #[test]
@@ -1545,11 +1605,11 @@ mod tests {
         let hot_upper = IntervalIdx::from(10);
         let events = spanning_snapshot();
 
-        let kt: Vec<(alloc::string::String, TimestampHint)> = events
+        let kt: Vec<(Option<alloc::string::String>, TimestampHint)> = events
             .iter()
-            .map(|e| (e.key().to_string(), e.timestamp().clone()))
+            .map(|e| (e.key().map(ToString::to_string), e.timestamp().clone()))
             .collect();
-        let digest = build_digest(&cfg, kt.iter().map(|(k, t)| (k.as_str(), t)), hot_upper);
+        let digest = build_digest(&cfg, kt.iter().map(|(k, t)| (k.as_deref(), t)), hot_upper);
         let buckets = EventBuckets::from_events(events, &cfg);
 
         // HOT: the per-sub map is byte-identical to the digest's hot map.
@@ -1585,8 +1645,12 @@ mod tests {
     fn a_digest_diff() -> DigestDiff {
         let cfg = cfg2();
         let hot_upper = IntervalIdx::from(10);
-        let local = build_digest(&cfg, [("k/a", &at(9, 0))], hot_upper);
-        let peer = build_digest(&cfg, [("k/a", &at(9, 0)), ("k/b", &at(9, 1))], hot_upper);
+        let local = build_digest(&cfg, [(Some("k/a"), &at(9, 0))], hot_upper);
+        let peer = build_digest(
+            &cfg,
+            [(Some("k/a"), &at(9, 0)), (Some("k/b"), &at(9, 1))],
+            hot_upper,
+        );
         local
             .diff(peer)
             .expect("the peer holds an extra key -> a diff exists")
@@ -1603,7 +1667,8 @@ mod tests {
             [SubIntervalIdx::from(0)].into_iter().collect(),
         );
         let q_subs = AlignmentQuery::SubIntervals(sub_map);
-        let q_events = AlignmentQuery::Events(vec![EventMetadata::put("k/a", at(9, 0))]);
+        let q_events =
+            AlignmentQuery::Events(vec![EventMetadata::put(Some("k/a".into()), at(9, 0))]);
 
         // self-equal (incl. through Clone)
         assert_eq!(AlignmentQuery::Discovery, AlignmentQuery::Discovery);
@@ -1629,8 +1694,11 @@ mod tests {
         inner.insert(SubIntervalIdx::from(0), Fingerprint::from(9u64));
         subs.insert(IntervalIdx::from(9), inner);
         let r_subs = AlignmentReply::SubIntervals(subs);
-        let r_meta = AlignmentReply::EventsMetadata(vec![EventMetadata::delete("k/x", at(9, 0))]);
-        let r_ret = AlignmentReply::Retrieval(EventMetadata::put("k/y", at(9, 1)));
+        let r_meta = AlignmentReply::EventsMetadata(vec![EventMetadata::delete(
+            Some("k/x".into()),
+            at(9, 0),
+        )]);
+        let r_ret = AlignmentReply::Retrieval(EventMetadata::put(Some("k/y".into()), at(9, 1)));
 
         // self-equal
         assert_eq!(r_disc, AlignmentReply::Discovery(vec![0x01, 0xab]));

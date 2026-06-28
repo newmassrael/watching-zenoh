@@ -399,7 +399,7 @@ mod tests {
         state.apply_sample(&sample, || {
             panic!("fallback must not run for a stamped sample")
         });
-        let stored = state.get("demo/a").expect("stored after put");
+        let stored = state.get(Some("demo/a")).expect("stored after put");
         assert_eq!(stored.payload, vec![1, 2, 3]);
         assert_eq!(stored.timestamp, ts(10, 1));
     }
@@ -409,7 +409,7 @@ mod tests {
         let mut state = fresh();
         let sample = Sample::new_put("demo/a", vec![9]);
         state.apply_sample(&sample, || ts(7, 9));
-        let stored = state.get("demo/a").expect("stored after put");
+        let stored = state.get(Some("demo/a")).expect("stored after put");
         assert_eq!(
             stored.timestamp,
             ts(7, 9),
@@ -428,7 +428,7 @@ mod tests {
             &Sample::new_del("demo/a").with_timestamp(ts(20, 1)),
             || unreachable!(),
         );
-        assert!(state.get("demo/a").is_none(), "del removed the value");
+        assert!(state.get(Some("demo/a")).is_none(), "del removed the value");
     }
 
     #[test]
@@ -445,12 +445,12 @@ mod tests {
             || unreachable!(),
         );
         assert_eq!(
-            state.get("demo/a").unwrap().payload,
+            state.get(Some("demo/a")).unwrap().payload,
             vec![9],
             "outdated put dropped"
         );
         assert_eq!(
-            state.get("demo/a").unwrap().timestamp,
+            state.get(Some("demo/a")).unwrap().timestamp,
             ts(100, 1),
             "newer value retained"
         );
@@ -460,11 +460,11 @@ mod tests {
     fn answer_query_wildcard_replies_each_matching_key_under_its_own_keyexpr() {
         let mut state = fresh();
         assert_eq!(
-            state.process_put("demo/a", vec![1], None, ts(10, 1)),
+            state.process_put(Some("demo/a"), vec![1], None, ts(10, 1)),
             StorageInsertionResult::Inserted
         );
-        state.process_put("demo/b", vec![2], None, ts(10, 1));
-        state.process_put("other/c", vec![3], None, ts(10, 1));
+        state.process_put(Some("demo/b"), vec![2], None, ts(10, 1));
+        state.process_put(Some("other/c"), vec![3], None, ts(10, 1));
 
         let mut out = RecordingReplyOut::default();
         state.answer_into(&query("demo/*"), &mut out);
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn answer_query_exact_key_replies_the_single_value() {
         let mut state = fresh();
-        state.process_put("demo/a", vec![42], None, ts(10, 1));
+        state.process_put(Some("demo/a"), vec![42], None, ts(10, 1));
         let mut out = RecordingReplyOut::default();
         state.answer_into(&query("demo/a"), &mut out);
         assert_eq!(out.keyed, vec![(String::from("demo/a"), vec![42])]);
@@ -493,8 +493,8 @@ mod tests {
     #[test]
     fn answer_query_does_not_reply_a_deleted_key() {
         let mut state = fresh();
-        state.process_put("demo/a", vec![1], None, ts(10, 1));
-        state.process_delete("demo/a", ts(20, 1));
+        state.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+        state.process_delete(Some("demo/a"), ts(20, 1));
         let mut out = RecordingReplyOut::default();
         state.answer_into(&query("demo/**"), &mut out);
         assert!(out.keyed.is_empty(), "a deleted key is not replied");
@@ -539,7 +539,7 @@ mod tests {
 
         storage.with_state(|st| {
             assert_eq!(
-                st.get("demo/a").map(|d| d.payload.clone()),
+                st.get(Some("demo/a")).map(|d| d.payload.clone()),
                 Some(b"v1".to_vec()),
                 "the declared storage captured the loopback publish into the store"
             );
@@ -598,12 +598,12 @@ mod tests {
         storage.with_state(|st| {
             // Captured under the RELATIVE key (strip applied on the live path).
             assert_eq!(
-                st.get("temp").map(|d| d.payload.clone()),
+                st.get(Some("temp")).map(|d| d.payload.clone()),
                 Some(b"v1".to_vec()),
                 "the live capture stored the key RELATIVE to the mount"
             );
             assert!(
-                st.get("home/kitchen/temp").is_none(),
+                st.get(Some("home/kitchen/temp")).is_none(),
                 "the full keyexpr is not a stored key under strip"
             );
 

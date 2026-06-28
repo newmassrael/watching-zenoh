@@ -319,7 +319,7 @@ mod tests {
         use wz_session_core::sample::TimestampHint;
         let mut st = StorageState::new(MemoryStorage::new());
         st.process_put(
-            "demo/a",
+            Some("demo/a"),
             vec![1, 2, 3],
             None,
             TimestampHint {
@@ -335,7 +335,7 @@ mod tests {
         let mut st = StorageState::new(MemoryStorage::new());
         for (i, key) in keys.iter().enumerate() {
             st.process_put(
-                key,
+                Some(key),
                 vec![i as u8],
                 None,
                 TimestampHint {

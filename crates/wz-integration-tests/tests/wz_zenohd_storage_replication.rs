@@ -309,7 +309,7 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
                 {
                     let guard = replica.lock().unwrap();
                     if guard
-                        .get(DATA_KEY)
+                        .get(Some(DATA_KEY))
                         .is_some_and(|s| String::from_utf8_lossy(&s.payload).contains(SEED_VALUE))
                     {
                         return;
@@ -330,7 +330,7 @@ async fn wz_replica_converges_to_zenohd_storage_manager() {
     //    the real zenoh replication aligner protocol.
     let guard = replica.lock().unwrap();
     let stored = guard
-        .get(DATA_KEY)
+        .get(Some(DATA_KEY))
         .expect("wz replica converged: zenohd's entry is present");
     let got = String::from_utf8_lossy(&stored.payload);
     assert!(
@@ -454,7 +454,7 @@ async fn zenohd_converges_to_wz_replica() {
     let replica: Arc<StdMutex<StorageState<MemoryStorage>>> =
         Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
     replica.lock().unwrap().process_put(
-        WZ_DATA_KEY,
+        Some(WZ_DATA_KEY),
         WZ_SEED_VALUE.as_bytes().to_vec(),
         None,
         TimestampHint {
@@ -515,7 +515,7 @@ async fn zenohd_converges_to_wz_replica() {
     //    unchanged by answering an alignment query).
     let guard = replica.lock().unwrap();
     let stored = guard
-        .get(WZ_DATA_KEY)
+        .get(Some(WZ_DATA_KEY))
         .expect("wz still holds its source entry after answering zenohd's alignment");
     assert_eq!(
         stored.payload,

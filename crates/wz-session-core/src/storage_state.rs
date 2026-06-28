@@ -71,19 +71,18 @@
 //!   ordinary stored key; wildcard-update overriding is a dedicated
 //!   follow-up atom (it needs the `KeBoxTree` wildcard registry zenoh
 //!   keeps separately).
-//! - **`strip_prefix` + replication mount-root edge** (R311y61). With a
+//! - **`strip_prefix` and the mount-root `None` key** (R311y61/y64). With a
 //!   configured `strip_prefix` (`storage-mgr-strip-prefix`), the gate keys
 //!   on the STORED (stripped) key — `None` being the exact-prefix-match
 //!   mount-root slot, faithful to zenoh's `Option<OwnedKeyExpr>` backend
 //!   key. The replication/aligner snapshot ([`replication_digest`](StorageState::replication_digest),
 //!   [`replication_events`](StorageState::replication_events)) reads the same
-//!   `latest` map, but [`crate::storage_aligner::EventMetadata`] carries a
-//!   `String` key (no `Option`), so a mount-root value cannot be represented
-//!   as a replication event and is SKIPPED from the digest / event snapshot.
-//!   The combination (a `strip_prefix`-configured storage that ALSO
-//!   replicates a value at the exact mount point) is the one documented edge;
-//!   the common (under-mount) keys replicate normally, and a non-strip
-//!   storage is unaffected (every stored key is `Some`).
+//!   `latest` map, and [`crate::storage_aligner::EventMetadata`] now carries an
+//!   `Option<String>` key (R311y64), so the mount-root `None` value is carried
+//!   through the digest, the aligner events, AND the bincode wire faithfully —
+//!   mirroring zenoh's `Event.stripped_key: Option<OwnedKeyExpr>`. A mount-root
+//!   value is NO LONGER skipped; the under-mount keys replicate as before, and
+//!   a non-strip storage is unaffected (every stored key is `Some`).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -249,27 +248,16 @@ impl<B: StorageBackend> StorageState<B> {
         }
     }
 
-    /// Process an inbound Put. In [`History::Latest`] mode the newer-wins
-    /// gate runs: a strictly-older value returns
+    /// Process an inbound Put over the backend's `Option<&str>` key space:
+    /// `None` is the exact-prefix-match mount-root slot a strip-configured
+    /// [`apply_sample`](Self::apply_sample) produces. In [`History::Latest`]
+    /// mode the newer-wins gate runs: a strictly-older value returns
     /// [`Outdated`](StorageInsertionResult::Outdated) (backend untouched),
     /// otherwise the value is stored and its timestamp recorded. In
     /// [`History::All`] mode the gate is SKIPPED (zenoh
-    /// service.rs:319) — every version is appended by the backend.
+    /// service.rs:319) — every version is appended by the backend. The
+    /// newer-wins gate and the `latest` record key on the same stored key.
     pub fn process_put(
-        &mut self,
-        key: &str,
-        payload: Vec<u8>,
-        encoding: Option<EncodingHint>,
-        timestamp: TimestampHint,
-    ) -> StorageInsertionResult {
-        self.put_stored(Some(key), payload, encoding, timestamp)
-    }
-
-    /// The [`process_put`](Self::process_put) core over the backend's
-    /// `Option<&str>` key space: `None` is the exact-prefix-match mount-root
-    /// slot a strip-configured [`apply_sample`](Self::apply_sample) produces.
-    /// The newer-wins gate and the `latest` record key on the same stored key.
-    fn put_stored(
         &mut self,
         key: Option<&str>,
         payload: Vec<u8>,
@@ -287,25 +275,15 @@ impl<B: StorageBackend> StorageState<B> {
         result
     }
 
-    /// Process an inbound Delete. In [`History::Latest`] mode the newer-wins
-    /// gate runs (a strictly-older delete returns
+    /// Process an inbound Delete over the backend's `Option<&str>` key space
+    /// (`None` = the mount-root slot). In [`History::Latest`] mode the
+    /// newer-wins gate runs (a strictly-older delete returns
     /// [`Outdated`](StorageInsertionResult::Outdated)) and the accepted
     /// delete timestamp is retained as a **tombstone** (so a subsequent
     /// older Put cannot resurrect the key). In [`History::All`] mode the
     /// gate is skipped (the backend decides how a delete affects its
     /// version list).
     pub fn process_delete(
-        &mut self,
-        key: &str,
-        timestamp: TimestampHint,
-    ) -> StorageInsertionResult {
-        self.delete_stored(Some(key), timestamp)
-    }
-
-    /// The [`process_delete`](Self::process_delete) core over the backend's
-    /// `Option<&str>` key space (`None` = the mount-root slot). Retains the
-    /// accepted delete timestamp as a tombstone in `latest`.
-    fn delete_stored(
         &mut self,
         key: Option<&str>,
         timestamp: TimestampHint,
@@ -326,9 +304,10 @@ impl<B: StorageBackend> StorageState<B> {
     }
 
     /// Exact-key read of the live stored value (none if absent or deleted).
-    /// The direct (non-wildcard) query fast path.
-    pub fn get(&self, key: &str) -> Option<&StoredData> {
-        self.backend.get(Some(key))
+    /// The direct (non-wildcard) query fast path. `key` is `Option<&str>`
+    /// over the backend key space (`None` = the mount-root slot).
+    pub fn get(&self, key: Option<&str>) -> Option<&StoredData> {
+        self.backend.get(key)
     }
 
     /// The set of live stored entries whose key answers a query on
@@ -415,7 +394,7 @@ impl<B: StorageBackend> StorageState<B> {
         match view.kind() {
             SampleKind::Put => {
                 let encoding = view.encoding().cloned();
-                self.put_stored(
+                self.process_put(
                     stored_key.as_deref(),
                     view.payload().to_vec(),
                     encoding,
@@ -423,7 +402,7 @@ impl<B: StorageBackend> StorageState<B> {
                 );
             }
             SampleKind::Del => {
-                self.delete_stored(stored_key.as_deref(), timestamp);
+                self.process_delete(stored_key.as_deref(), timestamp);
             }
         }
     }
@@ -497,12 +476,12 @@ impl<B: StorageBackend> StorageState<B> {
         );
         build_digest(
             config,
-            // The mount-root (`None`) key has no full keyexpr to fingerprint;
-            // it is excluded from the digest (the strip + replication combo is
-            // a documented R311y61 edge — see the module-level note).
-            self.latest
-                .iter()
-                .filter_map(|(key, ts)| key.as_deref().map(|k| (k, ts))),
+            // Every key in `latest`, INCLUDING the mount-root (`None`) key: the
+            // digest's per-event fingerprint hashes an `Option<&str>` key
+            // (no key bytes when `None`), so a strip-configured storage's
+            // mount-root value replicates faithfully (R311y64). zenoh hashes the
+            // `Option` stripped key likewise (log.rs:237).
+            self.latest.iter().map(|(key, ts)| (key.as_deref(), ts)),
             hot_era_upper_bound,
         )
     }
@@ -538,16 +517,16 @@ impl<B: StorageBackend> StorageState<B> {
         );
         self.latest
             .iter()
-            // The mount-root (`None`) key has no full keyexpr for an
-            // EventMetadata; it is skipped (the strip + replication combo is a
-            // documented R311y61 edge — see the module-level note).
-            .filter_map(|(key, ts)| {
-                let key = key.as_deref()?;
-                Some(if self.backend.get(Some(key)).is_some() {
-                    EventMetadata::put(key, ts.clone())
+            // Every key in `latest`, INCLUDING the mount-root (`None`) key: an
+            // [`EventMetadata`] now carries an `Option<String>` key (R311y64),
+            // so a strip-configured storage's mount-root value is a first-class
+            // replication event, faithful to zenoh's `Option` stripped_key.
+            .map(|(key, ts)| {
+                if self.backend.get(key.as_deref()).is_some() {
+                    EventMetadata::put(key.clone(), ts.clone())
                 } else {
-                    EventMetadata::delete(key, ts.clone())
-                })
+                    EventMetadata::delete(key.clone(), ts.clone())
+                }
             })
             .collect()
     }
@@ -662,7 +641,7 @@ impl<B: StorageBackend> StorageState<B> {
                 reply: AlignmentReply::Retrieval(meta),
                 value: None,
             }),
-            Action::Put => match self.backend.get(Some(meta.key())) {
+            Action::Put => match self.backend.get(meta.key()) {
                 Some(data) if &data.timestamp == meta.timestamp() => Some(AlignmentResponse {
                     value: Some(RetrievedValue {
                         payload: data.payload.clone(),
@@ -820,7 +799,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// check (aligner_reply.rs:244-252).
     #[cfg(feature = "storage-aligner")]
     fn is_missing(&self, meta: &EventMetadata) -> bool {
-        match self.latest.get(&Some(String::from(meta.key()))) {
+        match self.latest.get(&meta.key().map(String::from)) {
             Some(recorded) => timestamp_strictly_newer(meta.timestamp(), recorded),
             None => true,
         }
@@ -848,24 +827,24 @@ mod tests {
     fn newer_put_replaces_older_value() {
         let mut s = state();
         assert_eq!(
-            s.process_put("demo/a", vec![1], None, ts(10, 1)),
+            s.process_put(Some("demo/a"), vec![1], None, ts(10, 1)),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            s.process_put("demo/a", vec![2], None, ts(20, 1)),
+            s.process_put(Some("demo/a"), vec![2], None, ts(20, 1)),
             StorageInsertionResult::Replaced
         );
-        assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
     }
 
     #[test]
     fn older_put_is_rejected_as_outdated_and_value_unchanged() {
         let mut s = state();
-        s.process_put("demo/a", vec![9], None, ts(100, 1));
-        let r = s.process_put("demo/a", vec![1], None, ts(1, 1));
+        s.process_put(Some("demo/a"), vec![9], None, ts(100, 1));
+        let r = s.process_put(Some("demo/a"), vec![1], None, ts(1, 1));
         assert_eq!(r, StorageInsertionResult::Outdated);
         assert_eq!(
-            s.get("demo/a").unwrap().payload,
+            s.get(Some("demo/a")).unwrap().payload,
             vec![9],
             "the outdated put must not overwrite the newer value"
         );
@@ -877,10 +856,10 @@ mod tests {
         // (service.rs:536 `data.timestamp > new`), so an equal timestamp
         // proceeds (Replaced).
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(10, 1));
-        let r = s.process_put("demo/a", vec![2], None, ts(10, 1));
+        s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+        let r = s.process_put(Some("demo/a"), vec![2], None, ts(10, 1));
         assert_eq!(r, StorageInsertionResult::Replaced);
-        assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
     }
 
     #[test]
@@ -888,13 +867,13 @@ mod tests {
         // Equal NTP64 time -> the zid bytes decide (uhlc Ord, time then
         // id). A put with the same time but a higher zid is strictly newer.
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(10, 1));
-        let r = s.process_put("demo/a", vec![2], None, ts(10, 2));
+        s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+        let r = s.process_put(Some("demo/a"), vec![2], None, ts(10, 2));
         assert_eq!(r, StorageInsertionResult::Replaced);
         // The reverse (lower zid at equal time) is older -> rejected.
-        let r2 = s.process_put("demo/a", vec![3], None, ts(10, 1));
+        let r2 = s.process_put(Some("demo/a"), vec![3], None, ts(10, 1));
         assert_eq!(r2, StorageInsertionResult::Outdated);
-        assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
     }
 
     #[test]
@@ -933,39 +912,39 @@ mod tests {
         // The correctness property the tombstone exists for: a Delete at
         // t=50 must block a Put at t=40 from resurrecting the key.
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(10, 1));
+        s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
         assert_eq!(
-            s.process_delete("demo/a", ts(50, 1)),
+            s.process_delete(Some("demo/a"), ts(50, 1)),
             StorageInsertionResult::Deleted
         );
-        assert!(s.get("demo/a").is_none(), "deleted value is gone");
-        let r = s.process_put("demo/a", vec![2], None, ts(40, 1));
+        assert!(s.get(Some("demo/a")).is_none(), "deleted value is gone");
+        let r = s.process_put(Some("demo/a"), vec![2], None, ts(40, 1));
         assert_eq!(
             r,
             StorageInsertionResult::Outdated,
             "an older put after a delete must not resurrect the key"
         );
-        assert!(s.get("demo/a").is_none());
+        assert!(s.get(Some("demo/a")).is_none());
     }
 
     #[test]
     fn delete_then_newer_put_resurrects_the_key() {
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(10, 1));
-        s.process_delete("demo/a", ts(50, 1));
-        let r = s.process_put("demo/a", vec![2], None, ts(60, 1));
+        s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+        s.process_delete(Some("demo/a"), ts(50, 1));
+        let r = s.process_put(Some("demo/a"), vec![2], None, ts(60, 1));
         assert_eq!(r, StorageInsertionResult::Inserted);
-        assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
     }
 
     #[test]
     fn delete_older_than_stored_is_rejected() {
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(100, 1));
-        let r = s.process_delete("demo/a", ts(50, 1));
+        s.process_put(Some("demo/a"), vec![1], None, ts(100, 1));
+        let r = s.process_delete(Some("demo/a"), ts(50, 1));
         assert_eq!(r, StorageInsertionResult::Outdated);
         assert!(
-            s.get("demo/a").is_some(),
+            s.get(Some("demo/a")).is_some(),
             "an outdated delete must not remove the newer value"
         );
     }
@@ -973,9 +952,9 @@ mod tests {
     #[test]
     fn matching_entries_wildcard_returns_intersecting_live_keys() {
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(10, 1));
-        s.process_put("demo/b", vec![2], None, ts(10, 1));
-        s.process_put("other/c", vec![3], None, ts(10, 1));
+        s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+        s.process_put(Some("demo/b"), vec![2], None, ts(10, 1));
+        s.process_put(Some("other/c"), vec![3], None, ts(10, 1));
         let mut hits: Vec<String> = s
             .matching_entries("demo/*")
             .into_iter()
@@ -988,9 +967,9 @@ mod tests {
     #[test]
     fn matching_entries_excludes_deleted_keys() {
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(10, 1));
-        s.process_put("demo/b", vec![2], None, ts(10, 1));
-        s.process_delete("demo/a", ts(20, 1));
+        s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+        s.process_put(Some("demo/b"), vec![2], None, ts(10, 1));
+        s.process_delete(Some("demo/a"), ts(20, 1));
         let hits: Vec<String> = s
             .matching_entries("demo/**")
             .into_iter()
@@ -1006,8 +985,8 @@ mod tests {
     #[test]
     fn matching_entries_exact_key_query() {
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(10, 1));
-        s.process_put("demo/b", vec![2], None, ts(10, 1));
+        s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+        s.process_put(Some("demo/b"), vec![2], None, ts(10, 1));
         let hits = s.matching_entries("demo/a");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "demo/a");
@@ -1019,8 +998,8 @@ mod tests {
         // A History::Latest backend keeps one value per key, so
         // matching_versions collapses to the matching_entries shape.
         let mut s = state();
-        s.process_put("demo/a", vec![1], None, ts(20, 1));
-        s.process_put("demo/a", vec![2], None, ts(30, 1)); // replaces
+        s.process_put(Some("demo/a"), vec![1], None, ts(20, 1));
+        s.process_put(Some("demo/a"), vec![2], None, ts(30, 1)); // replaces
         let hits = s.matching_versions("demo/a");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1.len(), 1, "Latest keeps one version");
@@ -1048,13 +1027,13 @@ mod tests {
             );
             // Stored under the RELATIVE key, not the full keyexpr.
             assert_eq!(
-                s.get("temp")
+                s.get(Some("temp"))
                     .expect("stored under the stripped key")
                     .payload,
                 vec![21]
             );
             assert!(
-                s.get("home/kitchen/temp").is_none(),
+                s.get(Some("home/kitchen/temp")).is_none(),
                 "the full keyexpr is not a stored key"
             );
             // A query is matched + replied in the FULL keyexpr space (restored).
@@ -1110,7 +1089,7 @@ mod tests {
                 &Sample::new_put("home/kitchen/temp", vec![5]).with_timestamp(ts(10, 1)),
                 || unreachable!(),
             );
-            assert_eq!(s.get("home/kitchen/temp").unwrap().payload, vec![5]);
+            assert_eq!(s.get(Some("home/kitchen/temp")).unwrap().payload, vec![5]);
         }
     }
 
@@ -1130,10 +1109,10 @@ mod tests {
             // Newest first, then an OLDER put: under Latest this would be
             // Outdated and dropped; under All it is retained.
             assert_eq!(
-                s.process_put("demo/a", vec![3], None, ts(30, 1)),
+                s.process_put(Some("demo/a"), vec![3], None, ts(30, 1)),
                 StorageInsertionResult::Inserted
             );
-            let r = s.process_put("demo/a", vec![1], None, ts(10, 1));
+            let r = s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
             assert_ne!(
                 r,
                 StorageInsertionResult::Outdated,
@@ -1150,9 +1129,9 @@ mod tests {
         #[test]
         fn matching_versions_wildcard_returns_all_versions_per_matching_key() {
             let mut s = all_state();
-            s.process_put("demo/a", vec![1], None, ts(10, 1));
-            s.process_put("demo/a", vec![2], None, ts(20, 1));
-            s.process_put("demo/b", vec![9], None, ts(15, 1));
+            s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+            s.process_put(Some("demo/a"), vec![2], None, ts(20, 1));
+            s.process_put(Some("demo/b"), vec![9], None, ts(15, 1));
             let mut hits = s.matching_versions("demo/*");
             hits.sort_by(|a, b| a.0.cmp(&b.0));
             assert_eq!(hits.len(), 2);
@@ -1178,14 +1157,18 @@ mod tests {
             let cfg = ReplicationConfig::defaults("demo/**");
             let hot_upper = IntervalIdx::from(10);
             let mut s = state();
-            s.process_put("demo/a", vec![1], None, ts(10, 1));
-            s.process_put("demo/b", vec![2], None, ts(15, 2));
+            s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+            s.process_put(Some("demo/b"), vec![2], None, ts(15, 2));
 
             let a = ts(10, 1);
             let b = ts(15, 2);
             assert_eq!(
                 s.replication_digest(&cfg, hot_upper),
-                build_digest(&cfg, [("demo/a", &a), ("demo/b", &b)], hot_upper)
+                build_digest(
+                    &cfg,
+                    [(Some("demo/a"), &a), (Some("demo/b"), &b)],
+                    hot_upper
+                )
             );
         }
 
@@ -1194,8 +1177,8 @@ mod tests {
             let cfg = ReplicationConfig::defaults("demo/**");
             let hot_upper = IntervalIdx::from(10);
             let mut s = state();
-            s.process_put("demo/a", vec![1], None, ts(10, 1));
-            s.process_delete("demo/a", ts(20, 1)); // tombstone at ts 20
+            s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+            s.process_delete(Some("demo/a"), ts(20, 1)); // tombstone at ts 20
 
             // The backend dropped the deleted key, but the digest must still
             // cover it (at the delete timestamp) so the delete propagates to a
@@ -1207,7 +1190,7 @@ mod tests {
             let tombstone = ts(20, 1);
             assert_eq!(
                 s.replication_digest(&cfg, hot_upper),
-                build_digest(&cfg, [("demo/a", &tombstone)], hot_upper)
+                build_digest(&cfg, [(Some("demo/a"), &tombstone)], hot_upper)
             );
             // ...and it is NOT the empty digest a get_all_entries build gives.
             assert_ne!(
@@ -1221,14 +1204,14 @@ mod tests {
             let cfg = ReplicationConfig::defaults("demo/**");
             let hot_upper = IntervalIdx::from(10);
             let mut s = state();
-            s.process_put("demo/a", vec![1], None, ts(20, 1));
+            s.process_put(Some("demo/a"), vec![1], None, ts(20, 1));
             // Older put is rejected (Outdated) -> latest stays at ts 20.
-            s.process_put("demo/a", vec![2], None, ts(10, 1));
+            s.process_put(Some("demo/a"), vec![2], None, ts(10, 1));
 
             let newer = ts(20, 1);
             assert_eq!(
                 s.replication_digest(&cfg, hot_upper),
-                build_digest(&cfg, [("demo/a", &newer)], hot_upper)
+                build_digest(&cfg, [(Some("demo/a"), &newer)], hot_upper)
             );
         }
     }
@@ -1242,19 +1225,19 @@ mod tests {
         #[test]
         fn replication_events_distinguishes_put_from_delete_tombstone() {
             let mut s = StorageState::new(MemoryStorage::new());
-            s.process_put("demo/a", vec![1], None, ts(10, 1));
-            s.process_put("demo/b", vec![2], None, ts(11, 1));
-            s.process_delete("demo/b", ts(20, 1)); // tombstone
+            s.process_put(Some("demo/a"), vec![1], None, ts(10, 1));
+            s.process_put(Some("demo/b"), vec![2], None, ts(11, 1));
+            s.process_delete(Some("demo/b"), ts(20, 1)); // tombstone
 
             let events = s.replication_events();
             // One entry per key in `latest`, including the tombstone.
             assert_eq!(events.len(), 2);
 
-            let a = events.iter().find(|e| e.key() == "demo/a").unwrap();
+            let a = events.iter().find(|e| e.key() == Some("demo/a")).unwrap();
             assert_eq!(a.action(), Action::Put, "a live key is a Put event");
             assert_eq!(a.timestamp(), &ts(10, 1));
 
-            let b = events.iter().find(|e| e.key() == "demo/b").unwrap();
+            let b = events.iter().find(|e| e.key() == Some("demo/b")).unwrap();
             assert_eq!(
                 b.action(),
                 Action::Delete,
@@ -1264,6 +1247,69 @@ mod tests {
                 b.timestamp(),
                 &ts(20, 1),
                 "the tombstone carries the delete ts"
+            );
+        }
+
+        // R311y64 — the strip + replication mount-root edge is CLOSED: a
+        // strip-configured storage's exact-prefix value (stored under the
+        // backend `None` key) is now carried through the replication snapshot
+        // as a first-class `None`-keyed event, NO LONGER skipped (the former
+        // documented edge). Needs the strip feature on top of the aligner.
+        #[cfg(feature = "storage-mgr-strip-prefix")]
+        #[test]
+        fn replication_carries_the_mount_root_none_keyed_event() {
+            use crate::sample::Sample;
+            use crate::storage_replication::{IntervalIdx, ReplicationConfig};
+
+            let mut s =
+                StorageState::with_strip_prefix(MemoryStorage::new(), Some("home/kitchen".into()));
+            // The mount-root value (stored under the backend `None` key) ...
+            s.apply_sample(
+                &Sample::new_put("home/kitchen", vec![7]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            // ... and an under-mount value (stored under the stripped "temp").
+            s.apply_sample(
+                &Sample::new_put("home/kitchen/temp", vec![21]).with_timestamp(ts(11, 1)),
+                || unreachable!(),
+            );
+
+            let events = s.replication_events();
+            assert_eq!(events.len(), 2, "BOTH events are carried, none skipped");
+            // The mount-root event has a `None` key (no longer dropped).
+            let root = events
+                .iter()
+                .find(|e| e.key().is_none())
+                .expect("the mount-root None-keyed event is present");
+            assert_eq!(root.action(), Action::Put);
+            assert_eq!(root.timestamp(), &ts(10, 1));
+            // The under-mount event carries the stripped "temp" key.
+            let temp = events
+                .iter()
+                .find(|e| e.key() == Some("temp"))
+                .expect("the under-mount event is present");
+            assert_eq!(temp.action(), Action::Put);
+
+            // The digest covers the None-keyed event's fingerprint too: a digest
+            // built from BOTH keys equals the snapshot's, and dropping the None
+            // key changes it -> the mount-root event is genuinely in the digest.
+            let cfg = ReplicationConfig::defaults("home/kitchen/**");
+            let hot_upper = IntervalIdx::from(10);
+            let root_ts = ts(10, 1);
+            let temp_ts = ts(11, 1);
+            assert_eq!(
+                s.replication_digest(&cfg, hot_upper),
+                build_digest(
+                    &cfg,
+                    [(None, &root_ts), (Some("temp"), &temp_ts)],
+                    hot_upper
+                ),
+                "the digest carries the None-keyed mount-root fingerprint"
+            );
+            assert_ne!(
+                s.replication_digest(&cfg, hot_upper),
+                build_digest(&cfg, [(Some("temp"), &temp_ts)], hot_upper),
+                "omitting the None-keyed event changes the digest -> it is included"
             );
         }
 
@@ -1291,7 +1337,7 @@ mod tests {
         fn st_with(puts: &[(&str, TimestampHint)]) -> StorageState<MemoryStorage> {
             let mut s = StorageState::new(MemoryStorage::new());
             for (k, t) in puts {
-                s.process_put(k, vec![0xAB], None, t.clone());
+                s.process_put(Some(k), vec![0xAB], None, t.clone());
             }
             s
         }
@@ -1309,17 +1355,17 @@ mod tests {
         #[test]
         fn answer_all_retrieves_puts_with_value_and_deletes_without() {
             let mut s = st_with(&[("demo/a", at(9, 0))]);
-            s.process_delete("demo/b", at(9, 1)); // a tombstone
+            s.process_delete(Some("demo/b"), at(9, 1)); // a tombstone
             let r = s.answer_alignment_query(&cfg(), &AlignmentQuery::All, &[0x01], NOW10);
             assert_eq!(r.len(), 2);
             let put = r
                 .iter()
-                .find(|x| matches!(&x.reply, AlignmentReply::Retrieval(m) if m.key() == "demo/a"))
+                .find(|x| matches!(&x.reply, AlignmentReply::Retrieval(m) if m.key() == Some("demo/a")))
                 .unwrap();
             assert!(put.value.is_some(), "a Put retrieval carries the payload");
             let del = r
                 .iter()
-                .find(|x| matches!(&x.reply, AlignmentReply::Retrieval(m) if m.key() == "demo/b"))
+                .find(|x| matches!(&x.reply, AlignmentReply::Retrieval(m) if m.key() == Some("demo/b")))
                 .unwrap();
             assert!(del.value.is_none(), "a Delete retrieval carries no payload");
         }
@@ -1330,7 +1376,7 @@ mod tests {
             // Matching timestamp -> retrieved with its value.
             let ok = s.answer_alignment_query(
                 &cfg(),
-                &AlignmentQuery::Events(vec![EventMetadata::put("demo/a", at(9, 0))]),
+                &AlignmentQuery::Events(vec![EventMetadata::put(Some("demo/a".into()), at(9, 0))]),
                 &[0x01],
                 NOW10,
             );
@@ -1339,7 +1385,7 @@ mod tests {
             // A stale timestamp (the stored value moved on) -> skipped entirely.
             let stale = s.answer_alignment_query(
                 &cfg(),
-                &AlignmentQuery::Events(vec![EventMetadata::put("demo/a", at(8, 0))]),
+                &AlignmentQuery::Events(vec![EventMetadata::put(Some("demo/a".into()), at(8, 0))]),
                 &[0x01],
                 NOW10,
             );
@@ -1350,7 +1396,10 @@ mod tests {
             // A delete event -> a value-less Retrieval.
             let del = s.answer_alignment_query(
                 &cfg(),
-                &AlignmentQuery::Events(vec![EventMetadata::delete("demo/a", at(9, 0))]),
+                &AlignmentQuery::Events(vec![EventMetadata::delete(
+                    Some("demo/a".into()),
+                    at(9, 0),
+                )]),
                 &[0x01],
                 NOW10,
             );
@@ -1376,7 +1425,7 @@ mod tests {
                 s.answer_alignment_query(&cfg(), &AlignmentQuery::Diff(hot_diff), &[0x01], NOW10);
             assert_eq!(r.len(), 1);
             assert!(matches!(&r[0].reply, AlignmentReply::EventsMetadata(evs)
-                    if evs.len() == 1 && evs[0].key() == "demo/h"));
+                    if evs.len() == 1 && evs[0].key() == Some("demo/h")));
 
             let cold_diff = DigestDiff {
                 cold_eras_differ: true,
@@ -1450,7 +1499,7 @@ mod tests {
             );
             assert_eq!(r.len(), 1);
             assert!(matches!(&r[0].reply, AlignmentReply::EventsMetadata(evs)
-                    if evs.iter().any(|e| e.key() == "demo/h")));
+                    if evs.iter().any(|e| e.key() == Some("demo/h"))));
 
             let r = s.answer_alignment_query(
                 &cfg(),
@@ -1511,19 +1560,19 @@ mod tests {
         fn process_events_metadata_applies_delete_and_collects_missing_put() {
             let mut s = StorageState::new(MemoryStorage::new());
             let reply = AlignmentReply::EventsMetadata(vec![
-                EventMetadata::put("demo/p", at(10, 0)),
-                EventMetadata::delete("demo/d", at(10, 1)),
+                EventMetadata::put(Some("demo/p".into()), at(10, 0)),
+                EventMetadata::delete(Some("demo/d".into()), at(10, 1)),
             ]);
             match s.process_alignment_reply(&cfg(), reply, None) {
                 AlignmentFollowup::Query(AlignmentQuery::Events(puts)) => {
                     assert_eq!(puts.len(), 1, "only the Put needs a payload fetch");
-                    assert_eq!(puts[0].key(), "demo/p");
+                    assert_eq!(puts[0].key(), Some("demo/p"));
                 }
                 other => panic!("expected an Events follow-up, got {other:?}"),
             }
             // The Delete applied as a tombstone: an older Put can't resurrect it.
             assert_eq!(
-                s.process_put("demo/d", vec![1], None, at(9, 0)),
+                s.process_put(Some("demo/d"), vec![1], None, at(9, 0)),
                 StorageInsertionResult::Outdated
             );
         }
@@ -1531,7 +1580,7 @@ mod tests {
         #[test]
         fn process_retrieval_applies_a_put_then_skips_when_already_held() {
             let mut s = StorageState::new(MemoryStorage::new());
-            let put = EventMetadata::put("demo/x", at(10, 0));
+            let put = EventMetadata::put(Some("demo/x".into()), at(10, 0));
             assert_eq!(
                 s.process_alignment_reply(
                     &cfg(),
@@ -1543,7 +1592,10 @@ mod tests {
                 ),
                 AlignmentFollowup::Done
             );
-            assert_eq!(s.get("demo/x").map(|d| d.payload.clone()), Some(vec![0xAB]));
+            assert_eq!(
+                s.get(Some("demo/x")).map(|d| d.payload.clone()),
+                Some(vec![0xAB])
+            );
             // Re-processing the same (already held) event does not re-apply.
             s.process_alignment_reply(
                 &cfg(),
@@ -1554,7 +1606,7 @@ mod tests {
                 }),
             );
             assert_eq!(
-                s.get("demo/x").unwrap().payload,
+                s.get(Some("demo/x")).unwrap().payload,
                 vec![0xAB],
                 "an already-held event is not overwritten"
             );
@@ -1597,26 +1649,26 @@ mod tests {
             // hot_upper = 11: cold < 8, warm {8,9}, hot {10,11}.
             let now = 11u64 << 32;
             let mut peer = StorageState::new(MemoryStorage::new());
-            peer.process_put("demo/cold", vec![1], None, at(2, 0));
-            peer.process_put("demo/warm", vec![2], None, at(8, 1));
-            peer.process_put("demo/hot", vec![3], None, at(10, 0));
-            peer.process_delete("demo/gone", at(10, 1)); // a hot-era tombstone
+            peer.process_put(Some("demo/cold"), vec![1], None, at(2, 0));
+            peer.process_put(Some("demo/warm"), vec![2], None, at(8, 1));
+            peer.process_put(Some("demo/hot"), vec![3], None, at(10, 0));
+            peer.process_delete(Some("demo/gone"), at(10, 1)); // a hot-era tombstone
             let mut local = StorageState::new(MemoryStorage::new());
-            local.process_put("demo/cold", vec![1], None, at(2, 0)); // already shares cold
+            local.process_put(Some("demo/cold"), vec![1], None, at(2, 0)); // already shares cold
 
             drive_alignment(&mut local, &peer, &config, now);
 
             // Local pulled every entry it was missing, across all three eras.
             assert_eq!(
-                local.get("demo/warm").map(|d| d.payload.clone()),
+                local.get(Some("demo/warm")).map(|d| d.payload.clone()),
                 Some(vec![2])
             );
             assert_eq!(
-                local.get("demo/hot").map(|d| d.payload.clone()),
+                local.get(Some("demo/hot")).map(|d| d.payload.clone()),
                 Some(vec![3])
             );
             assert!(
-                local.get("demo/gone").is_none(),
+                local.get(Some("demo/gone")).is_none(),
                 "the tombstone removed the key locally"
             );
             // Local was a subset of the peer, so the digests now match exactly.
@@ -1636,13 +1688,13 @@ mod tests {
             let config = cfg();
             let now = 11u64 << 32;
             let mut a = StorageState::new(MemoryStorage::new());
-            a.process_put("k/shared", vec![0], None, at(2, 0));
-            a.process_put("k/only_a_warm", vec![0xA1], None, at(8, 0));
-            a.process_put("k/only_a_hot", vec![0xA2], None, at(10, 0));
+            a.process_put(Some("k/shared"), vec![0], None, at(2, 0));
+            a.process_put(Some("k/only_a_warm"), vec![0xA1], None, at(8, 0));
+            a.process_put(Some("k/only_a_hot"), vec![0xA2], None, at(10, 0));
             let mut b = StorageState::new(MemoryStorage::new());
-            b.process_put("k/shared", vec![0], None, at(2, 0));
-            b.process_put("k/only_b_warm", vec![0xB1], None, at(9, 0));
-            b.process_put("k/only_b_hot", vec![0xB2], None, at(11, 0));
+            b.process_put(Some("k/shared"), vec![0], None, at(2, 0));
+            b.process_put(Some("k/only_b_warm"), vec![0xB1], None, at(9, 0));
+            b.process_put(Some("k/only_b_hot"), vec![0xB2], None, at(11, 0));
 
             // a pulls from b, then b pulls from a (now the union).
             drive_alignment(&mut a, &b, &config, now);
@@ -1654,8 +1706,11 @@ mod tests {
                 ("k/only_b_warm", vec![0xB1]),
                 ("k/only_b_hot", vec![0xB2]),
             ] {
-                assert_eq!(a.get(key).map(|d| d.payload.clone()), Some(val.clone()));
-                assert_eq!(b.get(key).map(|d| d.payload.clone()), Some(val));
+                assert_eq!(
+                    a.get(Some(key)).map(|d| d.payload.clone()),
+                    Some(val.clone())
+                );
+                assert_eq!(b.get(Some(key)).map(|d| d.payload.clone()), Some(val));
             }
             let hu = config.classify(now).0;
             assert_eq!(
@@ -1682,18 +1737,21 @@ mod tests {
                 zid: vec![0x02],
             };
             let mut local = StorageState::new(MemoryStorage::new());
-            local.process_put("k/x", vec![0xAA], None, lo);
+            local.process_put(Some("k/x"), vec![0xAA], None, lo);
             let mut peer = StorageState::new(MemoryStorage::new());
-            peer.process_put("k/x", vec![0xBB], None, hi.clone());
+            peer.process_put(Some("k/x"), vec![0xBB], None, hi.clone());
 
             // The peer holds the higher-zid version -> local must adopt it.
             drive_alignment(&mut local, &peer, &config, now);
             assert_eq!(
-                local.get("k/x").map(|d| d.payload.clone()),
+                local.get(Some("k/x")).map(|d| d.payload.clone()),
                 Some(vec![0xBB]),
                 "the higher-zid value wins the equal-time conflict"
             );
-            assert_eq!(local.get("k/x").map(|d| d.timestamp.clone()), Some(hi));
+            assert_eq!(
+                local.get(Some("k/x")).map(|d| d.timestamp.clone()),
+                Some(hi)
+            );
         }
     }
 }

@@ -679,7 +679,7 @@ mod tests {
     ) -> Arc<Mutex<StorageState<MemoryStorage>>> {
         let mut st = StorageState::new(MemoryStorage::new());
         st.process_put(
-            key,
+            Some(key),
             payload,
             None,
             TimestampHint {
@@ -967,7 +967,7 @@ mod tests {
         // Retrieval. The value-presence keys on the event Action, not the
         // Retrieval variant.
         let meta = EventMetadata::delete(
-            "demo/a",
+            Some("demo/a".into()),
             TimestampHint {
                 time: 1,
                 zid: vec![0x01],

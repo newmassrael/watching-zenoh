@@ -350,7 +350,7 @@ mod tests {
         mgr.storage("kitchen").unwrap().with_state(|st| {
             // Captured under the RELATIVE (stripped) key.
             assert_eq!(
-                st.get("temp").map(|d| d.payload.clone()),
+                st.get(Some("temp")).map(|d| d.payload.clone()),
                 Some(b"k".to_vec()),
                 "kitchen stored the key relative to its mount"
             );
@@ -366,7 +366,7 @@ mod tests {
         // The bath storage is independent — it captured nothing.
         mgr.storage("bath").unwrap().with_state(|st| {
             assert!(
-                st.get("temp").is_none(),
+                st.get(Some("temp")).is_none(),
                 "bath did not capture the kitchen put (keyexpr isolation)"
             );
         });

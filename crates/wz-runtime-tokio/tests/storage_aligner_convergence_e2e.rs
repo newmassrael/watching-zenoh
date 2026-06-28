@@ -153,7 +153,7 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     //    are held for the whole test (RAII: dropping undeclares / aborts).
     let state_a: SharedState = Arc::new(StdMutex::new(StorageState::new(MemoryStorage::new())));
     state_a.lock().unwrap().process_put(
-        DATA_KEY,
+        Some(DATA_KEY),
         DATA_VALUE.to_vec(),
         None,
         TimestampHint {
@@ -214,7 +214,7 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
             for _ in 0..400 {
                 {
                     let guard = state_b.lock().unwrap();
-                    if guard.get(DATA_KEY).map(|s| s.payload.as_slice()) == Some(DATA_VALUE) {
+                    if guard.get(Some(DATA_KEY)).map(|s| s.payload.as_slice()) == Some(DATA_VALUE) {
                         return;
                     }
                 }
@@ -236,7 +236,7 @@ async fn two_replicas_converge_via_digest_driven_alignment() {
     {
         let gb = state_b.lock().unwrap();
         let stored = gb
-            .get(DATA_KEY)
+            .get(Some(DATA_KEY))
             .expect("B converged: the aligned entry is present in B's store");
         assert_eq!(
             stored.payload, DATA_VALUE,

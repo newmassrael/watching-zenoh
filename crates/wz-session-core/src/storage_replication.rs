@@ -69,13 +69,17 @@
 //!
 //! ## Deliberate divergences (each documented)
 //!
-//! - **No `strip_prefix` yet.** wz carries no `strip_prefix`
-//!   ([`crate::storage_backend`] divergence note), so the stored key is
-//!   always the full keyexpr and is always hashed. zenoh hashes the
-//!   *stripped* key and omits it entirely when the strip matched exactly
-//!   (log.rs:237). The fingerprints therefore match a zenoh replica
-//!   configured with no `strip_prefix` (stripped == full); `strip_prefix`
-//!   parity is a later storage-config atom.
+//! - **`strip_prefix` and the mount-root `None` key (R311y64).** With a
+//!   configured `strip_prefix` the stored key is the *stripped* key, and the
+//!   exact-prefix mount-root value is stored under the backend `None` key —
+//!   mirroring zenoh's `Option<OwnedKeyExpr>` stripped key. [`event_fingerprint`]
+//!   takes `Option<&str>` and hashes the key bytes ONLY when `Some`, omitting
+//!   them entirely for a `None` mount-root key (zenoh `compute_fingerprint`,
+//!   log.rs:237: `if let Some(key_expr) = maybe_stripped_key { ... }`). So a
+//!   `None` key and a `Some("")` key fingerprint identically (neither hashes
+//!   any key bytes) — the zenoh-faithful equivalence. With no `strip_prefix`
+//!   every stored key is `Some(full_key)` and the fingerprints match a
+//!   non-strip zenoh replica.
 //! - **`sub_intervals` width pinned to 8 bytes.** zenoh's `sub_intervals` is
 //!   a `usize`, so its hashed width is the platform pointer width (8 bytes
 //!   on the 64-bit AP interop target). wz stores it as a `u64` so the hash
@@ -278,8 +282,9 @@ impl ReplicationConfig {
     }
 
     /// The `strip_prefix`, if configured (zenoh `Configuration::prefix`,
-    /// configuration.rs:87-89). wz does not yet strip; this is carried for
-    /// fingerprint parity.
+    /// configuration.rs:87-89), carried for config-fingerprint parity. The
+    /// per-event strip is applied by [`crate::storage_state`] (R311y64); a
+    /// mount-root value lands under the backend `None` key.
     pub fn prefix(&self) -> Option<&str> {
         self.prefix.as_deref()
     }
@@ -398,17 +403,25 @@ fn ntp64_to_ms(time: u64) -> u128 {
 /// The [`Fingerprint`] of a single stored event — a `(key, timestamp)` pair.
 /// zenoh `Event::compute_fingerprint` (log.rs:232-244).
 ///
-/// Hashes the key bytes, the NTP64 `time` as 8 little-endian bytes
-/// (`timestamp.get_time().0.to_le_bytes()`, log.rs:240), and the zid as the
+/// The key is `Option<&str>` mirroring zenoh's `maybe_stripped_key:
+/// Option<OwnedKeyExpr>`: the key bytes are hashed ONLY when `Some`
+/// (`if let Some(key_expr) = maybe_stripped_key { hasher.update(...) }`,
+/// log.rs:237-239), so a `None` mount-root key hashes the timestamp only.
+/// Then the NTP64 `time` as 8 little-endian bytes
+/// (`timestamp.get_time().0.to_le_bytes()`, log.rs:240) and the zid as the
 /// 16-byte zero-padded little-endian array (via
 /// `storage_state::zid_to_le_array`, matching `timestamp.get_id().to_le_bytes()`,
 /// log.rs:241). The action/kind is deliberately *not* hashed — it adds no
 /// distinguishing power and hashing it would cost time (log.rs:226-231). The
 /// `(key, time, id)` triple is exactly what the newer-wins comparator orders
 /// on, so two replicas that hold the same event compute the same fingerprint.
-pub(crate) fn event_fingerprint(key: &str, timestamp: &TimestampHint) -> Fingerprint {
+/// A `None` key and a `Some("")` key fingerprint identically (neither hashes
+/// any key bytes) — the zenoh-faithful equivalence.
+pub(crate) fn event_fingerprint(key: Option<&str>, timestamp: &TimestampHint) -> Fingerprint {
     let mut hasher = Xxh3::default();
-    hasher.update(key.as_bytes());
+    if let Some(k) = key {
+        hasher.update(k.as_bytes());
+    }
     hasher.update(&timestamp.time.to_le_bytes());
     hasher.update(&zid_to_le_array(&timestamp.zid));
     Fingerprint::from(hasher.digest())
@@ -583,9 +596,11 @@ impl DigestDiff {
 /// bound (typically the last elapsed interval). zenoh
 /// `LogLatest::digest_from` (log.rs:557-590).
 ///
-/// `events` is the distinct latest `(key, timestamp)` per key — exactly what
-/// [`crate::storage_backend::StorageBackend::get_all_entries`] yields. Each
-/// event is hashed (`event_fingerprint`) and XOR-accumulated into its
+/// `events` is the distinct latest `(Option<key>, timestamp)` per key — the
+/// key being `Option` to carry a strip-configured storage's mount-root value
+/// (stored under the backend `None` key), faithful to zenoh's
+/// `maybe_stripped_key`. Each event is hashed (`event_fingerprint`, which
+/// hashes the key bytes only when `Some`) and XOR-accumulated into its
 /// `(interval, sub-interval)` bucket; the bucket fingerprints then roll up by
 /// era:
 /// - intervals `< warm_lower` XOR into the single `cold_era_fingerprint`;
@@ -612,7 +627,7 @@ impl DigestDiff {
 /// future atom if profiling demands it.
 pub fn build_digest<'a>(
     config: &ReplicationConfig,
-    events: impl IntoIterator<Item = (&'a str, &'a TimestampHint)>,
+    events: impl IntoIterator<Item = (Option<&'a str>, &'a TimestampHint)>,
     hot_era_upper_bound: IntervalIdx,
 ) -> Digest {
     // 1. XOR-accumulate every event into its (interval, sub-interval) bucket.
@@ -895,11 +910,11 @@ pub mod wire {
             build_digest(
                 &cfg,
                 [
-                    ("demo/a", &cold),
-                    ("demo/b", &warm_a),
-                    ("demo/c", &warm_b),
-                    ("demo/d", &hot_a),
-                    ("demo/e", &hot_b),
+                    (Some("demo/a"), &cold),
+                    (Some("demo/b"), &warm_a),
+                    (Some("demo/c"), &warm_b),
+                    (Some("demo/d"), &hot_a),
+                    (Some("demo/e"), &hot_b),
                 ],
                 IntervalIdx::from(10),
             )
@@ -1183,13 +1198,25 @@ mod tests {
 
     #[test]
     fn event_fingerprint_is_deterministic_and_field_sensitive() {
-        let base = event_fingerprint("demo/a", &ts(100, vec![0x01]));
+        let base = event_fingerprint(Some("demo/a"), &ts(100, vec![0x01]));
 
-        assert_eq!(base, event_fingerprint("demo/a", &ts(100, vec![0x01])));
+        assert_eq!(
+            base,
+            event_fingerprint(Some("demo/a"), &ts(100, vec![0x01]))
+        );
         // Different key, time, or zid all change the fingerprint.
-        assert_ne!(base, event_fingerprint("demo/b", &ts(100, vec![0x01])));
-        assert_ne!(base, event_fingerprint("demo/a", &ts(101, vec![0x01])));
-        assert_ne!(base, event_fingerprint("demo/a", &ts(100, vec![0x02])));
+        assert_ne!(
+            base,
+            event_fingerprint(Some("demo/b"), &ts(100, vec![0x01]))
+        );
+        assert_ne!(
+            base,
+            event_fingerprint(Some("demo/a"), &ts(101, vec![0x01]))
+        );
+        assert_ne!(
+            base,
+            event_fingerprint(Some("demo/a"), &ts(100, vec![0x02]))
+        );
     }
 
     /// The zid is normalised to the 16-byte LE array before hashing, so a
@@ -1198,9 +1225,29 @@ mod tests {
     /// uhlc's canonical 16-byte id (and with the newer-wins comparator).
     #[test]
     fn event_fingerprint_zid_is_length_normalised() {
-        let trimmed = event_fingerprint("demo/a", &ts(100, vec![0x01]));
-        let padded = event_fingerprint("demo/a", &ts(100, vec![0x01, 0x00, 0x00]));
+        let trimmed = event_fingerprint(Some("demo/a"), &ts(100, vec![0x01]));
+        let padded = event_fingerprint(Some("demo/a"), &ts(100, vec![0x01, 0x00, 0x00]));
         assert_eq!(trimmed, padded);
+    }
+
+    /// The zenoh-faithful `None`/`Some("")` equivalence: `compute_fingerprint`
+    /// hashes the key bytes ONLY when `Some` (log.rs:237), so a `None`
+    /// mount-root key hashes no key bytes — and `Some("")` hashes no key bytes
+    /// either (an empty slice). The two are therefore EQUAL, and both differ
+    /// from a non-empty key (which DOES hash bytes).
+    #[test]
+    fn event_fingerprint_none_key_equals_empty_key_and_differs_from_nonempty() {
+        let ts = ts(100, vec![0x01]);
+        assert_eq!(
+            event_fingerprint(None, &ts),
+            event_fingerprint(Some(""), &ts),
+            "a None key and a Some(\"\") key both hash zero key bytes -> equal"
+        );
+        assert_ne!(
+            event_fingerprint(None, &ts),
+            event_fingerprint(Some("demo/a"), &ts),
+            "a None key differs from a non-empty key (which hashes its bytes)"
+        );
     }
 
     /// The zid-as-zenoh-hex SSOT: a zid renders as zenoh's `ZenohId` Display —
@@ -1257,7 +1304,11 @@ mod tests {
         let cold = ts(at_secs(35), vec![0x01]);
         let warm = ts(at_secs(75), vec![0x01]);
         let hot = ts(at_secs(95), vec![0x01]);
-        let events = [("demo/a", &cold), ("demo/b", &warm), ("demo/c", &hot)];
+        let events = [
+            (Some("demo/a"), &cold),
+            (Some("demo/b"), &warm),
+            (Some("demo/c"), &hot),
+        ];
 
         let digest = build_digest(&cfg, events, IntervalIdx::from(10));
 
@@ -1265,14 +1316,14 @@ mod tests {
         // Cold: the single cold event's fingerprint.
         assert_eq!(
             digest.cold_era_fingerprint(),
-            event_fingerprint("demo/a", &cold)
+            event_fingerprint(Some("demo/a"), &cold)
         );
         // Warm: exactly interval 7, fingerprint == the event's (one event,
         // one sub-interval, so the interval fingerprint is the event's).
         assert_eq!(digest.warm_era_fingerprints().len(), 1);
         assert_eq!(
             digest.warm_era_fingerprints().get(&IntervalIdx::from(7)),
-            Some(&event_fingerprint("demo/b", &warm))
+            Some(&event_fingerprint(Some("demo/b"), &warm))
         );
         // Hot: interval 9, sub-interval 2 (95000ms -> rem 5000 / 2000 = 2).
         assert_eq!(digest.hot_era_fingerprints().len(), 1);
@@ -1282,7 +1333,7 @@ mod tests {
             .expect("interval 9 is in the hot era");
         assert_eq!(
             hot_subs.get(&SubIntervalIdx::from(2)),
-            Some(&event_fingerprint("demo/c", &hot))
+            Some(&event_fingerprint(Some("demo/c"), &hot))
         );
     }
 
@@ -1294,11 +1345,12 @@ mod tests {
         // XOR of the two sub-interval (single-event) fingerprints.
         let e0 = ts(at_secs(71), vec![0x01]);
         let e2 = ts(at_secs(75), vec![0x01]);
-        let events = [("demo/a", &e0), ("demo/b", &e2)];
+        let events = [(Some("demo/a"), &e0), (Some("demo/b"), &e2)];
 
         let digest = build_digest(&cfg, events, IntervalIdx::from(10));
 
-        let expected = event_fingerprint("demo/a", &e0) ^ event_fingerprint("demo/b", &e2);
+        let expected =
+            event_fingerprint(Some("demo/a"), &e0) ^ event_fingerprint(Some("demo/b"), &e2);
         assert_eq!(
             digest.warm_era_fingerprints().get(&IntervalIdx::from(7)),
             Some(&expected)
@@ -1312,7 +1364,7 @@ mod tests {
         // 98000ms -> sub 4. Both must appear separately under interval 9.
         let s2 = ts(at_secs(94), vec![0x01]);
         let s4 = ts(at_secs(98), vec![0x01]);
-        let events = [("demo/a", &s2), ("demo/b", &s4)];
+        let events = [(Some("demo/a"), &s2), (Some("demo/b"), &s4)];
 
         let digest = build_digest(&cfg, events, IntervalIdx::from(10));
 
@@ -1323,11 +1375,11 @@ mod tests {
         assert_eq!(subs.len(), 2);
         assert_eq!(
             subs.get(&SubIntervalIdx::from(2)),
-            Some(&event_fingerprint("demo/a", &s2))
+            Some(&event_fingerprint(Some("demo/a"), &s2))
         );
         assert_eq!(
             subs.get(&SubIntervalIdx::from(4)),
-            Some(&event_fingerprint("demo/b", &s4))
+            Some(&event_fingerprint(Some("demo/b"), &s4))
         );
     }
 
@@ -1336,7 +1388,7 @@ mod tests {
         let cfg = era_cfg();
         // hot_upper = 5, but the event is at interval 9 -> excluded entirely.
         let future = ts(at_secs(95), vec![0x01]);
-        let events = [("demo/a", &future)];
+        let events = [(Some("demo/a"), &future)];
 
         let digest = build_digest(&cfg, events, IntervalIdx::from(5));
 
@@ -1353,7 +1405,7 @@ mod tests {
         // absent entry and a zero entry must diff differently, so this filter
         // is load-bearing for digest equality.
         let e = ts(at_secs(75), vec![0x01]);
-        let events = [("demo/a", &e), ("demo/a", &e)];
+        let events = [(Some("demo/a"), &e), (Some("demo/a"), &e)];
 
         let digest = build_digest(&cfg, events, IntervalIdx::from(10));
 
@@ -1366,7 +1418,7 @@ mod tests {
     #[test]
     fn build_digest_empty_store_is_empty_but_carries_config_fp() {
         let cfg = era_cfg();
-        let events: [(&str, &TimestampHint); 0] = [];
+        let events: [(Option<&str>, &TimestampHint); 0] = [];
 
         let digest = build_digest(&cfg, events, IntervalIdx::from(10));
 
@@ -1384,7 +1436,11 @@ mod tests {
         let c = ts(at_secs(35), vec![0x01]);
         let w = ts(at_secs(75), vec![0x01]);
         let h = ts(at_secs(95), vec![0x01]);
-        let events = [("demo/a", &c), ("demo/b", &w), ("demo/c", &h)];
+        let events = [
+            (Some("demo/a"), &c),
+            (Some("demo/b"), &w),
+            (Some("demo/c"), &h),
+        ];
 
         let a = build_digest(&cfg, events, IntervalIdx::from(10));
         let b = build_digest(&cfg, events, IntervalIdx::from(10));
@@ -1397,7 +1453,7 @@ mod tests {
         let other_cfg = ReplicationConfig::new("other/**", None, 10_000, 5, 2, 3, 250);
         let h = ts(at_secs(95), vec![0x01]);
 
-        let local = build_digest(&cfg, [("demo/a", &h)], IntervalIdx::from(10));
+        let local = build_digest(&cfg, [(Some("demo/a"), &h)], IntervalIdx::from(10));
         // Different key_expr -> different config fingerprint -> never compares,
         // even though the stored data plainly differs.
         let remote = build_digest(&other_cfg, [], IntervalIdx::from(10));
@@ -1410,10 +1466,10 @@ mod tests {
         let s2 = ts(at_secs(94), vec![0x01]); // interval 9, sub 2
         let s4 = ts(at_secs(98), vec![0x01]); // interval 9, sub 4
 
-        let local = build_digest(&cfg, [("demo/a", &s2)], IntervalIdx::from(10));
+        let local = build_digest(&cfg, [(Some("demo/a"), &s2)], IntervalIdx::from(10));
         let remote = build_digest(
             &cfg,
-            [("demo/a", &s2), ("demo/b", &s4)],
+            [(Some("demo/a"), &s2), (Some("demo/b"), &s4)],
             IntervalIdx::from(10),
         );
 
@@ -1433,8 +1489,8 @@ mod tests {
         let cfg = era_cfg();
         // Same (interval 9, sub 2) bucket, different value -> different fp.
         let here = ts(at_secs(94), vec![0x01]);
-        let local = build_digest(&cfg, [("demo/a", &here)], IntervalIdx::from(10));
-        let remote = build_digest(&cfg, [("demo/b", &here)], IntervalIdx::from(10));
+        let local = build_digest(&cfg, [(Some("demo/a"), &here)], IntervalIdx::from(10));
+        let remote = build_digest(&cfg, [(Some("demo/b"), &here)], IntervalIdx::from(10));
 
         let diff = local.diff(remote).expect("the shared bucket differs");
         let subs = diff
@@ -1450,10 +1506,10 @@ mod tests {
         let i7 = ts(at_secs(75), vec![0x01]); // interval 7 (warm)
         let i8 = ts(at_secs(85), vec![0x01]); // interval 8 (warm)
 
-        let local = build_digest(&cfg, [("demo/a", &i7)], IntervalIdx::from(10));
+        let local = build_digest(&cfg, [(Some("demo/a"), &i7)], IntervalIdx::from(10));
         let remote = build_digest(
             &cfg,
-            [("demo/a", &i7), ("demo/b", &i8)],
+            [(Some("demo/a"), &i7), (Some("demo/b"), &i8)],
             IntervalIdx::from(10),
         );
 
@@ -1472,8 +1528,8 @@ mod tests {
         let c3 = ts(at_secs(35), vec![0x01]); // interval 3 (cold)
         let c4 = ts(at_secs(45), vec![0x01]); // interval 4 (cold)
 
-        let local = build_digest(&cfg, [("demo/a", &c3)], IntervalIdx::from(10));
-        let remote = build_digest(&cfg, [("demo/b", &c4)], IntervalIdx::from(10));
+        let local = build_digest(&cfg, [(Some("demo/a"), &c3)], IntervalIdx::from(10));
+        let remote = build_digest(&cfg, [(Some("demo/b"), &c4)], IntervalIdx::from(10));
 
         let diff = local.diff(remote).expect("the cold rollups differ");
         assert!(diff.cold_eras_differ());
@@ -1490,10 +1546,10 @@ mod tests {
         // `local` is a superset of `remote` (has the extra sub 4).
         let local = build_digest(
             &cfg,
-            [("demo/a", &s2), ("demo/b", &s4)],
+            [(Some("demo/a"), &s2), (Some("demo/b"), &s4)],
             IntervalIdx::from(10),
         );
-        let remote = build_digest(&cfg, [("demo/a", &s2)], IntervalIdx::from(10));
+        let remote = build_digest(&cfg, [(Some("demo/a"), &s2)], IntervalIdx::from(10));
 
         // From local's perspective there is nothing to pull (it already has
         // everything remote has).
@@ -1514,11 +1570,15 @@ mod tests {
         let s4 = ts(at_secs(98), vec![0x01]); // hot interval 9 sub 4
         let cold = ts(at_secs(35), vec![0x01]); // cold interval 3
 
-        let local = build_digest(&cfg, [("demo/a", &s2)], IntervalIdx::from(10));
+        let local = build_digest(&cfg, [(Some("demo/a"), &s2)], IntervalIdx::from(10));
         // remote diverges in the hot era AND has a cold event local lacks.
         let remote = build_digest(
             &cfg,
-            [("demo/a", &s2), ("demo/b", &s4), ("demo/c", &cold)],
+            [
+                (Some("demo/a"), &s2),
+                (Some("demo/b"), &s4),
+                (Some("demo/c"), &cold),
+            ],
             IntervalIdx::from(10),
         );
 
