@@ -262,4 +262,40 @@ mod tests {
             "one row per key with its newest timestamp"
         );
     }
+
+    #[test]
+    fn boxed_history_storage_keeps_all_through_the_blanket_impl() {
+        // The `Box<B>` blanket impl (storage_backend.rs) forwards
+        // `history` / `get_versions` EXPLICITLY rather than letting them
+        // fall back to the trait defaults (which would collapse
+        // `get_versions` to the single `get`). Drive a `History::All`
+        // HistoryStorage entirely through a `Box<dyn StorageBackend + Send>`
+        // — the boxed form a `Volume::create_storage` result is — and assert
+        // the multi-version behaviour survives: the capability stays
+        // `History::All` and `get_versions` returns both versions, not the
+        // default-collapsed single one.
+        let mut b: alloc::boxed::Box<dyn StorageBackend + Send> =
+            alloc::boxed::Box::new(HistoryStorage::new());
+        assert_eq!(
+            b.put(Some("a"), vec![1], None, ts(10, 1)),
+            StorageInsertionResult::Inserted
+        );
+        assert_eq!(
+            b.put(Some("a"), vec![2], None, ts(20, 1)),
+            StorageInsertionResult::Replaced
+        );
+        assert_eq!(
+            b.history(),
+            History::All,
+            "the boxed backend keeps its All capability (not the Latest default)"
+        );
+        let versions = b.get_versions(Some("a"));
+        assert_eq!(
+            versions.len(),
+            2,
+            "get_versions forwards to the All backend, not the default get-collapse"
+        );
+        assert_eq!(versions[0].payload, vec![1]);
+        assert_eq!(versions[1].payload, vec![2]);
+    }
 }

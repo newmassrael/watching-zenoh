@@ -563,8 +563,9 @@ mod tests {
     #[test]
     fn strip_configured_storage_captures_stripped_and_restores_on_query() {
         use crate::observer::ApplicationLayerObserver;
+        use crate::reply_sink::ReplyView;
         use crate::runtime_impl::TokioTime;
-        use crate::session::{PublishOptions, TokioSession};
+        use crate::session::{PublishOptions, QueryOptions, TokioSession};
         use wz_session_core::locality::Locality;
         use wz_session_core::storage_volume::{MemoryVolume, Volume};
 
@@ -595,8 +596,9 @@ mod tests {
             .expect("loopback publish");
         assert_eq!(fired, 1, "the storage's capture subscriber fired once");
 
+        // CAPTURE leg (kept): the value is stored under the RELATIVE (stripped)
+        // key on the live path, never under the full keyexpr.
         storage.with_state(|st| {
-            // Captured under the RELATIVE key (strip applied on the live path).
             assert_eq!(
                 st.get(Some("temp")).map(|d| d.payload.clone()),
                 Some(b"v1".to_vec()),
@@ -606,16 +608,36 @@ mod tests {
                 st.get(Some("home/kitchen/temp")).is_none(),
                 "the full keyexpr is not a stored key under strip"
             );
-
-            // A query RESTORES the full keyexpr on the reply.
-            let mut out = RecordingReplyOut::default();
-            st.answer_into(&query("home/kitchen/*"), &mut out);
-            assert_eq!(
-                out.keyed,
-                vec![(String::from("home/kitchen/temp"), b"v1".to_vec())],
-                "the query reply restores the full keyexpr from the stored relative key"
-            );
         });
+
+        // RESTORE leg (over the LIVE path): a real loopback GET drives the
+        // declared queryable's callback inline (SessionLocal locality), which
+        // runs the gate's answer_into + strip restore. The recorded reply must
+        // carry the RESTORED full keyexpr `home/kitchen/temp` with payload v1 —
+        // proving the queryable -> answer_into -> restore wiring, not just the
+        // kernel method. The recorder is Arc<Mutex<..>> because the on_reply
+        // closure is `Send + 'static`.
+        let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+        let rec = Arc::clone(&replies);
+        session
+            .query(
+                "home/kitchen/*",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply: &dyn ReplyView| {
+                    rec.lock()
+                        .expect("reply recorder poisoned")
+                        .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+                },
+                |_rid| {},
+            )
+            .expect("loopback query fires the declared queryable inline");
+
+        let got = replies.lock().expect("reply recorder poisoned").clone();
+        assert_eq!(
+            got,
+            vec![(String::from("home/kitchen/temp"), b"v1".to_vec())],
+            "the live loopback query restores the full keyexpr from the stored relative key"
+        );
     }
 
     // The History::All driver path needs the storage-history backend.

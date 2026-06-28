@@ -311,6 +311,55 @@ mod tests {
         assert_eq!(mgr.len(), 1);
     }
 
+    #[test]
+    fn remove_storage_drops_the_capture_subscriber_no_more_loopback_fires() {
+        use crate::session::PublishOptions;
+        use wz_session_core::locality::Locality;
+
+        // The teardown PROOF: removing a storage must actually UNDECLARE its
+        // capture subscriber (the StorageService's RAII Drop), not merely drop
+        // the map entry. While hosted, a loopback publish on the storage's
+        // keyexpr fires the capture subscriber (fired == 1); after remove, the
+        // SAME publish fires ZERO subscribers (fired == 0) — the subscriber is
+        // genuinely gone from the observer's registry.
+        let session = make_session();
+        let mut mgr = RuntimeStorageManager::new();
+        mgr.register_volume("mem", Box::new(MemoryVolume));
+
+        mgr.add_storage(
+            &session,
+            &StorageConfig::new("s1", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("storage hosts");
+
+        // Hosted: the loopback publish reaches the capture subscriber.
+        let fired = session
+            .publish(
+                "demo/a",
+                b"v1",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(fired, 1, "the hosted storage's capture subscriber fired");
+
+        assert!(mgr.remove_storage("s1"), "the storage is removed");
+
+        // Removed: the SAME loopback publish fires NO subscribers — the RAII
+        // Drop undeclared the capture subscriber.
+        let fired_after = session
+            .publish(
+                "demo/a",
+                b"v2",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish after remove");
+        assert_eq!(
+            fired_after, 0,
+            "remove undeclared the capture subscriber (RAII Drop), so no subscriber fires"
+        );
+    }
+
     // The COMPOSITION proof through the manager: it hosts N live
     // strip-configured storages, each isolated by its keyexpr, each applying
     // strip on the live capture + restore on a query — driven entirely by the
@@ -318,8 +367,35 @@ mod tests {
     #[cfg(feature = "storage-mgr-strip-prefix")]
     #[test]
     fn manager_hosts_two_strip_configured_storages_each_isolated() {
-        use crate::session::PublishOptions;
+        use crate::reply_sink::ReplyView;
+        use crate::session::{PublishOptions, QueryOptions};
         use wz_session_core::locality::Locality;
+
+        // A real loopback GET over the manager-hosted storages: drive the
+        // declared queryable callbacks inline (SessionLocal locality) and record
+        // every (keyexpr, payload) reply. The closure is `Send + 'static`, hence
+        // the Arc<Mutex<..>> sink.
+        fn loopback_query(session: &TokioSession, keyexpr: &str) -> Vec<(String, Vec<u8>)> {
+            let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+            let rec = Arc::clone(&replies);
+            session
+                .query(
+                    keyexpr,
+                    QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                    move |reply: &dyn ReplyView| {
+                        rec.lock()
+                            .expect("reply recorder poisoned")
+                            .push((reply.keyexpr().to_string(), reply.payload().to_vec()));
+                    },
+                    |_rid| {},
+                )
+                .expect("loopback query fires the declared queryables inline");
+            // Bind through a local so the MutexGuard temporary is dropped before
+            // the function returns (a direct `.lock()..clone()` return trips the
+            // borrow checker on the guard's lifetime).
+            let recorded = replies.lock().expect("reply recorder poisoned").clone();
+            recorded
+        }
 
         let session = make_session();
         let mut mgr = RuntimeStorageManager::new();
@@ -350,28 +426,30 @@ mod tests {
             .expect("loopback publish");
         assert_eq!(fired, 1, "only the kitchen storage captured the put");
 
+        // CAPTURE leg (kept): kitchen stored the key RELATIVE to its mount.
         mgr.storage("kitchen").unwrap().with_state(|st| {
-            // Captured under the RELATIVE (stripped) key.
             assert_eq!(
                 st.get(Some("temp")).map(|d| d.payload.clone()),
                 Some(b"k".to_vec()),
                 "kitchen stored the key relative to its mount"
             );
-            // A query restores the full keyexpr.
-            let hits = st.matching_entries("home/kitchen/*");
-            assert_eq!(hits.len(), 1);
-            assert_eq!(
-                hits[0].0, "home/kitchen/temp",
-                "the query restores the mount prefix"
-            );
         });
 
-        // The bath storage is independent — it captured nothing.
-        mgr.storage("bath").unwrap().with_state(|st| {
-            assert!(
-                st.get(Some("temp")).is_none(),
-                "bath did not capture the kitchen put (keyexpr isolation)"
-            );
-        });
+        // RESTORE leg (over the LIVE path): a real loopback GET on the kitchen
+        // mount drives kitchen's declared queryable -> answer_into -> restore,
+        // and the recorded reply carries the RESTORED full keyexpr with v=`k`.
+        assert_eq!(
+            loopback_query(&session, "home/kitchen/*"),
+            vec![(String::from("home/kitchen/temp"), b"k".to_vec())],
+            "the kitchen queryable restores the mount prefix on the live path"
+        );
+
+        // The bath storage is independent: a real loopback GET on the bath mount
+        // returns NOTHING — bath captured nothing AND kitchen's queryable does
+        // not match the bath keyexpr (keyexpr isolation across hosted storages).
+        assert!(
+            loopback_query(&session, "home/bath/*").is_empty(),
+            "the bath mount yields no replies (isolation: bath empty, kitchen unmatched)"
+        );
     }
 }

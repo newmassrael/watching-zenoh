@@ -1600,6 +1600,8 @@ layer_c1z_cargo_test_storage_driver() {
         && cargo clippy -p wz-session-core --features storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo test -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --lib storage --quiet \
         && cargo clippy -p wz-session-core --features storage-backend,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
+        && cargo test -p wz-session-core --features storage-history,storage-mgr-strip-prefix --lib storage --quiet \
+        && cargo clippy -p wz-session-core --features storage-history,storage-mgr-strip-prefix --all-targets --quiet -- -D warnings \
         && cargo build -p wz --features storage-mgr-strip-prefix --quiet \
         && cargo test -p wz-runtime-tokio --features storage-mgr-complete-flag --lib storage_service --quiet \
         && cargo clippy -p wz-runtime-tokio --features storage-mgr-complete-flag --all-targets --quiet -- -D warnings \

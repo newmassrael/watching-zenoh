@@ -1091,6 +1091,84 @@ mod tests {
             );
             assert_eq!(s.get(Some("home/kitchen/temp")).unwrap().payload, vec![5]);
         }
+
+        #[test]
+        fn delete_under_strip_leaves_a_tombstone_on_the_stripped_key() {
+            // The newer-wins tombstone is keyed on the STORED (stripped) key.
+            // A Put then Delete under the mount removes the relative "temp", and
+            // the tombstone — recorded at the stripped key — then rejects an
+            // OLDER Put on the same full keyexpr (no resurrection through strip).
+            let mut s = stripped("home/kitchen");
+            s.apply_sample(
+                &Sample::new_put("home/kitchen/temp", vec![21]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            s.apply_sample(
+                &Sample::new_del("home/kitchen/temp").with_timestamp(ts(50, 1)),
+                || unreachable!(),
+            );
+            assert!(
+                s.get(Some("temp")).is_none(),
+                "the delete removed the stripped key from the backend"
+            );
+            // An OLDER put on the full keyexpr is rejected — the tombstone keyed
+            // on the stripped "temp" holds across the strip transform.
+            s.apply_sample(
+                &Sample::new_put("home/kitchen/temp", vec![99]).with_timestamp(ts(40, 1)),
+                || unreachable!(),
+            );
+            assert!(
+                s.get(Some("temp")).is_none(),
+                "an older put after the delete must not resurrect the stripped key"
+            );
+        }
+
+        #[test]
+        fn delete_on_the_exact_mount_root_leaves_a_tombstone_on_the_none_key() {
+            // The mount-root value lives under the backend `None` key; its
+            // tombstone is recorded on `None` too, so a Put then Delete then an
+            // OLDER Put on EXACTLY the prefix is rejected.
+            let mut s = stripped("home/kitchen");
+            s.apply_sample(
+                &Sample::new_put("home/kitchen", vec![7]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            s.apply_sample(
+                &Sample::new_del("home/kitchen").with_timestamp(ts(50, 1)),
+                || unreachable!(),
+            );
+            assert!(
+                s.backend().get(None).is_none(),
+                "the delete removed the mount-root value from the None slot"
+            );
+            // An OLDER put on the mount root is rejected — the tombstone keyed
+            // on the `None` slot holds.
+            s.apply_sample(
+                &Sample::new_put("home/kitchen", vec![99]).with_timestamp(ts(40, 1)),
+                || unreachable!(),
+            );
+            assert!(
+                s.backend().get(None).is_none(),
+                "an older put after the mount-root delete must not resurrect the None key"
+            );
+        }
+
+        #[test]
+        fn a_wild_prefix_drops_every_sample() {
+            // A WILD strip_prefix (e.g. "home/*") makes strip_prefix return
+            // Err(WildPrefix) -> stored_key_for yields None -> apply_sample
+            // drops the sample. Nothing is ever captured (the same drop the
+            // not-under-prefix case takes, for a different reason).
+            let mut s = stripped("home/*");
+            s.apply_sample(
+                &Sample::new_put("home/x/y", vec![1]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            assert!(
+                s.backend().get_all_entries().is_empty(),
+                "a wild strip_prefix drops the sample (strip returns Err)"
+            );
+        }
     }
 
     // The History::All path needs the storage-history backend.
@@ -1139,6 +1217,49 @@ mod tests {
             assert_eq!(hits[0].1.len(), 2, "demo/a has two versions");
             assert_eq!(hits[1].0, "demo/b");
             assert_eq!(hits[1].1.len(), 1);
+        }
+    }
+
+    // The strip + History::All intersection: a multi-version backend under a
+    // configured strip_prefix. Needs both kernels.
+    #[cfg(all(feature = "storage-mgr-strip-prefix", feature = "storage-history"))]
+    mod strip_history {
+        use super::*;
+        use crate::sample::Sample;
+        use crate::storage_history::HistoryStorage;
+
+        #[test]
+        fn matching_versions_under_strip_restores_the_full_key_for_every_version() {
+            // A strip-configured History::All storage: two versions captured
+            // under the mount are stored RELATIVE to it, and matching_versions
+            // restores the full keyexpr while still returning BOTH versions
+            // (the strip restore and the version retention compose).
+            let mut s =
+                StorageState::with_strip_prefix(HistoryStorage::new(), Some("home/kitchen".into()));
+            s.apply_sample(
+                &Sample::new_put("home/kitchen/temp", vec![1]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            s.apply_sample(
+                &Sample::new_put("home/kitchen/temp", vec![2]).with_timestamp(ts(20, 1)),
+                || unreachable!(),
+            );
+            // Stored under the RELATIVE key with both versions retained.
+            assert_eq!(
+                s.backend().version_count(Some("temp")),
+                2,
+                "both versions kept under the stripped key"
+            );
+
+            let hits = s.matching_versions("home/kitchen/*");
+            assert_eq!(hits.len(), 1, "one matching key");
+            assert_eq!(
+                hits[0].0, "home/kitchen/temp",
+                "the reply key restores the mount prefix"
+            );
+            assert_eq!(hits[0].1.len(), 2, "both versions returned under strip");
+            assert_eq!(hits[0].1[0].payload, vec![1]);
+            assert_eq!(hits[0].1[1].payload, vec![2]);
         }
     }
 
