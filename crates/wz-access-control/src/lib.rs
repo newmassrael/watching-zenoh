@@ -214,6 +214,28 @@ impl AclPolicy {
         self.config.default_permission
     }
 
+    /// R311y49 — the keyexprs appearing in at least one DENY rule, sorted and
+    /// deduplicated: the admin-introspection summary of "what this policy forbids".
+    /// It is the GET-observable surface of a runtime ACL reconfigure — a config
+    /// write that adds or changes a deny rule changes THIS list, so the admin
+    /// config GET observes the change (the read-path counterpart to the data-plane
+    /// drop). A SUMMARY, not the full per-rule dump: the subject / message-kind /
+    /// flow of each rule are elided (a detailed rule view is a deferred richer
+    /// admin layer); two different rules denying the same keyexpr collapse to one
+    /// entry. Allow rules never appear here.
+    pub fn deny_key_exprs(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .config
+            .rules
+            .iter()
+            .filter(|r| r.permission == Permission::Deny)
+            .flat_map(|r| r.key_exprs.iter().cloned())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     /// The verdict for a request — the wz port of zenoh
     /// `PolicyEnforcer::policy_decision_point` (deny-first, then default, then
     /// allow). `keyexpr` is the message's key expression; it is split once here
@@ -291,6 +313,29 @@ mod tests {
             permission: Permission::Allow,
             ..deny_rule(subject, ke)
         }
+    }
+
+    #[test]
+    fn deny_key_exprs_collects_sorted_deduped_deny_keys_only() {
+        // R311y49 — the admin-introspection summary: only DENY rules' keyexprs,
+        // sorted + deduped; allow rules and the rule's subject/message/flow elided.
+        let policy = AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![
+                deny_rule(SubjectSelector::Any, "mesh/data"),
+                allow_rule(SubjectSelector::Any, "metrics/**"), // allow: excluded
+                deny_rule(SubjectSelector::Any, "admin/**"),
+                deny_rule(SubjectSelector::Any, "mesh/data"), // dup: collapsed
+            ],
+        });
+        assert_eq!(
+            policy.deny_key_exprs(),
+            vec!["admin/**".to_owned(), "mesh/data".to_owned()]
+        );
+        // No rules at all -> empty (a default-allow open policy forbids nothing).
+        assert!(AclPolicy::new(AclConfig::allow_all())
+            .deny_key_exprs()
+            .is_empty());
     }
 
     #[test]

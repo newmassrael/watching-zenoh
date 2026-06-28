@@ -4341,6 +4341,41 @@ mod tests {
         );
     }
 
+    // R311y49 (§5.23) — the admin config GET is now OBSERVABLE under a runtime
+    // reconfigure: to_admin_json's acl_deny array is [] before any ACL, then
+    // carries the denied keyexpr after a config-write deny -> the read path
+    // witnesses the flip (the counterpart to the data-plane drop), closing the
+    // y45 read-at-open caveat on the READ path. Needs config-mutate-runtime (the
+    // reconfigure is the live drive) + access-acl (the ACL slice exists).
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_to_admin_json_reflects_a_reconfigure() {
+        use crate::config::WzConfig;
+        let fwd = LinkstateForwarder::new(zid(0x05), WhatAmI::Peer);
+        let mut config = WzConfig::new();
+        config.install_interceptors(&fwd);
+        // Before any ACL: the deny list is empty (GET shows nothing denied).
+        assert!(
+            config.to_admin_json().contains(r#""acl_deny":[]"#),
+            "pre-reconfigure admin JSON should carry an empty acl_deny: {}",
+            config.to_admin_json()
+        );
+        // A config-write deny reconfigure -> the denied keyexpr now appears in
+        // the GET view (observable on the SAME instance the forwarder drives).
+        config.reconfigure_interceptors(
+            InterceptorConfig {
+                acl: Some(deny_put_policy("demo/**")),
+                ..Default::default()
+            },
+            &fwd,
+        );
+        assert!(
+            config.to_admin_json().contains(r#""acl_deny":["demo/**"]"#),
+            "post-reconfigure admin JSON should carry the denied keyexpr: {}",
+            config.to_admin_json()
+        );
+    }
+
     // R311y43 — §5.23 combined-node FOUNDATION proof (binding level): ONE WzConfig
     // BINDING both DRIVES the live forwarder (the deny verdict flips, as in the
     // test above) AND serves the admin read-at-open view (`to_admin_json`) — the
@@ -4349,9 +4384,11 @@ mod tests {
     // answering its own admin GET off this instance) is the deferred Phase-2 step
     // (the forwarder self-query dispatch bridge). The read assertion checks the
     // CONCRETE JSON (falsifiable on the serialization contract), not a
-    // from_init_params self-comparison; the live interceptor config is NOT in
-    // `to_admin_json` (the documented deferred §5.23 layer), so the read-at-open
-    // view is invariant under the reconfigure, as a handshake-fixed mirror must be.
+    // from_init_params self-comparison. R311y49 — the ACL is now in `to_admin_json`
+    // (the `acl_deny` array), so the read view OBSERVES the SAME reconfigure that
+    // drove the forwarder above: the binding's two surfaces stay mutually
+    // consistent (a strengthening of the one-binding proof), while the
+    // handshake-fixed read-at-open fields (batch/lease/whatami) stay invariant.
     #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
     #[test]
     fn wzconfig_one_instance_drives_forwarder_and_serves_admin_read() {
@@ -4410,15 +4447,18 @@ mod tests {
         );
 
         // READ surface — the SAME `config` binding that just drove the forwarder
-        // serves the admin read-at-open JSON. Assert the CONCRETE expected string
-        // (falsifiable: catches key-order / whatami-string / numeric-format drift),
-        // NOT a from_init_params self-comparison. The fixture params resolve to
-        // batch_size 0 -> effective 65535, lease_ms 10000, whatami Peer -> "peer".
+        // serves the admin JSON. Assert the CONCRETE expected string (falsifiable:
+        // catches key-order / whatami-string / numeric-format drift), NOT a
+        // from_init_params self-comparison. R311y49 — the JSON now leads with
+        // `acl_deny:["demo/**"]`, the SAME deny the reconfigure above drove into
+        // the forwarder: one binding, both surfaces, mutually consistent. The
+        // fixture params resolve to batch_size 0 -> effective 65535, lease_ms
+        // 10000, whatami Peer -> "peer".
         assert_eq!(
             config.to_admin_json(),
-            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
-            "one binding: the config that drove the forwarder serves the correct \
-             read-at-open JSON"
+            r#"{"acl_deny":["demo/**"],"batch_size":65535,"lease_ms":10000,"whatami":"peer"}"#,
+            "one binding: the config that drove the forwarder's deny also SHOWS it \
+             in the admin read view"
         );
     }
 

@@ -10,9 +10,12 @@
 //!
 //! Scope of the proof: this asserts config-GET-over-the-wire WORKS and (by
 //! construction) the single shared instance serves both surfaces. The served
-//! JSON is the READ-AT-OPEN mirror (handshake-fixed batch/lease/whatami), so it
-//! cannot OBSERVE a runtime change — live-reconfigure-over-wire visibility is a
-//! deferred §5.23 layer, not demonstrated here.
+//! JSON carries the handshake-fixed read-at-open fields (batch/lease/whatami)
+//! AND, R311y49, the LIVE ACL deny-list (acl_deny) — here empty, since A has no
+//! startup ACL, but its presence proves the GET-observable interceptor view
+//! crosses the wire. The runtime FLIP ([] -> populated after a config-write) is
+//! proven by the data-plane e2e wz_peer_adminspace_config_write + the unit
+//! wzconfig_to_admin_json_reflects_a_reconfigure.
 //!
 //! Test flow (reuses the query-reply e2e harness, `wz_query_reply_round_trip`):
 //!   1. Spawn peer A: `wz-ap-demo --peer <addr> --config-queryable`. A hosts a
@@ -166,5 +169,15 @@ fn wz_peer_admin_config_get_over_the_wire() {
         "REPLY RECEIVED lacks batch_size=65535 — the read-at-open mirror (the \
          0-sentinel resolves to the effective 65535) is not in the served config.\n\
          --- B stderr ---\n{reply}"
+    );
+    // R311y49 — the served JSON now carries the LIVE ACL deny-list (acl_deny). A
+    // has no startup --acl-deny, so it is empty here; its mere PRESENCE proves the
+    // GET-observable interceptor view crosses the wire (a runtime config-write
+    // would change it from [] to populated — proven at the unit level + by the
+    // data-plane flip e2e wz_peer_adminspace_config_write).
+    assert!(
+        reply.contains(r#"\"acl_deny\":[]"#),
+        "REPLY RECEIVED lacks the acl_deny array — the GET-observable interceptor \
+         view (R311y49) is not in the served config.\n--- B stderr ---\n{reply}"
     );
 }

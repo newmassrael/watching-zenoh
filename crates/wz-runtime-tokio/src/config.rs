@@ -93,18 +93,47 @@ impl WzConfig {
         }
     }
 
-    /// R311y40 — the admin-GET JSON view of the read-at-open config mirror
-    /// (the `@/<zid>/<whatami>/config` reply). BEYOND-ZENOH (R311y42 correction):
+    /// R311y40 — the admin-GET JSON view of the config (the
+    /// `@/<zid>/<whatami>/config` reply). BEYOND-ZENOH (R311y42 correction):
     /// zenoh's `@/<zid>/<whatami>/config/**` is a write-only subscriber (PUT ->
     /// `insert_json5`); zenoh has NO admin config-READ, so this typed read is a wz
-    /// superset, not a mirror. Alphabetical keys (`batch_size` / `lease_ms` /
-    /// `whatami`), matching the serde_json-BTreeMap order the other §5.23 emitters
-    /// (`AdminLocalData`) use. The LIVE interceptor config is a deferred layer —
-    /// not in this view until a node holds the forwarder-bound WzConfig (a §5.23
-    /// caveat).
+    /// superset, not a mirror. Alphabetical keys, matching the serde_json-BTreeMap
+    /// order the other §5.23 emitters (`AdminLocalData`) use.
+    ///
+    /// R311y49 — the LIVE ACL is now in this view: under `routing-peer` +
+    /// `access-acl`, an `acl_deny` array (alphabetically first) carries the
+    /// currently-denied keyexprs. This makes a runtime config-write reconfigure
+    /// GET-OBSERVABLE (the read-path counterpart to the data-plane drop): after a
+    /// `config/acl-deny` PUT the admin GET shows the new deny list, closing the
+    /// R311y45 read-at-open caveat on the read path too. `batch_size` / `lease_ms`
+    /// / `whatami` remain the handshake-fixed read-at-open mirror. Still deferred:
+    /// the downsampling / low-pass interceptor view and the full per-rule ACL dump
+    /// (subject / message / flow) — `acl_deny` is the denied-keyexpr summary.
     pub fn to_admin_json(&self) -> String {
+        // `acl_deny` (alphabetically before `batch_size`) — the denied-keyexpr
+        // summary, present only where the build can carry an interceptor ACL. The
+        // trailing comma slots it ahead of the read-at-open keys; an empty list
+        // (`[]`) is emitted when no ACL is configured, so the key is always present
+        // under this build (a GET sees deny-list go from `[]` to populated).
+        #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+        let acl_deny = {
+            let mut s = String::from(r#""acl_deny":["#);
+            if let Some(acl) = &self.interceptors.acl {
+                for (i, ke) in acl.deny_key_exprs().iter().enumerate() {
+                    if i > 0 {
+                        s.push(',');
+                    }
+                    push_json_string(ke, &mut s);
+                }
+            }
+            s.push_str("],");
+            s
+        };
+        #[cfg(not(all(feature = "routing-peer", feature = "access-acl")))]
+        let acl_deny = "";
         format!(
-            r#"{{"batch_size":{},"lease_ms":{},"whatami":"{}"}}"#,
+            r#"{{{}"batch_size":{},"lease_ms":{},"whatami":"{}"}}"#,
+            acl_deny,
             self.batch_size,
             self.lease_ms,
             self.whatami.to_str()
@@ -167,6 +196,32 @@ impl WzConfig {
     }
 }
 
+/// R311y49 — push `s` as a correct JSON string literal (quotes + escapes) onto
+/// `out`. The denied keyexpr originates from an untrusted config-write PUT
+/// payload, so the emitter must escape rather than `format!` a raw byte that
+/// could corrupt the JSON. Mirrors the `wz_session_core::adminspace`
+/// `push_json_str` convention (that one is crate-private to session-core; this is
+/// the config.rs-local twin, gated to where `acl_deny` is emitted).
+#[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+fn push_json_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use core::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,15 +229,22 @@ mod tests {
     #[test]
     fn to_admin_json_is_typed_alphabetical() {
         // R311y40 — the config GET reply shape: TYPED fields, serde_json-BTreeMap
-        // alphabetical key order (batch_size / lease_ms / whatami), whatami as the
-        // zenoh role string. The read-at-open mirror; the live interceptor config
-        // is a deferred layer not in this view.
+        // alphabetical key order, whatami as the zenoh role string. With NO ACL
+        // configured the deny list is empty. R311y49 — under routing-peer +
+        // access-acl the `acl_deny` array is emitted first (alphabetically before
+        // batch_size), `[]` when no ACL is set; otherwise the 3 read-at-open keys.
         let c = WzConfig {
             whatami: WhatAmI::Router,
             batch_size: 65535,
             lease_ms: 10_000,
             ..WzConfig::new()
         };
+        #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+        assert_eq!(
+            c.to_admin_json(),
+            r#"{"acl_deny":[],"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
+        );
+        #[cfg(not(all(feature = "routing-peer", feature = "access-acl")))]
         assert_eq!(
             c.to_admin_json(),
             r#"{"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
