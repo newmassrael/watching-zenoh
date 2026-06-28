@@ -35,19 +35,27 @@
 //!   sync — the in-memory backend never awaits, and an `async` backend is
 //!   an AP-side wrapper over a sync core. The seam mirrored here is the
 //!   data shape, not the await coloring.
-//! - **`&str` key, never `Option`**: zenoh keys are `Option<OwnedKeyExpr>`
+//! - **`Option<&str>` key** (R311y61): zenoh keys are `Option<OwnedKeyExpr>`
 //!   (`None` == the configured `strip_prefix` matched the storage key_expr
-//!   exactly, lib.rs:225). wz's minimal storage carries no `strip_prefix`,
-//!   so the key is always the full keyexpr string. `strip_prefix` is a
-//!   later storage-config atom.
+//!   exactly, so the value sits AT the mount point under the "none" key,
+//!   lib.rs:225). wz now mirrors this exactly: a backend keys on
+//!   `Option<&str>`, `None` being the exact-prefix-match slot. The
+//!   strip/restore that *produces* the `None` lives one layer up in the
+//!   storage service gate ([`crate::storage_state::StorageState`] +
+//!   [`crate::storage_strip_prefix`]); the bare backend just stores under
+//!   whatever (already-stripped) key it is handed. Before R311y61 the key
+//!   was a bare `&str` (no `strip_prefix` support); the Option key is the
+//!   seam change that lets a strip-configured storage hold the mount-root
+//!   value.
 //! - **no `ZResult` wrapper**: the in-memory mutations are infallible, so
 //!   the result is the bare [`StorageInsertionResult`] (zenoh wraps it in
 //!   `ZResult` for the fallible-backend case).
-//! - **`BTreeMap`, not `HashMap`**: zenoh's memory backend is a `HashMap`
-//!   (memory_backend/mod.rs:79); the no_std kernel has no std hasher, and
-//!   the exact-key lookup is semantically identical (a key->value store
-//!   does not depend on iteration order — [`MemoryStorage::get_all_entries`]
-//!   simply yields keys sorted).
+//! - **`BTreeMap`, not `HashMap`**: zenoh's memory backend is a
+//!   `HashMap<Option<OwnedKeyExpr>, StoredData>` (memory_backend/mod.rs:79);
+//!   the no_std kernel has no std hasher, and the exact-key lookup is
+//!   semantically identical (a key->value store does not depend on iteration
+//!   order — [`MemoryStorage::get_all_entries`] simply yields keys sorted,
+//!   with the `None` key — if present — ordering first).
 //! - **`get` returns `Option`, not `Vec`**: zenoh's `get` returns
 //!   `Vec<StoredData>` because History::All (lib.rs:164-168) may hold
 //!   several versions per key; the History::Latest in-memory backend holds
@@ -72,6 +80,7 @@
 //! loop, an AP wz-runtime-tokio binding) are the follow-up atoms. This
 //! atom is the runtime-agnostic backend foundation they sit on.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -153,16 +162,24 @@ pub struct StoredData {
 /// [`Outdated`](StorageInsertionResult::Outdated). Keeping the backend
 /// comparison-free is what lets the newer-wins gate be the single,
 /// testable place that decision lives.
+///
+/// The `key` is `Option<&str>` (zenoh `Option<OwnedKeyExpr>`): `None` is the
+/// exact-prefix-match slot — the value of a strip-configured storage whose
+/// incoming key equalled the `strip_prefix` exactly (it sits AT the mount
+/// point). The strip transform that yields the `None` lives in the service
+/// gate ([`crate::storage_state`] / [`crate::storage_strip_prefix`]); the
+/// backend just stores under whatever stripped key it is handed.
 pub trait StorageBackend {
     /// Store `payload` / `encoding` under `key`, versioned by `timestamp`.
     /// Returns [`Inserted`](StorageInsertionResult::Inserted) for a new
     /// key, [`Replaced`](StorageInsertionResult::Replaced) for an existing
     /// one. Does NOT compare timestamps (zenoh memory_backend `put`,
     /// `memory_backend/mod.rs:97-122`: Occupied -> Replaced, Vacant ->
-    /// Inserted).
+    /// Inserted). `key` is `None` for the exact-prefix-match (mount-root)
+    /// slot.
     fn put(
         &mut self,
-        key: &str,
+        key: Option<&str>,
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
@@ -174,21 +191,24 @@ pub trait StorageBackend {
     /// `Deleted`). `timestamp` is accepted for contract parity (a
     /// history / replication backend records the delete version); the bare
     /// in-memory backend drops the entry.
-    fn delete(&mut self, key: &str, timestamp: TimestampHint) -> StorageInsertionResult;
+    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageInsertionResult;
 
     /// Retrieve the value stored under an exact `key`, if any. zenoh `get`
     /// (`zenoh-backend-traits/src/lib.rs:250-254`) returns
     /// `Vec<StoredData>` for History::All; the History::Latest in-memory
     /// backend holds at most one value per key, so wz returns `Option`
-    /// (the `Vec` form arrives with `storage-history`).
-    fn get(&self, key: &str) -> Option<&StoredData>;
+    /// (the `Vec` form arrives with `storage-history`). `key` is `None` for
+    /// the exact-prefix-match slot.
+    fn get(&self, key: Option<&str>) -> Option<&StoredData>;
 
     /// List every stored `(key, timestamp)` pair — the input the query
     /// path resolves a wildcard query against. zenoh `get_all_entries`
-    /// (`zenoh-backend-traits/src/lib.rs:256-259`). For a multi-version
+    /// (`zenoh-backend-traits/src/lib.rs:256-259`). The key is `Option<String>`
+    /// (`None` = the exact-prefix-match slot); the query path restores the
+    /// configured prefix to each key before matching. For a multi-version
     /// (`History::All`) backend this lists each key once with its NEWEST
     /// timestamp (the wildcard-match scan only needs the key set).
-    fn get_all_entries(&self) -> Vec<(String, TimestampHint)>;
+    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)>;
 
     /// This backend's history capability — how many values it keeps per
     /// key. zenoh `Capability::history` (`zenoh-backend-traits/src/lib.rs:145`).
@@ -206,17 +226,18 @@ pub trait StorageBackend {
     /// single latest value (0 or 1), so a [`History::Latest`] backend needs
     /// no override; a [`History::All`] backend returns its full version
     /// list.
-    fn get_versions(&self, key: &str) -> Vec<&StoredData> {
+    fn get_versions(&self, key: Option<&str>) -> Vec<&StoredData> {
         self.get(key).into_iter().collect()
     }
 }
 
 /// In-memory [`StorageBackend`]: a keyexpr -> [`StoredData`] map. zenoh
 /// `MemoryStorage` (`memory_backend/mod.rs:78-158`). Backed by an `alloc`
-/// [`BTreeMap`] (see the module-level divergence note).
+/// [`BTreeMap`] keyed on `Option<String>` (the `None` key is the
+/// exact-prefix-match slot; see the module-level divergence note).
 #[derive(Debug, Default)]
 pub struct MemoryStorage {
-    map: BTreeMap<String, StoredData>,
+    map: BTreeMap<Option<String>, StoredData>,
 }
 
 impl MemoryStorage {
@@ -241,7 +262,7 @@ impl MemoryStorage {
 impl StorageBackend for MemoryStorage {
     fn put(
         &mut self,
-        key: &str,
+        key: Option<&str>,
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
@@ -254,31 +275,73 @@ impl StorageBackend for MemoryStorage {
         // `BTreeMap::insert` returns the displaced value (Some) or None for
         // a fresh key — the exact Occupied/Vacant split zenoh's memory
         // backend keys Replaced/Inserted off of (memory_backend/mod.rs:108
-        // / :121).
-        match self.map.insert(String::from(key), data) {
+        // / :121). The map key is `Option<String>`; `None` is the
+        // exact-prefix-match slot.
+        match self.map.insert(key.map(String::from), data) {
             Some(_) => StorageInsertionResult::Replaced,
             None => StorageInsertionResult::Inserted,
         }
     }
 
-    fn delete(&mut self, key: &str, _timestamp: TimestampHint) -> StorageInsertionResult {
+    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageInsertionResult {
         // zenoh `remove_entry` then `Deleted` unconditionally
         // (memory_backend/mod.rs:132-133): absent-key delete is still
         // Deleted (the storage-history / tombstone semantics live above
         // the bare backend).
-        self.map.remove(key);
+        self.map.remove(&key.map(String::from));
         StorageInsertionResult::Deleted
     }
 
-    fn get(&self, key: &str) -> Option<&StoredData> {
-        self.map.get(key)
+    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
+        self.map.get(&key.map(String::from))
     }
 
-    fn get_all_entries(&self) -> Vec<(String, TimestampHint)> {
+    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
         self.map
             .iter()
             .map(|(k, v)| (k.clone(), v.timestamp.clone()))
             .collect()
+    }
+}
+
+/// Forwarding [`StorageBackend`] for a boxed backend, so a
+/// [`Volume::create_storage`](crate::storage_volume::Volume::create_storage)
+/// result (`Box<dyn StorageBackend + Send>`) drives a generic storage service
+/// (`StorageService<.., B>`) without the caller naming the concrete backend
+/// type. `?Sized` covers the `dyn` trait-object case. Every method — including
+/// the defaulted [`history`](StorageBackend::history) /
+/// [`get_versions`](StorageBackend::get_versions) — is forwarded explicitly,
+/// so a boxed `History::All` backend keeps its version behaviour (the default
+/// `get_versions` would otherwise collapse to the single `get`).
+impl<B: StorageBackend + ?Sized> StorageBackend for Box<B> {
+    fn put(
+        &mut self,
+        key: Option<&str>,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+        timestamp: TimestampHint,
+    ) -> StorageInsertionResult {
+        (**self).put(key, payload, encoding, timestamp)
+    }
+
+    fn delete(&mut self, key: Option<&str>, timestamp: TimestampHint) -> StorageInsertionResult {
+        (**self).delete(key, timestamp)
+    }
+
+    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
+        (**self).get(key)
+    }
+
+    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
+        (**self).get_all_entries()
+    }
+
+    fn history(&self) -> History {
+        (**self).history()
+    }
+
+    fn get_versions(&self, key: Option<&str>) -> Vec<&StoredData> {
+        (**self).get_versions(key)
     }
 }
 
@@ -301,10 +364,10 @@ mod tests {
     #[test]
     fn put_new_key_is_inserted_and_readable() {
         let mut s = MemoryStorage::new();
-        let r = s.put("demo/a", vec![1, 2, 3], enc(), ts(10));
+        let r = s.put(Some("demo/a"), vec![1, 2, 3], enc(), ts(10));
         assert_eq!(r, StorageInsertionResult::Inserted);
         assert_eq!(s.len(), 1);
-        let stored = s.get("demo/a").expect("key present after put");
+        let stored = s.get(Some("demo/a")).expect("key present after put");
         assert_eq!(stored.payload, vec![1, 2, 3]);
         assert_eq!(stored.timestamp, ts(10));
     }
@@ -313,22 +376,44 @@ mod tests {
     fn put_existing_key_is_replaced() {
         let mut s = MemoryStorage::new();
         assert_eq!(
-            s.put("demo/a", vec![1], enc(), ts(10)),
+            s.put(Some("demo/a"), vec![1], enc(), ts(10)),
             StorageInsertionResult::Inserted
         );
-        let r = s.put("demo/a", vec![2], enc(), ts(20));
+        let r = s.put(Some("demo/a"), vec![2], enc(), ts(20));
         assert_eq!(r, StorageInsertionResult::Replaced);
         assert_eq!(s.len(), 1, "replace does not grow the key set");
-        assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
+    }
+
+    #[test]
+    fn put_and_get_the_none_exact_prefix_key() {
+        // R311y61 — the `None` key is the exact-prefix-match (mount-root) slot:
+        // a strip-configured storage whose incoming key equalled the prefix
+        // exactly stores under `None`. It is a distinct slot from any `Some`
+        // key and round-trips on get.
+        let mut s = MemoryStorage::new();
+        assert_eq!(
+            s.put(None, vec![7], enc(), ts(10)),
+            StorageInsertionResult::Inserted
+        );
+        assert_eq!(
+            s.get(None).expect("mount-root value present").payload,
+            vec![7]
+        );
+        // The `None` slot is independent of any `Some` key.
+        s.put(Some("a"), vec![1], enc(), ts(10));
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.get(None).unwrap().payload, vec![7]);
+        assert_eq!(s.get(Some("a")).unwrap().payload, vec![1]);
     }
 
     #[test]
     fn delete_removes_entry_and_returns_deleted() {
         let mut s = MemoryStorage::new();
-        s.put("demo/a", vec![1], enc(), ts(10));
-        let r = s.delete("demo/a", ts(20));
+        s.put(Some("demo/a"), vec![1], enc(), ts(10));
+        let r = s.delete(Some("demo/a"), ts(20));
         assert_eq!(r, StorageInsertionResult::Deleted);
-        assert!(s.get("demo/a").is_none(), "key gone after delete");
+        assert!(s.get(Some("demo/a")).is_none(), "key gone after delete");
         assert!(s.is_empty());
     }
 
@@ -339,7 +424,7 @@ mod tests {
         // (memory_backend/mod.rs:132-133).
         let mut s = MemoryStorage::new();
         assert_eq!(
-            s.delete("demo/missing", ts(1)),
+            s.delete(Some("demo/missing"), ts(1)),
             StorageInsertionResult::Deleted
         );
     }
@@ -347,16 +432,30 @@ mod tests {
     #[test]
     fn get_all_entries_lists_every_key_with_its_timestamp() {
         let mut s = MemoryStorage::new();
-        s.put("demo/a", vec![1], enc(), ts(10));
-        s.put("demo/b", vec![2], enc(), ts(20));
+        s.put(Some("demo/a"), vec![1], enc(), ts(10));
+        s.put(Some("demo/b"), vec![2], enc(), ts(20));
         let mut entries = s.get_all_entries();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             entries,
             vec![
-                (String::from("demo/a"), ts(10)),
-                (String::from("demo/b"), ts(20)),
+                (Some(String::from("demo/a")), ts(10)),
+                (Some(String::from("demo/b")), ts(20)),
             ]
+        );
+    }
+
+    #[test]
+    fn get_all_entries_orders_the_none_key_first() {
+        // BTreeMap<Option<String>, _> orders `None` before every `Some`, so
+        // the exact-prefix-match slot lists first.
+        let mut s = MemoryStorage::new();
+        s.put(Some("demo/a"), vec![1], enc(), ts(10));
+        s.put(None, vec![9], enc(), ts(20));
+        let entries = s.get_all_entries();
+        assert_eq!(
+            entries,
+            vec![(None, ts(20)), (Some(String::from("demo/a")), ts(10)),]
         );
     }
 
@@ -367,11 +466,11 @@ mod tests {
         // backend is what would reject it as Outdated). This is the
         // invariant the follow-up newer-wins atom relies on.
         let mut s = MemoryStorage::new();
-        s.put("demo/a", vec![9], enc(), ts(100));
-        let r = s.put("demo/a", vec![1], enc(), ts(1));
+        s.put(Some("demo/a"), vec![9], enc(), ts(100));
+        let r = s.put(Some("demo/a"), vec![1], enc(), ts(1));
         assert_eq!(r, StorageInsertionResult::Replaced);
         assert_eq!(
-            s.get("demo/a").unwrap().payload,
+            s.get(Some("demo/a")).unwrap().payload,
             vec![1],
             "bare backend overwrites verbatim, ignoring the older timestamp"
         );

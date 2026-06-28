@@ -79,6 +79,7 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::TimestampHint;
 use wz_session_core::sink::SampleView;
 use wz_session_core::storage_backend::{MemoryStorage, StorageBackend};
+use wz_session_core::storage_config::StorageConfig;
 use wz_session_core::storage_state::StorageState;
 
 use wz_runtime_core::TimeSource;
@@ -135,34 +136,51 @@ where
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    /// Declare a storage on `keyexpr` over `session` backed by an explicit
-    /// `backend`: a capture subscriber plus a complete queryable. The
-    /// generic form — pass [`MemoryStorage`] for `History::Latest` (or the
-    /// [`declare`](StorageService::declare) shorthand) or a
-    /// `History::All` backend (`storage-history`'s `HistoryStorage`) for a
-    /// version-keeping storage. `local_zid` is the storage's identity for
-    /// stamping un-timestamped samples (the fallback `zid`; see the
-    /// module-level fallback note) — must be non-empty.
+    /// Declare a storage on `session` from a [`StorageConfig`], backed by an
+    /// explicit `backend`: a capture subscriber plus a queryable. The config
+    /// supplies the storage's `key_expr` (the keyexpr it captures + answers
+    /// on), `complete` flag, and `strip_prefix` (R311y61 — the mount-relative
+    /// key transform). The config's `name` / `volume_id` / `garbage_collection`
+    /// are the storage MANAGER's concern and are NOT read here. The generic
+    /// form — pass [`MemoryStorage`] for `History::Latest` (or the
+    /// [`declare`](StorageService::declare) shorthand), a `History::All`
+    /// backend (`storage-history`'s `HistoryStorage`), or a volume-created
+    /// `Box<dyn StorageBackend + Send>`
+    /// ([`crate::storage_service`] composition). `local_zid` is the storage's
+    /// identity for stamping un-timestamped samples (the fallback `zid`; see
+    /// the module-level fallback note) — must be non-empty.
     ///
     /// The queryable is declared COMPLETE
-    /// ([`QueryableOptions::with_complete`]) when `complete` is `true`: a storage
-    /// is then an authoritative answerer for its keyexpr, the BestMatching producer
-    /// signal a router routes a get to (the query-routing track). R311y59 — under
-    /// `storage-mgr-complete-flag` a `false` declares a PARTIAL storage (zenoh
-    /// `StorageConfig.complete`); with that gate off the value is ignored and the
-    /// queryable is always complete (the pre-y59 behavior). The
-    /// [`declare`](StorageService::declare) shorthand passes `true`.
+    /// ([`QueryableOptions::with_complete`]) when `config.complete` is `true`: a
+    /// storage is then an authoritative answerer for its keyexpr, the
+    /// BestMatching producer signal a router routes a get to (the query-routing
+    /// track). R311y59 — under `storage-mgr-complete-flag` a `false`
+    /// `config.complete` declares a PARTIAL storage (zenoh
+    /// `StorageConfig.complete`); with that gate off the value is ignored and
+    /// the queryable is always complete (the pre-y59 behavior). R311y61 —
+    /// `complete` now flows from the config, retiring the prior standalone
+    /// `complete` parameter.
     pub fn declare_with_backend(
         session: &Session<R, T, Unicast>,
-        keyexpr: impl Into<String>,
+        config: &StorageConfig,
         local_zid: Vec<u8>,
         backend: B,
-        complete: bool,
     ) -> Result<Self, StorageServiceError> {
         if local_zid.is_empty() {
             return Err(StorageServiceError::InvalidZid);
         }
-        let keyexpr: String = keyexpr.into();
+        let keyexpr: String = config.key_expr.clone();
+        // The newer-wins gate over the backend, with the config's `strip_prefix`
+        // applied to the live capture + query key path (R311y61): a stored key
+        // is held RELATIVE to the mount point, and restored to its full keyexpr
+        // on a query reply. Without the `storage-mgr-strip-prefix` feature the
+        // prefix is ignored and keys are stored verbatim.
+        #[cfg(feature = "storage-mgr-strip-prefix")]
+        let state: SharedState<B> = Arc::new(Mutex::new(StorageState::with_strip_prefix(
+            backend,
+            config.strip_prefix.clone(),
+        )));
+        #[cfg(not(feature = "storage-mgr-strip-prefix"))]
         let state: SharedState<B> = Arc::new(Mutex::new(StorageState::new(backend)));
 
         // Capture leg: each inbound sample locks the gate and applies it,
@@ -190,7 +208,7 @@ where
         let query_state = Arc::clone(&state);
         let queryable = session.declare_queryable(
             keyexpr,
-            QueryableOptions::default().with_complete(storage_queryable_complete(complete)),
+            QueryableOptions::default().with_complete(storage_queryable_complete(config.complete)),
             move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
                 let guard = query_state.lock().expect("storage state mutex poisoned");
                 guard.answer_into(view, out);
@@ -234,19 +252,17 @@ where
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    /// Declare an in-memory `History::Latest` storage — the common shape
-    /// (newer-wins, one value per key). Shorthand for
+    /// Declare an in-memory `History::Latest` storage from a [`StorageConfig`]
+    /// — the common shape (newer-wins, one value per key). Shorthand for
     /// [`declare_with_backend`](StorageService::declare_with_backend) with
-    /// a fresh [`MemoryStorage`].
+    /// a fresh [`MemoryStorage`]; `complete` / `strip_prefix` flow from the
+    /// config exactly as the generic form.
     pub fn declare(
         session: &Session<R, T, Unicast>,
-        keyexpr: impl Into<String>,
+        config: &StorageConfig,
         local_zid: Vec<u8>,
     ) -> Result<Self, StorageServiceError> {
-        // The shorthand declares a COMPLETE (authoritative) storage; a partial
-        // storage uses declare_with_backend with `complete: false` (under
-        // storage-mgr-complete-flag).
-        Self::declare_with_backend(session, keyexpr, local_zid, MemoryStorage::new(), true)
+        Self::declare_with_backend(session, config, local_zid, MemoryStorage::new())
     }
 }
 
@@ -505,8 +521,12 @@ mod tests {
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let storage = StorageService::declare(&session, "demo/**", vec![0x01])
-            .expect("storage declare succeeds against the test link");
+        let storage = StorageService::declare(
+            &session,
+            &StorageConfig::new("demo", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("storage declare succeeds against the test link");
 
         let fired = session
             .publish(
@@ -522,6 +542,78 @@ mod tests {
                 st.get("demo/a").map(|d| d.payload.clone()),
                 Some(b"v1".to_vec()),
                 "the declared storage captured the loopback publish into the store"
+            );
+        });
+    }
+
+    // R311y61 — the §5.24 COMPOSITION proof: a strip-configured StorageConfig
+    // drives a LIVE StorageService over a Volume-created backend, end to end. A
+    // loopback publish UNDER the mount is captured into the backend under the
+    // STRIPPED (relative) key, and a query RESTORES the full keyexpr on the
+    // reply — proving Volume(create_storage) + StorageConfig(key_expr / complete
+    // / strip_prefix) + the live capture/answer service COMPOSE (closing the
+    // §5.24 "atoms built but unwired into a live storage path" gap). Gated on
+    // `storage-mgr-strip-prefix`: without it `declare_with_backend` ignores the
+    // prefix and the storage would hold the full key.
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "pubsub-allow-loop",
+        feature = "storage-mgr-strip-prefix"
+    ))]
+    #[test]
+    fn strip_configured_storage_captures_stripped_and_restores_on_query() {
+        use crate::observer::ApplicationLayerObserver;
+        use crate::runtime_impl::TokioTime;
+        use crate::session::{PublishOptions, TokioSession};
+        use wz_session_core::locality::Locality;
+        use wz_session_core::storage_volume::{MemoryVolume, Volume};
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        // A storage mounted at home/kitchen, holding keys RELATIVE to it.
+        let mut config = StorageConfig::new("kitchen", "home/kitchen/**", "mem");
+        config.strip_prefix = Some("home/kitchen".into());
+
+        // The backend comes from a Volume (create_storage), wiring the §5.24
+        // factory into the live service.
+        let backend = MemoryVolume
+            .create_storage(&config)
+            .expect("in-memory volume create");
+        let storage = StorageService::declare_with_backend(&session, &config, vec![0x01], backend)
+            .expect("strip-configured storage declares against the test link");
+
+        // A loopback publish UNDER the mount fires the capture subscriber.
+        let fired = session
+            .publish(
+                "home/kitchen/temp",
+                b"v1",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .expect("loopback publish");
+        assert_eq!(fired, 1, "the storage's capture subscriber fired once");
+
+        storage.with_state(|st| {
+            // Captured under the RELATIVE key (strip applied on the live path).
+            assert_eq!(
+                st.get("temp").map(|d| d.payload.clone()),
+                Some(b"v1".to_vec()),
+                "the live capture stored the key RELATIVE to the mount"
+            );
+            assert!(
+                st.get("home/kitchen/temp").is_none(),
+                "the full keyexpr is not a stored key under strip"
+            );
+
+            // A query RESTORES the full keyexpr on the reply.
+            let mut out = RecordingReplyOut::default();
+            st.answer_into(&query("home/kitchen/*"), &mut out);
+            assert_eq!(
+                out.keyed,
+                vec![(String::from("home/kitchen/temp"), b"v1".to_vec())],
+                "the query reply restores the full keyexpr from the stored relative key"
             );
         });
     }

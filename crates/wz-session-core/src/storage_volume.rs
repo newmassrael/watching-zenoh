@@ -18,10 +18,13 @@
 //! R311y57 — [`Volume::create_storage`] takes the declarative [`StorageConfig`]
 //! (the storage-mgr-config data model). Divergences from zenoh: wz's
 //! `create_storage` is SYNC (zenoh's is `async`); it returns
-//! `Result<Box<dyn StorageBackend>, VolumeError>` (R311y60 — fallible like zenoh's
-//! `ZResult`, so a future Durable volume lands without a breaking trait change);
-//! `get_admin_status` (admin JSON) belongs to the adminspace layer, not this
-//! runtime-agnostic kernel seam.
+//! `Result<Box<dyn StorageBackend + Send>, VolumeError>` (R311y60 — fallible like
+//! zenoh's `ZResult`, so a future Durable volume lands without a breaking trait
+//! change; R311y61 — `+ Send` so a volume-created backend can drive an async
+//! runtime storage service, which the tokio `StorageService` hosts across worker
+//! threads, mirroring zenoh's `Send + Sync` `Storage`); `get_admin_status`
+//! (admin JSON) belongs to the adminspace layer, not this runtime-agnostic
+//! kernel seam.
 //!
 //! NOTE (honest status): applying a config's `key_expr` / `strip_prefix` /
 //! `complete` to the live key path is the storage manager / service's job and is
@@ -104,7 +107,7 @@ pub trait Volume {
     fn create_storage(
         &self,
         config: &StorageConfig,
-    ) -> Result<Box<dyn StorageBackend>, VolumeError>;
+    ) -> Result<Box<dyn StorageBackend + Send>, VolumeError>;
 }
 
 /// The built-in in-memory volume — zenoh `MemoryBackend`
@@ -127,7 +130,7 @@ impl Volume for MemoryVolume {
     fn create_storage(
         &self,
         _config: &StorageConfig,
-    ) -> Result<Box<dyn StorageBackend>, VolumeError> {
+    ) -> Result<Box<dyn StorageBackend + Send>, VolumeError> {
         // Always succeeds: a fresh in-memory store, config-agnostic. zenoh's
         // MemoryBackend likewise just makes a store (it retains the config only for
         // its admin-status, which wz's kernel seam does not carry); applying the
@@ -180,11 +183,11 @@ mod tests {
             .create_storage(&cfg)
             .expect("in-memory create never fails");
         assert_eq!(
-            s1.put("demo/a", vec![1, 2, 3], None, ts(10)),
+            s1.put(Some("demo/a"), vec![1, 2, 3], None, ts(10)),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            s1.get("demo/a").expect("present after put").payload,
+            s1.get(Some("demo/a")).expect("present after put").payload,
             vec![1, 2, 3]
         );
 
@@ -192,7 +195,7 @@ mod tests {
             .create_storage(&cfg)
             .expect("in-memory create never fails");
         assert!(
-            s2.get("demo/a").is_none(),
+            s2.get(Some("demo/a")).is_none(),
             "a second storage from the same volume is an independent instance"
         );
     }

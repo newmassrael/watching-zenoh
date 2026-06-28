@@ -155,7 +155,7 @@ mod tests {
         fn create_storage(
             &self,
             _config: &StorageConfig,
-        ) -> Result<Box<dyn StorageBackend>, VolumeError> {
+        ) -> Result<Box<dyn StorageBackend + Send>, VolumeError> {
             Err(VolumeError::CreateFailed(alloc::string::String::from(
                 "test backend open failed",
             )))
@@ -188,11 +188,15 @@ mod tests {
             .unwrap();
         let s = m.storage_mut("s1").expect("s1 hosted");
         assert_eq!(
-            s.put("demo/a", vec![1], None, ts(10)),
+            s.put(Some("demo/a"), vec![1], None, ts(10)),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            m.storage("s1").unwrap().get("demo/a").unwrap().payload,
+            m.storage("s1")
+                .unwrap()
+                .get(Some("demo/a"))
+                .unwrap()
+                .payload,
             vec![1]
         );
     }
@@ -229,9 +233,9 @@ mod tests {
             .unwrap();
         m.storage_mut("s1")
             .unwrap()
-            .put("a/x", vec![1], None, ts(1));
+            .put(Some("a/x"), vec![1], None, ts(1));
         // s2 is a separate store from one MemoryVolume: it does not see s1's key.
-        assert!(m.storage("s2").unwrap().get("a/x").is_none());
+        assert!(m.storage("s2").unwrap().get(Some("a/x")).is_none());
         let names: Vec<&str> = m.storage_names().collect();
         assert_eq!(names, vec!["s1", "s2"]);
     }

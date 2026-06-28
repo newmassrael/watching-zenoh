@@ -459,14 +459,19 @@ mod tests {
         use crate::runtime_impl::TokioTime;
         use crate::session::TokioSession;
         use crate::storage_service::StorageService;
+        use wz_session_core::storage_config::StorageConfig;
 
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let storage =
-            StorageService::declare(&session, "demo/**", vec![0x01]).expect("storage declares");
+        let storage = StorageService::declare(
+            &session,
+            &StorageConfig::new("demo", "demo/**", "mem"),
+            vec![0x01],
+        )
+        .expect("storage declares");
         let config = cfg();
         let sub =
             DigestSubscriber::declare(&session, storage.shared_state(), config, |_zid, _diff| {});

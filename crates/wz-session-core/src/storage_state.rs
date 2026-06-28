@@ -71,9 +71,22 @@
 //!   ordinary stored key; wildcard-update overriding is a dedicated
 //!   follow-up atom (it needs the `KeBoxTree` wildcard registry zenoh
 //!   keeps separately).
+//! - **`strip_prefix` + replication mount-root edge** (R311y61). With a
+//!   configured `strip_prefix` (`storage-mgr-strip-prefix`), the gate keys
+//!   on the STORED (stripped) key — `None` being the exact-prefix-match
+//!   mount-root slot, faithful to zenoh's `Option<OwnedKeyExpr>` backend
+//!   key. The replication/aligner snapshot ([`replication_digest`](StorageState::replication_digest),
+//!   [`replication_events`](StorageState::replication_events)) reads the same
+//!   `latest` map, but [`crate::storage_aligner::EventMetadata`] carries a
+//!   `String` key (no `Option`), so a mount-root value cannot be represented
+//!   as a replication event and is SKIPPED from the digest / event snapshot.
+//!   The combination (a `strip_prefix`-configured storage that ALSO
+//!   replicates a value at the exact mount point) is the one documented edge;
+//!   the common (under-mount) keys replicate normally, and a non-strip
+//!   storage is unaffected (every stored key is `Some`).
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::keyexpr_match::keyexpr_intersects_target;
@@ -137,22 +150,82 @@ pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
 #[derive(Debug, Default)]
 pub struct StorageState<B: StorageBackend> {
     backend: B,
-    /// The latest accepted timestamp per key — the newer-wins comparison
-    /// source (zenoh `cache_latest.latest_updates`). Populated on every
-    /// accepted Put AND Delete, so a deleted key leaves a tombstone
+    /// The latest accepted timestamp per STORED key — the newer-wins
+    /// comparison source (zenoh `cache_latest.latest_updates`). Keyed on the
+    /// backend's `Option<String>` key space (`None` = the exact-prefix-match
+    /// / mount-root slot under a configured `strip_prefix`). Populated on
+    /// every accepted Put AND Delete, so a deleted key leaves a tombstone
     /// timestamp here even though its value is gone from `backend`; that is
     /// what makes an older Put after a Delete reject as Outdated instead of
     /// resurrecting the key.
-    latest: BTreeMap<String, TimestampHint>,
+    latest: BTreeMap<Option<String>, TimestampHint>,
+    /// The optional keyexpr prefix STRIPPED from an incoming key before it is
+    /// stored, and re-prepended (restored) on a query reply — the
+    /// `storage-mgr-strip-prefix` atom (R311y61), so a storage holds keys
+    /// relative to a mount point. `None` (the default + the only value when
+    /// the feature is off) stores keys verbatim.
+    #[cfg(feature = "storage-mgr-strip-prefix")]
+    strip_prefix: Option<String>,
 }
 
 impl<B: StorageBackend> StorageState<B> {
-    /// Wrap a backend in the newer-wins service gate.
+    /// Wrap a backend in the newer-wins service gate (no `strip_prefix`).
     pub fn new(backend: B) -> Self {
         Self {
             backend,
             latest: BTreeMap::new(),
+            #[cfg(feature = "storage-mgr-strip-prefix")]
+            strip_prefix: None,
         }
+    }
+
+    /// Wrap a backend in the gate with a configured `strip_prefix`
+    /// (R311y61, `storage-mgr-strip-prefix`): an incoming key `<prefix>/<rest>`
+    /// is stored under `<rest>` (and `<prefix>` exactly under the `None`
+    /// mount-root slot), and restored to its full keyexpr on a query reply.
+    /// `None` is equivalent to [`new`](Self::new). The
+    /// [`crate::storage_state`] driver / [`crate::storage_config::StorageConfig`]
+    /// supply the prefix.
+    #[cfg(feature = "storage-mgr-strip-prefix")]
+    pub fn with_strip_prefix(backend: B, strip_prefix: Option<String>) -> Self {
+        Self {
+            backend,
+            latest: BTreeMap::new(),
+            strip_prefix,
+        }
+    }
+
+    /// The STORED key for an incoming full keyexpr: applies the configured
+    /// `strip_prefix` (zenoh `strip_prefix`, the capture-side transform).
+    /// Returns `Some(stored)` to store — the inner `Option<String>` being the
+    /// backend key (`None` = the exact-prefix-match mount-root slot) — or the
+    /// outer `None` to DROP the sample (the key is not under the prefix, or the
+    /// prefix is wild; zenoh logs and returns). Without the
+    /// `storage-mgr-strip-prefix` feature this is the identity (every key is
+    /// stored verbatim).
+    #[cfg(feature = "storage-mgr-strip-prefix")]
+    fn stored_key_for(&self, full_key: &str) -> Option<Option<String>> {
+        // `Ok(stored)` -> store under `stored` (inner `None` = mount-root);
+        // `Err` (not under prefix / wild) -> outer `None` = drop the sample.
+        crate::storage_strip_prefix::strip_prefix(self.strip_prefix.as_deref(), full_key).ok()
+    }
+    #[cfg(not(feature = "storage-mgr-strip-prefix"))]
+    fn stored_key_for(&self, full_key: &str) -> Option<Option<String>> {
+        Some(Some(String::from(full_key)))
+    }
+
+    /// The full keyexpr for a STORED key: re-prepends the configured
+    /// `strip_prefix` (zenoh `prefix`, the reply-side inverse). `None` when
+    /// there is no full key to form (the degenerate empty-prefix + mount-root
+    /// case). Without the `storage-mgr-strip-prefix` feature this is the
+    /// identity (the stored key IS the full key).
+    #[cfg(feature = "storage-mgr-strip-prefix")]
+    fn full_key_for(&self, stored: Option<&str>) -> Option<String> {
+        crate::storage_strip_prefix::restore_prefix(self.strip_prefix.as_deref(), stored)
+    }
+    #[cfg(not(feature = "storage-mgr-strip-prefix"))]
+    fn full_key_for(&self, stored: Option<&str>) -> Option<String> {
+        stored.map(String::from)
     }
 
     /// Whether the backend keeps only the latest value per key
@@ -169,8 +242,8 @@ impl<B: StorageBackend> StorageState<B> {
     /// (equal timestamp) proceeds, mirroring zenoh's "reject iff
     /// `recorded > incoming`" (service.rs:536). Consulted only in
     /// [`History::Latest`] mode.
-    fn accepts(&self, key: &str, incoming: &TimestampHint) -> bool {
-        match self.latest.get(key) {
+    fn accepts(&self, key: Option<&str>, incoming: &TimestampHint) -> bool {
+        match self.latest.get(&key.map(String::from)) {
             Some(recorded) => !timestamp_strictly_newer(recorded, incoming),
             None => true,
         }
@@ -189,13 +262,27 @@ impl<B: StorageBackend> StorageState<B> {
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
     ) -> StorageInsertionResult {
+        self.put_stored(Some(key), payload, encoding, timestamp)
+    }
+
+    /// The [`process_put`](Self::process_put) core over the backend's
+    /// `Option<&str>` key space: `None` is the exact-prefix-match mount-root
+    /// slot a strip-configured [`apply_sample`](Self::apply_sample) produces.
+    /// The newer-wins gate and the `latest` record key on the same stored key.
+    fn put_stored(
+        &mut self,
+        key: Option<&str>,
+        payload: Vec<u8>,
+        encoding: Option<EncodingHint>,
+        timestamp: TimestampHint,
+    ) -> StorageInsertionResult {
         let latest_mode = self.latest_mode();
         if latest_mode && !self.accepts(key, &timestamp) {
             return StorageInsertionResult::Outdated;
         }
         let result = self.backend.put(key, payload, encoding, timestamp.clone());
         if latest_mode {
-            self.latest.insert(key.to_string(), timestamp);
+            self.latest.insert(key.map(String::from), timestamp);
         }
         result
     }
@@ -212,6 +299,17 @@ impl<B: StorageBackend> StorageState<B> {
         key: &str,
         timestamp: TimestampHint,
     ) -> StorageInsertionResult {
+        self.delete_stored(Some(key), timestamp)
+    }
+
+    /// The [`process_delete`](Self::process_delete) core over the backend's
+    /// `Option<&str>` key space (`None` = the mount-root slot). Retains the
+    /// accepted delete timestamp as a tombstone in `latest`.
+    fn delete_stored(
+        &mut self,
+        key: Option<&str>,
+        timestamp: TimestampHint,
+    ) -> StorageInsertionResult {
         let latest_mode = self.latest_mode();
         if latest_mode && !self.accepts(key, &timestamp) {
             return StorageInsertionResult::Outdated;
@@ -222,7 +320,7 @@ impl<B: StorageBackend> StorageState<B> {
             // from the backend but the latest-accepted record survives, so
             // the newer-wins gate still rejects an older Put. zenoh keeps the
             // Delete event in `cache_latest.latest_updates` for this reason.
-            self.latest.insert(key.to_string(), timestamp);
+            self.latest.insert(key.map(String::from), timestamp);
         }
         result
     }
@@ -230,7 +328,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// Exact-key read of the live stored value (none if absent or deleted).
     /// The direct (non-wildcard) query fast path.
     pub fn get(&self, key: &str) -> Option<&StoredData> {
-        self.backend.get(key)
+        self.backend.get(Some(key))
     }
 
     /// The set of live stored entries whose key answers a query on
@@ -248,10 +346,17 @@ impl<B: StorageBackend> StorageState<B> {
     pub fn matching_entries(&self, query_keyexpr: &str) -> Vec<(String, &StoredData)> {
         let target_chunks: Vec<&str> = query_keyexpr.split('/').collect();
         let mut out = Vec::new();
-        for (key, _ts) in self.backend.get_all_entries() {
-            if keyexpr_intersects_target(&key, &target_chunks) {
-                if let Some(data) = self.backend.get(&key) {
-                    out.push((key, data));
+        for (stored_key, _ts) in self.backend.get_all_entries() {
+            // Restore the configured strip_prefix so the match + reply key are
+            // in the FULL keyexpr space (zenoh restores the prefix before
+            // `intersects`, service.rs:639); the backend fetch uses the stored
+            // key. Without strip this is the identity.
+            let Some(full_key) = self.full_key_for(stored_key.as_deref()) else {
+                continue;
+            };
+            if keyexpr_intersects_target(&full_key, &target_chunks) {
+                if let Some(data) = self.backend.get(stored_key.as_deref()) {
+                    out.push((full_key, data));
                 }
             }
         }
@@ -269,11 +374,14 @@ impl<B: StorageBackend> StorageState<B> {
     pub fn matching_versions(&self, query_keyexpr: &str) -> Vec<(String, Vec<&StoredData>)> {
         let target_chunks: Vec<&str> = query_keyexpr.split('/').collect();
         let mut out = Vec::new();
-        for (key, _ts) in self.backend.get_all_entries() {
-            if keyexpr_intersects_target(&key, &target_chunks) {
-                let versions = self.backend.get_versions(&key);
+        for (stored_key, _ts) in self.backend.get_all_entries() {
+            let Some(full_key) = self.full_key_for(stored_key.as_deref()) else {
+                continue;
+            };
+            if keyexpr_intersects_target(&full_key, &target_chunks) {
+                let versions = self.backend.get_versions(stored_key.as_deref());
                 if !versions.is_empty() {
-                    out.push((key, versions));
+                    out.push((full_key, versions));
                 }
             }
         }
@@ -295,14 +403,27 @@ impl<B: StorageBackend> StorageState<B> {
         view: &dyn SampleView,
         fallback: impl FnOnce() -> TimestampHint,
     ) {
+        // Capture-side strip (zenoh `process_sample`, service.rs:308): an
+        // incoming `<prefix>/<rest>` is stored under `<rest>` (and `<prefix>`
+        // exactly under the `None` mount-root slot). A key not under the
+        // configured prefix is DROPPED (zenoh logs + returns). Without the
+        // strip feature every key is stored verbatim.
+        let Some(stored_key) = self.stored_key_for(view.keyexpr()) else {
+            return;
+        };
         let timestamp = view.timestamp().cloned().unwrap_or_else(fallback);
         match view.kind() {
             SampleKind::Put => {
                 let encoding = view.encoding().cloned();
-                self.process_put(view.keyexpr(), view.payload().to_vec(), encoding, timestamp);
+                self.put_stored(
+                    stored_key.as_deref(),
+                    view.payload().to_vec(),
+                    encoding,
+                    timestamp,
+                );
             }
             SampleKind::Del => {
-                self.process_delete(view.keyexpr(), timestamp);
+                self.delete_stored(stored_key.as_deref(), timestamp);
             }
         }
     }
@@ -376,7 +497,12 @@ impl<B: StorageBackend> StorageState<B> {
         );
         build_digest(
             config,
-            self.latest.iter().map(|(key, ts)| (key.as_str(), ts)),
+            // The mount-root (`None`) key has no full keyexpr to fingerprint;
+            // it is excluded from the digest (the strip + replication combo is
+            // a documented R311y61 edge — see the module-level note).
+            self.latest
+                .iter()
+                .filter_map(|(key, ts)| key.as_deref().map(|k| (k, ts))),
             hot_era_upper_bound,
         )
     }
@@ -412,12 +538,16 @@ impl<B: StorageBackend> StorageState<B> {
         );
         self.latest
             .iter()
-            .map(|(key, ts)| {
-                if self.backend.get(key).is_some() {
-                    EventMetadata::put(key.clone(), ts.clone())
+            // The mount-root (`None`) key has no full keyexpr for an
+            // EventMetadata; it is skipped (the strip + replication combo is a
+            // documented R311y61 edge — see the module-level note).
+            .filter_map(|(key, ts)| {
+                let key = key.as_deref()?;
+                Some(if self.backend.get(Some(key)).is_some() {
+                    EventMetadata::put(key, ts.clone())
                 } else {
-                    EventMetadata::delete(key.clone(), ts.clone())
-                }
+                    EventMetadata::delete(key, ts.clone())
+                })
             })
             .collect()
     }
@@ -532,7 +662,7 @@ impl<B: StorageBackend> StorageState<B> {
                 reply: AlignmentReply::Retrieval(meta),
                 value: None,
             }),
-            Action::Put => match self.backend.get(meta.key()) {
+            Action::Put => match self.backend.get(Some(meta.key())) {
                 Some(data) if &data.timestamp == meta.timestamp() => Some(AlignmentResponse {
                     value: Some(RetrievedValue {
                         payload: data.payload.clone(),
@@ -690,7 +820,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// check (aligner_reply.rs:244-252).
     #[cfg(feature = "storage-aligner")]
     fn is_missing(&self, meta: &EventMetadata) -> bool {
-        match self.latest.get(meta.key()) {
+        match self.latest.get(&Some(String::from(meta.key()))) {
             Some(recorded) => timestamp_strictly_newer(meta.timestamp(), recorded),
             None => true,
         }
@@ -895,6 +1025,93 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1.len(), 1, "Latest keeps one version");
         assert_eq!(hits[0].1[0].payload, vec![2]);
+    }
+
+    // R311y61 — strip_prefix composition: a strip-configured state stores keys
+    // RELATIVE to the mount point (the exact-prefix key under the backend's
+    // `None` slot) and restores the full keyexpr on a query.
+    #[cfg(feature = "storage-mgr-strip-prefix")]
+    mod strip {
+        use super::*;
+        use crate::sample::Sample;
+
+        fn stripped(prefix: &str) -> StorageState<MemoryStorage> {
+            StorageState::with_strip_prefix(MemoryStorage::new(), Some(prefix.into()))
+        }
+
+        #[test]
+        fn under_mount_key_is_stored_relative_and_restored_on_query() {
+            let mut s = stripped("home/kitchen");
+            s.apply_sample(
+                &Sample::new_put("home/kitchen/temp", vec![21]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            // Stored under the RELATIVE key, not the full keyexpr.
+            assert_eq!(
+                s.get("temp")
+                    .expect("stored under the stripped key")
+                    .payload,
+                vec![21]
+            );
+            assert!(
+                s.get("home/kitchen/temp").is_none(),
+                "the full keyexpr is not a stored key"
+            );
+            // A query is matched + replied in the FULL keyexpr space (restored).
+            let hits = s.matching_entries("home/kitchen/*");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].0, "home/kitchen/temp", "the reply key is restored");
+            assert_eq!(hits[0].1.payload, vec![21]);
+        }
+
+        #[test]
+        fn exact_mount_root_key_is_stored_under_the_none_slot() {
+            // A put on EXACTLY the prefix sits AT the mount point: stored under
+            // the backend's `None` slot (zenoh Ok(None)), restored to the prefix.
+            let mut s = stripped("home/kitchen");
+            s.apply_sample(
+                &Sample::new_put("home/kitchen", vec![7]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            assert_eq!(
+                s.backend()
+                    .get(None)
+                    .expect("mount-root value in the None slot")
+                    .payload,
+                vec![7]
+            );
+            let hits = s.matching_entries("home/kitchen");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(
+                hits[0].0, "home/kitchen",
+                "the mount-root key restores to the prefix"
+            );
+            assert_eq!(hits[0].1.payload, vec![7]);
+        }
+
+        #[test]
+        fn a_key_not_under_the_prefix_is_dropped() {
+            let mut s = stripped("home/kitchen");
+            s.apply_sample(
+                &Sample::new_put("away/x", vec![1]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            assert!(
+                s.backend().get_all_entries().is_empty(),
+                "a key outside the mount is not captured"
+            );
+        }
+
+        #[test]
+        fn no_strip_configured_stores_verbatim() {
+            // with_strip_prefix(None) is equivalent to new(): keys stored as-is.
+            let mut s = StorageState::with_strip_prefix(MemoryStorage::new(), None);
+            s.apply_sample(
+                &Sample::new_put("home/kitchen/temp", vec![5]).with_timestamp(ts(10, 1)),
+                || unreachable!(),
+            );
+            assert_eq!(s.get("home/kitchen/temp").unwrap().payload, vec![5]);
+        }
     }
 
     // The History::All path needs the storage-history backend.

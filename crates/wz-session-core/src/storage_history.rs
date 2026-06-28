@@ -17,13 +17,17 @@
 //! ## zenoh anchor
 //!
 //! zenoh's bundled in-memory backend is `History::Latest` only (a
-//! `HashMap<key, StoredData>`, `memory_backend/mod.rs:79`). `History::All`
-//! is the capability a persistent backend (influxdb / rocksdb) declares;
-//! `get` then returns `Vec<StoredData>` (`zenoh-backend-traits/src/lib.rs:250-254`)
-//! and the storage replies each version with its own timestamp
+//! `HashMap<Option<key>, StoredData>`, `memory_backend/mod.rs:79`).
+//! `History::All` is the capability a persistent backend (influxdb /
+//! rocksdb) declares; `get` then returns `Vec<StoredData>`
+//! (`zenoh-backend-traits/src/lib.rs:250-254`) and the storage replies each
+//! version with its own timestamp
 //! (`storages_mgt/service.rs:575-577 (wildcard) / :609-611 (non-wild)` — `q.reply(key, payload).timestamp(ts)`).
 //! [`HistoryStorage`] is the in-memory realisation of that `All` shape — a
-//! `BTreeMap<key, Vec<StoredData>>`, the versions kept sorted by timestamp.
+//! `BTreeMap<Option<key>, Vec<StoredData>>`, the versions kept sorted by
+//! timestamp. The key is `Option<String>` (R311y61, mirroring
+//! [`MemoryStorage`](crate::storage_backend::MemoryStorage)): `None` is the
+//! exact-prefix-match (mount-root) slot.
 //!
 //! ## Deliberate divergences (each layer/profile-driven)
 //!
@@ -39,7 +43,7 @@
 //!   appends — the version list never holds two entries at one timestamp.
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::sample::{EncodingHint, TimestampHint};
@@ -50,10 +54,11 @@ use crate::storage_state::timestamp_order_key;
 /// In-memory [`History::All`] [`StorageBackend`]: a
 /// `key -> Vec<StoredData>` map, each key's versions kept sorted by
 /// timestamp (newest last). The multi-version counterpart of
-/// [`MemoryStorage`](crate::storage_backend::MemoryStorage).
+/// [`MemoryStorage`](crate::storage_backend::MemoryStorage). Keyed on
+/// `Option<String>` (`None` = the exact-prefix-match slot).
 #[derive(Debug, Default)]
 pub struct HistoryStorage {
-    map: BTreeMap<String, Vec<StoredData>>,
+    map: BTreeMap<Option<String>, Vec<StoredData>>,
 }
 
 impl HistoryStorage {
@@ -75,16 +80,17 @@ impl HistoryStorage {
         self.map.is_empty()
     }
 
-    /// Total number of versions stored under `key` (0 if absent).
-    pub fn version_count(&self, key: &str) -> usize {
-        self.map.get(key).map_or(0, Vec::len)
+    /// Total number of versions stored under `key` (0 if absent). `key` is
+    /// `None` for the exact-prefix-match slot.
+    pub fn version_count(&self, key: Option<&str>) -> usize {
+        self.map.get(&key.map(String::from)).map_or(0, Vec::len)
     }
 }
 
 impl StorageBackend for HistoryStorage {
     fn put(
         &mut self,
-        key: &str,
+        key: Option<&str>,
         payload: Vec<u8>,
         encoding: Option<EncodingHint>,
         timestamp: TimestampHint,
@@ -94,7 +100,7 @@ impl StorageBackend for HistoryStorage {
             encoding,
             timestamp,
         };
-        let versions = self.map.entry(key.to_string()).or_default();
+        let versions = self.map.entry(key.map(String::from)).or_default();
         let existed = !versions.is_empty();
         // The version list is maintained sorted by `(time, zid)`, so a
         // binary search both locates an exact-timestamp duplicate (replace)
@@ -116,19 +122,21 @@ impl StorageBackend for HistoryStorage {
         }
     }
 
-    fn delete(&mut self, key: &str, _timestamp: TimestampHint) -> StorageInsertionResult {
+    fn delete(&mut self, key: Option<&str>, _timestamp: TimestampHint) -> StorageInsertionResult {
         // Minimal in-memory shape: a delete clears the whole version list
         // (see the module-level divergence note on versioned tombstones).
-        self.map.remove(key);
+        self.map.remove(&key.map(String::from));
         StorageInsertionResult::Deleted
     }
 
-    fn get(&self, key: &str) -> Option<&StoredData> {
+    fn get(&self, key: Option<&str>) -> Option<&StoredData> {
         // The newest version (the list is sorted newest-last).
-        self.map.get(key).and_then(|versions| versions.last())
+        self.map
+            .get(&key.map(String::from))
+            .and_then(|versions| versions.last())
     }
 
-    fn get_all_entries(&self) -> Vec<(String, TimestampHint)> {
+    fn get_all_entries(&self) -> Vec<(Option<String>, TimestampHint)> {
         // One row per key, carrying its NEWEST timestamp (the wildcard scan
         // only needs the key set; see the `get_all_entries` trait doc).
         self.map
@@ -145,9 +153,9 @@ impl StorageBackend for HistoryStorage {
         History::All
     }
 
-    fn get_versions(&self, key: &str) -> Vec<&StoredData> {
+    fn get_versions(&self, key: Option<&str>) -> Vec<&StoredData> {
         self.map
-            .get(key)
+            .get(&key.map(String::from))
             .map(|versions| versions.iter().collect())
             .unwrap_or_default()
     }
@@ -174,29 +182,29 @@ mod tests {
     fn put_retains_every_version_newest_last() {
         let mut s = HistoryStorage::new();
         assert_eq!(
-            s.put("demo/a", vec![1], None, ts(10, 1)),
+            s.put(Some("demo/a"), vec![1], None, ts(10, 1)),
             StorageInsertionResult::Inserted
         );
         assert_eq!(
-            s.put("demo/a", vec![2], None, ts(20, 1)),
+            s.put(Some("demo/a"), vec![2], None, ts(20, 1)),
             StorageInsertionResult::Replaced
         );
-        assert_eq!(s.version_count("demo/a"), 2, "both versions retained");
-        let versions = s.get_versions("demo/a");
+        assert_eq!(s.version_count(Some("demo/a")), 2, "both versions retained");
+        let versions = s.get_versions(Some("demo/a"));
         assert_eq!(versions.len(), 2);
         assert_eq!(versions[0].payload, vec![1]);
         assert_eq!(versions[1].payload, vec![2]);
         // get() returns the newest.
-        assert_eq!(s.get("demo/a").unwrap().payload, vec![2]);
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![2]);
     }
 
     #[test]
     fn out_of_order_put_is_inserted_in_timestamp_order() {
         let mut s = HistoryStorage::new();
-        s.put("demo/a", vec![3], None, ts(30, 1));
-        s.put("demo/a", vec![1], None, ts(10, 1)); // older, arrives later
-        s.put("demo/a", vec![2], None, ts(20, 1));
-        let versions = s.get_versions("demo/a");
+        s.put(Some("demo/a"), vec![3], None, ts(30, 1));
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1)); // older, arrives later
+        s.put(Some("demo/a"), vec![2], None, ts(20, 1));
+        let versions = s.get_versions(Some("demo/a"));
         let payloads: Vec<&Vec<u8>> = versions.iter().map(|d| &d.payload).collect();
         assert_eq!(
             payloads,
@@ -204,7 +212,7 @@ mod tests {
             "versions sorted ascending by timestamp regardless of arrival order"
         );
         assert_eq!(
-            s.get("demo/a").unwrap().payload,
+            s.get(Some("demo/a")).unwrap().payload,
             vec![3],
             "newest by timestamp, not by arrival"
         );
@@ -213,43 +221,43 @@ mod tests {
     #[test]
     fn exact_timestamp_duplicate_replaces_not_appends() {
         let mut s = HistoryStorage::new();
-        s.put("demo/a", vec![1], None, ts(10, 1));
-        s.put("demo/a", vec![9], None, ts(10, 1)); // same (time, zid)
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1));
+        s.put(Some("demo/a"), vec![9], None, ts(10, 1)); // same (time, zid)
         assert_eq!(
-            s.version_count("demo/a"),
+            s.version_count(Some("demo/a")),
             1,
             "an identical timestamp is the same version, replaced not appended"
         );
-        assert_eq!(s.get("demo/a").unwrap().payload, vec![9]);
+        assert_eq!(s.get(Some("demo/a")).unwrap().payload, vec![9]);
     }
 
     #[test]
     fn delete_clears_the_version_list() {
         let mut s = HistoryStorage::new();
-        s.put("demo/a", vec![1], None, ts(10, 1));
-        s.put("demo/a", vec![2], None, ts(20, 1));
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1));
+        s.put(Some("demo/a"), vec![2], None, ts(20, 1));
         assert_eq!(
-            s.delete("demo/a", ts(30, 1)),
+            s.delete(Some("demo/a"), ts(30, 1)),
             StorageInsertionResult::Deleted
         );
-        assert_eq!(s.version_count("demo/a"), 0);
-        assert!(s.get("demo/a").is_none());
+        assert_eq!(s.version_count(Some("demo/a")), 0);
+        assert!(s.get(Some("demo/a")).is_none());
         assert!(s.is_empty());
     }
 
     #[test]
     fn get_all_entries_lists_each_key_once_with_its_newest_timestamp() {
         let mut s = HistoryStorage::new();
-        s.put("demo/a", vec![1], None, ts(10, 1));
-        s.put("demo/a", vec![2], None, ts(20, 1));
-        s.put("demo/b", vec![3], None, ts(15, 1));
+        s.put(Some("demo/a"), vec![1], None, ts(10, 1));
+        s.put(Some("demo/a"), vec![2], None, ts(20, 1));
+        s.put(Some("demo/b"), vec![3], None, ts(15, 1));
         let mut entries = s.get_all_entries();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             entries,
             vec![
-                (String::from("demo/a"), ts(20, 1)),
-                (String::from("demo/b"), ts(15, 1)),
+                (Some(String::from("demo/a")), ts(20, 1)),
+                (Some(String::from("demo/b")), ts(15, 1)),
             ],
             "one row per key with its newest timestamp"
         );
