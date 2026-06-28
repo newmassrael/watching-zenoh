@@ -109,9 +109,15 @@ impl WzConfig {
     /// caveat on the read path too. `acl_default` is REQUIRED for faithfulness — a
     /// bare `acl_deny:[]` on a DEFAULT-DENY policy would read as "open" (the exact
     /// opposite of the truth); the pair disambiguates. `batch_size` / `lease_ms` /
-    /// `whatami` remain the handshake-fixed read-at-open mirror. Still deferred:
-    /// the downsampling / low-pass interceptor view and the full per-rule ACL dump
-    /// (subject / message / flow) — `acl_deny` is the denied-keyexpr summary.
+    /// `whatami` remain the handshake-fixed read-at-open mirror.
+    ///
+    /// R311y53 — the interceptor view is now complete on the rate/size axes:
+    /// `downsampling` (under `access-downsampling`) and `low_pass` (under
+    /// `access-quota`) emit the LIVE rule arrays (`{key_exprs, min_interval_ms}` /
+    /// `{key_exprs, max_payload_size}`). These are startup-config introspection
+    /// (only `acl-deny` is runtime-reconfigurable via config-write so far). Still
+    /// deferred: the full per-rule ACL dump (subject / message / flow) — `acl_deny`
+    /// stays the denied-keyexpr summary.
     ///
     /// R311y50 — built from an ordered (alphabetical) (key, value-json) list rather
     /// than a hand-spliced `format!`, so a new field is "push a pair where it
@@ -156,11 +162,67 @@ impl WzConfig {
             fields.push(("acl_deny", deny));
         }
 
+        // downsampling — the LIVE rate-limit rules (each `{key_exprs, min_interval_ms}`),
+        // the §5.23 introspection of the access-downsampling interceptor slice. Present
+        // only under access-downsampling; an empty array means no rule is installed.
+        #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
+        {
+            let mut ds = String::from("[");
+            for (i, rule) in self.interceptors.downsampling.iter().enumerate() {
+                if i > 0 {
+                    ds.push(',');
+                }
+                ds.push_str("{\"key_exprs\":[");
+                for (j, ke) in rule.key_exprs.iter().enumerate() {
+                    if j > 0 {
+                        ds.push(',');
+                    }
+                    wz_session_core::json::escape_into(ke, &mut ds);
+                }
+                ds.push_str("],\"min_interval_ms\":");
+                ds.push_str(&rule.min_interval.as_millis().to_string());
+                ds.push('}');
+            }
+            ds.push(']');
+            fields.push(("downsampling", ds));
+        }
+
+        // low_pass — the LIVE per-key payload-size caps (each `{key_exprs,
+        // max_payload_size}`), the introspection of the access-quota interceptor
+        // slice. Present only under access-quota; an empty array means no rule.
+        #[cfg(all(feature = "routing-peer", feature = "access-quota"))]
+        {
+            let mut lp = String::from("[");
+            for (i, rule) in self.interceptors.low_pass.iter().enumerate() {
+                if i > 0 {
+                    lp.push(',');
+                }
+                lp.push_str("{\"key_exprs\":[");
+                for (j, ke) in rule.key_exprs.iter().enumerate() {
+                    if j > 0 {
+                        lp.push(',');
+                    }
+                    wz_session_core::json::escape_into(ke, &mut lp);
+                }
+                lp.push_str("],\"max_payload_size\":");
+                lp.push_str(&rule.max_payload_size.to_string());
+                lp.push('}');
+            }
+            lp.push(']');
+            fields.push(("low_pass", lp));
+        }
+
         fields.push(("batch_size", self.batch_size.to_string()));
         fields.push(("lease_ms", self.lease_ms.to_string()));
         let mut whatami = String::new();
         wz_session_core::json::escape_into(self.whatami.to_str(), &mut whatami);
         fields.push(("whatami", whatami));
+
+        // serde_json-BTreeMap alphabetical key order. R311y53 — an explicit sort (vs
+        // the prior push-in-order assumption) so a new field is just "push it" with no
+        // position bookkeeping (downsampling/low_pass sort MID-object, between
+        // batch_size and lease_ms / lease_ms and whatami).
+        fields.sort_by(|a, b| a.0.cmp(b.0));
 
         let mut out = String::from("{");
         for (i, (key, value)) in fields.iter().enumerate() {
@@ -236,28 +298,93 @@ impl WzConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn to_admin_json_is_typed_alphabetical() {
-        // R311y40 — the config GET reply shape: TYPED fields, serde_json-BTreeMap
-        // alphabetical key order, whatami as the zenoh role string. With NO ACL the
-        // base verdict is "allow" and the deny list is empty. R311y49/y50 — under
-        // routing-peer + access-acl `acl_default` then `acl_deny` lead (both sort
-        // before batch_size); otherwise just the 3 read-at-open keys.
-        let c = WzConfig {
+    // R311y40/y49/y50/y53 — the config GET reply shape: TYPED fields, serde_json-
+    // BTreeMap alphabetical key order, whatami as the zenoh role string. The emitted
+    // key set depends on the access-* features, so the byte-exact assertion is split
+    // per feature combo (each gated to EXACTLY the build that emits that shape, so no
+    // never-run branch and no wrong assertion under an un-CI'd partial combo). The
+    // empty-config shape: acl => acl_default:"allow"/acl_deny:[]; downsampling/low_pass
+    // => empty arrays; always batch_size/lease_ms/whatami — sorted alphabetically.
+    fn router_config() -> WzConfig {
+        WzConfig {
             whatami: WhatAmI::Router,
             batch_size: 65535,
             lease_ms: 10_000,
             ..WzConfig::new()
-        };
-        #[cfg(all(feature = "routing-peer", feature = "access-acl"))]
+        }
+    }
+
+    #[cfg(not(any(
+        feature = "access-acl",
+        feature = "access-downsampling",
+        feature = "access-quota"
+    )))]
+    #[test]
+    fn to_admin_json_base_alphabetical() {
+        // No access interceptor feature: just the 3 read-at-open keys.
         assert_eq!(
-            c.to_admin_json(),
+            router_config().to_admin_json(),
+            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
+        );
+    }
+
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        not(feature = "access-downsampling"),
+        not(feature = "access-quota")
+    ))]
+    #[test]
+    fn to_admin_json_acl_only_alphabetical() {
+        // access-acl only: acl_default/acl_deny lead (both sort before batch_size).
+        assert_eq!(
+            router_config().to_admin_json(),
             r#"{"acl_default":"allow","acl_deny":[],"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
         );
-        #[cfg(not(all(feature = "routing-peer", feature = "access-acl")))]
+    }
+
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-acl",
+        feature = "access-downsampling",
+        feature = "access-quota"
+    ))]
+    #[test]
+    fn to_admin_json_full_access_alphabetical() {
+        // The full routing-peer access set (the wz-ap-demo build): downsampling sorts
+        // between batch_size and lease_ms; low_pass between lease_ms and whatami.
         assert_eq!(
-            c.to_admin_json(),
-            r#"{"batch_size":65535,"lease_ms":10000,"whatami":"router"}"#
+            router_config().to_admin_json(),
+            r#"{"acl_default":"allow","acl_deny":[],"batch_size":65535,"downsampling":[],"lease_ms":10000,"low_pass":[],"whatami":"router"}"#
+        );
+    }
+
+    #[cfg(all(
+        feature = "routing-peer",
+        feature = "access-downsampling",
+        feature = "access-quota"
+    ))]
+    #[test]
+    fn to_admin_json_renders_downsampling_and_low_pass_rules() {
+        use crate::linkstate_forward::{DownsamplingRule, LowPassRule};
+        use std::time::Duration;
+        let mut c = router_config();
+        c.interceptors.downsampling = vec![DownsamplingRule {
+            key_exprs: vec!["mesh/data".to_string()],
+            min_interval: Duration::from_millis(250),
+        }];
+        c.interceptors.low_pass = vec![LowPassRule {
+            key_exprs: vec!["mesh/bulk".to_string()],
+            max_payload_size: 1024,
+        }];
+        let json = c.to_admin_json();
+        assert!(
+            json.contains(r#""downsampling":[{"key_exprs":["mesh/data"],"min_interval_ms":250}]"#),
+            "downsampling rule not rendered: {json}"
+        );
+        assert!(
+            json.contains(r#""low_pass":[{"key_exprs":["mesh/bulk"],"max_payload_size":1024}]"#),
+            "low_pass rule not rendered: {json}"
         );
     }
 }
