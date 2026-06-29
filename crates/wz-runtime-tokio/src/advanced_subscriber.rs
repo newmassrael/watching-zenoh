@@ -54,19 +54,22 @@
 //! re-entrant query (and the loopback cache replies it drains) cannot
 //! self-deadlock.
 //!
-//! ### Scope vs zenoh (the other recovery triggers + timestamp dedup)
+//! ### Recovery triggers (sample-driven + periodic built; heartbeat follow-on)
 //!
-//! zenoh drives recovery from THREE triggers: the sample-driven GET built
-//! here, a periodic `Timer` GET (advanced_subscriber.rs:585-643), and a
-//! heartbeat-subscriber GET keyed off the publisher's last-sn beacon
-//! (:1045-1149, `z_deserialize::<u32>`). The periodic + heartbeat triggers
-//! are follow-on under this same `ext-pubsub-advanced-recovery` gate
-//! (R311y83); the sample-driven trigger is the recovery core. A recovered
-//! reply also cannot carry its original body timestamp (the [`crate::reply_sink::ReplyView`]
-//! seam surfaces source_info / encoding / attachment, not the reply
-//! timestamp), so a retransmitted sample is delivered timestamp-less — a
-//! documented fidelity gap, not silent (the recovery essential is the source
-//! identity that re-keys it).
+//! zenoh drives recovery from THREE triggers: the sample-driven GET (the gap
+//! handling above), a periodic `Timer` GET (advanced_subscriber.rs:585-643),
+//! and a heartbeat-subscriber GET keyed off the publisher's last-sn beacon
+//! (:1045-1149, `z_deserialize::<u32>`). wz builds the **sample-driven**
+//! (R311y82) + **periodic** (R311y83, [`RecoveryConfig::periodic_queries`]:
+//! a background task re-asks every source `_sn=last+1..` every period, catching
+//! a lost LAST sample no later live sample would trigger recovery for). The
+//! **heartbeat** trigger is the remaining follow-on under this same
+//! `ext-pubsub-advanced-recovery` gate. A recovered reply cannot carry its
+//! original body timestamp (the [`crate::reply_sink::ReplyView`] seam surfaces
+//! source_info / encoding / attachment, not the reply timestamp), so a
+//! retransmitted sample is delivered timestamp-less — a documented fidelity
+//! gap, not silent (the recovery essential is the source identity that re-keys
+//! it).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -81,6 +84,8 @@ use crate::session_glue::SessionLinkActions;
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use std::collections::BTreeMap;
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+use std::time::Duration;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::locality::Locality;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -130,8 +135,9 @@ struct SourceState {
 
 /// Configuration for a recovering subscriber ([`AdvancedSubscriber::declare_with_recovery`]).
 /// The sample-driven `_sn`-range recovery GET is implied by recovering at all
-/// (zenoh's `retransmission.is_some()`); the periodic / heartbeat triggers are
-/// R311y83 follow-on fields under this same gate.
+/// (zenoh's `retransmission.is_some()`); [`Self::periodic_queries`] adds the
+/// R311y83 periodic trigger. The heartbeat trigger is a follow-on field under
+/// this same gate.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
@@ -141,6 +147,15 @@ pub struct RecoveryConfig {
     /// pins it to loopback (single-host composition tests). Mirrors zenoh's
     /// recovery get target (advanced_subscriber.rs:603, `query_target` All).
     pub allowed_destination: Locality,
+    /// R311y83 — when `Some(period)`, a background task re-asks every known
+    /// source `_sn=last+1..` every `period`, catching a lost LAST sample that
+    /// no further live sample would trigger sample-driven recovery for (zenoh's
+    /// `RecoveryConfig::periodic_queries`, advanced_subscriber.rs:111-116 + the
+    /// `PeriodicQuery` TimedEvent :580-643). `None` (default) = sample-driven
+    /// recovery only. NB enabling this spawns a tokio task at declare time, so
+    /// the caller MUST be inside a tokio runtime context (the sample-driven and
+    /// no-recovery paths have no such requirement).
+    pub periodic_queries: Option<Duration>,
 }
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -148,6 +163,7 @@ impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
             allowed_destination: Locality::Any,
+            periodic_queries: None,
         }
     }
 }
@@ -163,6 +179,13 @@ impl RecoveryConfig {
     /// composition).
     pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
         self.allowed_destination = locality;
+        self
+    }
+
+    /// Enable the periodic recovery trigger with the given re-ask period (see
+    /// [`Self::periodic_queries`]). Requires a tokio runtime at declare time.
+    pub fn with_periodic_queries(mut self, period: Duration) -> Self {
+        self.periodic_queries = Some(period);
         self
     }
 }
@@ -350,6 +373,31 @@ impl State {
             }
         }
     }
+
+    /// R311y83 — the periodic trigger: collect a `_sn=last+1..` recovery
+    /// request for every sequenced source with no GET in flight. Re-asking past
+    /// `last_delivered` catches a lost LAST sample that no later live sample
+    /// would trigger sample-driven recovery for (zenoh `PeriodicQuery::run`,
+    /// advanced_subscriber.rs:587-643). wz drives ONE shared task that iterates
+    /// all sources here (vs zenoh's per-source `TimedEvent`) — observable-
+    /// equivalent, the GET shape is identical. No-op when retransmission is off.
+    fn periodic_requests(&mut self) -> Vec<RecoveryRequest> {
+        if !self.retransmission {
+            return Vec::new();
+        }
+        let mut requests = Vec::new();
+        for (key, state) in self.sequenced.iter_mut() {
+            if state.pending_queries == 0 {
+                state.pending_queries += 1;
+                requests.push(RecoveryRequest {
+                    zid: key.0.clone(),
+                    eid: key.1,
+                    from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
+                });
+            }
+        }
+        requests
+    }
 }
 
 /// Deliver `sample` (sn = `sn`), advance `last_delivered`, then drain every
@@ -481,11 +529,65 @@ fn issue_recovery_query<R, T>(
     );
 }
 
+/// R311y83 — run ONE periodic recovery tick: collect each source's
+/// `_sn=last+1..` request under the state lock, then issue the GETs OUTSIDE the
+/// lock (same re-entrancy discipline as the sample-driven path). The background
+/// [`PeriodicTask`] loop calls this every period; a test drives it directly so
+/// the recovery path is exercised deterministically (no timer wait).
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+fn run_periodic_tick<R, T>(
+    session: &Session<R, T, Unicast>,
+    statesref: &Arc<Mutex<State>>,
+    base_keyexpr: &str,
+    dest: Locality,
+) where
+    R: SessionRuntime,
+    T: TimeSource + 'static,
+    <R as SessionRuntime>::LinkSink: Send + Sync,
+    SessionLinkActions<R, T>: Send + Sync + 'static,
+{
+    let requests = {
+        let mut state = statesref
+            .lock()
+            .expect("advanced subscriber state mutex poisoned");
+        state.periodic_requests()
+    };
+    for req in requests {
+        issue_recovery_query(session, statesref, base_keyexpr, req, dest);
+    }
+}
+
+/// RAII handle for the periodic recovery background task: dropping it aborts the
+/// loop so a torn-down subscriber stops re-asking (the [`crate::storage_replication_service::DigestPublisher`]
+/// teardown shape). The spawn loop is thin timer glue over the deterministically
+/// tested [`run_periodic_tick`] / [`State::periodic_requests`].
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+struct PeriodicTask {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "ext-pubsub-advanced-recovery")]
+impl Drop for PeriodicTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 /// A live advanced subscriber bound to a [`Session`]: owns the wrapped
 /// plain [`Subscriber`] (RAII: dropping it undeclares) whose callback runs
 /// the per-source ordering / de-duplication state machine.
 pub struct AdvancedSubscriber<R: SessionRuntime = crate::runtime_impl::TokioRuntime> {
     _subscriber: Subscriber<R>,
+    /// R311y83 — the shared ordering state; retained so a test can drive a
+    /// recovery tick over the live source map ([`run_periodic_tick`]). The
+    /// background task captures its own clone, so prod never reads this field
+    /// (underscore-prefixed like `_subscriber` / `_periodic`).
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    _statesref: Arc<Mutex<State>>,
+    /// R311y83 — the periodic recovery task (RAII abort-on-drop), `Some` only
+    /// when `RecoveryConfig::periodic_queries` was set.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    _periodic: Option<PeriodicTask>,
 }
 
 #[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
@@ -540,9 +642,11 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         on_miss: OnMiss,
     ) -> Result<Self, SubscribeError>
     where
-        T: TimeSource + 'static,
+        R: 'static,
+        T: TimeSource + Send + Sync + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Send + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
@@ -561,9 +665,11 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         on_miss: OnMiss,
     ) -> Result<Self, SubscribeError>
     where
-        T: TimeSource + 'static,
+        R: 'static,
+        T: TimeSource + Send + Sync + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Send + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
@@ -578,9 +684,11 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         recovery: Option<RecoveryConfig>,
     ) -> Result<Self, SubscribeError>
     where
-        T: TimeSource + 'static,
+        R: 'static,
+        T: TimeSource + Send + Sync + 'static,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         SessionLinkActions<R, T>: Send + Sync + 'static,
+        Session<R, T, Unicast>: Send + 'static,
         OnSample: FnMut(Sample) + Send + 'static,
         OnMiss: FnMut(Miss) + Send + 'static,
     {
@@ -588,6 +696,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let dest = recovery
             .map(|c| c.allowed_destination)
             .unwrap_or(Locality::Any);
+        let periodic = recovery.and_then(|c| c.periodic_queries);
         let base_keyexpr: String = keyexpr.into();
 
         let state = Arc::new(Mutex::new(State {
@@ -600,7 +709,7 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
         let q_session = session.clone();
         let q_base = base_keyexpr.clone();
         let subscriber = session.declare_subscriber(
-            base_keyexpr,
+            base_keyexpr.clone(),
             SubscribeOptions::default(),
             move |view: &dyn SampleView| {
                 let request = cb_state
@@ -616,8 +725,33 @@ impl<R: SessionRuntime> AdvancedSubscriber<R> {
                 }
             },
         )?;
+
+        // R311y83 — the periodic recovery trigger: a background loop that
+        // re-asks every known source `_sn=last+1..` every `period`. Spawned
+        // here (the caller is in a tokio runtime context), aborted on drop.
+        // The loop is thin glue over `run_periodic_tick` / `periodic_requests`
+        // (the deterministically tested core; the storage_replication
+        // DigestPublisher pattern).
+        let periodic_task = periodic.map(|period| {
+            let p_session = session.clone();
+            let p_state = Arc::clone(&state);
+            let p_base = base_keyexpr;
+            let clock = Arc::clone(session.clock());
+            let period_ms = period.as_millis() as u64;
+            PeriodicTask {
+                handle: tokio::spawn(async move {
+                    loop {
+                        clock.sleep(period_ms).await;
+                        run_periodic_tick(&p_session, &p_state, &p_base, dest);
+                    }
+                }),
+            }
+        });
+
         Ok(Self {
             _subscriber: subscriber,
+            _statesref: state,
+            _periodic: periodic_task,
         })
     }
 }
@@ -1019,6 +1153,164 @@ mod tests {
             *misses.lock().unwrap(),
             0,
             "the recovery filled the hole -> no Miss"
+        );
+    }
+
+    /// R311y83 periodic-trigger unit (no session): `periodic_requests` re-asks
+    /// every retransmission source `_sn=last+1..` once, marking each with a GET
+    /// in flight so a second tick is a no-op until the GET finalises.
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    #[test]
+    fn periodic_requests_reask_each_source_once() {
+        let mut state = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: true,
+        };
+        state.sequenced.insert(
+            (vec![0x01u8], 1u32),
+            SourceState {
+                last_delivered: Some(4),
+                ..Default::default()
+            },
+        );
+        state.sequenced.insert(
+            (vec![0x02u8], 2u32),
+            SourceState {
+                last_delivered: Some(0),
+                ..Default::default()
+            },
+        );
+
+        let mut reqs = state.periodic_requests();
+        reqs.sort_by_key(|r| r.eid);
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(
+            (reqs[0].zid.clone(), reqs[0].eid, reqs[0].from_sn),
+            (vec![0x01], 1, 5),
+            "source A re-asks from last_delivered(4)+1"
+        );
+        assert_eq!(
+            (reqs[1].zid.clone(), reqs[1].eid, reqs[1].from_sn),
+            (vec![0x02], 2, 1),
+            "source B re-asks from last_delivered(0)+1"
+        );
+        assert!(
+            state.periodic_requests().is_empty(),
+            "a GET is now in flight per source -> no re-ask until it finalises"
+        );
+
+        // Retransmission OFF -> the periodic trigger is inert.
+        let mut plain = State {
+            sequenced: HashMap::new(),
+            on_sample: Box::new(|_| {}),
+            on_miss: Box::new(|_| {}),
+            retransmission: false,
+        };
+        plain.sequenced.insert(
+            (vec![0x01u8], 1u32),
+            SourceState {
+                last_delivered: Some(0),
+                ..Default::default()
+            },
+        );
+        assert!(
+            plain.periodic_requests().is_empty(),
+            "no retransmission -> periodic_requests is a no-op"
+        );
+    }
+
+    /// R311y83 composed periodic recovery e2e: a lost LAST sample (no later live
+    /// sample, so the sample-driven trigger never fires) is recovered by one
+    /// periodic tick. The cache holds 0..=2; live 0,1 arrive but sn 2 is lost
+    /// and undetected; [`run_periodic_tick`] re-asks `_sn=2..` and the cache
+    /// refills sn 2. Declared WITHOUT `periodic_queries` so no background task
+    /// spawns (no tokio runtime needed); the test drives the deterministic tick
+    /// directly — the spawn loop is thin glue over this same path.
+    #[cfg(all(
+        feature = "ext-pubsub-advanced-recovery",
+        feature = "ext-pubsub-advanced-cache",
+        feature = "pubsub-allow-loop"
+    ))]
+    #[test]
+    fn composed_periodic_tick_recovers_lost_last_sample() {
+        use crate::advanced_cache::{AdvancedCache, CacheConfig, CachedSample};
+        use wz_session_core::sample::TimestampHint;
+
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let clock = Arc::new(TokioTime::new());
+        let session = TokioSession::new(actions, observer, clock);
+
+        let pub_zid = vec![0x09u8];
+        let pub_eid = 4u32;
+        let zid_hex = zid_to_zenoh_hex(&pub_zid);
+        let cache_ke = format!("demo/data/@adv/pub/{zid_hex}/{pub_eid}/_");
+        let cache = AdvancedCache::declare(&session, cache_ke, CacheConfig { max_samples: 8 })
+            .expect("advanced cache declares");
+        for sn in 0u8..3 {
+            cache.cache_sample(CachedSample {
+                keyexpr: "demo/data".to_string(),
+                payload: vec![sn],
+                source_info: Some(SourceInfo::new(&pub_zid, pub_eid, sn as u32)),
+                timestamp: TimestampHint {
+                    time: 100 + sn as u64,
+                    zid: pub_zid.clone(),
+                },
+            });
+        }
+
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let misses = Arc::new(Mutex::new(0usize));
+        let d = Arc::clone(&delivered);
+        let m = Arc::clone(&misses);
+        let sub = AdvancedSubscriber::declare_with_recovery(
+            &session,
+            "demo/data",
+            RecoveryConfig::new().with_allowed_destination(Locality::SessionLocal),
+            move |sample: Sample| d.lock().unwrap().push(sample.payload[0]),
+            move |_miss: Miss| *m.lock().unwrap() += 1,
+        )
+        .expect("recovering advanced subscriber declares");
+
+        let live = |sn: u32, v: u8| {
+            session
+                .publish(
+                    "demo/data",
+                    &[v],
+                    PublishOptions::put()
+                        .with_locality(Locality::SessionLocal)
+                        .with_source_info(SourceInfo::new(&pub_zid, pub_eid, sn)),
+                )
+                .expect("loopback live publish");
+        };
+        live(0, 0xA0);
+        live(1, 0xA1);
+        // sn 2 (the LAST) is lost; nothing later arrives -> no gap detected.
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1],
+            "only 0,1 delivered live; the lost last sn 2 is undetected"
+        );
+
+        // One periodic tick re-asks _sn=2.. -> the cache refills sn 2.
+        run_periodic_tick(
+            &session,
+            &sub._statesref,
+            "demo/data",
+            Locality::SessionLocal,
+        );
+
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![0xA0, 0xA1, 0x02],
+            "the periodic tick recovered the lost LAST sample (cache payload 0x02)"
+        );
+        assert_eq!(
+            *misses.lock().unwrap(),
+            0,
+            "the periodic recovery filled it -> no Miss"
         );
     }
 }
